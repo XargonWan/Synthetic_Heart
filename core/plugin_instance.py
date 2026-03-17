@@ -1074,8 +1074,8 @@ async def _extract_image_data_from_message(message, interface_name: str):
             f"[plugin_instance] message.photo is tuple: {isinstance(message.photo, tuple)}"
         )
 
-        # Handle list/tuple of photos (multiple resolutions)
-        if isinstance(message.photo, (list, tuple)):
+        # Handle list of photos (multiple resolutions)
+        if isinstance(message.photo, list):
             photo = message.photo[-1]  # Last element is typically highest resolution
         else:
             photo = message.photo

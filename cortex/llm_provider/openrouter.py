@@ -1277,9 +1277,6 @@ class OpenRouterPlugin(AIPluginBase):
             return parts
 
         multimodal_keys = {"attachments", "images", "audio", "documents", "videos"}
-        # Keys whose subtrees are action schema definitions (not multimodal
-        # data) and should be skipped during recursive attachment collection.
-        schema_only_keys = {"actions", "available_actions", "schema"}
         attachments: list[dict[str, Any]] = []
 
         def collect_recursive(container: Any) -> None:
@@ -1303,9 +1300,7 @@ class OpenRouterPlugin(AIPluginBase):
                                     )
                         elif isinstance(items, dict):
                             attachments.append(items)
-                for key, value in container.items():
-                    if key in schema_only_keys:
-                        continue
+                for value in container.values():
                     collect_recursive(value)
             elif isinstance(container, list):
                 for item in container:
@@ -1356,16 +1351,7 @@ class OpenRouterPlugin(AIPluginBase):
                         "image_url": {"url": f"data:{mime_type};base64,{b64_data}"},
                     }
                 )
-                # Log a short content hash so duplicate images can be diagnosed
-                import hashlib
-
-                _img_hash = hashlib.md5(
-                    b64_data[:512].encode(), usedforsecurity=False
-                ).hexdigest()[:10]
-                log_debug(
-                    f"[openrouter] Added image part: {mime_type} "
-                    f"len={len(b64_data)} hash={_img_hash}"
-                )
+                log_debug(f"[openrouter] Added image part: {mime_type}")
             else:
                 # Audio — OpenAI input_audio format
                 audio_fmt = _AUDIO_MIME_TYPES[mime_type]

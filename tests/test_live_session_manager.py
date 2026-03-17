@@ -51,15 +51,13 @@ async def test_history_sync_loop(monkeypatch):
     state = SimpleNamespace(is_active=True, last_injected_ts=None)
     mgr._sessions[999] = state
 
-    # stub send_context_update to record sends (history sync now uses
-    # context updates instead of send_text to avoid triggering model
-    # responses for every synced message)
+    # stub send_text to record sends
     sent = []
 
-    async def fake_context_update(gid: int, text: str) -> None:
+    async def fake_send(gid, text):
         sent.append((gid, text))
 
-    mgr.send_context_update = fake_context_update
+    mgr.send_text = fake_send
 
     # stub chat history functions
     msgs = [
@@ -100,49 +98,51 @@ async def test_history_sync_loop(monkeypatch):
     mgr._sessions[999].is_active = False
     await task
 
-    # verify that send_context_update and save_chat_message were called
-    assert any(
-        gid == 999 and "hi" in text for gid, text in sent if isinstance(text, str)
-    )
+    # verify that send_text and save_chat_message were called
+    assert (999, "hi") in sent
     assert any(item[0] == "replicate" for item in sent)
 
 
 @pytest.mark.asyncio
 async def test_send_context_update(monkeypatch):
-    """send_context_update should forward text via send_client_content with role=system."""
+    """send_context_update should forward text to the session and log info."""
     monkeypatch.setattr(live_session_manager, "_HAS_GENAI_SDK", True)
     mgr = live_session_manager.LiveSessionManager(api_key="x")
-    logged: list[dict] = []
+    logged = []
 
-    # stub a session object — send_context_update uses send_client_content
+    # stub a session object
     class DummySession:
-        async def send_client_content(self, **kwargs) -> None:
-            turns = kwargs.get("turns")
-            text = ""
-            role = ""
-            if turns and hasattr(turns, "parts"):
-                role = getattr(turns, "role", "")
-                for p in turns.parts:
-                    if hasattr(p, "text"):
-                        text = p.text
-            logged.append(
-                {
-                    "text": text,
-                    "role": role,
-                    "turn_complete": kwargs.get("turn_complete"),
-                }
-            )
+        async def send_client_content(self, turns=None, turn_complete=False):
+            logged.append((turns, turn_complete))
 
     state = SimpleNamespace(
         is_active=True,
+        _session=DummySession(),
         generating=False,
         pending_context_updates=[],
-        _session=DummySession(),
     )
     mgr._sessions[42] = state
 
+    # immediate send when not generating
     await mgr.send_context_update(42, "note")
     assert logged, "session method should be invoked"
-    assert logged[0]["text"] == "[System Context Update] note"
-    assert logged[0]["role"] == "user"
-    assert logged[0]["turn_complete"] is False
+    turns, tc = logged[0]
+    assert tc is False
+    assert isinstance(turns, live_session_manager.types.Content)
+    assert turns.role == "system"
+    assert "note" in turns.parts[0].text
+
+    # now simulate model generating, buffer two updates and flush
+    logged.clear()
+    state.generating = True
+    await mgr.send_context_update(42, "buffer1")
+    await mgr.send_context_update(42, "buffer2")
+    # nothing sent yet
+    assert logged == []
+    assert state.pending_context_updates == ["buffer1", "buffer2"]
+
+    # flush explicitly using helper
+    state.generating = False
+    await mgr._flush_pending_updates(42)
+    # verify flush submitted both updates to session
+    assert len(logged) == 2

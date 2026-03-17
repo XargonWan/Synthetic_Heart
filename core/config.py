@@ -4,8 +4,6 @@ import os
 import json
 import asyncio
 
-from core.variables_engine import register_exposed_var as _register_exposed_var
-
 try:
     from dotenv import load_dotenv  # type: ignore
 except Exception:  # pragma: no cover - fallback when dotenv not installed
@@ -166,125 +164,6 @@ LIVE_HISTORY_SYNC_INTERVAL = config_registry.get_var(
     group="core",
     component="live",
     value_type=int,
-)
-
-# ----------------------------------------------------------------------
-# Live voice configuration
-# ----------------------------------------------------------------------
-LIVE_VOICE_NAME = config_registry.get_var(
-    "LIVE_VOICE_NAME",
-    "Aoede",
-    label="Live Voice",
-    description=(
-        "Prebuilt voice for Gemini Live API sessions. "
-        "Each voice has a distinct character and tone."
-    ),
-    group="core",
-    component="cortex_live",
-)
-
-LIVE_VOICE_STYLE = config_registry.get_var(
-    "LIVE_VOICE_STYLE",
-    "",
-    label="Voice Style Prompt",
-    description=(
-        "Extra instructions appended to the live system prompt to shape how "
-        "the model speaks (e.g. tone, pacing, vocabulary, personality quirks). "
-        "Leave empty for default persona behavior."
-    ),
-    group="core",
-    component="cortex_live",
-)
-
-_register_exposed_var(
-    "LIVE_VOICE_NAME",
-    label="Live Voice",
-    default="Aoede",
-    value_type=str,
-    ui_type="select",
-    description=(
-        "Prebuilt voice for Gemini Live API sessions. "
-        "Each voice has a distinct character and tone."
-    ),
-    scope="live",
-    component="cortex_live",
-    options=[
-        # Female
-        "Aoede",
-        "Kore",
-        "Leda",
-        "Zephyr",
-        "Autonoe",
-        "Achernar",
-        "Callirrhoe",
-        "Despina",
-        "Erinome",
-        "Gacrux",
-        "Laomedeia",
-        "Pulcherrima",
-        "Sulafat",
-        "Vindemiatrix",
-        # Male
-        "Puck",
-        "Charon",
-        "Fenrir",
-        "Orus",
-        "Achird",
-        "Algenib",
-        "Algieba",
-        "Alnilam",
-        "Enceladus",
-        "Iapetus",
-        "Rasalgethi",
-        "Sadachbia",
-        "Sadaltager",
-        "Schedar",
-        "Umbriel",
-        "Zubenelgenubi",
-    ],
-)
-
-_register_exposed_var(
-    "LIVE_VOICE_STYLE",
-    label="Voice Style Prompt",
-    default="",
-    value_type=str,
-    ui_type="textarea",
-    description=(
-        "Extra instructions appended to the live system prompt to shape how "
-        "the model speaks (e.g. tone, pacing, vocabulary, personality quirks). "
-        "Leave empty for default persona behavior."
-    ),
-    scope="live",
-    component="cortex_live",
-)
-
-# Live session feature toggles
-LIVE_AFFECTIVE_DIALOG = config_registry.get_var(
-    "LIVE_AFFECTIVE_DIALOG",
-    False,
-    label="Affective Dialog",
-    description="Model adapts tone/emotion to match the user's expression.",
-    group="core",
-    component="cortex_live",
-)
-
-LIVE_PROACTIVE_AUDIO = config_registry.get_var(
-    "LIVE_PROACTIVE_AUDIO",
-    False,
-    label="Proactive Audio",
-    description="Model can choose not to respond when audio is irrelevant.",
-    group="core",
-    component="cortex_live",
-)
-
-LIVE_THINKING_BUDGET = config_registry.get_var(
-    "LIVE_THINKING_BUDGET",
-    0,
-    label="Thinking Budget",
-    description="Internal reasoning tokens before responding (0 = disabled).",
-    group="core",
-    component="cortex_live",
 )
 
 # --- LogChat configuration (use config_registry so exposed-variable APIs are consistent)

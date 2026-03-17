@@ -227,14 +227,6 @@ class GrilloOutreachPlugin:
             for chat_id in last_chats:
                 chat_path = recent_chats.get_chat_path(chat_id)
                 if chat_path:
-                    # Skip live voice paths — they are audio-only sessions
-                    # and cannot receive text outreach messages.
-                    if "_live_" in chat_path:
-                        log_debug(
-                            f"[grillo_outreach] Skipping live voice path: {chat_path}"
-                        )
-                        continue
-
                     # chat_path format is "interface_name/chat_id" or "interface_name/chat_id/thread_id"
                     parts = chat_path.split("/")
                     if len(parts) >= 2:

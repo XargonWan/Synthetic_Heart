@@ -1424,171 +1424,36 @@ def reduce_json_text_for_transmission(json_text: str, max_chars: int) -> str:
 async def build_live_system_instruction(
     message: object = None,
     context_memory: object = None,
-    attachment_context: str | None = None,
 ) -> str:
     """Build a condensed system instruction for Gemini Live API sessions.
 
     The Live API has a smaller context window (128k tokens) and system
     instructions are set once at session start.  This produces a compact
-    persona string that includes the full persona identity, emotional state,
-    memories, diary entries, participant bios, and safety instructions —
-    everything the model needs to stay in-character during voice.
-
-    Args:
-        message: Optional message object for context.
-        context_memory: Optional context memory object.
-        attachment_context: Optional pre-formatted document text to embed
-            in the system instruction (e.g. from Discord attachments).
+    persona string without the full JSON-action scaffolding.
 
     Returns:
-        A plain-text system instruction for the Live API.
+        A plain-text system instruction containing the persona identity,
+        emotional state, and conversational guidelines.
     """
-    injections: dict[str, object] = {}
+    # Gather the persona injection (same path as build_json_prompt)
+    static_persona = ""
     try:
         from core.action_parser import gather_static_injections
 
         injections = await gather_static_injections(message, context_memory)
-        if not isinstance(injections, dict):
-            injections = {}
+        if isinstance(injections, dict) and "persona" in injections:
+            static_persona = injections.pop("persona", "")
     except Exception as e:
-        log_warning(f"[live_prompt] Failed to gather injections for Live API: {e}")
+        log_warning(f"[live_prompt] Failed to gather persona for Live API: {e}")
 
     parts: list[str] = []
 
-    # --- Persona identity ---
-    persona = injections.pop("persona", "")
-    if persona and isinstance(persona, str):
-        parts.append(persona)
+    if static_persona:
+        parts.append(static_persona)
 
-    # --- Safety / gasmask ---
-    gasmask = injections.pop("gasmask_protection", "")
-    if gasmask and isinstance(gasmask, str):
-        parts.append(gasmask)
-
-    # --- Emotional state ---
-    # Use the natural-language description only — NOT emotion_state which
-    # contains "{happy 8.5}" tag instructions meant for text LLMs.  The
-    # Live API generates speech directly, so the model would literally
-    # speak the tags aloud.
-    injections.pop("emotion_state", None)  # discard tag instructions
-    injections.pop("available_emotions", None)  # not useful for voice
-    emotion_nl = injections.pop("current_emotions_nl", "")
-    if emotion_nl and isinstance(emotion_nl, str):
-        parts.append(
-            f"Your current emotional state: {emotion_nl}\n"
-            "Let this colour your tone and word choice naturally — "
-            "do NOT mention emotion names or numbers aloud."
-        )
-
-    # --- Date/time/location ---
-    time_parts: list[str] = []
-    for key in ("location", "date", "time"):
-        val = injections.pop(key, "")
-        if val and isinstance(val, str):
-            time_parts.append(f"{key.capitalize()}: {val}")
-    if time_parts:
-        parts.append("Current context:\n" + "\n".join(time_parts))
-
-    # --- Weather ---
-    weather = injections.pop("weather", "")
-    if weather and isinstance(weather, str):
-        parts.append(f"Current weather: {weather}")
-
-    # --- Participant bios ---
-    participants = injections.pop("participants", None)
-    if participants and isinstance(participants, list):
-        bio_lines: list[str] = []
-        for p in participants:
-            if not isinstance(p, dict):
-                continue
-            tag = p.get("usertag", "unknown")
-            bio = p.get("short_bio", "")
-            nicks = p.get("nicknames", [])
-            nick_str = f" (also known as: {', '.join(nicks)})" if nicks else ""
-            feelings = p.get("feelings", [])
-            feel_str = (
-                f" [feelings: {', '.join(str(f) for f in feelings)}]"
-                if feelings
-                else ""
-            )
-            bio_lines.append(f"- {tag}{nick_str}: {bio}{feel_str}")
-        if bio_lines:
-            parts.append(
-                "People you know who may be in this conversation:\n"
-                + "\n".join(bio_lines)
-            )
-
-    # --- Diary / recent memories ---
-    diary = injections.pop("latest_diary_entries", None)
-    if diary and isinstance(diary, list):
-        diary_lines: list[str] = []
-        for entry in diary[:5]:  # cap at 5 to save context window
-            if not isinstance(entry, dict):
-                continue
-            ts = entry.get("timestamp", "")
-            thought = entry.get("personal_thought", "")
-            summary = entry.get("interaction_summary", "")
-            text = thought or summary
-            if text:
-                diary_lines.append(f"- [{ts}] {text}")
-        if diary_lines:
-            parts.append(
-                "Your recent memories (use these to stay consistent):\n"
-                + "\n".join(diary_lines)
-            )
-
-    # --- Recent cross-interface chat history ---
-    # This keeps the model aware of conversations on other interfaces
-    # (Telegram, Matrix, other Discord channels) so it stays consistent.
-    try:
-        from core.chat_history_cache import load_global_chat_history
-
-        recent_msgs = await load_global_chat_history(limit=15)
-        if recent_msgs:
-            history_lines: list[str] = []
-            for msg in recent_msgs:
-                if not isinstance(msg, dict):
-                    continue
-                sender = msg.get("sender_name", "?")
-                text_val = msg.get("text", "")
-                ts = msg.get("timestamp", "")
-                ipath = msg.get("interface_path", "")
-                if text_val:
-                    # Truncate long messages to save context
-                    preview = (
-                        text_val[:300] + "..." if len(text_val) > 300 else text_val
-                    )
-                    history_lines.append(f"- [{ts} via {ipath}] {sender}: {preview}")
-            if history_lines:
-                parts.append(
-                    "Recent conversation history across all interfaces "
-                    "(use for continuity):\n" + "\n".join(history_lines)
-                )
-    except Exception as e:
-        log_warning(f"[live_prompt] Failed to load chat history for Live API: {e}")
-
-    # --- Attachment / document context ---
-    if attachment_context and isinstance(attachment_context, str):
-        parts.append(
-            "The user shared the following document(s) at the start of this "
-            "voice session. You have full access to their contents and can "
-            "discuss, quote, or answer questions about them:\n\n" + attachment_context
-        )
-
-    # --- Custom voice style prompt ---
-    try:
-        voice_style = str(
-            config_registry.get_value("LIVE_VOICE_STYLE", "") or ""
-        ).strip()
-        if voice_style:
-            parts.append(voice_style)
-    except Exception:
-        pass
-
-    # --- Conversational guidelines (no JSON scaffolding for voice) ---
+    # Conversational guidelines (no JSON scaffolding for voice)
     parts.append(
-        "You are in a live voice conversation. Always speak in English. "
-        "Speak naturally and conversationally. "
+        "You are in a live voice conversation. Speak naturally and conversationally. "
         "Keep responses concise — a few sentences at most unless asked for detail. "
         "You can express emotions through tone and word choice. "
         "Do not output JSON, markdown, or structured data — just speak naturally."
