@@ -12,6 +12,7 @@ This core plugin manages the digital persona's emotional state with:
 
 import json
 import math
+import re
 import asyncio
 from datetime import datetime
 from typing import Any, Dict, Optional, Tuple
@@ -72,6 +73,28 @@ EMOTION_SYNONYMS = {
     "worship": "devotion",
     "dedication": "devotion",
 }
+
+
+# ---------------------------------------------------------------------------
+# Emotion tag regex — matches {happy 8.5} or {happy 8.5, love 5.0, sad 2}
+# Does NOT match JSON, code blocks, or other {…} content.
+# ---------------------------------------------------------------------------
+_EMOTION_TAG_RE = re.compile(
+    r"\s*\{\s*(?:\w+\s+-?\d+(?:\.\d+)?)(?:\s*,\s*\w+\s+-?\d+(?:\.\d+)?)*\s*\}"
+)
+
+
+def strip_emotion_tags(text: str) -> str:
+    """Remove emotion tags like ``{happy 8.5, love 5.0}`` from *text*.
+
+    Uses a targeted regex that only matches the ``{word number, …}`` pattern
+    so JSON, code blocks, and other brace-delimited content are left intact.
+    """
+    if not text:
+        return text
+    cleaned = _EMOTION_TAG_RE.sub("", text)
+    cleaned = re.sub(r" {2,}", " ", cleaned).strip()
+    return cleaned
 
 
 def normalize_emotion_name(name: str) -> str | None:

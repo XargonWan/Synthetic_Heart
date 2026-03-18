@@ -1359,6 +1359,9 @@ class OpenAPIPlugin(AIPluginBase):
             return parts
 
         multimodal_keys = {"attachments", "images", "audio", "documents", "videos"}
+        # Keys whose subtrees are action schema definitions (not multimodal
+        # data) and should be skipped during recursive attachment collection.
+        schema_only_keys = {"actions", "available_actions", "schema"}
         attachments: list[dict[str, Any]] = []
 
         def collect_recursive(container: Any) -> None:
@@ -1382,7 +1385,9 @@ class OpenAPIPlugin(AIPluginBase):
                                     )
                         elif isinstance(items, dict):
                             attachments.append(items)
-                for value in container.values():
+                for key, value in container.items():
+                    if key in schema_only_keys:
+                        continue
                     collect_recursive(value)
             elif isinstance(container, list):
                 for item in container:
