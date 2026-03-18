@@ -144,7 +144,10 @@ async def test_kitten_engine_uses_language_model_map() -> None:
 
 def test_kitten_engine_defaults_to_english_when_no_language() -> None:
     """Without a language kwarg the engine defaults to the configured model."""
-    from plugins.vox_engines.kitten import KittenVoxEngine, LocalKittenTTS, _USING_VENDOR_STUB
+    from plugins.vox_engines.kitten import (
+        KittenVoxEngine,
+        LocalKittenTTS,
+    )
 
     class FakeModel:
         phonemizer: Any = None

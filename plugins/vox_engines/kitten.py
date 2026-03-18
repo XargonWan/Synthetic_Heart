@@ -196,13 +196,17 @@ class LocalKittenTTS:
         # then call generate().  A lock serialises phonemizer swaps so that
         # concurrent TTS calls on the same model instance don't race.
         espeak_lang = _espeak_lang_code(language)
-        log_info(f"[vox/kitten] generate: voice={voice!r} lang={language!r} espeak={espeak_lang!r}")
+        log_info(
+            f"[vox/kitten] generate: voice={voice!r} lang={language!r} espeak={espeak_lang!r}"
+        )
         model = self._engine.model  # KittenTTS_1_Onnx instance
         with self._phonemizer_lock:
             old_phonemizer = model.phonemizer
             new_phonemizer = self._get_phonemizer(espeak_lang)
             model.phonemizer = new_phonemizer
-            log_info(f"[vox/kitten] phonemizer swapped to espeak '{espeak_lang}' (id={id(new_phonemizer)})")
+            log_info(
+                f"[vox/kitten] phonemizer swapped to espeak '{espeak_lang}' (id={id(new_phonemizer)})"
+            )
             try:
                 result = self._engine.generate(text=text, voice=voice)
             finally:

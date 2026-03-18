@@ -51,6 +51,7 @@ dependencies = [
     "lingua-language-detector>=2.0.2",
     "kittentts",
     "torch",
+    "torchaudio",
 ]
 
 [project.optional-dependencies]
@@ -101,6 +102,7 @@ include = [
 [tool.uv.sources]
 kittentts = { url = "https://github.com/KittenML/KittenTTS/releases/download/0.8.1/kittentts-0.8.1-py3-none-any.whl" }
 torch = { index = "pytorch-cpu" }
+torchaudio = { index = "pytorch-cpu" }
 
 [[tool.uv.index]]
 name = "pytorch-cpu"

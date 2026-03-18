@@ -1608,14 +1608,10 @@ class SynthWebUIInterface:
         if self._multi_session_enabled():
             session_id = str(uuid.uuid4())
         else:
-            session_id = self.session_id or str(uuid.uuid4())
-            # Ensure session id is persisted if it was generated now
-            if not self.session_id:
-                self.session_id = session_id
-                try:
-                    self._ensure_persistent_session_id(force_write=True)
-                except Exception:
-                    pass
+            # Single-session mode: always use the same fixed ID so that chat
+            # history survives container restarts without any file/DB dependency.
+            session_id = "webui_default"
+            self.session_id = session_id
         self.connections[session_id] = websocket
         self.message_history.setdefault(session_id, deque(maxlen=self.max_history))
         await websocket.send_json({"type": "session", "session_id": session_id})
@@ -1735,9 +1731,14 @@ class SynthWebUIInterface:
                 text = (payload.get("text") or "").strip()
                 if not text:
                     continue
+                is_voice_input = bool(payload.get("is_voice_input", False))
                 await self._append_history(session_id, "user", text)
                 # Process message in background to avoid blocking WebSocket
-                asyncio.create_task(self._handle_user_message(session_id, text))
+                asyncio.create_task(
+                    self._handle_user_message(
+                        session_id, text, is_voice_input=is_voice_input
+                    )
+                )
         except WebSocketDisconnect:
             log_info(f"{LOG_PREFIX} Client disconnected: {session_id}")
         except Exception as exc:  # pragma: no cover - runtime issues
@@ -1918,6 +1919,7 @@ class SynthWebUIInterface:
                     status_code=503,
                     detail="Auris STT subsystem is not loaded. Select an Auris engine or disable via ACTIVE_AURIS_ENGINE.",
                 )
+            tmp_dir = Path("tmp") / "webui_audio"
             tmp_dir.mkdir(parents=True, exist_ok=True)
             suffix = Path(file.filename).suffix or ".audio"
             tmp_path = tmp_dir / f"webui_{uuid.uuid4().hex}{suffix}"
@@ -2597,7 +2599,9 @@ class SynthWebUIInterface:
                 status_code=500, detail=f"Failed to retrieve animation state: {exc}"
             ) from exc
 
-    async def _handle_user_message(self, session_id: str, text: str) -> None:
+    async def _handle_user_message(
+        self, session_id: str, text: str, is_voice_input: bool = False
+    ) -> None:
         from types import SimpleNamespace
         from core.config import TRAINER_NAME
         from core import message_queue
@@ -2618,6 +2622,7 @@ class SynthWebUIInterface:
             interface_path=f"{INTERFACE_NAME}/{session_id}",  # Add interface_path for proper routing
             message_id=int(datetime.utcnow().timestamp() * 1000) % 1_000_000,
             text=text,
+            is_voice_input=is_voice_input,
             date=datetime.utcnow(),
             from_user=SimpleNamespace(
                 id=session_id,
@@ -2900,36 +2905,66 @@ class SynthWebUIInterface:
         except Exception:
             return False
 
-    def _ensure_persistent_session_id(self, force_write: bool = False) -> None:
-        """Ensure there's a persistent session id on disk for WebUI single-session deployments.
+    async def _load_session_id_from_db(self) -> "str | None":
+        """Read the WebUI session ID from the ``config`` table.
 
-        If a session id file exists, read it; otherwise generate one and persist it.
+        Returns the stored value, or ``None`` if unavailable (DB offline, key absent).
+        The file-based fallback in :meth:`_ensure_persistent_session_id` covers that case.
         """
         try:
-            # if multi-session is enabled we do not persist or read any file
+            from core.db import get_conn_ctx
+
+            async with get_conn_ctx() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "SELECT value FROM config WHERE config_key = 'webui_session_id' LIMIT 1"
+                    )
+                    row = await cur.fetchone()
+                    if row and row[0]:
+                        sid = str(row[0]).strip()
+                        if sid:
+                            log_debug(f"{LOG_PREFIX} Loaded session id from DB: {sid}")
+                            return sid
+        except Exception as exc:
+            log_debug(f"{LOG_PREFIX} Could not load session id from DB: {exc}")
+        return None
+
+    async def _save_session_id_to_db(self, sid: str) -> None:
+        """Persist the WebUI session ID to the ``config`` table (upsert)."""
+        try:
+            from core.db import get_conn_ctx
+
+            async with get_conn_ctx() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "INSERT INTO config (config_key, value) VALUES ('webui_session_id', %s) "
+                        "ON DUPLICATE KEY UPDATE value = VALUES(value)",
+                        (sid,),
+                    )
+                await conn.commit()
+                log_info(f"{LOG_PREFIX} Saved session id to DB: {sid}")
+        except Exception as exc:
+            log_debug(f"{LOG_PREFIX} Could not save session id to DB: {exc}")
+
+    def _ensure_persistent_session_id(self, force_write: bool = False) -> None:
+        """Synchronous initialisation of the single-session ID.
+
+        In single-session mode (MULTI_SESSION=False, default) we always use the
+        fixed constant ``"webui_default"`` as the session identifier.  This makes
+        chat history survive container restarts without depending on file or DB
+        persistence.  The async DB-backed path is no longer called on reconnect.
+        """
+        try:
             if self._multi_session_enabled():
                 log_debug(
                     f"{LOG_PREFIX} MULTI_SESSION enabled; skipping persistent session file"
                 )
                 return
-            if not self.session_id_file.parent.exists():
-                self.session_id_file.parent.mkdir(parents=True, exist_ok=True)
-            if self.session_id_file.exists() and not force_write:
-                try:
-                    sid = self.session_id_file.read_text(encoding="utf-8").strip()
-                    if sid:
-                        self.session_id = sid
-                        log_debug(f"{LOG_PREFIX} Loaded persistent session id: {sid}")
-                        return
-                except Exception:
-                    log_debug(
-                        f"{LOG_PREFIX} Failed to read session id file: {self.session_id_file}"
-                    )
-            # Write a new session id
-            sid = str(uuid.uuid4())
-            self.session_id_file.write_text(sid, encoding="utf-8")
-            self.session_id = sid
-            log_info(f"{LOG_PREFIX} Created persistent session id: {sid}")
+            # Fixed constant for single-user deployments — no UUID generation needed.
+            self.session_id = "webui_default"
+            log_debug(
+                f"{LOG_PREFIX} Single-session mode: using fixed session id 'webui_default'"
+            )
         except Exception as exc:
             log_warning(f"{LOG_PREFIX} Failed to ensure persistent session id: {exc}")
 
@@ -3229,6 +3264,17 @@ class SynthWebUIInterface:
         if not websocket:
             log_warning(f"{LOG_PREFIX} send_tts_audio: no websocket for session {sid}")
             return False
+
+        # Deliver the caption as a regular chat message so that it is persisted
+        # in the DB, appears in the in-memory history (replay on reconnect) and
+        # shows as a visible text bubble on clients that may not support audio.
+        if text:
+            try:
+                await self.send_message(sid, text=text)
+            except Exception as exc:
+                log_warning(
+                    f"{LOG_PREFIX} send_tts_audio: failed to send caption message for session {sid}: {exc}"
+                )
 
         # Derive a client-accessible URL from the filesystem path.
         # Audio is stored under the /static mount, e.g.

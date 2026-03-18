@@ -400,6 +400,15 @@ async def handle_incoming_message(
                 f"[message_chain] Built interface_path from interface+chat_id: {ctx['interface_path']}"
             )
 
+    # Propagate is_voice_input from message attributes (set by WebUI when input
+    # was transcribed from audio, so TTS auto-inject fires for voice-originated requests)
+    if (
+        hasattr(message, "is_voice_input")
+        and message.is_voice_input
+        and not ctx.get("is_voice_input")
+    ):
+        ctx["is_voice_input"] = True
+
     log_debug(
         f"[message_chain] Context preserved: interface_path={ctx.get('interface_path')}, chat_id={ctx.get('chat_id')}, interface={ctx.get('interface')}"
     )
@@ -1164,9 +1173,12 @@ async def handle_incoming_message(
                                 # Determine whether this is a voice-originated request.
                                 # For voice inputs we want to send a SINGLE audio+caption
                                 # message instead of separate text then audio.
-                                is_voice_response = _is_voice_input or bool(
-                                    context and context.get("request_tts")
-                                )
+                                # Exception: synth_webui always keeps the text bubble so the
+                                # tts-play handler has a bubble to annotate; audio is overlaid.
+                                is_voice_response = (
+                                    _is_voice_input
+                                    or bool(context and context.get("request_tts"))
+                                ) and _iface_tts_prefix != "synth_webui"
 
                                 if is_voice_response:
                                     # Voice response strategy:
