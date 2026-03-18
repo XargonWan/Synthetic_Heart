@@ -1,4 +1,5 @@
 {
+  "fps": 30,
   "intro": {
     "start_frame": 0,
     "end_frame": 60
