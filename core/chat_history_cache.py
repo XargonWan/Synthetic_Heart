@@ -62,7 +62,8 @@ async def save_chat_message(
     message_text: str,
     sender_name: str | None = None,
     sender_id: str | None = None,
-    timestamp: datetime | None = None,
+    timestamp: datetime | str | None = None,
+    metadata: dict[str, Any] | None = None,
 ) -> bool:
     """Save a message to the chat history cache.
 
@@ -74,6 +75,7 @@ async def save_chat_message(
         timestamp: Optional message timestamp (datetime object or ISO string)
                    If provided, will be converted to UTC before storing.
                    If tzinfo is None, assumes local time and converts to UTC.
+        metadata: Optional dict of extra metadata (e.g. ``{"tts_url": ...}``).
     """
     if not interface_path or not message_text:
         return False
@@ -88,8 +90,8 @@ async def save_chat_message(
             except Exception:
                 timestamp = None
 
-        # Convert timestamp to UTC for storage
-        if timestamp:
+        # Convert timestamp to UTC for storage; only proceed when we have a datetime
+        if isinstance(timestamp, datetime):
             if timestamp.tzinfo is None:
                 # If no timezone info, assume it's UTC (already passed as UTC from interfaces)
                 timestamp = timestamp.replace(tzinfo=timezone.utc)

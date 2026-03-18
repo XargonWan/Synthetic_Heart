@@ -2813,14 +2813,29 @@ class SynthWebUIInterface:
                 else:
                     sender = "synth"
             text = item.get("text") if isinstance(item, dict) else str(item)
-            await websocket.send_json(
-                {"type": "message", "sender": sender, "text": text}
-            )
+            replay_payload: Dict[str, Any] = {"type": "message", "sender": sender, "text": text}
+            # Propagate metadata fields (e.g. tts_url) so the client can restore
+            # click-to-replay audio icons on reconnect / restart.
+            meta = item.get("metadata") if isinstance(item, dict) else None
+            if isinstance(meta, dict):
+                tts_url = meta.get("tts_url")
+                if tts_url:
+                    replay_payload["tts_url"] = tts_url
+                    replay_payload["data"] = {"tts_url": tts_url}
+                else:
+                    replay_payload["data"] = meta
+            await websocket.send_json(replay_payload)
         log_info(
             f"{LOG_PREFIX} _replay_history: sent {len(history)} messages to session {session_id}"
         )
 
-    async def _append_history(self, session_id: str, sender: str, text: str) -> None:
+    async def _append_history(
+        self,
+        session_id: str,
+        sender: str,
+        text: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
         history = self.message_history.setdefault(
             session_id, deque(maxlen=self.max_history)
         )
@@ -2844,16 +2859,17 @@ class SynthWebUIInterface:
 
         from datetime import timezone
 
-        history.append(
-            {
-                "message_id": None,
-                "user_id": "self" if canonical_sender == "self" else str(session_id),
-                "username": canonical_sender,
-                "text": text,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "interface_path": interface_path,
-            }
-        )
+        msg: dict[str, Any] = {
+            "message_id": None,
+            "user_id": "self" if canonical_sender == "self" else str(session_id),
+            "username": canonical_sender,
+            "text": text,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "interface_path": interface_path,
+        }
+        if metadata and isinstance(metadata, dict):
+            msg["metadata"] = metadata
+        history.append(msg)
 
         # Persist to chat_history_cache for long-term storage
         try:
@@ -3039,6 +3055,11 @@ class SynthWebUIInterface:
         **kwargs,
     ) -> None:
         skip_history = kwargs.pop("skip_history", False)
+        metadata = kwargs.pop("metadata", None)
+        # Normalize metadata to a dict, otherwise ignore it.
+        if metadata is not None and not isinstance(metadata, dict):
+            metadata = None
+
         if isinstance(payload_or_chat_id, dict):
             payload = payload_or_chat_id
             # Accept both "text" (standard) and "value" (legacy synthetic-action mapping)
@@ -3049,10 +3070,14 @@ class SynthWebUIInterface:
                 or payload.get("chat_id")
             )
             skip_history = payload.get("skip_history", skip_history)
+            if metadata is None and isinstance(payload.get("metadata"), dict):
+                metadata = payload.get("metadata")
         else:
             chat_id = payload_or_chat_id or kwargs.get("chat_id")
             if text is None:
                 text = kwargs.get("text")
+            if metadata is None and isinstance(kwargs.get("metadata"), dict):
+                metadata = kwargs.get("metadata")
 
         if not text or not chat_id:
             log_warning(f"{LOG_PREFIX} send_message missing text or chat_id")
@@ -3149,16 +3174,25 @@ class SynthWebUIInterface:
         # If websocket is present attempt to send; otherwise persist for later replay
         if websocket:
             try:
-                await websocket.send_json(
-                    {"type": "message", "sender": "synth", "text": text}
-                )
+                payload: Dict[str, Any] = {
+                    "type": "message",
+                    "sender": "synth",
+                    "text": text,
+                }
+                # Forward metadata fields that the client can use (e.g. tts_url).
+                if metadata and metadata.get("tts_url"):
+                    payload["tts_url"] = metadata["tts_url"]
+                    # Also include in `data` for clients that expect it there.
+                    payload["data"] = {"tts_url": metadata["tts_url"]}
+
+                await websocket.send_json(payload)
             except Exception as e:
                 log_warning(
                     f"{LOG_PREFIX} Failed to send websocket message to {session_id}: {e}"
                 )
 
         # Append to in-memory history so reconnect will replay it
-        await self._append_history(session_id, "synth", text)
+        await self._append_history(session_id, "synth", text, metadata=metadata)
 
         # Save SyntH's response via core chat_context_manager
         if not skip_history:
@@ -3166,7 +3200,7 @@ class SynthWebUIInterface:
                 from core.chat_context_manager import save_response_message
 
                 msg_interface_path = f"{INTERFACE_NAME}/{chat_id}"
-                await save_response_message(msg_interface_path, text)
+                await save_response_message(msg_interface_path, text, metadata=metadata)
             except Exception as e:
                 log_debug(
                     f"{LOG_PREFIX} Failed to save response via context_manager: {e}"

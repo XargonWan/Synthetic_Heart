@@ -980,6 +980,21 @@ export function initChatUI() {
                         if (data && data.type === 'message') {
                             const ts = data.ts || data.timestamp || Date.now();
                             appendMessage(getMessagesEl(), data.sender === 'synth' ? 'synth' : 'user', data.text || '', ts);
+                            // Restore click-to-replay audio metadata when replaying history.
+                            const ttsUrl = data.tts_url || (data.data && data.data.tts_url);
+                            if (ttsUrl && data.sender === 'synth') {
+                                try {
+                                    const activeMessages = getMessagesEl();
+                                    if (activeMessages) {
+                                        const bubbles = activeMessages.querySelectorAll('.bubble.synth:not(.typing-indicator)');
+                                        const lastBubble = bubbles.length > 0 ? bubbles[bubbles.length - 1] : null;
+                                        if (lastBubble) {
+                                            lastBubble.dataset.ttsUrl = ttsUrl;
+                                            lastBubble.classList.add('clickable-audio');
+                                        }
+                                    }
+                                } catch (e) { /* ignore */ }
+                            }
                         } else if (data && data.type === 'action_state') {
                             const phase = String(data.phase || '').toUpperCase();
                             if (phase === 'THINKING' || phase === 'WRITING' || phase === 'TALKING') {
