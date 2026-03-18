@@ -1984,6 +1984,8 @@ class AnimationHandler {
         // schedule a conservative fallback to idle to avoid lingering T-pose.
         this._postOutroIdleTimer = null;
         this._postOutroIdleToken = 0;
+        this._pendingRequestedAction = null;
+        this._lateRecoveryTokens = {};
 
         // Serialize animation switches to avoid concurrent startAction() calls
         // which can momentarily stop the current action and cause a visible T-pose.
@@ -2031,12 +2033,19 @@ class AnimationHandler {
                 this.loadedDescriptors[normalizedKey] = descriptor;
                 console.log('[AnimationHandler] Cached descriptor for:', normalizedKey);
 
-                // Also cache under the canonical descriptor URL key used by loadDescriptor()
+                // Also cache under the canonical descriptor URL key used by loadDescriptor().
+                // loadDescriptor() constructs the path as /api/skins/<skin>/animations/<state>/<file>.json
+                // so we must cache under BOTH the bare path and the /api/-prefixed path to avoid
+                // a cache miss that would trigger a redundant HTTP fetch.
                 try {
                     if (typeof animationFile === 'string' && animationFile.includes('/')) {
                         const cleanAnim = animationFile.split('?')[0].split('#')[0];
-                        const descriptorPath = `${cleanAnim}.json`;
-                        this.loadedDescriptors[descriptorPath] = descriptor;
+                        // Bare path: /skins/Rei/animations/think/Thinking.fbx.json
+                        this.loadedDescriptors[`${cleanAnim}.json`] = descriptor;
+                        // API-prefixed path: /api/skins/Rei/animations/think/Thinking.fbx.json
+                        if (cleanAnim.includes('/skins/')) {
+                            this.loadedDescriptors[`/api${cleanAnim}.json`] = descriptor;
+                        }
                     }
                 } catch (e) { /* ignore */ }
             }
@@ -2213,10 +2222,12 @@ class AnimationHandler {
                     this._baseIdleAction.setLoop(THREE.LoopRepeat);
                     this._baseIdleAction.clampWhenFinished = false;
                     if (typeof this._baseIdleAction.setEffectiveWeight === 'function') {
+                        // Apply weight immediately — DO NOT call fadeIn() here.
+                        // fadeIn(t) resets the weight to 0 internally and ramps to 1
+                        // over t seconds, which would leave the skeleton partially
+                        // un-driven during that window and cause a visible T-pose.
                         this._baseIdleAction.setEffectiveWeight(minWeight);
                     }
-                    // Longer fade-in (0.35s) for smoother transitions to base idle
-                    this._baseIdleAction.fadeIn(0.35);
                     this._baseIdleAction.play();
                 } catch (e) { /* ignore */ }
                 return;
@@ -3022,6 +3033,7 @@ class AnimationHandler {
         console.log(`[AnimationHandler] startAction called with actionName: ${actionName}, animationFile: ${animationFile}, playOnce: ${playOnce}, playSection: ${playSection}`);
         console.log(`[AnimationHandler] this.mixer exists:`, !!this.mixer);
         console.log(`[AnimationHandler] this.vrm exists:`, !!this.vrm);
+        this._pendingRequestedAction = { actionName, animationFile, playOnce, playSection, descriptorOverride };
 
         // If we got a descriptorOverride but no explicit rich animation_state, apply a minimal
         // state so expression/blink configs are consistent across transitions.
@@ -3130,12 +3142,12 @@ class AnimationHandler {
         // "no clip driving bones" gaps and reduces skipped WRITE.
         try {
             if (animationFile) {
-                const clipReady = await this._awaitAnimationReady(actionName, animationFile, 30000);
+                const clipReady = await this._awaitAnimationReady(actionName, animationFile, 8000);
                 if (!clipReady) {
-                    console.warn('[AnimationHandler] Cannot play (preload failed). Falling back to minimal animation state:', actionName, animationFile);
-                    // Boost base idle to full weight so the skeleton is fully driven and T-pose is avoided.
+                    console.warn('[AnimationHandler] Cannot play yet (preload still pending or failed). Keeping current animation and scheduling late recovery:', actionName, animationFile);
+                    // If nothing is currently driving the skeleton, boost base idle as a safe fallback.
                     try {
-                        if (this._baseIdleAction) {
+                        if (!this.currentAction && !this.currentStructuredAction && this._baseIdleAction) {
                             this._baseIdleAction.enabled = true;
                             this._baseIdleAction.setLoop(THREE.LoopRepeat);
                             this._baseIdleAction.clampWhenFinished = false;
@@ -3146,36 +3158,28 @@ class AnimationHandler {
                             this._baseIdleAction.play();
                         }
                     } catch (_e) { /* ignore */ }
-                    // Stop whatever action was playing since the new clip never arrived.
+
+                    // Keep the previous animation alive and auto-retry this action once the clip finishes loading.
                     try {
-                        if (this.currentAction) {
-                            this._safeFadeStop(this.currentAction, 0.2);
-                        }
-                        if (this.currentStructuredAction) {
-                            this._safeFadeStop(this.currentStructuredAction.intro, 0.2);
-                            this._safeFadeStop(this.currentStructuredAction.loop, 0.2);
-                            this._safeFadeStop(this.currentStructuredAction.outro, 0.2);
-                        }
-                        this.currentAction = null;
-                        this.currentActionName = null;
-                        this.currentActionPhase = null;
-                        this.currentStructuredAction = null;
-                    } catch (e) { /* ignore */ }
-                    // Apply a minimal animation state so UI can reflect the requested action even if the clip failed to preload.
-                    try {
-                        this.currentActionName = actionName;
-                        this.currentActionPhase = playOnce ? 'clip' : 'loop';
-                        const minimalState = {
-                            action: (actionName || '').toString().toLowerCase(),
-                            phase: this.currentActionPhase,
-                            animation: animationFile || null,
-                            descriptor: null,
-                            clip: { fps: 30 },
-                            timing: { started_at: new Date().toISOString(), time_in_clip: 0.0, current_frame: 0 },
-                            source: 'startAction_fallback'
-                        };
-                        if (typeof this.applyAnimationState === 'function') {
-                            try { this.applyAnimationState(minimalState); } catch (e) { /* ignore */ }
+                        const normalizedKey = this._normalizeAnimationKey(animationFile);
+                        const pending = this._preloadPromises[normalizedKey] || this._preloadPromises[animationFile] || null;
+                        if (pending && !this._lateRecoveryTokens[normalizedKey]) {
+                            this._lateRecoveryTokens[normalizedKey] = true;
+                            pending.then((lateClip) => {
+                                try {
+                                    delete this._lateRecoveryTokens[normalizedKey];
+                                    if (!lateClip) return;
+                                    const pendingRequest = this._pendingRequestedAction || {};
+                                    const stillRequested = pendingRequest.actionName === actionName && pendingRequest.animationFile === animationFile;
+                                    if (!stillRequested) return;
+                                    console.warn('[AnimationHandler] Late animation preload recovered; replaying requested action:', actionName, animationFile);
+                                    this.startAction(actionName, animationFile, playOnce, playSection, descriptorOverride);
+                                } catch (lateErr) {
+                                    console.warn('[AnimationHandler] Late animation recovery failed:', lateErr);
+                                }
+                            }).catch(() => {
+                                try { delete this._lateRecoveryTokens[normalizedKey]; } catch (e) { /* ignore */ }
+                            });
                         }
                     } catch (e) { /* ignore */ }
                     return;
@@ -3198,6 +3202,8 @@ class AnimationHandler {
             } catch (_e) { /* ignore */ }
             return;
         }
+
+        this._pendingRequestedAction = null;
 
         // Guard: if the requested logical action is already active with the same (or any)
         // animation file, avoid restarting it to prevent rapid transitions / T-pose gaps.

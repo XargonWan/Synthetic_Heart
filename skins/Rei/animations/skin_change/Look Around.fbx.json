@@ -1,0 +1,12 @@
+{
+  "fps": 30,
+  "intro": {
+    "start_frame": 0,
+    "end_frame": 60
+  },
+  "outro": {
+    "start_frame": 61,
+    "end_frame": 120
+  },
+  "play_once": true
+}

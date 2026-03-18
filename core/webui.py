@@ -1609,14 +1609,10 @@ class SynthWebUIInterface:
         if self._multi_session_enabled():
             session_id = str(uuid.uuid4())
         else:
-            session_id = self.session_id or str(uuid.uuid4())
-            # Ensure session id is persisted if it was generated now
-            if not self.session_id:
-                self.session_id = session_id
-                try:
-                    self._ensure_persistent_session_id(force_write=True)
-                except Exception:
-                    pass
+            # Single-session mode: always use the same fixed ID so that chat
+            # history survives container restarts without any file/DB dependency.
+            session_id = "webui_default"
+            self.session_id = session_id
         self.connections[session_id] = websocket
         self.message_history.setdefault(session_id, deque(maxlen=self.max_history))
         await websocket.send_json({"type": "session", "session_id": session_id})
@@ -1736,9 +1732,14 @@ class SynthWebUIInterface:
                 text = (payload.get("text") or "").strip()
                 if not text:
                     continue
+                is_voice_input = bool(payload.get("is_voice_input", False))
                 await self._append_history(session_id, "user", text)
                 # Process message in background to avoid blocking WebSocket
-                asyncio.create_task(self._handle_user_message(session_id, text))
+                asyncio.create_task(
+                    self._handle_user_message(
+                        session_id, text, is_voice_input=is_voice_input
+                    )
+                )
         except WebSocketDisconnect:
             log_info(f"{LOG_PREFIX} Client disconnected: {session_id}")
         except Exception as exc:  # pragma: no cover - runtime issues
@@ -1919,6 +1920,7 @@ class SynthWebUIInterface:
                     status_code=503,
                     detail="Auris STT subsystem is not loaded. Select an Auris engine or disable via ACTIVE_AURIS_ENGINE.",
                 )
+            tmp_dir = Path("tmp") / "webui_audio"
             tmp_dir.mkdir(parents=True, exist_ok=True)
             suffix = Path(file.filename).suffix or ".audio"
             tmp_path = tmp_dir / f"webui_{uuid.uuid4().hex}{suffix}"
@@ -2598,7 +2600,9 @@ class SynthWebUIInterface:
                 status_code=500, detail=f"Failed to retrieve animation state: {exc}"
             ) from exc
 
-    async def _handle_user_message(self, session_id: str, text: str) -> None:
+    async def _handle_user_message(
+        self, session_id: str, text: str, is_voice_input: bool = False
+    ) -> None:
         from types import SimpleNamespace
         from core.config import TRAINER_NAME
         from core import message_queue
@@ -2619,6 +2623,7 @@ class SynthWebUIInterface:
             interface_path=f"{INTERFACE_NAME}/{session_id}",  # Add interface_path for proper routing
             message_id=int(datetime.utcnow().timestamp() * 1000) % 1_000_000,
             text=text,
+            is_voice_input=is_voice_input,
             date=datetime.utcnow(),
             from_user=SimpleNamespace(
                 id=session_id,
@@ -2809,14 +2814,29 @@ class SynthWebUIInterface:
                 else:
                     sender = "synth"
             text = item.get("text") if isinstance(item, dict) else str(item)
-            await websocket.send_json(
-                {"type": "message", "sender": sender, "text": text}
-            )
+            replay_payload: Dict[str, Any] = {"type": "message", "sender": sender, "text": text}
+            # Propagate metadata fields (e.g. tts_url) so the client can restore
+            # click-to-replay audio icons on reconnect / restart.
+            meta = item.get("metadata") if isinstance(item, dict) else None
+            if isinstance(meta, dict):
+                tts_url = meta.get("tts_url")
+                if tts_url:
+                    replay_payload["tts_url"] = tts_url
+                    replay_payload["data"] = {"tts_url": tts_url}
+                else:
+                    replay_payload["data"] = meta
+            await websocket.send_json(replay_payload)
         log_info(
             f"{LOG_PREFIX} _replay_history: sent {len(history)} messages to session {session_id}"
         )
 
-    async def _append_history(self, session_id: str, sender: str, text: str) -> None:
+    async def _append_history(
+        self,
+        session_id: str,
+        sender: str,
+        text: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
         history = self.message_history.setdefault(
             session_id, deque(maxlen=self.max_history)
         )
@@ -2840,16 +2860,17 @@ class SynthWebUIInterface:
 
         from datetime import timezone
 
-        history.append(
-            {
-                "message_id": None,
-                "user_id": "self" if canonical_sender == "self" else str(session_id),
-                "username": canonical_sender,
-                "text": text,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "interface_path": interface_path,
-            }
-        )
+        msg: dict[str, Any] = {
+            "message_id": None,
+            "user_id": "self" if canonical_sender == "self" else str(session_id),
+            "username": canonical_sender,
+            "text": text,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "interface_path": interface_path,
+        }
+        if metadata and isinstance(metadata, dict):
+            msg["metadata"] = metadata
+        history.append(msg)
 
         # Persist to chat_history_cache for long-term storage
         try:
@@ -2901,36 +2922,66 @@ class SynthWebUIInterface:
         except Exception:
             return False
 
-    def _ensure_persistent_session_id(self, force_write: bool = False) -> None:
-        """Ensure there's a persistent session id on disk for WebUI single-session deployments.
+    async def _load_session_id_from_db(self) -> "str | None":
+        """Read the WebUI session ID from the ``config`` table.
 
-        If a session id file exists, read it; otherwise generate one and persist it.
+        Returns the stored value, or ``None`` if unavailable (DB offline, key absent).
+        The file-based fallback in :meth:`_ensure_persistent_session_id` covers that case.
         """
         try:
-            # if multi-session is enabled we do not persist or read any file
+            from core.db import get_conn_ctx
+
+            async with get_conn_ctx() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "SELECT value FROM config WHERE config_key = 'webui_session_id' LIMIT 1"
+                    )
+                    row = await cur.fetchone()
+                    if row and row[0]:
+                        sid = str(row[0]).strip()
+                        if sid:
+                            log_debug(f"{LOG_PREFIX} Loaded session id from DB: {sid}")
+                            return sid
+        except Exception as exc:
+            log_debug(f"{LOG_PREFIX} Could not load session id from DB: {exc}")
+        return None
+
+    async def _save_session_id_to_db(self, sid: str) -> None:
+        """Persist the WebUI session ID to the ``config`` table (upsert)."""
+        try:
+            from core.db import get_conn_ctx
+
+            async with get_conn_ctx() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "INSERT INTO config (config_key, value) VALUES ('webui_session_id', %s) "
+                        "ON DUPLICATE KEY UPDATE value = VALUES(value)",
+                        (sid,),
+                    )
+                await conn.commit()
+                log_info(f"{LOG_PREFIX} Saved session id to DB: {sid}")
+        except Exception as exc:
+            log_debug(f"{LOG_PREFIX} Could not save session id to DB: {exc}")
+
+    def _ensure_persistent_session_id(self, force_write: bool = False) -> None:
+        """Synchronous initialisation of the single-session ID.
+
+        In single-session mode (MULTI_SESSION=False, default) we always use the
+        fixed constant ``"webui_default"`` as the session identifier.  This makes
+        chat history survive container restarts without depending on file or DB
+        persistence.  The async DB-backed path is no longer called on reconnect.
+        """
+        try:
             if self._multi_session_enabled():
                 log_debug(
                     f"{LOG_PREFIX} MULTI_SESSION enabled; skipping persistent session file"
                 )
                 return
-            if not self.session_id_file.parent.exists():
-                self.session_id_file.parent.mkdir(parents=True, exist_ok=True)
-            if self.session_id_file.exists() and not force_write:
-                try:
-                    sid = self.session_id_file.read_text(encoding="utf-8").strip()
-                    if sid:
-                        self.session_id = sid
-                        log_debug(f"{LOG_PREFIX} Loaded persistent session id: {sid}")
-                        return
-                except Exception:
-                    log_debug(
-                        f"{LOG_PREFIX} Failed to read session id file: {self.session_id_file}"
-                    )
-            # Write a new session id
-            sid = str(uuid.uuid4())
-            self.session_id_file.write_text(sid, encoding="utf-8")
-            self.session_id = sid
-            log_info(f"{LOG_PREFIX} Created persistent session id: {sid}")
+            # Fixed constant for single-user deployments — no UUID generation needed.
+            self.session_id = "webui_default"
+            log_debug(
+                f"{LOG_PREFIX} Single-session mode: using fixed session id 'webui_default'"
+            )
         except Exception as exc:
             log_warning(f"{LOG_PREFIX} Failed to ensure persistent session id: {exc}")
 
@@ -3005,6 +3056,11 @@ class SynthWebUIInterface:
         **kwargs,
     ) -> None:
         skip_history = kwargs.pop("skip_history", False)
+        metadata = kwargs.pop("metadata", None)
+        # Normalize metadata to a dict, otherwise ignore it.
+        if metadata is not None and not isinstance(metadata, dict):
+            metadata = None
+
         if isinstance(payload_or_chat_id, dict):
             payload = payload_or_chat_id
             # Accept both "text" (standard) and "value" (legacy synthetic-action mapping)
@@ -3015,10 +3071,14 @@ class SynthWebUIInterface:
                 or payload.get("chat_id")
             )
             skip_history = payload.get("skip_history", skip_history)
+            if metadata is None and isinstance(payload.get("metadata"), dict):
+                metadata = payload.get("metadata")
         else:
             chat_id = payload_or_chat_id or kwargs.get("chat_id")
             if text is None:
                 text = kwargs.get("text")
+            if metadata is None and isinstance(kwargs.get("metadata"), dict):
+                metadata = kwargs.get("metadata")
 
         if not text or not chat_id:
             log_warning(f"{LOG_PREFIX} send_message missing text or chat_id")
@@ -3115,16 +3175,25 @@ class SynthWebUIInterface:
         # If websocket is present attempt to send; otherwise persist for later replay
         if websocket:
             try:
-                await websocket.send_json(
-                    {"type": "message", "sender": "synth", "text": text}
-                )
+                payload: Dict[str, Any] = {
+                    "type": "message",
+                    "sender": "synth",
+                    "text": text,
+                }
+                # Forward metadata fields that the client can use (e.g. tts_url).
+                if metadata and metadata.get("tts_url"):
+                    payload["tts_url"] = metadata["tts_url"]
+                    # Also include in `data` for clients that expect it there.
+                    payload["data"] = {"tts_url": metadata["tts_url"]}
+
+                await websocket.send_json(payload)
             except Exception as e:
                 log_warning(
                     f"{LOG_PREFIX} Failed to send websocket message to {session_id}: {e}"
                 )
 
         # Append to in-memory history so reconnect will replay it
-        await self._append_history(session_id, "synth", text)
+        await self._append_history(session_id, "synth", text, metadata=metadata)
 
         # Save SyntH's response via core chat_context_manager
         if not skip_history:
@@ -3132,7 +3201,7 @@ class SynthWebUIInterface:
                 from core.chat_context_manager import save_response_message
 
                 msg_interface_path = f"{INTERFACE_NAME}/{chat_id}"
-                await save_response_message(msg_interface_path, text)
+                await save_response_message(msg_interface_path, text, metadata=metadata)
             except Exception as e:
                 log_debug(
                     f"{LOG_PREFIX} Failed to save response via context_manager: {e}"
@@ -3230,6 +3299,17 @@ class SynthWebUIInterface:
         if not websocket:
             log_warning(f"{LOG_PREFIX} send_tts_audio: no websocket for session {sid}")
             return False
+
+        # Deliver the caption as a regular chat message so that it is persisted
+        # in the DB, appears in the in-memory history (replay on reconnect) and
+        # shows as a visible text bubble on clients that may not support audio.
+        if text:
+            try:
+                await self.send_message(sid, text=text)
+            except Exception as exc:
+                log_warning(
+                    f"{LOG_PREFIX} send_tts_audio: failed to send caption message for session {sid}: {exc}"
+                )
 
         # Derive a client-accessible URL from the filesystem path.
         # Audio is stored under the /static mount, e.g.
@@ -7216,6 +7296,9 @@ class SynthWebUIInterface:
             active_live = None
 
         live_data: list[dict] = list(by_cortex.get("live", []))
+        # Fix active flag for cortex live engines (they were marked using BASE_CORTEX's active_engine)
+        for engine in live_data:
+            engine["active"] = engine.get("name") == active_live
         # always offer disabled choice; mark it active if the config says so
         live_data.insert(
             0,

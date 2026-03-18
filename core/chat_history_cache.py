@@ -46,12 +46,23 @@ async def init_chat_history_table() -> None:
                         sender_name VARCHAR(255),
                         sender_id VARCHAR(255),
                         message_text LONGTEXT NOT NULL,
+                        metadata JSON DEFAULT NULL,
                         timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
                         INDEX idx_interface_path (interface_path),
                         INDEX idx_timestamp (timestamp),
                         UNIQUE KEY uniq_message (interface_path, timestamp)
                     )
                 """)
+                # Migration: add metadata column for pre-existing tables.
+                try:
+                    await cur.execute(
+                        "ALTER TABLE chat_history_cache "
+                        "ADD COLUMN metadata JSON DEFAULT NULL"
+                    )
+                    log_debug("[chat_history_cache] Added metadata column")
+                except Exception:
+                    # Column already exists — ignore.
+                    pass
                 log_debug("[chat_history_cache] chat_history_cache table initialized")
     except Exception as e:
         log_error(f"[chat_history_cache] Failed to create table: {e}")
@@ -62,7 +73,8 @@ async def save_chat_message(
     message_text: str,
     sender_name: str | None = None,
     sender_id: str | None = None,
-    timestamp: datetime | None = None,
+    timestamp: datetime | str | None = None,
+    metadata: dict[str, Any] | None = None,
 ) -> bool:
     """Save a message to the chat history cache.
 
@@ -74,6 +86,7 @@ async def save_chat_message(
         timestamp: Optional message timestamp (datetime object or ISO string)
                    If provided, will be converted to UTC before storing.
                    If tzinfo is None, assumes local time and converts to UTC.
+        metadata: Optional dict of extra metadata (e.g. ``{"tts_url": ...}``).
     """
     if not interface_path or not message_text:
         return False
@@ -88,8 +101,8 @@ async def save_chat_message(
             except Exception:
                 timestamp = None
 
-        # Convert timestamp to UTC for storage
-        if timestamp:
+        # Convert timestamp to UTC for storage; only proceed when we have a datetime
+        if isinstance(timestamp, datetime):
             if timestamp.tzinfo is None:
                 # If no timezone info, assume it's UTC (already passed as UTC from interfaces)
                 timestamp = timestamp.replace(tzinfo=timezone.utc)
@@ -121,20 +134,26 @@ async def save_chat_message(
                 except Exception as e:
                     log_debug(f"[chat_history_cache] Deduplication check failed: {e}")
 
+                # Serialise metadata dict to JSON for storage.
+                import json as _json
+
+                metadata_json = _json.dumps(metadata) if metadata else None
+
                 # Insert message with timestamp (always in UTC)
                 if timestamp:
                     await cur.execute(
                         """
                         INSERT INTO chat_history_cache 
-                        (interface_path, sender_name, sender_id, message_text, timestamp)
-                        VALUES (%s, %s, %s, %s, %s)
-                        ON DUPLICATE KEY UPDATE timestamp=VALUES(timestamp)
+                        (interface_path, sender_name, sender_id, message_text, metadata, timestamp)
+                        VALUES (%s, %s, %s, %s, %s, %s)
+                        ON DUPLICATE KEY UPDATE timestamp=VALUES(timestamp), metadata=VALUES(metadata)
                     """,
                         (
                             interface_path,
                             sender_name,
                             sender_id,
                             message_text,
+                            metadata_json,
                             timestamp,
                         ),
                     )
@@ -142,11 +161,17 @@ async def save_chat_message(
                     await cur.execute(
                         """
                         INSERT INTO chat_history_cache 
-                        (interface_path, sender_name, sender_id, message_text, timestamp)
-                        VALUES (%s, %s, %s, %s, UTC_TIMESTAMP())
-                        ON DUPLICATE KEY UPDATE timestamp=UTC_TIMESTAMP()
+                        (interface_path, sender_name, sender_id, message_text, metadata, timestamp)
+                        VALUES (%s, %s, %s, %s, %s, UTC_TIMESTAMP())
+                        ON DUPLICATE KEY UPDATE timestamp=UTC_TIMESTAMP(), metadata=VALUES(metadata)
                     """,
-                        (interface_path, sender_name, sender_id, message_text),
+                        (
+                            interface_path,
+                            sender_name,
+                            sender_id,
+                            message_text,
+                            metadata_json,
+                        ),
                     )
 
                 # Clean up old messages beyond CHAT_HISTORY_LIMIT
@@ -218,7 +243,7 @@ async def load_chat_history(interface_path: str) -> deque:
                 # Load messages in chronological order
                 await cur.execute(
                     """
-                    SELECT sender_name, sender_id, message_text, timestamp, interface_path
+                    SELECT sender_name, sender_id, message_text, timestamp, interface_path, metadata
                     FROM chat_history_cache
                     WHERE interface_path = %s
                     ORDER BY timestamp ASC, id ASC
@@ -230,12 +255,21 @@ async def load_chat_history(interface_path: str) -> deque:
                 rows = await cur.fetchall()
 
                 # Convert rows to message objects
+                import json as _json
+
                 messages = deque()
                 for row in rows:
                     try:
-                        sender_name, sender_id, message_text, timestamp, ipath = row
+                        (
+                            sender_name,
+                            sender_id,
+                            message_text,
+                            timestamp,
+                            ipath,
+                            raw_meta,
+                        ) = row
                         # Store as dict for flexibility
-                        msg = {
+                        msg: dict[str, Any] = {
                             "sender_name": sender_name,
                             "sender_id": sender_id,
                             "text": message_text,
@@ -244,6 +278,18 @@ async def load_chat_history(interface_path: str) -> deque:
                             else str(timestamp),
                             "interface_path": ipath,
                         }
+                        # Deserialise metadata JSON.
+                        if raw_meta:
+                            try:
+                                parsed = (
+                                    _json.loads(raw_meta)
+                                    if isinstance(raw_meta, str)
+                                    else raw_meta
+                                )
+                                if isinstance(parsed, dict):
+                                    msg["metadata"] = parsed
+                            except Exception:
+                                pass
                         messages.append(msg)
                     except Exception as e:
                         log_debug(

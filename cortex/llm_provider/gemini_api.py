@@ -485,22 +485,18 @@ class GeminiAPIPlugin(AIPluginBase):
     # ------------------------------------------------------------------
 
     def get_live_session_manager(self) -> "LiveSessionManager | None":
-        """Return the LiveSessionManager instance, creating it lazily.
+        """Return the global LiveSessionManager singleton.
 
         Returns None if the google-genai SDK is unavailable or no API key is set.
+        Uses the singleton so all code paths (start, stop, is_session_active,
+        chat sync) share the same instance and session state.
         """
         if not _HAS_GENAI_SDK or not GEMINI_API_KEY:
             return None
 
-        if not hasattr(self, "_live_session_manager"):
-            from core.live_session_manager import LiveSessionManager
+        from core.live_session_manager import LiveSessionManager
 
-            self._live_session_manager = LiveSessionManager(
-                api_key=str(GEMINI_API_KEY).strip()
-            )
-            log_info("[gemini_api] LiveSessionManager created")
-
-        return self._live_session_manager
+        return LiveSessionManager.get_instance(api_key=str(GEMINI_API_KEY).strip())
 
     async def start_live_voice_session(
         self,
@@ -1357,7 +1353,9 @@ class GeminiAPIPlugin(AIPluginBase):
 
         # Keys whose subtrees are schema definitions (not multimodal data)
         # and should be skipped during recursive attachment collection.
-        SCHEMA_ONLY_KEYS = {"actions", "available_actions", "schema", "payload"}
+        # NOTE: "payload" was removed — it caused the function to skip
+        # input.payload.attachments where the actual multimodal data lives.
+        SCHEMA_ONLY_KEYS = {"actions", "available_actions", "schema"}
 
         def collect_attachments_recursive(container: dict | list | str) -> None:
             """Recursively collect multimodal attachments from any level."""

@@ -160,10 +160,20 @@ class MessagePlugin:
                 rebuilt_interface_path = f"{interface_name}/{target}"
 
         # --- Grillo Suppression Logic ---
-        if isinstance(context, dict) and (
-            context.get("grillo_beat")
-            or context.get("activity_log_id")
-            or context.get("grillo_activity_log_id")
+        # Outreach beats are EXEMPT from suppression: their purpose is to
+        # initiate conversation, so silencing them defeats the feature.
+        is_outreach = (
+            isinstance(context, dict) and context.get("beat_type") == "outreach"
+        )
+
+        if (
+            not is_outreach
+            and isinstance(context, dict)
+            and (
+                context.get("grillo_beat")
+                or context.get("activity_log_id")
+                or context.get("grillo_activity_log_id")
+            )
         ):
             try:
                 suppress_enabled = config_registry.get_value(
@@ -204,7 +214,7 @@ class MessagePlugin:
                         try:
                             if int(target) < 0:
                                 is_public = True
-                        except:
+                        except Exception:
                             pass
                     elif (
                         interface_name

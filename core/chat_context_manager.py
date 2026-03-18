@@ -8,7 +8,7 @@ This module manages context_memory across all interfaces, ensuring:
 """
 
 from collections import deque
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 from core.logging_utils import log_debug, log_warning, log_info
 from core.config_manager import config_registry
 
@@ -300,7 +300,11 @@ def get_context_stats() -> dict:
     return stats
 
 
-async def save_response_message(interface_path: str, message_text: str) -> None:
+async def save_response_message(
+    interface_path: str,
+    message_text: str,
+    metadata: dict[str, Any] | None = None,
+) -> None:
     """Save a message sent by the core (bot response).
 
     This should be called by the core whenever it sends a message to an interface.
@@ -308,6 +312,7 @@ async def save_response_message(interface_path: str, message_text: str) -> None:
     Args:
         interface_path: Interface path (e.g., telegram_bot/123456/2)
         message_text: The response message text
+        metadata: Optional message metadata (e.g. {"tts_url": ...})
     """
     if not interface_path or not message_text:
         return
@@ -322,6 +327,7 @@ async def save_response_message(interface_path: str, message_text: str) -> None:
             message_text=message_text,
             sender_name="self",
             sender_id="self",
+            metadata=metadata,
         )
         log_debug(
             f"[context_manager] Saved response message for interface_path {interface_path}"
