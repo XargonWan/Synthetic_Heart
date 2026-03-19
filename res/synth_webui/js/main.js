@@ -39,10 +39,15 @@
             const parser = new DOMParser();
             const doc = parser.parseFromString(text, 'text/html');
 
-            // If the template is a tab-panel matching id, append children inside
+            // If a parsed child wraps content with the same id as the panel,
+            // extract its inner content to avoid nesting .tab-panel inside .tab-panel
+            // (which would be hidden by CSS display:none).
             const children = Array.from(doc.body.children || []);
-            if (children.length === 1 && children[0].id === panel.id) {
-                Array.from(children[0].children).forEach(n => panel.appendChild(n));
+            const wrapper = children.find(c => c.id === panel.id);
+            if (wrapper) {
+                Array.from(wrapper.children).forEach(n => panel.appendChild(n));
+                // Append sibling elements (e.g. <style> blocks) that sit outside the wrapper
+                children.filter(c => c !== wrapper).forEach(n => panel.appendChild(n));
             } else {
                 children.forEach(n => panel.appendChild(n));
             }
