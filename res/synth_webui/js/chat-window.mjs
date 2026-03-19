@@ -13,7 +13,8 @@ function injectChatStyles() {
         /* chat styles (injected by chat-window.mjs) */
         .synth-chat { display:flex; flex-direction:column; height:100%; min-height:0; width:100%; position:relative; }
         .synth-chat-header { width:100%; display:flex; align-items:center; justify-content:flex-start; padding:0.35rem 0.6rem 0 0.6rem; }
-        .synth-chat-body { flex:1 1 auto; min-height:0; overflow:hidden; transition: overflow 0s; }
+        .synth-chat-body { flex:1 1 auto; min-height:0; overflow:hidden; transition: overflow 0s; -ms-overflow-style: none; scrollbar-width: none; }
+        .synth-chat-body::-webkit-scrollbar { width: 0; height: 0; }
         .synth-chat-body.at-max { overflow-y:auto; }
         .synth-chat-footer { flex:0 0 auto; position:sticky; bottom:0; z-index:2; background: inherit; }
         .synth-chat-composer { width:100%; display:flex; gap:0.6rem; align-items:flex-end; padding:0.6rem 1rem; box-sizing:border-box; }
