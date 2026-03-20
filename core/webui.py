@@ -669,6 +669,7 @@ class SynthWebUIInterface:
         # Emotion state endpoint (separate from animation_state) — returns current emotion intensities
         self.app.get("/api/emotion_state")(self.get_emotion_state_endpoint)
         self.app.get("/api/locations")(self.get_suggested_locations)
+        self.app.get("/api/weather/current")(self.get_current_weather_endpoint)
 
         # Template sections route for modular loading
         self.app.get("/templates/{section}.html")(self.serve_template_section)
@@ -2814,7 +2815,11 @@ class SynthWebUIInterface:
                 else:
                     sender = "synth"
             text = item.get("text") if isinstance(item, dict) else str(item)
-            replay_payload: Dict[str, Any] = {"type": "message", "sender": sender, "text": text}
+            replay_payload: Dict[str, Any] = {
+                "type": "message",
+                "sender": sender,
+                "text": text,
+            }
             # Propagate metadata fields (e.g. tts_url) so the client can restore
             # click-to-replay audio icons on reconnect / restart.
             meta = item.get("metadata") if isinstance(item, dict) else None
@@ -8604,6 +8609,49 @@ class SynthWebUIInterface:
             log_error(f"{LOG_PREFIX} Error getting suggested locations: {e}")
             return JSONResponse(
                 {"locations": [], "count": 0, "error": str(e)}, status_code=500
+            )
+
+    async def get_current_weather_endpoint(self):
+        """GET /api/weather/current — return the current weather from WeatherPlugin."""
+        from core.core_initializer import PLUGIN_REGISTRY
+
+        weather_plugin = None
+        try:
+            if isinstance(PLUGIN_REGISTRY, dict):
+                weather_plugin = PLUGIN_REGISTRY.get("weather")
+        except Exception as e:
+            log_error(f"{LOG_PREFIX} Error accessing PLUGIN_REGISTRY: {e}")
+
+        if not weather_plugin:
+            return JSONResponse(
+                {
+                    "status": "error",
+                    "message": "Weather plugin not available",
+                },
+                status_code=503,
+            )
+
+        if not hasattr(weather_plugin, "get_current_weather"):
+            return JSONResponse(
+                {
+                    "status": "error",
+                    "message": "Weather plugin does not support current weather endpoint",
+                },
+                status_code=501,
+            )
+
+        try:
+            result = await weather_plugin.get_current_weather()
+            return JSONResponse(result)
+        except Exception as e:
+            log_error(f"{LOG_PREFIX} Error in get_current_weather_endpoint: {e}")
+            return JSONResponse(
+                {
+                    "status": "error",
+                    "message": "Failed to fetch current weather",
+                    "error": str(e),
+                },
+                status_code=500,
             )
 
     async def clear_uploaded_vrm(self):

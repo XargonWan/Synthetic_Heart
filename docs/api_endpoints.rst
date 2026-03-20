@@ -155,6 +155,9 @@ external services such as Mate Engine or other automations.
 - **GET** `/api/integrations/outbox?source=<source>` – retrieve queued outbound
   messages for a given integration, clearing the queue on read (use
   ``source=mate`` for Mate Engine).
+- **GET** `/api/weather/current` – get a snapshot of the current weather from the
+  weather plugin.  Returns ``{status, weather, last_fetch}``, where ``status`` is
+  ``ok`` or ``unavailable``.
 
 Config & Miscellaneous
 ----------------------
