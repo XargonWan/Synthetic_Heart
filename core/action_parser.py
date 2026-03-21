@@ -1464,6 +1464,20 @@ async def run_actions(actions: Any, context: Dict[str, Any], bot, original_messa
                 except Exception as e:
                     log_debug(f"[action_parser] Grillo dedupe check failed: {e}")
 
+                # Block agent actions (propose_action, agent_execute, etc.)
+                # from grillo beats — outreach should deliver directly to the
+                # target interface, never route through the agent approval flow.
+                if action_type in (
+                    "propose_action",
+                    "agent_execute",
+                    "approve_action",
+                    "start_task",
+                ):
+                    log_warning(
+                        f"[action_parser] Dropping '{action_type}' from grillo beat — agent actions not allowed in grillo context"
+                    )
+                    continue
+
             if is_from_cortex:
                 try:
                     # Centralized safety decision
@@ -1473,7 +1487,10 @@ async def run_actions(actions: Any, context: Dict[str, Any], bot, original_messa
                         action, context or {}, original_message
                     )
                     if not allowed:
-                        # Maintain previous behavior: collect as failed action and continue
+                        # Safety/policy blocks are unfixable — the LLM cannot
+                        # change the system configuration, so asking the
+                        # corrector to "fix" these only produces workarounds
+                        # like propose_action that bypass the intended policy.
                         error_msg = f"Action '{action.get('type')}' blocked by safety policy: {reason}"
                         log_info(f"[action_parser] {error_msg}")
                         collected_errors.append(error_msg)
@@ -1483,6 +1500,7 @@ async def run_actions(actions: Any, context: Dict[str, Any], bot, original_messa
                                 "action": action,
                                 "errors": [error_msg],
                                 "safety_meta": meta,
+                                "unfixable": True,
                             }
                         )
                         continue

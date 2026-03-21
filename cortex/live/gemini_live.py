@@ -25,12 +25,15 @@ CAPABILITIES = {
     "low_latency": True,
 }
 
+ENGINE_LABEL = "Gemini Live (experimental bidirectional streaming)"
+
 
 class GeminiLivePlugin:
     display_name = "Gemini Live (Prototype)"
     # Maximum live session duration in seconds (declared, not exposed).
-    # LiveSessionManager reads this via reflection to schedule auto-rejoin.
-    MAX_SESSION_SECONDS: int = 900  # 15 minutes
+    # Google documents 15 min for audio-only, but empirically the server
+    # closes WebSocket connections at roughly 10 min (~600s).
+    MAX_SESSION_SECONDS: int = 600  # ~10 minutes (empirical)
 
     def __init__(self, notify_fn: object = None) -> None:
         # Internal data buffers — intentionally named *_buf (not *_queue) so that

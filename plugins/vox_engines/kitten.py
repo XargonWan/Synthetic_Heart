@@ -29,74 +29,200 @@ from core.vox_registry import register_vox_engine
 from plugins.vox_base import VoxEngineBase
 from core.model_manager import VoiceSpec
 
-# real KittenTTS implementation (imports from vendored or pip package).
-# when we ship a vendored copy under ``vendor/kittentts`` we must add the
-# *parent* directory of that package to ``sys.path``. previously we were
-# inserting ``.../vendor/kittentts`` itself which meant ``import kittentts``
-# could not locate ``__init__.py`` (python looked for
-# ``vendor/kittentts/kittentts``).
+# Import strategy: try the real kittentts package installed via uv/pip first.
+# Only fall back to the vendored gTTS stub when the real package is absent.
+# The vendor path must NOT be inserted before the real package is attempted,
+# otherwise the stub would always shadow the installed package.
 import os
 import sys
 
-_vendor_base = os.path.normpath(
-    os.path.join(os.path.dirname(__file__), "..", "..", "vendor")
-)
-# add path only if the vendored package actually exists
-if os.path.isdir(os.path.join(_vendor_base, "kittentts")):
-    sys.path.insert(0, _vendor_base)
+# Default HuggingFace model used when no model_id is configured.
+# kitten-tts-nano-0.8 is the standard ONNX model (~25 MB).
+_DEFAULT_KITTENTTS_MODEL = "KittenML/kitten-tts-nano-0.8"
+
+# Flag set at import time so generate() knows which API to call.
+_USING_VENDOR_STUB: bool
 
 try:
+    # Prefer the real neural kittentts package — multi-voice, multilingual.
     from kittentts import KittenTTS  # type: ignore[import]
-except ImportError:  # pragma: no cover - engine optional
-    KittenTTS = None  # type: ignore[assignment]
+
+    _USING_VENDOR_STUB = False
+    log_info("[vox/kitten] Using real kittentts package (multi-voice neural TTS).")
+except ImportError:
+    # Real package not installed — fall back to vendored gTTS stub.
+    # NOTE: the stub uses gTTS which does NOT support multiple voice personas;
+    # all voices will sound identical regardless of the ``voice`` parameter.
+    log_info(
+        "[vox/kitten] Real kittentts not found; falling back to vendored gTTS stub "
+        "(voice selection not supported — install kittentts for multi-voice TTS)."
+    )
+    _vendor_base = os.path.normpath(
+        os.path.join(os.path.dirname(__file__), "..", "..", "vendor")
+    )
+    if os.path.isdir(os.path.join(_vendor_base, "kittentts")):
+        sys.path.insert(0, _vendor_base)
+    try:
+        from kittentts import KittenTTS  # type: ignore[import]  # noqa: F811
+    except ImportError:  # pragma: no cover
+        KittenTTS = None  # type: ignore[assignment]
+    _USING_VENDOR_STUB = True
+
+
+# Mapping from ISO 639-1 codes to espeak-ng language identifiers.
+# Used to replace the kittentts hardcoded ``en-us`` phonemizer at call time
+# so that non-English text is phonemized correctly.
+_ESPEAK_LANG_MAP: dict[str, str] = {
+    "en": "en-us",
+    "it": "it",
+    "fr": "fr",
+    "de": "de",
+    "es": "es",
+    "pt": "pt",
+    "nl": "nl",
+    "pl": "pl",
+    "ru": "ru",
+    "ko": "ko",
+    "ar": "ar",
+    # Japanese (ISO 639-1: ja; non-standard alias jp).
+    # espeak-ng 'ja' is not reliably present in all deployments and kittentts
+    # was trained on Latin-script phonemes.  Italian shares Japanese's open
+    # vowel system and clear consonants, producing more intelligible output
+    # than the English fallback.
+    "ja": "it",
+    "jp": "it",
+}
+
+
+def _espeak_lang_code(lang: str | None) -> str:
+    """Return the espeak-ng language code for an ISO 639-1 *lang* tag.
+
+    Falls back to ``"en-us"`` for unknown or None values.
+    """
+    if not lang:
+        return "en-us"
+    # Accept both 'it' and 'it-IT' style codes.
+    base = lang.split("-")[0].lower()
+    return _ESPEAK_LANG_MAP.get(base, "en-us")
 
 
 class LocalKittenTTS:
-    """Wrapper around the actual KittenTTS package.
+    """Wrapper around the KittenTTS package (real neural or vendored gTTS stub).
 
-    The previous version of this plugin used ``pyttsx3`` and the system
-    TTS backend; the output was robotic and did not match the expectations
-    for "KittenTTS".  We now require the real ``kittentts`` package (vendored
-    under ``vendor/kittentts`` when not installed) which provides a neural
-    model-based synthesiser.  If the package is missing the engine will log
-    and simply refuse to generate audio.
+    When the real ``kittentts`` package is installed the wrapper:
+    - Initialises the model by downloading it from HuggingFace on first use.
+    - Honours the ``voice`` parameter (each voice has a distinct acoustic profile).
+    - Supports multilingual phonemization by swapping the espeak-ng phonemizer
+      before each synthesis call (kittentts 0.8.x hardcodes ``en-us`` internally).
+    - Returns a numpy audio array which is converted to WAV by the caller.
+
+    When only the vendored gTTS stub is available:
+    - ``voice`` is ignored (gTTS has a single voice per language).
+    - ``language`` must be provided explicitly for correct phonetics.
+    - Returns bytes directly.
     """
 
     def __init__(self, model_path: str | None = None) -> None:
-        # ``model_path`` may be used by the real package to locate a
-        # downloaded model; we forward it through.
         self._engine: Any | None = None
-        if KittenTTS is not None:
+        # Lock protecting phonemizer swaps; cache avoids re-creating backends.
+        self._phonemizer_lock = threading.Lock()
+        self._phonemizer_cache: dict[str, Any] = {}
+        if KittenTTS is None:
+            return
+        if _USING_VENDOR_STUB:
+            # gTTS stub ignores model_path; pass it through for compat.
             self._engine = KittenTTS(model_path)
+        else:
+            # Real package: model_path is a HuggingFace repo ID or local dir.
+            # Map sentinel values to the compact default model.
+            effective = (
+                _DEFAULT_KITTENTTS_MODEL
+                if (model_path is None or model_path == "builtin")
+                else model_path
+            )
+            self._engine = KittenTTS(effective)
+
+    def _get_phonemizer(self, espeak_lang: str) -> Any:
+        """Return a cached ``EspeakBackend`` for *espeak_lang*, creating if needed."""
+        if espeak_lang not in self._phonemizer_cache:
+            try:
+                from phonemizer.backend import EspeakBackend  # type: ignore[import]
+
+                self._phonemizer_cache[espeak_lang] = EspeakBackend(
+                    language=espeak_lang,
+                    preserve_punctuation=True,
+                    with_stress=True,
+                )
+            except Exception as exc:
+                log_error(
+                    f"[vox/kitten] Could not create EspeakBackend for '{espeak_lang}': {exc}; "
+                    "falling back to en-us."
+                )
+                # Re-use the English backend already cached (or create it).
+                if "en-us" not in self._phonemizer_cache:
+                    from phonemizer.backend import EspeakBackend  # type: ignore[import]
+
+                    self._phonemizer_cache["en-us"] = EspeakBackend(
+                        language="en-us", preserve_punctuation=True, with_stress=True
+                    )
+                self._phonemizer_cache[espeak_lang] = self._phonemizer_cache["en-us"]
+        return self._phonemizer_cache[espeak_lang]
 
     def generate(
         self, text: str, voice: str = "Bella", language: str | None = None
-    ) -> bytes:
+    ) -> Any:
+        """Synthesise *text* and return audio (bytes or numpy array).
+
+        The return type is ``Any`` because:
+        - The vendored stub returns ``bytes`` directly.
+        - The real kittentts returns a numpy array; callers must convert via
+          ``_audio_to_wav()`` before writing to disk.
+
+        For the real kittentts package the internal espeak phonemizer is swapped
+        to match *language* before synthesis, then restored.  kittentts 0.8.x
+        hardcodes ``en-us`` in its constructor, so without this swap non-English
+        text is mispronounced.
+        """
         if not self._engine:
             raise RuntimeError(
                 "KittenTTS engine not available; install the 'kittentts' package"
             )
-        # Forward the language hint so the underlying engine (real or vendored
-        # stub) can select the correct voice model / gTTS language code.
-        if language:
-            return self._engine.generate(text=text, voice=voice, language=language)
-        return self._engine.generate(text=text, voice=voice)
+        if _USING_VENDOR_STUB:
+            # gTTS stub: voice param is ignored, language drives phonetics.
+            return self._engine.generate(
+                text=text, voice=voice, language=language or "en"
+            )
+        # Real kittentts: swap the espeak phonemizer for the detected language
+        # then call generate().  A lock serialises phonemizer swaps so that
+        # concurrent TTS calls on the same model instance don't race.
+        espeak_lang = _espeak_lang_code(language)
+        log_info(
+            f"[vox/kitten] generate: voice={voice!r} lang={language!r} espeak={espeak_lang!r}"
+        )
+        model = self._engine.model  # KittenTTS_1_Onnx instance
+        with self._phonemizer_lock:
+            old_phonemizer = model.phonemizer
+            new_phonemizer = self._get_phonemizer(espeak_lang)
+            model.phonemizer = new_phonemizer
+            log_info(
+                f"[vox/kitten] phonemizer swapped to espeak '{espeak_lang}' (id={id(new_phonemizer)})"
+            )
+            try:
+                result = self._engine.generate(text=text, voice=voice)
+            finally:
+                model.phonemizer = old_phonemizer
+        return result
 
     @classmethod
     def list_voices(cls) -> list[str]:
+        if not _USING_VENDOR_STUB:
+            # Voices for kitten-tts-nano-0.8 (canonical names from model card).
+            # Retrieving them dynamically requires loading the model first, which
+            # triggers a HuggingFace download — avoid at import time.
+            return ["Bella", "Jasper", "Luna", "Bruno", "Rosie", "Hugo", "Kiki", "Leo"]
         if KittenTTS is not None and hasattr(KittenTTS, "list_voices"):
             return KittenTTS.list_voices()
-        # fallback to the model manager defaults
-        return [
-            "Bella",
-            "Jasper",
-            "Luna",
-            "Bruno",
-            "Rosie",
-            "Hugo",
-            "Kiki",
-            "Leo",
-        ]
+        return ["Bella", "Jasper", "Luna", "Bruno", "Rosie", "Hugo", "Kiki", "Leo"]
 
 
 # ---------------------------------------------------------------------------
@@ -195,17 +321,18 @@ _model_cache_lock = threading.Lock()
 
 
 def _get_model(model_id: str) -> Any | None:
-    """Return a cached local TTS engine instance.
+    """Return a cached ``LocalKittenTTS`` instance for *model_id*.
 
-    The *model_id* parameter is accepted for API compatibility but is
-    ignored; all syntheses are handled by ``LocalKittenTTS``.
+    For the real kittentts package, *model_id* is forwarded to the constructor
+    as a HuggingFace repository ID (e.g. ``"KittenML/kitten-tts-nano-0.8"``
+    or the sentinel ``"builtin"`` which maps to the compact int8 variant).
     """
     with _model_cache_lock:
         if model_id in _model_cache:
             return _model_cache[model_id]
 
     try:
-        instance = LocalKittenTTS(None)
+        instance = LocalKittenTTS(model_id)  # real pkg maps "builtin" → default
         with _model_cache_lock:
             _model_cache[model_id] = instance
         return instance
@@ -310,18 +437,22 @@ class KittenVoxEngine(VoxEngineBase):
             template = _SAMPLE_TEXTS.get("en", _SAMPLE_TEXT_DEFAULT)
             text = template.format(voice=speaker)
 
-        # Respect language-specific model mapping for samples too.
         model_id = self._active_model_id()
-        # samples always use the default language (no per-message context here)
-        sample_lang = "en"
-
         tts = _get_model(model_id)
         if tts is None:
             raise NotImplementedError("TTS engine unavailable")
         try:
             # Pass the speaker name explicitly so the real KittenTTS package
             # applies the correct voice model.
-            return tts.generate(text=text, voice=speaker, language=sample_lang)
+            # Samples always use 'en' language; LocalKittenTTS.generate() decides
+            # whether to forward it to the underlying engine or not.
+            audio = tts.generate(text=text, voice=speaker, language="en")
+            if isinstance(audio, bytes):
+                return audio
+            wav = _audio_to_wav(audio, _SAMPLE_RATE)
+            if wav is None:
+                raise RuntimeError("WAV conversion failed for sample")
+            return wav
         except Exception as exc:
             log_error(f"[vox/kitten] sample generation failed: {exc}")
             raise
@@ -391,8 +522,10 @@ class KittenVoxEngine(VoxEngineBase):
             return None
 
         try:
-            audio = tts.generate(text=text, voice=voice, language=language or "en")
-            # Engine may return raw bytes (WAV/MP3) — pass through directly.
+            # LocalKittenTTS.generate() internally decides whether to pass
+            # ``language`` to the underlying engine based on _USING_VENDOR_STUB.
+            audio = tts.generate(text=text, voice=voice, language=language)
+            # Engine may return raw bytes (WAV/MP3) or a numpy array.
             if isinstance(audio, bytes):
                 return audio
             return _audio_to_wav(audio, _SAMPLE_RATE)

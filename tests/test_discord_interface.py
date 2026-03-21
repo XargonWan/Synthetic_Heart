@@ -287,7 +287,7 @@ async def test_live_sync_forwarding(monkeypatch):
         def is_session_active(self, gid):
             return True
 
-        async def send_text(self, gid, text):
+        async def send_context_update(self, gid, text):
             self.sent.append((gid, text))
 
     fake_mgr = FakeMgr()
@@ -328,7 +328,12 @@ async def test_live_sync_forwarding(monkeypatch):
 
     await di._process_message(fake_message)
     await asyncio.sleep(0)
-    assert fake_mgr.sent == [(42, "hello")]
+    # Context update includes the sender prefix, e.g. "[Text chat] bob: hello"
+    assert len(fake_mgr.sent) == 1
+    gid, text = fake_mgr.sent[0]
+    assert gid == 42
+    assert "hello" in text
+    assert "bob" in text
     assert repl == [("discord_live_42", "hello")]
 
 
@@ -538,7 +543,7 @@ async def test_join_voice_no_autostart_when_no_trainer(monkeypatch):
         joined.append(cid)
         return {"status": "success"}
 
-    async def fake_start(cid):
+    async def fake_start(cid, attachments=None):
         started.append(cid)
         return {"status": "success"}
 
@@ -601,7 +606,7 @@ async def test_join_voice_autostart_when_trainer_present(monkeypatch):
         joined.append(cid)
         return {"status": "success"}
 
-    async def fake_start(cid):
+    async def fake_start(cid, attachments=None):
         started.append(cid)
         return {"status": "success"}
 
@@ -754,8 +759,10 @@ async def test_start_live_voice_uses_registry_engine_not_global_cortex(monkeypat
 
     # ---- Fake Discord objects ----
     fake_vc = SimpleNamespace(
-        channel=SimpleNamespace(id=CHANNEL_ID),
+        channel=SimpleNamespace(id=CHANNEL_ID, name="voice-test"),
+        is_connected=lambda: True,
         is_playing=lambda: False,
+        is_listening=lambda: True,
         play=lambda src: None,
         listen=lambda sink: None,
         move_to=lambda ch: None,
@@ -777,8 +784,11 @@ async def test_start_live_voice_uses_registry_engine_not_global_cortex(monkeypat
 
     fake_channel.connect = _fake_connect
 
+    import asyncio
+
     fake_client = SimpleNamespace(
         get_channel=lambda cid: fake_channel,
+        loop=asyncio.get_event_loop(),
     )
 
     # ---- Patch helpers ----

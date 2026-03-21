@@ -13,7 +13,8 @@ function injectChatStyles() {
         /* chat styles (injected by chat-window.mjs) */
         .synth-chat { display:flex; flex-direction:column; height:100%; min-height:0; width:100%; position:relative; }
         .synth-chat-header { width:100%; display:flex; align-items:center; justify-content:flex-start; padding:0.35rem 0.6rem 0 0.6rem; }
-        .synth-chat-body { flex:1 1 auto; min-height:0; overflow:hidden; transition: overflow 0s; }
+        .synth-chat-body { flex:1 1 auto; min-height:0; overflow:hidden; transition: overflow 0s; -ms-overflow-style: none; scrollbar-width: none; }
+        .synth-chat-body::-webkit-scrollbar { width: 0; height: 0; }
         .synth-chat-body.at-max { overflow-y:auto; }
         .synth-chat-footer { flex:0 0 auto; position:sticky; bottom:0; z-index:2; background: inherit; }
         .synth-chat-composer { width:100%; display:flex; gap:0.6rem; align-items:flex-end; padding:0.6rem 1rem; box-sizing:border-box; }
@@ -21,6 +22,7 @@ function injectChatStyles() {
         #send { flex:0 0 auto; border-radius:50%; height:2.6rem; width:2.6rem; cursor:pointer; transition: background 0.2s, transform 0.15s; }
         #send.send-mode { /* text ready */ }
         #send.mic-mode  { background: var(--accent, #6bfefe); color: #111; }
+        #send.mic-mode.ambient-speaking { animation: synth-mic-pulse-ambient 1.2s ease-in-out infinite; }
         #send.recording { background: #d94; color: #fff; animation: synth-mic-pulse 0.9s ease-in-out infinite; }
         /* Brighter pulse while voice is actively detected (toggle mode) */
         #send.recording.speaking {
@@ -66,6 +68,10 @@ function injectChatStyles() {
         @keyframes synth-mic-pulse {
             0%,100% { transform:scale(1);   box-shadow:0 0 0 0   rgba(210,100,0,0.5); }
             50%      { transform:scale(1.12); box-shadow:0 0 0 7px rgba(210,100,0,0);   }
+        }
+        @keyframes synth-mic-pulse-ambient {
+            0%,100% { transform:scale(1);    box-shadow:0 0 0 0   rgba(107,254,254,0.45); }
+            50%      { transform:scale(1.07); box-shadow:0 0 0 6px rgba(107,254,254,0);    }
         }
         @keyframes synth-mic-pulse-active {
             0%,100% { transform:scale(1);    box-shadow:0 0 0 0   rgba(230,60,30,0.7); }
@@ -518,7 +524,15 @@ function _setUserAudioError(container, msg) {
 
 export function initChatUI() {
     try {
-        if (window.__synth_chat_initialized) return;
+        if (window.__synth_chat_initialized) {
+            const existingMessages = document.getElementById('messages');
+            const existingInput = document.getElementById('input');
+            const existingForm = document.getElementById('composer');
+            const existingSend = document.getElementById('send');
+            if (existingMessages && existingInput && existingForm && existingSend) {
+                return;
+            }
+        }
         const statusLabel = document.getElementById('status-label');
         const statusIndicator = document.querySelector('.connection-status .indicator');
         const messages = document.getElementById('messages');
@@ -530,7 +544,8 @@ export function initChatUI() {
 
         try { bindArchiveButton(); } catch (e) { /* ignore */ }
 
-        let ws = null;
+        const getMessagesEl = () => document.getElementById('messages') || messages;
+        let ws = window.chatWs || null;
         let _typingAnimActive = false; // true when user is typing; reset after submit
 
         // ── Mic recording state ────────────────────────────────────────────
@@ -547,6 +562,9 @@ export function initChatUI() {
         let micSilenceMs     = 0;
         let micHasSpoken     = false;  // true once voice is detected during current recording
         let _sttAbortController = null;  // AbortController for in-flight STT request
+        let _sileroWs     = null;   // WebSocket to /api/audio/stream (Silero VAD)
+        let _sileroNode   = null;   // ScriptProcessorNode feeding PCM to Silero
+        let _sileroActive = false;  // true once Silero WS has confirmed 'ready'
         const MIC_LONG_PRESS_MS   = 300;   // ms before PTT activates
         const MIC_SILENCE_SEND_MS = 1800;  // ms of silence after speech → auto-send (toggle)
         const MIC_VAD_THRESHOLD   = 0.015; // RMS volume threshold
@@ -611,12 +629,19 @@ export function initChatUI() {
                                 micSpeaking = true;
                                 try { if (typeof window._synthVADLookAtCamera === 'function') window._synthVADLookAtCamera(true); } catch (_) { /* ignore */ }
                             }
-                            if (micRecordingMode === 'toggle') {
-                                clearTimeout(micSilenceTimer); micSilenceTimer = null;
-                                // Mark that voice was detected at least once in this recording
-                                micHasSpoken = true;
-                                // Visual: brighter pulse while speaking
-                                if (sendBtn) sendBtn.classList.add('speaking');
+                            // Button animation and auto-send driven by Silero when it is active;
+                            // fall back to RMS loop when Silero is unavailable.
+                            if (!_sileroActive) {
+                                if (micRecordingMode === 'toggle') {
+                                    clearTimeout(micSilenceTimer); micSilenceTimer = null;
+                                    // Mark that voice was detected at least once in this recording
+                                    micHasSpoken = true;
+                                    // Visual: brighter pulse while speaking
+                                    if (sendBtn) sendBtn.classList.add('speaking');
+                                } else if (!micRecordingMode) {
+                                    // Ambient VAD: pulsate the mic button subtly even outside recording
+                                    if (sendBtn) sendBtn.classList.add('ambient-speaking');
+                                }
                             }
                         } else {
                             micSilenceMs += 100;
@@ -624,16 +649,113 @@ export function initChatUI() {
                                 micSpeaking = false;
                                 try { if (typeof window._synthVADLookAtCamera === 'function') window._synthVADLookAtCamera(false); } catch (_) { /* ignore */ }
                                 // Visual: dim back to idle pulse when silence detected
-                                if (sendBtn) sendBtn.classList.remove('speaking');
+                                if (!_sileroActive) {
+                                    if (sendBtn) sendBtn.classList.remove('speaking');
+                                    if (sendBtn) sendBtn.classList.remove('ambient-speaking');
+                                }
                             }
-                            // Auto-send only if user actually spoke (avoid sending empty clips)
-                            if (micRecordingMode === 'toggle' && micHasSpoken && !micSilenceTimer && micSilenceMs >= MIC_SILENCE_SEND_MS) {
+                            // Auto-send only if user actually spoke (avoid sending empty clips).
+                            // When Silero is active, auto-send is driven by _applySileroVAD.
+                            if (!_sileroActive && micRecordingMode === 'toggle' && micHasSpoken && !micSilenceTimer && micSilenceMs >= MIC_SILENCE_SEND_MS) {
                                 micSilenceTimer = setTimeout(() => { stopRecordingAndSend(); }, 0);
                             }
                         }
                     } catch (_) { /* ignore */ }
                 }, 100);
+            // Attempt Silero VAD (backend) for higher-quality voice detection.
+            // Falls back silently to the RMS loop above if unavailable.
+            _startSileroVAD(stream);
             } catch (e) { console.warn('[chat-window] VAD loop failed:', e); }
+        }
+
+        // ── Silero VAD (backend WS) — upgrades RMS loop when available ──────
+        function _startSileroVAD(stream) {
+            if (_sileroWs || !stream) return;
+            try {
+                // Derive WebSocket URL using the same port logic as _getApiBase
+                const wsProto = window.location.protocol === 'https:' ? 'wss' : 'ws';
+                let wsHost = window.location.host;
+                const p = window.location.port;
+                if (p === '3000' || p === '3001' || p === '9007') {
+                    wsHost = window.location.hostname + ':9009';
+                }
+                const vadWs = new WebSocket(`${wsProto}://${wsHost}/api/audio/stream`);
+                _sileroWs = vadWs;
+                vadWs.binaryType = 'arraybuffer';
+
+                // Dedicated 16 kHz AudioContext so the browser resamples the mic stream.
+                // Silero expects exactly 16 kHz s16le PCM.
+                const vadCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+                const vadSrc = vadCtx.createMediaStreamSource(stream);
+                // bufferSize 512 = 32 ms at 16 kHz — matches _CHUNK_SAMPLES_16K in vad_service.py
+                // eslint-disable-next-line no-undef
+                const vadProc = vadCtx.createScriptProcessor(512, 1, 1);
+                _sileroNode = vadProc;
+
+                vadProc.onaudioprocess = (e) => {
+                    if (!_sileroActive || !_sileroWs || _sileroWs.readyState !== WebSocket.OPEN) return;
+                    const f32 = e.inputBuffer.getChannelData(0);
+                    const i16 = new Int16Array(f32.length);
+                    for (let i = 0; i < f32.length; i++) {
+                        i16[i] = Math.max(-32768, Math.min(32767, f32[i] * 32767 | 0));
+                    }
+                    try { vadWs.send(i16.buffer); } catch (_) { /* ignore */ }
+                };
+                vadSrc.connect(vadProc);
+                vadProc.connect(vadCtx.destination);
+
+                vadWs.onopen = () => {
+                    try { vadWs.send(JSON.stringify({ sample_rate: 16000, engine: 'vad' })); } catch (_) { /* ignore */ }
+                };
+                vadWs.onmessage = (ev) => {
+                    try {
+                        const d = JSON.parse(String(ev.data));
+                        if (d.type === 'ready') {
+                            _sileroActive = true;
+                            console.debug('[chat-window] Silero VAD active — button animation upgraded from RMS to Silero');
+                        } else if (d.type === 'vad' && d.signal) {
+                            _applySileroVAD(d.signal === 'speech_start');
+                        }
+                    } catch (_) { /* ignore */ }
+                };
+                vadWs.onerror = () => { _sileroActive = false; };
+                vadWs.onclose = () => { _sileroActive = false; _sileroWs = null; };
+            } catch (e) {
+                console.debug('[chat-window] Silero VAD unavailable, using RMS fallback:', e);
+                _sileroActive = false;
+                _sileroWs = null;
+            }
+        }
+
+        // Apply Silero VAD events to button animation and auto-send logic.
+        // Called by _startSileroVAD onmessage; mirrors the RMS loop's visual logic.
+        function _applySileroVAD(speaking) {
+            if (speaking) {
+                micSilenceMs = 0;
+                if (!micSpeaking) {
+                    micSpeaking = true;
+                    try { if (typeof window._synthVADLookAtCamera === 'function') window._synthVADLookAtCamera(true); } catch (_) { /* ignore */ }
+                }
+                if (micRecordingMode === 'toggle') {
+                    clearTimeout(micSilenceTimer); micSilenceTimer = null;
+                    micHasSpoken = true;
+                    if (sendBtn) sendBtn.classList.add('speaking');
+                } else if (!micRecordingMode) {
+                    if (sendBtn) sendBtn.classList.add('ambient-speaking');
+                }
+            } else {
+                // speech_end: Silero already applied hysteresis server-side — act immediately.
+                micSilenceMs = MIC_SILENCE_SEND_MS; // saturate to unblock auto-send guard
+                if (micSpeaking) {
+                    micSpeaking = false;
+                    try { if (typeof window._synthVADLookAtCamera === 'function') window._synthVADLookAtCamera(false); } catch (_) { /* ignore */ }
+                    if (sendBtn) sendBtn.classList.remove('speaking');
+                    if (sendBtn) sendBtn.classList.remove('ambient-speaking');
+                }
+                if (micRecordingMode === 'toggle' && micHasSpoken && !micSilenceTimer) {
+                    micSilenceTimer = setTimeout(() => { stopRecordingAndSend(); }, 0);
+                }
+            }
         }
 
         async function _ensureMicStream() {
@@ -702,7 +824,8 @@ export function initChatUI() {
                         const base = _getApiBase();
 
                         // Show user-side 3-dot bubble immediately
-                        if (messages) _addUserAudioIndicator(messages);
+                        const activeMessages = getMessagesEl();
+                        if (activeMessages) _addUserAudioIndicator(activeMessages);
 
                         // Enter processing state on the button
                         _sttAbortController = new AbortController();
@@ -742,9 +865,10 @@ export function initChatUI() {
                             const text = (data && data.text) ? String(data.text).trim() : '';
                             if (text) {
                                 // Replace 3-dot bubble with the real transcribed text
-                                _replaceUserAudioIndicator(messages, text, Date.now());
+                                _replaceUserAudioIndicator(getMessagesEl(), text, Date.now());
                                 if (ws && ws.readyState === WebSocket.OPEN) {
-                                    ws.send(JSON.stringify({ text }));
+                                    // Mark as voice input so the server triggers TTS auto-inject
+                                    ws.send(JSON.stringify({ text, is_voice_input: true }));
                                 }
                             } else if (data) {
                                 // Response OK but no text
@@ -813,14 +937,14 @@ export function initChatUI() {
                     _wsReconnectDelay = 1500;  // reset backoff on success
                     if (statusLabel) statusLabel.textContent = 'Connected';
                     if (statusIndicator) statusIndicator.classList.add('online');
-                    updateSendState();
+                    updateButtonMode();
                     // Try to start ambient VAD immediately if mic permission already granted.
                     // This lets Synth look at the camera even when not in recording mode.
                     // Silently ignored if permission hasn't been granted yet.
                     _ensureMicStream().catch(() => {});
                     // After the server pushes history messages on connect, scroll to bottom.
                     // We use a small delay so the messages have time to render.
-                    setTimeout(() => { try { _scrollToBottom(messages); } catch (e) { /* ignore */ } }, 400);
+                    setTimeout(() => { try { _scrollToBottom(getMessagesEl()); } catch (e) { /* ignore */ } }, 400);
                     // Send hello so server knows our capabilities
                     try {
                         ws.send(JSON.stringify({
@@ -861,7 +985,22 @@ export function initChatUI() {
 
                         if (data && data.type === 'message') {
                             const ts = data.ts || data.timestamp || Date.now();
-                            appendMessage(messages, data.sender === 'synth' ? 'synth' : 'user', data.text || '', ts);
+                            appendMessage(getMessagesEl(), data.sender === 'synth' ? 'synth' : 'user', data.text || '', ts);
+                            // Restore click-to-replay audio metadata when replaying history.
+                            const ttsUrl = data.tts_url || (data.data && data.data.tts_url);
+                            if (ttsUrl && data.sender === 'synth') {
+                                try {
+                                    const activeMessages = getMessagesEl();
+                                    if (activeMessages) {
+                                        const bubbles = activeMessages.querySelectorAll('.bubble.synth:not(.typing-indicator)');
+                                        const lastBubble = bubbles.length > 0 ? bubbles[bubbles.length - 1] : null;
+                                        if (lastBubble) {
+                                            lastBubble.dataset.ttsUrl = ttsUrl;
+                                            lastBubble.classList.add('clickable-audio');
+                                        }
+                                    }
+                                } catch (e) { /* ignore */ }
+                            }
                         } else if (data && data.type === 'action_state') {
                             const phase = String(data.phase || '').toUpperCase();
                             if (phase === 'THINKING' || phase === 'WRITING' || phase === 'TALKING') {
@@ -967,30 +1106,53 @@ export function initChatUI() {
                                     : (window.__SYNTH_CONFIG && window.__SYNTH_CONFIG.VOX_ENABLED !== undefined
                                         ? window.__SYNTH_CONFIG.VOX_ENABLED
                                         : true);
-                                if (voxEnabled) {
-                                    // Auto-play
-                                    try { new Audio(data.url).play().catch(() => {}); } catch (e) { /* ignore */ }
 
-                                    // Cache management
-                                    const cacheLimit = (typeof window.VOX_AUDIO_CACHE_SIZE === 'number' && window.VOX_AUDIO_CACHE_SIZE > 0)
-                                        ? window.VOX_AUDIO_CACHE_SIZE
-                                        : ((window.__SYNTH_CONFIG && window.__SYNTH_CONFIG.VOX_AUDIO_CACHE_SIZE) || 40);
-                                    window.__synth_tts_cache = window.__synth_tts_cache || [];
-                                    window.__synth_tts_cache.push({ url: data.url, ts: Date.now() });
-                                    while (window.__synth_tts_cache.length > cacheLimit) {
-                                        window.__synth_tts_cache.shift();
-                                    }
+                                // Cache management — always, so history survives voxEnabled toggling
+                                const cacheLimit = (typeof window.VOX_AUDIO_CACHE_SIZE === 'number' && window.VOX_AUDIO_CACHE_SIZE > 0)
+                                    ? window.VOX_AUDIO_CACHE_SIZE
+                                    : ((window.__SYNTH_CONFIG && window.__SYNTH_CONFIG.VOX_AUDIO_CACHE_SIZE) || 40);
+                                window.__synth_tts_cache = window.__synth_tts_cache || [];
+                                window.__synth_tts_cache.push({ url: data.url, ts: Date.now() });
+                                while (window.__synth_tts_cache.length > cacheLimit) {
+                                    window.__synth_tts_cache.shift();
+                                }
 
-                                    // Attach URL to the last synth bubble so the user can tap to replay
-                                    try {
-                                        if (messages) {
-                                            const synthBubbles = messages.querySelectorAll('.bubble.synth');
-                                            const lastBubble = synthBubbles.length > 0 ? synthBubbles[synthBubbles.length - 1] : null;
-                                            if (lastBubble) {
-                                                lastBubble.dataset.ttsUrl = data.url;
-                                                lastBubble.classList.add('clickable-audio');
-                                            }
+                                // Attach URL to the last synth bubble — always, so click-to-replay
+                                // works even when autoplay is blocked or voxEnabled is false.
+                                // Exclude typing indicators: they are transient and get removed
+                                // when the real message arrives, which would lose the TTS URL.
+                                try {
+                                    const activeMessages = getMessagesEl();
+                                    if (activeMessages) {
+                                        const synthBubbles = activeMessages.querySelectorAll('.bubble.synth:not(.typing-indicator)');
+                                        let lastBubble = synthBubbles.length > 0 ? synthBubbles[synthBubbles.length - 1] : null;
+                                        // Safety net: if no synth bubble exists yet (race between
+                                        // message and tts-play events) create one from the caption.
+                                        if (!lastBubble && data.text && typeof appendMessage === 'function') {
+                                            appendMessage(activeMessages, 'synth', data.text, Date.now());
+                                            const updated = activeMessages.querySelectorAll('.bubble.synth:not(.typing-indicator)');
+                                            lastBubble = updated.length > 0 ? updated[updated.length - 1] : null;
                                         }
+                                        if (lastBubble) {
+                                            lastBubble.dataset.ttsUrl = data.url;
+                                            lastBubble.classList.add('clickable-audio');
+                                        }
+                                    }
+                                } catch (e) { /* ignore */ }
+
+                                // Auto-play only when vox is enabled
+                                if (voxEnabled) {
+                                    try {
+                                        const audio = new Audio(data.url);
+                                        audio.play().catch((err) => {
+                                            // Browser autoplay policy — bubble already has clickable-audio
+                                            // so the user can tap to replay. Queue URL for first interaction.
+                                            if (err && err.name === 'NotAllowedError') {
+                                                console.debug('[chat-window] Autoplay blocked; user can tap bubble to play');
+                                                window.__synthPendingAudio = window.__synthPendingAudio || [];
+                                                window.__synthPendingAudio.push(data.url);
+                                            }
+                                        });
                                     } catch (e) { /* ignore */ }
                                 }
                             } catch (e) { /* ignore */ }
@@ -1005,7 +1167,7 @@ export function initChatUI() {
         }
 
         if (input) {
-            input.addEventListener('input', updateSendState);
+            input.addEventListener('input', updateButtonMode);
 
             // Trigger 'think' animation when user starts typing, so Synth looks
             // attentive before the message is even sent.
@@ -1053,10 +1215,10 @@ export function initChatUI() {
                 try {
                     console.log('[chat-window] sending message via WS, len=', text.length);
                     ws.send(JSON.stringify({ text }));
-                    appendMessage(messages, 'user', text, Date.now());
+                    appendMessage(getMessagesEl(), 'user', text, Date.now());
                     input.value = '';
                     _typingAnimActive = false; // backend takes over think→write→idle from here
-                    updateSendState();
+                    updateButtonMode();
                     // keep focus on input
                     try { input.focus(); } catch (e) { /* ignore */ }
                 } catch (e) {
@@ -1066,8 +1228,8 @@ export function initChatUI() {
         }
 
         // ── Click-to-replay delegated handler ──────────────────────────────────
-        if (messages) {
-            messages.addEventListener('click', (ev) => {
+        if (!window.__synth_tts_click_bound) {
+            document.addEventListener('click', (ev) => {
                 try {
                     const bubble = ev.target ? ev.target.closest('.bubble.synth.clickable-audio') : null;
                     if (!bubble) return;
@@ -1075,10 +1237,37 @@ export function initChatUI() {
                     if (!url) return;
                     try { new Audio(url).play().catch(() => {}); } catch (e) { /* ignore */ }
                 } catch (e) { /* ignore */ }
-            });
+            }, true);
+            window.__synth_tts_click_bound = true;
         }
 
-        connectWs();
+        // ── Autoplay unlock on first user interaction ───────────────────────────
+        // When the browser blocks autoplay (NotAllowedError), audio URLs are
+        // enqueued in window.__synthPendingAudio. The first gesture (click, key,
+        // touch) unlocks the AudioContext and drains the queue.
+        try {
+            const _drainPendingAudio = () => {
+                try {
+                    const q = window.__synthPendingAudio;
+                    if (!q || !q.length) return;
+                    window.__synthPendingAudio = [];
+                    // Play only the most recent pending audio (latest message)
+                    const url = q[q.length - 1];
+                    try { new Audio(url).play().catch(() => {}); } catch (e) { /* ignore */ }
+                } catch (e) { /* ignore */ }
+            };
+            const _unlockHandler = () => {
+                _drainPendingAudio();
+                try { document.removeEventListener('click', _unlockHandler, true); } catch (e) { /* ignore */ }
+                try { document.removeEventListener('keydown', _unlockHandler, true); } catch (e) { /* ignore */ }
+                try { document.removeEventListener('touchstart', _unlockHandler, true); } catch (e) { /* ignore */ }
+            };
+            document.addEventListener('click', _unlockHandler, true);
+            document.addEventListener('keydown', _unlockHandler, true);
+            document.addEventListener('touchstart', _unlockHandler, true);
+        } catch (e) { /* ignore */ }
+
+        if (!ws || ws.readyState === WebSocket.CLOSED) connectWs();
         updateButtonMode(); // set initial icon state
         try {
             if (typeof localStorage !== 'undefined' && localStorage.getItem && localStorage.getItem(TYPING_INDICATOR_KEY)) {

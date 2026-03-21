@@ -1899,9 +1899,14 @@ class KaradaStateServer:
                 )
 
             # Build preload payload
+            # NOTE: message type must be "vrm_preload" to match the client WS handler
+            # in chat-window.mjs and base.html (both check data.type === 'vrm_preload').
+            # Fields must be "file" (animation path) and "state" (logical state folder),
+            # as the client calls: VRMAnimations.preload(data.state, data.file, data.descriptor).
             preload_payload = {
-                "type": "preload_animation",
-                "animation": resolved_path,
+                "type": "vrm_preload",
+                "file": resolved_path,
+                "state": state_folder or "",
                 "descriptor": descriptor,
             }
 

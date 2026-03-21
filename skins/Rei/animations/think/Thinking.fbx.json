@@ -1,4 +1,5 @@
 {
+  "fps": 30,
   "intro": {
     "start_frame": 0,
     "end_frame": 70
@@ -10,8 +11,7 @@
   "outro": {
     "start_frame": 141,
     "end_frame": 180
-  }
-  ,
+  },
   "expressions": [
     {
       "start_frame": 20,

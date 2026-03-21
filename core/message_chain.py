@@ -400,6 +400,15 @@ async def handle_incoming_message(
                 f"[message_chain] Built interface_path from interface+chat_id: {ctx['interface_path']}"
             )
 
+    # Propagate is_voice_input from message attributes (set by WebUI when input
+    # was transcribed from audio, so TTS auto-inject fires for voice-originated requests)
+    if (
+        hasattr(message, "is_voice_input")
+        and message.is_voice_input
+        and not ctx.get("is_voice_input")
+    ):
+        ctx["is_voice_input"] = True
+
     log_debug(
         f"[message_chain] Context preserved: interface_path={ctx.get('interface_path')}, chat_id={ctx.get('chat_id')}, interface={ctx.get('interface')}"
     )
@@ -614,6 +623,30 @@ async def handle_incoming_message(
                         f"[message_chain] ⚠️ No recognized text field in Gemini action, using fallback payload: {list(fallback_payload.keys())}"
                     )
                 actions = [normalized_action]
+            elif (
+                isinstance(parsed, dict)
+                and "text" in parsed
+                and "interface_path" in parsed
+            ):
+                # Bare message payload recovered from corrupted JSON — the
+                # LLM produced the correct payload but the actions wrapper
+                # was lost during JSON extraction.  Infer the action type
+                # from the interface_path prefix.
+                _ipath = str(parsed.get("interface_path", ""))
+                _iface = _ipath.split("/")[0] if "/" in _ipath else _ipath
+                _inferred_type = f"message_{_iface}" if _iface else None
+                if _inferred_type:
+                    log_info(
+                        f"[message_chain] 🔄 Wrapping bare message payload "
+                        f"as {_inferred_type} (recovered from corrupted JSON)"
+                    )
+                    actions = [{"type": _inferred_type, "payload": parsed}]
+                else:
+                    log_warning(
+                        f"[message_chain] Bare payload has interface_path "
+                        f"but no inferrable action type: {_ipath}"
+                    )
+                    parsed = None
             else:
                 log_warning(
                     f"[message_chain] Unrecognized JSON structure: {parsed} - triggering corrector"
@@ -1164,9 +1197,12 @@ async def handle_incoming_message(
                                 # Determine whether this is a voice-originated request.
                                 # For voice inputs we want to send a SINGLE audio+caption
                                 # message instead of separate text then audio.
-                                is_voice_response = _is_voice_input or bool(
-                                    context and context.get("request_tts")
-                                )
+                                # Exception: synth_webui always keeps the text bubble so the
+                                # tts-play handler has a bubble to annotate; audio is overlaid.
+                                is_voice_response = (
+                                    _is_voice_input
+                                    or bool(context and context.get("request_tts"))
+                                ) and _iface_tts_prefix != "synth_webui"
 
                                 if is_voice_response:
                                     # Voice response strategy:

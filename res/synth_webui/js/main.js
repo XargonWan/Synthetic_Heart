@@ -39,10 +39,15 @@
             const parser = new DOMParser();
             const doc = parser.parseFromString(text, 'text/html');
 
-            // If the template is a tab-panel matching id, append children inside
+            // If a parsed child wraps content with the same id as the panel,
+            // extract its inner content to avoid nesting .tab-panel inside .tab-panel
+            // (which would be hidden by CSS display:none).
             const children = Array.from(doc.body.children || []);
-            if (children.length === 1 && children[0].id === panel.id) {
-                Array.from(children[0].children).forEach(n => panel.appendChild(n));
+            const wrapper = children.find(c => c.id === panel.id);
+            if (wrapper) {
+                Array.from(wrapper.children).forEach(n => panel.appendChild(n));
+                // Append sibling elements (e.g. <style> blocks) that sit outside the wrapper
+                children.filter(c => c !== wrapper).forEach(n => panel.appendChild(n));
             } else {
                 children.forEach(n => panel.appendChild(n));
             }
@@ -119,7 +124,7 @@
 
             // Initialize Chat window module (separate file) and attach header tools
             try {
-                import('./chat-window.mjs?v=20260305-tpose-fix').then(async (mod) => {
+                import('./chat-window.mjs?v=20260318-chat-history-fix').then(async (mod) => {
                     try {
                         if (mod && typeof mod.createChatWindow === 'function') {
                             // Ensure the Home section (and #chat mount) is available before creating the window
@@ -987,7 +992,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                         return window.SynthWindowManager.ensureChatWindow();
                     }
                     // Fallback: lazy-create the chat window via module
-                    try { import('./chat-window.mjs?v=20260305-tpose-fix').then((mod) => { try { if (mod && typeof mod.createChatWindow === 'function') mod.createChatWindow(); } catch (e) {} }).catch(() => {}); } catch (e) {}
+                    try { import('./chat-window.mjs?v=20260318-chat-history-fix').then((mod) => { try { if (mod && typeof mod.createChatWindow === 'function') mod.createChatWindow(); } catch (e) {} }).catch(() => {}); } catch (e) {}
                     return null;
                 } catch (e) { return null; }
             }
@@ -2947,6 +2952,112 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                     setupRegistrySelect('auris-engine-select','auris-engine-info','auris-engine-label','auris-engine-description', data.auris || [], 'ACTIVE_AURIS_ENGINE');
                     setupRegistrySelect('live-engine-select', 'live-engine-info', 'live-engine-label', 'live-engine-description',  data.live || [], 'LIVE_CORTEX');  // persist selected live engine via LIVE_CORTEX config
 
+                    // ── Live voice configuration ──────────────────────────────
+                    const liveVoiceCfg = document.getElementById('live-voice-config');
+                    const liveVoiceNameSel = document.getElementById('live-voice-name');
+                    const liveVoiceStyleTa = document.getElementById('live-voice-style');
+                    const liveEngineSel = document.getElementById('live-engine-select');
+
+                    function updateLiveVoiceVisibility() {
+                        if (!liveVoiceCfg || !liveEngineSel) return;
+                        liveVoiceCfg.style.display = (liveEngineSel.value && liveEngineSel.value !== 'disabled') ? '' : 'none';
+                    }
+                    updateLiveVoiceVisibility();
+                    if (liveEngineSel && !liveEngineSel.dataset.liveVoiceBound) {
+                        liveEngineSel.addEventListener('change', updateLiveVoiceVisibility);
+                        liveEngineSel.dataset.liveVoiceBound = '1';
+                    }
+
+                    // Load current values from config
+                    if (liveVoiceNameSel || liveVoiceStyleTa) {
+                        try {
+                            const cfgR = await fetch('/api/config');
+                            if (cfgR.ok) {
+                                const cfgD = await cfgR.json();
+                                const cfgI = Array.isArray(cfgD.items) ? cfgD.items : [];
+                                const voiceItem = cfgI.find(i => i.key === 'LIVE_VOICE_NAME');
+                                const styleItem = cfgI.find(i => i.key === 'LIVE_VOICE_STYLE');
+                                if (voiceItem && liveVoiceNameSel) {
+                                    const opts = liveVoiceNameSel.options;
+                                    for (let i = 0; i < opts.length; i++) {
+                                        if (opts[i].value === String(voiceItem.value)) { opts[i].selected = true; break; }
+                                    }
+                                }
+                                if (styleItem && liveVoiceStyleTa) {
+                                    liveVoiceStyleTa.value = String(styleItem.value || '');
+                                }
+                            }
+                        } catch (e) { console.debug('[synth_webui] Failed to load live voice config', e); }
+                    }
+
+                    // Save on change
+                    if (liveVoiceNameSel && !liveVoiceNameSel.dataset.bound) {
+                        liveVoiceNameSel.addEventListener('change', async () => {
+                            try {
+                                const r = await fetch('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ key: 'LIVE_VOICE_NAME', value: liveVoiceNameSel.value }) });
+                                if (r.ok) window.showToast && window.showToast('Voice set to ' + liveVoiceNameSel.value);
+                                else window.showToast && window.showToast('Failed to save voice', true);
+                            } catch (e) { window.showToast && window.showToast('Failed to save voice', true); }
+                        });
+                        liveVoiceNameSel.dataset.bound = '1';
+                    }
+                    if (liveVoiceStyleTa && !liveVoiceStyleTa.dataset.bound) {
+                        const saveStyle = async () => {
+                            try {
+                                const r = await fetch('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ key: 'LIVE_VOICE_STYLE', value: liveVoiceStyleTa.value }) });
+                                if (r.ok) window.showToast && window.showToast('Voice style saved');
+                                else window.showToast && window.showToast('Failed to save style', true);
+                            } catch (e) { window.showToast && window.showToast('Failed to save style', true); }
+                        };
+                        liveVoiceStyleTa.addEventListener('blur', saveStyle);
+                        liveVoiceStyleTa.addEventListener('keydown', (ev) => { if (ev.key === 'Enter' && (ev.ctrlKey || ev.metaKey)) { ev.preventDefault(); saveStyle(); } });
+                        liveVoiceStyleTa.dataset.bound = '1';
+                    }
+
+                    // ── Live session feature toggles ─────────────────────────
+                    const liveAffective = document.getElementById('live-affective-dialog');
+                    const liveProactive = document.getElementById('live-proactive-audio');
+                    const liveThinkingBudget = document.getElementById('live-thinking-budget');
+
+                    // Load current values
+                    if (liveAffective || liveProactive || liveThinkingBudget) {
+                        try {
+                            const cfgR = await fetch('/api/config');
+                            if (cfgR.ok) {
+                                const cfgD = await cfgR.json();
+                                const cfgI = Array.isArray(cfgD.items) ? cfgD.items : [];
+                                const aff = cfgI.find(i => i.key === 'LIVE_AFFECTIVE_DIALOG');
+                                const pro = cfgI.find(i => i.key === 'LIVE_PROACTIVE_AUDIO');
+                                const tb = cfgI.find(i => i.key === 'LIVE_THINKING_BUDGET');
+                                if (aff && liveAffective) liveAffective.checked = !!aff.value;
+                                if (pro && liveProactive) liveProactive.checked = !!pro.value;
+                                if (tb && liveThinkingBudget) liveThinkingBudget.value = tb.value || 0;
+                            }
+                        } catch (e) { /* non-fatal */ }
+                    }
+
+                    // Helper to save a boolean/number config key
+                    const saveLiveCfg = async (key, value, label) => {
+                        try {
+                            const r = await fetch('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ key, value }) });
+                            if (r.ok) window.showToast && window.showToast(label + ' saved');
+                            else window.showToast && window.showToast('Failed to save ' + label, true);
+                        } catch (e) { window.showToast && window.showToast('Failed to save ' + label, true); }
+                    };
+
+                    if (liveAffective && !liveAffective.dataset.bound) {
+                        liveAffective.addEventListener('change', () => saveLiveCfg('LIVE_AFFECTIVE_DIALOG', liveAffective.checked, 'Affective dialog'));
+                        liveAffective.dataset.bound = '1';
+                    }
+                    if (liveProactive && !liveProactive.dataset.bound) {
+                        liveProactive.addEventListener('change', () => saveLiveCfg('LIVE_PROACTIVE_AUDIO', liveProactive.checked, 'Proactive audio'));
+                        liveProactive.dataset.bound = '1';
+                    }
+                    if (liveThinkingBudget && !liveThinkingBudget.dataset.bound) {
+                        liveThinkingBudget.addEventListener('change', () => saveLiveCfg('LIVE_THINKING_BUDGET', parseInt(liveThinkingBudget.value, 10) || 0, 'Thinking budget'));
+                        liveThinkingBudget.dataset.bound = '1';
+                    }
+
                     // ── Kitten TTS speaker selector ───────────────────────────
                     const kittenSpeakerSelect = document.getElementById('kitten-speaker-select');
                     const kittenPlayBtn = document.getElementById('kitten-play-btn');
@@ -3470,7 +3581,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                 } catch (e) { /* ignore */ }
                 // Delegate chat UI to the chat-window module
                 try {
-                    import('./chat-window.mjs?v=20260305-tpose-fix').then((mod) => {
+                    import('./chat-window.mjs?v=20260318-chat-history-fix').then((mod) => {
                         try { if (mod && typeof mod.createChatWindow === 'function') mod.createChatWindow(); } catch (e) { /* ignore */ }
                         try { if (mod && typeof mod.initChatUI === 'function') mod.initChatUI(); } catch (e) { /* ignore */ }
                     }).catch((e) => { console.debug('[synth_webui] chat-window import failed', e); });

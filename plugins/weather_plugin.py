@@ -18,6 +18,12 @@ from core.variables_engine import register_exposed_var
 INJECTION_PRIORITY = 2  # High priority - weather is contextually important
 
 
+MAX_WEATHER_FETCH_RETRIES = 2
+DEFAULT_WEATHER_UNAVAILABLE = (
+    "Meteo non disponibile al momento, riprova tra qualche minuto."
+)
+
+
 def register_injection_priority():
     """Register this component's injection priority."""
     log_info(f"[weather_plugin] Registered injection priority: {INJECTION_PRIORITY}")
@@ -289,7 +295,6 @@ class WeatherPlugin:
 
     async def get_static_injection(self) -> dict:
         """Get current weather for static injection. Returns cached value immediately."""
-        # Check if update is needed based on fetch_minutes config
         now = time.time()
         timeout_sec = self.fetch_minutes * 60
 
@@ -297,18 +302,18 @@ class WeatherPlugin:
 
         if is_stale:
             if self._update_task and not self._update_task.done():
-                # Update already in progress, just return cached message
                 pass
             else:
                 log_debug(
                     "[weather_plugin] Weather data is stale or missing, triggering background update"
                 )
-                # Trigger background update without awaiting it
                 asyncio.create_task(self._update_weather())
 
-        return {
-            "weather": self._cached_weather or "Weather data gathering in progress..."
-        }
+        weather_text = self._cached_weather
+        if not weather_text:
+            weather_text = DEFAULT_WEATHER_UNAVAILABLE
+
+        return {"weather": weather_text}
 
     async def _ensure_weather(self) -> None:
         now = time.time()
@@ -336,110 +341,183 @@ class WeatherPlugin:
         except Exception as e:
             log_error(f"[weather_plugin] Error in update coordination: {e}")
 
+    async def _is_weather_data_valid(self, cc: dict) -> bool:
+        if not isinstance(cc, dict):
+            return False
+        desc = cc.get("weatherDesc", [{}])[0].get("value", "")
+        temp_c = cc.get("temp_C")
+        feels_c = cc.get("FeelsLikeC")
+
+        if not desc or desc == "N/A":
+            return False
+        if temp_c in (None, "", "N/A"):
+            return False
+        if feels_c in (None, "", "N/A"):
+            return False
+        return True
+
+    async def get_current_weather(self) -> dict:
+        """Return the latest weather data, triggering refresh if needed."""
+        await self._ensure_weather()
+        if self._cached_weather and "⚠️" not in self._cached_weather:
+            status = "ok"
+            weather_text = self._cached_weather
+        else:
+            status = "unavailable"
+            weather_text = self._cached_weather or DEFAULT_WEATHER_UNAVAILABLE
+
+        return {
+            "weather": weather_text,
+            "status": status,
+            "last_fetch": datetime.utcfromtimestamp(self._last_fetch).isoformat()
+            if self._last_fetch
+            else None,
+        }
+
     async def _fetch_weather_data(self) -> None:
         """Actual worker method to fetch weather from wttr.in."""
         location = get_local_location()
         encoded = urllib.parse.quote(location)
         url = f"https://wttr.in/{encoded}?format=j1"
-        log_info(f"[weather_plugin] Fetching weather for {location}")
-        try:
-            try:
-                loop = asyncio.get_running_loop()
-            except RuntimeError:
-                # Event loop is closed; skip update
-                log_warning(
-                    "[weather_plugin] Event loop closed; aborting weather update"
-                )
-                self._cached_weather = f"{location}: ⚠️ Weather service temporarily unavailable (system shutting down)"
-                return
 
-            try:
-                response = await loop.run_in_executor(
-                    self._executor, urllib.request.urlopen, url
-                )
-                data_bytes = await loop.run_in_executor(self._executor, response.read)
-            except urllib.error.HTTPError as e:
-                # HTTP errors (404, 500, etc.)
-                log_warning(
-                    f"[weather_plugin] HTTP error fetching weather: {e.code} {e.reason}"
-                )
-                self._cached_weather = (
-                    f"{location}: ⚠️ Cannot reach weather service (HTTP {e.code})"
-                )
-                return
-            except urllib.error.URLError as e:
-                # Network/connection errors
-                log_warning(
-                    f"[weather_plugin] Network error fetching weather: {e.reason}"
-                )
-                self._cached_weather = (
-                    f"{location}: ⚠️ Cannot reach weather service (connection failed)"
-                )
-                return
-            except RuntimeError as e:
-                # Executor or loop has been shutdown
-                log_warning(f"[weather_plugin] Could not schedule weather read: {e}")
-                self._cached_weather = (
-                    f"{location}: ⚠️ Weather service temporarily unavailable"
-                )
-                return
-            if not data_bytes:
-                log_warning("[weather_plugin] Empty response from weather service")
-                self._cached_weather = (
-                    f"{location}: ⚠️ Weather service returned empty response"
-                )
-                return
-            try:
-                data = json.loads(data_bytes.decode())
-            except json.JSONDecodeError as e:
-                log_warning(f"[weather_plugin] Invalid JSON weather data: {e}")
-                self._cached_weather = (
-                    f"{location}: ⚠️ Weather service returned invalid data"
-                )
-                return
-            cc = data.get("current_condition", [{}])[0]
-            desc = cc.get("weatherDesc", [{}])[0].get("value", "N/A")
-            temp_c = cc.get("temp_C", "N/A")
-            feels_c = cc.get("FeelsLikeC", "N/A")
-            humidity = cc.get("humidity", "N/A")
-            wind_speed = cc.get("windspeedKmph", "N/A")
-            wind_dir = cc.get("winddir16Point", "N/A")
-            cloudcover = cc.get("cloudcover", "N/A")
-            visibility = cc.get("visibility", "N/A")
-            pressure = cc.get("pressure", "N/A")
-
-            log_debug(
-                "[weather_plugin] Parsed values: desc=%s temp=%s feels=%s humidity=%s wind=%s%s cloud=%s visibility=%s pressure=%s"
-                % (
-                    desc,
-                    temp_c,
-                    feels_c,
-                    humidity,
-                    wind_speed,
-                    wind_dir,
-                    cloudcover,
-                    visibility,
-                    pressure,
-                )
+        attempt = 0
+        while attempt < MAX_WEATHER_FETCH_RETRIES:
+            attempt += 1
+            log_info(
+                f"[weather_plugin] Fetching weather for {location} (attempt {attempt})"
             )
 
-            emoji = self._choose_emoji(desc)
-            weather_string = (
-                f"{location}: {emoji} {desc} +{temp_c}°C ("
-                f"Feels like {feels_c}°C, Humidity {humidity}%, "
-                f"Wind {wind_speed}km/h {wind_dir}, Visibility {visibility}km, "
-                f"Pressure {pressure}hPa, Cloud cover {cloudcover}%)"
-            )
-            log_debug(f"[weather_plugin] Final weather string: {weather_string}")
-            self._cached_weather = weather_string
-            self._last_fetch = time.time()
-            log_info(f"[weather_plugin] Weather updated: {self._cached_weather}")
-        except Exception as e:
-            log_warning(f"[weather_plugin] Failed to fetch weather: {e}")
-            log_error("[weather_plugin] Weather update error", e)
-            self._cached_weather = (
-                f"{location}: ⚠️ Weather service error (please try again later)"
-            )
+            try:
+                try:
+                    loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    # Event loop is closed; skip update
+                    log_warning(
+                        "[weather_plugin] Event loop closed; aborting weather update"
+                    )
+                    self._cached_weather = f"{location}: ⚠️ Weather service temporarily unavailable (system shutting down)"
+                    return
+
+                try:
+                    response = await loop.run_in_executor(
+                        self._executor, urllib.request.urlopen, url
+                    )
+                    data_bytes = await loop.run_in_executor(
+                        self._executor, response.read
+                    )
+                except urllib.error.HTTPError as e:
+                    log_warning(
+                        f"[weather_plugin] HTTP error fetching weather: {e.code} {e.reason}"
+                    )
+                    if attempt < MAX_WEATHER_FETCH_RETRIES:
+                        await asyncio.sleep(1)
+                        continue
+                    self._cached_weather = (
+                        f"{location}: ⚠️ Cannot reach weather service (HTTP {e.code})"
+                    )
+                    return
+                except urllib.error.URLError as e:
+                    log_warning(
+                        f"[weather_plugin] Network error fetching weather: {e.reason}"
+                    )
+                    if attempt < MAX_WEATHER_FETCH_RETRIES:
+                        await asyncio.sleep(1)
+                        continue
+                    self._cached_weather = f"{location}: ⚠️ Cannot reach weather service (connection failed)"
+                    return
+                except RuntimeError as e:
+                    log_warning(
+                        f"[weather_plugin] Could not schedule weather read: {e}"
+                    )
+                    self._cached_weather = (
+                        f"{location}: ⚠️ Weather service temporarily unavailable"
+                    )
+                    return
+
+                if not data_bytes:
+                    log_warning("[weather_plugin] Empty response from weather service")
+                    if attempt < MAX_WEATHER_FETCH_RETRIES:
+                        await asyncio.sleep(1)
+                        continue
+                    self._cached_weather = (
+                        f"{location}: ⚠️ Weather service returned empty response"
+                    )
+                    return
+
+                try:
+                    data = json.loads(data_bytes.decode())
+                except json.JSONDecodeError as e:
+                    log_warning(f"[weather_plugin] Invalid JSON weather data: {e}")
+                    if attempt < MAX_WEATHER_FETCH_RETRIES:
+                        await asyncio.sleep(1)
+                        continue
+                    self._cached_weather = (
+                        f"{location}: ⚠️ Weather service returned invalid data"
+                    )
+                    return
+
+                cc = data.get("current_condition", [{}])[0]
+                if not await self._is_weather_data_valid(cc):
+                    log_warning(
+                        "[weather_plugin] Received invalid or incomplete weather payload"
+                    )
+                    if attempt < MAX_WEATHER_FETCH_RETRIES:
+                        await asyncio.sleep(1)
+                        continue
+                    self._cached_weather = (
+                        f"{location}: ⚠️ Meteo non disponibile (dati non completi)"
+                    )
+                    self._last_fetch = time.time()
+                    return
+
+                desc = cc.get("weatherDesc", [{}])[0].get("value", "N/A")
+                temp_c = cc.get("temp_C", "N/A")
+                feels_c = cc.get("FeelsLikeC", "N/A")
+                humidity = cc.get("humidity", "N/A")
+                wind_speed = cc.get("windspeedKmph", "N/A")
+                wind_dir = cc.get("winddir16Point", "N/A")
+                cloudcover = cc.get("cloudcover", "N/A")
+                visibility = cc.get("visibility", "N/A")
+                pressure = cc.get("pressure", "N/A")
+
+                log_debug(
+                    "[weather_plugin] Parsed values: desc=%s temp=%s feels=%s humidity=%s wind=%s%s cloud=%s visibility=%s pressure=%s"
+                    % (
+                        desc,
+                        temp_c,
+                        feels_c,
+                        humidity,
+                        wind_speed,
+                        wind_dir,
+                        cloudcover,
+                        visibility,
+                        pressure,
+                    )
+                )
+
+                emoji = self._choose_emoji(desc)
+                weather_string = (
+                    f"{location}: {emoji} {desc} +{temp_c}°C ("
+                    f"Feels like {feels_c}°C, Humidity {humidity}%, "
+                    f"Wind {wind_speed}km/h {wind_dir}, Visibility {visibility}km, "
+                    f"Pressure {pressure}hPa, Cloud cover {cloudcover}% )"
+                )
+                log_debug(f"[weather_plugin] Final weather string: {weather_string}")
+
+                self._cached_weather = weather_string
+                self._last_fetch = time.time()
+                log_info(f"[weather_plugin] Weather updated: {self._cached_weather}")
+                return
+            except Exception as e:
+                log_warning(f"[weather_plugin] Failed to fetch weather: {e}")
+                log_error("[weather_plugin] Weather update error", e)
+                if attempt < MAX_WEATHER_FETCH_RETRIES:
+                    await asyncio.sleep(1)
+                    continue
+                self._cached_weather = (
+                    f"{location}: ⚠️ Weather service error (please try again later)"
+                )
+                return
 
     async def start(self):
         """Start background scheduler to periodically refresh weather cache."""

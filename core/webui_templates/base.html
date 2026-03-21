@@ -1107,6 +1107,11 @@
                 color: var(--accent);
             }
 
+            /* When nav is expanded (mobile menu open), hide the hamburger toggle (mutually exclusive) */
+            header.top-bar.nav-open .hamburger {
+                display: none;
+            }
+
             header.top-bar.topbar--compact .hamburger {
                 margin-left: auto;
             }
