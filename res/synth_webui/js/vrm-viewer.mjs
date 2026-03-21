@@ -2184,7 +2184,18 @@ class AnimationHandler {
         try {
             if (!action) return;
             try { this._activeActions && this._activeActions.delete(action); } catch (e) { /* ignore */ }
-            try { action.enabled = true; } catch (e) { /* ignore */ }
+            // Only re-enable the action if it is currently running (or paused
+            // mid-play).  Re-enabling a finished LoopOnce action can re-trigger
+            // playback from t=0 on the next mixer update, causing a spurious
+            // finished event and potential T-pose flicker.
+            try {
+                const isRunning = (typeof action.isRunning === 'function')
+                    ? action.isRunning()
+                    : (action.enabled && !action.paused);
+                if (isRunning || action.paused) {
+                    action.enabled = true;
+                }
+            } catch (e) { /* ignore */ }
             try { action.fadeOut(fadeSec); } catch (e) { /* ignore */ }
             setTimeout(() => {
                 try {
@@ -2404,10 +2415,20 @@ class AnimationHandler {
 
     async loadAnimation(actionName, animationFile) {
         console.log(`[AnimationHandler] loadAnimation called for ${actionName} with file ${animationFile}`);
-        const cacheKey = this._normalizeAnimationKey(animationFile);
+        const normalizedFile = this._normalizeAnimationKey(animationFile);
+        // Include actionName in the cache key so the same filename in different
+        // state directories (e.g. write/Texting.fbx vs idle/Texting.fbx) doesn't
+        // collide.  Fall back to filename-only lookup for backward compatibility.
+        const cacheKey = actionName ? `${actionName}:${normalizedFile}` : normalizedFile;
         if (this.loadedAnimations[cacheKey]) {
             console.log(`[AnimationHandler] Using cached animation for ${cacheKey}`);
             return this.loadedAnimations[cacheKey];
+        }
+        // Also allow lookup by normalized filename for backward compatibility
+        // (clips loaded before this fix used filename-only keys).
+        if (this.loadedAnimations[normalizedFile]) {
+            console.log(`[AnimationHandler] Using cached animation for ${normalizedFile}`);
+            return this.loadedAnimations[normalizedFile];
         }
         // Also allow lookup by the original string for backward compatibility.
         if (animationFile && this.loadedAnimations[animationFile]) {
@@ -2432,9 +2453,12 @@ class AnimationHandler {
             const clip = await loadMixamoAnimation(animPath, this.vrm);
             console.log(`[AnimationHandler] loadMixamoAnimation returned clip:`, !!clip);
             if (clip) {
-                // Cache both by normalized filename and by the original input string.
+                // Cache by state-scoped key, normalized filename, and original string.
                 this.loadedAnimations[cacheKey] = clip;
-                if (animationFile !== cacheKey) {
+                if (normalizedFile !== cacheKey) {
+                    this.loadedAnimations[normalizedFile] = clip;
+                }
+                if (animationFile && animationFile !== cacheKey && animationFile !== normalizedFile) {
                     this.loadedAnimations[animationFile] = clip;
                 }
                 console.log(`[AnimationHandler] Animation ${cacheKey} cached successfully`);
@@ -2942,7 +2966,10 @@ class AnimationHandler {
                 introAction.setLoop(THREE.LoopOnce, 0);
                 introAction.clampWhenFinished = true;
                 outroAction.setLoop(THREE.LoopOnce, 0);
-                outroAction.clampWhenFinished = false;
+                // clampWhenFinished = true keeps the outro's last-frame pose
+                // until we manually fade it out, preventing the T-pose gap that
+                // occurs when Three.js zeroes the weight before our finished handler fires.
+                outroAction.clampWhenFinished = true;
 
                 // Create structured action object
                 const structuredAction = {
@@ -3386,7 +3413,9 @@ class AnimationHandler {
                             introAction.setLoop(THREE.LoopOnce, 0);
                             introAction.clampWhenFinished = true;
                             outroAction.setLoop(THREE.LoopOnce, 0);
-                            outroAction.clampWhenFinished = false;
+                            // clampWhenFinished = true keeps the outro's last-frame pose
+                            // until we manually fade it out, preventing T-pose gap.
+                            outroAction.clampWhenFinished = true;
 
                             const structuredAction = {
                                 intro: introAction,
@@ -3614,12 +3643,23 @@ class AnimationHandler {
 
                                 // Start outro if available
                                 if (this.currentStructuredAction.outro) {
+                                    // Proactively boost base idle so the skeleton
+                                    // is fully covered when the outro finishes.
+                                    try {
+                                        if (this._baseIdleAction) {
+                                            this._baseIdleAction.enabled = true;
+                                            if (typeof this._baseIdleAction.setEffectiveWeight === 'function') {
+                                                this._baseIdleAction.setEffectiveWeight(1.0);
+                                            }
+                                            this._baseIdleAction.play();
+                                        }
+                                    } catch (_e) { /* ignore */ }
                                     // Ensure outro starts at time 0 and plays once
                                     try {
                                         const outroAction = this.currentStructuredAction.outro;
                                         outroAction.reset();
                                         outroAction.setLoop(THREE.LoopOnce, 0);
-                                        outroAction.clampWhenFinished = false;
+                                        outroAction.clampWhenFinished = true;
                                         outroAction.enabled = true;
                                         outroAction.paused = false;
                                         outroAction.fadeIn(0.1).play();
@@ -3768,6 +3808,16 @@ class AnimationHandler {
                                     const logicalName = String(key || '').split(':')[0] || String(key || '');
                                     if (candidate._playOnceOnly || !candidate.loop) {
                                         console.log(`[AnimationHandler] intro finished for play_once animation ${key} -> starting outro`);
+                                        // Proactively boost base idle so skeleton is covered when outro finishes.
+                                        try {
+                                            if (this._baseIdleAction) {
+                                                this._baseIdleAction.enabled = true;
+                                                if (typeof this._baseIdleAction.setEffectiveWeight === 'function') {
+                                                    this._baseIdleAction.setEffectiveWeight(1.0);
+                                                }
+                                                this._baseIdleAction.play();
+                                            }
+                                        } catch (_e) { /* ignore */ }
                                         candidate.outro.reset().fadeIn(0.15).play();
                                         // Fade out intro so it doesn't keep driving bones at its
                                         // clamped last-frame pose while outro plays.
@@ -3807,11 +3857,9 @@ class AnimationHandler {
                                 console.log(`[AnimationHandler] outro finished for ${key} -> advancing to next animation`);
 
                                 // ── CRITICAL: boost base-idle to full weight FIRST ──────────────────
-                                // When outro ends with clampWhenFinished=false, Three.js sets its
-                                // weight to 0 automatically *before* this handler fires.  At that
-                                // moment the base-idle is still at 0.12 (set when think/write began)
-                                // → skeleton has only 12% weight driven → T-pose for several frames.
-                                // Setting weight=1.0 here, before any other cleanup, closes the gap.
+                                // With clampWhenFinished=true, the outro holds its last frame.
+                                // Boost base idle to full weight before fading out the clamped
+                                // outro so the skeleton seamlessly transitions to idle.
                                 try {
                                     if (this._baseIdleAction) {
                                         this._baseIdleAction.enabled = true;
@@ -4027,6 +4075,19 @@ class AnimationHandler {
                             // before the new idle clip fades in.
                             const idleDelay = hasBaseIdle ? 140 : 0;
                             setTimeout(() => { try { this.startAction('idle'); } catch (e) { /* ignore */ } }, idleDelay);
+
+                            // Clear any playOnce timers for this non-idle action before returning.
+                            try {
+                                const tkey = keyFile ? `${keyActionName}:${keyFile}` : keyActionName;
+                                if (this._playOnceTimers && this._playOnceTimers[tkey]) {
+                                    clearTimeout(this._playOnceTimers[tkey]);
+                                    delete this._playOnceTimers[tkey];
+                                }
+                            } catch (e) { /* ignore */ }
+                            // Non-idle recovery is fully handled above; do NOT fall through
+                            // to the idle-cycling code below (which would fire a second
+                            // startAction('idle') and load descriptors for the wrong state).
+                            return;
                         }
 
                         // Clear any playOnce timers for this action
@@ -4204,17 +4265,39 @@ class AnimationHandler {
                 // If currently looping, fade it out and play outro
                 if (this.currentAction === action.loop) {
                     console.log('[AnimationHandler] Stopping think loop -> playing outro');
+                    // Proactively boost base idle so the skeleton is fully covered
+                    // when the outro finishes and we transition back.
+                    try {
+                        if (this._baseIdleAction) {
+                            this._baseIdleAction.enabled = true;
+                            if (typeof this._baseIdleAction.setEffectiveWeight === 'function') {
+                                this._baseIdleAction.setEffectiveWeight(1.0);
+                            }
+                            this._baseIdleAction.play();
+                        }
+                    } catch (_e) { /* ignore */ }
                     action.loop.fadeOut(0.2);
                     action.outro.reset().fadeIn(0.15).play();
                     this.currentAction = action.outro;
+                    this.currentActionPhase = 'outro';
                     return;
                 }
                 // If intro still playing, fade it out and play outro
                 if (this.currentAction === action.intro) {
                     console.log('[AnimationHandler] Intro still playing -> switching to outro');
+                    try {
+                        if (this._baseIdleAction) {
+                            this._baseIdleAction.enabled = true;
+                            if (typeof this._baseIdleAction.setEffectiveWeight === 'function') {
+                                this._baseIdleAction.setEffectiveWeight(1.0);
+                            }
+                            this._baseIdleAction.play();
+                        }
+                    } catch (_e) { /* ignore */ }
                     action.intro.fadeOut(0.1);
                     action.outro.reset().fadeIn(0.15).play();
                     this.currentAction = action.outro;
+                    this.currentActionPhase = 'outro';
                     return;
                 }
             } catch (err) {

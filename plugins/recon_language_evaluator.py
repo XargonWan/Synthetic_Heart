@@ -49,7 +49,13 @@ class ReconLanguageEvaluatorPlugin:
 
     def get_recon_instruction(self) -> str:
         return (
-            "Detect the primary language of the conversation. "
+            "Detect the primary language of the conversation based ONLY on "
+            "the Recent local history and human user messages. "
+            "Ignore the global history and any assistant/bot messages when "
+            "determining the language. "
+            "Weight recent human user messages 3x compared to older history 1x. "
+            "If the incoming user message is a system/internal prompt (not natural "
+            "conversation), rely on the local chat history instead. "
             'Return as an object: {"language_code": "it"}.'
         )
 

@@ -408,6 +408,13 @@ async def gather_recon_contributions(
         key = plugin.get_recon_key()
         instruction = plugin.get_recon_instruction()
         system_lines.append(f"- {key}: {instruction}")
+    system_lines.append(
+        "IMPORTANT for language_hint: base your language detection ONLY on the "
+        "Recent local history and human user messages. Ignore the global history "
+        "section entirely for language detection. Also ignore assistant/bot "
+        "responses — they may contain language errors that should not influence "
+        "detection."
+    )
     system_lines.append("Do not add any extra keys or commentary.")
     system_prompt = "\n".join(system_lines)
     log_debug(f"[recon] system_prompt:\n{system_prompt}")
@@ -416,8 +423,26 @@ async def gather_recon_contributions(
     local_text, global_text = await _build_recon_history_texts_async(
         message=message, context_memory=context_memory
     )
+
+    # For outreach beats the "text" is an internal Grillo prompt (in English)
+    # which would mislead language detection.  Use only local chat history.
+    _is_outreach = (
+        isinstance(context_memory, dict)
+        and context_memory.get("beat_type") == "outreach"
+    )
+    if _is_outreach:
+        user_message_section = (
+            "(System-generated outreach prompt — ignore for language detection)"
+        )
+        log_debug(
+            "[recon] Outreach beat detected: excluding prompt text from "
+            "language detection"
+        )
+    else:
+        user_message_section = text.strip() if isinstance(text, str) else ""
+
     user_prompt = (
-        f"User message:\n{text.strip() if isinstance(text, str) else ''}\n\n"
+        f"User message:\n{user_message_section}\n\n"
         f"Recent local history:\n{local_text}\n\n"
         f"Recent global history:\n{global_text}\n"
     )
