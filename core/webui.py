@@ -3277,6 +3277,7 @@ class SynthWebUIInterface:
         audio_path: str,
         text: Optional[str] = None,
         lipsync_data: Optional[Dict[str, Any]] = None,
+        audio_duration_s: Optional[float] = None,
     ) -> bool:
         """Push a TTS audio playback event to a WebUI session.
 
@@ -3287,10 +3288,12 @@ class SynthWebUIInterface:
         accessible via the ``/static`` mount.
 
         Args:
-            session_id:   WebUI session identifier (plain or ``synth_webui/<id>`` form).
-            audio_path:   Absolute or relative filesystem path to the audio file.
-            text:         Optional caption / message text (for accessibility).
-            lipsync_data: Optional phoneme/timing dict forwarded to the animator.
+            session_id:      WebUI session identifier (plain or ``synth_webui/<id>`` form).
+            audio_path:      Absolute or relative filesystem path to the audio file.
+            text:            Optional caption / message text (for accessibility).
+            lipsync_data:    Optional phoneme/timing dict forwarded to the animator.
+            audio_duration_s: Duration of the audio in seconds (used by the client
+                              to synchronise facial expressions with playback).
 
         Returns:
             ``True`` if the message was delivered, ``False`` if no websocket was found.
@@ -3339,6 +3342,8 @@ class SynthWebUIInterface:
             payload["text"] = text
         if lipsync_data:
             payload["lipsync"] = lipsync_data
+        if audio_duration_s is not None:
+            payload["audio_duration_s"] = audio_duration_s
 
         try:
             await websocket.send_json(payload)

@@ -123,6 +123,7 @@ class FacialExpressionPlugin(PluginBase):
         cooldown_s: float,
         chars_per_sec: float,
         expr_section: Optional[Dict[str, Any]] = None,
+        audio_duration_s: Optional[float] = None,
     ) -> None:
         """Drive KaradaStateServer through a sequence of expression events.
 
@@ -132,14 +133,25 @@ class FacialExpressionPlugin(PluginBase):
         (Python-side) and forwarded to the client already scaled by the
         event intensity.  This lets the JS pipeline apply the correct morphs
         without knowing the expression catalogue (GAP 1A).
+
+        *audio_duration_s*, when provided, overrides the character-based
+        timing estimate with the actual TTS audio duration so that facial
+        expressions stay synchronised with speech output.
         """
         karada = get_karada_state_server()
         if not karada:
             return
+        # Total duration: prefer real audio length over character estimate
+        total_duration = (
+            audio_duration_s
+            if audio_duration_s is not None and audio_duration_s > 0
+            else (total_chars / chars_per_sec if chars_per_sec > 0 else 1.0)
+        )
         timeline: List[_TimelineEvent] = []
         for ev in events:
-            # compute approximate delay based on character position
-            delay = (ev.position / total_chars) * (total_chars / chars_per_sec)
+            # compute delay proportional to character position in the text
+            frac = ev.position / total_chars if total_chars > 0 else 0.0
+            delay = frac * total_duration
             timeline.append(_TimelineEvent(delay, ev.name, ev.intensity))
         start = asyncio.get_event_loop().time()
         for item in timeline:

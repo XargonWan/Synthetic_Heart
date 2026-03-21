@@ -34,7 +34,7 @@ class GrilloDiaryConsolidatorPlugin:
             label="Enable Grillo diary consolidation",
             description=(
                 "When enabled, Grillo will periodically scan recent diary days "
-                "and ask the LLM to consolidate fragmented diary entries." 
+                "and ask the LLM to consolidate fragmented diary entries."
             ),
             value_type=bool,
             group="grillo",
@@ -57,7 +57,9 @@ class GrilloDiaryConsolidatorPlugin:
 
         # Register ourselves so the core recognizes this plugin.
         register_plugin("grillo_diary_consolidator", self)
-        log_info("[grillo_diary_consolidator] Registered Grillo Diary Consolidation plugin")
+        log_info(
+            "[grillo_diary_consolidator] Registered Grillo Diary Consolidation plugin"
+        )
 
         # Listen for config changes
         def _update_enabled(val):
@@ -67,7 +69,9 @@ class GrilloDiaryConsolidatorPlugin:
             except Exception:
                 pass
 
-        config_registry.add_listener("GRILLO_DIARY_CONSOLIDATE_ENABLED", _update_enabled)
+        config_registry.add_listener(
+            "GRILLO_DIARY_CONSOLIDATE_ENABLED", _update_enabled
+        )
 
         def _update_lookback(val):
             try:

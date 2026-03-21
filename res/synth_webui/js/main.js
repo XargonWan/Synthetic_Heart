@@ -254,6 +254,8 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
         window.__synthLipSyncData = null;
         window.__synthIsLipSyncing = false;
         window.__synthLipSyncAudio = null;
+        window.__synthLipSyncSource = null;
+        window.__synthLipSyncCtx = null;
         
         const navButtons = document.querySelectorAll('.nav-btn');
         const tabPanels = document.querySelectorAll('.tab-panel');

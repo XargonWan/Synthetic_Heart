@@ -7,6 +7,7 @@ from typing import List, Optional, Tuple
 # Pattern matches [em], [em_name], [em_name:0.5], [em:0.3]
 _EXPR = re.compile(r"\[em(?:_([a-z_]+))?(?::([0-9.]+))?\]")
 
+
 @dataclass
 class FacialExpressionEvent:
     position: int  # character index in cleaned text where this event occurs
@@ -42,7 +43,9 @@ def parse_facial_expressions(text: str) -> Tuple[str, List[FacialExpressionEvent
         # bare [em] or [em_:x] -> reset
         if name == "" or name is None:
             name = None
-        events.append(FacialExpressionEvent(position=pos, name=name, intensity=intensity))
+        events.append(
+            FacialExpressionEvent(position=pos, name=name, intensity=intensity)
+        )
     # append remainder
     cleaned_chars.append(text[last_idx:])
     clean_text = "".join(cleaned_chars)

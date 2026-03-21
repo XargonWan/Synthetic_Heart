@@ -1,4 +1,9 @@
 import asyncio
+import struct
+import tempfile
+import wave
+from pathlib import Path
+
 import pytest
 
 from plugins.facial_expression_plugin import (
@@ -82,3 +87,61 @@ async def test_process_message_text(monkeypatch):
     if created_tasks:
         await asyncio.gather(*created_tasks)
     assert ("grin", 0.9) in dummy.sent
+
+
+@pytest.mark.asyncio
+async def test_timeline_with_audio_duration(monkeypatch):
+    """When audio_duration_s is provided, delays are proportional to audio length."""
+    plugin = FacialExpressionPlugin()
+    dummy = DummyKarada()
+    monkeypatch.setattr(
+        "plugins.facial_expression_plugin.get_karada_state_server", lambda: dummy
+    )
+    events = [
+        FacialExpressionEvent(position=0, name="smile", intensity=0.5),
+        FacialExpressionEvent(position=5, name="sad", intensity=0.2),
+    ]
+    # audio_duration_s=0.2 means second event at ~0.1s instead of chars-based timing
+    await plugin._play_expression_timeline(
+        events,
+        total_chars=10,
+        session_id="x",
+        cooldown_s=0.05,
+        chars_per_sec=10,
+        audio_duration_s=0.2,
+    )
+    assert dummy.sent[0] == ("smile", 0.5)
+    assert dummy.sent[1] == ("sad", 0.2)
+    assert dummy.sent[2] == (None, 0)
+
+
+def test_get_wav_duration():
+    """_get_wav_duration extracts correct duration from a WAV file."""
+    from plugins.vox_plugin import _get_wav_duration
+
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+        path = Path(f.name)
+    # Write a 1-second WAV: 22050 samples at 22050 Hz, 16-bit mono
+    sample_rate = 22050
+    n_frames = sample_rate  # 1 second
+    with wave.open(str(path), "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sample_rate)
+        wf.writeframes(struct.pack(f"<{n_frames}h", *([0] * n_frames)))
+
+    dur = _get_wav_duration(path)
+    assert dur is not None
+    assert abs(dur - 1.0) < 0.01
+    path.unlink()
+
+
+def test_get_wav_duration_bad_file():
+    """_get_wav_duration returns None for non-WAV files."""
+    from plugins.vox_plugin import _get_wav_duration
+
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+        f.write(b"not a wav file")
+        path = Path(f.name)
+    assert _get_wav_duration(path) is None
+    path.unlink()

@@ -19,6 +19,7 @@ class VoxCapabilities(TypedDict, total=False):
 
     voice_cloning: bool  # Supports reference-voice cloning
     emotions: bool  # Accepts emotion/style hints
+    emotion_tags: bool  # Can process inline [em_*] tags via preprocess_emotional_text
     streaming: bool  # Can stream audio chunks instead of returning a blob
     local: bool  # Runs fully on the local machine (no external API)
     lipsync_data: bool  # Returns phoneme/timing data suitable for lip-sync

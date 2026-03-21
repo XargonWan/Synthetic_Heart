@@ -927,6 +927,73 @@ export function initChatUI() {
             _wsReconnectDelay = Math.min(_wsReconnectDelay * 2, _WS_MAX_DELAY);
         }
 
+        // ── Shared lipsync-aware audio player ─────────────────────────────
+        // Handles Web Audio API setup so both tts-play and click-to-replay
+        // get proper lipsync.  Guards stopLipsync with an identity check to
+        // avoid stale event listeners clobbering the state.
+        function __synthPlayWithLipsync(url) {
+            // Disconnect & stop previous audio
+            if (window.__synthLipSyncSource) {
+                try { window.__synthLipSyncSource.disconnect(); } catch (_) { /* ignore */ }
+                window.__synthLipSyncSource = null;
+            }
+            if (window.__synthLipSyncAudio) {
+                try {
+                    window.__synthLipSyncAudio.pause();
+                    window.__synthLipSyncAudio.removeAttribute('src');
+                    window.__synthLipSyncAudio.load();
+                } catch (_) { /* ignore */ }
+            }
+            window.__synthIsLipSyncing = false;
+
+            const audio = new Audio(url);
+            window.__synthLipSyncAudio = audio;
+
+            // Set up Web Audio API analyser for lipsync
+            try {
+                if (!window.__synthLipSyncCtx) {
+                    window.__synthLipSyncCtx = new (window.AudioContext || window.webkitAudioContext)();
+                }
+                const ctx = window.__synthLipSyncCtx;
+                if (ctx.state === 'suspended') ctx.resume();
+
+                const source = ctx.createMediaElementSource(audio);
+                const analyser = ctx.createAnalyser();
+                analyser.fftSize = 512;
+                analyser.smoothingTimeConstant = 0.4;
+                source.connect(analyser);
+                analyser.connect(ctx.destination);
+
+                window.__synthLipSyncSource = source;
+                window.__synthLipSyncAnalyser = analyser;
+                window.__synthLipSyncData = null;
+            } catch (audioCtxErr) {
+                console.warn('[chat-window] Web Audio API setup failed, playing without lipsync:', audioCtxErr);
+                window.__synthLipSyncAnalyser = null;
+            }
+
+            // Guard: only the *current* audio instance may toggle lipsync
+            const thisAudio = audio;
+            audio.addEventListener('play', () => {
+                if (window.__synthLipSyncAudio === thisAudio) window.__synthIsLipSyncing = true;
+            });
+            const stopLipsync = () => {
+                if (window.__synthLipSyncAudio === thisAudio) window.__synthIsLipSyncing = false;
+            };
+            audio.addEventListener('ended', stopLipsync);
+            audio.addEventListener('pause', stopLipsync);
+            audio.addEventListener('error', stopLipsync);
+
+            audio.play().catch((err) => {
+                if (window.__synthLipSyncAudio === thisAudio) window.__synthIsLipSyncing = false;
+                if (err && err.name === 'NotAllowedError') {
+                    console.debug('[chat-window] Autoplay blocked; user can tap bubble to play');
+                    window.__synthPendingAudio = window.__synthPendingAudio || [];
+                    window.__synthPendingAudio.push(url);
+                }
+            });
+        }
+
         function connectWs() {
             try {
                 const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
@@ -1142,18 +1209,7 @@ export function initChatUI() {
 
                                 // Auto-play only when vox is enabled
                                 if (voxEnabled) {
-                                    try {
-                                        const audio = new Audio(data.url);
-                                        audio.play().catch((err) => {
-                                            // Browser autoplay policy — bubble already has clickable-audio
-                                            // so the user can tap to replay. Queue URL for first interaction.
-                                            if (err && err.name === 'NotAllowedError') {
-                                                console.debug('[chat-window] Autoplay blocked; user can tap bubble to play');
-                                                window.__synthPendingAudio = window.__synthPendingAudio || [];
-                                                window.__synthPendingAudio.push(data.url);
-                                            }
-                                        });
-                                    } catch (e) { /* ignore */ }
+                                    try { __synthPlayWithLipsync(data.url); } catch (e) { /* ignore */ }
                                 }
                             } catch (e) { /* ignore */ }
                         }
@@ -1235,7 +1291,7 @@ export function initChatUI() {
                     if (!bubble) return;
                     const url = bubble.dataset.ttsUrl;
                     if (!url) return;
-                    try { new Audio(url).play().catch(() => {}); } catch (e) { /* ignore */ }
+                    try { __synthPlayWithLipsync(url); } catch (e) { /* ignore */ }
                 } catch (e) { /* ignore */ }
             }, true);
             window.__synth_tts_click_bound = true;
@@ -1253,7 +1309,7 @@ export function initChatUI() {
                     window.__synthPendingAudio = [];
                     // Play only the most recent pending audio (latest message)
                     const url = q[q.length - 1];
-                    try { new Audio(url).play().catch(() => {}); } catch (e) { /* ignore */ }
+                    try { __synthPlayWithLipsync(url); } catch (e) { /* ignore */ }
                 } catch (e) { /* ignore */ }
             };
             const _unlockHandler = () => {

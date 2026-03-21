@@ -136,3 +136,36 @@ class VoxEngineBase(ABC):
 
     def teardown(self) -> None:
         """Called when the engine is unloaded or the application shuts down."""
+
+    # ------------------------------------------------------------------
+    # Optional — emotional text preprocessing
+    # ------------------------------------------------------------------
+
+    def supports_emotion_tags(self) -> bool:
+        """Whether this engine can process inline emotion tags.
+
+        Engines that support SSML or proprietary emotional markup (e.g.
+        ElevenLabs) should override this to return ``True`` and implement
+        :meth:`preprocess_emotional_text`.
+        """
+        return False
+
+    def preprocess_emotional_text(
+        self,
+        text: str,
+        emotions: list[tuple[int, str | None, float]],
+    ) -> str:
+        """Convert facial expression events into engine-specific markup.
+
+        Called only when :meth:`supports_emotion_tags` returns ``True``.
+        The default implementation returns *text* unchanged.
+
+        Args:
+            text:     Clean text (``[em_*]`` tags already stripped).
+            emotions: List of ``(position, name, intensity)`` tuples from
+                      the expression parser.  *name* is ``None`` for resets.
+
+        Returns:
+            Text with engine-specific emotional markup inserted.
+        """
+        return text
