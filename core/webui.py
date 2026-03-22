@@ -562,6 +562,8 @@ class SynthWebUIInterface:
         self.app.get("/api/config/{key}/file")(self.get_exposed_file)
         # Debug endpoints (only enabled when WEB_DEBUG=1)
         self.app.get("/api/debug/db_pool")(self.db_pool_debug)
+        self.app.post("/api/debug/inject_message")(self.debug_inject_message)
+        self.app.get("/api/debug/expressions")(self.debug_expressions)
         self.app.post("/api/config")(self.update_config_entry)
         # Cortex-aware endpoints
         self.app.post("/api/components/cortex")(self.set_cortex_engine)
@@ -1427,6 +1429,211 @@ class SynthWebUIInterface:
             raise HTTPException(
                 status_code=500, detail="Unable to retrieve DB debug info"
             )
+
+    async def debug_inject_message(self, request: Request) -> JSONResponse:
+        """Inject a fake LLM response through the full action pipeline.
+
+        Routes the message through ``run_action()`` exactly as if the LLM
+        had produced it: facial expression tags are parsed, TTS is triggered
+        (when Vox is active), and animation state transitions (THINK → WRITE
+        → IDLE) are executed.
+
+        Supports ``[em_*]`` facial expression tags.
+        Gated by ``WEB_DEBUG=1``.
+        """
+        web_debug = os.getenv("WEB_DEBUG", "0").lower()
+        if web_debug not in ("1", "true", "yes"):
+            raise HTTPException(status_code=403, detail="Debug endpoints disabled")
+
+        try:
+            body: Dict[str, Any] = await request.json()
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+        raw_text: str = body.get("text", "")
+        if not raw_text or not raw_text.strip():
+            raise HTTPException(status_code=400, detail="'text' is required")
+
+        as_audio: bool = bool(body.get("as_audio", False))
+
+        # Strip [em_*] tags from the text; they drive facial expressions only
+        from core.facial_expression_parser import parse_facial_expressions
+
+        clean_text, em_events = parse_facial_expressions(raw_text)
+
+        # Trigger facial expression timeline when tags are present
+        if em_events:
+            try:
+                from plugins.facial_expression_plugin import FacialExpressionPlugin
+                from core.animation_handler import get_karada_state_server
+                from core.core_initializer import PLUGIN_REGISTRY
+
+                kss = get_karada_state_server()
+                if kss.has_connected_clients():
+                    expr_plugin: Optional[FacialExpressionPlugin] = None
+                    if isinstance(PLUGIN_REGISTRY, dict):
+                        for p in PLUGIN_REGISTRY.values():
+                            if isinstance(p, FacialExpressionPlugin):
+                                expr_plugin = p
+                                break
+                    if expr_plugin:
+                        from core.persona_manager import get_persona_manager
+
+                        persona_json: Optional[Dict[str, Any]] = None
+                        pm = get_persona_manager()
+                        if pm and getattr(pm, "_current_persona", None):
+                            try:
+                                persona_json = pm._load_persona_json(
+                                    pm._current_persona.name
+                                )
+                            except Exception:
+                                persona_json = None
+                        cooldown = (
+                            persona_json.get("facial_expression_cooldown_s", 3)
+                            if persona_json
+                            else 3
+                        )
+                        chars_per_sec = (
+                            persona_json.get("facial_expression_chars_per_sec", 12)
+                            if persona_json
+                            else 12
+                        )
+                        expr_section = (
+                            persona_json.get("facial_expressions", {})
+                            if persona_json
+                            else {}
+                        )
+                        asyncio.create_task(
+                            expr_plugin._play_expression_timeline(
+                                em_events,
+                                len(clean_text),
+                                "",
+                                cooldown,
+                                chars_per_sec,
+                                expr_section=expr_section,
+                            )
+                        )
+            except Exception as exc:
+                log_debug(
+                    f"{LOG_PREFIX} debug_inject_message expression timeline error: {exc}"
+                )
+
+        # Deliver to every connected session through the full action pipeline
+        from types import SimpleNamespace
+        from core.action_parser import run_actions
+
+        delivered = 0
+        errors: List[str] = []
+        for session_id in list(self.connections.keys()):
+            interface_path = f"{INTERFACE_NAME}/{session_id}"
+
+            # Build the action list.  Use clean_text (tags already stripped).
+            # When as_audio is set, only send tts_speak — the Vox pipeline
+            # calls send_tts_audio → send_message internally, so a separate
+            # message_synth_webui would cause a duplicate bubble.
+            actions: List[Dict[str, Any]] = []
+            if as_audio:
+                actions.append(
+                    {
+                        "type": "tts_speak",
+                        "payload": {
+                            "text": clean_text,
+                            "interface_path": interface_path,
+                        },
+                    }
+                )
+            else:
+                actions.append(
+                    {
+                        "type": "message_synth_webui",
+                        "payload": {
+                            "text": clean_text,
+                            "interface_path": interface_path,
+                        },
+                    }
+                )
+
+            context: Dict[str, Any] = {
+                "interface_path": interface_path,
+                "chat_id": session_id,
+                "interface": INTERFACE_NAME,
+                "from_cortex": True,
+            }
+
+            original_message = SimpleNamespace(
+                session_id=session_id,
+                interface_path=interface_path,
+                from_cortex=True,
+                chat_id=session_id,
+            )
+
+            try:
+                result = await run_actions(actions, context, self, original_message)
+                delivered += 1
+                if result and result.get("errors"):
+                    errors.extend(result["errors"])
+            except Exception as exc:
+                errors.append(f"{session_id}: {exc}")
+                log_debug(
+                    f"{LOG_PREFIX} debug_inject_message pipeline error for {session_id}: {exc}"
+                )
+
+        log_info(
+            f"{LOG_PREFIX} 🧪 Debug inject (pipeline): delivered to {delivered} session(s), "
+            f"audio={as_audio}, em_tags={len(em_events)}, text={clean_text[:60]!r}"
+        )
+        resp: Dict[str, Any] = {"status": "ok", "delivered": delivered}
+        if errors:
+            resp["warnings"] = errors
+        return JSONResponse(resp)
+
+    async def debug_expressions(self, request: Request) -> JSONResponse:
+        """Return the list of valid facial expressions for the active persona.
+
+        Reads ``facial_expressions`` from the current persona's JSON and
+        falls back to a minimal default set.  Gated by ``WEB_DEBUG=1``.
+        """
+        web_debug = os.getenv("WEB_DEBUG", "0").lower()
+        if web_debug not in ("1", "true", "yes"):
+            raise HTTPException(status_code=403, detail="Debug endpoints disabled")
+
+        from core.persona_manager import get_persona_manager
+
+        persona_json: Optional[Dict[str, Any]] = None
+        pm = get_persona_manager()
+        if pm and getattr(pm, "_current_persona", None):
+            try:
+                persona_json = pm._load_persona_json(pm._current_persona.name)
+            except Exception:
+                persona_json = None
+
+        expr_section: Dict[str, Any] = (
+            persona_json.get("facial_expressions", {}) if persona_json else {}
+        )
+        if not expr_section:
+            expr_section = {
+                n: {"description": n}
+                for n in ["smile", "grin", "sad", "blush", "surprised", "angry"]
+            }
+
+        # Also return canonical emotions from emotion_manager if available
+        canonical_emotions: List[str] = []
+        try:
+            from plugins.emotion_manager import CANONICAL_EMOTIONS
+
+            canonical_emotions = sorted(CANONICAL_EMOTIONS)
+        except Exception:
+            pass
+
+        return JSONResponse(
+            {
+                "expressions": {
+                    name: info.get("description", name)
+                    for name, info in expr_section.items()
+                },
+                "canonical_emotions": canonical_emotions,
+            }
+        )
 
     async def logs_page(self):
         html = self._render_logs()

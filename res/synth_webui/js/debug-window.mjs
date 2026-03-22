@@ -116,6 +116,24 @@ export function createDebugWindow() {
                         <button id="synth-debug-face-clear" class="pill secondary" type="button">Clear Overrides</button>
                     </div>
                 </div>
+
+                <div class="card" style="margin:0;">
+                    <h2 style="margin:0 0 8px 0;">Message Inject</h2>
+                    <div style="font-size:11px;color:var(--text-soft);margin-bottom:6px;line-height:1.3;">Inject a message through the full LLM response pipeline. Supports <code>[em_name:intensity]</code> tags for facial expressions.</div>
+                    <textarea id="synth-debug-inject-text" rows="3" placeholder="Hello! [em_smile:0.8] How are you? [em_surprised:0.5]" style="width:100%;padding:6px;border-radius:8px;background:rgba(255,255,255,0.02);border:1px solid var(--border);color:var(--text);font-family:inherit;font-size:13px;resize:vertical;"></textarea>
+                    <div style="display:flex;gap:8px;margin-top:8px;align-items:center;">
+                        <label style="display:flex;align-items:center;gap:4px;font-size:12px;color:var(--text-soft);cursor:pointer;white-space:nowrap;">
+                            <input id="synth-debug-inject-audio" type="checkbox" style="accent-color:var(--accent);" />
+                            Audio (TTS)
+                        </label>
+                        <button id="synth-debug-inject-send" class="pill" type="button" style="flex:1;">Send</button>
+                    </div>
+                    <div id="synth-debug-inject-status" style="margin-top:6px;font-size:11px;color:var(--text-soft);display:none;"></div>
+                    <details id="synth-debug-inject-expressions" style="margin-top:8px;">
+                        <summary style="cursor:pointer;font-size:12px;color:var(--text-soft);user-select:none;">Available expressions &amp; emotions</summary>
+                        <div id="synth-debug-inject-expr-list" style="margin-top:6px;font-size:11px;color:var(--text-soft);line-height:1.6;">Loading…</div>
+                    </details>
+                </div>
             </div>
         `;
             return panel;
@@ -1083,6 +1101,104 @@ export function createDebugWindow() {
                 });
             } catch (e) { /* ignore */ }
         };
+
+        // Bind message inject controls
+        try {
+            const injectText = win.querySelector('#synth-debug-inject-text');
+            const injectAudio = win.querySelector('#synth-debug-inject-audio');
+            const injectSendBtn = win.querySelector('#synth-debug-inject-send');
+            const injectStatus = win.querySelector('#synth-debug-inject-status');
+
+            const showInjectStatus = (msg, isError) => {
+                if (!injectStatus) return;
+                injectStatus.textContent = msg;
+                injectStatus.style.display = 'block';
+                injectStatus.style.color = isError ? '#ff6b6b' : 'var(--text-soft)';
+                setTimeout(() => { injectStatus.style.display = 'none'; }, 4000);
+            };
+
+            if (injectSendBtn && injectText) {
+                const doInject = async () => {
+                    const text = (injectText.value || '').trim();
+                    if (!text) { showInjectStatus('Empty message', true); return; }
+                    injectSendBtn.disabled = true;
+                    injectSendBtn.textContent = 'Sending…';
+                    try {
+                        const body = { text: text, as_audio: !!(injectAudio && injectAudio.checked) };
+                        const res = await fetch(_apiBase + '/api/debug/inject_message', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify(body),
+                        });
+                        if (res.ok) {
+                            const data = await res.json().catch(() => ({}));
+                            const warns = (data.warnings && data.warnings.length) ? ` (${data.warnings.length} warning(s))` : '';
+                            showInjectStatus(`Injected to ${data.delivered || 0} session(s)${warns}`, false);
+                            injectText.value = '';
+                        } else {
+                            const err = await res.json().catch(() => ({}));
+                            showInjectStatus(err.detail || ('Error ' + res.status), true);
+                        }
+                    } catch (e) {
+                        showInjectStatus('Network error', true);
+                    } finally {
+                        injectSendBtn.disabled = false;
+                        injectSendBtn.textContent = 'Send';
+                    }
+                };
+                injectSendBtn.addEventListener('click', doInject);
+                injectText.addEventListener('keydown', (ev) => {
+                    if (ev.key === 'Enter' && (ev.ctrlKey || ev.metaKey)) { ev.preventDefault(); doInject(); }
+                });
+            }
+
+            // Load available expressions & emotions list
+            const exprListEl = win.querySelector('#synth-debug-inject-expr-list');
+            if (exprListEl) {
+                (async () => {
+                    try {
+                        const res = await fetch(_apiBase + '/api/debug/expressions');
+                        if (!res.ok) { exprListEl.textContent = 'Failed to load'; return; }
+                        const data = await res.json();
+                        let html = '';
+                        const expressions = data.expressions || {};
+                        const emotions = data.canonical_emotions || [];
+                        if (Object.keys(expressions).length) {
+                            html += '<div style="margin-bottom:6px;"><strong>Facial expressions</strong> <span style="opacity:0.6;">(use in [em_name] or [em_name:0.8])</span></div>';
+                            html += '<div style="display:flex;flex-wrap:wrap;gap:4px 8px;">';
+                            for (const [name, desc] of Object.entries(expressions)) {
+                                html += `<span style="cursor:pointer;padding:1px 6px;border-radius:4px;background:rgba(255,255,255,0.04);border:1px solid var(--border);" title="${desc}" data-em-tag="[em_${name}]">[em_${name}]</span>`;
+                            }
+                            html += '</div>';
+                        }
+                        if (emotions.length) {
+                            html += '<div style="margin-top:8px;margin-bottom:6px;"><strong>Canonical emotions</strong> <span style="opacity:0.6;">(emotion state system)</span></div>';
+                            html += '<div style="display:flex;flex-wrap:wrap;gap:4px 8px;">';
+                            for (const em of emotions) {
+                                html += `<span style="padding:1px 6px;border-radius:4px;background:rgba(255,255,255,0.04);border:1px solid var(--border);">${em}</span>`;
+                            }
+                            html += '</div>';
+                        }
+                        if (!html) html = 'No expressions configured';
+                        exprListEl.innerHTML = html;
+
+                        // Click-to-insert expression tags into textarea
+                        exprListEl.querySelectorAll('[data-em-tag]').forEach(el => {
+                            el.addEventListener('click', () => {
+                                if (!injectText) return;
+                                const tag = el.getAttribute('data-em-tag');
+                                const pos = injectText.selectionStart || injectText.value.length;
+                                injectText.value = injectText.value.slice(0, pos) + tag + injectText.value.slice(pos);
+                                injectText.focus();
+                                injectText.selectionStart = injectText.selectionEnd = pos + tag.length;
+                            });
+                        });
+                    } catch (e) {
+                        exprListEl.textContent = 'Error loading expressions';
+                    }
+                })();
+            }
+        } catch (e) { /* ignore */ }
 
         // Bind feelings controls
         try {
