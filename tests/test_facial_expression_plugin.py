@@ -39,7 +39,7 @@ async def test_timeline_basic(monkeypatch):
     ]
     # total_chars such that first event at 0 sec, second at >0
     await plugin._play_expression_timeline(
-        events, total_chars=10, session_id="x", cooldown_s=0.1, chars_per_sec=10
+        events, total_chars=10, session_id="x", chars_per_sec=10
     )
     # after timeline and cooldown, we should see three pushes (two events + clear)
     assert dummy.sent[0] == ("smile", 0.5)
@@ -61,7 +61,6 @@ async def test_process_message_text(monkeypatch):
 
         def _load_persona_json(self, name):
             return {
-                "facial_expression_cooldown_s": 0.05,
                 "facial_expression_chars_per_sec": 1000,
             }
 
@@ -106,7 +105,6 @@ async def test_timeline_with_audio_duration(monkeypatch):
         events,
         total_chars=10,
         session_id="x",
-        cooldown_s=0.05,
         chars_per_sec=10,
         audio_duration_s=0.2,
     )
@@ -145,3 +143,88 @@ def test_get_wav_duration_bad_file():
         path = Path(f.name)
     assert _get_wav_duration(path) is None
     path.unlink()
+
+
+@pytest.mark.asyncio
+async def test_expression_persists_until_end_of_audio(monkeypatch):
+    """Last expression is held until total_duration elapses, then cleared."""
+    plugin = FacialExpressionPlugin()
+    dummy = DummyKarada()
+    monkeypatch.setattr(
+        "plugins.facial_expression_plugin.get_karada_state_server", lambda: dummy
+    )
+    events = [
+        # Single expression at the very start
+        FacialExpressionEvent(position=0, name="grin", intensity=0.9),
+    ]
+    t0 = asyncio.get_event_loop().time()
+    await plugin._play_expression_timeline(
+        events,
+        total_chars=100,
+        session_id="x",
+        chars_per_sec=100,  # total_duration = 1.0s
+    )
+    elapsed = asyncio.get_event_loop().time() - t0
+    # Expression should have been held for ~1.0s (total_duration), not 0s
+    assert elapsed >= 0.8, f"Expected ~1s hold, got {elapsed:.2f}s"
+    # Two pushes: the expression + the final clear
+    assert dummy.sent[0] == ("grin", 0.9)
+    assert dummy.sent[-1] == (None, 0)
+
+
+@pytest.mark.asyncio
+async def test_bare_em_reset_produces_clear(monkeypatch):
+    """A bare [em] tag (name=None) should produce a clear to return to base."""
+    plugin = FacialExpressionPlugin()
+    dummy = DummyKarada()
+    monkeypatch.setattr(
+        "plugins.facial_expression_plugin.get_karada_state_server", lambda: dummy
+    )
+    events = [
+        FacialExpressionEvent(position=0, name="smile", intensity=0.8),
+        # bare [em] reset mid-text
+        FacialExpressionEvent(position=5, name=None, intensity=1.0),
+    ]
+    await plugin._play_expression_timeline(
+        events,
+        total_chars=10,
+        session_id="x",
+        chars_per_sec=100,  # fast — total_duration = 0.1s
+    )
+    # First: smile expression
+    assert dummy.sent[0] == ("smile", 0.8)
+    # Second: bare [em] → name=None, dispatched as-is (clear at frontend)
+    assert dummy.sent[1] == (None, 1.0)
+    # Third: final clear at end of audio
+    assert dummy.sent[-1] == (None, 0)
+
+
+@pytest.mark.asyncio
+async def test_neutral_expression_clears(monkeypatch):
+    """An [em_neutral] with empty targets produces a clear (return to base)."""
+    plugin = FacialExpressionPlugin()
+    dummy = DummyKarada()
+    monkeypatch.setattr(
+        "plugins.facial_expression_plugin.get_karada_state_server", lambda: dummy
+    )
+    expr_section = {
+        "grin": {"targets": {"mouth_smile": 0.9}},
+        "neutral": {"description": "return to base emotional state", "targets": {}},
+    }
+    events = [
+        FacialExpressionEvent(position=0, name="grin", intensity=0.9),
+        FacialExpressionEvent(position=5, name="neutral", intensity=1.0),
+    ]
+    await plugin._play_expression_timeline(
+        events,
+        total_chars=10,
+        session_id="x",
+        chars_per_sec=100,
+        expr_section=expr_section,
+    )
+    # First: grin expression
+    assert dummy.sent[0] == ("grin", 0.9)
+    # Second: neutral → clear (empty targets)
+    assert dummy.sent[1] == (None, 0)
+    # Last: final clear at end of audio
+    assert dummy.sent[-1] == (None, 0)

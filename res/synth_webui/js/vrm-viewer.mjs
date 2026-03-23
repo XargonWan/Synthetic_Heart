@@ -5188,6 +5188,157 @@ function stopTalking() {
     animationHandler.startAction('idle');
 }
 
+// ── Text-based viseme heuristic ──────────────────────────────────────────
+// Maps each character of the spoken text to a blend of the 5 VRM1 visemes
+// (aa, ih, ou, ee, oh).  Combined with FFT amplitude for intensity.
+
+/** Map a single lowercase character to viseme weights {aa, ih, ou, ee, oh}. */
+function _charToViseme(ch) {
+    // Vowels — primary shapes
+    switch (ch) {
+        case 'a': case 'à': return { aa: 1.0, ih: 0,   ou: 0,   ee: 0,   oh: 0   };
+        case 'i': case 'ì': case 'í': case 'y':
+                             return { aa: 0,   ih: 1.0, ou: 0,   ee: 0,   oh: 0   };
+        case 'u': case 'ù': case 'ú':
+                             return { aa: 0,   ih: 0,   ou: 1.0, ee: 0,   oh: 0   };
+        case 'e': case 'è': case 'é': case 'ê':
+                             return { aa: 0,   ih: 0,   ou: 0,   ee: 1.0, oh: 0   };
+        case 'o': case 'ò': case 'ó': case 'ô':
+                             return { aa: 0,   ih: 0,   ou: 0,   ee: 0,   oh: 1.0 };
+        // Bilabial consonants (M, B, P) — lips pressed together, minimal opening
+        case 'm': case 'b': case 'p':
+                             return { aa: 0.1, ih: 0,   ou: 0.2, ee: 0,   oh: 0   };
+        // Labiodental (F, V) — lower lip under upper teeth
+        case 'f': case 'v':
+                             return { aa: 0,   ih: 0.3, ou: 0,   ee: 0.4, oh: 0   };
+        // Alveolar consonants (L, N, D, T) — tongue behind teeth, slightly open
+        case 'l': case 'n': case 'd': case 't':
+                             return { aa: 0.2, ih: 0.4, ou: 0,   ee: 0,   oh: 0   };
+        // Sibilants / fricatives (S, Z, C, J) — teeth close, spread lips
+        case 's': case 'z': case 'c': case 'j':
+                             return { aa: 0,   ih: 0.3, ou: 0,   ee: 0.5, oh: 0   };
+        // Velar / guttural (K, G hard, Q, X, H) — open throat
+        case 'k': case 'g': case 'q': case 'x': case 'h':
+                             return { aa: 0.5, ih: 0,   ou: 0,   ee: 0,   oh: 0.2 };
+        // Trill / tap (R) — slight opening
+        case 'r':
+                             return { aa: 0.3, ih: 0.2, ou: 0,   ee: 0,   oh: 0   };
+        // W — rounded lips
+        case 'w':
+                             return { aa: 0,   ih: 0,   ou: 0.7, ee: 0,   oh: 0.3 };
+        // Space / punctuation — mouth closing (rest)
+        default:
+            return null;   // null = rest position (mouth closing)
+    }
+}
+
+/**
+ * Build a viseme timeline from spoken text and audio duration.
+ * Returns an array of {time, aa, ih, ou, ee, oh} sorted by time,
+ * with simple coarticulation blending between adjacent segments.
+ * Vowels get ~1.5× duration weight, consonants ~0.7×, for more
+ * realistic pacing.
+ */
+function _buildVisemeTimeline(text, durationS) {
+    if (!text || !durationS || durationS <= 0) return null;
+
+    // Strip emoji, markdown, tags, non-speech symbols — keep letters + spaces
+    const clean = text.replace(/\[em_[^\]]*\]/g, '')
+                      .replace(/[\u{1F000}-\u{1FFFF}]/gu, '')
+                      .replace(/[*_~`#<>[\]{}|\\^]/g, '')
+                      .toLowerCase()
+                      .trim();
+    if (!clean) return null;
+
+    // Build raw entries with duration weight per character
+    const entries = [];
+    for (let i = 0; i < clean.length; i++) {
+        const ch = clean[i];
+        const vis = _charToViseme(ch);
+        // Vowels get more time, consonants less, space = pause
+        const isVowel = 'aeiouyàèéêìíòóôùú'.includes(ch);
+        const isSpace = /\s/.test(ch);
+        const weight = isSpace ? 0.5 : (isVowel ? 1.5 : 0.7);
+        entries.push({ vis, weight });  // vis=null for spaces/punctuation
+    }
+
+    // Compute total weight to distribute over duration
+    const totalWeight = entries.reduce((s, e) => s + e.weight, 0);
+    if (totalWeight <= 0) return null;
+
+    // Assign timestamps
+    const timeline = [];
+    let cursor = 0;
+    for (const entry of entries) {
+        const segDur = (entry.weight / totalWeight) * durationS;
+        const t = cursor + segDur * 0.5; // midpoint of segment
+        if (entry.vis) {
+            timeline.push({ time: t, ...entry.vis });
+        } else {
+            // Rest position (space, punctuation)
+            timeline.push({ time: t, aa: 0, ih: 0, ou: 0, ee: 0, oh: 0 });
+        }
+        cursor += segDur;
+    }
+
+    // Apply coarticulation: blend each entry with its neighbours
+    if (timeline.length > 2) {
+        const blended = [];
+        for (let i = 0; i < timeline.length; i++) {
+            const prev = i > 0 ? timeline[i - 1] : null;
+            const curr = timeline[i];
+            const next = i < timeline.length - 1 ? timeline[i + 1] : null;
+            const b = { time: curr.time, aa: curr.aa, ih: curr.ih, ou: curr.ou, ee: curr.ee, oh: curr.oh };
+            const coartW = 0.15; // blend weight from neighbours
+            for (const k of ['aa', 'ih', 'ou', 'ee', 'oh']) {
+                let neighbour = 0;
+                let count = 0;
+                if (prev) { neighbour += prev[k]; count++; }
+                if (next) { neighbour += next[k]; count++; }
+                if (count > 0) {
+                    b[k] = curr[k] * (1 - coartW) + (neighbour / count) * coartW;
+                }
+            }
+            blended.push(b);
+        }
+        return blended;
+    }
+
+    return timeline;
+}
+
+/**
+ * Look up viseme weights at a given playback time from the timeline.
+ * Uses linear interpolation between the two nearest entries.
+ */
+function _sampleVisemeTimeline(timeline, currentTime) {
+    if (!timeline || timeline.length === 0) return null;
+
+    // Before first entry
+    if (currentTime <= timeline[0].time) return timeline[0];
+    // After last entry
+    if (currentTime >= timeline[timeline.length - 1].time) return timeline[timeline.length - 1];
+
+    // Binary search for the two bracketing entries
+    let lo = 0, hi = timeline.length - 1;
+    while (lo < hi - 1) {
+        const mid = (lo + hi) >> 1;
+        if (timeline[mid].time <= currentTime) lo = mid; else hi = mid;
+    }
+
+    const a = timeline[lo], b = timeline[hi];
+    const span = b.time - a.time;
+    const t = span > 0 ? (currentTime - a.time) / span : 0;
+
+    return {
+        aa: a.aa + (b.aa - a.aa) * t,
+        ih: a.ih + (b.ih - a.ih) * t,
+        ou: a.ou + (b.ou - a.ou) * t,
+        ee: a.ee + (b.ee - a.ee) * t,
+        oh: a.oh + (b.oh - a.oh) * t,
+    };
+}
+
 function render() {
     requestAnimationFrame(render);
     const delta = clock.getDelta();
@@ -5210,44 +5361,65 @@ function render() {
                 for (let i = lo; i <= hi; i++) voiceSum += data[i];
                 const voiceVolume = voiceSum / ((hi - lo + 1) * 255.0);
 
-                // Aggressive gain curve: low threshold + strong multiplier
-                // so even soft speech opens the mouth visibly.
-                const rawMouth = Math.max(0, (voiceVolume - 0.01) * 5.0);
-                const mouthOpen = Math.max(0, Math.min(1, rawMouth));
+                // Gain curve: moderate threshold + controlled multiplier.
+                // Caps at ~0.7 to avoid the oversized "frog mouth" effect.
+                const rawMouth = Math.max(0, (voiceVolume - 0.02) * 3.0);
+                const mouthOpen = Math.max(0, Math.min(0.7, rawMouth));
 
-                // Apply lipsync visemes directly to the VRM model, bypassing
-                // the expression source interpolation which is too slow for
-                // frame-by-frame mouth movement.  A lightweight per-frame
-                // smoothing (lerp α ≈ 0.35) keeps the motion natural.
+                // Per-frame smoothing (lerp α ≈ 0.35) for natural motion.
                 if (!window.__synthLipSyncPrev) window.__synthLipSyncPrev = 0;
-                const alpha = 0.35;  // 0 = no change, 1 = instant snap
+                const alpha = 0.35;
                 const smoothed = window.__synthLipSyncPrev + (mouthOpen - window.__synthLipSyncPrev) * alpha;
                 window.__synthLipSyncPrev = smoothed;
 
-                // Register as high-priority expression source so the priority
-                // system prevents facial_expression (priority 25) from
-                // overriding mouth visemes during speech.
+                // ── Text-based viseme shape selection ───────────────────
+                // If spoken text + duration are available, build a viseme
+                // timeline on first frame, then sample it each frame to
+                // determine the *shape* of the mouth (which viseme to use).
+                // FFT amplitude controls *intensity* (how open the mouth is).
+                let vAA = smoothed, vIH = 0, vOU = 0, vEE = 0, vOH = 0;
+
+                const audio = window.__synthLipSyncAudio;
+                const text = window.__synthLipSyncText;
+                const dur = window.__synthLipSyncDuration
+                    || (audio && audio.duration && isFinite(audio.duration) ? audio.duration : null);
+
+                if (text && dur && dur > 0) {
+                    // Lazy-build timeline once per audio clip
+                    if (!window.__synthLipSyncTimeline) {
+                        window.__synthLipSyncTimeline = _buildVisemeTimeline(text, dur);
+                    }
+                    const tl = window.__synthLipSyncTimeline;
+                    if (tl && audio) {
+                        const sample = _sampleVisemeTimeline(tl, audio.currentTime);
+                        if (sample) {
+                            // Normalize weights so the largest = 1, then
+                            // multiply by the FFT-driven mouth intensity.
+                            const maxW = Math.max(sample.aa, sample.ih, sample.ou, sample.ee, sample.oh, 0.01);
+                            vAA = (sample.aa / maxW) * smoothed;
+                            vIH = (sample.ih / maxW) * smoothed;
+                            vOU = (sample.ou / maxW) * smoothed;
+                            vEE = (sample.ee / maxW) * smoothed;
+                            vOH = (sample.oh / maxW) * smoothed;
+                        }
+                    }
+                }
+                // else: fallback — amplitude-only on aa (original behaviour)
+
+                // Register as expression source — the priority system merges
+                // lipsync visemes (priority 30) with facial expressions
+                // (priority 25) per-blendshape, so expressions like smile,
+                // sad etc. still show while speaking.  _directApply ensures
+                // instant responsiveness without slow interpolation.
                 if (animationHandler && typeof animationHandler.removeExpressionSourcesByTag === 'function') {
                     animationHandler.removeExpressionSourcesByTag('lipsync');
                     animationHandler.addExpressionSource({
-                        targets: { aa: smoothed, ih: 0, ou: 0, ee: 0, oh: 0 },
+                        targets: { aa: vAA, ih: vIH, ou: vOU, ee: vEE, oh: vOH },
                         priority: 30,
                         source: 'lipsync',
-                        _directApply: true  // flag: bypass applyExpressionsForFrame interpolation
+                        _directApply: true
                     });
                 }
-
-                // Also apply directly for instant responsiveness (the
-                // expression source above is still needed for priority gating).
-                try {
-                    const em = currentVRM.expressionManager;
-                    em.setValue('aa', smoothed);
-                    // Reset other visemes to 0 so they don't linger
-                    em.setValue('ih', 0);
-                    em.setValue('ou', 0);
-                    em.setValue('ee', 0);
-                    em.setValue('oh', 0);
-                } catch (_e) { /* ignore */ }
             } catch (e) {
                 // suppress to avoid render-loop spam
             }
@@ -5255,6 +5427,7 @@ function render() {
             // Clean up lipsync source when lipsync stops
             try { animationHandler.removeExpressionSourcesByTag('lipsync'); } catch (e) { /* ignore */ }
             window.__synthLipSyncPrev = 0;
+            window.__synthLipSyncTimeline = null;
         }
         // Update VRM lookAt target.
         // Default: look forward (not directly at the camera).

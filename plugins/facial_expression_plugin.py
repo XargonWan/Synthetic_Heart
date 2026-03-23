@@ -67,7 +67,17 @@ class FacialExpressionPlugin(PluginBase):
             "You can embed facial expression tags in your message text: [em_NAME:INTENSITY]"
             "\nAvailable: %s"
             % expr_names
-            + ("\nINTENSITY: float 0.0-1.0. Use [em] to reset immediately.")
+            + ("\nINTENSITY: float 0.0-1.0.")
+            + (
+                "\nEach expression persists until the next [em_...] tag or the end of the audio message."
+            )
+            + (
+                "\nAt the end of the audio, the face automatically returns to the current base emotional state."
+            )
+            + ("\nUse [em] (bare) to return to base emotional state mid-sentence.")
+            + (
+                "\nDo NOT add a reset tag at the end of your message — it happens automatically."
+            )
             + (
                 '\nThese tags are invisible to users. Example: "Ciao! [em_grin:0.9] Come va?"'
             )
@@ -77,15 +87,23 @@ class FacialExpressionPlugin(PluginBase):
         )
         return {"facial_expression_helper": instructions}
 
-    async def process_message_text(self, text: str, session_id: str) -> str:
+    async def process_message_text(
+        self,
+        text: str,
+        session_id: str,
+        audio_duration_s: Optional[float] = None,
+    ) -> str:
         """Parse text for tags and schedule expression timeline.
+
+        *audio_duration_s*, when provided, overrides the character-based
+        timing estimate so that expressions stay synchronised with speech.
 
         Returns the cleaned text (tags stripped).
         """
         clean, events = parse_facial_expressions(text)
         if events and get_karada_state_server().has_connected_clients():
             total_chars = len(clean)
-            # load persona.json to access cooldown/char-rate settings
+            # load persona.json to access char-rate settings
             persona_json: Optional[Dict] = None
             pm = get_persona_manager()
             if pm and getattr(pm, "_current_persona", None):
@@ -93,11 +111,6 @@ class FacialExpressionPlugin(PluginBase):
                     persona_json = pm._load_persona_json(pm._current_persona.name)
                 except Exception:
                     persona_json = None
-            cooldown = (
-                persona_json.get("facial_expression_cooldown_s", 3)
-                if persona_json
-                else 3
-            )
             chars_per_sec = (
                 persona_json.get("facial_expression_chars_per_sec", 12)
                 if persona_json
@@ -111,9 +124,9 @@ class FacialExpressionPlugin(PluginBase):
                     events,
                     total_chars,
                     session_id,
-                    cooldown,
                     chars_per_sec,
                     expr_section=expr_section,
+                    audio_duration_s=audio_duration_s,
                 )
             )
         return clean
@@ -123,7 +136,6 @@ class FacialExpressionPlugin(PluginBase):
         events: List[FacialExpressionEvent],
         total_chars: int,
         session_id: str,
-        cooldown_s: float,
         chars_per_sec: float,
         expr_section: Optional[Dict[str, Any]] = None,
         audio_duration_s: Optional[float] = None,
@@ -140,6 +152,11 @@ class FacialExpressionPlugin(PluginBase):
         *audio_duration_s*, when provided, overrides the character-based
         timing estimate with the actual TTS audio duration so that facial
         expressions stay synchronised with speech output.
+
+        Each expression persists until the next event.  After the last event
+        the expression is held until the end of the audio/text duration,
+        then a clear is sent so the avatar's base emotional state (managed
+        by ``emotion_manager`` at a lower priority) takes over.
         """
         karada = get_karada_state_server()
         if not karada:
@@ -158,7 +175,7 @@ class FacialExpressionPlugin(PluginBase):
             timeline.append(_TimelineEvent(delay, ev.name, ev.intensity))
         log_debug(
             f"{_LOG_PREFIX} timeline start: {len(timeline)} events, "
-            f"duration={total_duration:.2f}s, cooldown={cooldown_s}s"
+            f"duration={total_duration:.2f}s"
         )
         start = asyncio.get_event_loop().time()
         for item in timeline:
@@ -191,9 +208,15 @@ class FacialExpressionPlugin(PluginBase):
                 await karada.push_face_expression(
                     item.name, item.intensity, targets=resolved_targets
                 )
-        # after all events, schedule cooldown reset
-        await asyncio.sleep(cooldown_s)
-        log_debug(f"{_LOG_PREFIX} timeline cooldown done, sending final clear")
+        # Hold last expression until end of audio/text duration, then clear
+        # so the avatar returns to its base emotional state.
+        elapsed = asyncio.get_event_loop().time() - start
+        remaining = total_duration - elapsed
+        if remaining > 0:
+            await asyncio.sleep(remaining)
+        log_debug(
+            f"{_LOG_PREFIX} timeline done ({total_duration:.2f}s), returning to base emotional state"
+        )
         await karada.push_face_expression(None, 0)
 
     def get_metadata(self) -> Dict[str, Any]:

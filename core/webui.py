@@ -1518,11 +1518,6 @@ class SynthWebUIInterface:
                                 )
                             except Exception:
                                 persona_json = None
-                        cooldown = (
-                            persona_json.get("facial_expression_cooldown_s", 3)
-                            if persona_json
-                            else 3
-                        )
                         chars_per_sec = (
                             persona_json.get("facial_expression_chars_per_sec", 12)
                             if persona_json
@@ -1535,7 +1530,7 @@ class SynthWebUIInterface:
                         )
                         log_debug(
                             f"{LOG_PREFIX} expression dispatch: scheduling timeline, "
-                            f"events={len(em_events)}, cooldown={cooldown}, "
+                            f"events={len(em_events)}, "
                             f"cps={chars_per_sec}, expr_keys={list(expr_section.keys())}"
                         )
                         asyncio.create_task(
@@ -1543,7 +1538,6 @@ class SynthWebUIInterface:
                                 em_events,
                                 len(clean_text),
                                 "",
-                                cooldown,
                                 chars_per_sec,
                                 expr_section=expr_section,
                             )

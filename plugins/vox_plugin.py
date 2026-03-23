@@ -631,11 +631,6 @@ class VoxPlugin(AIPluginBase):
                 except Exception:
                     persona_json = None
 
-            cooldown = (
-                persona_json.get("facial_expression_cooldown_s", 3)
-                if persona_json
-                else 3
-            )
             chars_per_sec = (
                 persona_json.get("facial_expression_chars_per_sec", 12)
                 if persona_json
@@ -656,7 +651,6 @@ class VoxPlugin(AIPluginBase):
                     events,
                     len(clean_text),
                     session_id,
-                    cooldown,
                     chars_per_sec,
                     expr_section=expr_section,
                     audio_duration_s=audio_duration_s,

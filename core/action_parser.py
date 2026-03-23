@@ -1018,11 +1018,6 @@ async def _handle_plugin_action(
                                     )
                                 except Exception:
                                     persona_json = None
-                            cooldown = (
-                                persona_json.get("facial_expression_cooldown_s", 3)
-                                if persona_json
-                                else 3
-                            )
                             chars_per_sec = (
                                 persona_json.get("facial_expression_chars_per_sec", 12)
                                 if persona_json
@@ -1038,7 +1033,6 @@ async def _handle_plugin_action(
                                     events,
                                     total_chars,
                                     getattr(original_message, "session_id", ""),
-                                    cooldown,
                                     chars_per_sec,
                                     expr_section=expr_section,
                                 )

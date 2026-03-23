@@ -30,13 +30,13 @@
         }
     },
     "emotions": {
-        "happy": { "mouth_smile": 0.6, "eyes_smile": 0.5 },
-        "sad": { "mouth_frown": 0.7, "eyes_closed": 0.4 },
-        "surprised": { "eyes_wide": 0.8, "mouth_open": 0.2 },
-        "relaxed": { "eyes_smile": 0.3, "mouth_smile": 0.2 },
-        "angry": { "mouth_frown": 0.9, "brow_down": 0.8 },
-        "fear": { "eyes_wide": 0.7, "mouth_frown": 0.3 },
-        "disgust": { "mouth_frown": 0.4, "eyes_closed": 0.2 },
+        "happy": { "mouth_smile": 0.25, "eyes_smile": 0.2 },
+        "sad": { "mouth_frown": 0.25, "eyes_sad": 0.15 },
+        "surprised": { "eyes_wide": 0.3 },
+        "relaxed": { "eyes_smile": 0.15, "mouth_smile": 0.1 },
+        "angry": { "mouth_frown": 0.3, "brow_down": 0.35 },
+        "fear": { "eyes_wide": 0.3, "brow_down": 0.15 },
+        "disgust": { "mouth_frown": 0.2, "eyes_squint": 0.15 },
         "neutral": {}
     },
     "facial_expressions": {
@@ -46,7 +46,7 @@
         "blush":         {"description": "embarrassed",     "targets": {"cheek_blush": 0.8}},
         "surprised":     {"description": "surprised",       "targets": {"eyes_wide": 0.8, "mouth_open": 0.3}},
         "angry":         {"description": "angry",           "targets": {"brow_down": 0.8, "mouth_frown": 0.5}},
-        "neutral":       {"description": "neutral expression", "targets": {}},
+        "neutral":       {"description": "return to base emotional state", "targets": {}},
         "expressionless":{"description": "expressionless -_-",  "targets": {"eyes_squint": 0.6}},
         "joy_eyes":      {"description": "smiling eyes ^^","targets": {"eyes_smile": 0.9}},
         "tongue_out":    {"description": "tongue out :P", "targets": {"tongue_out": 0.8, "mouth_smile": 0.3}}

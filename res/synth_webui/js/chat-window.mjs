@@ -931,7 +931,7 @@ export function initChatUI() {
         // Handles Web Audio API setup so both tts-play and click-to-replay
         // get proper lipsync.  Guards stopLipsync with an identity check to
         // avoid stale event listeners clobbering the state.
-        function __synthPlayWithLipsync(url) {
+        function __synthPlayWithLipsync(url, text, audioDuration) {
             // Disconnect & stop previous audio
             if (window.__synthLipSyncSource) {
                 try { window.__synthLipSyncSource.disconnect(); } catch (_) { /* ignore */ }
@@ -945,6 +945,11 @@ export function initChatUI() {
                 } catch (_) { /* ignore */ }
             }
             window.__synthIsLipSyncing = false;
+
+            // Store spoken text and duration for text-based viseme estimation
+            window.__synthLipSyncText = text || null;
+            window.__synthLipSyncDuration = (typeof audioDuration === 'number' && audioDuration > 0) ? audioDuration : null;
+            window.__synthLipSyncTimeline = null;
 
             const audio = new Audio(url);
             window.__synthLipSyncAudio = audio;
@@ -978,7 +983,10 @@ export function initChatUI() {
                 if (window.__synthLipSyncAudio === thisAudio) window.__synthIsLipSyncing = true;
             });
             const stopLipsync = () => {
-                if (window.__synthLipSyncAudio === thisAudio) window.__synthIsLipSyncing = false;
+                if (window.__synthLipSyncAudio === thisAudio) {
+                    window.__synthIsLipSyncing = false;
+                    window.__synthLipSyncTimeline = null;
+                }
             };
             audio.addEventListener('ended', stopLipsync);
             audio.addEventListener('pause', stopLipsync);
@@ -989,7 +997,7 @@ export function initChatUI() {
                 if (err && err.name === 'NotAllowedError') {
                     console.debug('[chat-window] Autoplay blocked; user can tap bubble to play');
                     window.__synthPendingAudio = window.__synthPendingAudio || [];
-                    window.__synthPendingAudio.push(url);
+                    window.__synthPendingAudio.push({ url, text, audioDuration });
                 }
             });
         }
@@ -1207,6 +1215,7 @@ export function initChatUI() {
                                         }
                                         if (lastBubble) {
                                             lastBubble.dataset.ttsUrl = data.url;
+                                            if (data.text) lastBubble.dataset.ttsText = data.text;
                                             lastBubble.classList.add('clickable-audio');
                                         }
                                     }
@@ -1214,7 +1223,7 @@ export function initChatUI() {
 
                                 // Auto-play only when vox is enabled
                                 if (voxEnabled) {
-                                    try { __synthPlayWithLipsync(data.url); } catch (e) { /* ignore */ }
+                                    try { __synthPlayWithLipsync(data.url, data.text, data.audio_duration_s); } catch (e) { /* ignore */ }
                                 }
                             } catch (e) { /* ignore */ }
                         }
@@ -1296,7 +1305,8 @@ export function initChatUI() {
                     if (!bubble) return;
                     const url = bubble.dataset.ttsUrl;
                     if (!url) return;
-                    try { __synthPlayWithLipsync(url); } catch (e) { /* ignore */ }
+                    const text = bubble.dataset.ttsText || null;
+                    try { __synthPlayWithLipsync(url, text); } catch (e) { /* ignore */ }
                 } catch (e) { /* ignore */ }
             }, true);
             window.__synth_tts_click_bound = true;
@@ -1313,8 +1323,11 @@ export function initChatUI() {
                     if (!q || !q.length) return;
                     window.__synthPendingAudio = [];
                     // Play only the most recent pending audio (latest message)
-                    const url = q[q.length - 1];
-                    try { __synthPlayWithLipsync(url); } catch (e) { /* ignore */ }
+                    const item = q[q.length - 1];
+                    const url = (typeof item === 'string') ? item : item.url;
+                    const text = (typeof item === 'object' && item) ? item.text : undefined;
+                    const dur = (typeof item === 'object' && item) ? item.audioDuration : undefined;
+                    try { __synthPlayWithLipsync(url, text, dur); } catch (e) { /* ignore */ }
                 } catch (e) { /* ignore */ }
             };
             const _unlockHandler = () => {
