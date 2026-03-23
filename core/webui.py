@@ -4049,9 +4049,17 @@ class SynthWebUIInterface:
         """
         skin = self._derive_skin_from_active_vrm()
         if skin is None:
-            rei = Path(__file__).parent.parent / "skins" / "Rei"
-            if rei.exists():
-                skin = "Rei"
+            # Only fall back to Rei when no user-uploaded VRM is currently active.
+            # A bare filename (e.g. "model.vrm", no leading "/skins/") means the
+            # user has uploaded a custom model — return null in that case.
+            av = getattr(self, "active_vrm", None)
+            user_vrm_active = (
+                isinstance(av, str) and av and not av.startswith("/skins/")
+            )
+            if not user_vrm_active:
+                rei = Path(__file__).parent.parent / "skins" / "Rei"
+                if rei.exists():
+                    skin = "Rei"
         return JSONResponse({"skin": skin})
 
     @staticmethod

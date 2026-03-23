@@ -1,25 +1,56 @@
+import io
 import shutil
 from pathlib import Path
 
+import pytest
 from core.webui import SynthWebUIInterface
 from fastapi.testclient import TestClient
+from starlette.datastructures import UploadFile
+
+
+def _safe_clean_dir(path: Path) -> None:
+    """Remove files in *path*, skipping anything that can't be deleted (e.g.
+    files owned by the Docker container user).  Tries to remove the directory
+    itself only when it becomes empty."""
+    if not path.exists():
+        return
+    for item in list(path.iterdir()):
+        try:
+            if item.is_file() or item.is_symlink():
+                item.unlink()
+            elif item.is_dir():
+                shutil.rmtree(item, ignore_errors=True)
+        except PermissionError:
+            pass
+    try:
+        path.rmdir()
+    except OSError:
+        pass  # dir not empty because some files couldn't be removed
+
+
+@pytest.fixture(autouse=True)
+def _isolated_vrm_dir(tmp_path, monkeypatch):
+    """Redirect ``SYNTH_WEBUI_VRM_DIR`` to an isolated *tmp_path* subdirectory
+    so that tests never touch the real ``skins/temp/`` which may be owned by
+    the Docker container user."""
+    vrm_temp = tmp_path / "vrm_temp"
+    vrm_temp.mkdir()
+    monkeypatch.setenv("SYNTH_WEBUI_VRM_DIR", str(vrm_temp))
+    yield vrm_temp
+    # tmp_path is cleaned up automatically by pytest
 
 
 def _ensure_temp_vrm_dir(tmp_path: Path, name: str = "user.vrm") -> Path:
-    temp_dir = Path("skins") / "temp"
+    temp_dir = tmp_path / "vrm_temp"
     temp_dir.mkdir(parents=True, exist_ok=True)
     f = temp_dir / name
     f.write_bytes(b"dummy-vrm")
     return f
 
 
-def test_user_vrm_prevents_rei_default(tmp_path, monkeypatch):
-    # Arrange: ensure a user VRM exists in skins/temp before interface init
-    temp_dir = Path("skins") / "temp"
-    if temp_dir.exists():
-        shutil.rmtree(temp_dir)
-    temp_dir.mkdir(parents=True, exist_ok=True)
-    user_vrm = temp_dir / "uploaded.vrm"
+def test_user_vrm_prevents_rei_default(_isolated_vrm_dir: Path):
+    # Arrange: ensure a user VRM exists in the isolated vrm dir before interface init
+    user_vrm = _isolated_vrm_dir / "uploaded.vrm"
     user_vrm.write_bytes(b"vrm")
 
     # Act: create interface (autostart disabled for tests)
@@ -29,13 +60,8 @@ def test_user_vrm_prevents_rei_default(tmp_path, monkeypatch):
     assert ui.active_vrm == "uploaded.vrm"
 
 
-def test_upload_vrm_endpoint_http(tmp_path):
+def test_upload_vrm_endpoint_http(_isolated_vrm_dir: Path):
     # verify the /api/vrm route accepts multipart uploads and sets active model
-    temp_dir = Path("skins") / "temp"
-    if temp_dir.exists():
-        shutil.rmtree(temp_dir)
-    temp_dir.mkdir(parents=True, exist_ok=True)
-
     ui = SynthWebUIInterface(autostart=False)
     client = TestClient(ui.app)
 
@@ -45,8 +71,8 @@ def test_upload_vrm_endpoint_http(tmp_path):
 
     # uploaded file should exist and be active
     assert ui.active_vrm == "model.vrm"
-    assert (temp_dir / "model.vrm").exists()
-    assert (temp_dir / "model.vrm").read_bytes() == b"dummy"
+    assert (_isolated_vrm_dir / "model.vrm").exists()
+    assert (_isolated_vrm_dir / "model.vrm").read_bytes() == b"dummy"
 
 
 def test_skins_ui_contains_upload_logic():
@@ -82,14 +108,8 @@ def test_js_assets_no_cache_header(tmp_path):
     assert response.headers.get("cache-control") == "no-cache"
 
 
-def test_rei_used_when_no_user_vrms_and_no_marker(tmp_path, monkeypatch):
-    # Arrange: ensure skins/temp is empty and Rei model exists
-    temp_dir = Path("skins") / "temp"
-    if temp_dir.exists():
-        shutil.rmtree(temp_dir)
-    temp_dir.mkdir(parents=True, exist_ok=True)
-
-    # Ensure Rei model file exists for test (copy if not present)
+def test_rei_used_when_no_user_vrms_and_no_marker():
+    # Arrange: isolated vrm dir starts empty (via autouse fixture), Rei model must exist
     rei_vrm = Path(__file__).parent.parent / "skins" / "Rei" / "model.vrm"
     assert rei_vrm.exists(), "Rei model.vrm must exist for this test"
 
@@ -104,19 +124,10 @@ def test_rei_used_when_no_user_vrms_and_no_marker(tmp_path, monkeypatch):
     )
 
 
-import io
-from starlette.datastructures import UploadFile
-import pytest
-
-
 @pytest.mark.asyncio
-async def test_upload_vrm_becomes_active_and_replaces_old(tmp_path):
-    # start with a pre-existing stale VRM in cache
-    temp_dir = Path("skins") / "temp"
-    if temp_dir.exists():
-        shutil.rmtree(temp_dir)
-    temp_dir.mkdir(parents=True, exist_ok=True)
-    leftover = temp_dir / "old_stale.vrm"
+async def test_upload_vrm_becomes_active_and_replaces_old(_isolated_vrm_dir: Path):
+    # start with a pre-existing stale VRM in the isolated dir
+    leftover = _isolated_vrm_dir / "old_stale.vrm"
     leftover.write_bytes(b"legacy")
 
     # create interface and perform upload
@@ -128,7 +139,7 @@ async def test_upload_vrm_becomes_active_and_replaces_old(tmp_path):
     await ui.upload_vrm_model(upload1)
 
     # the uploaded file should become model.vrm and be active
-    model_path = temp_dir / "model.vrm"
+    model_path = _isolated_vrm_dir / "model.vrm"
     assert ui.active_vrm == "model.vrm"
     assert model_path.exists()
     assert model_path.read_bytes() == first_data
@@ -143,7 +154,7 @@ async def test_upload_vrm_becomes_active_and_replaces_old(tmp_path):
 
     assert ui.active_vrm == "model.vrm"
     assert model_path.read_bytes() == second_data
-    vrms = list(temp_dir.glob("*.vrm"))
+    vrms = list(_isolated_vrm_dir.glob("*.vrm"))
     assert vrms == [model_path], "only the single model.vrm file should remain in cache"
 
     # reinstantiate UI to ensure marker keeps the uploaded model active
@@ -151,14 +162,8 @@ async def test_upload_vrm_becomes_active_and_replaces_old(tmp_path):
     assert ui2.active_vrm == "model.vrm"
 
 
-def test_current_skin_default_and_changes(tmp_path):
+def test_current_skin_default_and_changes(_isolated_vrm_dir: Path):
     """Exercise the /api/skins/current_skin endpoint in various scenarios."""
-    # ensure a clean skins/temp directory
-    temp_dir = Path("skins") / "temp"
-    if temp_dir.exists():
-        shutil.rmtree(temp_dir)
-    temp_dir.mkdir(parents=True, exist_ok=True)
-
     ui = SynthWebUIInterface(autostart=False)
     client = TestClient(ui.app)
 
@@ -175,17 +180,16 @@ def test_current_skin_default_and_changes(tmp_path):
     assert r3.status_code == 200
     assert r3.json().get("skin") is None
 
-    # activate a fake skin and check value
+    # activate a named skin and verify current_skin reflects it
     dummy_skin = "FooSkin"
-    # create skin folder with a vrm
     skin_dir = Path("skins") / dummy_skin
     skin_dir.mkdir(parents=True, exist_ok=True)
     vrm_file = skin_dir / "model.vrm"
     vrm_file.write_bytes(b"vrm")
-    r4 = client.post(f"/api/skins/{dummy_skin}/activate")
-    assert r4.status_code == 201
-    r5 = client.get("/api/skins/current_skin")
-    assert r5.json().get("skin") == dummy_skin
-
-    # cleanup created skin
-    shutil.rmtree(skin_dir)
+    try:
+        r4 = client.post(f"/api/skins/{dummy_skin}/activate")
+        assert r4.status_code == 201
+        r5 = client.get("/api/skins/current_skin")
+        assert r5.json().get("skin") == dummy_skin
+    finally:
+        shutil.rmtree(skin_dir, ignore_errors=True)

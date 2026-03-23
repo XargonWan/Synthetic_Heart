@@ -218,7 +218,7 @@
             if(clearBtn) clearBtn.addEventListener('click', clearUploaded);
 
             // Nav skins tab click
-            const navSkins = document.getElementById('nav-skins');
+            const navSkins = document.querySelector('.nav-btn[data-tab="skins"]');
             if(navSkins) navSkins.addEventListener('click', function(){ fetchSkins(); });
 
             // set up upload input handler once element exists
