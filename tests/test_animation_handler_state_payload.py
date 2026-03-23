@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from core.animation_handler import get_karada_state_server, AnimationState
+from core.karada_ws_transport import WebSocketTransport
 
 
 class FakeWebSocket:
@@ -51,6 +52,8 @@ async def test_animation_state_included_and_lipsync_default(
     session = "sess1"
     fake = FakeWebUI(session)
     handler.set_webui(fake)
+    ws_transport = WebSocketTransport(fake.connections)
+    handler.add_transport(ws_transport)
 
     # Inject a fake emotion manager into PLUGIN_REGISTRY so that
     # _send_animation_command can fetch emotions without a full plugin stack.

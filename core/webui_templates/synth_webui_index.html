@@ -282,7 +282,7 @@
             console.log('[synth_webui] VRM loader configured with resource path: /skins/temp/');
         }
     </script>
-    <script type="module" src="/js/vrm-viewer.mjs?v=20260318-viewer-recovery"></script>
+    <script type="module" src="/js/vrm-viewer.mjs?v=20260323-subclip-fix"></script>
 <!-- VRM alias table / duplicate inline fragment removed — implementation lives in /js/vrm-viewer.mjs -->
 
 
@@ -313,7 +313,7 @@
                         try {
                             if (!this._lastExpressionLogTime) this._lastExpressionLogTime = 0;
                             <script src="/js/webui-bootstrap.js"></script>
-                            <script type="module" src="/js/vrm-viewer.mjs?v=20260318-viewer-recovery"></script>
+                            <script type="module" src="/js/vrm-viewer.mjs?v=20260323-subclip-fix"></script>
                                             return (sf <= timeInClip);
                                         }
                                         return true;
@@ -2191,6 +2191,11 @@
                         this._postOutroIdleToken = (this._postOutroIdleToken || 0) + 1;
                     } catch (e) { /* ignore */ }
 
+                    // Guarantee strong base idle during transition to prevent any T-pose.
+                    try {
+                        await this._ensureBaseIdle(1.0, false);
+                    } catch (e) { /* ignore */ }
+
                     // Ensure eyes are open when starting a new non-think action to avoid lingering closed lids
                     try {
                         const a = (actionName || '').toString().toLowerCase();
@@ -2261,9 +2266,10 @@
                     } catch (e) { /* ignore */ }
 
                     if (actionName !== 'idle') {
-                        // Keep base idle at low weight (0.05 = 5%) as fallback skeleton during non-idle animations.
-                        // This prevents T-pose gaps if the main animation fails or when transitioning.
-                        await this._ensureBaseIdle(0.12, false);
+                        // Boost base idle to full weight while we prepare the new action.
+                        // This ensures the previous animation (or idle) remains dominant in the
+                        // unlikely window between the old clip finishing and the new one loading.
+                        await this._ensureBaseIdle(1.0, false);
                     }
 
                     // If a specific file was requested, wait for its preload/load BEFORE
@@ -2280,6 +2286,12 @@
                     } catch (e) {
                         console.warn('[AnimationHandler] Cannot play (preload error). Keeping previous animation:', actionName, animationFile, e);
                         return;
+                    }
+
+                    // After the new clip is loaded (or we decided not to change), lower the
+                    // idle weight again so overlays can take precedence.
+                    if (actionName !== 'idle') {
+                        try { await this._ensureBaseIdle(0.12, false); } catch (e) { /* ignore */ }
                     }
 
                     // Guard: if the requested logical action is already active and

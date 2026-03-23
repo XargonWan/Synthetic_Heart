@@ -1,6 +1,11 @@
 """
 Animation Priority System - Implementation Summary
 
+> **Note:** The priority system is now fully integrated into KaradaStateServer
+> with runtime registration via `register_state_priority()` and preemption
+> logic in `play_animation()`.  See the *Priority & Preemption* section of
+> `animation_system.rst` for the current reference.
+
 This document describes the animation priority system that was implemented
 to prevent lower-priority animations from interrupting higher-priority ones.
 

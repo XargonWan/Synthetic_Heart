@@ -31,6 +31,10 @@ from typing import Any
 from core.ai_plugin_base import AIPluginBase
 from core.config_manager import config_registry
 from core.core_initializer import register_plugin, INTERFACE_REGISTRY
+from core.facial_expression_parser import (
+    FacialExpressionEvent,
+    parse_facial_expressions,
+)
 from core.logging_utils import log_debug, log_error, log_info, log_warning
 from core.variables_engine import register_exposed_var
 from core.vox_registry import VOX_REGISTRY
@@ -189,6 +193,19 @@ _EMOJI_RE = re.compile(r"[^\w\s,.!?;:\'\-\"\u2018\u2019]+")
 _MULTI_SPACE_RE = re.compile(r"\s+")
 
 
+def _get_wav_duration(path: Path) -> float | None:
+    """Return the duration in seconds of a WAV file, or ``None`` on failure."""
+    try:
+        with wave.open(str(path), "rb") as wf:
+            frames = wf.getnframes()
+            rate = wf.getframerate()
+            if rate > 0:
+                return frames / rate
+    except Exception:
+        pass
+    return None
+
+
 class VoxPlugin(AIPluginBase):
     """Core TTS + lip-sync plugin.  Interfaces and agents call ``speak()``."""
 
@@ -300,6 +317,15 @@ class VoxPlugin(AIPluginBase):
         if not clean:
             return {"status": "skipped", "reason": "empty_text"}
 
+        # --- Strip [em_*] facial expression tags ---
+        # Tags must be removed before synthesis so they don't appear as
+        # spoken text.  The parsed events are kept for optional scheduling
+        # of the facial expression timeline and for emotion-aware engines.
+        clean, em_events = parse_facial_expressions(clean)
+        clean = clean.strip()
+        if not clean:
+            return {"status": "skipped", "reason": "empty_text"}
+
         # Attempt language detection on the cleaned text so that downstream
         # engines (e.g. cloud APIs) can pick an appropriate voice or model.
         # Uses lingua-language-detector for much better accuracy on short texts
@@ -318,6 +344,17 @@ class VoxPlugin(AIPluginBase):
             log_error(f"[vox_plugin] Cannot load engine '{name}': {exc}")
             return await _fallback(merged_text or text)
 
+        # --- Emotional text preprocessing for capable engines ---
+        tts_text = clean
+        if em_events and getattr(engine, "supports_emotion_tags", lambda: False)():
+            try:
+                emotion_tuples = [
+                    (ev.position, ev.name, ev.intensity) for ev in em_events
+                ]
+                tts_text = engine.preprocess_emotional_text(clean, emotion_tuples)
+            except Exception as exc:
+                log_warning(f"[vox_plugin] preprocess_emotional_text failed: {exc}")
+
         # --- Generate audio ---
         try:
             # pass detected language hint to engine if available; engines may
@@ -326,7 +363,7 @@ class VoxPlugin(AIPluginBase):
             if detected_lang:
                 kwargs["language"] = detected_lang
             audio_bytes: bytes | None = await asyncio.to_thread(
-                engine.generate_tts, clean, emotion, **kwargs
+                engine.generate_tts, tts_text, emotion, **kwargs
             )
         except Exception as exc:
             log_error(f"[vox_plugin] Engine '{name}' generation error: {exc}")
@@ -358,6 +395,11 @@ class VoxPlugin(AIPluginBase):
             except Exception:
                 pass
 
+        # --- Extract actual audio duration ---
+        audio_duration_s = _get_wav_duration(out_path)
+        if audio_duration_s is not None:
+            log_debug(f"[vox_plugin] audio duration: {audio_duration_s:.2f}s")
+
         # --- Dispatch to interface ---
         await self._dispatch(
             audio_path=out_path,
@@ -366,9 +408,27 @@ class VoxPlugin(AIPluginBase):
             lipsync_data=lipsync_data,
             context=context,
             original_message=original_message,
+            audio_duration_s=audio_duration_s,
         )
 
-        return {"status": "success", "audio_path": str(out_path), "filename": filename}
+        # --- Schedule facial expression timeline (voice responses) ---
+        # For voice responses (allow_fallback=True, no parallel message_*
+        # action), the expression timeline is driven by VoxPlugin using the
+        # real audio duration.  For auto-injected TTS alongside a message_*
+        # action, the action_parser already scheduled the timeline.
+        if em_events and allow_fallback:
+            self._schedule_expression_timeline(
+                em_events, clean, interface_path, audio_duration_s
+            )
+
+        result: dict[str, Any] = {
+            "status": "success",
+            "audio_path": str(out_path),
+            "filename": filename,
+        }
+        if audio_duration_s is not None:
+            result["audio_duration_s"] = audio_duration_s
+        return result
 
     # ------------------------------------------------------------------
     # Language detection helper (used by recon and other components)
@@ -534,6 +594,71 @@ class VoxPlugin(AIPluginBase):
     # Internal helpers
     # ------------------------------------------------------------------
 
+    def _schedule_expression_timeline(
+        self,
+        events: list[FacialExpressionEvent],
+        clean_text: str,
+        interface_path: str | None,
+        audio_duration_s: float | None,
+    ) -> None:
+        """Fire-and-forget the facial expression timeline for a voice response."""
+        try:
+            from core.animation_handler import get_karada_state_server
+
+            karada = get_karada_state_server()
+            if not karada or not karada.has_connected_clients():
+                return
+
+            from core.core_initializer import PLUGIN_REGISTRY
+            from plugins.facial_expression_plugin import FacialExpressionPlugin
+
+            expr_plugin: FacialExpressionPlugin | None = None
+            if isinstance(PLUGIN_REGISTRY, dict):
+                for p in PLUGIN_REGISTRY.values():
+                    if isinstance(p, FacialExpressionPlugin):
+                        expr_plugin = p
+                        break
+            if not expr_plugin:
+                return
+
+            from core.persona_manager import get_persona_manager
+
+            persona_json: dict[str, Any] | None = None
+            pm = get_persona_manager()
+            if pm and getattr(pm, "_current_persona", None):
+                try:
+                    persona_json = pm._load_persona_json(pm._current_persona.name)
+                except Exception:
+                    persona_json = None
+
+            chars_per_sec = (
+                persona_json.get("facial_expression_chars_per_sec", 12)
+                if persona_json
+                else 12
+            )
+            expr_section = (
+                persona_json.get("facial_expressions", {}) if persona_json else {}
+            )
+
+            session_id = ""
+            if interface_path:
+                parts = str(interface_path).split("/")
+                if len(parts) >= 2:
+                    session_id = parts[1]
+
+            asyncio.create_task(
+                expr_plugin._play_expression_timeline(
+                    events,
+                    len(clean_text),
+                    session_id,
+                    chars_per_sec,
+                    expr_section=expr_section,
+                    audio_duration_s=audio_duration_s,
+                )
+            )
+        except Exception as exc:
+            log_warning(f"[vox_plugin] Failed to schedule expression timeline: {exc}")
+
     def _write_audio(self, path: Path, audio_bytes: bytes, engine: Any) -> None:
         """Write audio bytes to disk, wrapping raw PCM in WAV if needed."""
         fmt = getattr(engine, "output_format", "wav")
@@ -556,6 +681,7 @@ class VoxPlugin(AIPluginBase):
         lipsync_data: dict | None,
         context: dict | None,
         original_message: Any,
+        audio_duration_s: float | None = None,
     ) -> None:
         """Dispatch generated audio to the correct interface."""
         if not interface_path:
@@ -582,6 +708,7 @@ class VoxPlugin(AIPluginBase):
                         audio_path=str(audio_path),
                         text=caption,
                         lipsync_data=lipsync_data,
+                        audio_duration_s=audio_duration_s,
                     )
 
             elif iface_name == "discord_bot" and hasattr(target_iface, "send_message"):

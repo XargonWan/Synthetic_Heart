@@ -602,6 +602,11 @@ export function initChatUI() {
             }
         }
 
+        // Backwards-compatible helper for older code that expects this to exist.
+        function updateSendState() {
+            updateButtonMode();
+        }
+
         // ── Ambient VAD (volume-based, triggers look-at-camera always) ───────
         function _startVADLoop(stream) {
             if (micVADInterval) return;
@@ -922,6 +927,81 @@ export function initChatUI() {
             _wsReconnectDelay = Math.min(_wsReconnectDelay * 2, _WS_MAX_DELAY);
         }
 
+        // ── Shared lipsync-aware audio player ─────────────────────────────
+        // Handles Web Audio API setup so both tts-play and click-to-replay
+        // get proper lipsync.  Guards stopLipsync with an identity check to
+        // avoid stale event listeners clobbering the state.
+        function __synthPlayWithLipsync(url, text, audioDuration) {
+            // Disconnect & stop previous audio
+            if (window.__synthLipSyncSource) {
+                try { window.__synthLipSyncSource.disconnect(); } catch (_) { /* ignore */ }
+                window.__synthLipSyncSource = null;
+            }
+            if (window.__synthLipSyncAudio) {
+                try {
+                    window.__synthLipSyncAudio.pause();
+                    window.__synthLipSyncAudio.removeAttribute('src');
+                    window.__synthLipSyncAudio.load();
+                } catch (_) { /* ignore */ }
+            }
+            window.__synthIsLipSyncing = false;
+
+            // Store spoken text and duration for text-based viseme estimation
+            window.__synthLipSyncText = text || null;
+            window.__synthLipSyncDuration = (typeof audioDuration === 'number' && audioDuration > 0) ? audioDuration : null;
+            window.__synthLipSyncTimeline = null;
+
+            const audio = new Audio(url);
+            window.__synthLipSyncAudio = audio;
+
+            // Set up Web Audio API analyser for lipsync
+            try {
+                if (!window.__synthLipSyncCtx) {
+                    window.__synthLipSyncCtx = new (window.AudioContext || window.webkitAudioContext)();
+                }
+                const ctx = window.__synthLipSyncCtx;
+                if (ctx.state === 'suspended') ctx.resume();
+
+                const source = ctx.createMediaElementSource(audio);
+                const analyser = ctx.createAnalyser();
+                analyser.fftSize = 256;
+                analyser.smoothingTimeConstant = 0.2;
+                source.connect(analyser);
+                analyser.connect(ctx.destination);
+
+                window.__synthLipSyncSource = source;
+                window.__synthLipSyncAnalyser = analyser;
+                window.__synthLipSyncData = null;
+            } catch (audioCtxErr) {
+                console.warn('[chat-window] Web Audio API setup failed, playing without lipsync:', audioCtxErr);
+                window.__synthLipSyncAnalyser = null;
+            }
+
+            // Guard: only the *current* audio instance may toggle lipsync
+            const thisAudio = audio;
+            audio.addEventListener('play', () => {
+                if (window.__synthLipSyncAudio === thisAudio) window.__synthIsLipSyncing = true;
+            });
+            const stopLipsync = () => {
+                if (window.__synthLipSyncAudio === thisAudio) {
+                    window.__synthIsLipSyncing = false;
+                    window.__synthLipSyncTimeline = null;
+                }
+            };
+            audio.addEventListener('ended', stopLipsync);
+            audio.addEventListener('pause', stopLipsync);
+            audio.addEventListener('error', stopLipsync);
+
+            audio.play().catch((err) => {
+                if (window.__synthLipSyncAudio === thisAudio) window.__synthIsLipSyncing = false;
+                if (err && err.name === 'NotAllowedError') {
+                    console.debug('[chat-window] Autoplay blocked; user can tap bubble to play');
+                    window.__synthPendingAudio = window.__synthPendingAudio || [];
+                    window.__synthPendingAudio.push({ url, text, audioDuration });
+                }
+            });
+        }
+
         function connectWs() {
             try {
                 const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
@@ -1051,6 +1131,30 @@ export function initChatUI() {
                                     window.VRMAnimations.preload(data.state, data.file, data.descriptor);
                                 }
                             } catch (e) { /* ignore */ }
+                        } else if (data && data.type === 'vrm_expression_set') {
+                            try {
+                                // Remove previous facial_expression source before adding
+                                // the new one (replace semantics, not accumulate).
+                                if (window.animationHandler && typeof window.animationHandler.removeExpressionSourcesByTag === 'function') {
+                                    window.animationHandler.removeExpressionSourcesByTag('facial_expression');
+                                }
+                                if (window.animationHandler && typeof window.animationHandler.addExpressionSource === 'function') {
+                                    // prefer pre-resolved targets dict sent by Python (GAP 1A);
+                                    // fall back to {name: intensity} for backward compat.
+                                    const tgt = (data.targets && typeof data.targets === 'object')
+                                        ? Object.assign({}, data.targets)
+                                        : (data.name ? {[String(data.name)]: Number(data.intensity) || 0} : {});
+                                    window.animationHandler.addExpressionSource({targets: tgt, priority: 25, source: 'facial_expression'});
+                                }
+                            } catch (e) { /* ignore */ }
+                        } else if (data && data.type === 'vrm_expression_clear') {
+                            try {
+                                if (window.animationHandler && typeof window.animationHandler.removeExpressionSourcesByTag === 'function') {
+                                    window.animationHandler.removeExpressionSourcesByTag('facial_expression');
+                                } else if (window.animationHandler && typeof window.animationHandler.clearExpressionSources === 'function') {
+                                    window.animationHandler.clearExpressionSources();
+                                }
+                            } catch (e) { /* ignore */ }
                         } else if (data && data.type === 'vrm_face') {
                             // Update VRM blend-shape face values
                             try {
@@ -1111,6 +1215,7 @@ export function initChatUI() {
                                         }
                                         if (lastBubble) {
                                             lastBubble.dataset.ttsUrl = data.url;
+                                            if (data.text) lastBubble.dataset.ttsText = data.text;
                                             lastBubble.classList.add('clickable-audio');
                                         }
                                     }
@@ -1118,18 +1223,7 @@ export function initChatUI() {
 
                                 // Auto-play only when vox is enabled
                                 if (voxEnabled) {
-                                    try {
-                                        const audio = new Audio(data.url);
-                                        audio.play().catch((err) => {
-                                            // Browser autoplay policy — bubble already has clickable-audio
-                                            // so the user can tap to replay. Queue URL for first interaction.
-                                            if (err && err.name === 'NotAllowedError') {
-                                                console.debug('[chat-window] Autoplay blocked; user can tap bubble to play');
-                                                window.__synthPendingAudio = window.__synthPendingAudio || [];
-                                                window.__synthPendingAudio.push(data.url);
-                                            }
-                                        });
-                                    } catch (e) { /* ignore */ }
+                                    try { __synthPlayWithLipsync(data.url, data.text, data.audio_duration_s); } catch (e) { /* ignore */ }
                                 }
                             } catch (e) { /* ignore */ }
                         }
@@ -1211,7 +1305,8 @@ export function initChatUI() {
                     if (!bubble) return;
                     const url = bubble.dataset.ttsUrl;
                     if (!url) return;
-                    try { new Audio(url).play().catch(() => {}); } catch (e) { /* ignore */ }
+                    const text = bubble.dataset.ttsText || null;
+                    try { __synthPlayWithLipsync(url, text); } catch (e) { /* ignore */ }
                 } catch (e) { /* ignore */ }
             }, true);
             window.__synth_tts_click_bound = true;
@@ -1228,8 +1323,11 @@ export function initChatUI() {
                     if (!q || !q.length) return;
                     window.__synthPendingAudio = [];
                     // Play only the most recent pending audio (latest message)
-                    const url = q[q.length - 1];
-                    try { new Audio(url).play().catch(() => {}); } catch (e) { /* ignore */ }
+                    const item = q[q.length - 1];
+                    const url = (typeof item === 'string') ? item : item.url;
+                    const text = (typeof item === 'object' && item) ? item.text : undefined;
+                    const dur = (typeof item === 'object' && item) ? item.audioDuration : undefined;
+                    try { __synthPlayWithLipsync(url, text, dur); } catch (e) { /* ignore */ }
                 } catch (e) { /* ignore */ }
             };
             const _unlockHandler = () => {

@@ -46,7 +46,12 @@ from core.message_chain import (
 )
 from core import db as core_db
 from core.action_state_manager import get_action_state_manager, AnimationPhase
-from core.animation_handler import AnimationState, KaradaStateServer
+from core.animation_handler import (
+    AnimationState,
+    KaradaStateServer,
+    set_karada_state_server,
+)
+from core.karada_ws_transport import WebSocketTransport
 from core import animation_uploads
 import mimetypes
 
@@ -418,11 +423,28 @@ class SynthWebUIInterface:
             self.animation_handler = KaradaStateServer(self)
             # Register webui callbacks with the KaradaStateServer
             self.animation_handler.set_webui(self)
+            # Register WebSocket transport so KaradaStateServer can broadcast
+            ws_transport = WebSocketTransport(self.connections)
+            self.animation_handler.add_transport(ws_transport)
+            # Publish as global singleton so plugins (e.g. FacialExpressionPlugin)
+            # can reach the same instance via get_karada_state_server()
+            set_karada_state_server(self.animation_handler)
             # Preload idle animations in background (non-blocking)
             try:
                 asyncio.create_task(self.animation_handler.ensure_idle_preloaded())
             except Exception:
                 pass
+            # Mount the public Karada REST + WS API router
+            try:
+                from core.karada_api import create_karada_router
+
+                karada_router = create_karada_router(self.animation_handler)
+                self.app.include_router(karada_router)
+                log_info(f"{LOG_PREFIX} Karada API router mounted at /api/karada/")
+            except Exception as karada_exc:
+                log_warning(
+                    f"{LOG_PREFIX} Karada API router failed to mount (non-fatal): {karada_exc}"
+                )
         except Exception as e:
             # If KaradaStateServer fails to initialize, create a lightweight stub
             log_warning(f"{LOG_PREFIX} KaradaStateServer init failed: {e}")
@@ -562,6 +584,8 @@ class SynthWebUIInterface:
         self.app.get("/api/config/{key}/file")(self.get_exposed_file)
         # Debug endpoints (only enabled when WEB_DEBUG=1)
         self.app.get("/api/debug/db_pool")(self.db_pool_debug)
+        self.app.post("/api/debug/inject_message")(self.debug_inject_message)
+        self.app.get("/api/debug/expressions")(self.debug_expressions)
         self.app.post("/api/config")(self.update_config_entry)
         # Cortex-aware endpoints
         self.app.post("/api/components/cortex")(self.set_cortex_engine)
@@ -1428,6 +1452,222 @@ class SynthWebUIInterface:
                 status_code=500, detail="Unable to retrieve DB debug info"
             )
 
+    async def debug_inject_message(self, request: Request) -> JSONResponse:
+        """Inject a fake LLM response through the full action pipeline.
+
+        Routes the message through ``run_action()`` exactly as if the LLM
+        had produced it: facial expression tags are parsed, TTS is triggered
+        (when Vox is active), and animation state transitions (THINK → WRITE
+        → IDLE) are executed.
+
+        Supports ``[em_*]`` facial expression tags.
+        Gated by ``WEB_DEBUG=1``.
+        """
+        web_debug = os.getenv("WEB_DEBUG", "0").lower()
+        if web_debug not in ("1", "true", "yes"):
+            raise HTTPException(status_code=403, detail="Debug endpoints disabled")
+
+        try:
+            body: Dict[str, Any] = await request.json()
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+        raw_text: str = body.get("text", "")
+        if not raw_text or not raw_text.strip():
+            raise HTTPException(status_code=400, detail="'text' is required")
+
+        as_audio: bool = bool(body.get("as_audio", False))
+
+        # Strip [em_*] tags from the text; they drive facial expressions only
+        from core.facial_expression_parser import parse_facial_expressions
+
+        clean_text, em_events = parse_facial_expressions(raw_text)
+
+        # Trigger facial expression timeline when tags are present
+        if em_events:
+            try:
+                from plugins.facial_expression_plugin import FacialExpressionPlugin
+                from core.animation_handler import get_karada_state_server
+                from core.core_initializer import PLUGIN_REGISTRY
+
+                kss = get_karada_state_server()
+                has_clients = kss.has_connected_clients() if kss else False
+                log_debug(
+                    f"{LOG_PREFIX} expression dispatch: kss={kss is not None}, "
+                    f"has_clients={has_clients}, em_events={len(em_events)}"
+                )
+                if has_clients:
+                    expr_plugin: Optional[FacialExpressionPlugin] = None
+                    if isinstance(PLUGIN_REGISTRY, dict):
+                        for p in PLUGIN_REGISTRY.values():
+                            if isinstance(p, FacialExpressionPlugin):
+                                expr_plugin = p
+                                break
+                    log_debug(
+                        f"{LOG_PREFIX} expression dispatch: expr_plugin={'found' if expr_plugin else 'NOT FOUND'}"
+                    )
+                    if expr_plugin:
+                        from core.persona_manager import get_persona_manager
+
+                        persona_json: Optional[Dict[str, Any]] = None
+                        pm = get_persona_manager()
+                        if pm and getattr(pm, "_current_persona", None):
+                            try:
+                                persona_json = pm._load_persona_json(
+                                    pm._current_persona.name
+                                )
+                            except Exception:
+                                persona_json = None
+                        chars_per_sec = (
+                            persona_json.get("facial_expression_chars_per_sec", 12)
+                            if persona_json
+                            else 12
+                        )
+                        expr_section = (
+                            persona_json.get("facial_expressions", {})
+                            if persona_json
+                            else {}
+                        )
+                        log_debug(
+                            f"{LOG_PREFIX} expression dispatch: scheduling timeline, "
+                            f"events={len(em_events)}, "
+                            f"cps={chars_per_sec}, expr_keys={list(expr_section.keys())}"
+                        )
+                        asyncio.create_task(
+                            expr_plugin._play_expression_timeline(
+                                em_events,
+                                len(clean_text),
+                                "",
+                                chars_per_sec,
+                                expr_section=expr_section,
+                            )
+                        )
+                else:
+                    log_debug(
+                        f"{LOG_PREFIX} expression dispatch: SKIPPED (no connected clients)"
+                    )
+            except Exception as exc:
+                log_debug(
+                    f"{LOG_PREFIX} debug_inject_message expression timeline error: {exc}"
+                )
+
+        # Deliver to every connected session through the full action pipeline
+        from types import SimpleNamespace
+        from core.action_parser import run_actions
+
+        delivered = 0
+        errors: List[str] = []
+        for session_id in list(self.connections.keys()):
+            interface_path = f"{INTERFACE_NAME}/{session_id}"
+
+            # Build the action list.  Use clean_text (tags already stripped).
+            # When as_audio is set, only send tts_speak — the Vox pipeline
+            # calls send_tts_audio → send_message internally, so a separate
+            # message_synth_webui would cause a duplicate bubble.
+            actions: List[Dict[str, Any]] = []
+            if as_audio:
+                actions.append(
+                    {
+                        "type": "tts_speak",
+                        "payload": {
+                            "text": clean_text,
+                            "interface_path": interface_path,
+                        },
+                    }
+                )
+            else:
+                actions.append(
+                    {
+                        "type": "message_synth_webui",
+                        "payload": {
+                            "text": clean_text,
+                            "interface_path": interface_path,
+                        },
+                    }
+                )
+
+            context: Dict[str, Any] = {
+                "interface_path": interface_path,
+                "chat_id": session_id,
+                "interface": INTERFACE_NAME,
+                "from_cortex": True,
+            }
+
+            original_message = SimpleNamespace(
+                session_id=session_id,
+                interface_path=interface_path,
+                from_cortex=True,
+                chat_id=session_id,
+            )
+
+            try:
+                result = await run_actions(actions, context, self, original_message)
+                delivered += 1
+                if result and result.get("errors"):
+                    errors.extend(result["errors"])
+            except Exception as exc:
+                errors.append(f"{session_id}: {exc}")
+                log_debug(
+                    f"{LOG_PREFIX} debug_inject_message pipeline error for {session_id}: {exc}"
+                )
+
+        log_info(
+            f"{LOG_PREFIX} 🧪 Debug inject (pipeline): delivered to {delivered} session(s), "
+            f"audio={as_audio}, em_tags={len(em_events)}, text={clean_text[:60]!r}"
+        )
+        resp: Dict[str, Any] = {"status": "ok", "delivered": delivered}
+        if errors:
+            resp["warnings"] = errors
+        return JSONResponse(resp)
+
+    async def debug_expressions(self, request: Request) -> JSONResponse:
+        """Return the list of valid facial expressions for the active persona.
+
+        Reads ``facial_expressions`` from the current persona's JSON and
+        falls back to a minimal default set.  Gated by ``WEB_DEBUG=1``.
+        """
+        web_debug = os.getenv("WEB_DEBUG", "0").lower()
+        if web_debug not in ("1", "true", "yes"):
+            raise HTTPException(status_code=403, detail="Debug endpoints disabled")
+
+        from core.persona_manager import get_persona_manager
+
+        persona_json: Optional[Dict[str, Any]] = None
+        pm = get_persona_manager()
+        if pm and getattr(pm, "_current_persona", None):
+            try:
+                persona_json = pm._load_persona_json(pm._current_persona.name)
+            except Exception:
+                persona_json = None
+
+        expr_section: Dict[str, Any] = (
+            persona_json.get("facial_expressions", {}) if persona_json else {}
+        )
+        if not expr_section:
+            expr_section = {
+                n: {"description": n}
+                for n in ["smile", "grin", "sad", "blush", "surprised", "angry"]
+            }
+
+        # Also return canonical emotions from emotion_manager if available
+        canonical_emotions: List[str] = []
+        try:
+            from plugins.emotion_manager import CANONICAL_EMOTIONS
+
+            canonical_emotions = sorted(CANONICAL_EMOTIONS)
+        except Exception:
+            pass
+
+        return JSONResponse(
+            {
+                "expressions": {
+                    name: info.get("description", name)
+                    for name, info in expr_section.items()
+                },
+                "canonical_emotions": canonical_emotions,
+            }
+        )
+
     async def logs_page(self):
         html = self._render_logs()
         return HTMLResponse(content=html)
@@ -1669,7 +1909,7 @@ class SynthWebUIInterface:
         # Push full VRM state to the newly connected client
         try:
             if self.animation_handler:
-                full_state = self.animation_handler.get_full_state()
+                full_state = await self.animation_handler.get_full_state()
 
                 # 1) VRM model
                 vrm = full_state.get("vrm_model", {})
@@ -1915,13 +2155,15 @@ class SynthWebUIInterface:
         try:
             from core.core_initializer import PLUGIN_REGISTRY
 
+            import tempfile
+
             auris = PLUGIN_REGISTRY.get("auris_plugin")
             if auris is None:
                 raise HTTPException(
                     status_code=503,
                     detail="Auris STT subsystem is not loaded. Select an Auris engine or disable via ACTIVE_AURIS_ENGINE.",
                 )
-            tmp_dir = Path("tmp") / "webui_audio"
+            tmp_dir = Path(tempfile.mkdtemp())
             tmp_dir.mkdir(parents=True, exist_ok=True)
             suffix = Path(file.filename).suffix or ".audio"
             tmp_path = tmp_dir / f"webui_{uuid.uuid4().hex}{suffix}"
@@ -3275,6 +3517,7 @@ class SynthWebUIInterface:
         audio_path: str,
         text: Optional[str] = None,
         lipsync_data: Optional[Dict[str, Any]] = None,
+        audio_duration_s: Optional[float] = None,
     ) -> bool:
         """Push a TTS audio playback event to a WebUI session.
 
@@ -3285,10 +3528,12 @@ class SynthWebUIInterface:
         accessible via the ``/static`` mount.
 
         Args:
-            session_id:   WebUI session identifier (plain or ``synth_webui/<id>`` form).
-            audio_path:   Absolute or relative filesystem path to the audio file.
-            text:         Optional caption / message text (for accessibility).
-            lipsync_data: Optional phoneme/timing dict forwarded to the animator.
+            session_id:      WebUI session identifier (plain or ``synth_webui/<id>`` form).
+            audio_path:      Absolute or relative filesystem path to the audio file.
+            text:            Optional caption / message text (for accessibility).
+            lipsync_data:    Optional phoneme/timing dict forwarded to the animator.
+            audio_duration_s: Duration of the audio in seconds (used by the client
+                              to synchronise facial expressions with playback).
 
         Returns:
             ``True`` if the message was delivered, ``False`` if no websocket was found.
@@ -3337,14 +3582,36 @@ class SynthWebUIInterface:
             payload["text"] = text
         if lipsync_data:
             payload["lipsync"] = lipsync_data
+        if audio_duration_s is not None:
+            payload["audio_duration_s"] = audio_duration_s
 
-        try:
-            await websocket.send_json(payload)
-            log_info(f"{LOG_PREFIX} TTS audio dispatched to session {sid}: {url}")
-            return True
-        except Exception as exc:
-            log_warning(f"{LOG_PREFIX} send_tts_audio failed for session {sid}: {exc}")
-            return False
+        # "Single body" principle: broadcast TTS audio to ALL connected
+        # clients, not just the requesting session.  Every viewer should
+        # hear the same voice coming from the shared avatar.
+        delivered = False
+        for target_sid, target_ws in list(self.connections.items()):
+            try:
+                await target_ws.send_json(payload)
+                delivered = True
+            except Exception as exc:
+                log_warning(
+                    f"{LOG_PREFIX} send_tts_audio failed for session {target_sid}: {exc}"
+                )
+        if delivered:
+            log_info(
+                f"{LOG_PREFIX} TTS audio broadcast to {len(self.connections)} session(s): {url}"
+            )
+
+        # Track current audio in KaradaStateServer for late-joining clients
+        if hasattr(self, "animation_handler") and self.animation_handler:
+            try:
+                self.animation_handler.set_current_audio(
+                    url, audio_duration_s, lipsync_data
+                )
+            except Exception:
+                pass
+
+        return delivered
 
     async def _webui_clear_pending_thinking(self, session_id: str) -> None:
         pending = self._pending_thinking_actions.get(session_id)
@@ -8746,6 +9013,22 @@ class SynthWebUIInterface:
                 f"{LOG_PREFIX} Failed to set active VRM after activating skin {skin_name}: {exc}"
             )
             raise HTTPException(status_code=500, detail="Failed to activate skin")
+
+        # Trigger skin_change animation so the avatar plays a transition animation
+        # after the frontend reloads the VRM model.
+        try:
+            handler = getattr(self, "animation_handler", None)
+            if handler and hasattr(handler, "play_animation"):
+                asyncio.ensure_future(
+                    handler.play_animation(
+                        AnimationState.SKIN_CHANGE,
+                        session_id=None,
+                        loop=False,
+                        source="skin_activation",
+                    )
+                )
+        except Exception as exc:
+            log_warning(f"{LOG_PREFIX} Failed to trigger skin_change animation: {exc}")
 
         return JSONResponse({"status": "ok", "name": target.name}, status_code=201)
 

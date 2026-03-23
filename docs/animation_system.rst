@@ -246,7 +246,10 @@ The optional ``hash`` field allows clients to skip reloading an already-cached m
 ``vrm_face`` — Blend-shape / emotion values
 ---------------------------------------------
 
-Emitted to update the avatar's facial expression sliders.
+Emitted to update the avatar's facial expression sliders.  Because the
+client's smoothing pipeline decays values rapidly, this message is generally
+only used for slow-changing EmotionManager state.  (Facial expression tags
+use ``vrm_expression_set`` instead.)
 
 .. code-block:: json
 
@@ -254,6 +257,27 @@ Emitted to update the avatar's facial expression sliders.
         "type": "vrm_face",
         "values": {"happy": 0.8, "neutral": 0.1}
     }
+
+``vrm_expression_set`` / ``vrm_expression_clear`` — instantaneous facial overrides
+-------------------------------------------------------------------------------
+
+New in 2026 release.  These packets allow the backend to inject a short-lived
+facial expression with high priority, bypassing the normal emotion decay.
+They are consumed by the WebUI's expression pipeline which applies a smooth
+lerp and automatically removes the source when a matching ``vrm_expression_clear``
+packet is received (typically after a cooldown).  This is the mechanism used
+by ``[em_*]`` tags inserted into LLM-generated text.
+
+.. code-block:: json
+
+    {"type": "vrm_expression_set", "name": "grin", "intensity": 0.9}
+
+To clear the override and return to the emotional baseline:
+
+.. code-block:: json
+
+    {"type": "vrm_expression_clear"}
+
 
 ``preload_animation`` — Preload an animation file
 ---------------------------------------------------
@@ -372,7 +396,7 @@ KaradaStateServer API
 The following public methods are available for plugins and interfaces.
 
 ``get_full_state() → dict``
-    Returns the complete VRM state in a single dict with three keys:
+    Returns the complete VRM state in a single dict with four keys:
 
     .. code-block:: python
 
@@ -380,9 +404,12 @@ The following public methods are available for plugins and interfaces.
             "vrm_model":   {"name": "...", "url": "...", "hash": "..."},
             "animation":   {"file": "...", "url": "...", "state": "idle",
                             "loop": True, "descriptor": {...}},
-            "face_values": {"happy": 0.0, ...}
+            "face_values": {"happy": 0.0, ...},
+            "audio":       {"url": "...", "audio_duration_s": 3.2,
+                            "offset_s": 0.7, "lipsync_data": null}
         }
 
+    The ``audio`` key is ``None`` when no TTS audio is currently playing.
     Called on every new WebSocket connection to push the current state to
     the newly-connected client.
 
@@ -742,10 +769,136 @@ The frontend (``vrm-viewer.mjs``) uses this as a safety net on reconnect.
 Limitations
 ===========
 
-- Animations are only visible in the WebUI interface
+- Animations are only visible in WebUI and Karada API clients
 - Multiple concurrent animations on the same session may conflict (use context IDs properly)
 - Animation files must be Mixamo-compatible FBX format
 - File names in the mapping must match exactly (case-sensitive)
+
+Transport Layer
+===============
+
+KaradaStateServer is decoupled from any specific I/O mechanism through an abstract
+**transport** layer (``core/karada_transport.py``).  Each transport implements
+``KaradaTransport`` and is registered at runtime via ``add_transport()``.
+
+Built-in transports:
+
+- **WebSocketTransport** (``core/karada_ws_transport.py``) — wraps the WebUI's
+  ``connections`` dict and delegates to ``WebSocket.send_json()``.
+- **KaradaApiTransport** (``core/karada_api.py``) — serves clients that connect
+  through the public REST + WebSocket API (``/api/karada/ws``).
+
+Custom transports (e.g. a native desktop client or XR headset) only need to
+subclass ``KaradaTransport`` and call ``handler.add_transport(transport)``.
+
+.. code-block:: python
+
+    from core.karada_transport import KaradaTransport
+
+    class MyTransport(KaradaTransport):
+        async def broadcast_animation(self, payload: dict) -> None: ...
+        async def broadcast_audio(self, payload: dict) -> None: ...
+        async def broadcast_face(self, payload: dict) -> None: ...
+        async def broadcast_model(self, payload: dict) -> None: ...
+        async def broadcast_expression(self, payload: dict) -> None: ...
+        async def send_to_session(self, session_id: str, payload: dict) -> None: ...
+        async def preload_asset(self, session_id: str | None, payload: dict) -> None: ...
+        def get_connected_sessions(self) -> list[str]: ...
+
+    handler.add_transport(MyTransport())
+
+Priority & Preemption
+=====================
+
+Every animation state has a numeric priority (higher = more important).  When
+``play_animation()`` is called, the server compares the new request's priority
+against the currently active priority.  Lower-priority requests are silently
+rejected.
+
+Default priorities (defined in ``ANIMATION_STATE_PRIORITIES``):
+
+.. list-table::
+   :header-rows: 1
+
+   * - State
+     - Priority
+   * - IDLE
+     - 0
+   * - WRITE
+     - 3
+   * - TALK
+     - 5
+   * - THINK
+     - 10
+
+Plugins can register custom priorities:
+
+.. code-block:: python
+
+    handler.register_state_priority("touch", 7)
+
+Audio State Tracking
+====================
+
+KaradaStateServer tracks the currently playing TTS audio so that late-joining
+clients can resume playback from the correct offset.
+
+.. code-block:: python
+
+    # Called by the WebUI when TTS audio starts
+    handler.set_current_audio("/static/audio/tts/reply_42.wav", duration_s=3.2)
+
+    # Late-joining client receives this when it connects
+    audio = handler.get_current_audio()
+    # → {"url": "...", "audio_duration_s": 3.2, "offset_s": 0.7, "lipsync_data": ...}
+
+Audio state is automatically cleared when the estimated playback duration
+(plus a small buffer) has elapsed.  ``get_full_state()`` includes an ``"audio"``
+key so late-joiners get everything in one shot.
+
+Watchdog
+========
+
+A background watchdog task (10 s interval) detects stuck animation states — for
+example if THINK remains active after all ``_active_tasks`` have been cleared due
+to a race condition or bug.  When a stuck state is detected, the watchdog forces
+a return to IDLE.
+
+The watchdog starts automatically when the first transport is registered.  No
+manual configuration is needed.
+
+Karada REST & WebSocket API
+============================
+
+A public API router is mounted at ``/api/karada/`` and exposes the full body
+state to external clients (native apps, XR headsets, monitoring dashboards).
+
+**State endpoints** (GET):
+
+- ``/api/karada/state`` — full state (model + animation + face + audio)
+- ``/api/karada/state/animation`` — current animation only
+- ``/api/karada/state/model`` — current VRM model
+- ``/api/karada/state/face`` — current face blend-shapes
+- ``/api/karada/state/audio`` — current audio playback (if any)
+
+**Action endpoints** (POST):
+
+- ``/api/karada/action`` — request a state change (``{"state": "think"}``)
+
+**Discovery endpoints** (GET):
+
+- ``/api/karada/animations/{state}`` — list available animations for a state
+- ``/api/karada/animations/{state}/{file}/descriptor`` — get descriptor for a file
+- ``/api/karada/skins`` — list available skins
+
+**Asset distribution** (GET / POST):
+
+- ``/api/karada/assets/manifest`` — SHA-256 asset manifest for cache validation
+- ``/api/karada/assets/missing`` — given a list of owned hashes, returns missing assets
+
+**WebSocket** (WS):
+
+- ``/api/karada/ws`` — real-time push stream (same protocol as the WebUI WS)
 
 Future Enhancements
 ===================
