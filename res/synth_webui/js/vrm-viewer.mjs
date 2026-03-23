@@ -1654,6 +1654,24 @@ class AnimationHandler {
         } catch (e) { /* ignore */ }
     }
 
+    /**
+     * Mark all current expression blendshape targets for smooth decay to zero.
+     * Instead of snapping `_expressionState = {}`, this keeps existing keys
+     * but sets their desired value to 0 so the per-frame interpolation in
+     * applyExpressionsForFrame() smoothly fades them out over subsequent frames.
+     */
+    _fadeOutAllExpressions() {
+        try {
+            if (!this._expressionState || typeof this._expressionState !== 'object') return;
+            // Setting values to a tiny epsilon causes the decay path in
+            // applyExpressionsForFrame to smoothly bring them to zero and
+            // eventually delete the key once negligible.
+            Object.keys(this._expressionState).forEach(k => {
+                try { this._expressionState[k] = 0; } catch (e) { /* ignore */ }
+            });
+        } catch (e) { /* ignore */ }
+    }
+
 
     _getEffectivePersona() {
         const skin = window.activeSkinName ? window.activeSkinName.split('/').pop().replace('.vrm', '') : 'Rei';
@@ -2202,7 +2220,7 @@ class AnimationHandler {
         }
     }
 
-    _safeFadeStop(action, fadeSec = 0.2) {
+    _safeFadeStop(action, fadeSec = 0.3) {
         try {
             if (!action) return;
             try { this._activeActions && this._activeActions.delete(action); } catch (e) { /* ignore */ }
@@ -2277,6 +2295,71 @@ class AnimationHandler {
                 }
                 this._activeActions.clear();
             }
+        } catch (e) { /* ignore */ }
+    }
+
+    /**
+     * Cross-fade cleanup: fade out the previous action(s) + any orphaned mixer
+     * clips AFTER a new action has already started playing.
+     * This prevents T-pose gaps by keeping the old animation driving the skeleton
+     * until the new one has enough weight to take over.
+     *
+     * @param {THREE.AnimationAction|null} prevAction - the previous simple action
+     * @param {Object|null} prevStructured - the previous structured action {intro, loop, outro}
+     * @param {THREE.AnimationAction|null} newAction - the newly started action (excluded from cleanup)
+     * @param {number} fadeSec - fade-out duration in seconds
+     */
+    _crossFadeCleanup(prevAction, prevStructured, newAction, fadeSec = 0.35) {
+        try {
+            const baseIdle = this._baseIdleAction;
+            const skip = new Set();
+            if (baseIdle) skip.add(baseIdle);
+            if (newAction) skip.add(newAction);
+
+            // Collect all parts of the new structured action if applicable
+            if (this.currentStructuredAction) {
+                if (this.currentStructuredAction.intro) skip.add(this.currentStructuredAction.intro);
+                if (this.currentStructuredAction.loop) skip.add(this.currentStructuredAction.loop);
+                if (this.currentStructuredAction.outro) skip.add(this.currentStructuredAction.outro);
+            }
+
+            // Fade out the previous structured action parts
+            if (prevStructured) {
+                if (prevStructured.intro && !skip.has(prevStructured.intro)) this._safeFadeStop(prevStructured.intro, fadeSec);
+                if (prevStructured.loop && !skip.has(prevStructured.loop)) this._safeFadeStop(prevStructured.loop, fadeSec);
+                if (prevStructured.outro && !skip.has(prevStructured.outro)) this._safeFadeStop(prevStructured.outro, fadeSec);
+            }
+            // Fade out the previous simple action
+            if (prevAction && !skip.has(prevAction)) {
+                this._safeFadeStop(prevAction, fadeSec);
+            }
+
+            // Also catch orphaned mixer actions
+            const mixerActions = (this.mixer && Array.isArray(this.mixer._actions)) ? this.mixer._actions : [];
+            for (const a of mixerActions) {
+                try {
+                    if (!a || skip.has(a)) continue;
+                    this._safeFadeStop(a, fadeSec);
+                } catch (e) { /* ignore */ }
+            }
+
+            // Flush _activeActions set
+            if (this._activeActions) {
+                for (const a of this._activeActions) {
+                    try {
+                        if (!a || skip.has(a)) continue;
+                        this._safeFadeStop(a, fadeSec);
+                    } catch (e) { /* ignore */ }
+                }
+                this._activeActions.clear();
+            }
+
+            // Lower base idle weight now that the new action is taking over
+            try {
+                if (baseIdle && typeof baseIdle.setEffectiveWeight === 'function') {
+                    baseIdle.setEffectiveWeight(0.12);
+                }
+            } catch (e) { /* ignore */ }
         } catch (e) { /* ignore */ }
     }
 
@@ -3164,39 +3247,31 @@ class AnimationHandler {
             await this._ensureBaseIdle(1.0, false);
         } catch (e) { /* ignore */ }
 
-        // Ensure eyes are open when starting a new non-think action to avoid lingering closed lids
+        // Smoothly open eyes when starting a new non-think action to avoid lingering closed lids
         try {
             const a = (actionName || '').toString().toLowerCase();
             if (a !== 'think') {
-                try { this._forceOpenEyes(); } catch (e) { }
+                try { this._resetEyesSmoothly(250); } catch (e) { }
             }
         } catch (e) { }
 
-        // Reset expression state to clean up residuals from previous animation
-        // This ensures blendshapes from the old animation don't linger during transitions
+        // Mark all current expression values for smooth decay to zero via the
+        // per-frame interpolation loop — never snap them instantly.
         try {
             if (!this._expressionState) this._expressionState = {};
-            // Decay all current expression values to zero over next frame
-            // Rather than instant reset, gradual decay prevents abrupt visual pops
-            Object.keys(this._expressionState).forEach(k => {
-                if (this._expressionState[k] > 0.01) {
-                    this._expressionState[k] *= 0.1; // Quick decay to near-zero
-                } else {
-                    this._expressionState[k] = 0;
-                }
-            });
+            this._fadeOutAllExpressions();
         } catch (e) { /* ignore */ }
 
         // Missing tracks are common in Mixamo clips; keep a low-weight idle baseline
         // so unkeyed bones don't stay in previous poses.
         // When entering IDLE (no specific file), refresh the baseline and boost it to full weight.
         if (actionName === 'idle' && !playSection && !animationFile) {
-            // Clear expressions when returning to idle to prevent the previous state's
-            // face pose (e.g., THINK eyes_closed) from persisting.
+            // Smoothly fade out expressions when returning to idle to prevent the
+            // previous state's face pose (e.g., THINK eyes_closed) from snapping off.
             try {
                 this._clearEyesState();
-                if (this._expressionState) this._expressionState = {};
-                if (typeof this._forceOpenEyes === 'function') this._forceOpenEyes();
+                this._fadeOutAllExpressions();
+                try { this._resetEyesSmoothly(250); } catch (e) { }
                 // Ensure autonomous blink/eye movement can resume in idle.
                 if (this._blinkAutoEnabled && !this._blinkLoopRunning) { try { this._startBlinkLoop(); } catch (e) { } }
                 if (this._eyeAutoEnabled && !this._eyeLoopRunning) { try { this._startEyeMovement(); } catch (e) { } }
@@ -3315,15 +3390,16 @@ class AnimationHandler {
             }
         } catch (e) { /* ignore */ }
 
-        // ── KEY FIX: stop ALL active overlays before starting the new action. ──────────
-        // Any orphaned intro/loop/outro from a previous state that didn't get cleaned up
-        // will be faded out here, preventing residual poses from mixing with the new clip
-        // (which is what causes the "T-pose idle" appearance).
-        // _baseIdleAction is deliberately skipped so the skeleton stays covered during the
-        // transition; we also re-affirm its presence immediately after to guard against
-        // any accidental weight reduction.
-        this._stopAllOverlays(0.3);
-        try { await this._ensureBaseIdle(1.0, false); } catch(e) { /* ignore */ }
+        // ── DEFERRED OVERLAY CLEANUP ──────────────────────────────────────────────
+        // Do NOT stop overlays here. The old action must keep driving the skeleton
+        // while we load the new clip. Overlays will be cleaned up AFTER the new
+        // action starts playing (see crossFadeCleanup below).
+        // We only ensure the base idle is strong enough as a safety net.
+        try { await this._ensureBaseIdle(0.15, false); } catch(e) { /* ignore */ }
+
+        // Collect references to the actions we'll need to fade out once the new one starts.
+        const _prevAction = this.currentAction || null;
+        const _prevStructured = this.currentStructuredAction || null;
 
         let action = this.actions[actionName];
 
@@ -3608,22 +3684,18 @@ class AnimationHandler {
                     this._safeFadeStop(prevBaseIdle, 0.25);
                 }
 
-                // Fade out overlays and return.
-                if (this.currentStructuredAction) {
-                    this._safeFadeStop(this.currentStructuredAction.intro, 0.25);
-                    this._safeFadeStop(this.currentStructuredAction.loop, 0.25);
-                    this._safeFadeStop(this.currentStructuredAction.outro, 0.25);
-                }
-                this._safeFadeStop(this.currentAction, 0.25);
+                // Fade out overlays (previous action + structured parts + orphans).
+                // Clear structured refs first so _crossFadeCleanup doesn't skip old parts.
                 this.currentAction = null;
                 this.currentActionName = 'idle';
                 this.currentActionPhase = null;
                 this.currentStructuredAction = null;
-                // Same as generic idle: clear lingering expressions so eyes don't stay closed.
+                this._crossFadeCleanup(_prevAction, _prevStructured, base, 0.25);
+                // Same as generic idle: smoothly fade out lingering expressions.
                 try {
                     this._clearEyesState();
-                    if (this._expressionState) this._expressionState = {};
-                    if (typeof this._forceOpenEyes === 'function') this._forceOpenEyes();
+                    this._fadeOutAllExpressions();
+                    try { this._resetEyesSmoothly(250); } catch (e) { }
                     if (this._blinkAutoEnabled && !this._blinkLoopRunning) { try { this._startBlinkLoop(); } catch (e) { } }
                     if (this._eyeAutoEnabled && !this._eyeLoopRunning) { try { this._startEyeMovement(); } catch (e) { } }
                     this._lastAnimationState = { action: 'idle', phase: 'loop', expressions: [] };
@@ -3649,73 +3721,56 @@ class AnimationHandler {
                 if (this.currentActionPhase === 'intro' || this.currentActionPhase === 'loop') {
                     console.log(`[AnimationHandler] Currently in ${this.currentActionPhase} phase, transitioning to outro...`);
                     try {
-                        // Stop the current phase (fade) and then ensure it's stopped to avoid overlay
-                        const fadeDuration = 150; // ms
-                        if (this.currentActionPhase === 'intro' && this.currentStructuredAction.intro) {
-                            this.currentStructuredAction.intro.fadeOut(fadeDuration / 1000);
-                        } else if (this.currentActionPhase === 'loop' && this.currentStructuredAction.loop) {
-                            // Fade out the loop gently
-                            this.currentStructuredAction.loop.fadeOut(fadeDuration / 1000);
-                        }
+                        const fadeDuration = 0.3; // seconds
 
-                        // After fade completes, explicitly stop (to avoid residual state) then start outro
-                        setTimeout(() => {
+                        // Start the outro FIRST so the skeleton is always driven.
+                        if (this.currentStructuredAction.outro) {
+                            // Proactively boost base idle so the skeleton
+                            // is fully covered when the outro finishes.
                             try {
-                                // stop previous phase to make way for outro
-                                try {
-                                    if (this.currentActionPhase === 'intro' && this.currentStructuredAction.intro) {
-                                        this.currentStructuredAction.intro.stop();
-                                    } else if (this.currentActionPhase === 'loop' && this.currentStructuredAction.loop) {
-                                        this.currentStructuredAction.loop.stop();
+                                if (this._baseIdleAction) {
+                                    this._baseIdleAction.enabled = true;
+                                    if (typeof this._baseIdleAction.setEffectiveWeight === 'function') {
+                                        this._baseIdleAction.setEffectiveWeight(1.0);
                                     }
-                                } catch (e) { /* ignore */ }
-
-                                // Start outro if available
-                                if (this.currentStructuredAction.outro) {
-                                    // Proactively boost base idle so the skeleton
-                                    // is fully covered when the outro finishes.
-                                    try {
-                                        if (this._baseIdleAction) {
-                                            this._baseIdleAction.enabled = true;
-                                            if (typeof this._baseIdleAction.setEffectiveWeight === 'function') {
-                                                this._baseIdleAction.setEffectiveWeight(1.0);
-                                            }
-                                            this._baseIdleAction.play();
-                                        }
-                                    } catch (_e) { /* ignore */ }
-                                    // Ensure outro starts at time 0 and plays once
-                                    try {
-                                        const outroAction = this.currentStructuredAction.outro;
-                                        outroAction.reset();
-                                        outroAction.setLoop(THREE.LoopOnce, 0);
-                                        outroAction.clampWhenFinished = true;
-                                        outroAction.enabled = true;
-                                        outroAction.paused = false;
-                                        outroAction.fadeIn(0.1).play();
-                                    } catch (e) {
-                                        // fallback using existing code if above fails
-                                        this.currentStructuredAction.outro.reset().fadeIn(0.1).play();
-                                    }
-
-                                    this.currentAction = this.currentStructuredAction.outro;
-                                    this.currentActionPhase = 'outro';
-                                    console.log(`[AnimationHandler] Started outro for ${this.currentActionName} (after fade stop of prior phase)`);
-
-                                    // Determine duration reliably, fallback to 1s
-                                    const outroClip = this.currentStructuredAction.outro.getClip();
-                                    const outroDuration = (outroClip && Number.isFinite(outroClip.duration) ? outroClip.duration : 1) * 1000;
-
-                                    // Schedule the next action after outro completes
-                                    setTimeout(() => {
-                                        console.log(`[AnimationHandler] Outro completed for ${this.currentActionName}, now starting ${actionName}`);
-                                        try { this.startAction(actionName, animationFile, playOnce, playSection); } catch (e) { console.warn('[AnimationHandler] Failed to start next action after outro:', e); }
-                                    }, Math.round(outroDuration) + 100);
-                                    return;
+                                    this._baseIdleAction.play();
                                 }
-                            } catch (errInner) {
-                                console.warn('[AnimationHandler] Error while handling fade->stop->outro transition:', errInner);
+                            } catch (_e) { /* ignore */ }
+
+                            const outroAction = this.currentStructuredAction.outro;
+                            try {
+                                outroAction.reset();
+                                outroAction.setLoop(THREE.LoopOnce, 0);
+                                outroAction.clampWhenFinished = true;
+                                outroAction.enabled = true;
+                                outroAction.paused = false;
+                                outroAction.fadeIn(fadeDuration).play();
+                            } catch (e) {
+                                outroAction.reset().fadeIn(fadeDuration).play();
                             }
-                        }, fadeDuration + 10);
+
+                            // NOW fade out the current phase (cross-fade overlap).
+                            if (this.currentActionPhase === 'intro' && this.currentStructuredAction.intro) {
+                                this._safeFadeStop(this.currentStructuredAction.intro, fadeDuration);
+                            } else if (this.currentActionPhase === 'loop' && this.currentStructuredAction.loop) {
+                                this._safeFadeStop(this.currentStructuredAction.loop, fadeDuration);
+                            }
+
+                            this.currentAction = outroAction;
+                            this.currentActionPhase = 'outro';
+                            console.log(`[AnimationHandler] Started outro for ${this.currentActionName} (cross-fade from ${this.currentActionPhase})`);
+
+                            // Determine duration reliably, fallback to 1s
+                            const outroClip = this.currentStructuredAction.outro.getClip();
+                            const outroDuration = (outroClip && Number.isFinite(outroClip.duration) ? outroClip.duration : 1) * 1000;
+
+                            // Schedule the next action after outro completes
+                            setTimeout(() => {
+                                console.log(`[AnimationHandler] Outro completed for ${this.currentActionName}, now starting ${actionName}`);
+                                try { this.startAction(actionName, animationFile, playOnce, playSection); } catch (e) { console.warn('[AnimationHandler] Failed to start next action after outro:', e); }
+                            }, Math.round(outroDuration) + 100);
+                            return;
+                        }
                     } catch (err) {
                         console.warn('[AnimationHandler] Error during transition to outro:', err);
                     }
@@ -3729,16 +3784,24 @@ class AnimationHandler {
             // If playSection is specified (intro, loop, or outro), play only that section
             if (playSection === 'intro') {
                 console.log(`[AnimationHandler] Playing only intro section for ${actionName}`);
-                if (this.currentAction && this.currentAction !== structured.intro) {
-                    this._safeFadeStop(this.currentAction, 0.25);
-                }
                 structured.intro.setLoop(THREE.LoopOnce, 0);
                 structured.intro.clampWhenFinished = true;
-                structured.intro.reset().fadeIn(0.15).play();
+                structured.intro.reset().fadeIn(0.3).play();
+                const prevAct = this.currentAction;
                 this.currentAction = structured.intro;
                 this.currentActionName = actionName;
                 this.currentActionPhase = 'intro';
                 this.currentStructuredAction = structured;
+                // Fade out previous after new is playing
+                if (prevAct && prevAct !== structured.intro) {
+                    if (_prevStructured && _prevStructured === structured) {
+                        // Intra-action transition: just fade the specific previous phase
+                        this._safeFadeStop(prevAct, 0.3);
+                    } else {
+                        // Inter-action transition: full cleanup
+                        this._crossFadeCleanup(_prevAction, _prevStructured, structured.intro, 0.3);
+                    }
+                }
                 return;
             } else if (playSection === 'loop') {
                 if (!structured.loop) {
@@ -3746,16 +3809,24 @@ class AnimationHandler {
                     return;
                 }
                 console.log(`[AnimationHandler] Playing only loop section for ${actionName}`);
-                if (this.currentAction && this.currentAction !== structured.loop) {
-                    this._safeFadeStop(this.currentAction, 0.25);
-                }
                 structured.loop.setLoop(THREE.LoopRepeat);
                 structured.loop.clampWhenFinished = false;
-                structured.loop.reset().fadeIn(0.15).play();
+                structured.loop.reset().fadeIn(0.3).play();
+                const prevAct = this.currentAction;
                 this.currentAction = structured.loop;
                 this.currentActionName = actionName;
                 this.currentActionPhase = 'loop';
                 this.currentStructuredAction = structured;
+                // Fade out previous after new is playing
+                if (prevAct && prevAct !== structured.loop) {
+                    if (_prevStructured && _prevStructured === structured) {
+                        // Intra-action transition: just fade the specific previous phase
+                        this._safeFadeStop(prevAct, 0.3);
+                    } else {
+                        // Inter-action transition: full cleanup
+                        this._crossFadeCleanup(_prevAction, _prevStructured, structured.loop, 0.3);
+                    }
+                }
                 return;
             } else if (playSection === 'outro') {
                 console.log(`[AnimationHandler] Playing only outro section for ${actionName}`);
@@ -3770,16 +3841,24 @@ class AnimationHandler {
                         this._baseIdleAction.play();
                     }
                 } catch (_e) { /* ignore */ }
-                if (this.currentAction && this.currentAction !== structured.outro) {
-                    this._safeFadeStop(this.currentAction, 0.25);
-                }
                 structured.outro.setLoop(THREE.LoopOnce, 0);
                 structured.outro.clampWhenFinished = true;
-                structured.outro.reset().fadeIn(0.15).play();
+                structured.outro.reset().fadeIn(0.3).play();
+                const prevAct = this.currentAction;
                 this.currentAction = structured.outro;
                 this.currentActionName = actionName;
                 this.currentActionPhase = 'outro';
                 this.currentStructuredAction = structured;
+                // Fade out previous after new is playing
+                if (prevAct && prevAct !== structured.outro) {
+                    if (_prevStructured && _prevStructured === structured) {
+                        // Intra-action transition: just fade the specific previous phase
+                        this._safeFadeStop(prevAct, 0.3);
+                    } else {
+                        // Inter-action transition: full cleanup
+                        this._crossFadeCleanup(_prevAction, _prevStructured, structured.outro, 0.3);
+                    }
+                }
                 return;
             }
 
@@ -3795,16 +3874,12 @@ class AnimationHandler {
                 }
             }
 
-            // Cross-fade: start the new structured intro/loop first, then fade out the previous action
-            // This prevents a momentary gap where no action is active (T-pose) while loading/preparing clips.
-            let prevStructuredActionToStop = null;
-            if (this.currentAction && this.currentAction !== structured.loop && this.currentAction !== structured.intro) {
-                prevStructuredActionToStop = this.currentAction;
-            }
+            // Cross-fade: start the new structured intro first, THEN fade out all
+            // previous actions.  This guarantees the skeleton is never un-driven.
 
-            // Start the intro immediately, then gently fade out any previous action to avoid T-pose gaps.
+            // Start the intro immediately.
             try {
-                structured.intro.reset().fadeIn(0.15).play();
+                structured.intro.reset().fadeIn(0.3).play();
                 this.currentAction = structured.intro;
                 this.currentActionName = actionName;
                 this.currentActionPhase = 'intro';
@@ -3815,13 +3890,10 @@ class AnimationHandler {
                 console.warn('[AnimationHandler] Failed to start structured intro immediately:', e);
             }
 
-            // If there was a previous action to stop, fade it out after new action started
-            if (prevStructuredActionToStop) {
-                try {
-                    // Shortly delay to ensure the intro has applied transforms
-                    setTimeout(() => { try { this._safeFadeStop(prevStructuredActionToStop, 0.25); } catch (e) { /* ignore */ } }, 20);
-                } catch (e) { /* ignore */ }
-            }
+            // Now that the new intro is playing, cross-fade out all previous actions.
+            try {
+                this._crossFadeCleanup(_prevAction, _prevStructured, structured.intro, 0.35);
+            } catch (e) { /* ignore */ }
 
             // Ensure we have a mixer finished handler to move intro -> loop and outro -> cleanup
             if (!this._mixerEventBound) {
@@ -3858,10 +3930,10 @@ class AnimationHandler {
                                                 this._baseIdleAction.play();
                                             }
                                         } catch (_e) { /* ignore */ }
-                                        candidate.outro.reset().fadeIn(0.15).play();
+                                        candidate.outro.reset().fadeIn(0.3).play();
                                         // Fade out intro so it doesn't keep driving bones at its
                                         // clamped last-frame pose while outro plays.
-                                        try { this._safeFadeStop(candidate.intro, 0.15); } catch (e) { }
+                                        try { this._safeFadeStop(candidate.intro, 0.3); } catch (e) { }
                                         this.currentAction = candidate.outro;
                                         this.currentActionName = logicalName;
                                         this.currentActionKey = key;
@@ -3873,9 +3945,9 @@ class AnimationHandler {
                                         if (loopClip) loopClip.loop = THREE.LoopRepeat;
                                         try { candidate.loop.setLoop(THREE.LoopRepeat); } catch (e) { }
                                         try { candidate.loop.clampWhenFinished = false; } catch (e) { }
-                                        try { candidate.loop.reset().fadeIn(0.15).play(); } catch (e) { }
+                                        try { candidate.loop.reset().fadeIn(0.3).play(); } catch (e) { }
                                         // Fade out intro so it doesn't keep clamping at its last frame.
-                                        try { this._safeFadeStop(candidate.intro, 0.15); } catch (e) { }
+                                        try { this._safeFadeStop(candidate.intro, 0.3); } catch (e) { }
                                         this.currentAction = candidate.loop;
                                         this.currentActionName = logicalName;
                                         this.currentActionKey = key;
@@ -3912,11 +3984,11 @@ class AnimationHandler {
                                     }
                                 } catch (e) { /* ignore */ }
 
-                                // Now clean up the finished structured clips (outro already at w=0).
+                                // Now clean up the finished structured clips with a gentle cross-fade.
                                 try {
-                                    this._safeFadeStop(candidate.intro, 0.05);
-                                    this._safeFadeStop(candidate.loop, 0.05);
-                                    this._safeFadeStop(candidate.outro, 0.05);
+                                    this._safeFadeStop(candidate.intro, 0.25);
+                                    this._safeFadeStop(candidate.loop, 0.25);
+                                    this._safeFadeStop(candidate.outro, 0.25);
                                 } catch (e) { /* ignore */ }
                                 if (this.currentAction === candidate.outro) this.currentAction = null;
                                 this.currentActionPhase = null;
@@ -3971,11 +4043,12 @@ class AnimationHandler {
                                     }
                                 } catch (e) { /* ignore non-browser env */ }
 
-                                // Clear any persistent eyes state and ensure avatar eyes are open
+                                // Smoothly fade out eyes and expressions after outro instead of snapping
                                 try {
-                                    console.debug('[AnimationHandler] Clearing eyesState and forcing eyes open after outro for', key);
+                                    console.debug('[AnimationHandler] Smoothly fading eyes/expressions after outro for', key);
                                     try { this._clearEyesState(); } catch (e) { }
-                                    try { this._forceOpenEyes(); } catch (e) { }
+                                    try { this._resetEyesSmoothly(250); } catch (e) { }
+                                    try { this._fadeOutAllExpressions(); } catch (e) { }
                                     try { if (this._blinkAutoEnabled && !this._blinkLoopRunning) this._startBlinkLoop(); } catch (e) { }
                                     try { if (this._eyeAutoEnabled && !this._eyeLoopRunning) this._startEyeMovement(); } catch (e) { }
                                     try { this._minActionVisibleUntil = 0; } catch (e) { }
@@ -4228,40 +4301,28 @@ class AnimationHandler {
             console.warn('[AnimationHandler] Failed to set action playOnce:', err);
         }
 
-        // If a previous action exists, start the new action first (fade in) then fade out the previous.
-        if (this.currentAction && this.currentAction !== action) {
-            const prevAction = this.currentAction;
-            try {
-                action.enabled = true;
-                action.reset().fadeIn(0.5).play();
-                this.currentAction = action;
-                this.currentActionName = actionName;
-                this._currentAnimationFile = animationFile || null;
-                console.log(`[AnimationHandler] New action started (cross-fade in)`);
-            } catch (e) {
-                console.warn('[AnimationHandler] Failed to start new action for cross-fade:', e);
-                // Fallback: start normally
-                try { action.reset().fadeIn(0.5).play(); this.currentAction = action; } catch (ee) { /* ignore */ }
-            }
-
-            // Fade out previous action using safe helper which resets and disables
-            // after the fade completes.  This ensures no residual pose remains and
-            // weight is cleanly removed (the old manual stop sometimes left traces).
-            try {
-                this._safeFadeStop(prevAction, 0.5);
-            } catch (e) { /* ignore */ }
-        } else {
-            // No previous action, start normally
-            try {
-                action.reset().fadeIn(0.5).play();
-                this.currentAction = action;
-                this.currentActionName = actionName;
-                this._currentAnimationFile = animationFile || null;
-                console.log(`[AnimationHandler] Action started successfully`);
-            } catch (e) {
-                console.warn('[AnimationHandler] Failed to start action:', e);
-            }
+        // Start the new action first (fade in), THEN cross-fade out previous actions.
+        // This guarantees the skeleton is never un-driven during transitions.
+        try {
+            action.enabled = true;
+            action.reset().fadeIn(0.5).play();
+            this.currentAction = action;
+            this.currentActionName = actionName;
+            this._currentAnimationFile = animationFile || null;
+            console.log(`[AnimationHandler] New simple action started (cross-fade in)`);
+        } catch (e) {
+            console.warn('[AnimationHandler] Failed to start new action:', e);
+            try { action.reset().fadeIn(0.5).play(); this.currentAction = action; } catch (ee) { /* ignore */ }
         }
+
+        // Now that the new action is playing, fade out all previous actions + orphans.
+        // Clear structured action reference first so _crossFadeCleanup doesn't
+        // accidentally skip the OLD structured parts via the skip set.
+        this.currentStructuredAction = null;
+        this.currentActionPhase = null;
+        try {
+            this._crossFadeCleanup(_prevAction, _prevStructured, action, 0.5);
+        } catch (e) { /* ignore */ }
 
         // Safety fallback: if playOnce requested, schedule a timer to
         // advance to next animation after the clip duration + buffer
@@ -4316,8 +4377,8 @@ class AnimationHandler {
                             this._baseIdleAction.play();
                         }
                     } catch (_e) { /* ignore */ }
-                    action.loop.fadeOut(0.2);
-                    action.outro.reset().fadeIn(0.15).play();
+                    action.loop.fadeOut(0.3);
+                    action.outro.reset().fadeIn(0.3).play();
                     this.currentAction = action.outro;
                     this.currentActionPhase = 'outro';
                     return;
@@ -4334,8 +4395,8 @@ class AnimationHandler {
                             this._baseIdleAction.play();
                         }
                     } catch (_e) { /* ignore */ }
-                    action.intro.fadeOut(0.1);
-                    action.outro.reset().fadeIn(0.15).play();
+                    action.intro.fadeOut(0.3);
+                    action.outro.reset().fadeIn(0.3).play();
                     this.currentAction = action.outro;
                     this.currentActionPhase = 'outro';
                     return;
