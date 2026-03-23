@@ -46,7 +46,11 @@ from core.message_chain import (
 )
 from core import db as core_db
 from core.action_state_manager import get_action_state_manager, AnimationPhase
-from core.animation_handler import AnimationState, KaradaStateServer
+from core.animation_handler import (
+    AnimationState,
+    KaradaStateServer,
+    set_karada_state_server,
+)
 from core.karada_ws_transport import WebSocketTransport
 from core import animation_uploads
 import mimetypes
@@ -422,6 +426,9 @@ class SynthWebUIInterface:
             # Register WebSocket transport so KaradaStateServer can broadcast
             ws_transport = WebSocketTransport(self.connections)
             self.animation_handler.add_transport(ws_transport)
+            # Publish as global singleton so plugins (e.g. FacialExpressionPlugin)
+            # can reach the same instance via get_karada_state_server()
+            set_karada_state_server(self.animation_handler)
             # Preload idle animations in background (non-blocking)
             try:
                 asyncio.create_task(self.animation_handler.ensure_idle_preloaded())
