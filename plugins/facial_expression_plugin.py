@@ -10,7 +10,10 @@ from core.facial_expression_parser import (
     FacialExpressionEvent,
     parse_facial_expressions,
 )
+from core.logging_utils import log_debug
 from core.persona_manager import get_persona_manager
+
+_LOG_PREFIX = "[facial_expression]"
 
 
 @dataclass
@@ -153,6 +156,10 @@ class FacialExpressionPlugin(PluginBase):
             frac = ev.position / total_chars if total_chars > 0 else 0.0
             delay = frac * total_duration
             timeline.append(_TimelineEvent(delay, ev.name, ev.intensity))
+        log_debug(
+            f"{_LOG_PREFIX} timeline start: {len(timeline)} events, "
+            f"duration={total_duration:.2f}s, cooldown={cooldown_s}s"
+        )
         start = asyncio.get_event_loop().time()
         for item in timeline:
             now = asyncio.get_event_loop().time()
@@ -161,17 +168,32 @@ class FacialExpressionPlugin(PluginBase):
                 await asyncio.sleep(sleep_for)
             # resolve blendshape targets from persona expression catalogue
             resolved_targets: Optional[Dict[str, float]] = None
+            is_clear = False
             if item.name and expr_section:
-                raw = expr_section.get(item.name, {}).get("targets", {})
-                if raw:
-                    resolved_targets = {
-                        k: float(v) * item.intensity for k, v in raw.items()
-                    }
-            await karada.push_face_expression(
-                item.name, item.intensity, targets=resolved_targets
-            )
+                entry = expr_section.get(item.name)
+                if entry is not None:
+                    raw = entry.get("targets", {})
+                    if raw:
+                        resolved_targets = {
+                            k: float(v) * item.intensity for k, v in raw.items()
+                        }
+                    else:
+                        # Expression with empty targets (e.g. "neutral") → clear
+                        is_clear = True
+            if is_clear:
+                log_debug(f"{_LOG_PREFIX} event '{item.name}' → clear (empty targets)")
+                await karada.push_face_expression(None, 0)
+            else:
+                log_debug(
+                    f"{_LOG_PREFIX} event '{item.name}' i={item.intensity} → "
+                    f"targets={resolved_targets}"
+                )
+                await karada.push_face_expression(
+                    item.name, item.intensity, targets=resolved_targets
+                )
         # after all events, schedule cooldown reset
         await asyncio.sleep(cooldown_s)
+        log_debug(f"{_LOG_PREFIX} timeline cooldown done, sending final clear")
         await karada.push_face_expression(None, 0)
 
     def get_metadata(self) -> Dict[str, Any]:

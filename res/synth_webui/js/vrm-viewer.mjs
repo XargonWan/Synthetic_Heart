@@ -2698,7 +2698,7 @@ class AnimationHandler {
                                 };
                                 const normalizeRange = (start, end, label) => {
                                     const s = clampInt(start, 0, totalFrames);
-                                    const e = clampInt(end, 0, totalFrames);
+                                    const e = clampInt(end, 0, totalFrames + 1);
                                     if (e <= s + 1) {
                                         throw new Error(`[AnimationHandler] Invalid ${label} range: ${start}-${end} (normalized ${s}-${e}) totalFrames=${totalFrames}`);
                                     }
@@ -2706,7 +2706,8 @@ class AnimationHandler {
                                 };
 
                                 const loopStart = descriptor.loop?.start_frame ?? 0;
-                                const loopEnd = descriptor.loop?.end_frame ?? totalFrames;
+                                // Descriptors use inclusive end_frame; subclip() expects exclusive. Add +1.
+                                const loopEnd = (descriptor.loop?.end_frame ?? (totalFrames - 1)) + 1;
                                 const loopR = normalizeRange(loopStart, loopEnd, 'idle.loop');
                                 const loopClip = THREE.AnimationUtils.subclip(__idle_clip, `${storageKey}_idle_loop`, loopR.start, loopR.end, fps);
                                 loopClip.loop = THREE.LoopRepeat;
@@ -2831,7 +2832,7 @@ class AnimationHandler {
                             };
                             const normalizeRange = (start, end, label) => {
                                 const s = clampInt(start, 0, totalFrames);
-                                const e = clampInt(end, 0, totalFrames);
+                                const e = clampInt(end, 0, totalFrames + 1);
                                 if (e <= s + 1) {
                                     throw new Error(`[AnimationHandler] Invalid ${label} range: ${start}-${end} (normalized ${s}-${e}) totalFrames=${totalFrames}`);
                                 }
@@ -2839,7 +2840,8 @@ class AnimationHandler {
                             };
 
                             const loopStart = descriptor.loop?.start_frame ?? 0;
-                            const loopEnd = descriptor.loop?.end_frame ?? totalFrames;
+                            // Descriptors use inclusive end_frame; subclip() expects exclusive. Add +1.
+                            const loopEnd = (descriptor.loop?.end_frame ?? (totalFrames - 1)) + 1;
                             const loopR = normalizeRange(loopStart, loopEnd, 'idle.loop');
                             const loopClip = THREE.AnimationUtils.subclip(clip, `${storageKey}_idle_loop`, loopR.start, loopR.end, fps);
                             loopClip.loop = THREE.LoopRepeat;
@@ -2898,7 +2900,8 @@ class AnimationHandler {
 
                 const normalizeRange = (start, end, label) => {
                     const s = clampInt(start, 0, totalFrames);
-                    const e = clampInt(end, 0, totalFrames);
+                    // Allow end up to totalFrames + 1 for exclusive endpoint (inclusive + 1)
+                    const e = clampInt(end, 0, totalFrames + 1);
                     // subclip expects end > start; require at least 2 frames to avoid instant-finish loops
                     if (e <= s + 1) {
                         throw new Error(`[AnimationHandler] Invalid ${label} range: ${start}-${end} (normalized ${s}-${e}) totalFrames=${totalFrames}`);
@@ -2913,24 +2916,25 @@ class AnimationHandler {
                 let introStart, introEnd, loopStart, loopEnd, outroStart, outroEnd;
 
                 if (hasStructuredDescriptor) {
-                    // Use descriptor-defined frames
-                    // If not specified: start_frame defaults to 0, end_frame defaults to totalFrames
+                    // Use descriptor-defined frames.
+                    // Descriptors use inclusive end_frame; subclip() expects exclusive endFrame.
+                    // Convert: (inclusive ?? fallback_inclusive) + 1  →  exclusive.
                     introStart = descriptor.intro?.start_frame ?? 0;
-                    introEnd = descriptor.intro?.end_frame ?? totalFrames;
+                    introEnd = (descriptor.intro?.end_frame ?? (totalFrames - 1)) + 1;
 
                     if (hasLoopSection) {
                         // Animation has intro/loop/outro structure
                         loopStart = descriptor.loop?.start_frame ?? introEnd;
-                        loopEnd = descriptor.loop?.end_frame ?? totalFrames;
+                        loopEnd = (descriptor.loop?.end_frame ?? (totalFrames - 1)) + 1;
                         outroStart = descriptor.outro?.start_frame ?? loopEnd;
-                        outroEnd = descriptor.outro?.end_frame ?? totalFrames;
+                        outroEnd = (descriptor.outro?.end_frame ?? (totalFrames - 1)) + 1;
                     } else {
                         // Animation has only intro/outro structure (play_once animation)
                         // No loop section - outro starts right after intro
                         loopStart = null;
                         loopEnd = null;
                         outroStart = descriptor.outro?.start_frame ?? introEnd;
-                        outroEnd = descriptor.outro?.end_frame ?? totalFrames;
+                        outroEnd = (descriptor.outro?.end_frame ?? (totalFrames - 1)) + 1;
                     }
                 } else {
                     // Default split for 'think' state (always has loop)
@@ -2943,6 +2947,7 @@ class AnimationHandler {
                 }
 
                 // Validate & clamp ranges; if invalid, fall back to full clip.
+                // End values are now exclusive (inclusive + 1); normalizeRange allows up to totalFrames + 1.
                 const introR = normalizeRange(introStart, introEnd, 'intro');
                 const outroR = normalizeRange(outroStart, outroEnd, 'outro');
                 introStart = introR.start;
@@ -3367,28 +3372,29 @@ class AnimationHandler {
 
                             const normalizeRange = (start, end, label) => {
                                 const s = clampInt(start, 0, totalFrames);
-                                const e = clampInt(end, 0, totalFrames);
+                                const e = clampInt(end, 0, totalFrames + 1);
                                 if (e <= s + 1) {
                                     throw new Error(`[AnimationHandler] Invalid ${label} range: ${start}-${end} (normalized ${s}-${e}) totalFrames=${totalFrames}`);
                                 }
                                 return { start: s, end: e };
                             };
 
+                            // Descriptors use inclusive end_frame; subclip() expects exclusive. Add +1.
                             let introStart = descriptor.intro?.start_frame ?? 0;
-                            let introEnd = descriptor.intro?.end_frame ?? totalFrames;
+                            let introEnd = (descriptor.intro?.end_frame ?? (totalFrames - 1)) + 1;
                             let loopStart, loopEnd, outroStart, outroEnd;
 
                             if (hasLoopSection) {
                                 loopStart = descriptor.loop?.start_frame ?? introEnd;
-                                loopEnd = descriptor.loop?.end_frame ?? totalFrames;
+                                loopEnd = (descriptor.loop?.end_frame ?? (totalFrames - 1)) + 1;
                                 outroStart = descriptor.outro?.start_frame ?? loopEnd;
-                                outroEnd = descriptor.outro?.end_frame ?? totalFrames;
+                                outroEnd = (descriptor.outro?.end_frame ?? (totalFrames - 1)) + 1;
                             } else {
                                 // No loop section - intro goes directly to outro
                                 loopStart = null;
                                 loopEnd = null;
                                 outroStart = descriptor.outro?.start_frame ?? introEnd;
-                                outroEnd = descriptor.outro?.end_frame ?? totalFrames;
+                                outroEnd = (descriptor.outro?.end_frame ?? (totalFrames - 1)) + 1;
                             }
 
                             // Validate & clamp ranges; if invalid, fall back to simple action.
@@ -3474,7 +3480,7 @@ class AnimationHandler {
                                 };
                                 const normalizeRange = (start, end, label) => {
                                     const s = clampInt(start, 0, totalFrames);
-                                    const e = clampInt(end, 0, totalFrames);
+                                    const e = clampInt(end, 0, totalFrames + 1);
                                     if (e <= s + 1) {
                                         throw new Error(`[AnimationHandler] Invalid ${label} range: ${start}-${end} (normalized ${s}-${e}) totalFrames=${totalFrames}`);
                                     }
@@ -3482,7 +3488,8 @@ class AnimationHandler {
                                 };
 
                                 const loopStart = descriptor.loop?.start_frame ?? 0;
-                                const loopEnd = descriptor.loop?.end_frame ?? totalFrames;
+                                // Descriptors use inclusive end_frame; subclip() expects exclusive. Add +1.
+                                const loopEnd = (descriptor.loop?.end_frame ?? (totalFrames - 1)) + 1;
                                 const loopR = normalizeRange(loopStart, loopEnd, 'loop');
                                 const loopClip = THREE.AnimationUtils.subclip(clip, `${specificKey}_idle_loop`, loopR.start, loopR.end, fps);
                                 loopClip.loop = THREE.LoopRepeat;
@@ -3730,11 +3737,22 @@ class AnimationHandler {
                 return;
             } else if (playSection === 'outro') {
                 console.log(`[AnimationHandler] Playing only outro section for ${actionName}`);
+                // Boost base idle BEFORE playing outro so the skeleton is always
+                // covered when the outro finishes (prevents T-pose gap).
+                try {
+                    if (this._baseIdleAction) {
+                        this._baseIdleAction.enabled = true;
+                        if (typeof this._baseIdleAction.setEffectiveWeight === 'function') {
+                            this._baseIdleAction.setEffectiveWeight(1.0);
+                        }
+                        this._baseIdleAction.play();
+                    }
+                } catch (_e) { /* ignore */ }
                 if (this.currentAction && this.currentAction !== structured.outro) {
                     this._safeFadeStop(this.currentAction, 0.25);
                 }
                 structured.outro.setLoop(THREE.LoopOnce, 0);
-                structured.outro.clampWhenFinished = false;
+                structured.outro.clampWhenFinished = true;
                 structured.outro.reset().fadeIn(0.15).play();
                 this.currentAction = structured.outro;
                 this.currentActionName = actionName;
@@ -5162,13 +5180,32 @@ function render() {
                 for (let i = 0; i < data.length; i++) sum += data[i];
                 const volume = sum / (data.length * 255.0);
                 const mouthOpen = Math.max(0, Math.min(1, (volume - 0.02) * 3.0));
-                const shapes = { aa: mouthOpen, ih: 0, ou: 0, ee: 0, oh: 0 };
-                Object.entries(shapes).forEach(([k, v]) => {
-                    currentVRM.expressionManager.setValue(k, v);
-                });
+                // Route lipsync through the expression source system so it
+                // participates in priority-based blending instead of directly
+                // overwriting expressionManager values (which would clobber
+                // facial_expression mouth morphs).
+                if (animationHandler && typeof animationHandler.removeExpressionSourcesByTag === 'function') {
+                    animationHandler.removeExpressionSourcesByTag('lipsync');
+                    if (mouthOpen > 0.01) {
+                        animationHandler.addExpressionSource({
+                            targets: { aa: mouthOpen, ih: 0, ou: 0, ee: 0, oh: 0 },
+                            priority: 10,
+                            source: 'lipsync'
+                        });
+                    }
+                } else {
+                    // Fallback: direct setValue if handler not ready
+                    const shapes = { aa: mouthOpen, ih: 0, ou: 0, ee: 0, oh: 0 };
+                    Object.entries(shapes).forEach(([k, v]) => {
+                        currentVRM.expressionManager.setValue(k, v);
+                    });
+                }
             } catch (e) {
                 // suppress to avoid render-loop spam
             }
+        } else if (animationHandler && typeof animationHandler.removeExpressionSourcesByTag === 'function') {
+            // Clean up lipsync source when lipsync stops
+            try { animationHandler.removeExpressionSourcesByTag('lipsync'); } catch (e) { /* ignore */ }
         }
         // Update VRM lookAt target.
         // Default: look forward (not directly at the camera).

@@ -8,11 +8,25 @@
     }
     ,
     "blendshape_map": {
-        "eyes_closed": "eyes_closed",
-        "mouth.O": "mouth_O",
+        "eyes_closed": "blink",
+        "mouth_smile": "happy",
+        "eyes_smile": "happy",
+        "mouth_frown": "sad",
+        "eyes_sad": "sad",
+        "brow_down": "angry",
+        "eyes_wide": "surprised",
+        "mouth_open": "aa",
+        "mouth.O": "oh",
+        "mouth_O": "oh",
+        "cheek_blush": "relaxed",
+        "eyes_squint": "relaxed",
+        "tongue_out": "ou",
         "visemes": {
-            "A": { "mouth_A": 1.0 },
-            "O": { "mouth_O": 1.0 }
+            "A": { "aa": 1.0 },
+            "I": { "ih": 1.0 },
+            "U": { "ou": 1.0 },
+            "E": { "ee": 1.0 },
+            "O": { "oh": 1.0 }
         }
     },
     "emotions": {
@@ -40,7 +54,7 @@
     "facial_expression_cooldown_s": 3,
     "facial_expression_chars_per_sec": 12,
     "emotion_speed": {
-        "default": 1.0,
+        "default": 6.0,
         "per_emotion": { "happy": 1.2, "sad": 0.8 }
     },
     "animation_overrides": {

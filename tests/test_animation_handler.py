@@ -12,6 +12,7 @@ from core.animation_handler import (
     get_karada_state_server,
     set_karada_state_server,
 )
+from core.karada_ws_transport import WebSocketTransport
 
 
 @pytest.fixture
@@ -26,6 +27,8 @@ def mock_webui():
 def animation_handler(mock_webui):
     """Create a KaradaStateServer instance with mock WebUI."""
     handler = KaradaStateServer(mock_webui)
+    ws_transport = WebSocketTransport(mock_webui.connections)
+    handler.add_transport(ws_transport)
     return handler
 
 
@@ -119,13 +122,14 @@ async def test_stop_animation_multiple_contexts(animation_handler, mock_webui):
     context1 = "context1"
     context2 = "context2"
 
-    # Start two contexts
+    # Start two contexts — WRITE first (priority 3), then THINK (priority 10).
+    # THINK has higher priority so it will not be preempted by WRITE.
     await animation_handler.play_animation(
-        AnimationState.THINK, session_id=session_id, context_id=context1
+        AnimationState.WRITE, session_id=session_id, context_id=context1
     )
 
     await animation_handler.play_animation(
-        AnimationState.WRITE, session_id=session_id, context_id=context2
+        AnimationState.THINK, session_id=session_id, context_id=context2
     )
 
     # Stop first context
@@ -242,6 +246,8 @@ async def test_vrm_animation_broadcast_on_play():
 
     fake = FakeWebUI()
     handler.set_webui(fake)
+    ws_transport = WebSocketTransport(fake.connections)
+    handler.add_transport(ws_transport)
 
     # Trigger an animation change
     await handler.play_animation(
@@ -281,8 +287,8 @@ async def test_idle_animation_rotation_task_created(animation_handler, mock_webu
         AnimationState.IDLE, session_id=session_id, loop=True
     )
 
-    # Check that a rotation task was created
-    key = f"{session_id}:idle"
+    # Check that a rotation task was created (global key, not per-session)
+    key = "idle"
     assert key in animation_handler._rotation_tasks
     assert animation_handler._rotation_tasks[key] is not None
 

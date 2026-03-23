@@ -47,6 +47,7 @@ from core.message_chain import (
 from core import db as core_db
 from core.action_state_manager import get_action_state_manager, AnimationPhase
 from core.animation_handler import AnimationState, KaradaStateServer
+from core.karada_ws_transport import WebSocketTransport
 from core import animation_uploads
 import mimetypes
 
@@ -418,11 +419,25 @@ class SynthWebUIInterface:
             self.animation_handler = KaradaStateServer(self)
             # Register webui callbacks with the KaradaStateServer
             self.animation_handler.set_webui(self)
+            # Register WebSocket transport so KaradaStateServer can broadcast
+            ws_transport = WebSocketTransport(self.connections)
+            self.animation_handler.add_transport(ws_transport)
             # Preload idle animations in background (non-blocking)
             try:
                 asyncio.create_task(self.animation_handler.ensure_idle_preloaded())
             except Exception:
                 pass
+            # Mount the public Karada REST + WS API router
+            try:
+                from core.karada_api import create_karada_router
+
+                karada_router = create_karada_router(self.animation_handler)
+                self.app.include_router(karada_router)
+                log_info(f"{LOG_PREFIX} Karada API router mounted at /api/karada/")
+            except Exception as karada_exc:
+                log_warning(
+                    f"{LOG_PREFIX} Karada API router failed to mount (non-fatal): {karada_exc}"
+                )
         except Exception as e:
             # If KaradaStateServer fails to initialize, create a lightweight stub
             log_warning(f"{LOG_PREFIX} KaradaStateServer init failed: {e}")
@@ -1469,13 +1484,21 @@ class SynthWebUIInterface:
                 from core.core_initializer import PLUGIN_REGISTRY
 
                 kss = get_karada_state_server()
-                if kss.has_connected_clients():
+                has_clients = kss.has_connected_clients() if kss else False
+                log_debug(
+                    f"{LOG_PREFIX} expression dispatch: kss={kss is not None}, "
+                    f"has_clients={has_clients}, em_events={len(em_events)}"
+                )
+                if has_clients:
                     expr_plugin: Optional[FacialExpressionPlugin] = None
                     if isinstance(PLUGIN_REGISTRY, dict):
                         for p in PLUGIN_REGISTRY.values():
                             if isinstance(p, FacialExpressionPlugin):
                                 expr_plugin = p
                                 break
+                    log_debug(
+                        f"{LOG_PREFIX} expression dispatch: expr_plugin={'found' if expr_plugin else 'NOT FOUND'}"
+                    )
                     if expr_plugin:
                         from core.persona_manager import get_persona_manager
 
@@ -1503,6 +1526,11 @@ class SynthWebUIInterface:
                             if persona_json
                             else {}
                         )
+                        log_debug(
+                            f"{LOG_PREFIX} expression dispatch: scheduling timeline, "
+                            f"events={len(em_events)}, cooldown={cooldown}, "
+                            f"cps={chars_per_sec}, expr_keys={list(expr_section.keys())}"
+                        )
                         asyncio.create_task(
                             expr_plugin._play_expression_timeline(
                                 em_events,
@@ -1513,6 +1541,10 @@ class SynthWebUIInterface:
                                 expr_section=expr_section,
                             )
                         )
+                else:
+                    log_debug(
+                        f"{LOG_PREFIX} expression dispatch: SKIPPED (no connected clients)"
+                    )
             except Exception as exc:
                 log_debug(
                     f"{LOG_PREFIX} debug_inject_message expression timeline error: {exc}"
@@ -3552,13 +3584,33 @@ class SynthWebUIInterface:
         if audio_duration_s is not None:
             payload["audio_duration_s"] = audio_duration_s
 
-        try:
-            await websocket.send_json(payload)
-            log_info(f"{LOG_PREFIX} TTS audio dispatched to session {sid}: {url}")
-            return True
-        except Exception as exc:
-            log_warning(f"{LOG_PREFIX} send_tts_audio failed for session {sid}: {exc}")
-            return False
+        # "Single body" principle: broadcast TTS audio to ALL connected
+        # clients, not just the requesting session.  Every viewer should
+        # hear the same voice coming from the shared avatar.
+        delivered = False
+        for target_sid, target_ws in list(self.connections.items()):
+            try:
+                await target_ws.send_json(payload)
+                delivered = True
+            except Exception as exc:
+                log_warning(
+                    f"{LOG_PREFIX} send_tts_audio failed for session {target_sid}: {exc}"
+                )
+        if delivered:
+            log_info(
+                f"{LOG_PREFIX} TTS audio broadcast to {len(self.connections)} session(s): {url}"
+            )
+
+        # Track current audio in KaradaStateServer for late-joining clients
+        if hasattr(self, "animation_handler") and self.animation_handler:
+            try:
+                self.animation_handler.set_current_audio(
+                    url, audio_duration_s, lipsync_data
+                )
+            except Exception:
+                pass
+
+        return delivered
 
     async def _webui_clear_pending_thinking(self, session_id: str) -> None:
         pending = self._pending_thinking_actions.get(session_id)
@@ -8960,6 +9012,22 @@ class SynthWebUIInterface:
                 f"{LOG_PREFIX} Failed to set active VRM after activating skin {skin_name}: {exc}"
             )
             raise HTTPException(status_code=500, detail="Failed to activate skin")
+
+        # Trigger skin_change animation so the avatar plays a transition animation
+        # after the frontend reloads the VRM model.
+        try:
+            handler = getattr(self, "animation_handler", None)
+            if handler and hasattr(handler, "play_animation"):
+                asyncio.ensure_future(
+                    handler.play_animation(
+                        AnimationState.SKIN_CHANGE,
+                        session_id=None,
+                        loop=False,
+                        source="skin_activation",
+                    )
+                )
+        except Exception as exc:
+            log_warning(f"{LOG_PREFIX} Failed to trigger skin_change animation: {exc}")
 
         return JSONResponse({"status": "ok", "name": target.name}, status_code=201)
 

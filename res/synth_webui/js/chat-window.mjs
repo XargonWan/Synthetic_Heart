@@ -1125,6 +1125,11 @@ export function initChatUI() {
                             } catch (e) { /* ignore */ }
                         } else if (data && data.type === 'vrm_expression_set') {
                             try {
+                                // Remove previous facial_expression source before adding
+                                // the new one (replace semantics, not accumulate).
+                                if (window.animationHandler && typeof window.animationHandler.removeExpressionSourcesByTag === 'function') {
+                                    window.animationHandler.removeExpressionSourcesByTag('facial_expression');
+                                }
                                 if (window.animationHandler && typeof window.animationHandler.addExpressionSource === 'function') {
                                     // prefer pre-resolved targets dict sent by Python (GAP 1A);
                                     // fall back to {name: intensity} for backward compat.
