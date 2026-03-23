@@ -959,8 +959,8 @@ export function initChatUI() {
 
                 const source = ctx.createMediaElementSource(audio);
                 const analyser = ctx.createAnalyser();
-                analyser.fftSize = 512;
-                analyser.smoothingTimeConstant = 0.4;
+                analyser.fftSize = 256;
+                analyser.smoothingTimeConstant = 0.2;
                 source.connect(analyser);
                 analyser.connect(ctx.destination);
 

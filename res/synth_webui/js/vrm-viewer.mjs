@@ -1528,12 +1528,34 @@ class AnimationHandler {
 
             // Apply smoothing/interpolation towards desired values
             const speed = (effectivePersona && effectivePersona.emotion_speed && effectivePersona.emotion_speed.default) ? effectivePersona.emotion_speed.default : 6.0; // units/sec
+
+            // Collect blendshape keys driven by _directApply sources (e.g. lipsync).
+            // These should snap to target instantly — the source handles its own
+            // per-frame smoothing and the expression interpolation is too slow.
+            const directApplyKeys = new Set();
+            try {
+                if (Array.isArray(this._expressionSources)) {
+                    this._expressionSources.forEach(s => {
+                        if (s && s._directApply && s.targets) {
+                            Object.keys(s.targets).forEach(tk => directApplyKeys.add(tk));
+                        }
+                    });
+                }
+            } catch (_e) { /* ignore */ }
+
             Object.keys(desired).forEach(k => {
                 const cur = this._expressionState[k] || 0;
                 const tgt = desired[k];
-                // linear interpolation
-                const step = Math.min(1, speed * dt);
-                let next = cur + (tgt - cur) * step;
+
+                let next;
+                if (directApplyKeys.has(k)) {
+                    // Lipsync (or other direct sources): snap to target, no slow lerp
+                    next = tgt;
+                } else {
+                    // Normal interpolation for expressions/emotions
+                    const step = Math.min(1, speed * dt);
+                    next = cur + (tgt - cur) * step;
+                }
 
                 // Limit eyes_closed to avoid eyelid/cheek clipping when fully closed.
                 // 0.85 is intentionally conservative; adjust in persona if needed.
@@ -5176,36 +5198,63 @@ function render() {
                 if (!window.__synthLipSyncData) window.__synthLipSyncData = new Uint8Array(analyser.frequencyBinCount);
                 analyser.getByteFrequencyData(window.__synthLipSyncData);
                 const data = window.__synthLipSyncData;
-                let sum = 0;
-                for (let i = 0; i < data.length; i++) sum += data[i];
-                const volume = sum / (data.length * 255.0);
-                const mouthOpen = Math.max(0, Math.min(1, (volume - 0.02) * 3.0));
-                // Route lipsync through the expression source system so it
-                // participates in priority-based blending instead of directly
-                // overwriting expressionManager values (which would clobber
-                // facial_expression mouth morphs).
+
+                // Focus on voice-frequency bins (~85-4000 Hz) instead of
+                // averaging the entire spectrum.  With fftSize=256 and a
+                // typical 44100/48000 Hz sample rate each bin spans ~172-188 Hz.
+                // Bins 1-23 cover roughly 170-4300 Hz — the vocal range.
+                const binCount = data.length; // frequencyBinCount = fftSize/2
+                const lo = 1;
+                const hi = Math.min(Math.floor(binCount * 0.18), binCount - 1); // ~18% of bins ≈ voice band
+                let voiceSum = 0;
+                for (let i = lo; i <= hi; i++) voiceSum += data[i];
+                const voiceVolume = voiceSum / ((hi - lo + 1) * 255.0);
+
+                // Aggressive gain curve: low threshold + strong multiplier
+                // so even soft speech opens the mouth visibly.
+                const rawMouth = Math.max(0, (voiceVolume - 0.01) * 5.0);
+                const mouthOpen = Math.max(0, Math.min(1, rawMouth));
+
+                // Apply lipsync visemes directly to the VRM model, bypassing
+                // the expression source interpolation which is too slow for
+                // frame-by-frame mouth movement.  A lightweight per-frame
+                // smoothing (lerp α ≈ 0.35) keeps the motion natural.
+                if (!window.__synthLipSyncPrev) window.__synthLipSyncPrev = 0;
+                const alpha = 0.35;  // 0 = no change, 1 = instant snap
+                const smoothed = window.__synthLipSyncPrev + (mouthOpen - window.__synthLipSyncPrev) * alpha;
+                window.__synthLipSyncPrev = smoothed;
+
+                // Register as high-priority expression source so the priority
+                // system prevents facial_expression (priority 25) from
+                // overriding mouth visemes during speech.
                 if (animationHandler && typeof animationHandler.removeExpressionSourcesByTag === 'function') {
                     animationHandler.removeExpressionSourcesByTag('lipsync');
-                    if (mouthOpen > 0.01) {
-                        animationHandler.addExpressionSource({
-                            targets: { aa: mouthOpen, ih: 0, ou: 0, ee: 0, oh: 0 },
-                            priority: 10,
-                            source: 'lipsync'
-                        });
-                    }
-                } else {
-                    // Fallback: direct setValue if handler not ready
-                    const shapes = { aa: mouthOpen, ih: 0, ou: 0, ee: 0, oh: 0 };
-                    Object.entries(shapes).forEach(([k, v]) => {
-                        currentVRM.expressionManager.setValue(k, v);
+                    animationHandler.addExpressionSource({
+                        targets: { aa: smoothed, ih: 0, ou: 0, ee: 0, oh: 0 },
+                        priority: 30,
+                        source: 'lipsync',
+                        _directApply: true  // flag: bypass applyExpressionsForFrame interpolation
                     });
                 }
+
+                // Also apply directly for instant responsiveness (the
+                // expression source above is still needed for priority gating).
+                try {
+                    const em = currentVRM.expressionManager;
+                    em.setValue('aa', smoothed);
+                    // Reset other visemes to 0 so they don't linger
+                    em.setValue('ih', 0);
+                    em.setValue('ou', 0);
+                    em.setValue('ee', 0);
+                    em.setValue('oh', 0);
+                } catch (_e) { /* ignore */ }
             } catch (e) {
                 // suppress to avoid render-loop spam
             }
         } else if (animationHandler && typeof animationHandler.removeExpressionSourcesByTag === 'function') {
             // Clean up lipsync source when lipsync stops
             try { animationHandler.removeExpressionSourcesByTag('lipsync'); } catch (e) { /* ignore */ }
+            window.__synthLipSyncPrev = 0;
         }
         // Update VRM lookAt target.
         // Default: look forward (not directly at the camera).
