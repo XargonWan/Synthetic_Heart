@@ -5,6 +5,12 @@ set -e
 export LOG_DIR=${LOG_DIR:-./logs}
 mkdir -p "$LOG_DIR"
 
+if ! command -v uv >/dev/null 2>&1; then
+  echo "uv command not found. Installing uv with pip..."
+  python -m pip install --upgrade pip
+  python -m pip install uv
+fi
+
 echo "Syncing dependencies with uv..."
 # Installs project dependencies from uv.lock/pyproject.toml
 uv sync --frozen
