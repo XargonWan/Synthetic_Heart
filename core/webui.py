@@ -5862,7 +5862,7 @@ class SynthWebUIInterface:
             async with get_conn_ctx() as conn:
                 async with conn.cursor() as cur:
                     query = f"""
-                        SELECT interface_path, sender_name, message_text, timestamp
+                        SELECT interface_path, sender_name, message_text, timestamp, metadata
                         FROM chat_history_cache
                         WHERE {where_clause}
                         ORDER BY timestamp {order}
@@ -5878,13 +5878,17 @@ class SynthWebUIInterface:
 
                     for row in rows:
                         timestamp_str = self._dt_to_utc_iso(row[3])
+                        import json as _json
 
+                        raw_meta = row[4]
+                        parsed_meta = _json.loads(raw_meta) if raw_meta else None
                         messages.append(
                             {
                                 "interface_path": row[0],
                                 "sender_name": row[1],
                                 "message_text": row[2],
                                 "timestamp": timestamp_str,
+                                "metadata": parsed_meta,
                             }
                         )
 

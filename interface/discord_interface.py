@@ -2078,6 +2078,25 @@ class DiscordInterface:
             # NOTE: chat activity tracking is now centralized in chat_context_manager.add_message_to_context
             from core.chat_context_manager import add_message_to_context
 
+            # Build reply metadata if this message is a reply to another message (best-effort)
+            _reply_meta: dict | None = None
+            _ref = getattr(message, "reference", None)
+            if _ref is not None:
+                _resolved = getattr(_ref, "resolved", None)
+                if _resolved is not None:
+                    _ref_author = getattr(_resolved, "author", None)
+                    _reply_meta = {
+                        "reply_to": {
+                            "sender_name": (
+                                getattr(_ref_author, "display_name", None)
+                                or getattr(_ref_author, "name", None)
+                                or "Unknown"
+                            ),
+                            "text": getattr(_resolved, "content", "") or "",
+                            "message_id": getattr(_ref, "message_id", None),
+                        }
+                    }
+
             try:
                 await add_message_to_context(
                     interface_path=interface_path,
@@ -2088,6 +2107,7 @@ class DiscordInterface:
                     timestamp=message.created_at.isoformat()
                     if hasattr(message.created_at, "isoformat")
                     else None,
+                    metadata=_reply_meta,
                 )
             except Exception as e:
                 log_warning(

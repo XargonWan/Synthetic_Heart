@@ -977,6 +977,32 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log_debug(f"[telegram_bot] Tracking message for interface_path {interface_path}")
     from core.chat_context_manager import add_message_to_context
 
+    # Build reply metadata if this message is an explicit reply to another message.
+    # Skip implicit topic-header attachments: in Telegram forum-topic supergroups every
+    # message has reply_to_message pointing at the topic opener, which is NOT a real reply.
+    _reply_meta: dict | None = None
+    _reply_msg = getattr(message, "reply_to_message", None)
+    if _reply_msg is not None:
+        _is_topic_header = getattr(message, "is_topic_message", False) and getattr(
+            _reply_msg, "message_id", None
+        ) == getattr(message, "message_thread_id", None)
+        if not _is_topic_header:
+            _reply_from = getattr(_reply_msg, "from_user", None)
+            _reply_sender = (
+                getattr(_reply_from, "full_name", None)
+                or getattr(_reply_from, "username", None)
+                or "Unknown"
+            )
+            _reply_meta = {
+                "reply_to": {
+                    "sender_name": _reply_sender,
+                    "text": getattr(_reply_msg, "text", None)
+                    or getattr(_reply_msg, "caption", None)
+                    or "",
+                    "message_id": getattr(_reply_msg, "message_id", None),
+                }
+            }
+
     try:
         await add_message_to_context(
             interface_path=interface_path,
@@ -985,6 +1011,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             sender_id=str(user_id),
             message_id=message.message_id,
             timestamp=message.date.isoformat() if hasattr(message, "date") else None,
+            metadata=_reply_meta,
         )
     except Exception as e:
         log_warning(f"[telegram_bot] Failed to add message to context: {e}")

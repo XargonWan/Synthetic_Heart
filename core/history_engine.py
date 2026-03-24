@@ -210,8 +210,21 @@ def _entry_to_text(entry: HistoryEntry) -> str:
         body = " | ".join(parts) or (text or "")
         return f"[diary {_format_ts(ts)}] {body}".strip()
 
+    # Reply context annotation (40-char truncation for LLM readability)
+    reply_suffix = ""
+    meta = entry.get("metadata")
+    if isinstance(meta, dict):
+        reply_to = meta.get("reply_to")
+        if isinstance(reply_to, dict):
+            reply_sender = reply_to.get("sender_name") or "Unknown"
+            reply_text = str(reply_to.get("text") or "")
+            if len(reply_text) > 40:
+                reply_text = reply_text[:40] + "\u2026"
+            reply_text_safe = reply_text.replace('"', "'")
+            reply_suffix = f' [replied to {reply_sender}: "{reply_text_safe}"]'
+
     safe_text = str(text).replace('"', "'")
-    return f'[{_format_ts(ts)}] {sender}: "{safe_text}"'.strip()
+    return f'[{_format_ts(ts)}] {sender}{reply_suffix}: "{safe_text}"'.strip()
 
 
 def _source_label(

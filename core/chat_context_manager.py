@@ -158,6 +158,7 @@ async def add_message_to_context(
     sender_id: str,
     message_id: Optional[int] = None,
     timestamp: Optional[str] = None,
+    metadata: dict[str, Any] | None = None,
     **extra_fields,
 ) -> None:
     """Add a message to chat context with automatic persistence.
@@ -174,6 +175,7 @@ async def add_message_to_context(
         sender_id: Sender unique ID
         message_id: Optional message ID from interface
         timestamp: Optional ISO format timestamp
+        metadata: Optional dict of extra metadata (e.g. reply context).
         **extra_fields: Additional fields to store in context
     """
     interface_path = _resolve_context_path(interface_path)
@@ -181,7 +183,7 @@ async def add_message_to_context(
     # Add to in-memory context
     context = get_or_create_chat_context(interface_path)
 
-    message_obj = {
+    message_obj: dict[str, Any] = {
         "message_id": message_id,
         "user_id": sender_id,
         "username": sender_name,
@@ -189,6 +191,8 @@ async def add_message_to_context(
         "timestamp": timestamp,
         "interface_path": interface_path,
     }
+    if metadata:
+        message_obj["metadata"] = metadata
     message_obj.update(extra_fields)
 
     context.append(message_obj)
@@ -225,6 +229,7 @@ async def add_message_to_context(
             sender_name=sender_name,
             sender_id=sender_id,
             timestamp=timestamp,
+            metadata=metadata,
         )
     except Exception as e:
         log_warning(f"[context_manager] Failed to persist message to cache: {e}")

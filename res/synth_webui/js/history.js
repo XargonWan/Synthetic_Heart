@@ -405,11 +405,20 @@ function formatJsonBlock(value) { return SynthUtils.formatJsonBlock(value); }
 function renderChatMessage(msg) {
     const timestamp = formatTimestamp(msg.timestamp);
     let safeMessage = escapeHtml(msg.message_text || ''); safeMessage = safeMessage.replace(/^[\s\u00A0]+/, '').replace(/[\n\r]+$/, ''); const isLong = safeMessage.split('\n').length > 6 || safeMessage.length > 600; const longClass = isLong ? ' chat-text--limited' : '';
+    let replyQuoteHtml = '';
+    const replyTo = msg.metadata && msg.metadata.reply_to;
+    if (replyTo) {
+        const replySender = escapeHtml(replyTo.sender_name || 'Unknown');
+        const replyText = escapeHtml(replyTo.text || '');
+        replyQuoteHtml = `<div class="chat-reply-quote"><span class="chat-reply-sender">${replySender}</span><span class="chat-reply-text">${replyText}</span></div>`;
+    }
     return `
         <div class="chat-message">
             <div class="chat-sender">${escapeHtml(msg.sender_name || 'Unknown')}</div>
-            <div class="chat-text${longClass}" title="${safeMessage}">
+            <div class="chat-body">
+                ${replyQuoteHtml}<div class="chat-text${longClass}" title="${safeMessage}">
                 ${safeMessage}
+            </div>
             </div>
             <div class="chat-time">${timestamp}</div>
         </div>
