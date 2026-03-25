@@ -337,6 +337,7 @@ async def load_global_chat_history(limit: int = 10) -> deque:
                 rows.reverse()
 
                 messages = deque()
+                unique_paths = set()
                 for row in rows:
                     try:
                         sender_name, sender_id, message_text, timestamp, ipath = row
@@ -350,13 +351,14 @@ async def load_global_chat_history(limit: int = 10) -> deque:
                             "interface_path": ipath,
                         }
                         messages.append(msg)
+                        unique_paths.add(ipath)
                     except Exception as e:
                         log_debug(
                             f"[chat_history_cache] Error parsing global message row: {e}"
                         )
 
                 log_debug(
-                    f"[chat_history_cache] Loaded {len(messages)} global messages"
+                    f"[chat_history_cache] Loaded {len(messages)} global messages from {len(unique_paths)} unique interface_path(s): {list(unique_paths)}"
                 )
                 return messages
     except Exception as e:
