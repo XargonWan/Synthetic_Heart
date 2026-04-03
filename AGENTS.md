@@ -213,10 +213,10 @@ If any step fails, fix it before proceeding.
 
 ### Testing via Ollama API
 
-The Ollama-compatible API (port 11434) can be used for quick testing without Telegram/Discord:
+The Ollama-compatible API (port 11435) can be used for quick testing without Telegram/Discord:
 
 ```bash
-curl -X POST http://localhost:11434/api/chat \
+curl -X POST http://localhost:11435/api/chat \
   -H "Content-Type: application/json" \
   -d '{
     "model": "default",

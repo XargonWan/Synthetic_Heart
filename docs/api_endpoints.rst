@@ -174,7 +174,7 @@ Ollama‑Compatibility Server
 
 When the ``ollama_compat_server`` interface is enabled, SyntH speaks the same
 HTTP protocol as an Ollama daemon.  The following endpoints are implemented
-(usually on port ``11434`` by default):
+(usually on port ``11435`` by default):
 
 - **GET** `/api/tags` – list available models (returns `models` array).
 - **POST** `/api/chat` – standard chat endpoint accepting OpenAI‑style
