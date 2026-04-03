@@ -6,7 +6,7 @@ sphinx:
 python:
   install:
     - method: "pip"
-      path: "pyproject.toml"
+      path: "."
 
 build:
   os: ubuntu-24.04
