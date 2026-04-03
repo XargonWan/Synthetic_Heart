@@ -695,6 +695,33 @@ class SynthWebUIInterface:
         self.app.get("/api/locations")(self.get_suggested_locations)
         self.app.get("/api/weather/current")(self.get_current_weather_endpoint)
 
+        # External endpoints (custom AI service connections)
+        self.app.get("/api/external-endpoints")(self.list_external_endpoints)
+        self.app.post("/api/external-endpoints")(self.create_external_endpoint)
+        self.app.get("/api/external-endpoints/{ep_id}")(self.get_external_endpoint)
+        self.app.put("/api/external-endpoints/{ep_id}")(self.update_external_endpoint)
+        self.app.delete("/api/external-endpoints/{ep_id}")(
+            self.delete_external_endpoint
+        )
+        self.app.post("/api/external-endpoints/{ep_id}/probe")(
+            self.probe_external_endpoint
+        )
+        self.app.post("/api/external-endpoints/{ep_id}/ping")(
+            self.ping_external_endpoint
+        )
+        self.app.post("/api/external-endpoints/{ep_id}/enable")(
+            self.enable_external_endpoint
+        )
+        self.app.post("/api/external-endpoints/{ep_id}/disable")(
+            self.disable_external_endpoint
+        )
+        self.app.put("/api/external-endpoints/{ep_id}/mapping")(
+            self.set_external_endpoint_mapping
+        )
+        self.app.put("/api/external-endpoints/{ep_id}/model")(
+            self.set_external_endpoint_model
+        )
+
         # Template sections route for modular loading
         self.app.get("/templates/{section}.html")(self.serve_template_section)
         # Endpoint serving an iframe host page for embedding sections inside an iframe
@@ -1692,6 +1719,7 @@ class SynthWebUIInterface:
                 "about",
                 "navbar",
                 "agent",
+                "external_engines",
             }
             if section not in allowed_sections:
                 raise HTTPException(
@@ -3385,39 +3413,18 @@ class SynthWebUIInterface:
         # Ensure any pending THINKING is cleared before delivery (fallback).
         await self._webui_clear_pending_thinking(session_id)
 
-        # Ensure WRITING is active while delivering the message, but avoid starting it late
-        # if it was already started at generation-time.
+        # Reuse the WRITING action started by on_generation_start (if any).
+        # Do NOT push a new WRITING here: that would cause a spurious WRITING→IDLE
+        # flash for auxiliary/follow-up sends (e.g. grillo checker actions) that
+        # arrive after the primary LLM response has already been delivered.
+        # The typing indicator is exclusively managed by on_generation_start /
+        # on_generation_end; send_message only cleans it up when it was active.
         writing_action_id = None
         writing_pushed = False
         existing_writing = self._active_writing_actions.get(session_id)
         if existing_writing and len(existing_writing) > 0:
             writing_action_id = existing_writing[-1]
             writing_pushed = True
-        else:
-            writing_action_id = f"webui_write_{session_id}_{int(datetime.utcnow().timestamp() * 1000) % 1_000_000}"
-            try:
-                writing_pushed = await self.action_state_manager.push_action(
-                    action_id=writing_action_id,
-                    phase=AnimationPhase.WRITING,
-                    component=INTERNAL_CHAT_NAME,
-                )
-            except Exception as exc:
-                log_warning(f"{LOG_PREFIX} Failed to push WRITING action state: {exc}")
-                writing_pushed = False
-
-            if writing_pushed:
-                self._active_writing_actions.setdefault(session_id, deque()).append(
-                    writing_action_id
-                )
-                if self.persona_manager:
-                    try:
-                        await self.persona_manager.set_animation_state(
-                            "write", session_id=session_id
-                        )
-                    except Exception as anim_exc:
-                        log_debug(
-                            f"{LOG_PREFIX} Failed to set 'write' animation: {anim_exc}"
-                        )
 
         # If websocket is present attempt to send; otherwise persist for later replay
         if websocket:
@@ -4889,6 +4896,321 @@ class SynthWebUIInterface:
             import asyncio as _asyncio
 
             self._integration_outbox_locks[src] = _asyncio.Lock()
+
+    # ---------------------------------------------------------------------------
+    # External endpoints (custom AI service connections)
+    # ---------------------------------------------------------------------------
+
+    async def _run_auto_probe(
+        self,
+        ep_id: int,
+        api_key: str,
+        reg: "ExternalEndpointRegistry",  # type: ignore[name-defined]  # noqa: F821
+    ) -> dict:
+        """Run probe_endpoint with a timeout and save the result.
+
+        Never raises — errors are captured and returned as a failed probe dict.
+        """
+        import asyncio
+
+        try:
+            from core.external_endpoints.probe import probe_endpoint
+
+            ep = await reg.get_endpoint(ep_id)
+            if ep is None:
+                return {"status": "failed", "error": "Endpoint not found"}
+
+            result = await asyncio.wait_for(probe_endpoint(ep, api_key), timeout=40.0)
+            await reg.set_probe_result(
+                ep_id,
+                status=result.status,
+                capabilities=result.capabilities,
+                models=result.models,
+            )
+            return {
+                "status": result.status,
+                "capabilities": result.capabilities,
+                "models": result.models,
+                "ping_echo": result.ping_echo,
+                "error": result.error_message,
+            }
+        except asyncio.TimeoutError:
+            log_warning(f"{LOG_PREFIX} auto-probe timed out for ep_id={ep_id}")
+            return {"status": "failed", "error": "Probe timed out (40 s)"}
+        except Exception as exc:
+            log_warning(f"{LOG_PREFIX} auto-probe failed for ep_id={ep_id}: {exc}")
+            return {"status": "failed", "error": str(exc)}
+
+    async def list_external_endpoints(self) -> JSONResponse:
+        """GET /api/external-endpoints — list all configured external endpoints."""
+        try:
+            from core.external_endpoints.registry import get_external_endpoint_registry
+
+            endpoints = await get_external_endpoint_registry().list_endpoints()
+            return JSONResponse({"endpoints": [ep.to_dict() for ep in endpoints]})
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} list_external_endpoints failed: {exc}")
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    async def create_external_endpoint(self, request: Request) -> JSONResponse:
+        """POST /api/external-endpoints — add a new external endpoint."""
+        try:
+            data = await request.json()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="Invalid JSON payload") from exc
+
+        name = str(data.get("name") or "").strip()
+        base_url = str(data.get("base_url") or "").strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="Missing 'name'")
+        if not base_url:
+            raise HTTPException(status_code=400, detail="Missing 'base_url'")
+
+        api_key_str = str(data.get("api_key") or "")
+        try:
+            from core.external_endpoints.registry import get_external_endpoint_registry
+
+            reg = get_external_endpoint_registry()
+            ep = await reg.add_endpoint(
+                name=name,
+                base_url=base_url,
+                protocol=str(data.get("protocol") or "openai"),
+                api_key=api_key_str,
+                display_label=str(data.get("display_label") or ""),
+                extra_config=data.get("extra_config"),
+            )
+
+            # Auto-probe immediately after creation
+            probe_data = await self._run_auto_probe(ep.id, api_key_str, reg)
+
+            # Reload endpoint so probe fields are reflected
+            ep_updated = await reg.get_endpoint(ep.id) or ep
+            return JSONResponse(
+                {"endpoint": ep_updated.to_dict(), "probe": probe_data},
+                status_code=201,
+            )
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} create_external_endpoint failed: {exc}")
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    async def get_external_endpoint(self, ep_id: int) -> JSONResponse:
+        """GET /api/external-endpoints/{ep_id}."""
+        try:
+            from core.external_endpoints.registry import get_external_endpoint_registry
+
+            ep = await get_external_endpoint_registry().get_endpoint(ep_id)
+            if ep is None:
+                raise HTTPException(status_code=404, detail="Endpoint not found")
+            return JSONResponse({"endpoint": ep.to_dict()})
+        except HTTPException:
+            raise
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} get_external_endpoint failed: {exc}")
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    async def update_external_endpoint(
+        self, ep_id: int, request: Request
+    ) -> JSONResponse:
+        """PUT /api/external-endpoints/{ep_id} — update fields."""
+        try:
+            data = await request.json()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="Invalid JSON payload") from exc
+
+        try:
+            from core.external_endpoints.crypto import decrypt_api_key
+            from core.external_endpoints.registry import get_external_endpoint_registry
+
+            reg = get_external_endpoint_registry()
+            ep = await reg.update_endpoint(ep_id, **data)
+            if ep is None:
+                raise HTTPException(status_code=404, detail="Endpoint not found")
+
+            # Auto-probe on every save (including label-only changes)
+            api_key = decrypt_api_key(ep.api_key_enc or "")
+            probe_data = await self._run_auto_probe(ep.id, api_key, reg)
+
+            # Reload endpoint so probe fields are reflected
+            ep_updated = await reg.get_endpoint(ep.id) or ep
+            return JSONResponse({"endpoint": ep_updated.to_dict(), "probe": probe_data})
+        except HTTPException:
+            raise
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} update_external_endpoint failed: {exc}")
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    async def delete_external_endpoint(self, ep_id: int) -> JSONResponse:
+        """DELETE /api/external-endpoints/{ep_id}."""
+        try:
+            from core.external_endpoints.registry import get_external_endpoint_registry
+
+            removed = await get_external_endpoint_registry().remove_endpoint(ep_id)
+            if not removed:
+                raise HTTPException(status_code=404, detail="Endpoint not found")
+            return JSONResponse({"status": "deleted"})
+        except HTTPException:
+            raise
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} delete_external_endpoint failed: {exc}")
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    async def probe_external_endpoint(self, ep_id: int) -> JSONResponse:
+        """POST /api/external-endpoints/{ep_id}/probe — probe capabilities."""
+        try:
+            from core.external_endpoints.crypto import decrypt_api_key
+            from core.external_endpoints.probe import probe_endpoint
+            from core.external_endpoints.registry import get_external_endpoint_registry
+
+            reg = get_external_endpoint_registry()
+            ep = await reg.get_endpoint(ep_id)
+            if ep is None:
+                raise HTTPException(status_code=404, detail="Endpoint not found")
+
+            api_key = decrypt_api_key(ep.api_key_enc or "")
+            result = await probe_endpoint(ep, api_key)
+            await reg.set_probe_result(
+                ep_id,
+                status=result.status,
+                capabilities=result.capabilities,
+                models=result.models,
+            )
+            return JSONResponse(
+                {
+                    "status": result.status,
+                    "capabilities": result.capabilities,
+                    "models": result.models,
+                    "error": result.error_message,
+                }
+            )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} probe_external_endpoint failed: {exc}")
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    async def ping_external_endpoint(
+        self, ep_id: int, request: Request
+    ) -> JSONResponse:
+        """POST /api/external-endpoints/{ep_id}/ping — ping with a specific model."""
+        try:
+            from core.external_endpoints.crypto import decrypt_api_key
+            from core.external_endpoints.probe import get_adapter_for_endpoint
+            from core.external_endpoints.registry import get_external_endpoint_registry
+
+            reg = get_external_endpoint_registry()
+            ep = await reg.get_endpoint(ep_id)
+            if ep is None:
+                raise HTTPException(status_code=404, detail="Endpoint not found")
+
+            body: dict = {}
+            try:
+                body = await request.json()
+            except Exception:
+                pass
+            model: str | None = body.get("model") or None
+
+            api_key = decrypt_api_key(ep.api_key_enc or "")
+            adapter = get_adapter_for_endpoint(ep, api_key)
+            ok, echo = await adapter.ping_test(model=model, timeout=30.0)
+            return JSONResponse(
+                {
+                    "ok": ok,
+                    "echo": echo,
+                    "model": model or ep.default_model or "",
+                }
+            )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} ping_external_endpoint failed: {exc}")
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    async def enable_external_endpoint(self, ep_id: int) -> JSONResponse:
+        """POST /api/external-endpoints/{ep_id}/enable."""
+        try:
+            from core.external_endpoints.registry import get_external_endpoint_registry
+
+            reg = get_external_endpoint_registry()
+            ep = await reg.update_endpoint(ep_id, enabled=True)
+            if ep is None:
+                raise HTTPException(status_code=404, detail="Endpoint not found")
+            return JSONResponse({"endpoint": ep.to_dict()})
+        except HTTPException:
+            raise
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} enable_external_endpoint failed: {exc}")
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    async def disable_external_endpoint(self, ep_id: int) -> JSONResponse:
+        """POST /api/external-endpoints/{ep_id}/disable."""
+        try:
+            from core.external_endpoints.registry import get_external_endpoint_registry
+
+            reg = get_external_endpoint_registry()
+            ep = await reg.update_endpoint(ep_id, enabled=False)
+            if ep is None:
+                raise HTTPException(status_code=404, detail="Endpoint not found")
+            return JSONResponse({"endpoint": ep.to_dict()})
+        except HTTPException:
+            raise
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} disable_external_endpoint failed: {exc}")
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    async def set_external_endpoint_mapping(
+        self, ep_id: int, request: Request
+    ) -> JSONResponse:
+        """PUT /api/external-endpoints/{ep_id}/mapping — set subsystem mapping overrides."""
+        try:
+            data = await request.json()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="Invalid JSON payload") from exc
+
+        if not isinstance(data, dict):
+            raise HTTPException(status_code=400, detail="Payload must be a JSON object")
+
+        try:
+            from core.external_endpoints.registry import get_external_endpoint_registry
+
+            reg = get_external_endpoint_registry()
+            ep = await reg.get_endpoint(ep_id)
+            if ep is None:
+                raise HTTPException(status_code=404, detail="Endpoint not found")
+            await reg.set_subsystem_map(ep_id, {k: bool(v) for k, v in data.items()})
+            ep = await reg.get_endpoint(ep_id)
+            return JSONResponse({"endpoint": ep.to_dict() if ep else {}})
+        except HTTPException:
+            raise
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} set_external_endpoint_mapping failed: {exc}")
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    async def set_external_endpoint_model(
+        self, ep_id: int, request: Request
+    ) -> JSONResponse:
+        """PUT /api/external-endpoints/{ep_id}/model — set default model."""
+        try:
+            data = await request.json()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="Invalid JSON payload") from exc
+
+        model = str(data.get("model") or "").strip()
+
+        try:
+            from core.external_endpoints.registry import get_external_endpoint_registry
+
+            reg = get_external_endpoint_registry()
+            ep = await reg.get_endpoint(ep_id)
+            if ep is None:
+                raise HTTPException(status_code=404, detail="Endpoint not found")
+            await reg.set_default_model(ep_id, model)
+            ep = await reg.get_endpoint(ep_id)
+            return JSONResponse({"endpoint": ep.to_dict() if ep else {}})
+        except HTTPException:
+            raise
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} set_external_endpoint_model failed: {exc}")
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     async def diary_summary(self, request: Request):
         """Return persona snapshot and recent diary entries for the Diary tab."""
@@ -7263,6 +7585,23 @@ class SynthWebUIInterface:
                 except Exception:
                     pass
 
+            # For external endpoints, fall back to DB if the in-memory bridge has
+            # stale/empty available_models (e.g. bridge created before first probe).
+            if not supported_models and engine_name.startswith("ext_"):
+                try:
+                    from core.external_endpoints.registry import (
+                        get_external_endpoint_registry,
+                    )
+
+                    _ext_reg = get_external_endpoint_registry()
+                    _fallback_ep = await _ext_reg.get_endpoint_by_name(engine_name[4:])
+                    if _fallback_ep and _fallback_ep.available_models:
+                        supported_models = list(_fallback_ep.available_models)
+                        if not current_model and _fallback_ep.default_model:
+                            current_model = _fallback_ep.default_model
+                except Exception:
+                    pass
+
             # Re-evaluate health dynamically for loaded engines (init-time status
             # may be stale, e.g. API key set after engine was first loaded)
             engine_status = meta["status"]
@@ -7786,6 +8125,23 @@ class SynthWebUIInterface:
             log_warning(
                 f"{LOG_PREFIX} model set on engine but config persist failed: {exc}"
             )
+
+        # Persist model selection to the DB for external endpoint engines
+        try:
+            from core.external_endpoints.bridges.cortex_bridge import (
+                ExternalCortexEngine,
+            )
+
+            if isinstance(instance, ExternalCortexEngine):
+                from core.external_endpoints.registry import (
+                    get_external_endpoint_registry,
+                )
+
+                await get_external_endpoint_registry().set_default_model(
+                    instance._endpoint.id, model_name
+                )
+        except Exception as exc:
+            log_warning(f"{LOG_PREFIX} ext endpoint model DB persist failed: {exc}")
 
         log_info(f"{LOG_PREFIX} Model for '{engine_name}' set to '{model_name}'")
         return JSONResponse(

@@ -2324,6 +2324,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                                             }).then((res) => {
                                                 if (!res.ok) throw new Error('HTTP ' + res.status);
                                                 if (engineModelLabel) engineModelLabel.textContent = `model: ${m}`;
+                                                if (window.showToast) window.showToast('Saved', false);
                                             }).catch((err) => {
                                                 console.error('[synth_webui] Failed to set model', err);
                                                 alert('Failed to set model: ' + err.message);
@@ -2339,10 +2340,18 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                                     }
                                 };
 
+                                // Keep render function current every pass so stale-closure issues
+                                // don't arise when available models change after first bind.
+                                modelSearch._renderList = renderModelList;
+
                                 // Wire events only once
                                 if (!modelSearch.dataset.bound) {
-                                    modelSearch.addEventListener('focus', () => { renderModelList(modelSearch.value); modelDropdown.style.display = ''; });
-                                    modelSearch.addEventListener('input', () => { renderModelList(modelSearch.value); });
+                                    modelSearch.addEventListener('focus', () => {
+                                        modelSearch.select();
+                                        modelSearch._renderList(''); // always show ALL models on focus
+                                        modelDropdown.style.display = '';
+                                    });
+                                    modelSearch.addEventListener('input', () => { modelSearch._renderList(modelSearch.value); });
                                     modelSearch.addEventListener('blur', () => { setTimeout(() => { modelDropdown.style.display = 'none'; }, 180); });
                                     modelSearch.addEventListener('keydown', (ev) => {
                                         if (ev.key === 'Enter') {
@@ -2357,6 +2366,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                                                 }).then((res) => {
                                                     if (!res.ok) throw new Error('HTTP ' + res.status);
                                                     if (engineModelLabel) engineModelLabel.textContent = `model: ${val}`;
+                                                    if (window.showToast) window.showToast('Saved', false);
                                                 }).catch((err) => {
                                                     console.error('[synth_webui] Failed to set model', err);
                                                 });

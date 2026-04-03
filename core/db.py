@@ -953,6 +953,32 @@ async def ensure_plugin_tables() -> None:
                     """
                 )
 
+                # external_endpoints (core/external_endpoints)
+                await cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS external_endpoints (
+                        id INT AUTO_INCREMENT PRIMARY KEY,
+                        name VARCHAR(100) NOT NULL UNIQUE,
+                        display_label VARCHAR(255) NOT NULL DEFAULT '',
+                        protocol VARCHAR(50) NOT NULL,
+                        base_url TEXT NOT NULL,
+                        api_key_enc TEXT,
+                        enabled TINYINT(1) NOT NULL DEFAULT 1,
+                        capabilities JSON,
+                        subsystem_map JSON,
+                        available_models JSON,
+                        default_model VARCHAR(255),
+                        probe_status VARCHAR(50) NOT NULL DEFAULT 'never',
+                        last_probe_at DATETIME,
+                        extra_config JSON,
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                        INDEX idx_enabled (enabled),
+                        INDEX idx_protocol (protocol)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+                    """
+                )
+
                 try:
                     await conn.commit()
                 except Exception:
