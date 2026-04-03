@@ -99,6 +99,31 @@ include = [
     "main.py"
 ]
 
+[build-system]
+requires = ["setuptools>=70.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = [
+    "core*",
+    "plugins*",
+    "interface*",
+    "cortex*",
+    "llm_engines*",
+    "vendor*",
+    "plugins_dev*",
+    "interface_dev*",
+    "automation_tools*",
+    "tests*",
+]
+exclude = [
+    "res*",
+    "skins*",
+    "webtop*",
+    "website*",
+]
+
 [tool.uv.sources]
 kittentts = { url = "https://github.com/KittenML/KittenTTS/releases/download/0.8.1/kittentts-0.8.1-py3-none-any.whl" }
 torch = { index = "pytorch-cpu" }
