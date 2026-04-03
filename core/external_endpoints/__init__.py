@@ -11,7 +11,7 @@ Quick usage::
     registry = get_external_endpoint_registry()
     ep = await registry.add_endpoint(
         name="my-ollama",
-        base_url="http://localhost:11434/v1",
+        base_url="http://localhost:11435/v1",
         protocol="openai",
     )
 """

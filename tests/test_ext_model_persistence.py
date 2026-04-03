@@ -17,7 +17,7 @@ def _make_endpoint(
         name="my_ep",
         display_label="My EP",
         protocol=EndpointProtocol.OPENAI,
-        base_url="http://localhost:11434",
+        base_url="http://localhost:11435",
         api_key_enc=None,
         enabled=True,
         capabilities={},

@@ -171,7 +171,7 @@ The **Ollama compatibility server** exposes Synthetic Heart through the same HTT
 .. code-block:: bash
 
    OLLAMA_HOST=0.0.0.0          # Bind address for the compatibility server
-   OLLAMA_PORT=11434            # Default Ollama port; update if you already run a native instance
+   OLLAMA_PORT=11435            # Default Ollama port; update if you already run a native instance
    OLLAMA_DEFAULT_MODEL=SyntH   # Name reported to clients when no model is specified
    OLLAMA_DEFAULT_MODEL_DISPLAY="Synthetic Heart"  # Friendly label in /api/tags
    OLLAMA_MAX_HISTORY=20        # Conversation turns preserved between requests
@@ -185,7 +185,7 @@ The **Ollama compatibility server** exposes Synthetic Heart through the same HTT
 
    .. code-block:: bash
 
-      export OLLAMA_HOST=http://<synth-host>:11434
+      export OLLAMA_HOST=http://<synth-host>:11435
       ollama list    # returns the synthetic catalogue exposed by SyntH
       ollama chat SyntH  # your client now exchanges messages with synth
 

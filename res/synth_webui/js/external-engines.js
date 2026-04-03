@@ -127,7 +127,7 @@
 
         // Model selector
         const modelSelect = card.querySelector('.ext-ep-model-select');
-        const models = ep.available_models || [];
+        const models = Array.isArray(ep.available_models) ? ep.available_models : [];
         if (models.length === 0) {
             const opt = document.createElement('option');
             opt.value = '';
@@ -142,7 +142,7 @@
                 modelSelect.appendChild(opt);
             }
         }
-        if (ep.default_model && models.includes(ep.default_model)) {
+        if (ep.default_model && models && models.includes && models.includes(ep.default_model)) {
             modelSelect.value = ep.default_model;
         }
 
