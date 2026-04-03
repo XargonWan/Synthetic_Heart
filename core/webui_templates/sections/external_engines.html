@@ -27,6 +27,9 @@
             <h3 id="ext-ep-modal-title" style="margin:0 0 18px;">Add External Endpoint</h3>
             <div id="ext-ep-modal-error" style="display:none; margin-bottom:14px; padding:10px 14px; background:rgba(192,57,43,0.15); border:1px solid var(--danger,#c0392b); border-radius:8px; color:var(--danger,#c0392b); font-size:0.9rem;"></div>
             <form id="ext-ep-form" autocomplete="off" novalidate>
+                <!-- Prevent browser autofill overlay from hijacking the endpoint probe form -->
+                <input type="text" autocomplete="username" style="position:absolute; left:-9999px; top:-9999px;" tabindex="-1" aria-hidden="true" />
+                <input type="password" autocomplete="current-password" style="position:absolute; left:-9999px; top:-9999px;" tabindex="-1" aria-hidden="true" />
                 <input type="hidden" id="ext-ep-form-id" value="">
 
                 <label style="display:block; margin-bottom:4px; font-weight:600;">Name <span style="color:var(--muted); font-weight:400;">(unique identifier)</span></label>

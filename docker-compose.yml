@@ -78,7 +78,7 @@ services:
 
   # Selenium‑LLM Engine, you can disable this if you want to use a different endpoint
   # such as an API provider or a local LLM running in another container
-  selenium-llm-engine:
+  synth-selenium-llm-engine:
     image: xargonwan/selenium-llm-engine:latest
     container_name: synth-selenium-llm-engine
     hostname: synth-selenium-llm-engine
