@@ -8,12 +8,7 @@
 | `main`    | [![CI Status](https://img.shields.io/github/actions/workflow/status/XargonWan/Synthetic_Heart/build-release.yml)](https://github.com/XargonWan/Synthetic_Heart/actions)      | [![Docs Status](https://readthedocs.org/projects/synthetic-heart/badge/?version=latest)](https://synthetic-heart.readthedocs.io/en/latest/?badge=latest) |
 | `develop` | [![Develop CI Status](https://img.shields.io/github/actions/workflow/status/XargonWan/Synthetic_Heart/build-release.yml?branch=develop)](https://github.com/XargonWan/Synthetic_Heart/actions) | [![Docs Status](https://readthedocs.org/projects/synthetic-heart/badge/?version=latest)](https://synthetic-heart.readthedocs.io/en/latest/?badge=latest) |
 
-> **Audio engines notice:** the default Vox engine is now backed by the
-> real `kittentts` package (or the vendored stub).  The old `pyttsx3`
-> / system‑voice implementation has been removed, so the container no longer
-> needs `espeak-ng` or similar.  Install KittenTTS via ``uv add kittentts`` to
-> enable neural voices.  Development‑only engines such as Chatterbox have been
-> moved to ``plugins/_dev`` and are not loaded by default.
+
 [![Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/xargon)
 
 ## Meet SyntH — your digital friend
