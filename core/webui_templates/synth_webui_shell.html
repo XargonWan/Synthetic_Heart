@@ -1217,6 +1217,9 @@ window.__SYNTH_CONFIG = {
             <button class="nav-btn" data-tab="components" aria-controls="tab-components" aria-pressed="false">
                 <span class="icon" aria-hidden="true">🧩</span><span>Components</span>
             </button>
+            <button class="nav-btn" data-tab="external_engines" aria-controls="tab-external-engines" aria-pressed="false">
+                <span class="icon" aria-hidden="true">🔌</span><span>Ext. Engines</span>
+            </button>
             <button class="nav-btn" data-tab="about" aria-controls="tab-about" aria-pressed="false">
                 <span class="icon" aria-hidden="true">ℹ️</span><span>About</span>
             </button>
@@ -1229,6 +1232,7 @@ window.__SYNTH_CONFIG = {
         <section class="tab-panel" id="tab-logs" data-tab="logs" role="tabpanel"></section>
         <section class="tab-panel" id="tab-settings" data-tab="settings" role="tabpanel"></section>
         <section class="tab-panel" id="tab-components" data-tab="components" role="tabpanel"></section>
+        <section class="tab-panel" id="tab-external-engines" data-tab="external_engines" role="tabpanel"></section>
         <section class="tab-panel" id="tab-about" data-tab="about" role="tabpanel"></section>
     </main>
     <div id="synth-minimized-stack" class="synth-minimized-stack" aria-live="polite"></div>
@@ -1243,6 +1247,7 @@ window.__SYNTH_CONFIG = {
     <script src="/js/skins-ui.js?v=%%STATIC_VERSION%%"></script>
     <script src="/js/skins-upload.js?v=%%STATIC_VERSION%%"></script>
     <script src="/js/skins.js?v=%%STATIC_VERSION%%"></script>
+    <script src="/js/external-engines.js?v=%%STATIC_VERSION%%"></script>
 
     <!-- Ko‑fi widget is loaded only inside the About tab (init handled in `initAboutTab()` in `/js/main.js`) -->
 </body>

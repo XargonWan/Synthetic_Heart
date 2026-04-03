@@ -1079,9 +1079,24 @@ export function initChatUI() {
                         } else if (data && data.type === 'action_state') {
                             const phase = String(data.phase || '').toUpperCase();
                             if (phase === 'THINKING' || phase === 'WRITING' || phase === 'TALKING') {
+                                // Cancel any pending debounced IDLE removal
+                                if (window.__synth_idle_removal_timer) {
+                                    clearTimeout(window.__synth_idle_removal_timer);
+                                    window.__synth_idle_removal_timer = null;
+                                }
                                 addTypingIndicator();
                             } else {
-                                removeTypingIndicator();
+                                // Debounce IDLE removal: if WRITING is immediately followed by IDLE
+                                // (e.g. fast follow-up messages from background tasks), the indicator
+                                // would flash for 0ms and never render. A short delay ensures the dots
+                                // are visible for at least one frame before being removed.
+                                // If the actual message arrives first (appendMessage → removeTypingIndicator),
+                                // the timer becomes a harmless no-op.
+                                clearTimeout(window.__synth_idle_removal_timer);
+                                window.__synth_idle_removal_timer = setTimeout(() => {
+                                    window.__synth_idle_removal_timer = null;
+                                    removeTypingIndicator();
+                                }, 600);
                             }
                         } else if (data && (data.type === 'vrm_animation' || data.type === 'animation')) {
                             // Canonical animation command from VRMStateServer.

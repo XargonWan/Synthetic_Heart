@@ -115,6 +115,20 @@ class LiveRegistry:
         log_info(f"[live_registry] Loaded and instantiated engine '{name}'")
         return instance
 
+    def register_instance(self, name: str, instance: object, label: str = "") -> None:
+        """Register a pre-built engine instance directly (skips module loading)."""
+        self._engine_modules[name] = "__direct__"
+        self._engine_meta[name] = {"capabilities": {}, "label": label}
+        self._instances[name] = instance
+        log_info(f"[live_registry] Registered external instance '{name}'")
+
+    def unregister_engine(self, name: str) -> None:
+        """Fully remove an engine from all caches (registered + instances)."""
+        self._engine_modules.pop(name, None)
+        self._engine_meta.pop(name, None)
+        self._instances.pop(name, None)
+        log_info(f"[live_registry] Unregistered engine '{name}'")
+
 
 # ---------------------------------------------------------------------------
 # Module-level singleton + convenience helper

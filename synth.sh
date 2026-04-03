@@ -51,10 +51,12 @@ case "$MODE" in
             shift
             log "Running main.py in service mode (via uv)"
             # 'uv run' handles the venv activation and python path automatically
-            exec uv run main.py --service "$@"
+            # --frozen skips network sync (packages already installed in the image)
+            exec uv run --frozen main.py --service "$@"
         else
             log "Running main.py interactively (via uv)"
-            exec uv run main.py "$@"
+            # --frozen skips network sync (packages already installed in the image)
+            exec uv run --frozen main.py "$@"
         fi
         ;;
     notify)
