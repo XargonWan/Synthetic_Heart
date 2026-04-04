@@ -12,6 +12,7 @@ retry logic, and streaming are all handled by the SDK.
 from __future__ import annotations
 
 from typing import Any, AsyncIterator
+from urllib.parse import urlparse, urlunparse
 
 from core.logging_utils import log_debug, log_warning
 
@@ -148,8 +149,32 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
             owned_by=str(getattr(entry, "owned_by", "") or ""),
         )
 
-    async def list_models(self) -> list[ModelInfo]:
-        client = self._get_client()
+    def _resolve_http_url(self, path: str) -> str:
+        parsed = urlparse(self._base_url)
+        base_path = parsed.path.rstrip("/")
+        joined_path = f"{base_path}/{path.lstrip('/')}" if base_path else f"/{path.lstrip('/')}"
+        return urlunparse(parsed._replace(path=joined_path))
+
+    def _http_model_paths(self) -> list[str]:
+        parsed = urlparse(self._base_url)
+        if parsed.path.rstrip("/").endswith("/v1"):
+            return ["/models"]
+        return ["/v1/models", "/models"]
+
+    def _http_tts_paths(self) -> list[str]:
+        parsed = urlparse(self._base_url)
+        if parsed.path.rstrip("/").endswith("/v1"):
+            return ["/audio/speech"]
+        return ["/v1/audio/speech", "/audio/speech"]
+
+    def _http_stt_paths(self) -> list[str]:
+        parsed = urlparse(self._base_url)
+        if parsed.path.rstrip("/").endswith("/v1"):
+            return ["/audio/transcriptions"]
+        return ["/v1/audio/transcriptions", "/audio/transcriptions"]
+
+    async def _list_models_via_http(self) -> list[ModelInfo]:
+        import aiohttp
 
         def _parse_list(data: Any) -> list[ModelInfo]:
             if data is None:
@@ -164,43 +189,35 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
                     log_warning(f"[openai_compat] skipping invalid model entry: {exc}")
             return parsed
 
-        try:
-            response = await client.models.list()
-            data = getattr(response, "data", None)
-            if data is None and isinstance(response, dict):
-                data = response.get("data", [])
-            return _parse_list(data)
-        except Exception as exc:
-            log_warning(f"[openai_compat] primary list_models failed: {repr(exc)}")
-
-        # Fallback: direct HTTP request to base_url/v1/models.
-        fallback_url = f"{self._base_url}/v1/models"
-        log_debug(f"[openai_compat] trying fallback GET {fallback_url}")
-        try:
-            import aiohttp
-
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    fallback_url,
-                    headers={"Authorization": f"Bearer {self._api_key}"},
-                    timeout=aiohttp.ClientTimeout(total=40),
-                ) as resp:
-                    if resp.status != 200:
-                        log_warning(
-                            f"[openai_compat] fallback {fallback_url} returned HTTP {resp.status}"
-                        )
+        for path in self._http_model_paths():
+            url = self._resolve_http_url(path)
+            log_debug(f"[openai_compat] trying HTTP GET {url}")
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(
+                        url,
+                        headers={"Authorization": f"Bearer {self._api_key}"},
+                        timeout=aiohttp.ClientTimeout(total=40),
+                    ) as resp:
+                        if resp.status != 200:
+                            log_warning(
+                                f"[openai_compat] GET {url} returned HTTP {resp.status}"
+                            )
+                            continue
+                        response_data = await resp.json()
+                        if isinstance(response_data, dict):
+                            response_data = response_data.get("data", [])
+                        if isinstance(response_data, list):
+                            return _parse_list(response_data)
                         return []
-                    response_data = await resp.json()
-                    if isinstance(response_data, dict):
-                        return _parse_list(response_data.get("data", []))
-                    if isinstance(response_data, list):
-                        return _parse_list(response_data)
-                    return []
-        except Exception as exc:
-            log_warning(
-                f"[openai_compat] fallback list_models failed (url={fallback_url}): {repr(exc)}"
-            )
-            return []
+            except Exception as exc:
+                log_warning(
+                    f"[openai_compat] list_models HTTP fallback failed (url={url}): {repr(exc)}"
+                )
+        return []
+
+    async def list_models(self) -> list[ModelInfo]:
+        return await self._list_models_via_http()
 
     # ------------------------------------------------------------------
     # TTS
@@ -218,30 +235,31 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
         """
         import aiohttp
 
-        url = f"{self._base_url}/audio/speech"
-        headers = {"Authorization": f"Bearer {self._api_key}"}
         payload = {
             "model": kwargs.get("model", "tts-1"),
             "input": text,
             "voice": voice or "alloy",
         }
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    url,
-                    json=payload,
-                    headers=headers,
-                    timeout=aiohttp.ClientTimeout(total=60),
-                ) as resp:
-                    if resp.status == 200:
-                        return await resp.read()
-                    log_debug(
-                        f"[openai_compat] TTS returned {resp.status} – not supported"
-                    )
-                    return None
-        except Exception as exc:
-            log_debug(f"[openai_compat] TTS request failed: {exc}")
-            return None
+        headers = {"Authorization": f"Bearer {self._api_key}"}
+
+        for path in self._http_tts_paths():
+            url = self._resolve_http_url(path)
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(
+                        url,
+                        json=payload,
+                        headers=headers,
+                        timeout=aiohttp.ClientTimeout(total=60),
+                    ) as resp:
+                        if resp.status == 200:
+                            return await resp.read()
+                        log_debug(
+                            f"[openai_compat] TTS {url} returned {resp.status} – not supported"
+                        )
+            except Exception as exc:
+                log_debug(f"[openai_compat] TTS request failed ({url}): {exc}")
+        return None
 
     # ------------------------------------------------------------------
     # STT
@@ -274,48 +292,47 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
         )
         data.add_field("model", kwargs.get("model", "whisper-1"))
 
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    url,
-                    data=data,
-                    headers=headers,
-                    timeout=aiohttp.ClientTimeout(total=120),
-                ) as resp:
-                    if resp.status == 200:
-                        result = await resp.json()
-                        return result.get("text", "")
-                    log_debug(
-                        f"[openai_compat] STT returned {resp.status} – not supported"
-                    )
-                    return None
-        except Exception as exc:
-            log_debug(f"[openai_compat] STT request failed: {exc}")
-            return None
+        for path in self._http_stt_paths():
+            url = self._resolve_http_url(path)
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(
+                        url,
+                        data=data,
+                        headers=headers,
+                        timeout=aiohttp.ClientTimeout(total=120),
+                    ) as resp:
+                        if resp.status == 200:
+                            result = await resp.json()
+                            return result.get("text", "")
+                        log_debug(
+                            f"[openai_compat] STT {url} returned {resp.status} – not supported"
+                        )
+            except Exception as exc:
+                log_debug(f"[openai_compat] STT request failed ({url}): {exc}")
+        return None
 
     # ------------------------------------------------------------------
     # Probe / health
     # ------------------------------------------------------------------
 
     async def health_check(self) -> bool:
-        try:
-            await self.list_models()
-            return True  # If list_models succeeds, endpoint is alive
-        except Exception:
-            pass
-        # Fallback: raw HTTP check
         import aiohttp
 
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    f"{self._base_url}/models",
-                    headers={"Authorization": f"Bearer {self._api_key}"},
-                    timeout=aiohttp.ClientTimeout(total=10),
-                ) as resp:
-                    return resp.status < 500
-        except Exception:
-            return False
+        for path in self._http_model_paths():
+            url = self._resolve_http_url(path)
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(
+                        url,
+                        headers={"Authorization": f"Bearer {self._api_key}"},
+                        timeout=aiohttp.ClientTimeout(total=10),
+                    ) as resp:
+                        if resp.status < 500:
+                            return True
+            except Exception:
+                continue
+        return False
 
     async def ping_test(
         self,
@@ -401,18 +418,21 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
             pass
 
         # --- Vox: probe /audio/speech with a tiny payload ---
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    f"{self._base_url}/audio/speech",
-                    json={"model": "tts-1", "input": "test", "voice": "alloy"},
-                    headers={"Authorization": f"Bearer {self._api_key}"},
-                    timeout=aiohttp.ClientTimeout(total=10),
-                ) as resp:
-                    # 200 = supported, 4xx = not supported, 5xx = error from server
-                    capabilities["vox"] = resp.status == 200
-        except Exception:
-            pass
+        for path in self._http_tts_paths():
+            url = self._resolve_http_url(path)
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(
+                        url,
+                        json={"model": "tts-1", "input": "test", "voice": "alloy"},
+                        headers={"Authorization": f"Bearer {self._api_key}"},
+                        timeout=aiohttp.ClientTimeout(total=10),
+                    ) as resp:
+                        capabilities["vox"] = resp.status == 200
+                        if resp.status == 200:
+                            break
+            except Exception:
+                continue
 
         # --- Auris: probe /audio/transcriptions with empty form ---
         try:
