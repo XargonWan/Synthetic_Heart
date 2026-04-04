@@ -7,7 +7,7 @@ from typing import Any
 
 import aiohttp
 
-from core.logging_utils import log_debug, log_warning
+from core.logging_utils import log_debug
 
 from core.external_endpoints.adapters.base import (
     BaseProtocolAdapter,
@@ -136,8 +136,7 @@ class AnthropicAdapter(BaseProtocolAdapter):
                             ),
                         },
                     )
-        except Exception as exc:
-            log_warning(f"[anthropic_adapter] chat_completion failed: {exc}")
+        except Exception:
             raise
 
     # ------------------------------------------------------------------

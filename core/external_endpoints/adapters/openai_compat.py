@@ -96,8 +96,7 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
                 finish_reason=choice.finish_reason or "stop",
                 usage=usage,
             )
-        except Exception as exc:
-            log_warning(f"[openai_compat] chat_completion failed: {exc}")
+        except Exception:
             raise
 
     async def stream_chat_completion(
@@ -124,8 +123,7 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
                 delta = chunk.choices[0].delta if chunk.choices else None
                 if delta and delta.content:
                     yield delta.content
-        except Exception as exc:
-            log_warning(f"[openai_compat] stream_chat_completion failed: {exc}")
+        except Exception:
             raise
 
     # ------------------------------------------------------------------
