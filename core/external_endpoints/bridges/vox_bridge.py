@@ -26,7 +26,24 @@ class ExternalVoxEngine(VoxEngineBase):
 
     @property
     def output_format(self) -> str:
-        return "wav"
+        extra = self._endpoint.extra_config or {}
+        return str(extra.get("tts_output_format", extra.get("output_format", "wav")))
+
+    @property
+    def sample_rate(self) -> int:
+        extra = self._endpoint.extra_config or {}
+        try:
+            return int(extra.get("tts_sample_rate", extra.get("sample_rate", 22050)))
+        except Exception:
+            return 22050
+
+    @property
+    def channels(self) -> int:
+        extra = self._endpoint.extra_config or {}
+        try:
+            return int(extra.get("tts_channels", extra.get("channels", 1)))
+        except Exception:
+            return 1
 
     def generate_tts(
         self,

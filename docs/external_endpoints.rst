@@ -74,6 +74,20 @@ Use cases
   - Add multiple endpoints like `ollama`, `gpt-4o-mini`, custom LLM.
   - Use endpoint mapping as a fallback or specialization by subsystem.
 
+Legacy HTTP TTS endpoints
+------------------------
+
+If you need to integrate an existing legacy HTTP/Index-TTS style server as a Vox provider, register it as a ``custom`` external endpoint and enable the ``vox`` subsystem mapping.
+
+- `Protocol`: ``custom``
+- `Base URL`: host or root path of the TTS server
+- `Extra Config`: add at least ``{"legacy_http_tts": true}``
+- Optional extra config keys:
+  - ``tts_voice_wav``: path to the reference WAV file used by the remote server
+  - ``tts_endpoint_path``: custom POST path if the server does not accept requests at the base URL
+
+After saving, set ``ACTIVE_VOX_ENGINE`` to the endpoint `Name` you created. This registers the endpoint as a first-class Vox engine and is the preferred external endpoint flow for HTTP TTS.
+
 Troubleshooting
 ---------------
 

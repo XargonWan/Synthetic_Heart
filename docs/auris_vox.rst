@@ -255,7 +255,9 @@ Configuration (all WebUI-configurable):
      - ``true``
      - When ``true``, sends a plain-text message if TTS generation fails.
 
-Backward-compatibility:  All ``TTS_*`` config keys (``TTS_ENABLED``, ``TTS_ENDPOINTS``, ``TTS_TIMEOUT_SECONDS``, ``TTS_OUTPUT_DIR``) still work as before and are read by the ``http`` Vox engine.
+.. note::
+
+   Legacy ``TTS_*`` config keys (``TTS_ENABLED``, ``TTS_ENDPOINTS``, ``TTS_TIMEOUT_SECONDS``, ``TTS_OUTPUT_DIR``) are still supported by the built-in ``http`` Vox engine for backward compatibility, but the preferred configuration path for new deployments is to register external HTTP TTS servers through the External Endpoints system and map them to ``vox``.
 
 WebUI helper endpoints
 ~~~~~~~~~~~~~~~~~~~~~~
@@ -359,7 +361,7 @@ Available Vox engines
      - Notes
    * - ``http``
      - ``vox_engines/http.py``
-     - Calls one or more external HTTP TTS servers.  Reads legacy ``TTS_ENDPOINTS`` config key.  Full failover support.
+     - Legacy built-in HTTP TTS engine. Supports ``TTS_ENDPOINTS`` compatibility and is intended for backward-compatible deployments only. For new external HTTP TTS integrations, prefer adding a custom external endpoint and mapping it to ``vox``.
    * - ``kitten``
      - ``vox_engines/kitten.py``
      - Neural KittenTTS engine; requires the ``kittentts`` package or uses
@@ -388,13 +390,15 @@ No interface or plugin should call a lipsync API directly — all lipsync dispat
 Migration from ``tts_lipsync``
 --------------------------------
 
-The legacy ``tts_lipsync`` plugin is **still active** for backward-compatibility.  New deployments should switch to Vox:
+The legacy ``tts_lipsync`` plugin is maintained only for backward compatibility and should be avoided for new deployments. To move external HTTP TTS support to the modern external endpoint flow:
 
-1. Select a non-``disabled`` engine for ``ACTIVE_VOX_ENGINE`` in the WebUI or ``.env``.
-2. Set ``ACTIVE_VOX_ENGINE = http`` (reads the same ``TTS_ENDPOINTS`` as before).
-3. Optionally disable ``TTS_ENABLED`` to stop the legacy plugin from also attempting TTS.
+1. Add a new endpoint in the Web UI under Settings > External Engines / External Endpoints.
+2. Choose ``Protocol: custom`` and set ``Base URL`` to the root URI of your HTTP TTS server.
+3. In ``extra_config``, add ``{"legacy_http_tts": true}`` and any optional adapter settings such as ``tts_voice_wav`` or ``tts_endpoint_path``.
+4. Enable the ``vox`` subsystem mapping for the endpoint.
+5. Set ``ACTIVE_VOX_ENGINE`` to the endpoint ``Name`` you created.
 
-The HTTP Vox engine is a drop-in replacement for ``tts_lipsync``; it reads the same config keys and produces identical output.
+This registers the endpoint as a first-class Vox engine and removes the need to manage ``TTS_ENDPOINTS`` manually. The built-in ``http`` engine and legacy ``TTS_*`` keys remain available only for compatibility with existing deployments.
 
 Live — Bidirectional Streaming
 -------------------------------
