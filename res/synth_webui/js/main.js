@@ -1478,6 +1478,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                                 // Small option sets: use native datalist
                                 const input = document.createElement('input');
                                 input.type = 'text';
+                                input.autocomplete = 'off';
                                 input.value = typeof value === 'string' ? value : '';
                                 input.disabled = !isEditable;
                                 if (opts.length) {
@@ -1656,6 +1657,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
 
                                     const idInput = document.createElement('input');
                                     idInput.type = 'text';
+                                    idInput.autocomplete = 'off';
                                     idInput.placeholder = 'Trainer ID or username';
                                     idInput.value = entry && entry.id ? entry.id : '';
                                     idInput.disabled = !isEditable;
@@ -1724,6 +1726,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
 
                             const input = document.createElement('input');
                             input.type = 'text';
+                            input.autocomplete = 'off';
                             input.className = 'tag-input-field';
                             input.placeholder = 'Add tag and press Enter';
                             input.disabled = !isEditable;
@@ -1815,6 +1818,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                         } else {
                             const input = document.createElement('input');
                             input.type = item.ui_type === 'password' ? 'password' : (item.value_type === 'int' || item.value_type === 'float' || item.ui_type === 'number' ? 'number' : 'text');
+                            input.autocomplete = item.ui_type === 'password' ? 'new-password' : 'off';
                             input.value = typeof value === 'string' ? value : JSON.stringify(value);
                             input.disabled = !isEditable;
                             inputEl = input;
@@ -2860,6 +2864,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                                         const inp = document.createElement('input');
                                         inp.type = ci.ui_type === 'password' ? 'password'
                                             : (ci.value_type === 'int' || ci.value_type === 'float' || ci.ui_type === 'number') ? 'number' : 'text';
+                                        inp.autocomplete = ci.ui_type === 'password' ? 'new-password' : 'off';
                                         inp.style.cssText = 'padding:6px 10px; background:var(--background); color:var(--text); border:1px solid var(--border,#444); border-radius:6px; font-size:0.88rem; max-width:400px; width:100%;';
                                         inp.value = typeof val === 'string' ? val : JSON.stringify(val);
                                         inp.disabled = !editable;
