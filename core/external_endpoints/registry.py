@@ -85,6 +85,7 @@ class ExternalEndpointRegistry:
         api_key: str = "",
         display_label: str = "",
         extra_config: dict[str, Any] | None = None,
+        subsystem_map: dict[str, bool] | None = None,
     ) -> ExternalEndpoint:
         """Create a new external endpoint and persist it to the DB."""
         from core.db import get_conn_ctx
@@ -99,6 +100,7 @@ class ExternalEndpointRegistry:
         api_key_enc = encrypt_api_key(api_key) if api_key else None
         label = display_label or name
         extra = json.dumps(extra_config or {})
+        smap = json.dumps({k: bool(v) for k, v in (subsystem_map or {}).items()})
 
         async with get_conn_ctx() as conn:
             async with conn.cursor() as cur:
@@ -109,9 +111,9 @@ class ExternalEndpointRegistry:
                        enabled, capabilities, subsystem_map, available_models,
                        probe_status, extra_config)
                     VALUES (%s, %s, %s, %s, %s, 1,
-                            '{}', '{}', '[]', 'never', %s)
+                            '{}', %s, '[]', 'never', %s)
                     """,
-                    (name, label, proto.value, base_url, api_key_enc, extra),
+                    (name, label, proto.value, base_url, api_key_enc, smap, extra),
                 )
                 row_id = cur.lastrowid
             try:
@@ -146,6 +148,7 @@ class ExternalEndpointRegistry:
             "api_key",
             "enabled",
             "extra_config",
+            "subsystem_map",
         }
         set_clauses: list[str] = []
         params: list[Any] = []
@@ -156,9 +159,12 @@ class ExternalEndpointRegistry:
             if key == "api_key":
                 set_clauses.append("api_key_enc = %s")
                 params.append(encrypt_api_key(value) if value else None)
-            elif key == "extra_config":
-                set_clauses.append("extra_config = %s")
-                params.append(json.dumps(value))
+            elif key in ("extra_config", "subsystem_map"):
+                set_clauses.append(f"{key} = %s")
+                if isinstance(value, dict):
+                    params.append(json.dumps(value))
+                else:
+                    params.append(json.dumps({}))
             elif key == "protocol":
                 try:
                     proto = EndpointProtocol(value).value

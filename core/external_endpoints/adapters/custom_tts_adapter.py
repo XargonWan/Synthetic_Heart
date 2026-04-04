@@ -11,14 +11,20 @@ from typing import Any
 
 import aiohttp
 
-from core.external_endpoints.adapters.base import BaseProtocolAdapter, ChatResponse, ModelInfo
-from core.logging_utils import log_debug, log_warning
+from core.external_endpoints.adapters.base import (
+    BaseProtocolAdapter,
+    ChatResponse,
+    ModelInfo,
+)
+from core.logging_utils import log_warning
 
 
 class LegacyHttpTTSAdapter(BaseProtocolAdapter):
     """Adapter for legacy HTTP TTS endpoints."""
 
-    def __init__(self, base_url: str, extra_config: dict[str, Any] | None = None) -> None:
+    def __init__(
+        self, base_url: str, extra_config: dict[str, Any] | None = None
+    ) -> None:
         self._base_url = base_url.rstrip("/")
         self._extra_config = extra_config or {}
 
@@ -33,7 +39,9 @@ class LegacyHttpTTSAdapter(BaseProtocolAdapter):
         stream: bool = False,
         **kwargs: Any,
     ) -> ChatResponse:
-        raise NotImplementedError("Legacy HTTP TTS adapter does not support chat completion")
+        raise NotImplementedError(
+            "Legacy HTTP TTS adapter does not support chat completion"
+        )
 
     async def list_models(self) -> list[ModelInfo]:
         return []
@@ -70,7 +78,9 @@ class LegacyHttpTTSAdapter(BaseProtocolAdapter):
 
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=60)) as resp:
+                async with session.post(
+                    url, json=payload, timeout=aiohttp.ClientTimeout(total=60)
+                ) as resp:
                     if resp.status != 200:
                         log_warning(
                             f"[legacy_http_tts] {url} returned HTTP {resp.status}"
@@ -99,7 +109,9 @@ class LegacyHttpTTSAdapter(BaseProtocolAdapter):
 
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                async with session.post(
+                    url, json=payload, timeout=aiohttp.ClientTimeout(total=15)
+                ) as resp:
                     return resp.status == 200
         except Exception:
             return False

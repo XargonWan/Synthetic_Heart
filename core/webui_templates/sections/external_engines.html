@@ -57,6 +57,22 @@
                 <input id="ext-ep-form-key" type="password" placeholder="sk-… (optional)" autocomplete="new-password"
                     style="width:100%; margin-bottom:22px; padding:9px 12px; background:var(--background); color:var(--text); border:1px solid var(--border,#444); border-radius:8px; box-sizing:border-box;">
 
+                <label style="display:block; margin-bottom:6px; font-weight:600;">Capabilities <span style="color:var(--muted); font-weight:400;">(which subsystems can use this endpoint)</span></label>
+                <div id="ext-ep-form-capabilities" style="display:flex; gap:20px; flex-wrap:wrap; margin-bottom:22px;">
+                    <label style="display:flex; align-items:center; gap:6px; font-size:0.9rem; cursor:pointer;">
+                        <input type="checkbox" id="ext-ep-form-cap-cortex"> Cortex <span style="color:var(--muted); font-size:0.8rem;">(LLM / chat)</span>
+                    </label>
+                    <label style="display:flex; align-items:center; gap:6px; font-size:0.9rem; cursor:pointer;">
+                        <input type="checkbox" id="ext-ep-form-cap-vox"> Vox <span style="color:var(--muted); font-size:0.8rem;">(TTS)</span>
+                    </label>
+                    <label style="display:flex; align-items:center; gap:6px; font-size:0.9rem; cursor:pointer;">
+                        <input type="checkbox" id="ext-ep-form-cap-auris"> Auris <span style="color:var(--muted); font-size:0.8rem;">(STT)</span>
+                    </label>
+                    <label style="display:flex; align-items:center; gap:6px; font-size:0.9rem; cursor:pointer;">
+                        <input type="checkbox" id="ext-ep-form-cap-live"> Live <span style="color:var(--muted); font-size:0.8rem;">(real-time streaming)</span>
+                    </label>
+                </div>
+
                 <div style="display:flex; gap:10px; justify-content:flex-end;">
                     <button type="button" id="ext-ep-modal-cancel" class="pill secondary">Cancel</button>
                     <button type="submit" id="ext-ep-modal-save" class="pill">Save</button>

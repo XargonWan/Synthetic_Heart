@@ -205,7 +205,7 @@ The emotional state is exposed to the WebUI for real-time visualization and can 
     - ``TTS_FALLBACK_TO_TEXT`` (boolean): when true, sends a text-only fallback if TTS generation fails
   - Legacy compatibility: the built-in ``http`` Vox engine still supports ``TTS_ENDPOINTS`` and the same payload contract, but this is not the recommended configuration path for new installations.
 * ``vox_plugin`` – **Vox** TTS & lip-sync subsystem. Unified pipeline: text cleaning → engine generation → WAV/PCM file write → lip-sync extraction → cross-interface dispatch. Replaces ``tts_lipsync`` as the recommended TTS path. Supports pluggable engines (``http``, ``kitten``); development-only stubs such as ``chatterbox`` live in ``plugins/_dev/vox_engines`` and are not imported by default. Select the active engine via ``ACTIVE_VOX_ENGINE`` (choose ``disabled`` to turn off). See :doc:`auris_vox`.
-* ``auris_plugin`` – **Auris** STT subsystem. Unified transcription entry-point for voice notes and audio files. Supports pluggable engines (``gemini``, ``silero``). Select the active engine via ``ACTIVE_AURIS_ENGINE`` (choose ``disabled`` to turn off). See :doc:`auris_vox`.
+* ``auris_plugin`` – **Auris** STT subsystem. Unified transcription entry-point for voice notes and audio files. Supports pluggable engines; the built-in local default is ``vosk`` and external Auris providers can be added through the External Endpoints UI and mapped to ``auris``. Select the active engine via ``ACTIVE_AURIS_ENGINE`` (choose ``disabled`` to turn off). See :doc:`auris_vox`.
 
 
 Recent Chats Plugin

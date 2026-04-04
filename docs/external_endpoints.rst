@@ -19,7 +19,7 @@ Synthetic Heart supports connecting to external LLM endpoints and services via t
 Getting started
 ---------------
 
-1. Open Web UI > Settings > External Engines (or External Endpoints tab).
+1. Open Web UI > Settings > External Endpoints.
 2. Click **+ Add Endpoint**.
 3. Fill in:
    - `Name`: internal identifier (data model key)
@@ -27,7 +27,8 @@ Getting started
    - `Protocol`: `openai`, `gemini`, `anthropic`, `custom`
    - `Base URL`: host to query (e.g. `http://localhost:11435`)
    - `API Key` (optional; leave empty to keep existing secret)
-4. Save; the system performs a background `probe` to detect capabilities and model list.
+   - `Capabilities`: choose which subsystems this endpoint should support.
+4. Save; the system performs a background `probe` to detect capabilities, available models, and register the endpoint with the selected subsystems.
 
 Probe status
 ------------
@@ -50,14 +51,16 @@ Model list and default model
 Subsystem mapping
 -----------------
 
-Each endpoint can be mapped to subsystem roles:
+Each endpoint can be mapped to subsystem roles during Add or Edit:
 
 - `cortex`: chat / reasoning
 - `vox`: text-to-speech
 - `auris`: speech-to-text
 - `live`: real-time or multimodal
 
-Map toggles are visible on the endpoint card and can be toggled per endpoint.
+The endpoint card displays the current mapping as a read-only summary. To change a mapping, open the endpoint with the **Edit** button and update the capabilities in the form.
+
+Note: external services such as Gemini API or Gemini Live are not automatically exposed to Auris or Live. They must be added as external endpoints and explicitly mapped to the desired subsystems.
 
 Use cases
 ---------

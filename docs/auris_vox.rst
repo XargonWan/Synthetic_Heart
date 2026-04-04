@@ -185,6 +185,10 @@ Auris engines are **file-based only** — for real-time / bidirectional streamin
 Available Auris engines
 ~~~~~~~~~~~~~~~~~~~~~~~
 
+Most Auris capabilities are now configured through the External Endpoints UI. Add a provider as an endpoint and enable the `auris` mapping when the endpoint supports STT.
+
+The only built-in Auris engine currently shipped by default is:
+
 .. list-table::
    :header-rows: 1
    :widths: 20 15 65
@@ -192,9 +196,9 @@ Available Auris engines
    * - Alias
      - File
      - Notes
-   * - ``gemini``
-     - ``auris_engines/gemini.py``
-     - Wraps the existing Gemini ``handle_live_processing`` call.  File-based.  Requires a loaded Gemini cortex engine.
+   * - ``vosk``
+     - ``plugins/auris_engines/vosk_engine.py``
+     - Local speech recognition engine. File-based, offline, and suitable for self-hosted deployments.
 
 .. note::
 
@@ -406,10 +410,11 @@ Live — Bidirectional Streaming
 The **Live** subsystem handles persistent sessions where audio and text flow in both directions simultaneously (e.g. a microphone feed producing transcripts while the system synthesises speech).
 
 Configuration: select the active engine via ``LIVE_CORTEX`` in the WebUI. The components page dropdown is populated with both
-cortex engines of kind ``live`` and any engines registered with
-``LIVE_REGISTRY`` (e.g. ``gemini_live``). The currently-selected value
-is highlighted and persists across page reloads; choosing ``disabled``
-turns the subsystem off.
+cortex engines of kind ``live`` and any external endpoints that were added
+and mapped to ``live``. The currently-selected value is highlighted and
+persists across page reloads; choosing ``disabled`` turns the subsystem off.
+
+Note: Gemini Live is only available after adding it as an external endpoint and enabling the ``live`` mapping; it is not automatically exposed by default.
 
 
 ``LiveEngineBase`` contract
@@ -479,10 +484,11 @@ Available Live engines
      - Notes
    * - ``silero``
      - ``live_engines/silero.py``
-     - Silero VAD with async queue per session.  Local, CPU-friendly.  Connect a real ASR model in ``_transcribe_segment``.
-   * - ``gemini_live``
-     - ``live_engines/gemini.py``
-     - Gemini Live WebSocket (stub).  Bidirectional.  Requires ``google-genai`` and ``GOOGLE_API_KEY``.
+     - Silero VAD with async queue per session. Local, CPU-friendly. Connect a real ASR model in ``_transcribe_segment``.
+
+.. note::
+
+   Gemini Live is not exposed automatically. Add a Gemini Live-capable endpoint through the External Endpoints UI and enable the ``live`` subsystem mapping if you want a Gemini-based live engine.
 
 Adding a Live engine
 ~~~~~~~~~~~~~~~~~~~~~

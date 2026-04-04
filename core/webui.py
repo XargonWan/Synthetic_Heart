@@ -4967,6 +4967,11 @@ class SynthWebUIInterface:
             raise HTTPException(status_code=400, detail="Missing 'base_url'")
 
         api_key_str = str(data.get("api_key") or "")
+        # Extract subsystem_map if provided by the form (capabilities section)
+        raw_smap = data.get("subsystem_map")
+        subsystem_map: dict[str, bool] | None = None
+        if isinstance(raw_smap, dict):
+            subsystem_map = {k: bool(v) for k, v in raw_smap.items()}
         try:
             from core.external_endpoints.registry import get_external_endpoint_registry
 
@@ -4978,6 +4983,7 @@ class SynthWebUIInterface:
                 api_key=api_key_str,
                 display_label=str(data.get("display_label") or ""),
                 extra_config=data.get("extra_config"),
+                subsystem_map=subsystem_map,
             )
 
             # Auto-probe immediately after creation

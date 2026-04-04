@@ -129,4 +129,7 @@ class GeminiLivePlugin:
         return {"text": "[gemini_live] prototype response"}
 
 
-PLUGIN_CLASS = GeminiLivePlugin
+# PLUGIN_CLASS intentionally not set: this engine must be configured explicitly
+# via the External Endpoints UI before appearing in the Live subsystem selector.
+# ENGINE_CLASS is kept so the registry can load it when explicitly requested.
+ENGINE_CLASS = GeminiLivePlugin

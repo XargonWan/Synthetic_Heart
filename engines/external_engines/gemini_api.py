@@ -1839,8 +1839,9 @@ class GeminiAurisAdapter:
 # Registry exports
 # ---------------------------------------------------------------------------
 
-# Capability declaration: this engine registers as both LLM and STT.
-ENGINE_CAPABILITIES: dict[str, bool] = {"llm": True, "stt": True, "tts": False}
+# Capability declaration: only LLM — STT (auris) is registered only when the user
+# explicitly adds this service as an external endpoint with `auris` mapping enabled.
+ENGINE_CAPABILITIES: dict[str, bool] = {"llm": True, "stt": False, "tts": False}
 
 # Auris metadata used by external_engines_base during STT registration.
 AURIS_CAPABILITIES: dict[str, bool] = {

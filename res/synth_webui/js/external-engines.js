@@ -108,21 +108,21 @@
         // URL
         card.querySelector('.ext-ep-url').textContent = ep.base_url;
 
-        // Subsystems
+        // Subsystems — read-only badges (edit via the Edit button)
         const subsysEl = card.querySelector('.ext-ep-subsystems');
         const effectiveMap = ep.effective_subsystem_map || {};
-        for (const [key, val] of Object.entries(effectiveMap)) {
-            if (key === 'vision') continue; // not yet implemented
-            const pill = document.createElement('label');
-            pill.style.cssText = 'display:flex;align-items:center;gap:4px;cursor:pointer;font-size:0.85rem;';
-            const cb = document.createElement('input');
-            cb.type = 'checkbox';
-            cb.checked = !!val;
-            cb.dataset.key = key;
-            cb.addEventListener('change', () => handleSubsystemToggle(ep.id, key, cb.checked, card));
-            pill.appendChild(cb);
-            pill.append(subsystemLabel(key));
-            subsysEl.appendChild(pill);
+        const subsysKeys = ['cortex', 'vox', 'auris', 'live'];
+        for (const key of subsysKeys) {
+            if (!(key in effectiveMap)) continue;
+            const val = effectiveMap[key];
+            const badge = document.createElement('span');
+            badge.style.cssText = [
+                'display:inline-flex', 'align-items:center', 'gap:4px',
+                'font-size:0.8rem', 'padding:2px 9px', 'border-radius:12px',
+                val ? 'background:var(--success-bg,#155724);color:#d4edda;' : 'background:var(--border,#444);color:var(--muted);',
+            ].join(';');
+            badge.textContent = subsystemLabel(key);
+            subsysEl.appendChild(badge);
         }
 
         // Model selector
@@ -213,24 +213,6 @@
         }
     }
 
-    async function handleSubsystemToggle(id, key, value, card) {
-        try {
-            const current = _endpoints.find(e => e.id === id);
-            if (!current) return;
-            const overrides = { ...(current.subsystem_map || {}), [key]: value };
-            await apiFetch(`/api/external-endpoints/${id}/mapping`, {
-                method: 'PUT',
-                body: JSON.stringify(overrides),
-            });
-            // Update local state without full reload
-            current.subsystem_map = overrides;
-            current.effective_subsystem_map = { ...(current.capabilities || {}), ...overrides };
-        } catch (e) {
-            setStatus('Error: ' + e.message, 'var(--danger,#c0392b)');
-            await loadEndpoints(); // revert UI
-        }
-    }
-
     async function handleTestModel(id, model, card) {
         const echoEl = card ? card.querySelector('.ext-ep-model-test-echo') : null;
         if (echoEl) { echoEl.textContent = 'Testing…'; echoEl.style.color = 'var(--muted)'; }
@@ -272,6 +254,14 @@
         document.getElementById('ext-ep-form-protocol').value = ep ? ep.protocol : 'openai';
         document.getElementById('ext-ep-form-url').value = ep ? ep.base_url : '';
         document.getElementById('ext-ep-form-key').value = '';
+
+        // Populate capability checkboxes
+        const smap = (ep && ep.effective_subsystem_map) ? ep.effective_subsystem_map : {};
+        for (const key of ['cortex', 'vox', 'auris', 'live']) {
+            const cb = document.getElementById(`ext-ep-form-cap-${key}`);
+            if (cb) cb.checked = !!smap[key];
+        }
+
         modal.style.display = 'flex';
     }
 
@@ -306,7 +296,14 @@
         if (!id && !name) { setModalError('Name is required.'); return; }
         if (!base_url) { setModalError('Base URL is required.'); return; }
 
-        const payload = { display_label, protocol, base_url };
+        // Collect capability checkboxes into subsystem_map
+        const subsystem_map = {};
+        for (const k of ['cortex', 'vox', 'auris', 'live']) {
+            const cb = document.getElementById(`ext-ep-form-cap-${k}`);
+            if (cb) subsystem_map[k] = cb.checked;
+        }
+
+        const payload = { display_label, protocol, base_url, subsystem_map };
         if (!id) payload.name = name;
         if (key) payload.api_key = key;
 
