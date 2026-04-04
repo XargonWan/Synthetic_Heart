@@ -59,7 +59,7 @@
     function providerIcon(icon) {
         const icons = {
             google: '🔵', anthropic: '🟠', openrouter: '⚡', github: '🐙',
-            ollama: '🦙', selenium: '🤖', custom: '⚙️',
+            ollama: '🦙', openai: '🟢', selenium: '🤖', custom: '⚙️',
         };
         return icons[icon] || '🔌';
     }
