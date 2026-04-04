@@ -94,8 +94,6 @@ RUN chmod +x /etc/s6-overlay/s6-rc.d/synth/run && \
 # Final cleanup
 RUN rm -rf /tmp/*
 
-COPY container/root /
-
 # Permissions
 RUN chown -R abc:abc /app && \
     mkdir -p /app/logs && chown -R abc:abc /app/logs
