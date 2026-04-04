@@ -698,6 +698,10 @@ class SynthWebUIInterface:
         # External endpoints (custom AI service connections)
         self.app.get("/api/external-endpoints")(self.list_external_endpoints)
         self.app.post("/api/external-endpoints")(self.create_external_endpoint)
+        # NOTE: /presets MUST be registered before /{ep_id} to avoid routing conflicts
+        self.app.get("/api/external-endpoints/presets")(
+            self.list_external_endpoint_presets
+        )
         self.app.get("/api/external-endpoints/{ep_id}")(self.get_external_endpoint)
         self.app.put("/api/external-endpoints/{ep_id}")(self.update_external_endpoint)
         self.app.delete("/api/external-endpoints/{ep_id}")(
@@ -4950,6 +4954,23 @@ class SynthWebUIInterface:
             return JSONResponse({"endpoints": [ep.to_dict() for ep in endpoints]})
         except Exception as exc:
             log_error(f"{LOG_PREFIX} list_external_endpoints failed: {exc}")
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    async def list_external_endpoint_presets(self) -> JSONResponse:
+        """GET /api/external-endpoints/presets — list available provider presets.
+
+        Reads JSON files from the project-level ``providers/`` directory.  Each
+        file describes a known AI provider (Gemini, Anthropic, OpenRouter, …)
+        with default values that the UI wizard can use to pre-fill the add form.
+        Files can be deleted by the user without breaking the rest of the system.
+        """
+        try:
+            from core.external_endpoints.preset_registry import load_presets
+
+            presets = load_presets()
+            return JSONResponse({"presets": presets})
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} list_external_endpoint_presets failed: {exc}")
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     async def create_external_endpoint(self, request: Request) -> JSONResponse:

@@ -1,0 +1,17 @@
+{
+  "provider_id": "selenium_llm_engine",
+  "display_name": "Selenium LLM Engine",
+  "description": "Default SyntH component that automates browser-based AI interfaces (ChatGPT, Claude, Gemini web, etc.)",
+  "icon": "selenium",
+  "protocol": "openai",
+  "base_url": "http://synth-selenium-llm-engine:8000",
+  "base_url_locked": false,
+  "requires_api_key": false,
+  "api_key_placeholder": "",
+  "api_key_hint": "Selenium LLM Engine must be running as a companion container. See https://github.com/XargonWan/selenium-llm-engine",
+  "default_capabilities": { "cortex": true, "vox": false, "auris": false, "live": false },
+  "suggested_name": "selenium-llm-engine",
+  "suggested_label": "Selenium LLM Engine",
+  "extra_config": {},
+  "sort_order": 60
+}

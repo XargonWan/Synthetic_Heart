@@ -335,7 +335,34 @@ class ExternalEndpointRegistry:
 
         ep = await self.get_endpoint(endpoint_id)
         if ep is not None:
+            # Auto-select the first available model when none has been set yet
+            if status == "success" and models and ep.default_model is None:
+                await self._auto_set_default_model(endpoint_id, models[0])
+                ep = await self.get_endpoint(endpoint_id)
             await self._sync_registries(ep)
+
+    async def _auto_set_default_model(self, endpoint_id: int, model: str) -> None:
+        """Persist an automatically selected default model (probe post-processing)."""
+        from core.db import get_conn_ctx
+
+        async with get_conn_ctx() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "UPDATE external_endpoints SET default_model = %s, "
+                    "updated_at = %s WHERE id = %s AND default_model IS NULL",
+                    (
+                        model,
+                        datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+                        endpoint_id,
+                    ),
+                )
+            try:
+                await conn.commit()
+            except Exception:
+                pass
+        log_info(
+            f"[ext_endpoints] Auto-selected default_model='{model}' for id={endpoint_id}"
+        )
 
     async def set_default_model(self, endpoint_id: int, model: str) -> None:
         """Set the active model for an endpoint."""

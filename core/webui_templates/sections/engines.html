@@ -202,47 +202,112 @@
 
     </div>
 
-    <!-- ── Add / Edit modal ─────────────────────────────────────────────── -->
+    <!-- ── Add / Edit modal (2-step wizard) ───────────────────────────── -->
     <div id="ext-ep-modal" style="display:none; position:fixed; inset:0; z-index:9000; background:rgba(0,0,0,0.6); align-items:center; justify-content:center;">
-        <div style="background:var(--bg-card,#1a1a2e); border:1px solid var(--border,#444); border-radius:14px; padding:28px 32px; min-width:440px; max-width:600px; width:90%; max-height:90vh; overflow-y:auto; box-shadow:0 8px 32px rgba(0,0,0,0.5);">
-            <h3 id="ext-ep-modal-title" style="margin:0 0 18px;">Add External Endpoint</h3>
+        <div style="background:var(--bg-card,#1a1a2e); border:1px solid var(--border,#444); border-radius:14px; padding:28px 32px; min-width:440px; max-width:640px; width:93%; max-height:92vh; overflow-y:auto; box-shadow:0 8px 32px rgba(0,0,0,0.5);">
+            <h3 id="ext-ep-modal-title" style="margin:0 0 6px;">Add External Endpoint</h3>
             <div id="ext-ep-modal-error" style="display:none; margin-bottom:14px; padding:10px 14px; background:rgba(192,57,43,0.15); border:1px solid var(--danger,#c0392b); border-radius:8px; color:var(--danger,#c0392b); font-size:0.9rem;"></div>
-            <form id="ext-ep-form" autocomplete="off" novalidate>
-                <!-- Prevent browser autofill overlay from hijacking the endpoint probe form -->
-                <input type="text" autocomplete="username" style="position:absolute; left:-9999px; top:-9999px;" tabindex="-1" aria-hidden="true" />
-                <input type="password" autocomplete="current-password" style="position:absolute; left:-9999px; top:-9999px;" tabindex="-1" aria-hidden="true" />
-                <input type="hidden" id="ext-ep-form-id" value="">
 
-                <label style="display:block; margin-bottom:4px; font-weight:600;">Name <span style="color:var(--muted); font-weight:400;">(unique identifier)</span></label>
-                <input id="ext-ep-form-name" type="text" placeholder="e.g. my-ollama" autocomplete="off"
-                    style="width:100%; margin-bottom:14px; padding:9px 12px; background:var(--background); color:var(--text); border:1px solid var(--primary); border-radius:8px; box-sizing:border-box;">
-
-                <label style="display:block; margin-bottom:4px; font-weight:600;">Display Label</label>
-                <input id="ext-ep-form-label" type="text" placeholder="(optional) human-readable name" autocomplete="off"
-                    style="width:100%; margin-bottom:14px; padding:9px 12px; background:var(--background); color:var(--text); border:1px solid var(--border,#444); border-radius:8px; box-sizing:border-box;">
-
-                <label style="display:block; margin-bottom:4px; font-weight:600;">Protocol</label>
-                <select id="ext-ep-form-protocol"
-                    style="width:100%; margin-bottom:14px; padding:9px 12px; background:var(--background); color:var(--text); border:1px solid var(--primary); border-radius:8px;">
-                    <option value="openai">OpenAI-compatible (Ollama, OpenRouter, …)</option>
-                    <option value="gemini">Google Gemini</option>
-                    <option value="anthropic">Anthropic Claude</option>
-                    <option value="custom">Custom</option>
-                </select>
-
-                <label style="display:block; margin-bottom:4px; font-weight:600;">Base URL</label>
-                <input id="ext-ep-form-url" type="url" placeholder="http://localhost:11435" autocomplete="off"
-                    style="width:100%; margin-bottom:14px; padding:9px 12px; background:var(--background); color:var(--text); border:1px solid var(--primary); border-radius:8px; box-sizing:border-box;">
-
-                <label style="display:block; margin-bottom:4px; font-weight:600;">API Key <span style="color:var(--muted); font-weight:400;">(stored encrypted, leave blank to keep existing)</span></label>
-                <input id="ext-ep-form-key" type="password" placeholder="sk-… (optional)" autocomplete="new-password"
-                    style="width:100%; margin-bottom:22px; padding:9px 12px; background:var(--background); color:var(--text); border:1px solid var(--border,#444); border-radius:8px; box-sizing:border-box;">
-
-                <div style="display:flex; gap:10px; justify-content:flex-end;">
-                    <button type="button" id="ext-ep-modal-cancel" class="pill secondary">Cancel</button>
-                    <button type="submit" id="ext-ep-modal-save" class="pill">Save</button>
+            <!-- ── Step 1: provider picker ── -->
+            <div id="ext-ep-step-template">
+                <div class="meta" style="margin-bottom:16px; color:var(--muted);">Choose a provider to get started, or pick <strong>Custom Endpoint</strong> to configure manually.</div>
+                <div id="ext-ep-preset-loading" style="color:var(--muted); font-size:0.9rem;">Loading providers…</div>
+                <div id="ext-ep-preset-grid" style="display:grid; grid-template-columns:repeat(auto-fill,minmax(160px,1fr)); gap:12px; margin-bottom:20px;"></div>
+                <div style="display:flex; justify-content:flex-end;">
+                    <button type="button" id="ext-ep-modal-cancel-step1" class="pill secondary">Cancel</button>
                 </div>
-            </form>
+            </div>
+
+            <!-- ── Step 2: form (pre-filled from preset or edit) ── -->
+            <div id="ext-ep-step-form" style="display:none;">
+                <!-- Back button + provider name shown for add mode -->
+                <div id="ext-ep-form-provider-header" style="display:flex; align-items:center; gap:10px; margin-bottom:16px;">
+                    <button type="button" id="ext-ep-back-btn" class="pill secondary" style="padding:5px 12px; font-size:0.85rem;">← Change</button>
+                    <span id="ext-ep-form-provider-name" style="font-weight:600; font-size:1rem;"></span>
+                </div>
+
+                <form id="ext-ep-form" autocomplete="off" novalidate>
+                    <!-- Prevent browser autofill overlay from hijacking the endpoint probe form -->
+                    <input type="text" autocomplete="username" style="position:absolute; left:-9999px; top:-9999px;" tabindex="-1" aria-hidden="true" />
+                    <input type="password" autocomplete="current-password" style="position:absolute; left:-9999px; top:-9999px;" tabindex="-1" aria-hidden="true" />
+                    <input type="hidden" id="ext-ep-form-id" value="">
+
+                    <!-- API Key — shown only if requires_api_key or edit mode -->
+                    <div id="ext-ep-form-key-row" style="margin-bottom:14px;">
+                        <label style="display:block; margin-bottom:4px; font-weight:600;">
+                            API Key
+                            <span id="ext-ep-form-key-required-badge" style="color:var(--danger,#c0392b); font-size:0.8rem; margin-left:4px;"></span>
+                            <span style="color:var(--muted); font-weight:400;"> (stored encrypted)</span>
+                        </label>
+                        <input id="ext-ep-form-key" type="password" placeholder="paste your API key here" autocomplete="new-password"
+                            style="width:100%; padding:9px 12px; background:var(--background); color:var(--text); border:1px solid var(--primary); border-radius:8px; box-sizing:border-box;">
+                        <div id="ext-ep-form-key-hint" style="margin-top:5px; font-size:0.8rem; color:var(--muted);"></div>
+                    </div>
+
+                    <!-- Base URL — locked for known providers unless user unlocks -->
+                    <div style="margin-bottom:14px;">
+                        <label style="display:block; margin-bottom:4px; font-weight:600;">Base URL</label>
+                        <div style="display:flex; gap:6px; align-items:center;">
+                            <input id="ext-ep-form-url" type="url" placeholder="http://localhost:8000" autocomplete="off"
+                                style="flex:1; padding:9px 12px; background:var(--background); color:var(--text); border:1px solid var(--primary); border-radius:8px; box-sizing:border-box;">
+                            <button type="button" id="ext-ep-url-unlock-btn" title="Override URL"
+                                style="display:none; background:none; border:1px solid var(--border,#444); border-radius:8px; padding:7px 10px; cursor:pointer; color:var(--muted); font-size:0.9rem;">🔓</button>
+                        </div>
+                    </div>
+
+                    <!-- Name + Label — collapsible "Identity" section -->
+                    <details id="ext-ep-identity-details" style="margin-bottom:14px;">
+                        <summary style="cursor:pointer; font-weight:600; font-size:0.95rem; margin-bottom:8px; user-select:none;">Identity <span style="color:var(--muted); font-weight:400; font-size:0.85rem;">(name &amp; display label)</span></summary>
+                        <div style="padding-top:8px;">
+                            <label style="display:block; margin-bottom:4px; font-weight:600;">Name <span style="color:var(--muted); font-weight:400;">(unique identifier)</span></label>
+                            <input id="ext-ep-form-name" type="text" placeholder="e.g. my-gemini" autocomplete="off"
+                                style="width:100%; margin-bottom:12px; padding:9px 12px; background:var(--background); color:var(--text); border:1px solid var(--border,#444); border-radius:8px; box-sizing:border-box;">
+                            <label style="display:block; margin-bottom:4px; font-weight:600;">Display Label</label>
+                            <input id="ext-ep-form-label" type="text" placeholder="human-readable name" autocomplete="off"
+                                style="width:100%; padding:9px 12px; background:var(--background); color:var(--text); border:1px solid var(--border,#444); border-radius:8px; box-sizing:border-box;">
+                        </div>
+                    </details>
+
+                    <!-- Capabilities — collapsible override -->
+                    <details style="margin-bottom:14px;">
+                        <summary style="cursor:pointer; font-weight:600; font-size:0.95rem; margin-bottom:8px; user-select:none;">Capabilities <span style="color:var(--muted); font-weight:400; font-size:0.85rem;">(which subsystems can use this endpoint)</span></summary>
+                        <div id="ext-ep-form-capabilities" style="display:flex; gap:20px; flex-wrap:wrap; padding-top:8px;">
+                            <label style="display:flex; align-items:center; gap:6px; font-size:0.9rem; cursor:pointer;">
+                                <input type="checkbox" id="ext-ep-form-cap-cortex"> Cortex <span style="color:var(--muted); font-size:0.8rem;">(LLM / chat)</span>
+                            </label>
+                            <label style="display:flex; align-items:center; gap:6px; font-size:0.9rem; cursor:pointer;">
+                                <input type="checkbox" id="ext-ep-form-cap-vox"> Vox <span style="color:var(--muted); font-size:0.8rem;">(TTS)</span>
+                            </label>
+                            <label style="display:flex; align-items:center; gap:6px; font-size:0.9rem; cursor:pointer;">
+                                <input type="checkbox" id="ext-ep-form-cap-auris"> Auris <span style="color:var(--muted); font-size:0.8rem;">(STT)</span>
+                            </label>
+                            <label style="display:flex; align-items:center; gap:6px; font-size:0.9rem; cursor:pointer;">
+                                <input type="checkbox" id="ext-ep-form-cap-live"> Live <span style="color:var(--muted); font-size:0.8rem;">(real-time streaming)</span>
+                            </label>
+                        </div>
+                    </details>
+
+                    <!-- Advanced — protocol -->
+                    <details style="margin-bottom:22px;">
+                        <summary style="cursor:pointer; font-weight:600; font-size:0.95rem; margin-bottom:8px; user-select:none;">Advanced</summary>
+                        <div style="padding-top:8px;">
+                            <label style="display:block; margin-bottom:4px; font-weight:600;">Protocol</label>
+                            <select id="ext-ep-form-protocol"
+                                style="width:100%; padding:9px 12px; background:var(--background); color:var(--text); border:1px solid var(--border,#444); border-radius:8px;">
+                                <option value="openai">OpenAI-compatible (Ollama, OpenRouter, …)</option>
+                                <option value="gemini">Google Gemini</option>
+                                <option value="anthropic">Anthropic Claude</option>
+                                <option value="custom">Custom</option>
+                            </select>
+                        </div>
+                    </details>
+
+                    <div style="display:flex; gap:10px; justify-content:flex-end;">
+                        <button type="button" id="ext-ep-modal-cancel" class="pill secondary">Cancel</button>
+                        <button type="submit" id="ext-ep-modal-save" class="pill">Save</button>
+                    </div>
+                </form>
+            </div>
         </div>
     </div>
 </section>
