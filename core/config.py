@@ -98,7 +98,7 @@ TRAINER_NAME = config_registry.get_var(
 
 BASE_CORTEX = config_registry.get_var(
     "BASE_CORTEX",
-    "selenium_chatgpt",
+    "manual",
     label="Base Cortex",
     description="Default cortex engine used system-wide unless overridden by scope.",
     group="core",
@@ -344,7 +344,22 @@ async def get_active_cortex_engine(scope: str | None = None) -> str:
 
         reg = get_cortex_registry()
         if chosen not in reg.get_available_engines():
-            raise ValueError(f"Cortex engine '{chosen}' is not registered")
+            # Stale engine name in DB (e.g. removed engine from a previous branch).
+            # Fall back to the registry default rather than leaving the system broken.
+            try:
+                fallback = reg.get_default_engine()
+            except ValueError:
+                raise ValueError(f"Cortex engine '{chosen}' is not registered")
+            log_warning(
+                f"[config] ⚠️ Cortex engine '{chosen}' is no longer registered. "
+                f"Falling back to '{fallback}'. Update BASE_CORTEX to silence this warning."
+            )
+            # Persist the corrected value to avoid the warning on every restart.
+            try:
+                await config_registry.set_value("BASE_CORTEX", fallback)
+            except Exception:
+                pass
+            chosen = fallback
 
         log_debug(f"[config] 🧠 Active Cortex ({scope or 'base'}): {chosen}")
         return chosen

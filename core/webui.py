@@ -8148,6 +8148,7 @@ class SynthWebUIInterface:
             model_config_keys = {
                 "openrouter": "OPENROUTER_DEFAULT_MODEL",
                 "gemini_api": "GEMINI_MODEL",
+                "openapi": "OPENAPI_DEFAULT_MODEL",
             }
             config_key = model_config_keys.get(engine_name)
             if config_key:

@@ -470,18 +470,37 @@ _catalog = _ModelCatalog()
 
 
 def _fetch_catalog_sync(base_url: str, api_key: str = "") -> dict[str, OpenAPIModel]:
-    """Fetch model catalog from endpoint (blocking)."""
-    url = f"{base_url.rstrip('/')}/models"
+    """Fetch model catalog from endpoint (blocking).
+
+    Tries ``/v1/models`` first, then falls back to ``/models`` for servers
+    that expose models at the legacy path.
+    """
+    base = base_url.rstrip("/")
+    # Avoid double /v1/ when base_url already ends with /v1
+    if base.endswith("/v1"):
+        paths = ["/models"]
+    else:
+        paths = ["/v1/models", "/models"]
+
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
 
-    try:
-        resp = requests.get(url, headers=headers, timeout=30)
-        resp.raise_for_status()
-        data = resp.json()
-    except Exception as exc:
-        log_warning(f"[openapi] Failed to fetch model catalog: {exc}")
+    last_exc: Exception | None = None
+    for path in paths:
+        url = f"{base}{path}"
+        try:
+            resp = requests.get(url, headers=headers, timeout=30)
+            resp.raise_for_status()
+            data = resp.json()
+            last_exc = None
+            break
+        except Exception as exc:
+            log_warning(f"[openapi] Catalog fetch failed for {url}: {exc}")
+            last_exc = exc
+    else:
+        if last_exc:
+            log_warning(f"[openapi] Failed to fetch model catalog: {last_exc}")
         return {}
 
     models: dict[str, OpenAPIModel] = {}
@@ -691,28 +710,42 @@ class OpenAPIPlugin(AIPluginBase):
                 "OPENAPI_BASE_URL not configured. Please set it to your endpoint URL (e.g., http://localhost:8081/v1 for Ollama).",
             )
 
-        # Quick connectivity check
-        try:
-            resp = requests.get(f"{base_url.rstrip('/')}/models", timeout=5)
-            if resp.status_code == 401 and not str(OPENAPI_API_KEY).strip():
+        # Quick connectivity check — try /v1/models first, then /models
+        base = base_url.rstrip("/")
+        if base.endswith("/v1"):
+            check_paths = ["/models"]
+        else:
+            check_paths = ["/v1/models", "/models"]
+
+        last_exc: Exception | None = None
+        for path in check_paths:
+            try:
+                resp = requests.get(f"{base}{path}", timeout=5)
+                if resp.status_code == 401 and not str(OPENAPI_API_KEY).strip():
+                    return (
+                        False,
+                        "Endpoint requires authentication. Please set OPENAPI_API_KEY.",
+                    )
+                if resp.status_code in (200, 401, 403):
+                    return True, ""
+                # Non-success status on this path — try next
+                last_exc = None
+                break
+            except requests.exceptions.ConnectionError:
                 return (
                     False,
-                    "Endpoint requires authentication. Please set OPENAPI_API_KEY.",
+                    f"Cannot connect to endpoint {base_url}. Verify the URL and ensure the service is running.",
                 )
-            if resp.status_code in (200, 401, 403):
-                return True, ""
-        except requests.exceptions.ConnectionError:
-            return (
-                False,
-                f"Cannot connect to endpoint {base_url}. Verify the URL and ensure the service is running.",
-            )
-        except requests.exceptions.Timeout:
-            return (
-                False,
-                f"Timeout connecting to {base_url}. The endpoint may be slow or unreachable.",
-            )
-        except Exception as exc:
-            return False, f"Error connecting to endpoint: {exc}"
+            except requests.exceptions.Timeout:
+                return (
+                    False,
+                    f"Timeout connecting to {base_url}. The endpoint may be slow or unreachable.",
+                )
+            except Exception as exc:
+                last_exc = exc
+
+        if last_exc:
+            return False, f"Error connecting to endpoint: {last_exc}"
 
         return True, ""
 
