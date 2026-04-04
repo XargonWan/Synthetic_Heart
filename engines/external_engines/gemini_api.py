@@ -1,4 +1,4 @@
-# cortex/llm_provider/gemini_api.py
+# cortex/external_engines/gemini_api.py
 """
 Gemini API LLM Engine for Synthetic Heart.
 
@@ -26,7 +26,7 @@ import requests
 import base64
 import mimetypes
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from core.live_session_manager import LiveSessionManager
@@ -37,7 +37,6 @@ import os
 # Try importing the Google GenAI SDK for Live API support
 try:
     from google import genai
-    from google.genai import types
 
     _HAS_GENAI_SDK = True
 except ImportError:
@@ -276,6 +275,7 @@ class GeminiAPIPlugin(AIPluginBase):
 
     def get_current_model(self) -> str:
         """Return the currently active model."""
+        return self._current_model
 
     # --- Agentic hooks (optional) ---
     def supports_agent(self) -> bool:
@@ -349,21 +349,6 @@ class GeminiAPIPlugin(AIPluginBase):
         except Exception as e:
             log_warning(f"[gemini_api] detach_agent failed: {e}")
 
-    def agent_execute(self, action_dict: dict, context: dict | None = None) -> dict:
-        """Optional engine-level execution helper for agentic actions.
-
-        Default implementation returns a not-supported dict so callers can fall back.
-        Engines that can safely perform tool-calls should implement this.
-        """
-        log_debug(
-            "[gemini_api] agent_execute called but not implemented for this engine"
-        )
-        return {
-            "status": "unsupported",
-            "reason": "engine does not implement agent_execute",
-        }
-        return self._current_model
-
     def set_current_model(self, name: str):
         """Set the active model."""
         if name not in self.get_supported_models():
@@ -396,7 +381,7 @@ class GeminiAPIPlugin(AIPluginBase):
         }
 
     async def handle_live_processing(
-        self, file_path: str, mime_type_hint: str = None
+        self, file_path: str, mime_type_hint: str | None = None
     ) -> str | None:
         """
         Process 'live' media (Voice/Video notes) using standard GenerateContent API.
@@ -717,15 +702,16 @@ class GeminiAPIPlugin(AIPluginBase):
         finally:
             self._current_request_meta = None
 
-    async def generate_response(self, prompt):
+    async def generate_response(self, messages: object) -> str:  # type: ignore[override]
         """Send prompt to Gemini API and receive the response.
 
         Args:
-            prompt: Can be a dict (JSON prompt from prompt_engine) or string
+            messages: Can be a dict (JSON prompt from prompt_engine) or string
 
         Returns:
             str: The LLM response text
         """
+        prompt: Any = messages  # internal alias for backward-compatible body
         if not GEMINI_API_KEY:
             # Return a plain, user-readable string instead of a `system_message` action
             # which the message_chain treats as a blocked/unsupported action type.
@@ -740,7 +726,7 @@ class GeminiAPIPlugin(AIPluginBase):
                 # Check for system_message - but only trigger correction for ERROR types
                 # "output" type system_messages are just action results and should be processed normally
                 if "system_message" in prompt:
-                    sm = prompt.get("system_message", {})
+                    sm = prompt.get("system_message", {})  # type: ignore[union-attr]
                     sm_type = sm.get("type", "") if isinstance(sm, dict) else ""
                     # Only handle as correction if it's an actual error/correction request
                     if sm_type in (
@@ -782,7 +768,7 @@ class GeminiAPIPlugin(AIPluginBase):
 
             # --- Multimodal Support: Extract parts and redact text prompt ---
             # Extract heavy multimodal parts (images, audio) to be sent as native Gemini parts
-            multimodal_parts = await self._extract_multimodal_parts(prompt)
+            multimodal_parts = await self._extract_multimodal_parts(prompt)  # type: ignore[arg-type]
 
             # ALWAYS redact heavy base64 data from the text prompt, even if no parts were extracted.
             # This prevents unsupported mime-types or raw chunks from leaking into the text prompt
@@ -1728,7 +1714,7 @@ Do NOT include any message_* actions.
             return await self._http_generate_content(
                 prompt_text=correction_prompt,
                 system_instruction=config_args["system_instruction"],
-                max_output_tokens=config_args.get("max_output_tokens", 4096),
+                max_output_tokens=int(config_args.get("max_output_tokens", 4096)),
             )
 
         # Map interface to the correct message action type
@@ -1777,8 +1763,96 @@ Do NOT include any message_* actions.
         return await self._http_generate_content(
             prompt_text=correction_prompt,
             system_instruction=config_args["system_instruction"],
-            max_output_tokens=config_args.get("max_output_tokens", 8192),
+            max_output_tokens=int(config_args.get("max_output_tokens", 8192)),
         )
 
 
+# ---------------------------------------------------------------------------
+# Auris (STT) adapter — allows this engine to be registered in AurisRegistry
+# without duplicating any logic.  The transcription is delegated to the
+# already-loaded GeminiAPIPlugin instance via the cortex registry.
+# ---------------------------------------------------------------------------
+
+
+class GeminiAurisAdapter:
+    """STT engine that delegates to the GeminiAPIPlugin.handle_live_processing.
+
+    This adapter is discovered by AurisRegistry via ENGINE_CLASS and provides
+    file-based transcription through the Gemini GenerateContent API.  The
+    implementation reuses the GeminiAPIPlugin already loaded by CortexRegistry,
+    so no redundant API-client initialisation is needed.
+    """
+
+    display_name = "Gemini STT (file-based)"
+
+    def _get_engine_instance(self) -> "GeminiAPIPlugin | None":
+        """Return the active GeminiAPIPlugin instance from the cortex registry."""
+        try:
+            from core.cortex_registry import get_cortex_registry
+
+            reg = get_cortex_registry()
+            for name in reg.get_available_engines():
+                if "gemini" in name.lower():
+                    try:
+                        return reg.load_engine(name)  # type: ignore[return-value]
+                    except Exception:
+                        continue
+        except Exception as exc:
+            log_warning(f"[gemini_api/auris] Could not access cortex registry: {exc}")
+        return None
+
+    async def transcribe(
+        self, file_path: str, mime_type: str | None = None
+    ) -> "object | None":
+        """Transcribe *file_path* using GeminiAPIPlugin.handle_live_processing.
+
+        Returns an AurisTranscriptResult on success, None on failure.
+        language is always None because Gemini does not expose it directly;
+        AurisPlugin will apply text-based language detection as a fallback.
+        """
+        from plugins.auris_base import AurisTranscriptResult
+
+        engine = self._get_engine_instance()
+        if engine is None:
+            log_error("[gemini_api/auris] No GeminiAPIPlugin found in cortex registry.")
+            return None
+
+        handler = getattr(engine, "handle_live_processing", None)
+        if handler is None:
+            log_error(
+                "[gemini_api/auris] GeminiAPIPlugin lacks handle_live_processing."
+            )
+            return None
+
+        try:
+            text: str | None = await handler(file_path, mime_type_hint=mime_type)
+        except Exception as exc:
+            log_error(f"[gemini_api/auris] Transcription failed: {exc}")
+            return None
+
+        if not text:
+            return None
+        return AurisTranscriptResult(text=text, language=None)
+
+
+# ---------------------------------------------------------------------------
+# Registry exports
+# ---------------------------------------------------------------------------
+
+# Capability declaration: this engine registers as both LLM and STT.
+ENGINE_CAPABILITIES: dict[str, bool] = {"llm": True, "stt": True, "tts": False}
+
+# Auris metadata used by external_engines_base during STT registration.
+AURIS_CAPABILITIES: dict[str, bool] = {
+    "file_based": True,
+    "local": False,
+}
+AURIS_ENGINE_LABEL = (
+    "Gemini STT via GenerateContent API (file-based, requires GEMINI_API_KEY)"
+)
+
+# ENGINE_CLASS is the attribute looked up by AurisRegistry.load_engine().
+ENGINE_CLASS = GeminiAurisAdapter
+
+# PLUGIN_CLASS is the attribute looked up by CortexRegistry for LLM engines.
 PLUGIN_CLASS = GeminiAPIPlugin

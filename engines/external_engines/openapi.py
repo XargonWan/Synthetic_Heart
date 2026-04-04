@@ -1,4 +1,4 @@
-# cortex/llm_provider/openapi.py
+# cortex/external_engines/openapi.py
 """Generic OpenAPI LLM Engine for Synthetic Heart.
 
 This engine connects to ANY OpenAI-compatible endpoint (Ollama, LM Studio,
@@ -1493,5 +1493,8 @@ class OpenAPIPlugin(AIPluginBase):
             log_warning(f"[openapi] Failed to redact prompt data: {exc}")
             return prompt
 
+
+# Capability declaration for external_engines_base multi-registry discovery.
+ENGINE_CAPABILITIES: dict[str, bool] = {"llm": True, "stt": False, "tts": False}
 
 PLUGIN_CLASS = OpenAPIPlugin

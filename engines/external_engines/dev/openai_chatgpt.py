@@ -1,4 +1,4 @@
-# cortex/llm_provider/dev/openai_chatgpt.py
+# cortex/external_engines/dev/openai_chatgpt.py
 
 from core.ai_plugin_base import AIPluginBase
 import os

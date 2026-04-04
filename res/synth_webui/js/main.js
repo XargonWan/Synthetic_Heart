@@ -2155,7 +2155,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                     const componentsVoxListEl = document.getElementById('components-vox-list');
                     const componentsAurisListEl = document.getElementById('components-auris-list');
                     const componentsLiveListEl = document.getElementById('components-live-list');
-                    if (!componentsCortexListEl || !componentsInterfacesListEl || !componentsPluginsListEl) return;
+                    if (!componentsCortexListEl && !componentsInterfacesListEl && !componentsPluginsListEl) return;
                     const [res, cfgRes] = await Promise.all([
                         fetch('/api/components'),
                         fetch('/api/config').catch(() => null),
@@ -2257,7 +2257,10 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                     // Helper to render engines list and select for a particular cortex kind
                     const renderForCortex = (kind) => {
                         const byCortex = (data.cortex && data.cortex.by_cortex) || {};
-                        const engines = (Array.isArray(byCortex[kind]) ? byCortex[kind].slice() : []).sort((a, b) => {
+                        let engines = (Array.isArray(byCortex[kind]) ? byCortex[kind].slice() : []);
+                        // For llm_provider, only show external endpoint engines
+                        if (kind === 'llm_provider') engines = engines.filter(e => e.is_external);
+                        engines = engines.sort((a, b) => {
                             const an = (a.display_name || a.name || '').toLowerCase();
                             const bn = (b.display_name || b.name || '').toLowerCase();
                             return an.localeCompare(bn);
@@ -2425,7 +2428,9 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                                 try {
                                     if (componentsCortexListEl) {
                                         const byCortex = (data.cortex && data.cortex.by_cortex) || {};
-                                        renderDetailsList(byCortex[kind] || [], componentsCortexListEl);
+                                        let kindEngines = byCortex[kind] || [];
+                                        if (kind === 'llm_provider') kindEngines = kindEngines.filter(e => e.is_external);
+                                        renderDetailsList(kindEngines, componentsCortexListEl);
                                     }
                                 } catch (e) { console.debug('[synth_webui] renderForCortex: failed to re-render cards', e); }
                             });
@@ -2440,7 +2445,11 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                     // Also make sure the initial cards reflect the selected cortex kind
                     try {
                         const byCortex = (data.cortex && data.cortex.by_cortex) || {};
-                        if (componentsCortexListEl) renderDetailsList(byCortex[initialKind] || [], componentsCortexListEl);
+                        if (componentsCortexListEl) {
+                            let initEngines = byCortex[initialKind] || [];
+                            if (initialKind === 'llm_provider') initEngines = initEngines.filter(e => e.is_external);
+                            renderDetailsList(initEngines, componentsCortexListEl);
+                        }
                     } catch (e) { console.debug('[synth_webui] init: failed to render initial cortex cards', e); }
                     // Bind engineSelect change to switch engine
                     if (!engineSelect.dataset.bound) {
@@ -2906,9 +2915,11 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                     // Render engine list for the selected cortex kind
                     const toRenderKind = initialKind || 'llm_provider';
                     const byCortex = (data.cortex && data.cortex.by_cortex) || {};
-                    renderDetailsList(byCortex[toRenderKind] || [], componentsCortexListEl);
-                    renderDetailsList(data.interfaces || [], componentsInterfacesListEl);
-                    renderDetailsList(data.plugins || [], componentsPluginsListEl);
+                    let toRenderEngines = byCortex[toRenderKind] || [];
+                    if (toRenderKind === 'llm_provider') toRenderEngines = toRenderEngines.filter(e => e.is_external);
+                    if (componentsCortexListEl) renderDetailsList(toRenderEngines, componentsCortexListEl);
+                    if (componentsInterfacesListEl) renderDetailsList(data.interfaces || [], componentsInterfacesListEl);
+                    if (componentsPluginsListEl) renderDetailsList(data.plugins || [], componentsPluginsListEl);
 
                     // ── Audio registry selectors (Vox / Auris / Live) ──────────────
                     const setupRegistrySelect = (selectId, infoId, labelId, descId, engines, configKey) => {
@@ -3654,7 +3665,11 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                 refreshConfig();
             }
 
-            function initComponentsTab() {
+            function initPluginsTab() {
+                loadComponentsSummary();
+            }
+            // Also expose as initEnginesTab so that the Engines tab triggers the engine selector UI
+            function initEnginesTab() {
                 loadComponentsSummary();
             }
 
@@ -3882,7 +3897,9 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
             window.SynthWebUI = window.SynthWebUI || {};
             window.SynthWebUI.initHomeTab = initHomeTab;
             window.SynthWebUI.initSettingsTab = initSettingsTab;
-            window.SynthWebUI.initComponentsTab = initComponentsTab;
+            window.SynthWebUI.initPluginsTab = initPluginsTab;
+            window.SynthWebUI.initEnginesTab = initEnginesTab;
+            window.SynthWebUI.loadEnginesSummary = loadComponentsSummary;
             window.SynthWebUI.initLogsTab = initLogsTab;
             window.SynthWebUI.initAboutTab = initAboutTab;
 

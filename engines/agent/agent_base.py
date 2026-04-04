@@ -24,7 +24,7 @@ def discover_and_register(registry, dev_enabled: bool = False) -> None:
     for _importer, module_name, is_pkg in pkgutil.iter_modules([base_path]):
         if is_pkg or module_name.startswith("_") or module_name.endswith("_base"):
             continue
-        module_path = f"cortex.agent.{module_name}"
+        module_path = f"engines.agent.{module_name}"
         try:
             mod = importlib.import_module(module_path)
         except Exception as exc:

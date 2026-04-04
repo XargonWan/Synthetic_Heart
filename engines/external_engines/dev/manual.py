@@ -1,4 +1,4 @@
-# cortex/llm_provider/dev/manual.py
+# cortex/external_engines/dev/manual.py
 
 from plugins.message_map import (
     init_message_map_table,
@@ -65,27 +65,9 @@ def supports_functions() -> bool:
 
 
 def get_interface_limits() -> dict:
-    """Get the limits and capabilities for Manual LLM interface.
-
-    Reads from the active Selenium LLM engine if available,
-    falls back to default if no Selenium engine is active.
-    """
-    # Try to get limits from active Selenium LLM engine
-    try:
-        from cortex.selenium_engine.selenium_llm_base import get_active_selenium_limits
-
-        selenium_limits = get_active_selenium_limits()
-        max_prompt_chars = selenium_limits.get("max_prompt_chars", 128001)
-        llm_name = selenium_limits.get("llm_name", "unknown")
-        log_info(
-            f"[manual] Interface limits from active Selenium engine ({llm_name}): max_prompt_chars={max_prompt_chars}"
-        )
-    except Exception as e:
-        log_debug(f"[manual] Could not get Selenium limits, using fallback: {e}")
-        max_prompt_chars = MANUAL_CONFIG["max_prompt_chars"]
-
+    """Get the limits and capabilities for Manual LLM interface."""
     return {
-        "max_prompt_chars": max_prompt_chars,
+        "max_prompt_chars": MANUAL_CONFIG["max_prompt_chars"],
         "max_response_chars": MANUAL_CONFIG["max_response_chars"],
         "supports_images": MANUAL_CONFIG["supports_images"],
         "supports_functions": MANUAL_CONFIG["supports_functions"],
@@ -130,35 +112,9 @@ class ManualAIPlugin(AIPluginBase):
                 lambda chat_id, message: log_info(f"[NOTIFY fallback] {message}")
             )
 
-    def get_interface_limits(self):
-        """Get the limits and capabilities for Manual LLM interface.
-
-        Reads from the active Selenium LLM engine if available,
-        falls back to default if no Selenium engine is active.
-        """
-        # Try to get limits from active Selenium LLM engine
-        try:
-            from cortex.selenium_engine.selenium_llm_base import (
-                get_active_selenium_limits,
-            )
-
-            selenium_limits = get_active_selenium_limits()
-            max_prompt_chars = selenium_limits.get("max_prompt_chars", 128001)
-            llm_name = selenium_limits.get("llm_name", "unknown")
-            log_info(
-                f"[manual] Interface limits from active Selenium engine ({llm_name}): max_prompt_chars={max_prompt_chars}"
-            )
-        except Exception as e:
-            log_debug(f"[manual] Could not get Selenium limits, using fallback: {e}")
-            max_prompt_chars = MANUAL_CONFIG["max_prompt_chars"]
-
-        return {
-            "max_prompt_chars": max_prompt_chars,
-            "max_response_chars": MANUAL_CONFIG["max_response_chars"],
-            "supports_images": MANUAL_CONFIG["supports_images"],
-            "supports_functions": MANUAL_CONFIG["supports_functions"],
-            "model_name": MANUAL_CONFIG["model_name"],
-        }
+    def get_interface_limits(self) -> dict:
+        """Get the limits and capabilities for Manual LLM interface."""
+        return get_interface_limits()
 
     async def track_message(
         self, trainer_message_id, original_chat_id, original_message_id
@@ -182,8 +138,6 @@ class ManualAIPlugin(AIPluginBase):
 
         notify_trainer("🚨 Generating the reply...")
 
-        user_id = message.from_user.id
-        text = getattr(message, "text", "") or ""
         global _last_manual_log_time, _manual_log_throttle_sec
         now = time.time()
         if now - _last_manual_log_time >= _manual_log_throttle_sec:

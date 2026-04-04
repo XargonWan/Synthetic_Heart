@@ -1,4 +1,4 @@
-# cortex/llm_provider/openrouter.py
+# cortex/external_engines/openrouter.py
 """OpenRouter LLM Engine for Synthetic Heart.
 
 This engine uses the OpenRouter API (OpenAI-compatible) to communicate with
@@ -1465,5 +1465,8 @@ class OpenRouterPlugin(AIPluginBase):
             ),
         }
 
+
+# Capability declaration for external_engines_base multi-registry discovery.
+ENGINE_CAPABILITIES: dict[str, bool] = {"llm": True, "stt": False, "tts": False}
 
 PLUGIN_CLASS = OpenRouterPlugin

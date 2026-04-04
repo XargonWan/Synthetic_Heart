@@ -1,4 +1,4 @@
-# cortex/llm_provider/dev/gemini_cli.py
+# cortex/external_engines/dev/gemini_cli.py
 
 import subprocess
 from core.ai_plugin_base import AIPluginBase

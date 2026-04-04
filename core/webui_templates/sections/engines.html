@@ -1,7 +1,31 @@
-<section class="tab-panel" id="tab-components" data-tab="components" role="tabpanel">
+<section class="tab-panel" id="tab-engines" data-tab="engines" role="tabpanel">
     <div class="settings-grid" style="flex-direction: column;">
+
+        <!-- ── External Endpoints CRUD ────────────────────────────────────── -->
         <article class="card">
             <h2>Engines</h2>
+            <div class="meta" style="margin-bottom:16px;">
+                Connect external AI services: Ollama, OpenAI, Gemini, Anthropic, or any OpenAI-compatible API, even self hosted.
+                Endpoints are auto-probed for capabilities and can be mapped to Cortex (chat/text, reasoning), Vox (voice, TTS), Auris (audio, STT), or Live (real-time, multimodal) subsystems.
+            </div>
+
+            <!-- Toolbar -->
+            <div style="display:flex; gap:10px; align-items:center; margin-bottom:18px; flex-wrap:wrap;">
+                <button id="ext-ep-add-btn" class="pill" style="font-weight:700;">+ Add Endpoint</button>
+                <button id="ext-ep-refresh-btn" class="pill secondary" title="Reload list">↺ Refresh</button>
+                <span id="ext-ep-status" class="meta" style="font-size:0.85rem; color:var(--muted);"></span>
+            </div>
+
+            <!-- Endpoint list -->
+            <div id="ext-ep-list" style="display:flex; flex-direction:column; gap:14px;">
+                <div class="meta" style="color:var(--muted);">Loading…</div>
+            </div>
+        </article>
+
+        <!-- ── Engine configuration ────────────────────────────────────────── -->
+        <article class="card">
+            <h2>Engine Configuration</h2>
+            <div class="meta" style="margin-bottom:14px;">Configure the active engine for each subsystem. Only engines you have added above are listed here.</div>
 
             <!-- ── Cortex ────────────────────────────────────────────────────── -->
             <h3 style="margin:0 0 6px; font-size:1rem; color:var(--muted); text-transform:uppercase; letter-spacing:0.06em;">Cortex</h3>
@@ -10,16 +34,16 @@
                 <div class="meta" id="components-cortex-summary">Loading…</div>
 
                 <div class="meta" id="components-cortex-controls" style="display:flex; gap:10px; align-items:center; margin-top:10px; flex-wrap:wrap;">
-                    <select id="cortex-kind-select" style="padding:8px 12px; background:var(--background); color:var(--text); border:1px solid var(--primary); border-radius:8px; font-weight:600; min-width:200px;">
+                    <select id="cortex-kind-select" style="min-width:200px;">
                     </select>
 
-                    <select id="cortex-engine-select" style="padding:10px 14px; background:var(--background); color:var(--text); border:2px solid var(--primary); border-radius:10px; font-weight:700; min-width:360px; font-size:1rem;">
+                    <select id="cortex-engine-select" style="min-width:360px; font-size:1rem;">
                     </select>
 
                     <!-- Model selector (populated dynamically from engine's supported_models) -->
                     <div id="cortex-model-picker" style="position:relative; display:none;">
                         <input id="cortex-model-search" type="text" placeholder="Search models…" autocomplete="off"
-                            style="padding:10px 14px; background:var(--background); color:var(--text); border:2px solid var(--primary); border-radius:10px; font-weight:700; font-size:1rem; min-width:320px;">
+                            style="min-width:320px;">
                         <div id="cortex-model-dropdown" style="display:none; position:absolute; top:100%; left:0; right:0; max-height:300px; overflow-y:auto; border:1px solid var(--border); border-radius:8px; background:var(--bg-card,#1a1a2e); z-index:999; margin-top:2px;"></div>
                     </div>
 
@@ -52,10 +76,10 @@
                 <h3 style="margin:0 0 6px; font-size:1rem; color:var(--muted); text-transform:uppercase; letter-spacing:0.06em;">Vox — Text to Speech</h3>
                 <div class="meta" style="margin-bottom:10px;">File-based TTS engines. Select the active engine using the dropdown below.</div>
                 <div id="vox-controls" style="display:flex; gap:12px; align-items:flex-start; margin-bottom:12px; flex-wrap:wrap;">
-                    <select id="vox-engine-select" style="padding:8px 12px; background:var(--background); color:var(--text); border:2px solid var(--primary); border-radius:10px; font-weight:700; font-size:1rem; min-width:220px;">
+                    <select id="vox-engine-select" style="min-width:220px;">
                     </select>
                     <!-- speaker selector shown when a Kitten model is active -->
-                    <select id="kitten-speaker-select" title="Kitten TTS — Speaker voice" style="padding:8px 12px; background:var(--background); color:var(--text); border:2px solid var(--primary); border-radius:10px; font-weight:700; font-size:1rem; min-width:160px; display:none;">
+                    <select id="kitten-speaker-select" title="Kitten TTS — Speaker voice" style="min-width:160px; display:none;">
                     </select>
                     <button id="kitten-play-btn" title="Play sample" style="display:none; padding:8px 12px; font-weight:600;">▶</button>
                     <button id="vox-manage-models-btn" class="pill secondary" title="Download, update or remove TTS models" style="padding:8px 14px; font-weight:600;">🗂 Manage Models</button>
@@ -72,10 +96,10 @@
                 <h3 style="margin:0 0 6px; font-size:1rem; color:var(--muted); text-transform:uppercase; letter-spacing:0.06em;">Auris — Speech to Text</h3>
                 <div class="meta" style="margin-bottom:10px;">File-based STT engines. Select the active engine using the dropdown below.</div>
                 <div id="auris-controls" style="display:flex; gap:12px; align-items:flex-start; margin-bottom:12px; flex-wrap:wrap;">
-                    <select id="auris-engine-select" style="padding:8px 12px; background:var(--background); color:var(--text); border:2px solid var(--primary); border-radius:10px; font-weight:700; font-size:1rem; min-width:220px;">
+                    <select id="auris-engine-select" style="min-width:220px;">
                     </select>
                     <!-- Vosk model picker populated from MODEL_MANAGER catalog (shows download status) -->
-                    <select id="auris-vosk-language" style="padding:8px 12px; background:var(--background); color:var(--text); border:2px solid var(--primary); border-radius:10px; font-weight:700; font-size:1rem; min-width:240px; display:none;">
+                    <select id="auris-vosk-language" style="min-width:240px; display:none;">
                     </select>
                     <button id="auris-manage-models-btn" class="pill secondary" title="Download, update or remove STT models" style="padding:8px 14px; font-weight:600;">🗂 Manage Models</button>
                     <div id="auris-engine-info" class="meta" style="min-width:260px; display:none;">
@@ -91,7 +115,7 @@
                 <h3 style="margin:0 0 6px; font-size:1rem; color:var(--muted); text-transform:uppercase; letter-spacing:0.06em;">Live — Real-time Streaming</h3>
                 <div class="meta" style="margin-bottom:10px;">Bidirectional streaming engines (audio in + TTS out in real time). VAD is handled by <code>core.vad_service</code> — not listed here.</div>
                 <div id="live-controls" style="display:flex; gap:12px; align-items:flex-start; margin-bottom:12px; flex-wrap:wrap;">
-                    <select id="live-engine-select" style="padding:8px 12px; background:var(--background); color:var(--text); border:2px solid var(--primary); border-radius:10px; font-weight:700; font-size:1rem; min-width:220px;">
+                    <select id="live-engine-select" style="min-width:220px;">
                     </select>
                     <div id="live-engine-info" class="meta" style="min-width:260px; display:none;">
                         <div style="font-weight:600;" id="live-engine-label">—</div>
@@ -170,77 +194,90 @@
                 <div class="components-list" id="components-live-list"><div class="meta">Loading…</div></div>
             </div>
         </article>
-        <article class="card">
-            <h2>Interfaces</h2>
-            <div class="components-list" id="components-interfaces-list">
-                <div class="meta">Loading…</div>
-            </div>
-        </article>
-        <article class="card">
-            <h2>Plugins</h2>
-            <div class="components-list" id="components-plugins-list">
-                <div class="meta">Loading…</div>
-            </div>
-        </article>
 
-        <article class="card" style="background: var(--background); border: 2px solid #ffc107; border-radius: 8px;">
-            <h2 style="color: #ffc107;">🔧 Development Components</h2>
-            <div style="display: flex; align-items: center; gap: 15px; margin-top: 10px;">
-                <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
-                    <input type="checkbox" id="dev-components-toggle" style="width: 20px; height: 20px; cursor: pointer;">
-                    <span style="font-weight: 500;">Enable development components (interface_dev, plugins_dev, cortex/&lt;kind&gt;/dev)</span>
-                </label>
-            </div>
-            <div class="meta" style="margin-top: 10px;">
-                ⚠️ <strong>Warning:</strong> This setting is not persistent and will reset to OFF when SyntH restarts. SyntH will restart automatically after toggling.
-            </div>
-        </article>
+    </div>
+
+    <!-- ── Add / Edit modal ─────────────────────────────────────────────── -->
+    <div id="ext-ep-modal" style="display:none; position:fixed; inset:0; z-index:9000; background:rgba(0,0,0,0.6); align-items:center; justify-content:center;">
+        <div style="background:var(--bg-card,#1a1a2e); border:1px solid var(--border,#444); border-radius:14px; padding:28px 32px; min-width:440px; max-width:600px; width:90%; max-height:90vh; overflow-y:auto; box-shadow:0 8px 32px rgba(0,0,0,0.5);">
+            <h3 id="ext-ep-modal-title" style="margin:0 0 18px;">Add External Endpoint</h3>
+            <div id="ext-ep-modal-error" style="display:none; margin-bottom:14px; padding:10px 14px; background:rgba(192,57,43,0.15); border:1px solid var(--danger,#c0392b); border-radius:8px; color:var(--danger,#c0392b); font-size:0.9rem;"></div>
+            <form id="ext-ep-form" autocomplete="off" novalidate>
+                <!-- Prevent browser autofill overlay from hijacking the endpoint probe form -->
+                <input type="text" autocomplete="username" style="position:absolute; left:-9999px; top:-9999px;" tabindex="-1" aria-hidden="true" />
+                <input type="password" autocomplete="current-password" style="position:absolute; left:-9999px; top:-9999px;" tabindex="-1" aria-hidden="true" />
+                <input type="hidden" id="ext-ep-form-id" value="">
+
+                <label style="display:block; margin-bottom:4px; font-weight:600;">Name <span style="color:var(--muted); font-weight:400;">(unique identifier)</span></label>
+                <input id="ext-ep-form-name" type="text" placeholder="e.g. my-ollama" autocomplete="off"
+                    style="width:100%; margin-bottom:14px; padding:9px 12px; background:var(--background); color:var(--text); border:1px solid var(--primary); border-radius:8px; box-sizing:border-box;">
+
+                <label style="display:block; margin-bottom:4px; font-weight:600;">Display Label</label>
+                <input id="ext-ep-form-label" type="text" placeholder="(optional) human-readable name" autocomplete="off"
+                    style="width:100%; margin-bottom:14px; padding:9px 12px; background:var(--background); color:var(--text); border:1px solid var(--border,#444); border-radius:8px; box-sizing:border-box;">
+
+                <label style="display:block; margin-bottom:4px; font-weight:600;">Protocol</label>
+                <select id="ext-ep-form-protocol"
+                    style="width:100%; margin-bottom:14px; padding:9px 12px; background:var(--background); color:var(--text); border:1px solid var(--primary); border-radius:8px;">
+                    <option value="openai">OpenAI-compatible (Ollama, OpenRouter, …)</option>
+                    <option value="gemini">Google Gemini</option>
+                    <option value="anthropic">Anthropic Claude</option>
+                    <option value="custom">Custom</option>
+                </select>
+
+                <label style="display:block; margin-bottom:4px; font-weight:600;">Base URL</label>
+                <input id="ext-ep-form-url" type="url" placeholder="http://localhost:11435" autocomplete="off"
+                    style="width:100%; margin-bottom:14px; padding:9px 12px; background:var(--background); color:var(--text); border:1px solid var(--primary); border-radius:8px; box-sizing:border-box;">
+
+                <label style="display:block; margin-bottom:4px; font-weight:600;">API Key <span style="color:var(--muted); font-weight:400;">(stored encrypted, leave blank to keep existing)</span></label>
+                <input id="ext-ep-form-key" type="password" placeholder="sk-… (optional)" autocomplete="new-password"
+                    style="width:100%; margin-bottom:22px; padding:9px 12px; background:var(--background); color:var(--text); border:1px solid var(--border,#444); border-radius:8px; box-sizing:border-box;">
+
+                <div style="display:flex; gap:10px; justify-content:flex-end;">
+                    <button type="button" id="ext-ep-modal-cancel" class="pill secondary">Cancel</button>
+                    <button type="submit" id="ext-ep-modal-save" class="pill">Save</button>
+                </div>
+            </form>
+        </div>
     </div>
 </section>
 
-<script type="module">
-import { createModelManagerModal } from '/js/model-manager.mjs';
+<!-- ── Endpoint card template (cloned by JS) ───────────────────────────── -->
+<template id="ext-ep-card-tpl">
+    <div class="ext-ep-card" style="border:1px solid var(--border,#444); border-radius:10px; padding:16px 18px; background:var(--bg-card,#1a1a2e);">
+        <div style="display:flex; align-items:center; gap:10px; margin-bottom:10px; flex-wrap:wrap;">
+            <span class="ext-ep-label" style="font-weight:700; font-size:1.05rem;"></span>
+            <span class="ext-ep-protocol badge" style="font-size:0.75rem; padding:2px 8px; border-radius:12px; background:var(--primary,#7b61ff); color:#fff;"></span>
+            <span class="ext-ep-enabled-badge" style="font-size:0.75rem; padding:2px 8px; border-radius:12px;"></span>
+            <span class="ext-ep-probe-badge" style="font-size:0.75rem; padding:2px 8px; border-radius:12px; background:var(--border,#444);"></span>
+            <div style="flex:1;"></div>
+            <button class="ext-ep-edit-btn pill secondary" style="padding:5px 12px; font-size:0.85rem;">Edit</button>
+            <button class="ext-ep-toggle-btn pill" style="padding:5px 12px; font-size:0.85rem;"></button>
+            <button class="ext-ep-probe-btn pill" style="padding:5px 12px; font-size:0.85rem;">Probe</button>
+            <button class="ext-ep-delete-btn pill" style="padding:5px 12px; font-size:0.85rem; background:var(--danger,#c0392b); color:#fff;">Delete</button>
+        </div>
 
-// ── Vox "Manage Models" button ──────────────────────────────────────────────
-(function wireModelManagerButtons() {
-    function _wire() {
-        const voxBtn = document.getElementById('vox-manage-models-btn');
-        const aurisBtn = document.getElementById('auris-manage-models-btn');
-        if (voxBtn) voxBtn.addEventListener('click', () => createModelManagerModal());
-        if (aurisBtn) aurisBtn.addEventListener('click', () => createModelManagerModal());
-    }
-    // components.html may be injected dynamically; try immediately then via MutationObserver
-    if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', _wire);
-    } else {
-        _wire();
-    }
-})();
+        <div style="color:var(--muted); font-size:0.85rem; margin-bottom:10px;" class="ext-ep-url"></div>
 
-// ── Vosk language dropdown — populate from MODEL_MANAGER catalog ────────────
-(async function populateVoskModelDropdown() {
-    const select = document.getElementById('auris-vosk-language');
-    if (!select) return;
-    try {
-        const resp = await fetch('/api/models?plugin_id=auris_vosk');
-        if (!resp.ok) return;
-        const { models } = await resp.json();
-        if (!models || !models.length) return;
-        // Remove existing placeholder options (keep any already added by components.js)
-        const existingValues = new Set(Array.from(select.options).map(o => o.value));
-        for (const m of models) {
-            const tag = m.language || m.model_id;
-            if (existingValues.has(tag)) {
-                // Update label to reflect download status
-                const opt = select.querySelector(`option[value="${tag}"]`);
-                if (opt) {
-                    const prefix = m.downloaded ? '✓ ' : m.downloading ? '⬇ ' : '';
-                    if (!opt.textContent.startsWith(prefix) && prefix) {
-                        opt.textContent = prefix + opt.textContent.replace(/^[✓⬇] /, '');
-                    }
-                }
-            }
-        }
-    } catch (e) { /* non-fatal */ }
-})();
-</script>
+        <!-- Capabilities + subsystem mapping -->
+        <div style="display:flex; gap:18px; flex-wrap:wrap; margin-bottom:12px;">
+            <div>
+                <div style="font-size:0.8rem; text-transform:uppercase; letter-spacing:0.06em; color:var(--muted); margin-bottom:6px;">Subsystem Mapping</div>
+                <div class="ext-ep-subsystems" style="display:flex; gap:8px; flex-wrap:wrap;"></div>
+            </div>
+        </div>
+
+        <!-- Model selector -->
+        <div class="ext-ep-model-row" style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+            <label style="font-size:0.85rem; font-weight:600; min-width:110px;">Available Models</label>
+            <select class="ext-ep-model-select"
+                style="padding:6px 10px; background:var(--background); color:var(--text); border:1px solid var(--primary); border-radius:8px; min-width:220px;">
+                <option value="">— not set —</option>
+            </select>
+            <button class="ext-ep-model-test pill secondary" style="padding:5px 12px; font-size:0.85rem;">Test</button>
+            <span class="ext-ep-model-test-echo" style="font-size:0.85rem; margin-left:2px;"></span>
+        </div>
+
+        <div class="ext-ep-probe-time" style="font-size:0.78rem; color:var(--muted); margin-top:8px;"></div>
+    </div>
+</template>

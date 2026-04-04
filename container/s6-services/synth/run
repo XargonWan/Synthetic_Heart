@@ -1,0 +1,10 @@
+#!/command/with-contenv bash
+set -e
+
+# Ensure synth config directory exists and is writable
+mkdir -p /config/.config/
+chmod a+rwx -R /config
+
+echo "[S6 synth] Avvio Synthetic Heart..."
+cd /app
+exec /app/synth.sh run
