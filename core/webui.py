@@ -8152,7 +8152,7 @@ class SynthWebUIInterface:
             }
             config_key = model_config_keys.get(engine_name)
             if config_key:
-                config_registry.set_value(config_key, model_name)
+                await config_registry.set_value(config_key, model_name)
         except Exception as exc:
             log_warning(
                 f"{LOG_PREFIX} model set on engine but config persist failed: {exc}"

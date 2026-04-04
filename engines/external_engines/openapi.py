@@ -958,7 +958,11 @@ class OpenAPIPlugin(AIPluginBase):
     ) -> str:
         """Send chat completion request to OpenAPI endpoint."""
         base_url = str(OPENAPI_BASE_URL).strip()
-        url = f"{base_url.rstrip('/')}/chat/completions"
+        _base = base_url.rstrip("/")
+        if _base.endswith("/v1"):
+            url = f"{_base}/chat/completions"
+        else:
+            url = f"{_base}/v1/chat/completions"
 
         # Build messages
         messages: list[dict[str, Any]] = [
