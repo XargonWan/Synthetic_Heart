@@ -341,6 +341,10 @@ class ExternalEndpointRegistry:
                 ep = await self.get_endpoint(endpoint_id)
             await self._sync_registries(ep)
 
+            # Auto-activate as cortex engine when still on the default "manual"
+            if status == "success" and ep.effective_subsystem_map().get("cortex"):
+                await self._maybe_auto_activate_cortex(ep.engine_name())
+
     async def _auto_set_default_model(self, endpoint_id: int, model: str) -> None:
         """Persist an automatically selected default model (probe post-processing)."""
         from core.db import get_conn_ctx
@@ -363,6 +367,43 @@ class ExternalEndpointRegistry:
         log_info(
             f"[ext_endpoints] Auto-selected default_model='{model}' for id={endpoint_id}"
         )
+
+    async def _maybe_auto_activate_cortex(self, engine_name: str) -> None:
+        """Auto-switch ``BASE_CORTEX`` to *engine_name* after a successful probe.
+
+        Switches when the current cortex engine is a built-in engine (not an
+        external endpoint).  If the user already selected a *different* external
+        endpoint, their choice is respected and no switch happens.
+        """
+        from core.config import config_registry
+
+        current = config_registry.get_value("BASE_CORTEX", "")
+        if current == engine_name:
+            return  # already active
+
+        # If current BASE_CORTEX is another external endpoint, respect that choice.
+        if current:
+            try:
+                endpoints = await self.list_endpoints(enabled_only=True)
+                external_names = {ep.engine_name() for ep in endpoints}
+                if current in external_names:
+                    return
+            except Exception:
+                pass
+
+        try:
+            from core.config import switch_active_cortex_engine
+
+            await switch_active_cortex_engine(engine_name, use_hot_swap=True)
+            log_info(
+                f"[ext_endpoints] Auto-activated '{engine_name}' as cortex engine "
+                f"(was '{current or '<empty>'}')"
+            )
+        except Exception as exc:
+            log_warning(
+                f"[ext_endpoints] Failed to auto-activate '{engine_name}' "
+                f"as cortex: {exc}"
+            )
 
     async def set_default_model(self, endpoint_id: int, model: str) -> None:
         """Set the active model for an endpoint."""

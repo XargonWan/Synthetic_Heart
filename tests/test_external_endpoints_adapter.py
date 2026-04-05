@@ -6,7 +6,9 @@ from core.external_endpoints.adapters.openai_compat import OpenAICompatAdapter
 
 
 class FakeAiohttpResponse:
-    def __init__(self, status: int, payload: Any = None, body: bytes | None = None) -> None:
+    def __init__(
+        self, status: int, payload: Any = None, body: bytes | None = None
+    ) -> None:
         self.status = status
         self._payload = payload
         self._body = body or b""

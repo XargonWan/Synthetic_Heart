@@ -191,6 +191,7 @@
             const action = enable ? 'enable' : 'disable';
             await apiFetch(`/api/external-endpoints/${id}/${action}`, { method: 'POST' });
             await loadEndpoints();
+            window.SynthWebUI?.loadEnginesSummary?.();
         } catch (e) {
             setStatus('Error: ' + e.message, 'var(--danger,#c0392b)');
         }
@@ -207,6 +208,7 @@
                 result.status === 'success' ? 'var(--success,#27ae60)' : 'var(--danger,#c0392b)'
             );
             await loadEndpoints();
+            window.SynthWebUI?.loadEnginesSummary?.();
         } catch (e) {
             setStatus('Probe error: ' + e.message, 'var(--danger,#c0392b)');
         }
@@ -218,6 +220,7 @@
             setStatus('Deleting…', '');
             await apiFetch(`/api/external-endpoints/${id}`, { method: 'DELETE' });
             await loadEndpoints();
+            window.SynthWebUI?.loadEnginesSummary?.();
             setStatus('');
         } catch (e) {
             setStatus('Error: ' + e.message, 'var(--danger,#c0392b)');
@@ -519,6 +522,7 @@
             }
 
             await loadEndpoints();
+            window.SynthWebUI?.loadEnginesSummary?.();
 
             const probe = response.probe || {};
             if (probe.status === 'failed') {
