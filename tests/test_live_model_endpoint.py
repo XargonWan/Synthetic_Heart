@@ -14,16 +14,22 @@ def test_set_live_model_no_error(monkeypatch):
     webui = SynthWebUIInterface(autostart=False)
     client = TestClient(webui.app)
 
-    # ensure live engine is registered
-    try:
-        pass  # registers itself
-    except Exception:
-        pass
+    # Patch LIVE_REGISTRY to report "gemini_live" as available without actually
+    # loading the engine module (which may not be available in the test env).
+    from core.live_registry import LIVE_REGISTRY
 
-    resp = client.post(
-        "/api/components/cortex/model",
-        json={"engine": "gemini_live", "model": "whatever"},
-    )
+    original_modules = LIVE_REGISTRY._engine_modules.copy()
+    LIVE_REGISTRY._engine_modules["gemini_live"] = "fake.module"
+
+    try:
+        resp = client.post(
+            "/api/components/cortex/model",
+            json={"engine": "gemini_live", "model": "whatever"},
+        )
+    finally:
+        LIVE_REGISTRY._engine_modules.clear()
+        LIVE_REGISTRY._engine_modules.update(original_modules)
+
     assert resp.status_code == 200
     data = resp.json()
     assert data.get("status") == "ok"

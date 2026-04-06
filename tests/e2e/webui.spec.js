@@ -20,6 +20,25 @@ test('loads skins section and calls init if present', async ({ page }) => {
   expect(html.length).toBeGreaterThan(10);
 });
 
+test('external engines form has autofill traps and safe api key input', async ({ page }) => {
+  await page.goto(BASE, { waitUntil: 'networkidle' });
+  await page.click('.nav-btn[data-tab="external_engines"]');
+  await page.waitForSelector('#ext-ep-add-btn');
+  await page.click('#ext-ep-add-btn');
+  await page.waitForSelector('#ext-ep-form');
+
+  const usernameTrap = await page.$('#ext-ep-form input[autocomplete="username"]');
+  const currentPasswordTrap = await page.$('#ext-ep-form input[autocomplete="current-password"]');
+  const apiKeyInput = await page.$('#ext-ep-form-key');
+
+  expect(usernameTrap).not.toBeNull();
+  expect(currentPasswordTrap).not.toBeNull();
+  expect(apiKeyInput).not.toBeNull();
+
+  const apiKeyAutocomplete = await apiKeyInput.getAttribute('autocomplete');
+  expect(apiKeyAutocomplete).toBe('new-password');
+});
+
 test('settings panel enables page scroll', async ({ page }) => {
   await page.goto(BASE, { waitUntil: 'networkidle' });
   // Click the settings nav button

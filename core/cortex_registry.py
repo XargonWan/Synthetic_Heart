@@ -122,6 +122,36 @@ class CortexRegistry:
                 return name
         return None
 
+    def register_instance(
+        self,
+        name: str,
+        instance: Any,
+        cortex: str = "llm_provider",
+        label: str = "",
+    ) -> None:
+        """Register a pre-built engine instance directly, bypassing module loading.
+
+        Used by the external-endpoints subsystem so that dynamically constructed
+        bridge objects appear as ordinary cortex engines.
+        """
+        self._engine_modules[name] = "__direct__"
+        self._engine_meta[name] = {
+            "cortex": cortex,
+            "capabilities": {},
+            "label": label,
+        }
+        self._engines[name] = instance
+        log_debug(
+            f"[cortex_registry] Registered direct instance '{name}' (cortex={cortex})"
+        )
+
+    def unregister_engine(self, name: str) -> None:
+        """Remove an engine from all registry data structures."""
+        self._engine_modules.pop(name, None)
+        self._engine_meta.pop(name, None)
+        self._engines.pop(name, None)
+        log_debug(f"[cortex_registry] Unregistered engine '{name}'")
+
     def load_engine(self, name: str, notify_fn=None) -> Any:
         """Load an engine by name using the registered module path."""
         if not name or not isinstance(name, str):
@@ -133,10 +163,8 @@ class CortexRegistry:
         if not module_path:
             # dynamic fallback for backward compatibility and alternate layouts
             candidates = [
-                f"cortex.llm_provider.{name}",
-                f"cortex.llm_engine.{name}",
-                f"cortex.selenium_engine.{name}",
-                f"cortex.live.{name}",
+                f"engines.external_engines.{name}",
+                f"engines.live.{name}",
             ]
             log_debug(
                 f"[cortex_registry] Engine '{name}' not registered, attempting dynamic import from candidates: {candidates}"
@@ -148,6 +176,19 @@ class CortexRegistry:
                     break
                 except ModuleNotFoundError:
                     continue
+
+        # Special-case direct instance registration from external endpoints:
+        if module_path == "__direct__":
+            instance = self._engines.get(name)
+            if instance is None:
+                error_msg = f"Direct engine '{name}' has no instance in registry."
+                log_error(f"[cortex_registry] ❌ {error_msg}")
+                raise ValueError(error_msg)
+            log_debug(
+                f"[cortex_registry] Direct engine '{name}' loaded from registry instance."
+            )
+            return instance
+
         if not module_path:
             raise ValueError(f"Unknown engine: {name}")
 
@@ -241,15 +282,15 @@ def register_default_engines(*, dev_enabled: bool = False) -> None:
     import pkgutil
 
     try:
-        import cortex
+        import engines
     except ImportError as e:
-        log_warning(f"[cortex_registry] Could not import cortex package: {e}")
+        log_warning(f"[cortex_registry] Could not import engines package: {e}")
         return
 
     registry = get_cortex_registry()
 
     try:
-        base_path = os.path.dirname(cortex.__file__)
+        base_path = os.path.dirname(engines.__file__)
         for entry in os.scandir(base_path):
             if not entry.is_dir():
                 continue
@@ -272,7 +313,7 @@ def register_default_engines(*, dev_enabled: bool = False) -> None:
                 )
 
             base_module_name = base_modules[0]
-            module_path = f"cortex.{entry.name}.{base_module_name}"
+            module_path = f"engines.{entry.name}.{base_module_name}"
             try:
                 mod = importlib.import_module(module_path)
             except Exception as e:

@@ -947,7 +947,7 @@ class OllamaCompatServer:
         import uvicorn
 
         host = os.getenv("OLLAMA_HOST", "0.0.0.0")
-        port = int(os.getenv("OLLAMA_PORT", "11434"))
+        port = int(os.getenv("OLLAMA_PORT", "11435"))
         config = uvicorn.Config(self.app, host=host, port=port, log_level="info")
         server = uvicorn.Server(config)
 

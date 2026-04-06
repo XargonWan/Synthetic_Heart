@@ -113,6 +113,25 @@ class VoxRegistry:
         self._instances.pop(name, None)
         log_debug(f"[vox_registry] Unloaded engine instance '{name}'")
 
+    def register_instance(
+        self,
+        name: str,
+        instance: Any,
+        label: str = "",
+    ) -> None:
+        """Register a pre-built engine instance directly, bypassing module loading."""
+        self._engine_modules[name] = "__direct__"
+        self._engine_meta[name] = {"capabilities": {}, "label": label}
+        self._instances[name] = instance
+        log_debug(f"[vox_registry] Registered direct instance '{name}'")
+
+    def unregister_engine(self, name: str) -> None:
+        """Remove an engine from all registry data structures."""
+        self._engine_modules.pop(name, None)
+        self._engine_meta.pop(name, None)
+        self._instances.pop(name, None)
+        log_debug(f"[vox_registry] Unregistered engine '{name}'")
+
 
 # ---------------------------------------------------------------------------
 # Module-level singleton

@@ -30,6 +30,7 @@ getting started.
    cortex
    interfaces
    plugins
+   external_endpoints
    auris_vox
    vrm_animations
    animation_system

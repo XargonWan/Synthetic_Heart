@@ -168,7 +168,6 @@ class SeleniumElevenLabsPlugin:
                 headless=False,
                 use_subprocess=False,
                 version_main=chromium_major,
-                browser_executable_path=chromium_binary,
             )
             wait = WebDriverWait(driver, 60)
             try:

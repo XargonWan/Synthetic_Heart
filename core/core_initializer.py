@@ -158,6 +158,22 @@ class CoreInitializer:
                     f"[core_initializer] Failed to pre-load BASE_CORTEX: {preload_exc}"
                 )
 
+            # 0.6. Register external endpoints BEFORE loading the cortex engine so that
+            # ext_* engines are present in CortexRegistry._engines when load_plugin runs.
+            try:
+                from core.external_endpoints.registry import (
+                    get_external_endpoint_registry,
+                )
+
+                await get_external_endpoint_registry().register_all_enabled()
+                log_debug(
+                    "[core_initializer] ✅ external endpoints pre-registered (before cortex load)"
+                )
+            except Exception as e:
+                log_warning(
+                    f"[core_initializer] external endpoint pre-registration failed: {e}"
+                )
+
             # 1. Load Cortex engine
             await self._load_cortex_engine(notify_fn)
 
@@ -186,6 +202,18 @@ class CoreInitializer:
                 log_debug("[core_initializer] ✅ ensure_plugin_tables() completed")
             except Exception as e:
                 log_warning(f"[core_initializer] ensure_plugin_tables failed: {e}")
+
+            # 2.2. Re-sync external endpoints (idempotent; catches any endpoints registered
+            # by plugins during step 2 that were not present at step 0.6).
+            try:
+                from core.external_endpoints.registry import (
+                    get_external_endpoint_registry,
+                )
+
+                await get_external_endpoint_registry().register_all_enabled()
+                log_debug("[core_initializer] ✅ external endpoints re-synced")
+            except Exception as e:
+                log_warning(f"[core_initializer] external endpoint re-sync failed: {e}")
 
             # 2.5. Auto-register validation rules from loaded components
             log_debug(

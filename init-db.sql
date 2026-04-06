@@ -109,6 +109,44 @@ CREATE TABLE IF NOT EXISTS agent_tasks (
     INDEX idx_agent_created (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+-- External Endpoints: user-defined external AI service endpoints
+-- (OpenAI-compatible, Gemini, Anthropic, custom)
+CREATE TABLE IF NOT EXISTS external_endpoints (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    name VARCHAR(255) NOT NULL UNIQUE,
+    display_label VARCHAR(255) NOT NULL DEFAULT '',
+    protocol VARCHAR(50) NOT NULL DEFAULT 'openai',
+    base_url VARCHAR(1024) NOT NULL DEFAULT '',
+    api_key_enc TEXT,
+    enabled BOOLEAN NOT NULL DEFAULT 1,
+    capabilities JSON,
+    subsystem_map JSON,
+    available_models JSON,
+    default_model VARCHAR(255),
+    probe_status VARCHAR(50) NOT NULL DEFAULT 'never',
+    last_probe_at DATETIME,
+    extra_config JSON,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    INDEX idx_enabled (enabled),
+    INDEX idx_protocol (protocol)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Default external endpoint: Selenium LLM Engine
+INSERT IGNORE INTO external_endpoints
+    (name, display_label, protocol, base_url, enabled, capabilities, subsystem_map, probe_status)
+VALUES
+    (
+        'selenium-llm-engine',
+        'Selenium LLM Engine',
+        'openai',
+        'http://synth-selenium-llm-engine:8000',
+        1,
+        '{"llm": true, "tts": false, "stt": false}',
+        '{"cortex": true, "vox": false, "auris": false, "live": false}',
+        'never'
+    );
+
 -- Core config table (authoritative for config_registry)
 CREATE TABLE IF NOT EXISTS config (
     `config_key` VARCHAR(255) PRIMARY KEY,
@@ -117,11 +155,7 @@ CREATE TABLE IF NOT EXISTS config (
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
-INSERT IGNORE INTO config (`config_key`, `value`) VALUES ('BASE_CORTEX', 'selenium_chatgpt');
-INSERT IGNORE INTO config (`config_key`, `value`) VALUES ('GRILLO_CORTEX', 'Default');
-INSERT IGNORE INTO config (`config_key`, `value`) VALUES ('TRAINER_CORTEX', 'Default');
-
-INSERT IGNORE INTO config (`config_key`, `value`) VALUES ('BASE_CORTEX', 'selenium_chatgpt');
+INSERT IGNORE INTO config (`config_key`, `value`) VALUES ('BASE_CORTEX', 'selenium-llm-engine');
 INSERT IGNORE INTO config (`config_key`, `value`) VALUES ('GRILLO_CORTEX', 'Default');
 INSERT IGNORE INTO config (`config_key`, `value`) VALUES ('TRAINER_CORTEX', 'Default');
 
