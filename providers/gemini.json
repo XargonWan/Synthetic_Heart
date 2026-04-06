@@ -9,7 +9,7 @@
   "requires_api_key": true,
   "api_key_placeholder": "AIzaSy…",
   "api_key_hint": "Get your API key at https://aistudio.google.com/app/apikey",
-  "default_capabilities": { "cortex": true, "vox": false, "auris": false, "live": true },
+  "default_capabilities": { "cortex": true, "vox": false, "auris": false, "live": true, "vision": true },
   "suggested_name": "gemini",
   "suggested_label": "Google Gemini",
   "extra_config": {},

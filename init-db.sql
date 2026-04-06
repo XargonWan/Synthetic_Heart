@@ -160,6 +160,7 @@ CREATE TABLE IF NOT EXISTS config (
 INSERT IGNORE INTO config (`config_key`, `value`) VALUES ('BASE_CORTEX', 'selenium-llm-engine');
 INSERT IGNORE INTO config (`config_key`, `value`) VALUES ('GRILLO_CORTEX', 'Default');
 INSERT IGNORE INTO config (`config_key`, `value`) VALUES ('TRAINER_CORTEX', 'Default');
+INSERT IGNORE INTO config (`config_key`, `value`) VALUES ('ACTIVE_IRIS_ENGINE', 'selenium-llm-engine');
 
 -- Grant privileges to synth user from any host
 GRANT ALL PRIVILEGES ON synth.* TO 'synth'@'%' IDENTIFIED BY 'synth';

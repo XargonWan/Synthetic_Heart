@@ -9,7 +9,7 @@
   "requires_api_key": false,
   "api_key_placeholder": "(optional)",
   "api_key_hint": "Provide an API key if your service requires one.",
-  "default_capabilities": { "cortex": true, "vox": false, "auris": false, "live": false },
+  "default_capabilities": { "cortex": true, "vox": false, "auris": false, "live": false, "vision": false },
   "suggested_name": "",
   "suggested_label": "",
   "extra_config": {},
