@@ -9,7 +9,7 @@
   "requires_api_key": true,
   "api_key_placeholder": "github_pat_…",
   "api_key_hint": "Create a token at https://github.com/settings/tokens (no scopes needed for public models)",
-  "default_capabilities": { "cortex": true, "vox": false, "auris": false, "live": false },
+  "default_capabilities": { "cortex": true, "vox": false, "auris": false, "live": false, "vision": false },
   "suggested_name": "github-models",
   "suggested_label": "GitHub Models",
   "extra_config": {},

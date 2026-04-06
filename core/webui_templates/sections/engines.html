@@ -6,7 +6,7 @@
             <h2>Engines</h2>
             <div class="meta" style="margin-bottom:16px;">
                 Connect external AI services: Ollama, OpenAI, Gemini, Anthropic, or any OpenAI-compatible API, even self hosted.
-                Endpoints are auto-probed for capabilities and can be mapped to Cortex (chat/text, reasoning), Vox (voice, TTS), Auris (audio, STT), or Live (real-time, multimodal) subsystems.
+                Endpoints are auto-probed for capabilities and can be mapped to Cortex (chat/text, reasoning), Vox (voice, TTS), Auris (audio, STT), Iris (image/video vision), or Live (real-time, multimodal) subsystems.
             </div>
 
             <!-- Toolbar -->
@@ -104,6 +104,21 @@
                     </div>
                 </div>
                 <div class="components-list" id="components-auris-list"><div class="meta">Loading…</div></div>
+            </div>
+
+            <!-- ── Iris ────────────────────────────────────────────────────── -->
+            <div style="margin-top:28px; padding-top:20px; border-top:1px solid var(--border,#444);">
+                <h3 style="margin:0 0 6px; font-size:1rem; color:var(--muted); text-transform:uppercase; letter-spacing:0.06em;">Iris — Image &amp; Video Understanding</h3>
+                <div class="meta" style="margin-bottom:10px;">Vision engines for analysing images and video frames. Select the active engine using the dropdown below.</div>
+                <div id="iris-controls" style="display:flex; gap:12px; align-items:flex-start; margin-bottom:12px; flex-wrap:wrap;">
+                    <select id="iris-engine-select" style="min-width:220px;">
+                    </select>
+                    <div id="iris-engine-info" class="meta" style="min-width:260px; display:none;">
+                        <div style="font-weight:600;" id="iris-engine-label">—</div>
+                        <div style="font-size:0.9rem; color:var(--muted);" id="iris-engine-description">—</div>
+                    </div>
+                </div>
+                <div class="components-list" id="components-iris-list"><div class="meta">Loading…</div></div>
             </div>
 
             <!-- ── Live ────────────────────────────────────────────────────── -->

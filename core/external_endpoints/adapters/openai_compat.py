@@ -340,6 +340,82 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
         return None
 
     # ------------------------------------------------------------------
+    # Vision (Iris) – OpenAI vision message format
+    # ------------------------------------------------------------------
+
+    async def describe_image(
+        self,
+        image_bytes: bytes,
+        mime_type: str | None = None,
+        prompt: str | None = None,
+        **kwargs: Any,
+    ) -> str | None:
+        """Describe *image_bytes* using the OpenAI vision message format.
+
+        Sends a chat completion request with the image embedded as a base64
+        ``image_url`` content part, compatible with GPT-4o, LLaVA, Qwen-VL
+        and other vision-capable OpenAI-compatible endpoints.
+
+        Returns ``None`` if the request fails or the endpoint does not support
+        vision.
+        """
+        import base64
+
+        import aiohttp
+
+        effective_mime = mime_type or "image/jpeg"
+        b64 = base64.b64encode(image_bytes).decode("ascii")
+        data_url = f"data:{effective_mime};base64,{b64}"
+        effective_prompt = prompt or "Describe this image in detail."
+
+        messages: list[dict[str, Any]] = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": effective_prompt},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": data_url},
+                    },
+                ],
+            }
+        ]
+
+        payload: dict[str, Any] = {
+            "model": kwargs.get("model", "default"),
+            "messages": messages,
+            "max_tokens": kwargs.get("max_tokens", 1024),
+            "stream": False,
+        }
+        headers = {
+            "Authorization": f"Bearer {self._api_key}",
+            "Content-Type": "application/json",
+        }
+        chat_url = self._http_chat_url()
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    chat_url,
+                    json=payload,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=120),
+                ) as resp:
+                    if resp.status != 200:
+                        return None
+                    result = await resp.json()
+                    return (
+                        result.get("choices", [{}])[0]
+                        .get("message", {})
+                        .get("content", "")
+                        or None
+                    )
+        except Exception as exc:
+            from core.logging_utils import log_warning
+
+            log_warning(f"[openai_compat] describe_image failed: {exc}")
+            return None
+
+    # ------------------------------------------------------------------
     # Probe / health
     # ------------------------------------------------------------------
 

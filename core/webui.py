@@ -7979,6 +7979,47 @@ class SynthWebUIInterface:
         except Exception as exc:
             log_warning(f"{LOG_PREFIX} unable to build Live engine list: {exc}")
 
+        iris_data: list[dict] = []
+        try:
+            from core.iris_registry import IRIS_REGISTRY
+
+            active_iris: str | None = None
+            try:
+                active_iris = config_registry.get_value("ACTIVE_IRIS_ENGINE", None)
+            except Exception:
+                pass
+            iris_data.append(
+                {
+                    "name": "disabled",
+                    "display_name": "Disabled",
+                    "label": "No vision engine (disabled)",
+                    "capabilities": {},
+                    "description": "Vision disabled",
+                    "status": "success",
+                    "details": "Active" if active_iris == "disabled" else "",
+                    "error": None,
+                    "active": active_iris == "disabled",
+                }
+            )
+            for _name in IRIS_REGISTRY.get_available_engines():
+                _meta = IRIS_REGISTRY.get_engine_meta(_name)
+                _caps = _meta.get("capabilities") or {}
+                iris_data.append(
+                    {
+                        "name": _name,
+                        "display_name": _name.replace("_", " ").title(),
+                        "label": _meta.get("label", ""),
+                        "capabilities": _caps,
+                        "description": f"Vision engine — capabilities: {_caps_desc(_caps)}",
+                        "status": "success",
+                        "details": "Active" if _name == active_iris else "",
+                        "error": None,
+                        "active": _name == active_iris,
+                    }
+                )
+        except Exception as exc:
+            log_warning(f"{LOG_PREFIX} unable to build Iris engine list: {exc}")
+
         # Build scope overrides for the UI (Grillo, Trainer, Live cortex selectors)
         # Single source of truth: derive options from the same data already built above.
         cortex_scopes: list[dict] = []
@@ -8036,6 +8077,7 @@ class SynthWebUIInterface:
             },
             "vox": vox_data,
             "auris": auris_data,
+            "iris": iris_data,
             "live": live_data,
             "interfaces": interfaces_data,
             "plugins": plugins_data,

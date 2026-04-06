@@ -545,12 +545,28 @@ class ExternalEndpointRegistry:
                     f"[ext_endpoints] Live registration failed for '{ep.name}': {exc}"
                 )
 
+        if effective.get("vision"):
+            try:
+                from core.external_endpoints.bridges.iris_bridge import (
+                    ExternalIrisEngine,
+                )
+                from core.iris_registry import IRIS_REGISTRY
+
+                iris_bridge = ExternalIrisEngine(ep, adapter)
+                IRIS_REGISTRY.register_instance(engine_name, iris_bridge, label=label)
+                log_info(f"[ext_endpoints] '{ep.name}' registered as Iris engine")
+            except Exception as exc:
+                log_warning(
+                    f"[ext_endpoints] Iris registration failed for '{ep.name}': {exc}"
+                )
+
     def _unregister_from_all(self, engine_name: str) -> None:
         """Remove an engine from all subsystem registries."""
         _remove_from_cortex(engine_name)
         _remove_from_vox(engine_name)
         _remove_from_auris(engine_name)
         _remove_from_live(engine_name)
+        _remove_from_iris(engine_name)
 
 
 def _remove_from_cortex(name: str) -> None:
@@ -585,6 +601,15 @@ def _remove_from_live(name: str) -> None:
         from core.live_registry import LIVE_REGISTRY
 
         LIVE_REGISTRY.unregister_engine(name)
+    except Exception:
+        pass
+
+
+def _remove_from_iris(name: str) -> None:
+    try:
+        from core.iris_registry import IRIS_REGISTRY
+
+        IRIS_REGISTRY.unregister_engine(name)
     except Exception:
         pass
 

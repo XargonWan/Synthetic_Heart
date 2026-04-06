@@ -9,7 +9,7 @@
   "requires_api_key": true,
   "api_key_placeholder": "sk-ant-…",
   "api_key_hint": "Get your API key at https://console.anthropic.com/settings/keys",
-  "default_capabilities": { "cortex": true, "vox": false, "auris": false, "live": false },
+  "default_capabilities": { "cortex": true, "vox": false, "auris": false, "live": false, "vision": true },
   "suggested_name": "anthropic",
   "suggested_label": "Anthropic Claude",
   "extra_config": {},
