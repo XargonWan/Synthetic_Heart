@@ -92,6 +92,23 @@ class BaseProtocolAdapter(ABC):
         return None
 
     # ------------------------------------------------------------------
+    # Vision (Iris)
+    # ------------------------------------------------------------------
+
+    async def describe_image(
+        self,
+        image_bytes: bytes,
+        mime_type: str | None = None,
+        prompt: str | None = None,
+        **kwargs: Any,
+    ) -> str | None:
+        """Analyse image bytes and return a textual description.
+
+        Returns ``None`` if vision analysis is not supported by this adapter.
+        """
+        return None
+
+    # ------------------------------------------------------------------
     # Probe / health
     # ------------------------------------------------------------------
 

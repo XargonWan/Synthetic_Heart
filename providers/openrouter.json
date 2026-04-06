@@ -9,7 +9,7 @@
   "requires_api_key": true,
   "api_key_placeholder": "sk-or-…",
   "api_key_hint": "Get your API key at https://openrouter.ai/settings/keys",
-  "default_capabilities": { "cortex": true, "vox": false, "auris": false, "live": false },
+  "default_capabilities": { "cortex": true, "vox": false, "auris": false, "live": false, "vision": false },
   "suggested_name": "openrouter",
   "suggested_label": "OpenRouter",
   "extra_config": {},

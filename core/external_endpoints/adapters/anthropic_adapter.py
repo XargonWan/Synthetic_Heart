@@ -211,3 +211,78 @@ class AnthropicAdapter(BaseProtocolAdapter):
         self, audio_bytes: bytes, mime_type: str | None = None, **kwargs: Any
     ) -> str | None:
         return None
+
+    # ------------------------------------------------------------------
+    # Vision (Iris) – Anthropic Messages API image format
+    # ------------------------------------------------------------------
+
+    async def describe_image(
+        self,
+        image_bytes: bytes,
+        mime_type: str | None = None,
+        prompt: str | None = None,
+        **kwargs: Any,
+    ) -> str | None:
+        """Describe *image_bytes* using the Anthropic Messages API image format.
+
+        Sends a message with an ``image`` content block containing the image as
+        base64.  Supported MIME types: ``image/jpeg``, ``image/png``,
+        ``image/gif``, ``image/webp``.
+
+        Returns ``None`` if the request fails or the MIME type is unsupported.
+        """
+        import base64
+
+        _SUPPORTED_MIME = {"image/jpeg", "image/png", "image/gif", "image/webp"}
+        effective_mime = mime_type or "image/jpeg"
+        if effective_mime not in _SUPPORTED_MIME:
+            return None
+
+        effective_prompt = prompt or "Describe this image in detail."
+        b64 = base64.b64encode(image_bytes).decode("ascii")
+
+        messages: list[dict[str, Any]] = [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": effective_mime,
+                            "data": b64,
+                        },
+                    },
+                    {"type": "text", "text": effective_prompt},
+                ],
+            }
+        ]
+        request_model = kwargs.get("model", self.DEFAULT_MODEL)
+        payload: dict[str, Any] = {
+            "model": request_model,
+            "messages": messages,
+            "max_tokens": kwargs.get("max_tokens", 1024),
+        }
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{self._base_url}/v1/messages",
+                    json=payload,
+                    headers=self._headers(),
+                    timeout=aiohttp.ClientTimeout(total=120),
+                ) as resp:
+                    data = await resp.json()
+                    if resp.status != 200:
+                        return None
+                    content_blocks = data.get("content", [])
+                    return (
+                        "".join(
+                            block.get("text", "")
+                            for block in content_blocks
+                            if block.get("type") == "text"
+                        )
+                        or None
+                    )
+        except Exception as exc:
+            log_debug(f"[anthropic_adapter] describe_image failed: {exc}")
+            return None

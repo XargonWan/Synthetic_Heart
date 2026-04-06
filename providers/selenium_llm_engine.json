@@ -9,7 +9,7 @@
   "requires_api_key": false,
   "api_key_placeholder": "",
   "api_key_hint": "Selenium LLM Engine must be running as a companion container. See https://github.com/XargonWan/selenium-llm-engine",
-  "default_capabilities": { "cortex": true, "vox": false, "auris": false, "live": false },
+  "default_capabilities": { "cortex": true, "vox": false, "auris": false, "live": false, "vision": true },
   "suggested_name": "selenium-llm-engine",
   "suggested_label": "Selenium LLM Engine",
   "extra_config": {
