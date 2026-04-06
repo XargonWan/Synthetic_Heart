@@ -112,8 +112,7 @@ class GeminiAdapter(BaseProtocolAdapter):
                 model=request_model,
                 finish_reason="stop",
             )
-        except Exception as exc:
-            log_warning(f"[gemini_adapter] chat_completion failed: {exc}")
+        except Exception:
             raise
 
     async def stream_chat_completion(

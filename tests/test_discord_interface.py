@@ -527,7 +527,7 @@ async def test_join_voice_no_autostart_when_no_trainer(monkeypatch):
     driven exclusively by trainer presence in channel members.
     """
     try:
-        from cortex.live.live_base import LiveSessionManager as _LSM
+        from engines.live.live_base import LiveSessionManager as _LSM
 
         monkeypatch.setattr(_LSM, "get_instance", lambda: _LSM())
         monkeypatch.setattr(_LSM, "is_trainer_only_voice", lambda self: False)
@@ -564,7 +564,7 @@ async def test_join_voice_no_autostart_when_no_trainer(monkeypatch):
 async def test_join_voice_autostart_when_trainer_present(monkeypatch):
     """If the trainer is in the channel after join, live session starts automatically."""
     try:
-        from cortex.live.live_base import LiveSessionManager as _LSM
+        from engines.live.live_base import LiveSessionManager as _LSM
 
         monkeypatch.setattr(_LSM, "get_instance", lambda: _LSM())
         monkeypatch.setattr(_LSM, "is_trainer_only_voice", lambda self: False)
@@ -669,7 +669,7 @@ async def test_stop_live_voice_uses_stored_engine_not_global_cortex(monkeypatch)
 
     # Silence LiveSessionManager.deactivate_live_for_path
     try:
-        from cortex.live.live_base import LiveSessionManager as _LSM
+        from engines.live.live_base import LiveSessionManager as _LSM
 
         async def _noop_deactivate(self, path, gid):
             pass
@@ -816,7 +816,7 @@ async def test_start_live_voice_uses_registry_engine_not_global_cortex(monkeypat
 
     # Silence activate_live_for_path
     try:
-        from cortex.live.live_base import LiveSessionManager as _LSM2
+        from engines.live.live_base import LiveSessionManager as _LSM2
 
         async def _noop_activate(self, path, gid, rejoin_callback=None):
             pass
