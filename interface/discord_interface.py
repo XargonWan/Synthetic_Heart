@@ -1434,7 +1434,7 @@ class DiscordInterface:
             # A Discord-level rejoin would race with the Gemini reconnect
             # and cause cascading restarts.
             try:
-                from engines.live.live_base import LiveSessionManager as _LSM
+                from cortex.live.live_base import LiveSessionManager as _LSM
 
                 await _LSM.get_instance().activate_live_for_path(
                     live_interface_path, guild_id
@@ -1520,7 +1520,7 @@ class DiscordInterface:
                 _ipath = state_backup.get("interface_path") if state_backup else None
                 if _ipath:
                     try:
-                        from engines.live.live_base import LiveSessionManager
+                        from cortex.live.live_base import LiveSessionManager
 
                         await (
                             LiveSessionManager.get_instance().deactivate_live_for_path(
@@ -2515,7 +2515,7 @@ class DiscordInterface:
 
             # Gate: LIVE_TRAINER_ONLY_VOICE — only the trainer may request a voice join
             try:
-                from engines.live.live_base import LiveSessionManager as _LSM
+                from cortex.live.live_base import LiveSessionManager as _LSM
 
                 _mgr = _LSM.get_instance()
                 if _mgr.is_trainer_only_voice():

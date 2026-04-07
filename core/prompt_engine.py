@@ -15,7 +15,7 @@ import asyncio
 # Default maximum prompt characters (CHARACTERS, NOT TOKENS)
 # This is used as a safe fallback when no LLM engine provides explicit limits.
 # The actual value comes from the active LLM engine's configuration.
-# For model limits, see the individual cortex/llm_provider/* engines, e.g. MODEL_LIMITS_MAP["default"]
+# For ChatGPT, see cortex/selenium_engine/selenium_chatgpt.py MODEL_LIMITS_MAP["default"]
 DEFAULT_MAX_PROMPT_CHARS = None  # Will be set dynamically from LLM engine
 
 # Chat history limit

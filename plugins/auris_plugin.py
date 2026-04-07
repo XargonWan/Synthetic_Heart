@@ -320,9 +320,7 @@ class AurisPlugin(AIPluginBase):
         in ``plugins/live_engines/`` and are loaded by the Live registry.
         """
         builtins = [
-            # Note: cloud-based engines (e.g. Gemini) are not auto-loaded here;
-            # they are registered only when the user explicitly adds them as an
-            # external endpoint via the External Engines UI.
+            "plugins.auris_engines.gemini",
             "plugins.auris_engines.vosk_engine",
         ]
         for mod in builtins:

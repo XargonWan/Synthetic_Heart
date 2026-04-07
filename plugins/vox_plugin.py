@@ -21,7 +21,6 @@ without configuration changes.
 from __future__ import annotations
 
 import asyncio
-import os
 import re
 import threading
 import time
@@ -788,25 +787,10 @@ class VoxPlugin(AIPluginBase):
     def _import_builtin_engines() -> None:
         """Import built-in Vox engine modules so they self-register."""
         builtins = [
+            "plugins.vox_engines.http",
             # chatterbox moved to _dev; not imported by default
             "plugins.vox_engines.kitten",
         ]
-
-        try:
-            tts_endpoints = os.getenv("TTS_ENDPOINTS", "")
-            if not tts_endpoints:
-                tts_endpoints = config_registry.get_value(
-                    "TTS_ENDPOINTS",
-                    "",
-                    value_type=str,
-                    group="plugins",
-                    component="tts_lipsync",
-                )
-            if tts_endpoints and str(tts_endpoints).strip():
-                builtins.insert(0, "plugins.vox_engines.http")
-        except Exception:
-            pass
-
         for mod in builtins:
             try:
                 __import__(mod)

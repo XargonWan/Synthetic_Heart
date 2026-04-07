@@ -57,8 +57,8 @@ class ExternalEndpoint:
         return merged
 
     def engine_name(self) -> str:
-        """Return the name used when registering in SyntH's registries."""
-        return self.name
+        """Return the prefixed name used when registering in SyntH's registries."""
+        return f"ext_{self.name}"
 
     @staticmethod
     def from_row(row: dict[str, Any]) -> "ExternalEndpoint":

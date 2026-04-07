@@ -27,13 +27,17 @@ dependencies = [
     "python-telegram-bot>=22.6",
     "pyyaml>=6.0.3",
     "requests>=2.32.5",
+    "selenium>=4.40.0",
+    "selenium-stealth>=1.0.6",
     "telethon>=1.42.0",
     "tenacity>=9.1.2",
     "tqdm>=4.67.2",
     "tzdata>=2025.3",
+    "undetected-chromedriver>=3.5.5",
     "uvicorn>=0.40.0",
     "watchfiles>=1.1.1",
     "websockets>=15.0.1",
+    "webdriver-manager>=4.0.1",
     "setuptools>=70.0.0",
     "discord-ext-voice-recv>=0.5.2a179",
     # Auris/Vox default audio engines (packages that exist on PyPI and build cleanly)
@@ -48,7 +52,6 @@ dependencies = [
     "kittentts",
     "torch",
     "torchaudio",
-    "gemini-cli>=0.1.0",
 ]
 
 [project.optional-dependencies]

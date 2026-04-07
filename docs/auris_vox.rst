@@ -185,10 +185,6 @@ Auris engines are **file-based only** — for real-time / bidirectional streamin
 Available Auris engines
 ~~~~~~~~~~~~~~~~~~~~~~~
 
-Most Auris capabilities are now configured through the External Endpoints UI. Add a provider as an endpoint and enable the `auris` mapping when the endpoint supports STT.
-
-The only built-in Auris engine currently shipped by default is:
-
 .. list-table::
    :header-rows: 1
    :widths: 20 15 65
@@ -196,9 +192,9 @@ The only built-in Auris engine currently shipped by default is:
    * - Alias
      - File
      - Notes
-   * - ``vosk``
-     - ``plugins/auris_engines/vosk_engine.py``
-     - Local speech recognition engine. File-based, offline, and suitable for self-hosted deployments.
+   * - ``gemini``
+     - ``auris_engines/gemini.py``
+     - Wraps the existing Gemini ``handle_live_processing`` call.  File-based.  Requires a loaded Gemini cortex engine.
 
 .. note::
 
@@ -259,9 +255,7 @@ Configuration (all WebUI-configurable):
      - ``true``
      - When ``true``, sends a plain-text message if TTS generation fails.
 
-.. note::
-
-   Legacy ``TTS_*`` config keys (``TTS_ENABLED``, ``TTS_ENDPOINTS``, ``TTS_TIMEOUT_SECONDS``, ``TTS_OUTPUT_DIR``) are still supported by the built-in ``http`` Vox engine for backward compatibility, but the preferred configuration path for new deployments is to register external HTTP TTS servers through the External Endpoints system and map them to ``vox``.
+Backward-compatibility:  All ``TTS_*`` config keys (``TTS_ENABLED``, ``TTS_ENDPOINTS``, ``TTS_TIMEOUT_SECONDS``, ``TTS_OUTPUT_DIR``) still work as before and are read by the ``http`` Vox engine.
 
 WebUI helper endpoints
 ~~~~~~~~~~~~~~~~~~~~~~
@@ -365,7 +359,7 @@ Available Vox engines
      - Notes
    * - ``http``
      - ``vox_engines/http.py``
-     - Legacy built-in HTTP TTS engine. Supports ``TTS_ENDPOINTS`` compatibility and is intended for backward-compatible deployments only. For new external HTTP TTS integrations, prefer adding a custom external endpoint and mapping it to ``vox``.
+     - Calls one or more external HTTP TTS servers.  Reads legacy ``TTS_ENDPOINTS`` config key.  Full failover support.
    * - ``kitten``
      - ``vox_engines/kitten.py``
      - Neural KittenTTS engine; requires the ``kittentts`` package or uses
@@ -394,15 +388,13 @@ No interface or plugin should call a lipsync API directly — all lipsync dispat
 Migration from ``tts_lipsync``
 --------------------------------
 
-The legacy ``tts_lipsync`` plugin is maintained only for backward compatibility and should be avoided for new deployments. To move external HTTP TTS support to the modern external endpoint flow:
+The legacy ``tts_lipsync`` plugin is **still active** for backward-compatibility.  New deployments should switch to Vox:
 
-1. Add a new endpoint in the Web UI under Settings > External Engines / External Endpoints.
-2. Choose ``Protocol: custom`` and set ``Base URL`` to the root URI of your HTTP TTS server.
-3. In ``extra_config``, add ``{"legacy_http_tts": true}`` and any optional adapter settings such as ``tts_voice_wav`` or ``tts_endpoint_path``.
-4. Enable the ``vox`` subsystem mapping for the endpoint.
-5. Set ``ACTIVE_VOX_ENGINE`` to the endpoint ``Name`` you created.
+1. Select a non-``disabled`` engine for ``ACTIVE_VOX_ENGINE`` in the WebUI or ``.env``.
+2. Set ``ACTIVE_VOX_ENGINE = http`` (reads the same ``TTS_ENDPOINTS`` as before).
+3. Optionally disable ``TTS_ENABLED`` to stop the legacy plugin from also attempting TTS.
 
-This registers the endpoint as a first-class Vox engine and removes the need to manage ``TTS_ENDPOINTS`` manually. The built-in ``http`` engine and legacy ``TTS_*`` keys remain available only for compatibility with existing deployments.
+The HTTP Vox engine is a drop-in replacement for ``tts_lipsync``; it reads the same config keys and produces identical output.
 
 Live — Bidirectional Streaming
 -------------------------------
@@ -410,11 +402,10 @@ Live — Bidirectional Streaming
 The **Live** subsystem handles persistent sessions where audio and text flow in both directions simultaneously (e.g. a microphone feed producing transcripts while the system synthesises speech).
 
 Configuration: select the active engine via ``LIVE_CORTEX`` in the WebUI. The components page dropdown is populated with both
-cortex engines of kind ``live`` and any external endpoints that were added
-and mapped to ``live``. The currently-selected value is highlighted and
-persists across page reloads; choosing ``disabled`` turns the subsystem off.
-
-Note: Gemini Live is only available after adding it as an external endpoint and enabling the ``live`` mapping; it is not automatically exposed by default.
+cortex engines of kind ``live`` and any engines registered with
+``LIVE_REGISTRY`` (e.g. ``gemini_live``). The currently-selected value
+is highlighted and persists across page reloads; choosing ``disabled``
+turns the subsystem off.
 
 
 ``LiveEngineBase`` contract
@@ -484,11 +475,10 @@ Available Live engines
      - Notes
    * - ``silero``
      - ``live_engines/silero.py``
-     - Silero VAD with async queue per session. Local, CPU-friendly. Connect a real ASR model in ``_transcribe_segment``.
-
-.. note::
-
-   Gemini Live is not exposed automatically. Add a Gemini Live-capable endpoint through the External Endpoints UI and enable the ``live`` subsystem mapping if you want a Gemini-based live engine.
+     - Silero VAD with async queue per session.  Local, CPU-friendly.  Connect a real ASR model in ``_transcribe_segment``.
+   * - ``gemini_live``
+     - ``live_engines/gemini.py``
+     - Gemini Live WebSocket (stub).  Bidirectional.  Requires ``google-genai`` and ``GOOGLE_API_KEY``.
 
 Adding a Live engine
 ~~~~~~~~~~~~~~~~~~~~~

@@ -1,4 +1,4 @@
-"""Tests that setting a model on an external Cortex engine persists to the DB."""
+"""Tests that setting a model on an ext_* Cortex engine persists to the DB."""
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -31,7 +31,7 @@ def _make_endpoint(
 
 
 def test_set_model_persists_to_db(monkeypatch):
-    """POST /api/components/cortex/model for an external endpoint engine must call
+    """POST /api/components/cortex/model for an ext_* engine must call
     ExternalEndpointRegistry.set_default_model so the selection survives restart."""
 
     endpoint = _make_endpoint()
@@ -61,7 +61,7 @@ def test_set_model_persists_to_db(monkeypatch):
     ):
         resp = client.post(
             "/api/components/cortex/model",
-            json={"engine": "my_ep", "model": "model-b"},
+            json={"engine": "ext_my_ep", "model": "model-b"},
         )
 
     assert resp.status_code == 200
@@ -101,7 +101,7 @@ def test_set_model_persist_failure_does_not_break_response(monkeypatch):
     ):
         resp = client.post(
             "/api/components/cortex/model",
-            json={"engine": "my_ep", "model": "model-a"},
+            json={"engine": "ext_my_ep", "model": "model-a"},
         )
 
     assert resp.status_code == 200
