@@ -184,7 +184,31 @@ class RecentChatsPlugin:
                         f"• Chat {chat['chat_id']}: {time.ctime(chat['last_active'])}\n"
                     )
             else:
-                response = "No recent chats found."
+                # Fallback: if no record in recent_chats, use global chat_history_cache
+                # to avoid misleading "No recent chats found" when global history exists.
+                try:
+                    from core.chat_history_cache import load_global_chat_history
+
+                    global_msgs = await load_global_chat_history(limit=limit)
+                    if global_msgs:
+                        response = "Recent chats from global history:\n"
+                        for msg in list(global_msgs)[:limit]:
+                            ts = msg.get("timestamp", "unknown")
+                            i_path = msg.get("interface_path", "unknown")
+                            sender = msg.get(
+                                "sender_name", msg.get("sender_id", "unknown")
+                            )
+                            text = msg.get("text", "").strip().replace("\n", " ")
+                            if len(text) > 120:
+                                text = text[:117] + "..."
+                            response += f"• [{ts}] {i_path} {sender}: {text}\n"
+                    else:
+                        response = "No recent chats found."
+                except Exception as db_e:
+                    log_error(
+                        f"[recent_chats] Failed to load global fallback history: {db_e}"
+                    )
+                    response = "No recent chats found."
 
             await bot.send_message(original_message.chat_id, response)
         except Exception as e:

@@ -88,7 +88,7 @@ services:
       - TZ=${TZ:-Asia/Tokyo}
     ports:
       - "14848:8000"  # API port
-      - "3006:3000"   # webtop interface
+      - "3001:3001"   # webtop interface
     volumes:
       - synth_selenium_data:/app/data
       - synth_selenium_config:/config

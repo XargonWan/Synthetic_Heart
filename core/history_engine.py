@@ -237,6 +237,9 @@ def _source_label(
         return None
     if current_interface_path and entry_path == current_interface_path:
         return None
+    pretty = entry.get("interface_path_pretty")
+    if pretty:
+        return str(pretty)
     return str(entry_path)
 
 
@@ -504,8 +507,7 @@ class HistoryEngine:
                     unified_candidates.sort(key=_uni_sort_key)
 
                     # Filter out internal system messages (e.g. Grillo tags, Pattern Analysis)
-                    # These typically appear on '.../-1' as self-monologues.
-                    # We preserve actual chat on '/-1' (valid WebUI sessions).
+                    # Queste tipicamente appaiono su '.../-1' come monologhi di sistema.
                     def _is_internal_noise(m: dict) -> bool:
                         path = str(m.get("interface_path", "") or "")
                         if not path.endswith("/-1"):
@@ -515,14 +517,13 @@ class HistoryEngine:
                         if not txt:
                             return False
 
-                        # Heuristics for non-chat system monologues
+                        # Euristiche per monologhi di sistema non chat
                         if "G.R.I.L.L.O." in txt:
                             return True
                         if txt.startswith("Pattern analysis"):
                             return True
                         if txt.startswith("Reflecting on"):
                             return True
-                        # Grillo memory consolidation / diary reflection patterns
                         if txt.startswith("Recent cycles"):
                             return True
                         if txt.startswith("Analysis of recent"):
@@ -531,7 +532,6 @@ class HistoryEngine:
                             return True
                         if txt.startswith("Relationship Reflection:"):
                             return True
-                        # Messages from 'self' on /-1 are almost always system monologues
                         sender = str(m.get("sender_name", "") or "")
                         if sender.lower() == "self":
                             return True
@@ -549,6 +549,21 @@ class HistoryEngine:
 
                 # Filter out the current inbound message to avoid duplication
                 input_text = (text or "").strip()
+
+                # LOG: mostra quanti messaggi e da quali path
+                from core.logging_utils import log_debug
+
+                log_debug(
+                    f"[history_engine] Unified candidates totali: {len(unified_candidates)}"
+                )
+                path_counter = {}
+                for m in unified_candidates:
+                    ipath = m.get("interface_path")
+                    if ipath:
+                        path_counter[ipath] = path_counter.get(ipath, 0) + 1
+                log_debug(
+                    f"[history_engine] Messaggi per interface_path: {path_counter}"
+                )
 
                 for m in unified_candidates[-verbosity:] if verbosity > 0 else []:
                     # Skip if this entry's text matches the current input
@@ -579,6 +594,10 @@ class HistoryEngine:
                         other_lines.append(line)
 
                     seen_history.add(k)
+
+                log_debug(
+                    f"[history_engine] Messaggi globali passati al prompt: {len(local_lines) + len(other_lines)} (locali: {len(local_lines)}, altri: {len(other_lines)})"
+                )
 
                 # Preserve legacy `history_current_chat` as the merged unified view
                 history_current_chat = local_lines + other_lines
