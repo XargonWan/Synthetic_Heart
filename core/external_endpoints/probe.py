@@ -58,9 +58,13 @@ def get_adapter_for_endpoint(
             raise ValueError(
                 f"[probe] Endpoint '{endpoint.name}' (openai) requires a base_url."
             )
+        timeout = float(
+            (endpoint.extra_config or {}).get("timeout", 60.0)
+        )
         return OpenAICompatAdapter(
             base_url=endpoint.base_url,
             api_key=api_key,
+            timeout=timeout,
         )
 
     if proto == EndpointProtocol.GEMINI:
@@ -103,9 +107,13 @@ def get_adapter_for_endpoint(
                 OpenAICompatAdapter,
             )
 
+            timeout = float(
+                (endpoint.extra_config or {}).get("timeout", 60.0)
+            )
             return OpenAICompatAdapter(
                 base_url=endpoint.base_url,
                 api_key=api_key,
+                timeout=timeout,
             )
         raise ValueError(
             f"[probe] Endpoint '{endpoint.name}' (custom) requires a base_url."

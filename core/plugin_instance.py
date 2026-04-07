@@ -400,10 +400,11 @@ async def handle_incoming_message(
 
         if message is None and isinstance(context_memory_or_prompt, dict):
             prompt = context_memory_or_prompt
+            payload = prompt.get("input", {}).get("payload", {})
             message = SimpleNamespace(
                 chat_id="TARDIS / system / events",
                 message_id=int(datetime.utcnow().timestamp() * 1000) % 1_000_000,
-                text=prompt.get("input", {}).get("payload", {}).get("description", ""),
+                text=payload.get("text") or payload.get("description") or "",
                 date=datetime.utcnow(),
                 from_user=SimpleNamespace(id=0, full_name="system", username="system"),
                 reply_to_message=None,

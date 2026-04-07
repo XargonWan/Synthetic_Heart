@@ -31,7 +31,10 @@ def test_plugin_instance_injects_local_time_for_prebuilt_prompt(monkeypatch):
         # Return None to avoid passing through message_chain
         return None
 
-    fake_plugin = SimpleNamespace(handle_incoming_message=fake_handle_incoming_message)
+    fake_plugin = SimpleNamespace(
+        handle_incoming_message=fake_handle_incoming_message,
+        model_limits_map={"default": 1000},
+    )
     monkeypatch.setattr(plugin_instance, "plugin", fake_plugin)
 
     # Patch get_local_time_fields to deterministic value
@@ -53,3 +56,32 @@ def test_plugin_instance_injects_local_time_for_prebuilt_prompt(monkeypatch):
     assert payload.get("local_time") == "22:45"
     assert payload.get("local_hour") == 22
     assert payload.get("time_of_day") == "late_evening"
+
+
+def test_plugin_instance_prebuilt_prompt_uses_payload_text(monkeypatch):
+    prebuilt = {
+        "input": {
+            "payload": {
+                "text": "task run",
+                "source": {"interface_path": "agent:task"},
+            }
+        },
+        "system_message": {"type": "agent_iteration"},
+    }
+
+    captured = {}
+
+    async def fake_handle_incoming_message(bot, message, prompt):
+        captured["message_text"] = getattr(message, "text", None)
+        return None
+
+    fake_plugin = SimpleNamespace(handle_incoming_message=fake_handle_incoming_message)
+    monkeypatch.setattr(plugin_instance, "plugin", fake_plugin)
+
+    asyncio.run(
+        plugin_instance.handle_incoming_message(
+            bot=None, message=None, context_memory_or_prompt=prebuilt
+        )
+    )
+
+    assert captured.get("message_text") == "task run"

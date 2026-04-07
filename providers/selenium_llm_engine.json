@@ -12,6 +12,8 @@
   "default_capabilities": { "cortex": true, "vox": false, "auris": false, "live": false },
   "suggested_name": "selenium-llm-engine",
   "suggested_label": "Selenium LLM Engine",
-  "extra_config": {},
+  "extra_config": {
+    "timeout": 300
+  },
   "sort_order": 60
 }
