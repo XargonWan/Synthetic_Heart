@@ -736,7 +736,7 @@ async def init_db() -> None:
                 # Insert default config entries if they don't exist (use `config` table)
                 await cur.execute(
                     """
-                    INSERT IGNORE INTO config (`config_key`, `value`) VALUES ('BASE_CORTEX', 'selenium_chatgpt')
+                    INSERT IGNORE INTO config (`config_key`, `value`) VALUES ('BASE_CORTEX', 'selenium-llm-engine')
                     """
                 )
                 await cur.execute(
@@ -749,6 +749,57 @@ async def init_db() -> None:
                     INSERT IGNORE INTO config (`config_key`, `value`) VALUES ('TRAINER_CORTEX', 'Default')
                     """
                 )
+
+                # Runtime migration: heal cortex config keys that may have been
+                # corrupted by the stale-engine fallback bug.  The invariant is:
+                #   - Scope overrides (TRAINER/GRILLO/LIVE_CORTEX) must be 'Default'
+                #     unless they explicitly name a configured external endpoint.
+                #   - BASE_CORTEX must name a configured external endpoint; if it
+                #     doesn't, switch to the best available one (selenium-first).
+                # Wrapped in a separate try/except because external_endpoints may
+                # not exist on a first run (it is created by the plugin layer).
+                try:
+                    # 1. Reset scope overrides that point to unconfigured names.
+                    await cur.execute(
+                        """
+                        UPDATE config
+                        SET value = 'Default'
+                        WHERE config_key IN ('TRAINER_CORTEX', 'GRILLO_CORTEX', 'LIVE_CORTEX')
+                          AND value NOT IN ('', 'Default', 'None')
+                          AND NOT EXISTS (
+                              SELECT 1 FROM external_endpoints
+                              WHERE name = config.value AND enabled = 1
+                          )
+                        """
+                    )
+                    # 2. Reset BASE_CORTEX if it points to a name not in external_endpoints.
+                    #    Only switch when there IS at least one enabled external endpoint.
+                    await cur.execute(
+                        """
+                        UPDATE config AS c
+                        SET c.value = (
+                            SELECT e.name
+                            FROM external_endpoints e
+                            WHERE e.enabled = 1
+                            ORDER BY
+                                CASE WHEN e.name LIKE '%%selenium%%' THEN 0 ELSE 1 END,
+                                e.id
+                            LIMIT 1
+                        )
+                        WHERE c.config_key = 'BASE_CORTEX'
+                          AND NOT EXISTS (
+                              SELECT 1 FROM external_endpoints ee
+                              WHERE ee.name = c.value AND ee.enabled = 1
+                          )
+                          AND EXISTS (
+                              SELECT 1 FROM external_endpoints ex
+                              WHERE ex.enabled = 1
+                          )
+                        """
+                    )
+                except Exception:
+                    pass  # external_endpoints table may not exist yet on a fresh install
+
         except Exception as e:
             print(f"[init_db] Error: {e}")
 

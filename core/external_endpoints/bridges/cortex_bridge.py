@@ -116,37 +116,9 @@ class ExternalCortexEngine(AIPluginBase):
 
         The message_chain (plugin_instance) drives the full pipeline; this method
         only handles the LLM call — same contract as openrouter/gemini engine.
-
-        Correction prompts are skipped immediately: selenium/browser engines cannot
-        reliably produce corrected JSON and would trigger a multi-second bombardment
-        loop (CORRECTOR_RETRIES attempts × ~20 s each).
+        Correction prompts are forwarded to the engine like any other prompt;
+        the corrector loop is managed entirely by the message chain.
         """
-        # Detect correction prompts — return None so the corrector stops retrying.
-        _prompt_dict: dict[str, Any] | None = None
-        if isinstance(prompt, dict):
-            _prompt_dict = prompt
-        elif isinstance(prompt, str):
-            try:
-                _parsed = json.loads(prompt)
-                if isinstance(_parsed, dict):
-                    _prompt_dict = _parsed
-            except (json.JSONDecodeError, ValueError):
-                pass
-
-        if _prompt_dict is not None:
-            sm = _prompt_dict.get("system_message", {})
-            if isinstance(sm, dict) and sm.get("type") in {
-                "error",
-                "correction",
-                "invalid_json",
-                "validation_error",
-            }:
-                log_warning(
-                    f"[cortex_bridge:{self._endpoint.name}] Skipping correction prompt — "
-                    "external/browser engines do not support the JSON correction loop"
-                )
-                return None
-
         try:
             messages = self._build_messages(prompt)
             return await self.generate_response(messages)

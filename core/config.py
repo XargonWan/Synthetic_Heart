@@ -352,11 +352,24 @@ async def get_active_cortex_engine(scope: str | None = None) -> str:
                 raise ValueError(f"Cortex engine '{chosen}' is not registered")
             log_warning(
                 f"[config] ⚠️ Cortex engine '{chosen}' is no longer registered. "
-                f"Falling back to '{fallback}'. Update BASE_CORTEX to silence this warning."
+                f"Falling back to '{fallback}'. "
+                f"Update {'BASE_CORTEX' if scope is None else scope.upper() + '_CORTEX'} to silence this warning."
             )
-            # Persist the corrected value to avoid the warning on every restart.
+            # Persist the corrected value to the right config key.
+            # When the stale name came from a scope override (TRAINER_CORTEX,
+            # GRILLO_CORTEX, LIVE_CORTEX), reset that scope key to 'Default' so
+            # it falls through to BASE_CORTEX — do NOT touch BASE_CORTEX.
+            # When the stale name is BASE_CORTEX itself (scope is None), update
+            # BASE_CORTEX to the fallback.
             try:
-                await config_registry.set_value("BASE_CORTEX", fallback)
+                if scope is None:
+                    await config_registry.set_value("BASE_CORTEX", fallback)
+                elif scope == "trainer":
+                    await config_registry.set_value("TRAINER_CORTEX", "Default")
+                elif scope == "grillo":
+                    await config_registry.set_value("GRILLO_CORTEX", "Default")
+                elif scope == "live":
+                    await config_registry.set_value("LIVE_CORTEX", "Default")
             except Exception:
                 pass
             chosen = fallback

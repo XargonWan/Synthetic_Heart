@@ -1059,6 +1059,7 @@ async def universal_send(interface_send_func, *args, text: str = None, **kwargs)
         "context",
         "error_retry_policy",
         "interface_path",
+        "skip_history",
     }
     for param in excluded_params:
         kwargs.pop(param, None)

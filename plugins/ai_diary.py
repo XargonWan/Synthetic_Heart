@@ -1589,7 +1589,7 @@ class DiaryPlugin:
                 FROM ai_diary
                 WHERE timestamp >= DATE_SUB(CURDATE(), INTERVAL 7 DAY)
                 GROUP BY DATE(timestamp)
-                HAVING row_count > 1 OR combined LIKE '%---%'
+                HAVING row_count > 1 OR combined LIKE '%%---%%'
                 ORDER BY MIN(timestamp) ASC
                 LIMIT 1
                 """
