@@ -451,10 +451,13 @@ async def gather_recon_contributions(
     # Single LLM call
     engine = None
     try:
-        from core.config import get_active_cortex_engine
+        from core.config import derive_cortex_scope, get_active_cortex_engine
         from core.cortex_registry import get_cortex_registry
 
-        active_cortex = await get_active_cortex_engine()
+        scope = derive_cortex_scope(
+            context_memory if isinstance(context_memory, dict) else None
+        )
+        active_cortex = await get_active_cortex_engine(scope=scope)
         registry = get_cortex_registry()
         engine = registry.get_engine(active_cortex) or registry.load_engine(
             active_cortex

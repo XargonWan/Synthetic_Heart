@@ -83,6 +83,20 @@ def get_adapter_for_endpoint(
         return AnthropicAdapter(api_key=api_key, base_url=base_url)
 
     if proto == EndpointProtocol.CUSTOM:
+        if endpoint.extra_config.get("legacy_http_tts"):
+            from core.external_endpoints.adapters.custom_tts_adapter import (
+                LegacyHttpTTSAdapter,
+            )
+
+            if not endpoint.base_url:
+                raise ValueError(
+                    f"[probe] Endpoint '{endpoint.name}' (custom) requires a base_url."
+                )
+            return LegacyHttpTTSAdapter(
+                base_url=endpoint.base_url,
+                extra_config=endpoint.extra_config,
+            )
+
         # Fall back to OpenAI-compatible if a base_url is provided
         if endpoint.base_url:
             from core.external_endpoints.adapters.openai_compat import (

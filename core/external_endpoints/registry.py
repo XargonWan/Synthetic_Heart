@@ -85,6 +85,7 @@ class ExternalEndpointRegistry:
         api_key: str = "",
         display_label: str = "",
         extra_config: dict[str, Any] | None = None,
+        subsystem_map: dict[str, bool] | None = None,
     ) -> ExternalEndpoint:
         """Create a new external endpoint and persist it to the DB."""
         from core.db import get_conn_ctx
@@ -99,6 +100,7 @@ class ExternalEndpointRegistry:
         api_key_enc = encrypt_api_key(api_key) if api_key else None
         label = display_label or name
         extra = json.dumps(extra_config or {})
+        smap = json.dumps({k: bool(v) for k, v in (subsystem_map or {}).items()})
 
         async with get_conn_ctx() as conn:
             async with conn.cursor() as cur:
@@ -109,9 +111,9 @@ class ExternalEndpointRegistry:
                        enabled, capabilities, subsystem_map, available_models,
                        probe_status, extra_config)
                     VALUES (%s, %s, %s, %s, %s, 1,
-                            '{}', '{}', '[]', 'never', %s)
+                            '{}', %s, '[]', 'never', %s)
                     """,
-                    (name, label, proto.value, base_url, api_key_enc, extra),
+                    (name, label, proto.value, base_url, api_key_enc, smap, extra),
                 )
                 row_id = cur.lastrowid
             try:
@@ -146,6 +148,7 @@ class ExternalEndpointRegistry:
             "api_key",
             "enabled",
             "extra_config",
+            "subsystem_map",
         }
         set_clauses: list[str] = []
         params: list[Any] = []
@@ -156,9 +159,12 @@ class ExternalEndpointRegistry:
             if key == "api_key":
                 set_clauses.append("api_key_enc = %s")
                 params.append(encrypt_api_key(value) if value else None)
-            elif key == "extra_config":
-                set_clauses.append("extra_config = %s")
-                params.append(json.dumps(value))
+            elif key in ("extra_config", "subsystem_map"):
+                set_clauses.append(f"{key} = %s")
+                if isinstance(value, dict):
+                    params.append(json.dumps(value))
+                else:
+                    params.append(json.dumps({}))
             elif key == "protocol":
                 try:
                     proto = EndpointProtocol(value).value
@@ -329,7 +335,75 @@ class ExternalEndpointRegistry:
 
         ep = await self.get_endpoint(endpoint_id)
         if ep is not None:
+            # Auto-select the first available model when none has been set yet
+            if status == "success" and models and ep.default_model is None:
+                await self._auto_set_default_model(endpoint_id, models[0])
+                ep = await self.get_endpoint(endpoint_id)
             await self._sync_registries(ep)
+
+            # Auto-activate as cortex engine when still on the default "manual"
+            if status == "success" and ep.effective_subsystem_map().get("cortex"):
+                await self._maybe_auto_activate_cortex(ep.engine_name())
+
+    async def _auto_set_default_model(self, endpoint_id: int, model: str) -> None:
+        """Persist an automatically selected default model (probe post-processing)."""
+        from core.db import get_conn_ctx
+
+        async with get_conn_ctx() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "UPDATE external_endpoints SET default_model = %s, "
+                    "updated_at = %s WHERE id = %s AND default_model IS NULL",
+                    (
+                        model,
+                        datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+                        endpoint_id,
+                    ),
+                )
+            try:
+                await conn.commit()
+            except Exception:
+                pass
+        log_info(
+            f"[ext_endpoints] Auto-selected default_model='{model}' for id={endpoint_id}"
+        )
+
+    async def _maybe_auto_activate_cortex(self, engine_name: str) -> None:
+        """Auto-switch ``BASE_CORTEX`` to *engine_name* after a successful probe.
+
+        Switches when the current cortex engine is a built-in engine (not an
+        external endpoint).  If the user already selected a *different* external
+        endpoint, their choice is respected and no switch happens.
+        """
+        from core.config import config_registry
+
+        current = config_registry.get_value("BASE_CORTEX", "")
+        if current == engine_name:
+            return  # already active
+
+        # If current BASE_CORTEX is another external endpoint, respect that choice.
+        if current:
+            try:
+                endpoints = await self.list_endpoints(enabled_only=True)
+                external_names = {ep.engine_name() for ep in endpoints}
+                if current in external_names:
+                    return
+            except Exception:
+                pass
+
+        try:
+            from core.config import switch_active_cortex_engine
+
+            await switch_active_cortex_engine(engine_name, use_hot_swap=True)
+            log_info(
+                f"[ext_endpoints] Auto-activated '{engine_name}' as cortex engine "
+                f"(was '{current or '<empty>'}')"
+            )
+        except Exception as exc:
+            log_warning(
+                f"[ext_endpoints] Failed to auto-activate '{engine_name}' "
+                f"as cortex: {exc}"
+            )
 
     async def set_default_model(self, endpoint_id: int, model: str) -> None:
         """Set the active model for an endpoint."""

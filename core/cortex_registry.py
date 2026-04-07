@@ -163,10 +163,8 @@ class CortexRegistry:
         if not module_path:
             # dynamic fallback for backward compatibility and alternate layouts
             candidates = [
-                f"cortex.llm_provider.{name}",
-                f"cortex.llm_engine.{name}",
-                f"cortex.selenium_engine.{name}",
-                f"cortex.live.{name}",
+                f"engines.external_engines.{name}",
+                f"engines.live.{name}",
             ]
             log_debug(
                 f"[cortex_registry] Engine '{name}' not registered, attempting dynamic import from candidates: {candidates}"
@@ -284,15 +282,15 @@ def register_default_engines(*, dev_enabled: bool = False) -> None:
     import pkgutil
 
     try:
-        import cortex
+        import engines
     except ImportError as e:
-        log_warning(f"[cortex_registry] Could not import cortex package: {e}")
+        log_warning(f"[cortex_registry] Could not import engines package: {e}")
         return
 
     registry = get_cortex_registry()
 
     try:
-        base_path = os.path.dirname(cortex.__file__)
+        base_path = os.path.dirname(engines.__file__)
         for entry in os.scandir(base_path):
             if not entry.is_dir():
                 continue
@@ -315,7 +313,7 @@ def register_default_engines(*, dev_enabled: bool = False) -> None:
                 )
 
             base_module_name = base_modules[0]
-            module_path = f"cortex.{entry.name}.{base_module_name}"
+            module_path = f"engines.{entry.name}.{base_module_name}"
             try:
                 mod = importlib.import_module(module_path)
             except Exception as e:

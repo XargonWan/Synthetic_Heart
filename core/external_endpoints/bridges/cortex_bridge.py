@@ -37,6 +37,23 @@ class ExternalCortexEngine(AIPluginBase):
     # Core LLM interface
     # ------------------------------------------------------------------
 
+    def _extra_api_kwargs(self) -> dict[str, Any]:
+        """Build extra API kwargs derived from ``endpoint.extra_config``.
+
+        Supported keys (set inside the endpoint's *Extra Config* JSON field):
+
+        * ``disable_thinking`` (bool) — pass ``enable_thinking=False`` to the
+          API.  Supported by Qwen3 / LM Studio: prevents the model from spending
+          the entire context window on chain-of-thought tokens before generating
+          a response.  Drastically reduces latency on models that default to
+          extended thinking mode.
+        """
+        extra = self._endpoint.extra_config or {}
+        kwargs: dict[str, Any] = {}
+        if extra.get("disable_thinking"):
+            kwargs["enable_thinking"] = False
+        return kwargs
+
     async def generate_response(self, messages: list[dict[str, Any]] | Any) -> str:
         """Forward ``messages`` to the external endpoint and return the response text.
 
@@ -54,7 +71,9 @@ class ExternalCortexEngine(AIPluginBase):
 
         model = self._endpoint.default_model or None
         try:
-            chat_resp = await self._adapter.chat_completion(msg_list, model=model)
+            chat_resp = await self._adapter.chat_completion(
+                msg_list, model=model, **self._extra_api_kwargs()
+            )
             return chat_resp.content
         except Exception as exc:
             log_warning(
@@ -136,6 +155,10 @@ class ExternalCortexEngine(AIPluginBase):
                 f"[cortex_bridge:{self._endpoint.name}] handle_incoming_message failed: {exc}"
             )
             return None
+
+    # NOTE: generate_response already uses _extra_api_kwargs(), so all call
+    # paths (Recon via generate_response, main LLM via handle_incoming_message)
+    # benefit from extra_config settings such as ``disable_thinking``.
 
     # ------------------------------------------------------------------
     # Model / capability info

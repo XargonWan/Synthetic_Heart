@@ -199,12 +199,13 @@ The emotional state is exposed to the WebUI for real-time visualization and can 
 * ``time_plugin`` – Inject current time and location (no configuration).
 * ``weather_plugin`` – Provide weather info as static context. Optional ``WEATHER_FETCH_TIME`` sets refresh interval. Daily announcements can be enabled with ``WEATHER_DAILY_REPORT_ENABLED`` and targeted via ``WEATHER_DAILY_REPORT_INTERFACE`` (default: ``synth_webui``). Manual reports use action ``trigger_weather_report`` with ``interface_id`` or ``interface_path``. New endpoint available:
   - **GET** `/api/weather/current` — returns current plugin weather state as JSON.
-* ``tts_lipsync`` – *(Legacy)* Generate speech audio from external TTS endpoints and broadcast ``synth:tts-play`` to the WebUI. Replaced by the **Vox** subsystem (``vox_plugin``) in new deployments; kept for backward-compatibility. Configure ``TTS_ENDPOINTS`` and optional ``TTS_TIMEOUT_SECONDS`` / ``TTS_OUTPUT_DIR``.
+* ``tts_lipsync`` – *(Legacy/deprecated)* Generates speech audio from external HTTP TTS servers and broadcasts ``synth:tts-play`` to the WebUI. It is retained only for backward compatibility. New deployments should use the Vox subsystem and register external HTTP TTS providers via the `External Endpoints` UI instead.
   - Additional WebUI-configurable exposed variables:
-    - ``TTS_ENABLED`` (boolean): enable/disable TTS plugin from the WebUI
+    - ``TTS_ENABLED`` (boolean): enable/disable the legacy plugin from the WebUI
     - ``TTS_FALLBACK_TO_TEXT`` (boolean): when true, sends a text-only fallback if TTS generation fails
+  - Legacy compatibility: the built-in ``http`` Vox engine still supports ``TTS_ENDPOINTS`` and the same payload contract, but this is not the recommended configuration path for new installations.
 * ``vox_plugin`` – **Vox** TTS & lip-sync subsystem. Unified pipeline: text cleaning → engine generation → WAV/PCM file write → lip-sync extraction → cross-interface dispatch. Replaces ``tts_lipsync`` as the recommended TTS path. Supports pluggable engines (``http``, ``kitten``); development-only stubs such as ``chatterbox`` live in ``plugins/_dev/vox_engines`` and are not imported by default. Select the active engine via ``ACTIVE_VOX_ENGINE`` (choose ``disabled`` to turn off). See :doc:`auris_vox`.
-* ``auris_plugin`` – **Auris** STT subsystem. Unified transcription entry-point for voice notes and audio files. Supports pluggable engines (``gemini``, ``silero``). Select the active engine via ``ACTIVE_AURIS_ENGINE`` (choose ``disabled`` to turn off). See :doc:`auris_vox`.
+* ``auris_plugin`` – **Auris** STT subsystem. Unified transcription entry-point for voice notes and audio files. Supports pluggable engines; the built-in local default is ``vosk`` and external Auris providers can be added through the External Endpoints UI and mapped to ``auris``. Select the active engine via ``ACTIVE_AURIS_ENGINE`` (choose ``disabled`` to turn off). See :doc:`auris_vox`.
 
 
 Recent Chats Plugin
