@@ -698,10 +698,6 @@ class SynthWebUIInterface:
         # External endpoints (custom AI service connections)
         self.app.get("/api/external-endpoints")(self.list_external_endpoints)
         self.app.post("/api/external-endpoints")(self.create_external_endpoint)
-        # NOTE: /presets MUST be registered before /{ep_id} to avoid routing conflicts
-        self.app.get("/api/external-endpoints/presets")(
-            self.list_external_endpoint_presets
-        )
         self.app.get("/api/external-endpoints/{ep_id}")(self.get_external_endpoint)
         self.app.put("/api/external-endpoints/{ep_id}")(self.update_external_endpoint)
         self.app.delete("/api/external-endpoints/{ep_id}")(
@@ -1718,12 +1714,12 @@ class SynthWebUIInterface:
                 "diary",
                 "history",
                 "config",
-                "plugins",
+                "components",
                 "settings",
                 "about",
                 "navbar",
                 "agent",
-                "engines",
+                "external_engines",
             }
             if section not in allowed_sections:
                 raise HTTPException(
@@ -4956,23 +4952,6 @@ class SynthWebUIInterface:
             log_error(f"{LOG_PREFIX} list_external_endpoints failed: {exc}")
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
-    async def list_external_endpoint_presets(self) -> JSONResponse:
-        """GET /api/external-endpoints/presets — list available provider presets.
-
-        Reads JSON files from the project-level ``providers/`` directory.  Each
-        file describes a known AI provider (Gemini, Anthropic, OpenRouter, …)
-        with default values that the UI wizard can use to pre-fill the add form.
-        Files can be deleted by the user without breaking the rest of the system.
-        """
-        try:
-            from core.external_endpoints.preset_registry import load_presets
-
-            presets = load_presets()
-            return JSONResponse({"presets": presets})
-        except Exception as exc:
-            log_error(f"{LOG_PREFIX} list_external_endpoint_presets failed: {exc}")
-            raise HTTPException(status_code=500, detail=str(exc)) from exc
-
     async def create_external_endpoint(self, request: Request) -> JSONResponse:
         """POST /api/external-endpoints — add a new external endpoint."""
         try:
@@ -4988,11 +4967,6 @@ class SynthWebUIInterface:
             raise HTTPException(status_code=400, detail="Missing 'base_url'")
 
         api_key_str = str(data.get("api_key") or "")
-        # Extract subsystem_map if provided by the form (capabilities section)
-        raw_smap = data.get("subsystem_map")
-        subsystem_map: dict[str, bool] | None = None
-        if isinstance(raw_smap, dict):
-            subsystem_map = {k: bool(v) for k, v in raw_smap.items()}
         try:
             from core.external_endpoints.registry import get_external_endpoint_registry
 
@@ -5004,7 +4978,6 @@ class SynthWebUIInterface:
                 api_key=api_key_str,
                 display_label=str(data.get("display_label") or ""),
                 extra_config=data.get("extra_config"),
-                subsystem_map=subsystem_map,
             )
 
             # Auto-probe immediately after creation
@@ -7571,10 +7544,31 @@ class SynthWebUIInterface:
                     )
 
             meta = self._get_component_meta(engine_name)
-            # Login state — only relevant for external-endpoint based engines
+            # Attempt to include login info for Selenium-based engines without inducing side-effects
             login_state = "unknown"
             logged_in = False
             login_url = ""
+            try:
+                from cortex.selenium_engine.selenium_llm_base import SeleniumLLMBase
+
+                if instance is not None and isinstance(instance, SeleniumLLMBase):
+                    login_url = getattr(instance, "service_url", "") or getattr(
+                        instance, "config", {}
+                    ).get("service_url", "")
+                    # If the driver isn't initialized, avoid creating it just to check login
+                    if getattr(instance, "driver", None) is None:
+                        login_state = "unknown"
+                        logged_in = False
+                    else:
+                        try:
+                            logged_in = bool(instance.is_user_logged_in())
+                            login_state = "logged" if logged_in else "unlogged"
+                        except Exception:
+                            login_state = "unknown"
+                            logged_in = False
+            except Exception:
+                # If SeleniumLLMBase is not importable, just skip enrichment
+                pass
 
             # Gather model information from engines that expose it
             supported_models: list[str] = []
@@ -7593,24 +7587,14 @@ class SynthWebUIInterface:
 
             # For external endpoints, fall back to DB if the in-memory bridge has
             # stale/empty available_models (e.g. bridge created before first probe).
-            try:
-                from core.external_endpoints.bridges.cortex_bridge import (
-                    ExternalCortexEngine as _ExtCB,
-                )
-
-                _is_external = isinstance(instance, _ExtCB)
-            except Exception:
-                _is_external = False
-            if not supported_models and _is_external:
+            if not supported_models and engine_name.startswith("ext_"):
                 try:
                     from core.external_endpoints.registry import (
                         get_external_endpoint_registry,
                     )
 
                     _ext_reg = get_external_endpoint_registry()
-                    _fallback_ep = await _ext_reg.get_endpoint_by_name(
-                        instance._endpoint.name  # type: ignore[union-attr]
-                    )
+                    _fallback_ep = await _ext_reg.get_endpoint_by_name(engine_name[4:])
                     if _fallback_ep and _fallback_ep.available_models:
                         supported_models = list(_fallback_ep.available_models)
                         if not current_model and _fallback_ep.default_model:
@@ -7658,7 +7642,6 @@ class SynthWebUIInterface:
                     ),
                     "supported_models": supported_models,
                     "current_model": current_model,
-                    "is_external": _is_external,
                 }
             )
         interfaces_data: List[dict] = []
@@ -7980,46 +7963,32 @@ class SynthWebUIInterface:
             log_warning(f"{LOG_PREFIX} unable to build Live engine list: {exc}")
 
         # Build scope overrides for the UI (Grillo, Trainer, Live cortex selectors)
-        # Single source of truth: derive options from the same data already built above.
         cortex_scopes: list[dict] = []
         try:
-            # Grillo/Trainer: only llm_provider engines — same source as the main
-            # engine selector in the Engines tab (by_cortex is already built above).
-            llm_engines_sorted = sorted(
-                e["name"] for e in by_cortex.get("llm_provider", [])
-            )
-            # Live scope: LIVE_REGISTRY is the authoritative source for streaming
-            # engines; fall back to CortexRegistry if the registry is unavailable.
-            live_engine_names: list[str] = ["disabled"]
+            all_engines_sorted = sorted(engine_names)
+            live_engines: list[str] = []
             try:
-                from core.live_registry import LIVE_REGISTRY as _LIVE_REG
-
-                live_engine_names += sorted(_LIVE_REG.get_available_engines())
+                live_engines = cortex_reg.get_engines_by_cortex("live")
             except Exception:
-                try:
-                    live_engine_names += sorted(
-                        cortex_reg.get_engines_by_cortex("live")
-                    )
-                except Exception:
-                    pass
+                pass
             cortex_scopes = [
                 {
                     "key": "GRILLO_CORTEX",
                     "label": "Grillo",
                     "value": config_registry.get_value("GRILLO_CORTEX", "Default"),
-                    "options": ["Default"] + llm_engines_sorted,
+                    "options": ["Default"] + all_engines_sorted,
                 },
                 {
                     "key": "TRAINER_CORTEX",
                     "label": "Trainer",
                     "value": config_registry.get_value("TRAINER_CORTEX", "Default"),
-                    "options": ["Default"] + llm_engines_sorted,
+                    "options": ["Default"] + all_engines_sorted,
                 },
                 {
                     "key": "LIVE_CORTEX",
                     "label": "Live",
                     "value": config_registry.get_value("LIVE_CORTEX", "Default"),
-                    "options": ["Default"] + live_engine_names,
+                    "options": ["Default"] + live_engines,
                 },
             ]
         except Exception as exc:
@@ -8148,11 +8117,10 @@ class SynthWebUIInterface:
             model_config_keys = {
                 "openrouter": "OPENROUTER_DEFAULT_MODEL",
                 "gemini_api": "GEMINI_MODEL",
-                "openapi": "OPENAPI_DEFAULT_MODEL",
             }
             config_key = model_config_keys.get(engine_name)
             if config_key:
-                await config_registry.set_value(config_key, model_name)
+                config_registry.set_value(config_key, model_name)
         except Exception as exc:
             log_warning(
                 f"{LOG_PREFIX} model set on engine but config persist failed: {exc}"
@@ -8181,18 +8149,89 @@ class SynthWebUIInterface:
         )
 
     async def cortex_login(self, request: Request):
-        """Selenium-based login is no longer supported.
+        """Start the login flow for a Selenium-based Cortex engine (non-blocking).
 
-        The embedded Selenium engine has been removed. Use the external
-        selenium-llm-engine service and configure it as an external endpoint.
+        Expects JSON: { "name": "selenium_chatgpt" }
         """
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                "Selenium-based login is no longer supported. "
-                "Use the external selenium-llm-engine endpoint."
-            ),
-        )
+        try:
+            data = await request.json()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="Invalid JSON payload") from exc
+
+        name = str(data.get("name") or "").strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="Missing 'name'")
+
+        try:
+            from core.cortex_registry import get_cortex_registry
+
+            registry = get_cortex_registry()
+            engine = registry.get_engine(name)
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} unable to access Cortex registry: {exc}")
+            raise HTTPException(
+                status_code=500, detail="Unable to access Cortex registry"
+            ) from exc
+
+        if not engine:
+            raise HTTPException(
+                status_code=404, detail=f"Cortex engine '{name}' not loaded"
+            )
+
+        try:
+            from cortex.selenium_engine.selenium_llm_base import SeleniumLLMBase
+
+            if not isinstance(engine, SeleniumLLMBase):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Cortex engine '{name}' is not Selenium-based",
+                )
+        except HTTPException:
+            raise
+        except Exception:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Cortex engine '{name}' is not Selenium-based",
+            )
+
+        try:
+            # Fire-and-forget the login flow so the endpoint is non-blocking
+            try:
+                task = asyncio.create_task(engine.start_login_flow())
+                log_info(
+                    f"{LOG_PREFIX} Started login flow for Cortex '{name}' (task: {task})"
+                )
+            except RuntimeError:
+                # If event loop is not running or other issues, try scheduling differently
+                loop = asyncio.get_event_loop()
+                loop.create_task(engine.start_login_flow())
+
+            # Return immediate status (do not wait for the login to complete)
+            current_logged = False
+            try:
+                current_logged = bool(
+                    getattr(engine, "is_user_logged_in") and engine.is_user_logged_in()
+                )
+            except Exception:
+                current_logged = False
+
+            return JSONResponse(
+                {
+                    "status": "ok",
+                    "name": name,
+                    "action": "started",
+                    "logged_in": current_logged,
+                }
+            )
+
+        except HTTPException:
+            raise
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to start login flow for '{name}': {exc}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to start login flow for '{name}': {exc}",
+            ) from exc
 
     # Cortex endpoints
 

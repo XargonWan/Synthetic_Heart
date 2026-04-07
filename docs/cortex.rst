@@ -77,13 +77,6 @@ Gemini API (official API)
 - Where to get the key: Google Cloud Console → APIs & Services → Credentials
   (create API key or service account key; enable GenAI API; ensure billing).
 
-.. note::
-
-   If you want Gemini API to participate in the Auris or Live subsystems,
-   add it through the External Endpoints UI and enable the corresponding
-   subsystem mapping. It will not be exposed automatically as an Auris
-   provider unless configured explicitly.
-
 Live (Gemini Live — real-time voice)
 -------------------------------------
 
@@ -100,12 +93,6 @@ Live (Gemini Live — real-time voice)
      automatically, or you can ask it to join voice during chat.
 - Do I need API keys? Yes — ``GEMINI_API_KEY`` (and a Discord token for
   Discord voice). See the Live integration page for audio/config details.
-
-.. note::
-
-   Gemini Live support must be registered through the External Endpoints
-   workflow and mapped to the ``live`` subsystem before it is available
-   in the Components page.
 - Quick troubleshooting: make sure ``google-genai`` is installed, ffmpeg is
   available, and the Components page shows the Live/session manager as
   available.

@@ -259,11 +259,10 @@ class DebriefActionIntentPlugin:
 
         engine = None
         try:
-            from core.config import derive_cortex_scope, get_active_cortex_engine
+            from core.config import get_active_cortex_engine
             from core.cortex_registry import get_cortex_registry
 
-            scope = derive_cortex_scope(context if isinstance(context, dict) else None)
-            active_cortex = await get_active_cortex_engine(scope=scope)
+            active_cortex = await get_active_cortex_engine()
             registry = get_cortex_registry()
             engine = registry.get_engine(active_cortex) or registry.load_engine(
                 active_cortex

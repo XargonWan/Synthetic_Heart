@@ -70,7 +70,7 @@ def _make_http_response(
 
 class TestOpenRouterModel:
     def test_parse_vision_model(self) -> None:
-        from engines.external_engines.openrouter import OpenRouterModel
+        from cortex.llm_provider.openrouter import OpenRouterModel
 
         data = _SAMPLE_MODELS_RESPONSE["data"][0]
         m = OpenRouterModel.from_api(data)
@@ -83,7 +83,7 @@ class TestOpenRouterModel:
         assert m.pricing_prompt == 0.000003
 
     def test_parse_text_only_model(self) -> None:
-        from engines.external_engines.openrouter import OpenRouterModel
+        from cortex.llm_provider.openrouter import OpenRouterModel
 
         data = _SAMPLE_MODELS_RESPONSE["data"][2]
         m = OpenRouterModel.from_api(data)
@@ -94,7 +94,7 @@ class TestOpenRouterModel:
         assert m.modality == "text->text"
 
     def test_parse_audio_modality(self) -> None:
-        from engines.external_engines.openrouter import OpenRouterModel
+        from cortex.llm_provider.openrouter import OpenRouterModel
 
         data = {
             "id": "test/audio-model",
@@ -109,7 +109,7 @@ class TestOpenRouterModel:
         assert m.supports_audio is True
 
     def test_parse_missing_fields(self) -> None:
-        from engines.external_engines.openrouter import OpenRouterModel
+        from cortex.llm_provider.openrouter import OpenRouterModel
 
         m = OpenRouterModel.from_api({"id": "minimal/model"})
         assert m.id == "minimal/model"
@@ -120,7 +120,7 @@ class TestOpenRouterModel:
 
 class TestModelCatalog:
     def test_fetch_catalog_sync(self) -> None:
-        from engines.external_engines.openrouter import _fetch_catalog_sync
+        from cortex.llm_provider.openrouter import _fetch_catalog_sync
 
         with patch("cortex.llm_provider.openrouter.requests.get") as mock_get:
             mock_get.return_value = _make_http_response(
@@ -134,7 +134,7 @@ class TestModelCatalog:
         assert models["openai/gpt-4o"].supports_vision is True
 
     def test_fetch_catalog_failure(self) -> None:
-        from engines.external_engines.openrouter import _fetch_catalog_sync
+        from cortex.llm_provider.openrouter import _fetch_catalog_sync
 
         with patch("cortex.llm_provider.openrouter.requests.get") as mock_get:
             mock_get.side_effect = Exception("Network error")
@@ -151,7 +151,7 @@ class TestModelCatalog:
 class TestModelResolution:
     def _make_plugin(self) -> Any:
         """Create a plugin instance with mocked dependencies."""
-        from engines.external_engines.openrouter import OpenRouterPlugin
+        from cortex.llm_provider.openrouter import OpenRouterPlugin
 
         with patch("cortex.llm_provider.openrouter._refresh_catalog"):
             with patch("core.notifier.set_notifier"):
@@ -220,7 +220,7 @@ class TestModelResolution:
 
 class TestSystemInstruction:
     def _make_plugin(self) -> Any:
-        from engines.external_engines.openrouter import OpenRouterPlugin
+        from cortex.llm_provider.openrouter import OpenRouterPlugin
 
         plugin = OpenRouterPlugin.__new__(OpenRouterPlugin)
         plugin._current_model = "test/model"
@@ -253,7 +253,7 @@ class TestSystemInstruction:
 
 class TestMultimodalExtraction:
     def _make_plugin(self) -> Any:
-        from engines.external_engines.openrouter import OpenRouterPlugin
+        from cortex.llm_provider.openrouter import OpenRouterPlugin
 
         plugin = OpenRouterPlugin.__new__(OpenRouterPlugin)
         return plugin
@@ -319,7 +319,7 @@ class TestMultimodalExtraction:
 
 class TestChatCompletion:
     def _make_plugin(self) -> Any:
-        from engines.external_engines.openrouter import OpenRouterPlugin
+        from cortex.llm_provider.openrouter import OpenRouterPlugin
 
         plugin = OpenRouterPlugin.__new__(OpenRouterPlugin)
         plugin._current_model = "test/model"
@@ -459,7 +459,7 @@ class TestChatCompletion:
 
 class TestHealthAndLimits:
     def _make_plugin(self) -> Any:
-        from engines.external_engines.openrouter import OpenRouterPlugin
+        from cortex.llm_provider.openrouter import OpenRouterPlugin
 
         plugin = OpenRouterPlugin.__new__(OpenRouterPlugin)
         plugin._current_model = "anthropic/claude-sonnet-4"
@@ -485,7 +485,7 @@ class TestHealthAndLimits:
         assert ok is True
 
     def test_interface_limits_from_catalog(self) -> None:
-        from engines.external_engines.openrouter import OpenRouterModel, _catalog
+        from cortex.llm_provider.openrouter import OpenRouterModel, _catalog
 
         plugin = self._make_plugin()
         _catalog.models["anthropic/claude-sonnet-4"] = OpenRouterModel(
@@ -516,24 +516,24 @@ class TestHealthAndLimits:
 
 class TestParseRoutes:
     def test_dict_passthrough(self) -> None:
-        from engines.external_engines.openrouter import _parse_routes
+        from cortex.llm_provider.openrouter import _parse_routes
 
         routes = {"scopes": {"grillo": "test/model"}}
         assert _parse_routes(routes) == routes
 
     def test_json_string(self) -> None:
-        from engines.external_engines.openrouter import _parse_routes
+        from cortex.llm_provider.openrouter import _parse_routes
 
         result = _parse_routes('{"scopes": {"grillo": "test/model"}}')
         assert result == {"scopes": {"grillo": "test/model"}}
 
     def test_invalid_string(self) -> None:
-        from engines.external_engines.openrouter import _parse_routes
+        from cortex.llm_provider.openrouter import _parse_routes
 
         assert _parse_routes("not json") == {}
 
     def test_none(self) -> None:
-        from engines.external_engines.openrouter import _parse_routes
+        from cortex.llm_provider.openrouter import _parse_routes
 
         assert _parse_routes(None) == {}
 
@@ -545,14 +545,14 @@ class TestParseRoutes:
 
 class TestCapabilities:
     def _make_plugin(self) -> Any:
-        from engines.external_engines.openrouter import OpenRouterPlugin
+        from cortex.llm_provider.openrouter import OpenRouterPlugin
 
         plugin = OpenRouterPlugin.__new__(OpenRouterPlugin)
         plugin._current_model = "test/model"
         return plugin
 
     def test_capabilities_from_catalog(self) -> None:
-        from engines.external_engines.openrouter import OpenRouterModel, _catalog
+        from cortex.llm_provider.openrouter import OpenRouterModel, _catalog
 
         _catalog.models["test/model"] = OpenRouterModel(
             id="test/model",
@@ -578,7 +578,7 @@ class TestCapabilities:
         assert caps["available"] is False
 
     def test_catalog_summary(self) -> None:
-        from engines.external_engines.openrouter import OpenRouterModel, _catalog
+        from cortex.llm_provider.openrouter import OpenRouterModel, _catalog
 
         _catalog.models = {
             "a": OpenRouterModel(id="a", name="A", supports_vision=True),
