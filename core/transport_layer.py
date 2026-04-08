@@ -1924,6 +1924,18 @@ async def llm_to_interface(interface_send_func, *args, text: str = None, **kwarg
     except Exception:
         pass
 
+    # Strip internal emotion tags from every incoming LLM message so the text
+    # remains clean for downstream processors and interface outputs.
+    try:
+        from plugins.emotion_manager import strip_emotion_tags
+
+        cleaned = strip_emotion_tags(text)
+        if cleaned != text:
+            log_debug("[llm_to_interface] Stripped emotion tags from LLM text")
+            text = cleaned
+    except Exception:
+        pass
+
     # Suppress empty/whitespace LLM replies early — centralize handling here
     if kwargs.get("is_llm_response", False) and (not text or not text.strip()):
         log_debug(
