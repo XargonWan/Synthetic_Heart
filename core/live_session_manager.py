@@ -95,6 +95,14 @@ class LiveSessionState:
         "pending_context_updates",  # queued texts awaiting flush
         "_user_speaking",  # whether we have sent activity_start (manual VAD)
         "attachment_context",  # document text for system instruction (survives reconnects)
+        # Session resumption — set by _receive_loop when server sends a resumable handle.
+        # Passed to start_session on reconnect so the new WebSocket resumes where
+        # the old one left off (context window preserved, no cold restart).
+        "resumption_handle",
+        # Set True when a GoAway message is received — signals _receive_loop to
+        # trigger an immediate proactive reconnect rather than waiting for the
+        # connection to drop.
+        "_go_away_triggered",
     )
 
     def __init__(
@@ -121,6 +129,12 @@ class LiveSessionState:
         )
         # Document context embedded in system instruction (persisted for reconnects)
         self.attachment_context: str | None = None
+        # Latest resumption handle received from the server — used on reconnect
+        # to resume the session context without a cold restart.
+        self.resumption_handle: str | None = None
+        # Signals that a GoAway message has been received and a proactive
+        # reconnect should be triggered at the end of the current turn.
+        self._go_away_triggered: bool = False
 
     @property
     def elapsed_seconds(self) -> float:
@@ -312,6 +326,7 @@ class LiveSessionManager:
         tools: list[dict[str, Any]] | None = None,
         attachment_context: str | None = None,
         is_reconnect: bool = False,
+        resumption_handle: str | None = None,
     ) -> bool:
         """Start a Live API session for a guild's voice channel.
 
@@ -320,6 +335,11 @@ class LiveSessionManager:
             channel_id: Discord voice channel ID.
             system_instruction: Full persona/system prompt text.
             tools: Optional function declarations for the Live API.
+            attachment_context: Document text embedded in the system instruction.
+            is_reconnect: True when re-establishing after a session drop.
+            resumption_handle: If provided, the new WebSocket will resume the
+                previous session's context window instead of starting fresh.
+                Obtained from ``LiveSessionState.resumption_handle``.
 
         Returns:
             True if session started successfully.
@@ -410,6 +430,44 @@ class LiveSessionManager:
             )
         except Exception as _hc_exc:
             log_warning(f"[live_session] Could not set history_config: {_hc_exc}")
+
+        # Context window compression — keeps audio-only sessions alive beyond
+        # the 15-min raw limit by compressing old context with a sliding window.
+        # This is the official Google-recommended approach for long sessions.
+        try:
+            live_config.context_window_compression = (
+                types.ContextWindowCompressionConfig(
+                    sliding_window=types.SlidingWindow(),
+                )
+            )
+            log_info(
+                "[live_session] Context window compression enabled (sliding window)"
+            )
+        except Exception as _cw_exc:
+            log_warning(
+                f"[live_session] Could not enable context window compression: {_cw_exc}"
+            )
+
+        # Session resumption — the server will periodically send a resumable
+        # handle via SessionResumptionUpdate messages.  When the WebSocket
+        # connection drops (at ~10 min), we pass the latest handle back in the
+        # next connect call so Gemini resumes the same context without a cold
+        # restart.  resumption_handle=None means start a fresh session.
+        try:
+            live_config.session_resumption = types.SessionResumptionConfig(
+                handle=resumption_handle,
+            )
+            if resumption_handle:
+                log_info(
+                    f"[live_session] Resuming session with handle "
+                    f"{resumption_handle[:16]}…"
+                )
+            else:
+                log_info("[live_session] Session resumption enabled (fresh session)")
+        except Exception as _sr_exc:
+            log_warning(
+                f"[live_session] Could not configure session resumption: {_sr_exc}"
+            )
 
         # ── Model selection ──
         # Affective dialog and proactive audio are NOT supported on Gemini 3.1
@@ -1396,6 +1454,35 @@ class LiveSessionManager:
                                         f"[live_session] Tool call handling error: {e}"
                                     )
 
+                    # ── Session resumption handle ──
+                    # The server periodically sends a SessionResumptionUpdate with
+                    # a handle we can use to resume context across WebSocket
+                    # reconnections.  We store the latest *resumable* handle so
+                    # _reconnect_inner can pass it to the next start_session call.
+                    _sru = getattr(message, "session_resumption_update", None)
+                    if _sru is not None:
+                        _resumable = getattr(_sru, "resumable", False)
+                        _new_handle = getattr(_sru, "new_handle", None)
+                        if _resumable and _new_handle:
+                            state.resumption_handle = str(_new_handle)
+                            log_debug(
+                                f"[live_session] Stored resumption handle for guild "
+                                f"{guild_id}: {state.resumption_handle[:16]}…"
+                            )
+
+                    # ── GoAway — server signalling imminent connection close ──
+                    # The server sends this before terminating the WebSocket.
+                    # We mark go_away so the turn-complete handler will trigger
+                    # a proactive reconnect rather than waiting for an error.
+                    _go_away = getattr(message, "go_away", None)
+                    if _go_away is not None:
+                        _time_left = getattr(_go_away, "time_left", None)
+                        log_info(
+                            f"[live_session] ⏳ GoAway received for guild {guild_id} "
+                            f"(time_left={_time_left}) — queuing proactive reconnect"
+                        )
+                        state._go_away_triggered = True
+
                 log_info(
                     f"[live_session] Turn {turn_count} receive loop exited "
                     f"(guild {guild_id}, {turn_msg_count} msgs this turn, "
@@ -1434,11 +1521,15 @@ class LiveSessionManager:
                 if not state.is_active:
                     break
 
-                # After each turn, check if session is approaching time limit
-                if state.should_reconnect:
+                # Proactive reconnect: GoAway received or approaching time limit.
+                # GoAway takes priority — the server is about to kill the connection
+                # so we reconnect immediately at turn boundary.  The time-based
+                # check is a last-resort fallback for sessions without resumption.
+                if state._go_away_triggered or state.should_reconnect:
+                    _reason = "GoAway" if state._go_away_triggered else "time limit"
                     log_info(
-                        f"[live_session] Session nearing time limit for guild "
-                        f"{guild_id}, reconnecting"
+                        f"[live_session] Proactive reconnect ({_reason}) for guild "
+                        f"{guild_id} (handle={'yes' if state.resumption_handle else 'none'})"
                     )
                     asyncio.create_task(self._reconnect(guild_id, epoch=_loop_epoch))
                     break
@@ -1521,46 +1612,125 @@ class LiveSessionManager:
                 )
                 return  # Session was fully removed — nothing to reconnect
 
+            # Harvest the resumption handle *before* tearing down the session
+            # so we can pass it to the new connection.
+            _resumption_handle: str | None = state.resumption_handle
+            _has_handle = bool(_resumption_handle)
+
             log_info(
                 f"[live_session] 🔄 Reconnecting session for guild {guild_id} "
-                f"(elapsed {state.elapsed_seconds:.0f}s, was_active={state.is_active})"
+                f"(elapsed {state.elapsed_seconds:.0f}s, "
+                f"resumption={'yes' if _has_handle else 'no'})"
             )
 
             channel_id = state.channel_id
             _att_ctx = state.attachment_context
             await self.stop_session(guild_id)
 
-            # Rebuild system instruction from current persona for the new
-            # session — includes fresh chat history from recent_chats cache.
+            if _has_handle:
+                # ── Fast path: session resumption ──────────────────────────
+                # The server preserved our context window.  We just need to
+                # open a new WebSocket with the handle — no need to rebuild
+                # the system instruction or tool declarations from scratch.
+                # We still pass the last known instruction/tools so
+                # start_session can include them in the config (the server
+                # uses the handle to restore context, not the instruction).
+                log_info(f"[live_session] Using resumption handle for guild {guild_id}")
+                # Retrieve last-used instruction from prompt engine (quick, cached)
+                from core.prompt_engine import build_live_system_instruction
+
+                instruction = await build_live_system_instruction(
+                    attachment_context=_att_ctx,
+                )
+                tools: list[dict[str, Any]] | None = None
+                try:
+                    from core.live_tool_registry import LiveToolRegistry
+                    from core.live_tool_adapters.gemini import GeminiToolAdapter
+
+                    _manifests = LiveToolRegistry.build_manifests()
+                    tools = (
+                        GeminiToolAdapter.to_declarations(_manifests)
+                        if _manifests
+                        else None
+                    )
+                except Exception as _te:
+                    log_warning(
+                        f"[live_session] Could not rebuild tool declarations on resumption: {_te}"
+                    )
+
+                last_err: Exception | None = None
+                for attempt in range(1, self._RECONNECT_MAX_RETRIES + 1):
+                    try:
+                        ok = await self.start_session(
+                            guild_id=guild_id,
+                            channel_id=channel_id,
+                            system_instruction=instruction,
+                            tools=tools,
+                            attachment_context=_att_ctx,
+                            is_reconnect=True,
+                            resumption_handle=_resumption_handle,
+                        )
+                        if ok:
+                            log_info(
+                                f"[live_session] ✅ Resumed session for guild "
+                                f"{guild_id} (attempt {attempt})"
+                            )
+                            return
+                        last_err = RuntimeError("start_session returned False")
+                    except Exception as exc:
+                        last_err = exc
+
+                    log_warning(
+                        f"[live_session] Resumption attempt {attempt}/"
+                        f"{self._RECONNECT_MAX_RETRIES} failed for guild "
+                        f"{guild_id}: {last_err}"
+                    )
+                    if attempt < self._RECONNECT_MAX_RETRIES:
+                        await asyncio.sleep(self._RECONNECT_RETRY_DELAY * attempt)
+
+                # Resumption failed — fall through to cold restart below
+                log_warning(
+                    f"[live_session] Session resumption failed for guild {guild_id}, "
+                    "falling back to cold restart"
+                )
+                _resumption_handle = None
+
+            # ── Cold restart path ─────────────────────────────────────────
+            # No handle available, or resumption exhausted all retries.
+            # Rebuild system instruction and tool declarations from scratch.
             from core.prompt_engine import build_live_system_instruction
 
             instruction = await build_live_system_instruction(
                 attachment_context=_att_ctx,
             )
             log_info(
-                f"[live_session] Rebuilt system instruction for reconnect "
+                f"[live_session] Rebuilt system instruction for cold restart "
                 f"({len(instruction)} chars)"
             )
 
-            # Re-discover tool declarations so function calling persists
-            tools: list[dict[str, Any]] | None = None
+            tools = None
             try:
-                from interface.discord_interface import _build_gemini_tool_declarations
+                from core.live_tool_registry import LiveToolRegistry
+                from core.live_tool_adapters.gemini import GeminiToolAdapter
 
-                tools = _build_gemini_tool_declarations()
+                _manifests = LiveToolRegistry.build_manifests()
+                tools = (
+                    GeminiToolAdapter.to_declarations(_manifests)
+                    if _manifests
+                    else None
+                )
             except Exception as e:
                 log_warning(
                     f"[live_session] Could not rebuild tool declarations on reconnect: {e}"
                 )
 
             # Retry loop — Gemini may reject the connection briefly after a
-            # 1011 close.  We back off and try again up to _RECONNECT_MAX_RETRIES
-            # times before declaring failure.
-            last_err: Exception | None = None
+            # 1011 close.  Back off and retry up to _RECONNECT_MAX_RETRIES times.
+            last_err = None
             for attempt in range(1, self._RECONNECT_MAX_RETRIES + 1):
                 try:
                     log_info(
-                        f"[live_session] Reconnect attempt {attempt}/"
+                        f"[live_session] Cold restart attempt {attempt}/"
                         f"{self._RECONNECT_MAX_RETRIES} for guild {guild_id}"
                     )
                     ok = await self.start_session(
@@ -1573,7 +1743,7 @@ class LiveSessionManager:
                     )
                     if ok:
                         log_info(
-                            f"[live_session] ✅ Reconnect succeeded for guild "
+                            f"[live_session] ✅ Cold restart succeeded for guild "
                             f"{guild_id} (attempt {attempt})"
                         )
                         return  # success
@@ -1582,7 +1752,7 @@ class LiveSessionManager:
                     last_err = exc
 
                 log_warning(
-                    f"[live_session] Reconnect attempt {attempt}/"
+                    f"[live_session] Cold restart attempt {attempt}/"
                     f"{self._RECONNECT_MAX_RETRIES} failed for guild "
                     f"{guild_id}: {last_err}"
                 )
