@@ -1279,8 +1279,14 @@ class DiscordInterface:
                 attachment_context=_attachment_context,
             )
 
-            # Build Gemini function declarations from the SyntH action registry
-            tools = _build_gemini_tool_declarations()
+            # Build Gemini function declarations via the model-agnostic registry.
+            from core.live_tool_registry import LiveToolRegistry
+            from core.live_tool_adapters.gemini import GeminiToolAdapter
+
+            _manifests = LiveToolRegistry.build_manifests()
+            tools = (
+                GeminiToolAdapter.to_declarations(_manifests) if _manifests else None
+            )
 
             # Set up audio output callback: Live API → Discord voice
             audio_buffer = LiveAudioBuffer()
@@ -1289,13 +1295,9 @@ class DiscordInterface:
                 """Receive 24kHz mono PCM from Gemini, buffer for Discord playback."""
                 audio_buffer.write(pcm_data)
 
-            async def on_text_from_model(gid: int, text: str) -> None:
+            async def on_text_from_model(_gid: int, text: str) -> None:
                 """Log text responses from the live model (for debugging/diary)."""
-                log_info(f"[live_voice] Model text for guild {gid}: {text[:200]}")
-
-            async def on_tool_call(gid: int, call_dict: dict) -> dict:
-                """Route Gemini function calls to the SyntH action pipeline."""
-                return await _handle_live_tool_call(gid, call_dict, self.client)
+                log_info(f"[live_voice] Model text for guild {guild_id}: {text[:200]}")
 
             # Stable interface_path for this guild's live voice conversation.
             live_interface_path = f"discord_live_{guild_id}"
@@ -1383,9 +1385,11 @@ class DiscordInterface:
                 )
                 await self._stop_live_voice(gid)
 
+            from core.live_tool_executor import LiveToolExecutor
+
             manager.set_audio_callback(on_audio_from_model)
             manager.set_text_callback(on_text_from_model)
-            manager.set_tool_call_callback(on_tool_call)
+            manager.set_tool_executor(LiveToolExecutor(manager, bot=self.client))
             manager.set_turn_complete_callback(on_turn_complete)
             manager.set_reconnect_failed_callback(on_reconnect_failed)
 
@@ -2895,10 +2899,12 @@ class DiscordInterface:
 def _build_gemini_tool_declarations() -> list[Any] | None:
     """Build Gemini function declarations from the SyntH action registry.
 
-    Queries all plugins and interfaces via ``get_supported_actions()`` /
-    ``get_prompt_instructions()`` and converts them into the
-    ``google.genai.types.FunctionDeclaration`` format expected by the
-    Gemini Live API ``tools`` parameter.
+    .. deprecated::
+        Use ``LiveToolRegistry.build_manifests()`` + ``GeminiToolAdapter.to_declarations()``
+        from ``core.live_tool_registry`` / ``core.live_tool_adapters.gemini`` instead.
+        This function is retained for callers outside the Discord interface
+        (e.g. ``_reconnect_inner`` in ``live_session_manager.py``) until those
+        are migrated.
 
     Returns:
         A list containing a single ``types.Tool`` wrapping all function
