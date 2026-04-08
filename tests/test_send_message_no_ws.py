@@ -33,3 +33,21 @@ async def test_send_message_persists_when_no_websocket():
     assert msgs is not None
     found = any(m.get("text") == text for m in msgs)
     assert found
+
+
+@pytest.mark.asyncio
+async def test_execute_action_uses_original_message_interface_path_when_context_missing():
+    webui = SynthWebUIInterface()
+    payload = {
+        "text": "Hello from WebUI",
+    }
+    action = {"type": "message_synth_webui", "payload": payload}
+    original_message = type("M", (), {"interface_path": "synth_webui/webui_default"})()
+
+    with patch.object(webui, "send_message", AsyncMock()) as mock_send:
+        await webui.execute_action(action, context={}, bot=None, original_message=original_message)
+
+    assert mock_send.called
+    sent_payload = mock_send.call_args.args[0]
+    assert sent_payload["interface_path"] == "synth_webui/webui_default"
+    assert sent_payload["text"] == "Hello from WebUI"

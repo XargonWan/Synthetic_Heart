@@ -1771,6 +1771,27 @@ async def run_corrector_middleware(
                                             payload["interface_path"] = (
                                                 f"ollama_serve/{id_for_iface or '<chat_id>'}"
                                             )
+                                            rewritten = True
+
+                                        if act.get("type") == "message_ollama_serve":
+                                            conversation_id = payload.get("conversation_id")
+                                            if conversation_id is None:
+                                                conversation_id = (
+                                                    context.get("conversation_id")
+                                                    if context
+                                                    else None
+                                                )
+                                            payload.setdefault(
+                                                "target",
+                                                chat_id
+                                                or conversation_id
+                                                or id_for_iface
+                                                or "<chat_id>",
+                                            )
+                                            payload.setdefault(
+                                                "conversation_id",
+                                                conversation_id,
+                                            )
                                             act["payload"] = payload
                                             rewritten = True
                             if rewritten:

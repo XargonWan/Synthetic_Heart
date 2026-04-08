@@ -134,7 +134,7 @@ CREATE TABLE IF NOT EXISTS external_endpoints (
 
 -- Default external endpoint: Selenium LLM Engine
 INSERT IGNORE INTO external_endpoints
-    (name, display_label, protocol, base_url, enabled, capabilities, subsystem_map, probe_status)
+    (name, display_label, protocol, base_url, enabled, capabilities, subsystem_map, default_model, probe_status, extra_config)
 VALUES
     (
         'selenium-llm-engine',
@@ -144,7 +144,9 @@ VALUES
         1,
         '{"llm": true, "tts": false, "stt": false}',
         '{"cortex": true, "vox": false, "auris": false, "live": false}',
-        'never'
+        'gemini',
+        'never',
+        '{"timeout": 300}'
     );
 
 -- Core config table (authoritative for config_registry)

@@ -125,69 +125,16 @@
             box-shadow: 0 18px 35px -24px rgba(var(--accent-r,255), var(--accent-g,107), var(--accent-b,214), 0.95);
         }
 
-        /* ── Unified select / combo-box style ─────────────────────────────── */
-        select {
-            appearance: none;
-            -webkit-appearance: none;
-            background-color: rgba(0, 0, 0, 0.55) !important;
-            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%236bfefe' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E") !important;
-            background-repeat: no-repeat !important;
-            background-position: right 12px center !important;
+        /* Default: ensure dropdowns/selects use dark background and text by default */
+        select, select option, .components-list select {
+            background: var(--surface) !important;
             color: var(--text) !important;
-            border: 1.5px solid var(--border-strong) !important;
-            border-radius: 10px !important;
-            padding: 8px 36px 8px 12px !important;
-            font-size: 0.95rem !important;
-            font-weight: 600 !important;
-            cursor: pointer;
-            transition: border-color 0.2s ease, box-shadow 0.2s ease;
+            border-color: var(--border) !important;
         }
-        select:hover {
-            border-color: var(--accent) !important;
-        }
-        select:focus {
-            outline: none;
-            border-color: var(--accent) !important;
-            box-shadow: 0 0 0 3px rgba(107, 254, 254, 0.14);
-        }
+        /* Some browsers require option pseudo-classes for consistent styling */
         select option {
-            background: #0d0d16;
+            background: var(--surface);
             color: var(--text);
-        }
-        /* ── Unified text-input style ─────────────────────────────────── */
-        input[type="text"],
-        input[type="search"],
-        input[type="email"],
-        input[type="password"],
-        input[type="url"],
-        input[type="number"] {
-            background-color: rgba(0, 0, 0, 0.55);
-            color: var(--text);
-            border: 1.5px solid var(--border-strong);
-            border-radius: 10px;
-            padding: 8px 12px;
-            font-size: 0.95rem;
-            font-weight: 600;
-            transition: border-color 0.2s ease, box-shadow 0.2s ease;
-        }
-        input[type="text"]:hover,
-        input[type="search"]:hover {
-            border-color: var(--accent);
-        }
-        input[type="text"]:focus,
-        input[type="search"]:focus,
-        input[type="email"]:focus,
-        input[type="password"]:focus,
-        input[type="url"]:focus,
-        input[type="number"]:focus {
-            outline: none;
-            border-color: var(--accent);
-            box-shadow: 0 0 0 3px rgba(107, 254, 254, 0.14);
-        }
-        input[type="text"]::placeholder,
-        input[type="search"]::placeholder {
-            color: var(--text-soft);
-            font-weight: 400;
         }
 
         header.top-bar.topbar--compact .brand-text {
@@ -641,32 +588,30 @@
             width: 100%;
         }
 
-        /* Use browser scroll for About / Settings / Plugins / Engines */
+        /* Use browser scroll for About / Settings / Components */
         .tab-panel[data-tab="settings"],
-        .tab-panel[data-tab="plugins"],
-        .tab-panel[data-tab="engines"],
+        .tab-panel[data-tab="components"],
         .tab-panel[data-tab="about"] {
             /* Keep panels honor .active; only adjust sizing/overflow */
             height: auto;
             min-height: 0;
             overflow: visible;
         }
-        /* Active variants scroll inside the panel (body has overflow:hidden) */
+        /* Active variants use document flow so browser scroll is used */
         .tab-panel[data-tab="settings"].active,
-        .tab-panel[data-tab="plugins"].active,
-        .tab-panel[data-tab="engines"].active,
+        .tab-panel[data-tab="components"].active,
         .tab-panel[data-tab="about"].active {
             display: block;
-            height: calc(100vh - var(--topbar-height, 120px));
+            height: auto;
             min-height: 0;
-            overflow-y: auto;
+            overflow: visible;
         }
         .tab-panel[data-tab="settings"] .home-stage,
-        .tab-panel[data-tab="plugins"] .home-stage,
-        .tab-panel[data-tab="engines"] .home-stage,
+        .tab-panel[data-tab="components"] .home-stage,
         .tab-panel[data-tab="about"] .home-stage {
             height: auto;
             min-height: 0;
+            overflow: visible;
         }
         .card {
             background: var(--surface);
@@ -889,6 +834,11 @@
         .component-status-unknown {
             color: var(--text-soft);
             border-color: rgba(255, 255, 255, 0.2);
+        }
+        #cortex-engine-select {
+            background: rgba(0, 0, 0, 0.65) !important;
+            color: var(--text) !important;
+            border-color: var(--border-strong) !important;
         }
         .component-description {
             margin: 0.6rem 0;
@@ -1264,11 +1214,8 @@ window.__SYNTH_CONFIG = {
             <button class="nav-btn" data-tab="settings" aria-controls="tab-settings" aria-pressed="false">
                 <span class="icon" aria-hidden="true">⚙️</span><span>Settings</span>
             </button>
-            <button class="nav-btn" data-tab="plugins" aria-controls="tab-plugins" aria-pressed="false">
-                <span class="icon" aria-hidden="true">🧩</span><span>Plugins</span>
-            </button>
-            <button class="nav-btn" data-tab="engines" aria-controls="tab-engines" aria-pressed="false">
-                <span class="icon" aria-hidden="true">⚙️</span><span>Engines</span>
+            <button class="nav-btn" data-tab="components" aria-controls="tab-components" aria-pressed="false">
+                <span class="icon" aria-hidden="true">🧩</span><span>Components</span>
             </button>
             <button class="nav-btn" data-tab="about" aria-controls="tab-about" aria-pressed="false">
                 <span class="icon" aria-hidden="true">ℹ️</span><span>About</span>
@@ -1281,8 +1228,7 @@ window.__SYNTH_CONFIG = {
         <section class="tab-panel" id="tab-skins" data-tab="skins" role="tabpanel"></section>
         <section class="tab-panel" id="tab-logs" data-tab="logs" role="tabpanel"></section>
         <section class="tab-panel" id="tab-settings" data-tab="settings" role="tabpanel"></section>
-        <section class="tab-panel" id="tab-plugins" data-tab="plugins" role="tabpanel"></section>
-        <section class="tab-panel" id="tab-engines" data-tab="engines" role="tabpanel"></section>
+        <section class="tab-panel" id="tab-components" data-tab="components" role="tabpanel"></section>
         <section class="tab-panel" id="tab-about" data-tab="about" role="tabpanel"></section>
     </main>
     <div id="synth-minimized-stack" class="synth-minimized-stack" aria-live="polite"></div>
@@ -1297,7 +1243,6 @@ window.__SYNTH_CONFIG = {
     <script src="/js/skins-ui.js?v=%%STATIC_VERSION%%"></script>
     <script src="/js/skins-upload.js?v=%%STATIC_VERSION%%"></script>
     <script src="/js/skins.js?v=%%STATIC_VERSION%%"></script>
-    <script src="/js/engines.js?v=%%STATIC_VERSION%%"></script>
 
     <!-- Ko‑fi widget is loaded only inside the About tab (init handled in `initAboutTab()` in `/js/main.js`) -->
 </body>

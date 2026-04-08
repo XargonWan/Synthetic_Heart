@@ -59,7 +59,7 @@ def get_adapter_for_endpoint(
                 f"[probe] Endpoint '{endpoint.name}' (openai) requires a base_url."
             )
         timeout = float(
-            (endpoint.extra_config or {}).get("timeout", 60.0)
+            (endpoint.extra_config or {}).get("timeout", 300.0)
         )
         return OpenAICompatAdapter(
             base_url=endpoint.base_url,

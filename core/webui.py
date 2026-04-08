@@ -3798,15 +3798,22 @@ class SynthWebUIInterface:
     async def execute_action(self, action: dict, context: dict, bot, original_message):
         if action.get("type") == "message_synth_webui":
             payload = action.get("payload", {})
-            # Try to get session_id from context (chat_id or interface_path)
+
+            def _extract_session_id(value: str | None) -> str | None:
+                if not value or "/" not in str(value):
+                    return None
+                parts = str(value).split("/")
+                if len(parts) >= 2 and parts[0] == INTERFACE_NAME:
+                    return parts[1]
+                return None
+
             session_id = context.get("chat_id")
-            if not session_id and "interface_path" in context:
-                # Extract session_id from interface_path format: "synth_webui/session_id"
-                interface_path = context.get("interface_path")
-                if interface_path and "/" in interface_path:
-                    parts = interface_path.split("/")
-                    if len(parts) >= 2:
-                        session_id = parts[1]
+            if not session_id:
+                session_id = _extract_session_id(context.get("interface_path"))
+            if not session_id:
+                session_id = _extract_session_id(payload.get("interface_path"))
+            if not session_id and original_message is not None:
+                session_id = _extract_session_id(getattr(original_message, "interface_path", None))
 
             # Ensure the payload has the correct interface_path for sending
             if session_id:
@@ -4860,15 +4867,19 @@ class SynthWebUIInterface:
             msg = SimpleNamespace()
             msg.chat_id = payload.get("conversation_id") or None
             msg.interface_path = f"integration:{source}"
-            # Forward into the message chain so plugins and the core can handle it
-            from core import message_chain
+            # Forward into the message queue so plugins and the core can handle it
+            from core import message_queue
 
-            result = await message_chain.handle_incoming_message(
-                None,
-                msg,
-                text,
-                source="interface",
-                context={"integration_source": source, "metadata": metadata},
+            result = await message_queue.enqueue_and_wait(
+                bot=None,
+                message=msg,
+                context_memory={"integration_source": source, "metadata": metadata},
+                history_scope="local",
+                priority=False,
+                interface_id="integration",
+                skip_mention_check=True,
+                original_message=msg,
+                timeout=30.0,
             )
             return JSONResponse({"status": "ok", "result": result})
         else:

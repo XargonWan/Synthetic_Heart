@@ -444,11 +444,18 @@ class OllamaCompatServer:
             )
 
             try:
-                response = await plugin_instance.handle_incoming_message(
-                    self,
-                    message_obj,
-                    self.context_memory,
-                    self.interface_id,
+                from core import message_queue
+
+                response = await message_queue.enqueue_and_wait(
+                    bot=self,
+                    message=message_obj,
+                    context_memory=self.context_memory,
+                    history_scope="local",
+                    priority=False,
+                    interface_id=self.interface_id,
+                    skip_mention_check=True,
+                    original_message=message_obj,
+                    timeout=self.completion_timeout if self.completion_timeout > 0 else None,
                 )
             except Exception as exc:
                 log_error(f"[ollama_serve] Error while processing message: {exc}")

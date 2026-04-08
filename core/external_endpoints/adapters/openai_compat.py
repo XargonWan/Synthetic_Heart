@@ -14,6 +14,7 @@ from __future__ import annotations
 from typing import Any, AsyncIterator
 from urllib.parse import urlparse, urlunparse
 
+import httpx
 from core.logging_utils import log_debug, log_warning
 
 from core.external_endpoints.adapters.base import (
@@ -46,10 +47,14 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
             try:
                 from openai import AsyncOpenAI
 
+                http_client = httpx.AsyncClient(
+                    timeout=httpx.Timeout(self._timeout or 300.0),
+                )
                 self._client = AsyncOpenAI(
                     base_url=self._sdk_base_url(),
                     api_key=self._api_key,
                     timeout=self._timeout,
+                    http_client=http_client,
                 )
             except ImportError as exc:
                 raise RuntimeError(
