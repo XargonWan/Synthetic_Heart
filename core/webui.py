@@ -18,10 +18,12 @@ import re
 import threading
 import uuid
 import platform
+import tempfile
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Deque, Dict, Optional, List, Any
+from urllib.parse import quote, unquote, urlparse
 
 from fastapi import (
     FastAPI,
@@ -286,6 +288,36 @@ class SynthWebUIInterface:
         # initialise skin hint based on whatever active_vrm we found
         self._current_skin = self._derive_skin_from_active_vrm()
 
+        # Attachments storage: prefer explicit env var, then XDG_DATA_HOME, then /config
+        attachments_root = os.getenv("SYNTH_ATTACHMENTS_ROOT")
+        if attachments_root:
+            self.attachments_dir = Path(attachments_root).expanduser()
+        else:
+            xdg_data_home = os.getenv("XDG_DATA_HOME")
+            self.attachments_dir = (
+                Path(xdg_data_home).expanduser() if xdg_data_home else Path("/config")
+            ) / "attachments"
+        try:
+            self.attachments_dir.mkdir(parents=True, exist_ok=True)
+        except Exception as exc:
+            log_warning(
+                f"{LOG_PREFIX} Could not create attachments directory {self.attachments_dir}: {exc}",
+                log_file=WEBUI_LOG,
+            )
+            fallback_dir = Path(tempfile.gettempdir()) / "synth_webui" / "attachments"
+            try:
+                fallback_dir.mkdir(parents=True, exist_ok=True)
+                self.attachments_dir = fallback_dir
+                log_info(
+                    f"{LOG_PREFIX} Falling back to attachments directory {self.attachments_dir}",
+                    log_file=WEBUI_LOG,
+                )
+            except Exception as exc2:
+                log_warning(
+                    f"{LOG_PREFIX} Could not create fallback attachments directory {fallback_dir}: {exc2}",
+                    log_file=WEBUI_LOG,
+                )
+
         if static_dir.exists():
             self.app.mount(
                 "/static", StaticFiles(directory=str(static_dir)), name="static"
@@ -354,6 +386,7 @@ class SynthWebUIInterface:
                         path.startswith("/js/")
                         or path.startswith("/static/")
                         or path.startswith("/skins")
+                        or path.startswith("/uploads")
                     ):
                         # No store ensures proxies and browsers always revalidate.
                         response.headers["Cache-Control"] = "no-cache"
@@ -383,6 +416,20 @@ class SynthWebUIInterface:
                 log_warning(f"{LOG_PREFIX} Failed to mount /skins: {exc}")
         else:
             log_warning(f"{LOG_PREFIX} Skins directory not found: {skins_dir}")
+        if self.attachments_dir.exists():
+            try:
+                self.app.mount(
+                    "/uploads",
+                    StaticFiles(directory=str(self.attachments_dir)),
+                    name="synth-webui-uploads",
+                )
+                log_info(f"{LOG_PREFIX} Mounted /uploads to {self.attachments_dir}")
+            except Exception as exc:
+                log_warning(f"{LOG_PREFIX} Failed to mount /uploads: {exc}")
+        else:
+            log_warning(
+                f"{LOG_PREFIX} Attachments directory does not exist, /uploads endpoint NOT mounted"
+            )
         if self.vrm_dir.exists():
             try:
                 self.app.mount(
@@ -534,6 +581,7 @@ class SynthWebUIInterface:
         self.app.websocket("/logs")(self.logs_ws_endpoint)
         # Auris audio endpoints
         self.app.post("/api/audio/upload")(self.audio_upload_endpoint)
+        self.app.post("/api/chat/attachments")(self.chat_attachment_upload_endpoint)
         # helper endpoint for Vosk language selection (legacy compat, delegates to MODEL_MANAGER)
         self.app.post("/api/auris/vosk/download")(self.vosk_model_download)
         # Model management endpoints (SSOT: MODEL_MANAGER)
@@ -1154,6 +1202,23 @@ class SynthWebUIInterface:
                 _vox_cache = 40
             replacements["%%VOX_ENABLED%%"] = "true" if _vox_enabled else "false"
             replacements["%%VOX_AUDIO_CACHE_SIZE%%"] = str(_vox_cache)
+
+            # Iris enabled flag exposed to the WebUI client. Attachments require
+            # the Iris subsystem to be available in the current session.
+            try:
+                active_iris = str(
+                    config_registry.get_value(
+                        "ACTIVE_IRIS_ENGINE",
+                        "disabled",
+                        value_type=str,
+                        group="plugins",
+                        component="iris_plugin",
+                    )
+                )
+                _iris_enabled = bool(active_iris and active_iris != "disabled")
+            except Exception:
+                _iris_enabled = False
+            replacements["%%IRIS_ENABLED%%"] = "true" if _iris_enabled else "false"
 
             # Accent color config + presets (exposed to client as runtime config)
             try:
@@ -2003,14 +2068,23 @@ class SynthWebUIInterface:
                     continue
 
                 text = (payload.get("text") or "").strip()
-                if not text:
+                attachments = payload.get("attachments") or []
+                if not text and not attachments:
                     continue
                 is_voice_input = bool(payload.get("is_voice_input", False))
-                await self._append_history(session_id, "user", text)
+                normalized_attachments = [
+                    self._normalize_webui_attachment(att)
+                    for att in attachments
+                ]
+                metadata = {"attachments": normalized_attachments} if normalized_attachments else None
+                await self._append_history(session_id, "user", text, metadata=metadata)
                 # Process message in background to avoid blocking WebSocket
                 asyncio.create_task(
                     self._handle_user_message(
-                        session_id, text, is_voice_input=is_voice_input
+                        session_id,
+                        text,
+                        attachments=normalized_attachments,
+                        is_voice_input=is_voice_input,
                     )
                 )
         except WebSocketDisconnect:
@@ -2229,6 +2303,43 @@ class SynthWebUIInterface:
         except Exception as exc:
             log_error(f"{LOG_PREFIX} audio_upload_endpoint error: {exc}")
             return JSONResponse({"error": str(exc)}, status_code=500)
+
+    # ------------------------------------------------------------------
+    # WebUI chat attachment upload endpoint
+    # ------------------------------------------------------------------
+
+    async def chat_attachment_upload_endpoint(
+        self,
+        file: UploadFile = File(...),
+    ):
+        """POST /api/chat/attachments — store a user attachment for WebUI chat."""
+        if not file or not file.filename:
+            raise HTTPException(status_code=400, detail="No file uploaded")
+
+        filename = Path(file.filename).name
+        safe_name = f"{uuid.uuid4().hex}_{filename}"
+        destination = self.attachments_dir / safe_name
+        try:
+            with destination.open("wb") as fh:
+                while True:
+                    chunk = await file.read(1 << 20)
+                    if not chunk:
+                        break
+                    fh.write(chunk)
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to store chat attachment: {exc}")
+            raise HTTPException(status_code=500, detail="Failed to store uploaded file")
+
+        file_url = f"/uploads/{quote(safe_name)}"
+        return JSONResponse(
+            {
+                "status": "ok",
+                "url": file_url,
+                "filename": filename,
+                "mime_type": file.content_type or "application/octet-stream",
+                "size": destination.stat().st_size,
+            }
+        )
 
     # ------------------------------------------------------------------
     # Vox metadata/sample endpoints
@@ -2875,12 +2986,42 @@ class SynthWebUIInterface:
                 status_code=500, detail=f"Failed to retrieve animation state: {exc}"
             ) from exc
 
+    def _normalize_webui_attachment(self, attachment: dict[str, Any]) -> dict[str, Any]:
+        """Normalize WebUI attachment metadata for local engine ingestion."""
+        if not isinstance(attachment, dict):
+            return attachment
+
+        url = attachment.get("url")
+        if not isinstance(url, str):
+            return attachment
+
+        parsed = urlparse(url)
+        if parsed.path.startswith("/uploads/"):
+            file_name = Path(unquote(parsed.path[len("/uploads/"):])).name
+            if file_name:
+                local_path = self.attachments_dir / file_name
+                normalized = dict(attachment)
+                normalized["path"] = str(local_path)
+                normalized["file_path"] = str(local_path)
+                return normalized
+
+        return attachment
+
     async def _handle_user_message(
-        self, session_id: str, text: str, is_voice_input: bool = False
+        self,
+        session_id: str,
+        text: str,
+        attachments: list[dict[str, Any]] | None = None,
+        is_voice_input: bool = False,
     ) -> None:
         from types import SimpleNamespace
         from core.config import TRAINER_NAME
         from core import message_queue
+
+        normalized_attachments = [
+            self._normalize_webui_attachment(att)
+            for att in (attachments or [])
+        ]
 
         log_info(
             f"{LOG_PREFIX} [_handle_user_message] START: session_id={session_id}, text_len={len(text)}, text={text[:100]}"
@@ -2898,6 +3039,7 @@ class SynthWebUIInterface:
             interface_path=f"{INTERFACE_NAME}/{session_id}",  # Add interface_path for proper routing
             message_id=int(datetime.utcnow().timestamp() * 1000) % 1_000_000,
             text=text,
+            attachments=normalized_attachments or [],
             is_voice_input=is_voice_input,
             date=datetime.utcnow(),
             from_user=SimpleNamespace(
@@ -3104,6 +3246,9 @@ class SynthWebUIInterface:
                     replay_payload["data"] = {"tts_url": tts_url}
                 else:
                     replay_payload["data"] = meta
+                attachments = meta.get("attachments")
+                if attachments:
+                    replay_payload["attachments"] = attachments
             await websocket.send_json(replay_payload)
         log_info(
             f"{LOG_PREFIX} _replay_history: sent {len(history)} messages to session {session_id}"

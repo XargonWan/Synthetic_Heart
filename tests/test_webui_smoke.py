@@ -1,3 +1,10 @@
+from pathlib import Path
+from typing import Any
+import tempfile
+
+import core
+import core.message_queue
+import core.session_meta as session_meta
 from starlette.testclient import TestClient
 from core.webui import SynthWebUIInterface
 
@@ -28,6 +35,37 @@ def test_templates_skins_served():
     assert "skins-grid" in r.text
 
 
+def test_iris_disabled_config_exposed(monkeypatch):
+    import core.webui as core_webui
+
+    original_get_value = core_webui.config_registry.get_value
+
+    def fake_get_value(
+        key: str,
+        default: Any = None,
+        value_type: Any = None,
+        group: str | None = None,
+        component: str | None = None,
+    ) -> Any:
+        if key == "ACTIVE_IRIS_ENGINE":
+            return "disabled"
+        return original_get_value(
+            key,
+            default=default,
+            value_type=value_type,
+            group=group or "core",
+            component=component or "core",
+        )
+
+    monkeypatch.setattr(core_webui.config_registry, "get_value", fake_get_value)
+    ui = SynthWebUIInterface(autostart=False)
+    client = TestClient(ui.app)
+    r = client.get("/")
+    assert r.status_code == 200
+    assert "IRIS_ENABLED" in r.text
+    assert "IRIS_ENABLED: false" in r.text
+
+
 def test_static_js_files_served():
     client = create_client()
     r = client.get("/js/main.js")
@@ -36,3 +74,122 @@ def test_static_js_files_served():
     r2 = client.get("/js/skins.js")
     assert r2.status_code == 200
     assert "initSkinsTab" in r2.text
+
+
+def test_uploads_route_mounted(tmp_path, monkeypatch):
+    monkeypatch.setenv("SYNTH_ATTACHMENTS_ROOT", str(tmp_path / "attachments"))
+    ui = SynthWebUIInterface(autostart=False)
+    assert ui.attachments_dir == Path(str(tmp_path / "attachments"))
+    assert ui.attachments_dir.exists()
+
+    test_file = ui.attachments_dir / "hello.txt"
+    test_file.write_text("hello")
+
+    client = TestClient(ui.app)
+    r = client.get("/uploads/hello.txt")
+    assert r.status_code == 200
+    assert r.text == "hello"
+
+
+def test_chat_attachment_upload_endpoint(tmp_path, monkeypatch):
+    monkeypatch.setenv("SYNTH_ATTACHMENTS_ROOT", str(tmp_path / "attachments"))
+    ui = SynthWebUIInterface(autostart=False)
+    client = TestClient(ui.app)
+
+    files = {"file": ("hello.txt", b"hello", "text/plain")}
+    r = client.post("/api/chat/attachments", files=files)
+    assert r.status_code == 200
+    data = r.json()
+    assert data.get("status") == "ok"
+    assert data.get("filename") == "hello.txt"
+    assert data.get("url", "").startswith("/uploads/")
+    uploaded_name = data["url"].split("/uploads/")[1]
+    assert (ui.attachments_dir / uploaded_name).exists()
+
+
+def test_normalize_webui_attachment_local_path(tmp_path, monkeypatch):
+    monkeypatch.setenv("SYNTH_ATTACHMENTS_ROOT", str(tmp_path / "attachments"))
+    ui = SynthWebUIInterface(autostart=False)
+    local_file = ui.attachments_dir / "test.jpg"
+    local_file.write_bytes(b"dummy")
+
+    attachment = {
+        "url": "/uploads/test.jpg",
+        "filename": "test.jpg",
+        "mime_type": "image/jpeg",
+        "size": 5,
+    }
+    normalized = ui._normalize_webui_attachment(attachment)
+
+    assert normalized["path"] == str(local_file)
+    assert normalized["file_path"] == str(local_file)
+    assert normalized["filename"] == "test.jpg"
+
+
+async def test_handle_user_message_normalizes_webui_attachment(tmp_path, monkeypatch):
+    monkeypatch.setenv("SYNTH_ATTACHMENTS_ROOT", str(tmp_path / "attachments"))
+    ui = SynthWebUIInterface(autostart=False)
+    local_file = ui.attachments_dir / "test.jpg"
+    local_file.write_bytes(b"dummy")
+
+    captured: dict[str, Any] = {}
+
+    async def fake_enqueue(
+        bot=None,
+        message=None,
+        context_memory=None,
+        priority=None,
+        interface_id=None,
+        skip_mention_check=None,
+        original_message=None,
+    ):
+        captured["message"] = message or original_message
+
+    monkeypatch.setattr(core.message_queue, "enqueue", fake_enqueue)
+
+    monkeypatch.setattr(
+        session_meta,
+        "get_session_meta",
+        lambda interface_path: None,
+    )
+    async def dummy_set_session_meta(interface_path, value):
+        return None
+    monkeypatch.setattr(session_meta, "set_session_meta", dummy_set_session_meta)
+
+    await ui._handle_user_message(
+        session_id="session1",
+        text="Hello",
+        attachments=[
+            {
+                "url": "/uploads/test.jpg",
+                "filename": "test.jpg",
+                "mime_type": "image/jpeg",
+                "size": 5,
+            }
+        ],
+        is_voice_input=False,
+    )
+
+    assert "message" in captured
+    assert captured["message"].attachments[0]["path"] == str(local_file)
+    assert captured["message"].attachments[0]["file_path"] == str(local_file)
+
+
+def test_attachments_directory_falls_back_to_temp(monkeypatch):
+    monkeypatch.delenv("SYNTH_ATTACHMENTS_ROOT", raising=False)
+    monkeypatch.delenv("XDG_DATA_HOME", raising=False)
+
+    original_mkdir = Path.mkdir
+
+    def fake_mkdir(self, parents=False, exist_ok=False):
+        if str(self).startswith("/config"):
+            raise PermissionError("Permission denied: '/config/attachments'")
+        return original_mkdir(self, parents=parents, exist_ok=exist_ok)
+
+    monkeypatch.setattr(Path, "mkdir", fake_mkdir)
+
+    ui = SynthWebUIInterface(autostart=False)
+
+    assert "/config/attachments" not in str(ui.attachments_dir)
+    assert ui.attachments_dir.exists()
+    assert str(ui.attachments_dir).startswith(tempfile.gettempdir())
