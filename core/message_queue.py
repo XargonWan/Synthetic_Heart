@@ -1487,6 +1487,15 @@ async def _consumer_loop() -> None:
             log_error(
                 f"[QUEUE] Unexpected error in consumer loop: {repr(e)}\n{traceback.format_exc()}"
             )
+            # A stale-loop error means every subsequent iteration will fail the
+            # same way.  Break immediately rather than spinning and spamming logs.
+            if isinstance(e, RuntimeError) and "bound to a different event loop" in str(
+                e
+            ):
+                log_error(
+                    "[QUEUE] Consumer stopping: queue bound to wrong event loop. Call run() to reinitialize."
+                )
+                break
 
 
 async def enqueue_event(bot, prompt_data, event_id: int = None) -> None:
@@ -1529,7 +1538,7 @@ async def enqueue_event(bot, prompt_data, event_id: int = None) -> None:
 
 async def run() -> None:
     """Convenience wrapper to launch the consumer task if not running."""
-    global _consumer_task
+    global _consumer_task, _queue, _lock
 
     if _consumer_task and not _consumer_task.done():
         log_debug("[QUEUE] Consumer already running")

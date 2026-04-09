@@ -1589,10 +1589,11 @@ class DiaryPlugin:
                 FROM ai_diary
                 WHERE timestamp >= DATE_SUB(CURDATE(), INTERVAL 7 DAY)
                 GROUP BY DATE(timestamp)
-                HAVING row_count > 1 OR combined LIKE '%%---%%'
+                HAVING row_count > 1 OR combined LIKE %s
                 ORDER BY MIN(timestamp) ASC
                 LIMIT 1
-                """
+                """,
+                ("%---%",),
             )
         except Exception as e:
             log_debug(f"[ai_diary] on_debrief: DB error fetching unmerged entries: {e}")

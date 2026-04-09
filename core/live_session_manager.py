@@ -603,17 +603,49 @@ class LiveSessionManager:
 
             # Kick off the model with an initial text turn so it sends a greeting
             # without waiting for user audio. The system instruction handles the persona.
-            # On reconnect, tell the model to continue naturally without re-greeting.
+            # On reconnect (cold restart only — resumption preserves context), inject
+            # the last N messages from DB so the model knows what was discussed.
             #
             # NOTE: gemini-3.1-flash-live-preview restricts send_client_content to
             # initial-history seeding (requires history_config).  Use
             # send_realtime_input(text=...) for all text injections instead.
             if is_reconnect:
+                # Fetch recent chat history so a cold restart doesn't cause amnesia.
+                # Resumption (handle != None) preserves the context window server-side;
+                # only cold restarts need this injection.
+                _history_snippet = ""
+                if not resumption_handle:
+                    try:
+                        from core.chat_history_cache import load_chat_history_for_guild
+
+                        _hist = await load_chat_history_for_guild(guild_id, limit=20)
+                        if _hist:
+                            _lines = []
+                            for _m in _hist:
+                                _sender = _m.get("sender_name") or "user"
+                                _txt = (_m.get("text") or "").strip()
+                                if _txt:
+                                    _lines.append(f"{_sender}: {_txt}")
+                            if _lines:
+                                _history_snippet = (
+                                    "\n\nRecent conversation context:\n"
+                                    + "\n".join(_lines[-20:])
+                                )
+                            log_info(
+                                f"[live_session] Injected {len(_lines)} history "
+                                f"messages into cold restart kick for guild {guild_id}"
+                            )
+                    except Exception as _hist_err:
+                        log_warning(
+                            f"[live_session] Could not load history for cold restart "
+                            f"kick (guild {guild_id}): {_hist_err}"
+                        )
+
                 _kick_text = (
                     "[Voice session refreshed — you are continuing the same "
                     "conversation. Do NOT greet or introduce yourself again. "
                     "Simply acknowledge briefly that you're back and continue "
-                    "naturally.]"
+                    f"naturally.{_history_snippet}]"
                 )
             else:
                 _kick_text = "[Session started. Greet naturally.]"
@@ -1268,6 +1300,7 @@ class LiveSessionManager:
                 user_parts: list[str] = []
                 model_parts: list[str] = []
                 turn_msg_count = 0
+                turn_was_interrupted: bool = False
 
                 async for message in state._session.receive():
                     if not state.is_active:
@@ -1280,6 +1313,8 @@ class LiveSessionManager:
                     sc = getattr(message, "server_content", None)
                     _tc = getattr(sc, "turn_complete", None) if sc else None
                     _interrupted = getattr(sc, "interrupted", None) if sc else None
+                    if _interrupted:
+                        turn_was_interrupted = True
                     _gen_complete = (
                         getattr(sc, "generation_complete", None) if sc else None
                     )
@@ -1503,6 +1538,18 @@ class LiveSessionManager:
                     break
 
                 # Turn complete — fire callback with accumulated transcripts.
+                # If the turn was interrupted (noise or barge-in mid-response),
+                # the model_transcript is a partial fragment.  Discard it so we
+                # don't write cut-off bot responses to the DB.  The model will
+                # regenerate a complete response in the next turn.
+                if turn_was_interrupted:
+                    log_info(
+                        f"[live_session] Turn {turn_count} interrupted for guild "
+                        f"{guild_id} — discarding partial model transcript "
+                        f"({len(model_parts)} fragments)"
+                    )
+                    model_parts = []
+
                 if self._on_turn_complete and (user_parts or model_parts):
                     user_transcript = _clean_transcript(user_parts)
                     model_transcript = _clean_transcript(model_parts)

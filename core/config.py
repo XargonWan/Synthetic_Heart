@@ -321,6 +321,22 @@ LIVE_THINKING_BUDGET = config_registry.get_var(
     hidden=True,
 )
 
+LIVE_AUDIO_MIN_RMS = config_registry.get_var(
+    "LIVE_AUDIO_MIN_RMS",
+    500,
+    label="Live Audio Noise Gate (RMS)",
+    description=(
+        "Minimum RMS amplitude required before a Discord audio packet is forwarded "
+        "to the Live API. Packets below this threshold are silently discarded, "
+        "preventing mic hiss / background noise from triggering activity_start and "
+        "causing the model to transcribe garbage. Typical ambient noise sits around "
+        "100–300; speech is usually above 500. Set to 0 to disable the gate."
+    ),
+    group="core",
+    component="cortex_live",
+    value_type=int,
+)
+
 # --- LogChat configuration (use config_registry so exposed-variable APIs are consistent)
 LOG_CHAT_INTERFACE = config_registry.get_var(
     "LOG_CHAT_INTERFACE",

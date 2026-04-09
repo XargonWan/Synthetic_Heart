@@ -27,6 +27,7 @@ import logging as _stdlib_logging
 
 from core.logging_utils import log_debug, log_error, log_info, log_warning
 from core.chat_attention import set_attention, evaluate_triggers
+from core.reaction_handler import get_reaction_emoji
 
 # ── Route discord.ext.voice_recv logs into the synth logger ──────────────
 # voice_recv uses stdlib logging; without this its errors are invisible.
@@ -1652,12 +1653,37 @@ class DiscordInterface:
         ):
             return
 
-        # Case 1: The bot itself left the voice channel
+        # Case 1: The bot itself left the voice channel.
+        # Discord occasionally fires a transient VSU with channel_id=None
+        # immediately followed by a corrective VSU that puts the bot back.
+        # We wait one event-loop tick and then verify the bot is genuinely
+        # not in any voice channel before tearing down the live session.
         if (
             member.id == bot_user.id
             and before.channel is not None
             and after.channel is None
         ):
+            await asyncio.sleep(0)  # yield so any follow-up VSU can be processed
+            # Re-check: if the bot is still in a voice channel in this guild,
+            # the initial VSU was transient — do not stop the session.
+            _bot_in_vc = False
+            try:
+                if self.client:
+                    _guild_obj = self.client.get_guild(guild_id)
+                    if _guild_obj:
+                        _bot_member = _guild_obj.get_member(bot_user.id)
+                        if _bot_member and getattr(
+                            getattr(_bot_member, "voice", None), "channel", None
+                        ):
+                            _bot_in_vc = True
+            except Exception:
+                pass
+            if _bot_in_vc:
+                log_info(
+                    f"[discord_interface] Transient bot-left VSU ignored for "
+                    f"guild {guild_id} (bot still in channel)"
+                )
+                return
             log_info(
                 f"[discord_interface] Bot left voice in guild {guild_id}, "
                 "cleaning up live session"
@@ -2298,9 +2324,9 @@ class DiscordInterface:
                     if live_mgr and live_mgr.is_session_active(guild_id):
                         text = content
 
-                        # --- inject text-decodable file attachments as context ---
-                        # Live API only supports text; binary files (images,
-                        # PDFs) cannot be sent as inline_data.
+                        # --- inject file attachments into the live context ---
+                        # Text-decodable files go via send_context_update (plain text).
+                        # Images go via send_multimodal_context (send_realtime_input).
                         _DECODABLE_PREFIXES = (
                             "text/",
                             "application/json",
@@ -2330,6 +2356,9 @@ class DiscordInterface:
                             ".rst",
                             ".tex",
                         )
+                        _sender = getattr(
+                            message.author, "display_name", None
+                        ) or getattr(message.author, "name", "unknown")
                         for att in getattr(message, "attachments", []):
                             mime = getattr(att, "content_type", "") or ""
                             fname = getattr(att, "filename", "document")
@@ -2341,10 +2370,37 @@ class DiscordInterface:
                                     fname.lower().endswith(ext)
                                     for ext in _TEXT_EXTENSIONS
                                 )
+                            if mime.startswith("image/"):
+                                # Inject image via send_realtime_input so Gemini
+                                # can see it visually during the live session.
+                                try:
+                                    raw = await att.read()
+                                    await live_mgr.send_multimodal_context(
+                                        guild_id,
+                                        text=f"[{_sender} shared an image: {fname}]",
+                                        attachments=[(mime, raw)],
+                                    )
+                                    log_info(
+                                        f"[discord_interface] Injected image '{fname}' "
+                                        f"({len(raw)} bytes, {mime}) into live session "
+                                        f"for guild {guild_id}"
+                                    )
+                                    _emoji = get_reaction_emoji()
+                                    if _emoji:
+                                        try:
+                                            await message.add_reaction(_emoji)
+                                        except Exception:
+                                            pass
+                                except Exception as _att_err:
+                                    log_warning(
+                                        f"[discord_interface] Failed to inject image "
+                                        f"'{fname}' into live session: {_att_err}"
+                                    )
+                                continue
                             if not _is_decodable:
                                 log_info(
-                                    f"[discord_interface] Skipping non-text attachment "
-                                    f"'{fname}' ({mime}) — Live API text-only"
+                                    f"[discord_interface] Skipping attachment "
+                                    f"'{fname}' ({mime}) — unsupported type for live injection"
                                 )
                                 continue
                             try:
@@ -3185,6 +3241,16 @@ if _HAS_VOICE_RECV and voice_recv is not None:
             # attribute the user-side transcript to the correct Discord account.
             self._last_speaker_name: str | None = None
             self._last_speaker_id: str | None = None
+            # Cache the RMS noise-gate threshold once at construction time so
+            # we don't hit the config registry on every audio packet (50 Hz).
+            try:
+                from core.config_manager import config_registry as _cr
+
+                self._min_rms: int = int(
+                    _cr.get_value("LIVE_AUDIO_MIN_RMS", 500, value_type=int)
+                )
+            except Exception:
+                self._min_rms = 500
 
         def wants_opus(self) -> bool:
             """Return False so voice_recv decodes Opus internally.
@@ -3314,8 +3380,11 @@ if _HAS_VOICE_RECV and voice_recv is not None:
                     right = audioop.tomono(pcm_48k_stereo, _DISCORD_SAMPLE_WIDTH, 0, 1)
                     self._diag_right.writeframes(right)
 
-                if rms_mono == 0:
-                    # Pure silence — don't waste bandwidth
+                # Noise gate: discard sub-threshold audio so mic hiss and
+                # ambient background noise never reach the Live API.
+                # Without this, Gemini transcribes noise as speech (hallucination).
+                # Threshold cached at sink construction; set LIVE_AUDIO_MIN_RMS=0 to disable.
+                if rms_mono < self._min_rms:
                     return
 
                 # Downsample 48kHz → 16kHz for Gemini Live API input.

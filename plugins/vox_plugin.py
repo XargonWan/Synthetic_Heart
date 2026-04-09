@@ -532,9 +532,9 @@ class VoxPlugin(AIPluginBase):
             context=context,
             original_message=original_message,
             merged_text=payload.get("__merged_text"),
-            # Suppress text fallback for auto-injected TTS: text was already
-            # dispatched by message_*_bot and a duplicate would confuse the user.
-            allow_fallback=not payload.get("__auto_injected", False),
+            # Fallback to text if TTS fails, even if auto-injected, because
+            # the original message action might have been removed to merge text.
+            allow_fallback=True,
         )
 
     # ------------------------------------------------------------------
