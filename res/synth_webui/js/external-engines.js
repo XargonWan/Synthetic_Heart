@@ -129,7 +129,7 @@
         // Subsystems — read-only badges
         const subsysEl = card.querySelector('.ext-ep-subsystems');
         const effectiveMap = ep.effective_subsystem_map || {};
-        for (const key of ['cortex', 'vox', 'auris', 'live']) {
+        for (const key of ['cortex', 'vox', 'auris', 'vision', 'live']) {
             if (!(key in effectiveMap)) continue;
             const val = effectiveMap[key];
             const badge = document.createElement('span');
@@ -368,7 +368,7 @@
 
         // Capabilities checkboxes
         const caps = preset.default_capabilities || {};
-        for (const k of ['cortex', 'vox', 'auris', 'live']) {
+        for (const k of ['cortex', 'vox', 'auris', 'vision', 'live']) {
             const cb = document.getElementById(`ext-ep-form-cap-${k}`);
             if (cb) cb.checked = !!caps[k];
         }
@@ -427,7 +427,7 @@
 
         // Capabilities from effective_subsystem_map
         const smap = ep.effective_subsystem_map || {};
-        for (const k of ['cortex', 'vox', 'auris', 'live']) {
+        for (const k of ['cortex', 'vox', 'auris', 'vision', 'live']) {
             const cb = document.getElementById(`ext-ep-form-cap-${k}`);
             if (cb) cb.checked = !!smap[k];
         }
@@ -505,7 +505,7 @@
 
         // Collect capability checkboxes into subsystem_map
         const subsystem_map = {};
-        for (const k of ['cortex', 'vox', 'auris', 'live']) {
+        for (const k of ['cortex', 'vox', 'auris', 'vision', 'live']) {
             const cb = document.getElementById(`ext-ep-form-cap-${k}`);
             if (cb) subsystem_map[k] = cb.checked;
         }

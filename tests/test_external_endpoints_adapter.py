@@ -13,13 +13,13 @@ class FakeAiohttpResponse:
         self._payload = payload
         self._body = body or b""
 
-    async def json(self) -> Any:
+    async def json(self, *args: Any, **kwargs: Any) -> Any:
         return self._payload
 
-    async def text(self) -> str:
+    async def text(self, *args: Any, **kwargs: Any) -> str:
         return str(self._payload)
 
-    async def read(self) -> bytes:
+    async def read(self, *args: Any, **kwargs: Any) -> bytes:
         return self._body
 
     async def __aenter__(self):
@@ -108,6 +108,85 @@ async def test_openai_compat_list_models_prefers_v1_path(monkeypatch):
 
     assert all(call.endswith("/v1/models") for call in session.calls)
     assert models[0].id == "qwen"
+
+
+@pytest.mark.asyncio
+async def test_openai_compat_probe_capabilities_reads_model_capabilities(monkeypatch):
+    adapter = OpenAICompatAdapter(base_url="http://localhost:14848", api_key="x")
+
+    session = FakeAiohttpSession()
+    session.responses = [
+        FakeAiohttpResponse(
+            status=200,
+            payload={
+                "data": [
+                    {
+                        "id": "vision-model",
+                        "object": "model",
+                        "capabilities": {"vision": True},
+                    }
+                ]
+            },
+        ),
+        FakeAiohttpResponse(status=404, payload={}, body=b""),
+        FakeAiohttpResponse(status=404, payload={}, body=b""),
+    ]
+
+    import aiohttp
+
+    monkeypatch.setattr(aiohttp, "ClientSession", lambda: session)
+
+    caps = await adapter.probe_capabilities()
+
+    assert caps["vision"] is True
+    assert caps["auris"] is False
+    assert caps["vox"] is False
+
+
+@pytest.mark.asyncio
+async def test_openai_compat_probe_capabilities_probes_image_support(monkeypatch):
+    adapter = OpenAICompatAdapter(base_url="http://localhost:14848", api_key="x")
+
+    session = FakeAiohttpSession()
+    session.responses = [
+        FakeAiohttpResponse(status=200, payload={"data": [{"id": "chat-only", "object": "model"}]}),
+        FakeAiohttpResponse(status=200, payload={"choices": [{"message": {"content": "ok"}}]}),
+        FakeAiohttpResponse(status=404, payload={}, body=b""),
+        FakeAiohttpResponse(status=404, payload={}, body=b""),
+    ]
+
+    import aiohttp
+
+    monkeypatch.setattr(aiohttp, "ClientSession", lambda: session)
+
+    caps = await adapter.probe_capabilities()
+
+    assert caps["vision"] is True
+    assert caps["auris"] is False
+    assert caps["vox"] is False
+
+
+@pytest.mark.asyncio
+async def test_openai_compat_probe_capabilities_detects_vision_for_gemini_flash(monkeypatch):
+    adapter = OpenAICompatAdapter(base_url="http://localhost:14848", api_key="x")
+
+    session = FakeAiohttpSession()
+    session.responses = [
+        FakeAiohttpResponse(status=200, payload={"data": [{"id": "gemini-2.5-flash", "object": "model"}]}),
+        FakeAiohttpResponse(status=200, payload={"choices": [{"message": {"content": "ok"}}]}),
+        FakeAiohttpResponse(status=404, payload={}, body=b""),
+        FakeAiohttpResponse(status=404, payload={}, body=b""),
+    ]
+
+    import aiohttp
+
+    monkeypatch.setattr(aiohttp, "ClientSession", lambda: session)
+
+    caps = await adapter.probe_capabilities()
+
+    assert caps["vision"] is True
+    assert caps["auris"] is False
+    assert caps["vox"] is False
 
 
 # ---------------------------------------------------------------------------

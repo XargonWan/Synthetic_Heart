@@ -162,22 +162,49 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
     # Models
     # ------------------------------------------------------------------
 
+    def _normalize_capabilities(self, capabilities: Any) -> dict[str, bool]:
+        if isinstance(capabilities, dict):
+            return {
+                str(key).lower(): bool(value)
+                for key, value in capabilities.items()
+                if isinstance(key, (str, int, float))
+            }
+        if isinstance(capabilities, (list, tuple, set)):
+            return {str(item).lower(): True for item in capabilities if isinstance(item, (str, int, float))}
+        if isinstance(capabilities, (str, int, float)):
+            return {str(capabilities).lower(): True}
+        return {}
+
     def _parse_model_entry(self, entry: Any) -> ModelInfo:
         # Some OpenAI-compatible endpoints return dict-like entries, others
         # return SDK model objects. Support both.
         if isinstance(entry, dict):
             entry_id = str(entry.get("id", ""))
+            capabilities = self._normalize_capabilities(entry.get("capabilities", {}))
             return ModelInfo(
                 id=entry_id,
                 name=str(entry.get("name", entry_id)),
                 owned_by=str(entry.get("owned_by", "")),
+                capabilities=capabilities,
             )
         entry_id = getattr(entry, "id", "") or ""
+        capabilities = self._normalize_capabilities(getattr(entry, "capabilities", {}))
         return ModelInfo(
             id=str(entry_id),
             name=str(getattr(entry, "name", entry_id) or entry_id),
             owned_by=str(getattr(entry, "owned_by", "") or ""),
+            capabilities=capabilities,
         )
+
+    def _supports_vision_capability(self, model: ModelInfo) -> bool:
+        if not model.capabilities:
+            return False
+        keys = {key.lower() for key in model.capabilities.keys()}
+        if any(keyword in keys for keyword in ("vision", "image", "images", "multimodal", "visual")):
+            return True
+        if model.capabilities.get("vision") or model.capabilities.get("image"):
+            return True
+        return False
 
     def _resolve_http_url(self, path: str) -> str:
         parsed = urlparse(self._base_url)
@@ -420,6 +447,51 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
             log_warning(f"[openai_compat] describe_image failed: {exc}")
             return None
 
+    async def _probe_vision_support(self) -> bool:
+        import base64
+
+        import aiohttp
+
+        # A lightweight standard OpenAI-style image probe. If the endpoint supports
+        # vision in the chat completion path, this request should succeed.
+        tiny_png = (
+            b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01"
+            b"\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde\x00\x00"
+            b"\x00\x0cIDAT\x08\xdbc\xf8\x0f\x00\x01\x05\x01\x02\x9a\x9b"
+            b"\x0c\x1d\x00\x00\x00\x00IEND\xaeB`\x82"
+        )
+        data_url = f"data:image/png;base64,{base64.b64encode(tiny_png).decode('ascii')}"
+        prompt = "Describe this image in detail."
+        payload = {
+            "model": "default",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {"type": "image_url", "image_url": {"url": data_url}},
+                    ],
+                }
+            ],
+            "max_tokens": 10,
+            "stream": False,
+        }
+        headers = {
+            "Authorization": f"Bearer {self._api_key}",
+            "Content-Type": "application/json",
+        }
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    self._http_chat_url(),
+                    json=payload,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=15),
+                ) as resp:
+                    return resp.status == 200
+        except Exception:
+            return False
+
     # ------------------------------------------------------------------
     # Probe / health
     # ------------------------------------------------------------------
@@ -533,16 +605,15 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
 
         import aiohttp
 
-        # --- Vision: check model names from /models list ---
+        # --- Vision: read declared model capability metadata first ---
         try:
             models = await self.list_models()
             for m in models:
-                if any(
-                    kw in m.id.lower()
-                    for kw in ("vision", "vl", "llava", "visual", "gpt-4o", "gemma3")
-                ):
+                if self._supports_vision_capability(m):
                     capabilities["vision"] = True
                     break
+            if not capabilities["vision"]:
+                capabilities["vision"] = await self._probe_vision_support()
         except Exception:
             pass
 
@@ -575,15 +646,22 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
                 content_type="audio/wav",
             )
             data.add_field("model", "whisper-1")
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    f"{self._base_url}/audio/transcriptions",
-                    data=data,
-                    headers={"Authorization": f"Bearer {self._api_key}"},
-                    timeout=aiohttp.ClientTimeout(total=10),
-                ) as resp:
-                    # Any non-404 status means the path exists (empty file may return 400)
-                    capabilities["auris"] = resp.status != 404
+            for path in self._http_stt_paths():
+                url = self._resolve_http_url(path)
+                try:
+                    async with aiohttp.ClientSession() as session:
+                        async with session.post(
+                            url,
+                            data=data,
+                            headers={"Authorization": f"Bearer {self._api_key}"},
+                            timeout=aiohttp.ClientTimeout(total=10),
+                        ) as resp:
+                            # Any non-404 status means the path exists (empty file may return 400)
+                            capabilities["auris"] = resp.status != 404
+                            if capabilities["auris"]:
+                                break
+                except Exception:
+                    continue
         except Exception:
             pass
 
