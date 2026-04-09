@@ -31,11 +31,11 @@ from plugins.auris_base import AurisTranscriptResult
 register_exposed_var(
     "ACTIVE_AURIS_ENGINE",
     label="Active Auris Engine",
-    default="disabled",
+    default="vosk",
     value_type=str,
     ui_type="string",
     description=(
-        "Name of the active Auris STT engine (file-based only, e.g. 'gemini'). "
+        "Name of the active Auris STT engine (file-based only, e.g. 'vosk'). "
         "Set to 'disabled' to turn off the Auris subsystem. For real-time streaming use the Live subsystem."
     ),
     scope="plugins",
@@ -275,7 +275,7 @@ class AurisPlugin(AIPluginBase):
             self._active_engine_name = str(
                 config_registry.get_value(
                     "ACTIVE_AURIS_ENGINE",
-                    "gemini",
+                    "vosk",
                     value_type=str,
                     group="plugins",
                     component="auris_plugin",
