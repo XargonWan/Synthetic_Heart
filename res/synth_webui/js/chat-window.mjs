@@ -421,6 +421,8 @@ function removeTypingIndicator() {
         try { localStorage.removeItem(TYPING_INDICATOR_KEY); } catch (e) { /* ignore */ }
         try { localStorage.removeItem(TYPING_INDICATOR_TS_KEY); } catch (e) { /* ignore */ }
         try { _clearTypingTimeout(); } catch (e) { /* ignore */ }
+        try { _clearTypingIndicatorProcessingTimer(); } catch (e) { /* ignore */ }
+        _pendingSynthResponse = false;
     } catch (e) { /* ignore */ }
 }
 
@@ -503,6 +505,8 @@ function appendMessage(container, sender, text, ts, attachments) {
     _scrollToBottom(container);
 
     if (sender === 'synth') {
+        _pendingSynthResponse = false;
+        _clearTypingIndicatorProcessingTimer();
         try { if (window.SynthChat && typeof window.SynthChat.maybeNotify === 'function') window.SynthChat.maybeNotify(text); } catch (e) { /* ignore */ }
         try { removeTypingIndicator(); } catch (e) { /* ignore */ }
     }
@@ -593,6 +597,46 @@ export function initChatUI() {
         let pendingAttachmentMeta = null;
         let ws = window.chatWs || null;
         let _typingAnimActive = false; // true when user is typing; reset after submit
+        let _pendingSynthResponse = false; // wait for a final synth response before hiding typing dots
+        let _typingIndicatorProcessingTimer = null;
+
+        function _clearTypingIndicatorProcessingTimer() {
+            if (_typingIndicatorProcessingTimer) {
+                clearTimeout(_typingIndicatorProcessingTimer);
+                _typingIndicatorProcessingTimer = null;
+            }
+        }
+
+        async function _checkProcessingMetaAndMaybeRemoveTypingIndicator() {
+            _clearTypingIndicatorProcessingTimer();
+            const sid = window.sessionId || (typeof sessionId !== 'undefined' ? sessionId : null);
+            if (!sid) return;
+
+            try {
+                const base = _getApiBase();
+                const res = await fetch(
+                    (base || '') + '/api/chat/session_meta?session_id=' +
+                    encodeURIComponent(sid)
+                );
+                if (!res.ok) return;
+                const out = await res.json().catch(() => null);
+                const meta = out && out.meta ? out.meta : {};
+                if (!meta.processing) {
+                    _pendingSynthResponse = false;
+                    removeTypingIndicator();
+                } else {
+                    _typingIndicatorProcessingTimer = setTimeout(
+                        _checkProcessingMetaAndMaybeRemoveTypingIndicator,
+                        1000
+                    );
+                }
+            } catch (e) {
+                _typingIndicatorProcessingTimer = setTimeout(
+                    _checkProcessingMetaAndMaybeRemoveTypingIndicator,
+                    1000
+                );
+            }
+        }
 
         function renderAttachmentPreview() {
             if (!attachmentPreview) return;
@@ -1192,6 +1236,10 @@ export function initChatUI() {
                             return;
                         }
 
+                        if (data && data.type === 'message_ack') {
+                            _pendingSynthResponse = true;
+                            return;
+                        }
                         if (data && data.type === 'message') {
                             const ts = data.ts || data.timestamp || Date.now();
                             const attachments = data.attachments || (data.data && data.data.attachments) || [];
@@ -1230,7 +1278,11 @@ export function initChatUI() {
                                 clearTimeout(window.__synth_idle_removal_timer);
                                 window.__synth_idle_removal_timer = setTimeout(() => {
                                     window.__synth_idle_removal_timer = null;
-                                    removeTypingIndicator();
+                                    if (_pendingSynthResponse) {
+                                        _checkProcessingMetaAndMaybeRemoveTypingIndicator();
+                                    } else {
+                                        removeTypingIndicator();
+                                    }
                                 }, 600);
                             }
                         } else if (data && (data.type === 'vrm_animation' || data.type === 'animation')) {
