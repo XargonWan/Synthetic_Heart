@@ -19,6 +19,7 @@ import threading
 import uuid
 import platform
 import tempfile
+import base64
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
@@ -3003,6 +3004,21 @@ class SynthWebUIInterface:
                 normalized = dict(attachment)
                 normalized["path"] = str(local_path)
                 normalized["file_path"] = str(local_path)
+                if local_path.exists() and local_path.is_file():
+                    try:
+                        content = local_path.read_bytes()
+                        normalized["data"] = base64.b64encode(content).decode("utf-8")
+                        normalized["mime_type"] = normalized.get(
+                            "mime_type",
+                            mimetypes.guess_type(str(local_path))[0] or "application/octet-stream",
+                        )
+                        normalized["size"] = normalized.get(
+                            "size", len(content)
+                        )
+                    except Exception as exc:
+                        log_warning(
+                            f"{LOG_PREFIX} Failed to inline chat attachment data: {exc}"
+                        )
                 return normalized
 
         return attachment

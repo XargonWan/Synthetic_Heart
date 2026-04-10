@@ -1,3 +1,4 @@
+import base64
 from pathlib import Path
 from typing import Any
 import tempfile
@@ -124,6 +125,9 @@ def test_normalize_webui_attachment_local_path(tmp_path, monkeypatch):
     assert normalized["path"] == str(local_file)
     assert normalized["file_path"] == str(local_file)
     assert normalized["filename"] == "test.jpg"
+    assert normalized["mime_type"] == "image/jpeg"
+    assert normalized["size"] == 5
+    assert normalized["data"] == base64.b64encode(b"dummy").decode("utf-8")
 
 
 async def test_handle_user_message_normalizes_webui_attachment(tmp_path, monkeypatch):

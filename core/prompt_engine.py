@@ -431,6 +431,12 @@ async def build_json_prompt(
     except Exception as e:
         log_debug(f"[json_prompt] Failed to dump final prompt for logging: {e}")
 
+    # Fallback to image_data and attachments from context_memory when not provided explicitly.
+    if not image_data and isinstance(context_memory, dict):
+        image_data = context_memory.get("image_data")
+    if not attachments and isinstance(context_memory, dict):
+        attachments = context_memory.get("attachments")
+
     # Add image data if present
     if image_data:
         input_payload["image"] = image_data
