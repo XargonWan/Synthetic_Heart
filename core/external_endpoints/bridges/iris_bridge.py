@@ -45,7 +45,10 @@ class ExternalIrisEngine(IrisEngineBase):
             return None
 
         coro = self._adapter.describe_image(
-            image_bytes, mime_type=mime_type, prompt=prompt
+            image_bytes,
+            mime_type=mime_type,
+            prompt=prompt,
+            model=self._endpoint.default_model,
         )
 
         try:

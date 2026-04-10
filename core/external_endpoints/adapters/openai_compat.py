@@ -69,15 +69,23 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
             url = f"{url}/v1"
         return url
 
-    def _http_chat_url(self) -> str:
-        """Return the correct chat/completions URL for direct HTTP calls."""
+    def _http_chat_urls(self) -> list[str]:
+        """Return ordered candidate chat URLs for direct HTTP calls."""
         parsed = urlparse(self._base_url)
         base_path = parsed.path.rstrip("/")
         if base_path.endswith("/v1"):
-            path = f"{base_path}/chat/completions"
-        else:
-            path = f"{base_path}/v1/chat/completions"
-        return urlunparse(parsed._replace(path=path))
+            return [
+                urlunparse(parsed._replace(path=f"{base_path}/chat/completions")),
+                urlunparse(parsed._replace(path=f"{base_path}/chat")),
+            ]
+        return [
+            urlunparse(parsed._replace(path=f"{base_path}/v1/chat/completions")),
+            urlunparse(parsed._replace(path=f"{base_path}/v1/chat")),
+        ]
+
+    def _http_chat_url(self) -> str:
+        """Return the first candidate chat URL for direct HTTP calls."""
+        return self._http_chat_urls()[0]
 
     # ------------------------------------------------------------------
     # Chat
@@ -423,31 +431,34 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
             "Authorization": f"Bearer {self._api_key}",
             "Content-Type": "application/json",
         }
-        chat_url = self._http_chat_url()
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    chat_url,
-                    json=payload,
-                    headers=headers,
-                    timeout=aiohttp.ClientTimeout(total=120),
-                ) as resp:
-                    if resp.status != 200:
-                        return None
-                    result = await resp.json()
-                    return (
-                        result.get("choices", [{}])[0]
-                        .get("message", {})
-                        .get("content", "")
-                        or None
-                    )
+                for chat_url in self._http_chat_urls():
+                    try:
+                        async with session.post(
+                            chat_url,
+                            json=payload,
+                            headers=headers,
+                            timeout=aiohttp.ClientTimeout(total=120),
+                        ) as resp:
+                            if resp.status != 200:
+                                continue
+                            result = await resp.json()
+                            return (
+                                result.get("choices", [{}])[0]
+                                .get("message", {})
+                                .get("content", "")
+                                or None
+                            )
+                    except Exception:
+                        continue
         except Exception as exc:
             from core.logging_utils import log_warning
 
             log_warning(f"[openai_compat] describe_image failed: {exc}")
-            return None
+        return None
 
-    async def _probe_vision_support(self) -> bool:
+    async def _probe_vision_support(self, model: str | None = None) -> bool:
         import base64
 
         import aiohttp
@@ -463,7 +474,7 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
         data_url = f"data:image/png;base64,{base64.b64encode(tiny_png).decode('ascii')}"
         prompt = "Describe this image in detail."
         payload = {
-            "model": "default",
+            "model": model or "default",
             "messages": [
                 {
                     "role": "user",
@@ -482,15 +493,21 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
         }
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    self._http_chat_url(),
-                    json=payload,
-                    headers=headers,
-                    timeout=aiohttp.ClientTimeout(total=15),
-                ) as resp:
-                    return resp.status == 200
+                for chat_url in self._http_chat_urls():
+                    try:
+                        async with session.post(
+                            chat_url,
+                            json=payload,
+                            headers=headers,
+                            timeout=aiohttp.ClientTimeout(total=15),
+                        ) as resp:
+                            if resp.status == 200:
+                                return True
+                    except Exception:
+                        continue
         except Exception:
-            return False
+            pass
+        return False
 
     # ------------------------------------------------------------------
     # Probe / health
@@ -550,42 +567,46 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
         log_debug(
             f"[openai_compat] ping_test → POST {chat_url} model={payload['model']}"
         )
+        last_err = ""
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    chat_url,
-                    json=payload,
-                    headers=headers,
-                    timeout=aiohttp.ClientTimeout(connect=10.0, sock_read=timeout),
-                ) as resp:
-                    if resp.status >= 400:
-                        body = await resp.text()
-                        err = f"HTTP {resp.status}: {body[:200]}"
-                        log_warning(f"[openai_compat] ping_test failed: {err}")
-                        return False, err
-                    # HTTP 200 already received → server accepted the request.
-                    # Read the body optimistically; treat body-read timeout as a
-                    # soft success (slow model still generating, but server is live).
+                for chat_url in self._http_chat_urls():
                     try:
-                        data = await resp.json()
-                        reply = (
-                            data.get("choices", [{}])[0]
-                            .get("message", {})
-                            .get("content", "")
-                        )
-                        log_debug(f"[openai_compat] ping_test OK — reply: {reply!r}")
-                        return True, reply
-                    except Exception as body_exc:
-                        log_warning(
-                            f"[openai_compat] ping_test: HTTP 200 but body read timed out "
-                            f"(slow/thinking model?) — treating as reachable. "
-                            f"detail: {body_exc}"
-                        )
-                        return True, ""
+                        async with session.post(
+                            chat_url,
+                            json=payload,
+                            headers=headers,
+                            timeout=aiohttp.ClientTimeout(connect=10.0, sock_read=timeout),
+                        ) as resp:
+                            if resp.status >= 400:
+                                body = await resp.text()
+                                last_err = f"HTTP {resp.status}: {body[:200]}"
+                                continue
+                            try:
+                                data = await resp.json()
+                                reply = (
+                                    data.get("choices", [{}])[0]
+                                    .get("message", {})
+                                    .get("content", "")
+                                )
+                                log_debug(f"[openai_compat] ping_test OK — reply: {reply!r}")
+                                return True, reply
+                            except Exception as body_exc:
+                                log_warning(
+                                    f"[openai_compat] ping_test: HTTP 200 but body read timed out "
+                                    f"(slow/thinking model?) — treating as reachable. "
+                                    f"detail: {body_exc}"
+                                )
+                                return True, ""
+                    except Exception as exc:
+                        last_err = repr(exc)
+                        continue
         except Exception as exc:
-            err = repr(exc)
-            log_warning(f"[openai_compat] ping_test exception (url={chat_url}): {err}")
-            return False, err
+            last_err = repr(exc)
+
+        err = last_err or "No reachable chat endpoint"
+        log_warning(f"[openai_compat] ping_test failed: {err}")
+        return False, err
 
     async def probe_capabilities(self) -> dict[str, bool]:
         """Detect Vox / Auris / vision support.
@@ -612,6 +633,11 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
                 if self._supports_vision_capability(m):
                     capabilities["vision"] = True
                     break
+            if not capabilities["vision"]:
+                for m in models:
+                    if await self._probe_vision_support(model=m.id):
+                        capabilities["vision"] = True
+                        break
             if not capabilities["vision"]:
                 capabilities["vision"] = await self._probe_vision_support()
         except Exception:

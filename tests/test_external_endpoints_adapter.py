@@ -2,6 +2,7 @@ from typing import Any
 
 import pytest
 
+from core.external_endpoints.adapters.base import ModelInfo
 from core.external_endpoints.adapters.openai_compat import OpenAICompatAdapter
 
 
@@ -187,6 +188,31 @@ async def test_openai_compat_probe_capabilities_detects_vision_for_gemini_flash(
     assert caps["vision"] is True
     assert caps["auris"] is False
     assert caps["vox"] is False
+
+
+@pytest.mark.asyncio
+async def test_openai_compat_probe_capabilities_tries_each_model_id(monkeypatch):
+    adapter = OpenAICompatAdapter(base_url="http://localhost:14848", api_key="x")
+
+    async def fake_list_models():
+        return [
+            ModelInfo(id="text-only", name="TextOnly"),
+            ModelInfo(id="vision-model", name="VisionModel"),
+        ]
+
+    called_models: list[str | None] = []
+
+    async def fake_probe_vision_support(model: str | None = None) -> bool:
+        called_models.append(model)
+        return model == "vision-model"
+
+    monkeypatch.setattr(adapter, "list_models", fake_list_models)
+    monkeypatch.setattr(adapter, "_probe_vision_support", fake_probe_vision_support)
+
+    caps = await adapter.probe_capabilities()
+
+    assert caps["vision"] is True
+    assert called_models == ["text-only", "vision-model"]
 
 
 # ---------------------------------------------------------------------------
