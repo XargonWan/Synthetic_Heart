@@ -1,5 +1,7 @@
+import asyncio
 import base64
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 import tempfile
 
@@ -8,6 +10,7 @@ import core.message_queue
 import core.session_meta as session_meta
 from starlette.testclient import TestClient
 from core.webui import SynthWebUIInterface
+from core import plugin_instance
 
 
 def create_client():
@@ -128,6 +131,50 @@ def test_normalize_webui_attachment_local_path(tmp_path, monkeypatch):
     assert normalized["mime_type"] == "image/jpeg"
     assert normalized["size"] == 5
     assert normalized["data"] == base64.b64encode(b"dummy").decode("utf-8")
+
+
+def test_extract_image_data_from_webui_attachment():
+    message = SimpleNamespace(
+        attachments=[
+            {
+                "url": "/uploads/test.jpg",
+                "filename": "test.jpg",
+                "mime_type": "image/jpeg",
+                "size": 5,
+            }
+        ],
+        text="",
+        caption="",
+    )
+
+    image_data, has_trigger = asyncio.run(
+        plugin_instance._extract_image_data_from_message(message, "synth_webui")
+    )
+
+    assert has_trigger is True
+    assert image_data["type"] == "attachment"
+    assert image_data["content_type"] == "image/jpeg"
+    assert image_data["filename"] == "test.jpg"
+    assert image_data["url"] == "/uploads/test.jpg"
+
+
+def test_extract_multimodal_attachments_from_webui_attachment(tmp_path):
+    payload = {
+        "url": "/uploads/test.jpg",
+        "filename": "test.jpg",
+        "mime_type": "image/jpeg",
+        "size": 5,
+        "data": base64.b64encode(b"dummy").decode("utf-8"),
+    }
+    message = SimpleNamespace(attachments=[payload])
+
+    attachments = asyncio.run(
+        plugin_instance._extract_multimodal_attachments(None, message, "synth_webui")
+    )
+
+    assert len(attachments) == 1
+    assert attachments[0]["mime_type"] == "image/jpeg"
+    assert attachments[0]["data"] == payload["data"]
 
 
 async def test_handle_user_message_normalizes_webui_attachment(tmp_path, monkeypatch):

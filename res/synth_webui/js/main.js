@@ -2159,7 +2159,8 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                     const componentsVoxListEl = document.getElementById('components-vox-list');
                     const componentsAurisListEl = document.getElementById('components-auris-list');
                     const componentsLiveListEl = document.getElementById('components-live-list');
-                    if (!componentsCortexListEl && !componentsInterfacesListEl && !componentsPluginsListEl) return;
+                    const componentsIrisListEl = document.getElementById('components-iris-list');
+                    if (!componentsCortexListEl && !componentsInterfacesListEl && !componentsPluginsListEl && !componentsVoxListEl && !componentsAurisListEl && !componentsLiveListEl && !componentsIrisListEl) return;
                     const [res, cfgRes] = await Promise.all([
                         fetch('/api/components'),
                         fetch('/api/config').catch(() => null),
@@ -2193,6 +2194,10 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                             if (componentsCortexListEl) componentsCortexListEl.innerHTML = `<div class="meta">Failed to load components: ${safeEscapeHtml(errText)}</div>`;
                             if (componentsInterfacesListEl) componentsInterfacesListEl.innerHTML = `<div class="meta">Failed to load components: ${safeEscapeHtml(errText)}</div>`;
                             if (componentsPluginsListEl) componentsPluginsListEl.innerHTML = `<div class="meta">Failed to load components: ${safeEscapeHtml(errText)}</div>`;
+                            if (componentsVoxListEl) componentsVoxListEl.innerHTML = `<div class="meta">Failed to load components: ${safeEscapeHtml(errText)}</div>`;
+                            if (componentsAurisListEl) componentsAurisListEl.innerHTML = `<div class="meta">Failed to load components: ${safeEscapeHtml(errText)}</div>`;
+                            if (componentsLiveListEl) componentsLiveListEl.innerHTML = `<div class="meta">Failed to load components: ${safeEscapeHtml(errText)}</div>`;
+                            if (componentsIrisListEl) componentsIrisListEl.innerHTML = `<div class="meta">Failed to load components: ${safeEscapeHtml(errText)}</div>`;
                         } catch (e) {
                             console.error('[synth_webui] Failed to read components error body', e);
                             if (componentsCortexListEl) componentsCortexListEl.innerHTML = '<div class="meta">Failed to load components.</div>';
@@ -3247,6 +3252,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                     if (componentsVoxListEl)   renderDetailsList(data.vox   || [], componentsVoxListEl);
                     if (componentsAurisListEl) renderDetailsList(data.auris || [], componentsAurisListEl);
                     if (componentsLiveListEl)  renderDetailsList(data.live  || [], componentsLiveListEl);
+                    if (componentsIrisListEl)   renderDetailsList(data.iris  || [], componentsIrisListEl);
 
                     // Render cortex scope selectors (Grillo / Trainer / Live)
                     try {
@@ -3304,9 +3310,11 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                     const componentsVoxListErrEl = document.getElementById('components-vox-list');
                     const componentsAurisListErrEl = document.getElementById('components-auris-list');
                     const componentsLiveListErrEl = document.getElementById('components-live-list');
+                    const componentsIrisListErrEl = document.getElementById('components-iris-list');
                     if (componentsVoxListErrEl) componentsVoxListErrEl.innerHTML = '<div class="meta">Failed to load components.</div>';
                     if (componentsAurisListErrEl) componentsAurisListErrEl.innerHTML = '<div class="meta">Failed to load components.</div>';
                     if (componentsLiveListErrEl) componentsLiveListErrEl.innerHTML = '<div class="meta">Failed to load components.</div>';
+                    if (componentsIrisListErrEl) componentsIrisListErrEl.innerHTML = '<div class="meta">Failed to load components.</div>';
                 }
             }
 

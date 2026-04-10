@@ -104,10 +104,16 @@ def test_registry_register_instance() -> None:
 
     reg = IrisRegistry()
     instance = DirectEngine()
-    reg.register_instance("direct", instance, label="Direct test engine")
+    reg.register_instance(
+        "direct",
+        instance,
+        label="Direct test engine",
+        capabilities={"vision": True},
+    )
     loaded = reg.load_engine("direct")
     assert loaded is instance
     assert reg.get_engine_meta("direct")["label"] == "Direct test engine"
+    assert reg.get_engine_meta("direct")["capabilities"] == {"vision": True}
 
 
 # ---------------------------------------------------------------------------

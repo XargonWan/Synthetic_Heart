@@ -553,7 +553,15 @@ class ExternalEndpointRegistry:
                 from core.iris_registry import IRIS_REGISTRY
 
                 iris_bridge = ExternalIrisEngine(ep, adapter)
-                IRIS_REGISTRY.register_instance(engine_name, iris_bridge, label=label)
+                iris_caps = {
+                    "vision": bool(effective.get("vision")),
+                }
+                IRIS_REGISTRY.register_instance(
+                    engine_name,
+                    iris_bridge,
+                    label=label,
+                    capabilities=iris_caps,
+                )
                 log_info(f"[ext_endpoints] '{ep.name}' registered as Iris engine")
             except Exception as exc:
                 log_warning(

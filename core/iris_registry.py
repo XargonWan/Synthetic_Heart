@@ -108,10 +108,19 @@ class IrisRegistry:
         log_info(f"[iris_registry] Loaded engine '{name}' ({engine_class.__name__})")
         return instance
 
-    def register_instance(self, name: str, instance: object, label: str = "") -> None:
+    def register_instance(
+        self,
+        name: str,
+        instance: object,
+        label: str = "",
+        capabilities: Optional[IrisCapabilities] = None,
+    ) -> None:
         """Register a pre-built engine instance directly (skips module loading)."""
         self._engine_modules[name] = "__direct__"
-        self._engine_meta[name] = {"capabilities": {}, "label": label}
+        self._engine_meta[name] = {
+            "capabilities": capabilities or {},
+            "label": label,
+        }
         self._instances[name] = instance
         log_info(f"[iris_registry] Registered external instance '{name}'")
 
