@@ -1,9 +1,9 @@
-ARG TARGETPLATFORM
 # 1. Grab uv binary from its official image
 FROM ghcr.io/astral-sh/uv:latest AS uv_source
 
-# 2. Start your actual Base Image (Selkies/Ubuntu)
-FROM --platform=$TARGETPLATFORM ghcr.io/linuxserver/baseimage-ubuntu:noble
+# 2. Start your actual Base Image (Debian slim)
+# PyTorch official wheels require a glibc-based Python environment.
+FROM python:3.12-slim
 
 ARG TARGETARCH
 ARG GITVERSION_TAG
@@ -18,31 +18,36 @@ ENV TITLE="Synthetic Heart"
 ENV REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt \
     SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
 
+# --- [System Dependencies] ---
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      bash curl wget unzip nano vim \
+      ca-certificates \
+      openssl \
+      htop net-tools iputils-ping \
+      ffmpeg mariadb-client libmariadb-dev \
+      espeak \
+      xz-utils \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd -m -s /bin/bash abc
+
+# --- [S6 Overlay] ---
+ENV S6_OVERLAY_VERSION=v3.2.2.0
+RUN case "${TARGETARCH:-amd64}" in \
+      amd64) overlay_arch=x86_64 ;; \
+      arm64|aarch64) overlay_arch=aarch64 ;; \
+      *) overlay_arch=x86_64 ;; \
+    esac && \
+    wget -qO /tmp/s6-overlay-${overlay_arch}.tar.xz \
+      "https://github.com/just-containers/s6-overlay/releases/download/${S6_OVERLAY_VERSION}/s6-overlay-${overlay_arch}.tar.xz" && \
+    wget -qO /tmp/s6-overlay-noarch.tar.xz \
+      "https://github.com/just-containers/s6-overlay/releases/download/${S6_OVERLAY_VERSION}/s6-overlay-noarch.tar.xz" && \
+    tar xJf /tmp/s6-overlay-noarch.tar.xz -C / && \
+    tar xJf /tmp/s6-overlay-${overlay_arch}.tar.xz -C / && \
+    rm -f /tmp/s6-overlay-*.tar.xz
+
 # --- [Inject UV] ---
 # Copy the uv binary into /usr/local/bin so it's available globally
 COPY --from=uv_source /uv /usr/local/bin/uv
-
-# --- [System Dependencies] ---
-# Block snap & Install packages
-RUN echo 'Package: snapd' > /etc/apt/preferences.d/no-snap && \
-    echo 'Pin: release a=*' >> /etc/apt/preferences.d/no-snap && \
-    echo 'Pin-Priority: -10' >> /etc/apt/preferences.d/no-snap && \
-    apt-get update && \
-    apt-get purge -y snapd && \
-    apt-get autoremove -y && \
-    rm -rf /snap /var/snap /var/lib/snapd && \
-    # Added python3-full for venv support if needed, though uv handles it
-    apt-get install -y --no-install-recommends \
-      python3 python3-venv python3-pip \
-    git curl wget unzip nano vim \
-      lsb-release ca-certificates \
-    openssl \
-      htop net-tools iputils-ping \
-      ffmpeg mariadb-client libmariadb3 libmariadb-dev \
-      espeak-ng libespeak-ng1 \
-      libatomic1 && \
-    update-ca-certificates --fresh && \
-    apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # --- [CLI Tools Setup] ---
 # gemini-cli is installed in the project venv via uv sync (pyproject dependency)
@@ -67,9 +72,8 @@ RUN uv sync --frozen --no-cache
 
 # --- [App Setup] ---
 # Copy scripts
-COPY automation_tools/cleanup_chrome.sh /usr/local/bin/cleanup_chrome.sh
 COPY automation_tools/container_synth.sh /app/synth.sh
-RUN chmod +x /usr/local/bin/cleanup_chrome.sh /app/synth.sh
+RUN chmod +x /app/synth.sh
 
 # Copy application code (includes vendor packages)
 COPY . /app
@@ -95,6 +99,5 @@ RUN chmod +x /etc/s6-overlay/s6-rc.d/synth/run && \
 # Final cleanup
 RUN rm -rf /tmp/*
 
-# Permissions
-RUN chown -R abc:abc /app && \
-    mkdir -p /app/logs && chown -R abc:abc /app/logs
+ENTRYPOINT ["/init"]
+
