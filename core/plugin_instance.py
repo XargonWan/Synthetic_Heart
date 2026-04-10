@@ -10,6 +10,7 @@ from datetime import datetime
 import json
 import base64
 import os
+import tempfile
 from pathlib import Path
 from core.logging_utils import log_debug, log_info, log_warning, log_error
 from core.json_utils import dumps as json_dumps, sanitize_for_json
@@ -553,6 +554,24 @@ async def handle_incoming_message(
             log_info(
                 f"[plugin_instance] Message contains {len(attachments)} attachments from user {user_id}"
             )
+            iris_description = await _describe_attachment_images_with_iris(
+                attachments, prompt=getattr(message, "text", None)
+            )
+            if iris_description:
+                try:
+                    original_text = getattr(message, "text", "") or ""
+                    description_block = f"[Iris image description: {iris_description}]"
+                    if original_text:
+                        setattr(message, "text", f"{original_text}\n\n{description_block}")
+                    else:
+                        setattr(message, "text", description_block)
+                    log_info(
+                        "[plugin_instance] Appended Iris image description to prompt text"
+                    )
+                except Exception as exc:
+                    log_warning(
+                        f"[plugin_instance] Could not append Iris image description to message text: {exc}"
+                    )
 
         if isinstance(context_memory_or_prompt, str):
             try:
@@ -1187,6 +1206,82 @@ async def _extract_image_data_from_message(message, interface_name: str):
                 break
 
     return image_data, has_trigger
+
+
+async def _describe_attachment_images_with_iris(
+    attachments: list[dict],
+    prompt: str | None = None,
+) -> str | None:
+    """Use the configured Iris engine to describe the first image/video attachment."""
+    if not attachments:
+        return None
+
+    try:
+        from core.core_initializer import PLUGIN_REGISTRY
+
+        iris = PLUGIN_REGISTRY.get("iris_plugin")
+        if iris is None:
+            return None
+        # Refresh config before reading _active_engine_name so we get the
+        # DB-loaded value rather than the hard-coded startup default ("disabled").
+        try:
+            iris.refresh_config()
+        except Exception:
+            pass
+        if getattr(iris, "_active_engine_name", "disabled") == "disabled":
+            return None
+    except Exception as exc:
+        log_debug(f"[plugin_instance] Iris plugin lookup failed: {exc}")
+        return None
+
+    for attachment in attachments:
+        mime_type = str(
+            attachment.get("mime_type")
+            or attachment.get("content_type")
+            or attachment.get("type")
+            or ""
+        )
+        if not mime_type.startswith(("image/", "video/")):
+            continue
+
+        data_b64 = attachment.get("data")
+        if not data_b64 or not isinstance(data_b64, str):
+            continue
+
+        try:
+            image_bytes = base64.b64decode(data_b64)
+        except Exception as exc:
+            log_warning(
+                f"[plugin_instance] Failed to decode attachment data for Iris: {exc}"
+            )
+            continue
+
+        if not image_bytes:
+            continue
+
+        suffix = ""
+        if "/" in mime_type:
+            suffix = f".{mime_type.split('/', 1)[1].split(';')[0]}"
+
+        tmp_path = None
+        try:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                tmp.write(image_bytes)
+                tmp_path = tmp.name
+
+            result = await iris.describe_media(tmp_path, mime_type, prompt)
+            if result and result.description:
+                return result.description
+        except Exception as exc:
+            log_warning(f"[plugin_instance] Iris description failed: {exc}")
+        finally:
+            if tmp_path:
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
+
+    return None
 
 
 async def _extract_multimodal_attachments(

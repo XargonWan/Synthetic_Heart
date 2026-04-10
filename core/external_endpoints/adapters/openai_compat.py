@@ -73,15 +73,32 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
         """Return ordered candidate chat URLs for direct HTTP calls."""
         parsed = urlparse(self._base_url)
         base_path = parsed.path.rstrip("/")
+
         if base_path.endswith("/v1"):
-            return [
-                urlunparse(parsed._replace(path=f"{base_path}/chat/completions")),
-                urlunparse(parsed._replace(path=f"{base_path}/chat")),
+            candidates = [
+                f"{base_path}/chat/completions",
+                f"{base_path}/chat",
+                "/api/v1/chat/completions",
+                "/api/v1/chat",
             ]
-        return [
-            urlunparse(parsed._replace(path=f"{base_path}/v1/chat/completions")),
-            urlunparse(parsed._replace(path=f"{base_path}/v1/chat")),
-        ]
+        else:
+            candidates = [
+                f"{base_path}/v1/chat/completions",
+                f"{base_path}/v1/chat",
+                f"{base_path}/chat/completions",
+                f"{base_path}/chat",
+                f"{base_path}/api/v1/chat/completions",
+                f"{base_path}/api/v1/chat",
+            ]
+
+        urls: list[str] = []
+        seen: set[str] = set()
+        for path in candidates:
+            url = urlunparse(parsed._replace(path=path))
+            if url not in seen:
+                seen.add(url)
+                urls.append(url)
+        return urls
 
     def _http_chat_url(self) -> str:
         """Return the first candidate chat URL for direct HTTP calls."""
@@ -131,7 +148,7 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
                     "total_tokens": response.usage.total_tokens or 0,
                 }
             return ChatResponse(
-                content=choice.message.content or "",
+                content=self._extract_message_content(choice.message),
                 model=response.model or request_model,
                 finish_reason=choice.finish_reason or "stop",
                 usage=usage,
@@ -161,8 +178,11 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
             )
             async for chunk in stream:
                 delta = chunk.choices[0].delta if chunk.choices else None
-                if delta and delta.content:
-                    yield delta.content
+                if not delta:
+                    continue
+                content = self._extract_message_content(delta)
+                if content:
+                    yield content
         except Exception:
             raise
 
@@ -221,6 +241,19 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
             f"{base_path}/{path.lstrip('/')}" if base_path else f"/{path.lstrip('/')}"
         )
         return urlunparse(parsed._replace(path=joined_path))
+
+    @staticmethod
+    def _extract_message_content(message: Any) -> str:
+        if isinstance(message, dict):
+            content = message.get("content", "") or ""
+            if content:
+                return str(content)
+            return str(message.get("reasoning_content", "") or "")
+
+        content = getattr(message, "content", None)
+        if content:
+            return str(content)
+        return str(getattr(message, "reasoning_content", "") or "")
 
     def _http_model_paths(self) -> list[str]:
         parsed = urlparse(self._base_url)
@@ -444,12 +477,8 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
                             if resp.status != 200:
                                 continue
                             result = await resp.json()
-                            return (
-                                result.get("choices", [{}])[0]
-                                .get("message", {})
-                                .get("content", "")
-                                or None
-                            )
+                            message = result.get("choices", [{}])[0].get("message", {})
+                            return self._extract_message_content(message) or None
                     except Exception:
                         continue
         except Exception as exc:
@@ -584,11 +613,8 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
                                 continue
                             try:
                                 data = await resp.json()
-                                reply = (
-                                    data.get("choices", [{}])[0]
-                                    .get("message", {})
-                                    .get("content", "")
-                                )
+                                message = data.get("choices", [{}])[0].get("message", {})
+                                reply = self._extract_message_content(message)
                                 log_debug(f"[openai_compat] ping_test OK — reply: {reply!r}")
                                 return True, reply
                             except Exception as body_exc:

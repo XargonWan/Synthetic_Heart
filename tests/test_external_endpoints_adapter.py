@@ -1,3 +1,4 @@
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -109,6 +110,17 @@ async def test_openai_compat_list_models_prefers_v1_path(monkeypatch):
 
     assert all(call.endswith("/v1/models") for call in session.calls)
     assert models[0].id == "qwen"
+
+
+@pytest.mark.asyncio
+async def test_openai_compat_http_chat_urls_include_api_v1_paths():
+    adapter = OpenAICompatAdapter(base_url="http://localhost:14848")
+    urls = adapter._http_chat_urls()
+
+    assert any(url.endswith("/v1/chat/completions") for url in urls)
+    assert any(url.endswith("/v1/chat") for url in urls)
+    assert any(url.endswith("/api/v1/chat/completions") for url in urls)
+    assert any(url.endswith("/api/v1/chat") for url in urls)
 
 
 @pytest.mark.asyncio
@@ -268,6 +280,72 @@ async def test_openai_compat_ping_test_success(monkeypatch):
 
     assert ok is True
     assert echo == "pong"
+
+
+class FakeOpenAIChatCompletions:
+    async def create(self, model, messages, stream, extra_body=None, **kwargs):
+        class Message:
+            def __init__(self):
+                self.content = ""
+                self.reasoning_content = "Okay, the user just typed \"ping\"."
+
+        class Choice:
+            def __init__(self):
+                self.message = Message()
+                self.finish_reason = "length"
+
+        class Response:
+            def __init__(self):
+                self.choices = [Choice()]
+                self.model = model
+                self.usage = None
+
+        return Response()
+
+
+class FakeOpenAIClient:
+    def __init__(self):
+        self.chat = SimpleNamespace(completions=FakeOpenAIChatCompletions())
+
+
+@pytest.mark.asyncio
+async def test_openai_compat_chat_completion_uses_reasoning_content(monkeypatch):
+    adapter = OpenAICompatAdapter(base_url="http://fake-host", api_key="x")
+    fake_client = FakeOpenAIClient()
+    adapter._get_client = lambda: fake_client
+
+    response = await adapter.chat_completion(
+        [{"role": "user", "content": "ping"}], model="qwen/qwen3.5-9b"
+    )
+
+    assert response.content == 'Okay, the user just typed "ping".'
+    assert response.model == "qwen/qwen3.5-9b"
+
+
+@pytest.mark.asyncio
+async def test_external_cortex_engine_falls_back_to_first_available_model(monkeypatch):
+    from core.external_endpoints.bridges.cortex_bridge import ExternalCortexEngine
+
+    endpoint = SimpleNamespace(
+        name="lmstudio",
+        default_model=None,
+        available_models=["qwen/qwen3.5-9b"],
+        extra_config={},
+    )
+    called: dict[str, Any] = {}
+
+    class FakeAdapter:
+        async def chat_completion(self, messages, model=None, **kwargs):
+            called["model"] = model
+            return SimpleNamespace(content="ok", model=model)
+
+    engine = ExternalCortexEngine(endpoint, FakeAdapter())
+    response = await engine.generate_response(
+        [{"role": "user", "content": "ping"}]
+    )
+
+    assert response == "ok"
+    assert called["model"] == "qwen/qwen3.5-9b"
 
 
 @pytest.mark.asyncio

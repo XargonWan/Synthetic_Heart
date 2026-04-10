@@ -94,7 +94,9 @@ class ExternalCortexEngine(AIPluginBase):
         else:
             msg_list = [{"role": "user", "content": str(messages)}]
 
-        model = self._endpoint.default_model or None
+        model = self._endpoint.default_model
+        if not model and self._endpoint.available_models:
+            model = self._endpoint.available_models[0]
         max_retries, backoff = self._get_retry_settings()
         attempt = 0
         while True:

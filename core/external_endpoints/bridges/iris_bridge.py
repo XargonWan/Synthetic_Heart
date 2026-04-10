@@ -25,16 +25,13 @@ class ExternalIrisEngine(IrisEngineBase):
         self._adapter = adapter
         self.display_name = f"{endpoint.display_label or endpoint.name} (Vision)"
 
-    def describe_image(
+    async def describe_image(
         self,
         file_path: str,
         mime_type: str | None = None,
         prompt: str | None = None,
     ) -> IrisResult | None:
         """Read *file_path* and forward image bytes to the external adapter."""
-        import asyncio
-        import concurrent.futures
-
         if not os.path.exists(file_path):
             return None
 
@@ -44,31 +41,13 @@ class ExternalIrisEngine(IrisEngineBase):
         if not image_bytes:
             return None
 
-        coro = self._adapter.describe_image(
-            image_bytes,
-            mime_type=mime_type,
-            prompt=prompt,
-            model=self._endpoint.default_model,
-        )
-
         try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                future: concurrent.futures.Future[str | None] = (
-                    concurrent.futures.Future()
-                )
-
-                async def _run() -> None:
-                    try:
-                        result = await coro
-                        future.set_result(result)
-                    except Exception as exc:
-                        future.set_exception(exc)
-
-                asyncio.ensure_future(_run())
-                text = future.result(timeout=120)
-            else:
-                text = loop.run_until_complete(coro)
+            text = await self._adapter.describe_image(
+                image_bytes,
+                mime_type=mime_type,
+                prompt=prompt,
+                model=self._endpoint.default_model,
+            )
         except Exception:
             return None
 

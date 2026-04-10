@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import types
 from unittest.mock import patch
 
@@ -190,6 +191,51 @@ async def test_iris_plugin_calls_engine(tmp_path) -> None:  # type: ignore[no-un
     assert result is not None
     assert result.description == "a sunny beach"
     assert result.language == "en"
+
+
+@pytest.mark.asyncio
+async def test_describe_attachment_images_with_iris() -> None:
+    from core.core_initializer import PLUGIN_REGISTRY
+    from core.iris_registry import IrisRegistry
+    from core.plugin_instance import _describe_attachment_images_with_iris
+    from plugins.iris_base import IrisEngineBase, IrisResult
+    from plugins.iris_plugin import IrisPlugin
+
+    class MockEngine(IrisEngineBase):
+        def describe_image(
+            self,
+            file_path: str,
+            mime_type: str | None = None,
+            prompt: str | None = None,
+        ) -> IrisResult | None:
+            return IrisResult(description="a red ball", language="en")
+
+    reg = IrisRegistry()
+    reg.register_instance(
+        "mock", MockEngine(), label="Mock", capabilities={"vision": True}
+    )
+
+    plugin = IrisPlugin.__new__(IrisPlugin)
+    plugin._active_engine_name = "mock"
+    plugin._engine_settings = {}
+    plugin._default_prompt = "Describe this image."
+
+    data = base64.b64encode(b"dummy").decode("ascii")
+    attachment = {"mime_type": "image/png", "data": data}
+
+    with patch("plugins.iris_plugin.IRIS_REGISTRY", reg), patch.object(
+        plugin,
+        "refresh_config",
+    ), patch.dict(
+        "core.core_initializer.PLUGIN_REGISTRY",
+        {"iris_plugin": plugin},
+        clear=True,
+    ):
+        description = await _describe_attachment_images_with_iris(
+            [attachment], prompt="Describe this image."
+        )
+
+    assert description == "a red ball"
 
 
 # ---------------------------------------------------------------------------
