@@ -30,7 +30,9 @@ LOW_PRIORITY = (
 )
 
 _queue: asyncio.PriorityQueue | None = None
+_queue_loop: asyncio.AbstractEventLoop | None = None
 _lock: asyncio.Lock | None = None
+_lock_loop: asyncio.AbstractEventLoop | None = None
 _consumer_task: asyncio.Task | None = None
 _counter = 0  # Monotonic counter to prevent dict comparison when priorities are equal
 
@@ -42,16 +44,60 @@ _bg_tasks: dict[str, asyncio.Task] = {}
 
 
 def _get_queue() -> asyncio.PriorityQueue:
-    global _queue
+    global _queue, _queue_loop
+    try:
+        current_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        if _queue is None:
+            raise RuntimeError(
+                "[QUEUE] Cannot create message queue without a running event loop"
+            )
+        return _queue
+
     if _queue is None:
         _queue = asyncio.PriorityQueue()
+        _queue_loop = current_loop
+        return _queue
+
+    if _queue_loop is not current_loop:
+        old_items = list(_queue._queue)
+        log_warning(
+            "[QUEUE] Existing queue is bound to a different event loop; "
+            "recreating queue on the current loop"
+        )
+        _queue = asyncio.PriorityQueue()
+        _queue_loop = current_loop
+        if old_items:
+            _queue._queue.extend(old_items)
+            heapq.heapify(_queue._queue)
+
     return _queue
 
 
 def _get_lock() -> asyncio.Lock:
-    global _lock
+    global _lock, _lock_loop
+    try:
+        current_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        if _lock is None:
+            raise RuntimeError(
+                "[QUEUE] Cannot create lock without a running event loop"
+            )
+        return _lock
+
     if _lock is None:
         _lock = asyncio.Lock()
+        _lock_loop = current_loop
+        return _lock
+
+    if _lock_loop is not current_loop:
+        log_warning(
+            "[QUEUE] Existing lock is bound to a different event loop; "
+            "recreating lock on the current loop"
+        )
+        _lock = asyncio.Lock()
+        _lock_loop = current_loop
+
     return _lock
 
 
