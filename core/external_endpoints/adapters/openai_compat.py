@@ -170,7 +170,11 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
                 if isinstance(key, (str, int, float))
             }
         if isinstance(capabilities, (list, tuple, set)):
-            return {str(item).lower(): True for item in capabilities if isinstance(item, (str, int, float))}
+            return {
+                str(item).lower(): True
+                for item in capabilities
+                if isinstance(item, (str, int, float))
+            }
         if isinstance(capabilities, (str, int, float)):
             return {str(capabilities).lower(): True}
         return {}
@@ -200,7 +204,10 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
         if not model.capabilities:
             return False
         keys = {key.lower() for key in model.capabilities.keys()}
-        if any(keyword in keys for keyword in ("vision", "image", "images", "multimodal", "visual")):
+        if any(
+            keyword in keys
+            for keyword in ("vision", "image", "images", "multimodal", "visual")
+        ):
             return True
         if model.capabilities.get("vision") or model.capabilities.get("image"):
             return True

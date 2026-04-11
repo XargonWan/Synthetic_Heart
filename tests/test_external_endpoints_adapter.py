@@ -149,8 +149,12 @@ async def test_openai_compat_probe_capabilities_probes_image_support(monkeypatch
 
     session = FakeAiohttpSession()
     session.responses = [
-        FakeAiohttpResponse(status=200, payload={"data": [{"id": "chat-only", "object": "model"}]}),
-        FakeAiohttpResponse(status=200, payload={"choices": [{"message": {"content": "ok"}}]}),
+        FakeAiohttpResponse(
+            status=200, payload={"data": [{"id": "chat-only", "object": "model"}]}
+        ),
+        FakeAiohttpResponse(
+            status=200, payload={"choices": [{"message": {"content": "ok"}}]}
+        ),
         FakeAiohttpResponse(status=404, payload={}, body=b""),
         FakeAiohttpResponse(status=404, payload={}, body=b""),
     ]
@@ -167,13 +171,20 @@ async def test_openai_compat_probe_capabilities_probes_image_support(monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_openai_compat_probe_capabilities_detects_vision_for_gemini_flash(monkeypatch):
+async def test_openai_compat_probe_capabilities_detects_vision_for_gemini_flash(
+    monkeypatch,
+):
     adapter = OpenAICompatAdapter(base_url="http://localhost:14848", api_key="x")
 
     session = FakeAiohttpSession()
     session.responses = [
-        FakeAiohttpResponse(status=200, payload={"data": [{"id": "gemini-2.5-flash", "object": "model"}]}),
-        FakeAiohttpResponse(status=200, payload={"choices": [{"message": {"content": "ok"}}]}),
+        FakeAiohttpResponse(
+            status=200,
+            payload={"data": [{"id": "gemini-2.5-flash", "object": "model"}]},
+        ),
+        FakeAiohttpResponse(
+            status=200, payload={"choices": [{"message": {"content": "ok"}}]}
+        ),
         FakeAiohttpResponse(status=404, payload={}, body=b""),
         FakeAiohttpResponse(status=404, payload={}, body=b""),
     ]

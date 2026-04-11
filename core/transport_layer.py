@@ -134,6 +134,9 @@ def extract_json_from_text(text: str, return_metadata: bool = False) -> Optional
     """Extract the first valid JSON object or array from text.
 
     This function is smart enough to extract JSON even when LLMs (like Gemini)
+                            # For all other interfaces, once valid JSON has been recovered,
+                            # return the normalized JSON immediately instead of falling
+                            # through into another retry cycle.
     add extra text before or after the JSON structure. It scans the entire text
     looking for valid JSON objects or arrays, ignoring any surrounding text.
 
@@ -1080,21 +1083,46 @@ async def universal_send(interface_send_func, *args, text: str = None, **kwargs)
         log_debug(f"[transport] Detected JSON data, parsing: {json_data}")
         try:
             log_debug("[flow] transport.detects_json -> will attempt run_actions")
-            # Handle new nested actions format
+            # Handle various JSON structures: nested 'actions' list, bare list, or single action dict
+            actions = []
             if isinstance(json_data, dict) and "actions" in json_data:
                 actions = json_data["actions"]
                 if not isinstance(actions, list):
-                    log_warning("[transport] actions field must be a list")
-                    return await interface_send_func(*args, text=text, **kwargs)
-            # Fallback to legacy array format
+                    actions = [actions] if actions else []
             elif isinstance(json_data, list):
                 actions = json_data
-            # Fallback to legacy single action format
-            elif isinstance(json_data, dict) and "type" in json_data:
-                actions = [json_data]
-            else:
-                log_warning(f"[transport] Unrecognized JSON structure: {json_data}")
+            elif isinstance(json_data, dict):
+                # Single bare action (possibly using alternative keys)
+                if any(
+                    k in json_data
+                    for k in ["type", "function", "name", "plugin", "action"]
+                ):
+                    actions = [json_data]
+
+            if not actions:
+                log_debug(f"[transport] No actions found in JSON: {json_data}")
                 return await interface_send_func(*args, text=text, **kwargs)
+
+            # Normalize all actions to the standard (type, payload) format
+            log_debug(f"[transport] Normalizing {len(actions)} actions before dispatch")
+            for act in actions:
+                if isinstance(act, dict):
+                    # Normalize type
+                    if "type" not in act:
+                        act["type"] = (
+                            act.get("function")
+                            or act.get("name")
+                            or act.get("plugin")
+                            or act.get("action")
+                        )
+                    # Normalize payload
+                    if "payload" not in act:
+                        # Extract arguments/parameters if they exist
+                        act["payload"] = (
+                            act.get("arguments")
+                            or act.get("parameters")
+                            or act.get("args")
+                        )
 
             bot = getattr(interface_send_func, "__self__", None) or (
                 args[0] if args and hasattr(args[0], "send_message") else None
@@ -1303,21 +1331,62 @@ def _get_attempted_action_full_description(
         Or None if we can't identify an action
     """
     try:
-        # Try to extract partial JSON to find action type
-        import re
+        action_type: Optional[str] = None
 
-        # Look for "type": "..." or "action": "..." patterns
-        type_match = re.search(r'"type"\s*:\s*"([^"]+)"', error_text)
-        if not type_match:
-            type_match = re.search(r'"action"\s*:\s*"([^"]+)"', error_text)
+        try:
+            parsed_json, _ = extract_json_from_text(error_text, return_metadata=True)
+        except Exception:
+            parsed_json = None
 
-        if not type_match:
+        def _extract_action_type(candidate: Any) -> Optional[str]:
+            if isinstance(candidate, dict):
+                candidate_type = (
+                    candidate.get("type")
+                    or candidate.get("action")
+                    or candidate.get("function")
+                    or candidate.get("name")
+                    or candidate.get("plugin")
+                )
+                if isinstance(candidate_type, str) and candidate_type:
+                    return candidate_type
+                if len(candidate) == 1:
+                    only_key, only_value = next(iter(candidate.items()))
+                    if isinstance(only_key, str) and isinstance(only_value, dict):
+                        return only_key
+            return None
+
+        if isinstance(parsed_json, dict):
+            raw_actions = parsed_json.get("actions")
+            if isinstance(raw_actions, list):
+                for raw_action in raw_actions:
+                    action_type = _extract_action_type(raw_action)
+                    if action_type:
+                        break
+            if not action_type:
+                action_type = _extract_action_type(parsed_json)
+        elif isinstance(parsed_json, list):
+            for raw_action in parsed_json:
+                action_type = _extract_action_type(raw_action)
+                if action_type:
+                    break
+
+        if not action_type:
+            # Fallback to regex for partially malformed JSON.
+            import re
+
+            # Look for "type", "action", etc. key-value pairs. We use a more specific regex
+            # to avoid matching nested fields (like emotion types inside an action payload).
+            type_match = re.search(
+                r'"(?:type|action|function|name|plugin)"\s*:\s*"([^"]+)"', error_text
+            )
+            if type_match:
+                action_type = type_match.group(1)
+
+        if not action_type:
             log_debug(
                 "[_get_attempted_action] Could not extract action type from error text"
             )
             return None
-
-        action_type = type_match.group(1)
         log_debug(
             f"[_get_attempted_action] Identified attempted action type: {action_type}"
         )
@@ -1653,8 +1722,9 @@ async def run_corrector_middleware(
                 "MUST start with { and end with }",
                 "MUST contain 'actions' array",
                 "NO text outside JSON structure",
-                "NO markdown formatting",
+                "NO markdown formatting (e.g., no ```json blocks)",
                 "NO explanations outside JSON",
+                'Emotions MUST be provided in the \'feelings\' metadata object, NEVER as top-level actions (e.g., do NOT use {"type": "happy"})',
             ]
             correction_prompt = json.dumps(correction_payload, ensure_ascii=False)
 
@@ -1774,7 +1844,9 @@ async def run_corrector_middleware(
                                             rewritten = True
 
                                         if act.get("type") == "message_ollama_serve":
-                                            conversation_id = payload.get("conversation_id")
+                                            conversation_id = payload.get(
+                                                "conversation_id"
+                                            )
                                             if conversation_id is None:
                                                 conversation_id = (
                                                     context.get("conversation_id")
@@ -1802,6 +1874,12 @@ async def run_corrector_middleware(
                                 )
                                 # Return rewritten JSON immediately for ollama_serve origin
                                 return corrected
+
+                        corrected = json.dumps(parsed_json, ensure_ascii=False)
+                        log_info(
+                            "[corrector_middleware] Valid JSON correction recovered successfully"
+                        )
+                        return corrected
 
                 except Exception as e:
                     log_warning(
