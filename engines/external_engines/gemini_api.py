@@ -103,7 +103,20 @@ GEMINI_API_BASE_URL = config_registry.get_var(
 
 # Model configuration — Gemini 3.x family (April 2026)
 MODEL_CONFIGS = {
+    "gemini-1.5-flash": {
+        "label": "Gemini 1.5 Flash",
+        "description": "Fast multimodal model",
+        "max_output_tokens": 8192,
+        "max_prompt_chars": 1000000,
+    },
+    "gemini-1.5-pro": {
+        "label": "Gemini 1.5 Pro",
+        "description": "Complex reasoning multimodal model",
+        "max_output_tokens": 8192,
+        "max_prompt_chars": 2000000,
+    },
     "gemini-3.1-pro-preview": {
+        "label": "Gemini 3.1 Pro (Preview)",
         "description": "Gemini 3.1 Pro (Preview) — best reasoning, agentic workflows",
         "thinking": True,
         "default_thinking_level": "high",
@@ -111,6 +124,7 @@ MODEL_CONFIGS = {
         "max_prompt_chars": 1000000,
     },
     "gemini-3.1-pro-preview-customtools": {
+        "label": "Gemini 3.1 Pro Custom Tools",
         "description": "Gemini 3.1 Pro Custom Tools — optimised for custom tool use",
         "thinking": True,
         "default_thinking_level": "high",
@@ -118,6 +132,7 @@ MODEL_CONFIGS = {
         "max_prompt_chars": 1000000,
     },
     "gemini-3-flash-preview": {
+        "label": "Gemini 3 Flash (Preview)",
         "description": "Gemini 3 Flash (Preview) — fast multimodal + search grounding",
         "thinking": True,
         "default_thinking_level": "high",
@@ -125,6 +140,7 @@ MODEL_CONFIGS = {
         "max_prompt_chars": 1000000,
     },
     "gemini-3.1-flash-lite-preview": {
+        "label": "Gemini 3.1 Flash-Lite (Preview)",
         "description": "Gemini 3.1 Flash-Lite (Preview) — cost-efficient, high-volume",
         "thinking": True,
         "default_thinking_level": "minimal",
@@ -132,6 +148,7 @@ MODEL_CONFIGS = {
         "max_prompt_chars": 1000000,
     },
     "gemini-3.1-flash-image-preview": {
+        "label": "Gemini 3.1 Flash Image (Preview)",
         "description": "Gemini 3.1 Flash Image (Preview) — image generation + editing",
         "thinking": True,
         "default_thinking_level": "minimal",
@@ -139,6 +156,82 @@ MODEL_CONFIGS = {
         "max_prompt_chars": 1000000,
     },
 }
+
+
+def sync_discover_models() -> None:
+    """Fetch available models from the Gemini API and update MODEL_CONFIGS.
+
+    This is called during initialization to ensure the model list is up-to-date.
+    """
+    global MODEL_CONFIGS, MODEL_LIMITS_MAP
+    api_key = str(GEMINI_API_KEY).strip()
+    if not api_key:
+        return
+
+    try:
+        base_url = (
+            str(GEMINI_API_BASE_URL).strip()
+            or "https://generativelanguage.googleapis.com"
+        )
+        if base_url.endswith("/v1") or base_url.endswith("/v1beta"):
+            versioned_base = base_url
+        else:
+            versioned_base = f"{base_url}/v1beta"
+
+        url = f"{versioned_base}/models"
+        response = requests.get(url, params={"key": api_key}, timeout=10)
+        if response.status_code != 200:
+            log_warning(
+                f"[gemini_api] Model discovery failed: HTTP {response.status_code}"
+            )
+            return
+
+        data = response.json()
+        models = data.get("models", [])
+        if not models:
+            return
+
+        new_configs = {}
+        for m in models:
+            name = m.get("name", "")
+            if name.startswith("models/"):
+                model_id = name[7:]
+            else:
+                model_id = name
+
+            # Only include models that support content generation
+            if "generateContent" not in m.get("supportedGenerationMethods", []):
+                continue
+
+            # Skip experimental or internal names unless they are already known
+            if "-experimental" in model_id and model_id not in MODEL_CONFIGS:
+                continue
+
+            display_name = m.get("displayName", model_id)
+            new_configs[model_id] = {
+                "label": display_name,
+                "description": m.get("description", ""),
+                "max_output_tokens": m.get("outputTokenLimit", 8192),
+                "max_prompt_chars": m.get("inputTokenLimit", 1000000),
+                "thinking": m.get("thinking", False) or "thinking" in model_id.lower(),
+            }
+
+        if new_configs:
+            # Merge with existing configs to preserve any special flags (like thinking levels)
+            for mid, cfg in new_configs.items():
+                if mid in MODEL_CONFIGS:
+                    MODEL_CONFIGS[mid].update(cfg)
+                else:
+                    MODEL_CONFIGS[mid] = cfg
+
+            log_info(f"[gemini_api] Discovered {len(new_configs)} models from API.")
+
+            # Update limits map
+            for mid, cfg in MODEL_CONFIGS.items():
+                MODEL_LIMITS_MAP[mid] = cfg["max_prompt_chars"]
+    except Exception as e:
+        log_warning(f"[gemini_api] Error discovering models: {e}")
+
 
 DEFAULT_MODEL = "gemini-3-flash-preview"
 
@@ -153,8 +246,18 @@ def _get_gemini_model() -> str:
     from core.config import get_current_model
 
     current = get_current_model()
+    if not current:
+        return DEFAULT_MODEL
+    # If the current model is one we just discovered (or is in our list), use it
     if current in MODEL_CONFIGS:
         return current
+
+    # If it's a model in 'models/{id}' format, normalize it
+    if current.startswith("models/"):
+        normalized = current[7:]
+        if normalized in MODEL_CONFIGS:
+            return normalized
+
     return DEFAULT_MODEL
 
 
@@ -162,16 +265,20 @@ def _set_gemini_model(value: str) -> None:
     from core.config import set_current_model
 
     model = str(value).strip()
-    if model not in MODEL_CONFIGS:
-        model = DEFAULT_MODEL
-    set_current_model(model)
-    try:
-        from core.plugin_instance import plugin as active_plugin
+    # Normalize if user pasted the full 'models/' path
+    if model.startswith("models/"):
+        model = model[7:]
 
-        if active_plugin and hasattr(active_plugin, "set_current_model"):
-            active_plugin.set_current_model(model)
-    except Exception:
-        pass
+    if model not in MODEL_CONFIGS:
+        # If not found, try a refresh in case it's a new model
+        sync_discover_models()
+
+    if model not in MODEL_CONFIGS:
+        log_warning(f"[gemini_api] Attempted to set unknown model: {model}")
+        # We allow it anyway as the API might support it even if not listed
+        # but we don't change the DEFAULT_MODEL.
+
+    set_current_model(model)
 
 
 try:
@@ -202,7 +309,8 @@ GEMINI_MODEL = config_registry.get_var(
     group="llm",
     component="gemini_api",
     tags=["cortex_engine"],
-    constraints={"choices": list(MODEL_CONFIGS.keys())},
+    # We remove static choices to allow dynamic discovery to reflect in the UI
+    # The WebUI Engines tab uses get_supported_models() which is dynamic.
     getter=_get_gemini_model,
     setter=_set_gemini_model,
 )
@@ -233,7 +341,6 @@ class GeminiAPIPlugin(AIPluginBase):
 
     def __init__(self, notify_fn=None):
         from core.notifier import set_notifier
-        from core.config import get_current_model
 
         if notify_fn:
             set_notifier(notify_fn)
@@ -244,9 +351,8 @@ class GeminiAPIPlugin(AIPluginBase):
             )
             set_notifier(self._notify_fn)
 
-        self._current_model = str(GEMINI_MODEL) or get_current_model() or DEFAULT_MODEL
-        if self._current_model not in MODEL_CONFIGS:
-            self._current_model = DEFAULT_MODEL
+        # Always attempt to refresh the model list on startup
+        sync_discover_models()
 
         # Track current request metadata for error handling
         self._current_request_meta = None
@@ -270,6 +376,11 @@ class GeminiAPIPlugin(AIPluginBase):
 
         log_info(f"[gemini_api] Initialized with model: {self._current_model}")
 
+    @property
+    def _current_model(self) -> str:
+        """The currently active model, always in sync with the configuration."""
+        return _get_gemini_model()
+
     def get_health_status(self):
         """Return (ok, error_message) indicating whether the engine is ready."""
         if not GEMINI_API_KEY or not str(GEMINI_API_KEY).strip():
@@ -277,8 +388,8 @@ class GeminiAPIPlugin(AIPluginBase):
         return True, ""
 
     def get_supported_models(self) -> list[str]:
-        """Return available model names."""
-        return list(MODEL_CONFIGS.keys())
+        """Return available model names, including those discovered from API."""
+        return sorted(list(MODEL_CONFIGS.keys()))
 
     def get_current_model(self) -> str:
         """Return the currently active model."""
@@ -357,11 +468,8 @@ class GeminiAPIPlugin(AIPluginBase):
             log_warning(f"[gemini_api] detach_agent failed: {e}")
 
     def set_current_model(self, name: str):
-        """Set the active model."""
-        if name not in self.get_supported_models():
-            raise ValueError(f"Unsupported model: {name}")
-        self._current_model = name
-        log_info(f"[gemini_api] Active model updated: {name}")
+        """Set the active model and update the configuration."""
+        _set_gemini_model(name)
 
     def get_rate_limit(self):
         """Return rate limiting parameters.
@@ -1153,7 +1261,9 @@ class GeminiAPIPlugin(AIPluginBase):
         content = candidates[0].get("content", {})
         parts = content.get("parts") or []
         response_text = "".join(
-            part.get("text", "") for part in parts if isinstance(part, dict)
+            part.get("text", "")
+            for part in parts
+            if isinstance(part, dict) and not part.get("thought", False)
         ).strip()
 
         if not response_text:

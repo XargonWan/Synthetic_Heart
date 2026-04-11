@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time as _time
 from typing import TYPE_CHECKING, Any
 
 from core.ai_plugin_base import AIPluginBase
+from core.cortex_api_logger import log_cortex_request, log_cortex_response
 from core.logging_utils import log_warning
 
 if TYPE_CHECKING:
@@ -95,6 +97,13 @@ class ExternalCortexEngine(AIPluginBase):
             msg_list = [{"role": "user", "content": str(messages)}]
 
         model = self._endpoint.default_model or None
+        endpoint_name = self._endpoint.name or "cortex_bridge"
+        log_cortex_request(
+            f"cortex_bridge:{endpoint_name}",
+            model=model or "",
+            payload={"messages": msg_list},
+        )
+        _req_start = _time.monotonic()
         max_retries, backoff = self._get_retry_settings()
         attempt = 0
         while True:
@@ -103,11 +112,19 @@ class ExternalCortexEngine(AIPluginBase):
                 chat_resp = await self._adapter.chat_completion(
                     msg_list, model=model, **self._extra_api_kwargs()
                 )
+                _elapsed = (_time.monotonic() - _req_start) * 1000
+                log_cortex_response(
+                    f"cortex_bridge:{endpoint_name}",
+                    model=chat_resp.model or model or "",
+                    status=200,
+                    body=chat_resp.content,
+                    usage=chat_resp.usage or None,
+                    elapsed_ms=_elapsed,
+                )
                 return chat_resp.content
             except Exception as exc:
-                should_retry = (
-                    attempt < max_retries
-                    and self._is_retryable_exception(exc)
+                should_retry = attempt < max_retries and self._is_retryable_exception(
+                    exc
                 )
                 if should_retry:
                     delay = backoff * (2 ** (attempt - 1))
@@ -117,6 +134,13 @@ class ExternalCortexEngine(AIPluginBase):
                     )
                     await asyncio.sleep(delay)
                     continue
+                _elapsed = (_time.monotonic() - _req_start) * 1000
+                log_cortex_response(
+                    f"cortex_bridge:{endpoint_name}",
+                    model=model or "",
+                    error=str(exc),
+                    elapsed_ms=_elapsed,
+                )
                 log_warning(
                     f"[cortex_bridge:{self._endpoint.name}] generate_response failed: {exc}"
                 )
