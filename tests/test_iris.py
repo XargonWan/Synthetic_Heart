@@ -148,7 +148,6 @@ async def test_iris_plugin_file_not_found_returns_none() -> None:
 @pytest.mark.asyncio
 async def test_iris_plugin_calls_engine(tmp_path) -> None:  # type: ignore[no-untyped-def]
     """Plugin calls the engine and returns IrisResult."""
-    import os
 
     from plugins.iris_base import IrisEngineBase, IrisResult
 
@@ -176,8 +175,9 @@ async def test_iris_plugin_calls_engine(tmp_path) -> None:  # type: ignore[no-un
         plugin._engine_settings = {}
         plugin._default_prompt = "Describe this image."
 
-        with patch("plugins.iris_plugin.IRIS_REGISTRY", reg), patch.object(
-            plugin, "refresh_config"
+        with (
+            patch("plugins.iris_plugin.IRIS_REGISTRY", reg),
+            patch.object(plugin, "refresh_config"),
         ):
             result = await plugin.describe_media(str(test_file), "image/jpeg")
 
@@ -241,8 +241,9 @@ async def test_handle_custom_action_vision_describe(tmp_path) -> None:  # type: 
         plugin._engine_settings = {}
         plugin._default_prompt = "Describe."
 
-        with patch("plugins.iris_plugin.IRIS_REGISTRY", reg), patch.object(
-            plugin, "refresh_config"
+        with (
+            patch("plugins.iris_plugin.IRIS_REGISTRY", reg),
+            patch.object(plugin, "refresh_config"),
         ):
             response = await plugin.handle_custom_action(
                 "vision_describe",

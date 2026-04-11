@@ -162,10 +162,9 @@
         <!-- Model selector -->
         <div class="ext-ep-model-row" style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
             <label style="font-size:0.85rem; font-weight:600; min-width:110px;">Available Models</label>
-            <select class="ext-ep-model-select"
-                style="padding:6px 10px; background:var(--background); color:var(--text); border:1px solid var(--primary); border-radius:8px; min-width:220px;">
-                <option value="">— not set —</option>
-            </select>
+            <input class="ext-ep-model-select" type="text" autocomplete="off"
+                style="padding:6px 10px; background:var(--background); color:var(--text); border:1px solid var(--primary); border-radius:8px; min-width:220px; flex:1; max-width:400px;">
+            <datalist class="ext-ep-model-datalist"></datalist>
             <button class="ext-ep-model-test pill secondary" style="padding:5px 12px; font-size:0.85rem;">Test</button>
             <span class="ext-ep-model-test-echo" style="font-size:0.85rem; margin-left:2px;"></span>
         </div>

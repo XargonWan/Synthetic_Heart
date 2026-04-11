@@ -143,25 +143,43 @@
         }
 
         // Model selector
-        const modelSelect = card.querySelector('.ext-ep-model-select');
+        const modelInput = card.querySelector('.ext-ep-model-select');
+        const datalist = card.querySelector('.ext-ep-model-datalist');
+        const listId = 'ext-ep-models-' + ep.id;
+        datalist.id = listId;
+        modelInput.setAttribute('list', listId);
+
         const models = Array.isArray(ep.available_models) ? ep.available_models : [];
         if (models.length === 0) {
-            const opt = document.createElement('option');
-            opt.value = '';
-            opt.textContent = ep.probe_status === 'never' ? '— probe first —' : '— none found —';
-            modelSelect.appendChild(opt);
+            modelInput.placeholder = ep.probe_status === 'never' ? '— probe first —' : '— none found —';
+            modelInput.disabled = true;
         } else {
+            modelInput.placeholder = 'Type to search or select a model...';
+            modelInput.disabled = false;
             for (const m of models) {
                 const opt = document.createElement('option');
                 opt.value = m;
-                opt.textContent = m;
-                if (m === ep.default_model) opt.selected = true;
-                modelSelect.appendChild(opt);
+                datalist.appendChild(opt);
             }
         }
-        if (ep.default_model && models && models.includes && models.includes(ep.default_model)) {
-            modelSelect.value = ep.default_model;
+        if (ep.default_model) {
+            modelInput.value = ep.default_model;
         }
+
+        modelInput.addEventListener('change', async () => {
+            const newModel = modelInput.value;
+            try {
+                setStatus('Updating model…', '');
+                await apiFetch(`/api/external-endpoints/${ep.id}/model`, {
+                    method: 'PUT',
+                    body: JSON.stringify({ model: newModel })
+                });
+                setStatus('Model updated successfully', 'var(--success,#27ae60)');
+                window.SynthWebUI?.loadEnginesSummary?.();
+            } catch (e) {
+                setStatus('Error updating model: ' + e.message, 'var(--danger,#c0392b)');
+            }
+        });
 
         // Probe time
         if (ep.last_probe_at) {
@@ -180,7 +198,7 @@
         card.querySelector('.ext-ep-probe-btn').addEventListener('click', () => handleProbe(ep.id));
         card.querySelector('.ext-ep-delete-btn').addEventListener('click', () => handleDelete(ep.id, ep.display_label || ep.name));
         card.querySelector('.ext-ep-model-test').addEventListener('click', () => {
-            const model = modelSelect.value;
+            const model = modelInput.value;
             handleTestModel(ep.id, model, card);
         });
 

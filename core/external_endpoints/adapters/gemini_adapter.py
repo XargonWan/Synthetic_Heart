@@ -269,9 +269,7 @@ class GeminiAdapter(BaseProtocolAdapter):
                 )
                 return response.text or ""
 
-            return await asyncio.get_event_loop().run_in_executor(
-                None, _sync_describe
-            )
+            return await asyncio.get_event_loop().run_in_executor(None, _sync_describe)
         except Exception as exc:
             log_warning(f"[gemini_adapter] describe_image failed: {exc}")
             return None

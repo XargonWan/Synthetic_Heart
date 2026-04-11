@@ -76,7 +76,9 @@ async def test_execute_action_skips_delivery_for_action_result_evaluation(monkey
     def fake_request_llm_delivery(
         action_outputs, original_context, action_type="memory_search"
     ):
-        raise AssertionError("request_llm_delivery should not be called during action-result delivery")
+        raise AssertionError(
+            "request_llm_delivery should not be called during action-result delivery"
+        )
 
     monkeypatch.setattr(
         memory_search, "request_llm_delivery", fake_request_llm_delivery

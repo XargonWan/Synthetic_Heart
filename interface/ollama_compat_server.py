@@ -455,7 +455,9 @@ class OllamaCompatServer:
                     interface_id=self.interface_id,
                     skip_mention_check=True,
                     original_message=message_obj,
-                    timeout=self.completion_timeout if self.completion_timeout > 0 else None,
+                    timeout=self.completion_timeout
+                    if self.completion_timeout > 0
+                    else None,
                 )
             except Exception as exc:
                 log_error(f"[ollama_serve] Error while processing message: {exc}")

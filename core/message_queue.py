@@ -1212,7 +1212,10 @@ async def _consumer_loop() -> None:
                                 f"[QUEUE] Low-priority task scheduled as background for interface_path={interface_path}; not awaiting"
                             )
 
-                            if response_future is not None and not response_future.done():
+                            if (
+                                response_future is not None
+                                and not response_future.done()
+                            ):
                                 response_future.set_exception(
                                     RuntimeError(
                                         "enqueue_and_wait cannot wait for low-priority background tasks"
@@ -1342,7 +1345,9 @@ async def _consumer_loop() -> None:
                                             pass
 
                                         still_pending = False
-                                        for prio, _, queued_item in list(_get_queue()._queue):
+                                        for prio, _, queued_item in list(
+                                            _get_queue()._queue
+                                        ):
                                             item_chat = (
                                                 queued_item.get("chat_id")
                                                 if isinstance(queued_item, dict)
@@ -1390,7 +1395,10 @@ async def _consumer_loop() -> None:
                                         f"[QUEUE] Failed to attach background completion callback: {cb_e}"
                                     )
                         finally:
-                            if response_future is not None and not response_future.done():
+                            if (
+                                response_future is not None
+                                and not response_future.done()
+                            ):
                                 if processing_task.done():
                                     try:
                                         response_future.set_result(
