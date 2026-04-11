@@ -109,29 +109,15 @@ async def test_history_sync_loop(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_send_context_update(monkeypatch):
-    """send_context_update should forward text via send_client_content with role=system."""
+    """send_context_update should forward text via send_realtime_input."""
     monkeypatch.setattr(live_session_manager, "_HAS_GENAI_SDK", True)
     mgr = live_session_manager.LiveSessionManager(api_key="x")
-    logged: list[dict] = []
+    logged: list[str] = []
 
-    # stub a session object — send_context_update uses send_client_content
+    # stub a session object — send_context_update now uses send_realtime_input
     class DummySession:
-        async def send_client_content(self, **kwargs) -> None:
-            turns = kwargs.get("turns")
-            text = ""
-            role = ""
-            if turns and hasattr(turns, "parts"):
-                role = getattr(turns, "role", "")
-                for p in turns.parts:
-                    if hasattr(p, "text"):
-                        text = p.text
-            logged.append(
-                {
-                    "text": text,
-                    "role": role,
-                    "turn_complete": kwargs.get("turn_complete"),
-                }
-            )
+        async def send_realtime_input(self, **kwargs) -> None:
+            logged.append(kwargs.get("text", ""))
 
     state = SimpleNamespace(
         is_active=True,
@@ -143,6 +129,4 @@ async def test_send_context_update(monkeypatch):
 
     await mgr.send_context_update(42, "note")
     assert logged, "session method should be invoked"
-    assert logged[0]["text"] == "[System Context Update] note"
-    assert logged[0]["role"] == "user"
-    assert logged[0]["turn_complete"] is False
+    assert logged[0] == "[System Context Update] note"

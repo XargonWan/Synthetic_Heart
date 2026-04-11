@@ -278,13 +278,47 @@ LIVE_PROACTIVE_AUDIO = config_registry.get_var(
     component="cortex_live",
 )
 
+LIVE_THINKING_LEVEL = config_registry.get_var(
+    "LIVE_THINKING_LEVEL",
+    "minimal",
+    label="Live Thinking Level",
+    description=(
+        "Reasoning depth for the Live session. "
+        "'minimal' gives lowest latency; 'high' gives deepest reasoning. "
+        "Applies to Gemini 3.1 Flash Live; legacy 2.5 model uses LIVE_THINKING_BUDGET."
+    ),
+    group="core",
+    component="cortex_live",
+)
+
+_register_exposed_var(
+    "LIVE_THINKING_LEVEL",
+    label="Live Thinking Level",
+    default="minimal",
+    value_type=str,
+    ui_type="select",
+    options=["minimal", "low", "medium", "high"],
+    description=(
+        "Reasoning depth for the Live session. "
+        "'minimal' gives lowest latency; 'high' gives deepest reasoning."
+    ),
+    scope="live",
+    component="cortex_live",
+)
+
+# Legacy config kept for users on the 2.5 fallback model (affective/proactive sessions).
 LIVE_THINKING_BUDGET = config_registry.get_var(
     "LIVE_THINKING_BUDGET",
     0,
-    label="Thinking Budget",
-    description="Internal reasoning tokens before responding (0 = disabled).",
+    label="Live Thinking Budget (legacy 2.5)",
+    description=(
+        "Internal reasoning token budget for the legacy Gemini 2.5 Live model. "
+        "Only used when affective dialog or proactive audio is enabled. "
+        "0 = disabled."
+    ),
     group="core",
     component="cortex_live",
+    hidden=True,
 )
 
 # --- LogChat configuration (use config_registry so exposed-variable APIs are consistent)

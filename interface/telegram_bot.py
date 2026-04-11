@@ -2297,6 +2297,8 @@ class TelegramInterface:
         ``thread_id`` is the correct Telegram parameter for replies in
         topics and replaces the legacy ``thread_id`` name.
         """
+        import json
+
         if self.bot is None:
             log_warning("[telegram_interface] Bot not initialized, cannot send message")
             return
@@ -2360,7 +2362,6 @@ class TelegramInterface:
                 # Use orchestrator instead of legacy corrector
                 try:
                     from core import action_parser
-                    import json
                     from types import SimpleNamespace
                     from datetime import datetime
                 except Exception:
@@ -2428,7 +2429,11 @@ class TelegramInterface:
             and hasattr(original_message, "message_id")
             and chat_id == getattr(original_message, "chat_id")
         ):
-            reply_message_id = original_message.message_id
+            _raw_mid = original_message.message_id
+            try:
+                reply_message_id = int(_raw_mid)
+            except (ValueError, TypeError):
+                reply_message_id = None
             log_debug(f"[telegram_interface] reply_to_message_id: {reply_message_id}")
 
             # Also set thread_id from original message if not already set
@@ -2451,7 +2456,10 @@ class TelegramInterface:
             fallback_chat_id = original_message.chat_id
             fallback_thread_id = getattr(original_message, "thread_id", None)
             if hasattr(original_message, "message_id"):
-                fallback_reply_to = original_message.message_id
+                try:
+                    fallback_reply_to = int(original_message.message_id)
+                except (ValueError, TypeError):
+                    fallback_reply_to = None
         elif (
             original_message
             and hasattr(original_message, "chat_id")

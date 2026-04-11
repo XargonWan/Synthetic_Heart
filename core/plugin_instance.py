@@ -23,6 +23,18 @@ from core.multimodal_attachment import (
 # Plugin managed centrally in initialize_core_components
 plugin = None
 
+
+def _restore_plugin_instance(instance: object) -> None:
+    """Directly restore the module-level plugin reference from a saved instance."""
+    global plugin  # noqa: PLW0603
+    plugin = instance
+    from core.logging_utils import log_info as _log_info
+
+    _log_info(
+        f"[plugin_instance] Restored cortex instance directly: {instance.__class__.__name__}"
+    )
+
+
 # Global lease to serialize LLM chains (Recon + prompt + actions) across tasks
 _llm_chain_lock = asyncio.Lock()
 _llm_chain_depth = contextvars.ContextVar("llm_chain_depth", default=0)
@@ -370,9 +382,25 @@ async def handle_incoming_message(
         except Exception:
             pass
 
-        original_plugin_name = (
-            plugin.__class__.__module__.split(".")[-1] if plugin is not None else None
-        )
+        # Save both the instance and its registry name so we can restore cleanly.
+        # The module-path tail (e.g. "cortex_bridge") is NOT a registry key and
+        # cannot be passed back to load_plugin — keep the instance as a fallback.
+        original_plugin_instance = plugin  # may be None
+        original_plugin_name: str | None = None
+        if plugin is not None:
+            try:
+                reg = get_cortex_registry()
+                # Prefer the registered name (reverse-lookup by identity)
+                for _k, _v in reg._engines.items():
+                    if _v is plugin:
+                        original_plugin_name = _k
+                        break
+            except Exception:
+                pass
+            # Last resort: derive from module path (may be wrong for bridge engines)
+            if not original_plugin_name:
+                original_plugin_name = plugin.__class__.__module__.split(".")[-1]
+
         desired_plugin_name = original_plugin_name
         should_restore_plugin = False
 
@@ -921,8 +949,13 @@ async def handle_incoming_message(
                 )
             except Exception as e:
                 log_warning(
-                    f"[plugin_instance] Failed to restore cortex {original_plugin_name}: {e}"
+                    f"[plugin_instance] Failed to restore cortex via name '{original_plugin_name}': {e}"
+                    " — restoring saved instance directly"
                 )
+                # Restore the saved instance directly; the registry name was wrong
+                # (e.g. bridge engines register under a key different from their module).
+                if original_plugin_instance is not None:
+                    _restore_plugin_instance(original_plugin_instance)
 
 
 def get_supported_models():

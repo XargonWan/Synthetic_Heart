@@ -101,32 +101,42 @@ GEMINI_API_BASE_URL = config_registry.get_var(
     advanced=True,
 )
 
-# Model configuration
-# As of early 2025, Gemini 2.0 Flash is the latest efficient model.
+# Model configuration — Gemini 3.x family (April 2026)
 MODEL_CONFIGS = {
+    "gemini-3.1-pro-preview": {
+        "description": "Gemini 3.1 Pro (Preview) — best reasoning, agentic workflows",
+        "thinking": True,
+        "default_thinking_level": "high",
+        "max_output_tokens": 65536,
+        "max_prompt_chars": 1000000,
+    },
+    "gemini-3.1-pro-preview-customtools": {
+        "description": "Gemini 3.1 Pro Custom Tools — optimised for custom tool use",
+        "thinking": True,
+        "default_thinking_level": "high",
+        "max_output_tokens": 65536,
+        "max_prompt_chars": 1000000,
+    },
     "gemini-3-flash-preview": {
-        "description": "Gemini 3 Flash (Preview)",
+        "description": "Gemini 3 Flash (Preview) — fast multimodal + search grounding",
         "thinking": True,
-        "max_output_tokens": 8192,
+        "default_thinking_level": "high",
+        "max_output_tokens": 65536,
         "max_prompt_chars": 1000000,
     },
-    "gemini-3-pro-preview": {
-        "description": "Gemini 3 Pro (Preview)",
+    "gemini-3.1-flash-lite-preview": {
+        "description": "Gemini 3.1 Flash-Lite (Preview) — cost-efficient, high-volume",
         "thinking": True,
-        "max_output_tokens": 8192,
+        "default_thinking_level": "minimal",
+        "max_output_tokens": 65536,
         "max_prompt_chars": 1000000,
     },
-    "gemini-2.0-flash-thinking-exp-01-21": {
-        "description": "Gemini 2.0 Flash Thinking (Experimental)",
+    "gemini-3.1-flash-image-preview": {
+        "description": "Gemini 3.1 Flash Image (Preview) — image generation + editing",
         "thinking": True,
-        "max_output_tokens": 8192,
-        "max_prompt_chars": 500000,
-    },
-    "gemini-2.0-flash": {
-        "description": "Gemini 2.0 Flash",
-        "thinking": False,
-        "max_output_tokens": 8192,
-        "max_prompt_chars": 500000,
+        "default_thinking_level": "minimal",
+        "max_output_tokens": 65536,
+        "max_prompt_chars": 1000000,
     },
 }
 
@@ -200,12 +210,9 @@ GEMINI_MODEL = config_registry.get_var(
 # Model limits map for plugin_instance.py compatibility
 # This maps model names to their max character limits
 MODEL_LIMITS_MAP = {
-    "gemini-3-flash-preview": 1000000,
-    "gemini-3-pro-preview": 1000000,
-    "gemini-2.0-flash-thinking-exp-01-21": 500000,
-    "gemini-2.0-flash": 500000,
-    "default": 500000,
+    name: cfg["max_prompt_chars"] for name, cfg in MODEL_CONFIGS.items()
 }
+MODEL_LIMITS_MAP["default"] = 1000000
 
 
 class GeminiAPIPlugin(AIPluginBase):
@@ -418,7 +425,7 @@ class GeminiAPIPlugin(AIPluginBase):
             )
 
             # 3. Call Standard API
-            # Use current model (usually gemini-2.0-flash-exp or gemini-3-flash which supports audio/video)
+            # Use current model (supports audio/video in generate_content)
             model_id = self._current_model
 
             # Correction: gemini-3-flash-preview supports audio/video in generate_content

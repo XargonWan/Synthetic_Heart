@@ -211,7 +211,7 @@ class GrilloOutreachPlugin:
         """Determine which interface and chat to target for outreach.
 
         Prefers the last active interface/chat the user interacted with.
-        Falls back to configured interfaces if no recent activity found.
+        Falls back to chat_history_cache DB query, then configured IDs.
         """
         allowed_interfaces = [
             i.strip() for i in self.target_interfaces.split(",") if i.strip()
@@ -219,7 +219,7 @@ class GrilloOutreachPlugin:
         if not allowed_interfaces:
             return None, None
 
-        # Try to get the last active chat and its interface
+        # Try to get the last active chat and its interface via chat_path_map
         try:
             import core.recent_chats as recent_chats
 
@@ -247,12 +247,44 @@ class GrilloOutreachPlugin:
                             return interface_name, str(chat_id)
 
             log_debug(
-                "[grillo_outreach] No recent chat matched allowed interfaces, using fallback"
+                "[grillo_outreach] No recent chat matched via chat_path_map, trying chat_history_cache"
             )
         except Exception as e:
             log_warning(f"[grillo_outreach] Error getting last active chat: {e}")
 
-        # Fallback: use configured target or trainer's chat
+        # Fallback A: query chat_history_cache directly for a recent interface_path
+        try:
+            from core.db import get_conn_ctx
+
+            for interface in allowed_interfaces:
+                if "_live_" in interface:
+                    continue
+                async with get_conn_ctx() as conn:
+                    async with conn.cursor() as cur:
+                        await cur.execute(
+                            """
+                            SELECT interface_path FROM chat_history_cache
+                            WHERE interface_path LIKE %s
+                            ORDER BY id DESC LIMIT 1
+                            """,
+                            (f"{interface}/%",),
+                        )
+                        row = await cur.fetchone()
+                        if row:
+                            interface_path: str = row[0]
+                            parts = interface_path.split("/")
+                            if len(parts) >= 2:
+                                resolved_chat_id = parts[1]
+                                log_info(
+                                    f"[grillo_outreach] Recovered target from chat_history_cache: {interface_path}"
+                                )
+                                return interface, resolved_chat_id
+        except Exception as e:
+            log_warning(
+                f"[grillo_outreach] Error querying chat_history_cache for target: {e}"
+            )
+
+        # Fallback B: use configured target or trainer's chat
         interface = allowed_interfaces[0]  # Use first configured interface
         chat_id: Optional[str] = None
 
@@ -285,6 +317,7 @@ class GrilloOutreachPlugin:
         # Determine action type based on interface
         action_type = f"message_{interface}"
 
+        interface_path_example = f"{interface}/{chat_id}" if chat_id else interface
         prompt = f"""[G.R.I.L.L.O. OUTREACH]
 
 You feel like reaching out. Based on your recent experiences and thoughts,
@@ -304,7 +337,7 @@ Do NOT be overly formal or robotic. Be genuine and personable.
 {GRILLO_INSTRUCTIONS}
 
 RESPOND ONLY WITH VALID JSON:
-{{"actions": [{{"type": "{action_type}", "payload": {{"text": "your message here", "chat_id": "{chat_id or "TRAINER_CHAT"}"}}}}], "meta": {{"autonomous": true, "rationale": "Grillo outreach"}}}}
+{{"actions": [{{"type": "{action_type}", "payload": {{"text": "your message here", "interface_path": "{interface_path_example}"}}}}], "meta": {{"autonomous": true, "rationale": "Grillo outreach"}}}}
 """
         return prompt
 
@@ -313,6 +346,12 @@ RESPOND ONLY WITH VALID JSON:
         interface, chat_id = await self._get_target_interface_and_chat()
         if not interface:
             log_warning("[grillo_outreach] No target interface configured")
+            return
+        if not chat_id:
+            log_warning(
+                "[grillo_outreach] Could not resolve a target chat_id; "
+                "set GRILLO_OUTREACH_CHAT_IDS or TRAINER_CHAT_ID to enable outreach"
+            )
             return
 
         context = await self._get_context_snippets()

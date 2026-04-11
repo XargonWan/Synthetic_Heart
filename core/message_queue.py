@@ -776,8 +776,30 @@ async def _consumer_loop() -> None:
 
             plugin = plugin_instance.get_plugin()
             if not plugin:
-                log_error("[QUEUE] No active plugin when dispatching")
-                continue
+                # For grillo internal beats, attempt a one-time auto-load from config
+                # before giving up — beats fire on a timer and must not be silently dropped.
+                _is_grillo = final.get("interface") == "grillo" or (
+                    isinstance(final.get("context"), dict)
+                    and final["context"].get("grillo_beat")
+                )
+                if _is_grillo:
+                    try:
+                        from core.config import get_active_cortex_engine as _gace
+
+                        _engine_name = await _gace(scope="base")
+                        await plugin_instance.load_plugin(
+                            _engine_name, ensure_started=True
+                        )
+                        plugin = plugin_instance.get_plugin()
+                        if plugin:
+                            log_info(
+                                f"[QUEUE] Auto-loaded engine '{_engine_name}' for grillo beat"
+                            )
+                    except Exception as _e:
+                        log_warning(f"[QUEUE] Auto-load for grillo beat failed: {_e}")
+                if not plugin:
+                    log_error("[QUEUE] No active plugin when dispatching")
+                    continue
 
             try:
                 max_messages, window_seconds, trainer_fraction = plugin.get_rate_limit()
@@ -917,6 +939,15 @@ async def _consumer_loop() -> None:
                             context["request_tts"] = True
                         else:
                             context.pop("request_tts", None)
+
+                        # Propagate voice channel presence so the prompt engine can
+                        # inform the LLM that the sender is in a voice channel — this
+                        # lets the model decide to issue join_voice_discord.
+                        _vc_id = getattr(_queued_msg, "voice_channel_id", None)
+                        if _vc_id:
+                            context["voice_channel_id"] = str(_vc_id)
+                        else:
+                            context.pop("voice_channel_id", None)
 
                         # Propagate trainer flag so plugin_instance can route
                         # to TRAINER_CORTEX when a scope override is configured.

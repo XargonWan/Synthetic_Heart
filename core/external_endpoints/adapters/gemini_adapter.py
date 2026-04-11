@@ -45,7 +45,7 @@ def _messages_to_gemini(
 class GeminiAdapter(BaseProtocolAdapter):
     """Adapter using the ``google-genai`` SDK for Google Gemini services."""
 
-    DEFAULT_MODEL = "gemini-2.0-flash"
+    DEFAULT_MODEL = "gemini-3-flash-preview"
 
     def __init__(self, api_key: str) -> None:
         self._api_key = api_key
@@ -216,7 +216,7 @@ class GeminiAdapter(BaseProtocolAdapter):
 
             def _sync_transcribe() -> str:
                 response = client.models.generate_content(
-                    model="gemini-2.0-flash",
+                    model="gemini-3-flash-preview",
                     contents=[
                         types.Part.from_bytes(
                             data=audio_bytes, mime_type=effective_mime

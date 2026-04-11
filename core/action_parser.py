@@ -165,7 +165,7 @@ async def _grillo_recent_same_message(
             FROM chat_history_cache
             WHERE interface_path = %s
               AND COALESCE(sender_id,'') IN (%s,%s)
-              AND text = %s
+              AND message_text = %s
               AND timestamp > %s
             """,
             (interface_path, "self", "synth", text, threshold),
