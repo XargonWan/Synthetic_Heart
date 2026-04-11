@@ -649,14 +649,26 @@ class LiveSessionManager:
                 )
             else:
                 _kick_text = "[Session started. Greet naturally.]"
-            try:
-                await session.send_realtime_input(text=_kick_text)
+            # On resumption, the server restores the full context window
+            # server-side.  Sending a kick text would trigger an unsolicited
+            # model response before any audio arrives — and the model may read
+            # back system-level data (emotion state, instructions) aloud.
+            # Only kick on cold restarts where we need the model to greet or
+            # re-orient itself.
+            if not resumption_handle:
+                try:
+                    await session.send_realtime_input(text=_kick_text)
+                    log_info(
+                        f"[live_session] Sent initial kick to model for guild {guild_id} "
+                        f"(reconnect={is_reconnect})"
+                    )
+                except Exception as e:
+                    log_warning(f"[live_session] Initial kick failed (non-fatal): {e}")
+            else:
                 log_info(
-                    f"[live_session] Sent initial kick to model for guild {guild_id} "
-                    f"(reconnect={is_reconnect})"
+                    f"[live_session] Skipping kick on resumption for guild {guild_id} "
+                    "(context restored server-side)"
                 )
-            except Exception as e:
-                log_warning(f"[live_session] Initial kick failed (non-fatal): {e}")
 
             return True
 

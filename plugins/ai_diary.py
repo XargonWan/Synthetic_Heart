@@ -1230,12 +1230,48 @@ class DiaryPlugin:
             except Exception:
                 days = 2
 
-            entries = get_recent_entries(days=days, max_chars=None)
+            # Cap total diary chars to prevent context bloat. The daily diary
+            # blobs can grow to 50k+ chars as grillo appends all day's entries
+            # with '---' separators. We enforce a hard budget here and further
+            # truncate individual fields to avoid single entries consuming the
+            # whole context window.
+            try:
+                diary_budget = int(
+                    config_registry.get_value(
+                        "DIARY_CONTEXT_MAX_CHARS", 8000, value_type=int
+                    )
+                )
+            except Exception:
+                diary_budget = 8000
+
+            # Per-field character limit: keeps the most recent summary/thought
+            # readable without dumping multi-page merged blobs into the prompt.
+            per_field_limit = max(300, diary_budget // 4)
+
+            raw_entries = get_recent_entries(days=days, max_chars=diary_budget)
+
+            # Truncate heavy text fields on each returned entry so the history
+            # engine receives compact, LLM-digestible records rather than the
+            # raw megablobs that accumulate over a full day.
+            trimmed_entries = []
+            for entry in raw_entries:
+                if not isinstance(entry, dict):
+                    trimmed_entries.append(entry)
+                    continue
+                e = dict(entry)
+                for field in ("content", "interaction_summary", "personal_thought"):
+                    val = e.get(field)
+                    if isinstance(val, str) and len(val) > per_field_limit:
+                        # Keep the most recent segment (last `per_field_limit` chars)
+                        # since the blob is appended chronologically.
+                        e[field] = "…" + val[-per_field_limit:]
+                trimmed_entries.append(e)
+
             return [
                 HistoryContribution(
                     name="ai_diary",
                     priority=INJECTION_PRIORITY,
-                    entries=entries,
+                    entries=trimmed_entries,
                     enabled_var="ENABLE_AI_DIARY",
                 )
             ]

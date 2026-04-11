@@ -749,6 +749,12 @@ class HistoryEngine:
                 thought = entry.get("personal_thought")
                 if thought:
                     ts = _format_ts(entry.get("timestamp", ""))
+                    # Cap thought length — the merged daily blob can be 30k+ chars.
+                    # We keep the most recent 800 chars (tail) since entries are
+                    # appended chronologically and the latest thought is at the end.
+                    _MAX_THOUGHT = 800
+                    if len(thought) > _MAX_THOUGHT:
+                        thought = "\u2026" + thought[-_MAX_THOUGHT:]
                     thoughts.append(f"[thought {ts}] {thought}".strip())
                 if len(thoughts) >= thoughts_limit:
                     break

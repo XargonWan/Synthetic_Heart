@@ -846,14 +846,13 @@ class GeminiAPIPlugin(AIPluginBase):
     def _build_system_instruction(self, prompt) -> str:
         """Build the system instruction for Gemini based on the prompt context.
 
-        NOTE: The prompt_engine already includes complete action schemas with descriptions,
-        required fields, and examples. This system instruction just reinforces the JSON
-        output format requirement. Don't duplicate action definitions here.
+        This method extracts 'instructions' (the persona) and 'instructions_verbose'
+        (the rules) from the prompt and elevates them to the system instruction.
+        This ensures they are treated as prime directives by the Gemini model.
         """
-        # Extract interface information from prompt if available
-        # prompt_engine puts it at input.source.interface, but also check top-level
         interface = "unknown"
         verbose_instructions = None
+        persona_instructions = None
         prompt_dict = None
 
         if isinstance(prompt, dict):
@@ -872,6 +871,7 @@ class GeminiAPIPlugin(AIPluginBase):
                 "current_interface"
             )
             verbose_instructions = prompt_dict.get("instructions_verbose")
+            persona_instructions = prompt_dict.get("instructions")
 
             # If not found, check input.source.interface (prompt_engine structure)
             if not interface or interface == "unknown":
@@ -903,17 +903,12 @@ class GeminiAPIPlugin(AIPluginBase):
         is_grillo = interface == "grillo" or (
             isinstance(prompt_dict, dict) and prompt_dict.get("grillo_beat")
         )
-        # Outreach beats are grillo-initiated but MUST produce message_*
-        # actions to reach the target interface (e.g. telegram_bot).
         is_grillo_internal = is_grillo and (
             not isinstance(prompt_dict, dict)
             or prompt_dict.get("beat_type", "internal") != "outreach"
         )
 
-        # Minimal system instruction - the prompt itself contains full action schemas
-        # We just need to remind the model to output valid JSON
         if is_grillo_internal:
-            # Internal beats (tag_elaboration, self_reflection, etc.)
             interface_hint = (
                 "CURRENT INTERFACE: grillo (INTERNAL)\n"
                 "This is an internal introspection beat. Do NOT output any message_* actions.\n"
@@ -925,7 +920,8 @@ class GeminiAPIPlugin(AIPluginBase):
                 f"TO SEND A MESSAGE TO THE USER: Use action type '{message_action}'"
             )
 
-        system_instruction = (
+        # Core system formatting and routing instructions
+        core_instruction = (
             "You are part of the 'Synthetic Heart' AI system.\n"
             "\n"
             "CRITICAL OUTPUT FORMAT:\n"
@@ -942,11 +938,15 @@ class GeminiAPIPlugin(AIPluginBase):
             "Remember: Output ONLY valid JSON. The system will parse your JSON and execute the actions."
         )
 
-        # Include unminified chat instruction verbatim when provided
+        # Assemble the final system instruction from components
+        components = []
         if verbose_instructions:
-            system_instruction = f"{verbose_instructions}\n\n{system_instruction}"
+            components.append(verbose_instructions)
+        if persona_instructions:
+            components.append(persona_instructions)
+        components.append(core_instruction)
 
-        return system_instruction
+        return "\n\n".join(components)
 
     async def _http_generate_content(
         self,
@@ -1616,6 +1616,11 @@ class GeminiAPIPlugin(AIPluginBase):
             def redact_recursive(container) -> None:
                 """Recursively search and redact multimodal data at any level."""
                 if isinstance(container, dict):
+                    # Redact both instructions fields as they've been elevated to systemInstruction
+                    for instr_key in ("instructions", "instructions_verbose"):
+                        if instr_key in container:
+                            container[instr_key] = "<moved to systemInstruction>"
+
                     # Check for multimodal list keys at this level
                     for key in MULTIMODAL_KEYS:
                         if key in container:

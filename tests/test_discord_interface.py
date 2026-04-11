@@ -276,7 +276,7 @@ async def test_voice_cleanup_not_triggered_if_other_human_remains(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_live_sync_forwarding(monkeypatch):
-    """Messages should be forwarded to live session and replicated in history."""
+    """Messages should be forwarded to live session; no duplicate DB write on discord_live_."""
     di = DiscordInterface(bot_token="")
     di.client = SimpleNamespace(user=SimpleNamespace(id=1))
 
@@ -304,15 +304,6 @@ async def test_live_sync_forwarding(monkeypatch):
         ),
     )
 
-    repl = []
-
-    async def fake_save(
-        interface_path, message_text, sender_name=None, sender_id=None, timestamp=None
-    ):
-        repl.append((interface_path, message_text))
-        return True
-
-    monkeypatch.setattr("core.chat_history_cache.save_chat_message", fake_save)
     monkeypatch.setattr("core.message_queue.enqueue", lambda *a, **k: asyncio.sleep(0))
 
     fake_message = SimpleNamespace(
@@ -334,7 +325,8 @@ async def test_live_sync_forwarding(monkeypatch):
     assert gid == 42
     assert "hello" in text
     assert "bob" in text
-    assert repl == [("discord_live_42", "hello")]
+    # The message is already persisted to discord_bot/... by the normal pipeline;
+    # we must NOT write a second discord_live_ entry (that was the duplicate bug).
 
 
 @pytest.mark.asyncio

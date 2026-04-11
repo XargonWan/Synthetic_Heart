@@ -287,9 +287,7 @@ class GeminiLiveEngine(LiveEngineBase):
     # Event stream
     # ------------------------------------------------------------------
 
-    async def receive_events(
-        self, session_id: str
-    ) -> AsyncIterator[LiveEvent]:
+    async def receive_events(self, session_id: str) -> AsyncIterator[LiveEvent]:
         """Yield ``LiveEvent`` objects from the Gemini Live session.
 
         Terminates when ``close_session`` is called or the connection drops.

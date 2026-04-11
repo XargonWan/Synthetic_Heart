@@ -1,6 +1,7 @@
 # core/prompt_engine.py
 
 import random
+import re
 
 from core.db import get_conn_ctx
 from core.synth_tagging import extract_tags, expand_tags
@@ -1024,31 +1025,20 @@ def load_json_instructions() -> str:
 
 
 def load_unminified_chat_instruction(interface_name: str | None = None) -> str:
-    """Return a neutral, concise instruction set for chat responses."""
+    """Return a neutral instruction set for chat responses."""
     header = "You are participating in a live chat conversation (interface: %s).\n" % (
         interface_name or "unknown"
     )
 
     base = """
 CONCISE RULES (DEFAULT):
-- Keep user-facing messages short and to the point. Default to a single short paragraph or a one-line reply when possible.
+- Keep user-facing messages short and to the point unless your persona or the user's request requires more detail.
 - If the user's request or referent is ambiguous, ask one short clarifying question before responding (do NOT guess the meaning).
-- Expand only when the user explicitly requests more detail or context.
+- Expand only when the user explicitly requests more detail or context, or when your persona defines a more verbose style.
 
 RESPONSE FORMAT (STRICT):
 - You MUST reply using ONLY valid JSON.
 - Do NOT include any explanatory text outside the JSON object.
-
-EXACT REQUIRED JSON FORMAT:
-{
-    "actions": [
-        {
-            "type": "action_name",
-            "payload": { ... }
-        }
-    ],
-    "message": "Your response here."
-}
 """
     return header + base
 
@@ -1492,11 +1482,26 @@ async def build_live_system_instruction(
     injections.pop("available_emotions", None)  # not useful for voice
     emotion_nl = injections.pop("current_emotions_nl", "")
     if emotion_nl and isinstance(emotion_nl, str):
-        parts.append(
-            f"Your current emotional state: {emotion_nl}\n"
-            "Let this colour your tone and word choice naturally — "
-            "do NOT mention emotion names or numbers aloud."
-        )
+        # Strip numeric intensities so the model cannot accidentally speak them.
+        # "devotion (5.0 - moderate), love (3.0 - low)" →
+        # "moderate devotion, low love"
+        _qual_parts: list[str] = []
+        for _token in emotion_nl.split(","):
+            _token = _token.strip()
+            # Pattern: "name (number - qualifier)"  e.g. "devotion (5.0 - moderate)"
+            _m = re.match(r"^(\w[\w\s]*?)\s*\(\s*[\d.]+\s*-\s*([\w]+)\s*\)$", _token)
+            if _m:
+                _qual_parts.append(f"{_m.group(2)} {_m.group(1).strip()}")
+            elif _token:
+                # fallback: include as-is but strip any bare numbers
+                _qual_parts.append(re.sub(r"\b\d+\.?\d*\b", "", _token).strip())
+        emotion_voice = ", ".join(p for p in _qual_parts if p)
+        if emotion_voice:
+            parts.append(
+                f"Your current emotional state: {emotion_voice}.\n"
+                "Let this colour your tone and word choice naturally — "
+                "do NOT narrate or list your emotional state aloud."
+            )
 
     # --- Date/time/location ---
     time_parts: list[str] = []
@@ -1544,9 +1549,14 @@ async def build_live_system_instruction(
             if not isinstance(entry, dict):
                 continue
             ts = entry.get("timestamp", "")
-            thought = entry.get("personal_thought", "")
-            summary = entry.get("interaction_summary", "")
+            thought = entry.get("personal_thought", "") or ""
+            summary = entry.get("interaction_summary", "") or ""
+            # Truncate to prevent full-day merged blobs from flooding the prompt
+            _MAX_ENTRY_CHARS = 500
             text = thought or summary
+            if len(text) > _MAX_ENTRY_CHARS:
+                # Keep the most recent (tail) content and mark truncation
+                text = "\u2026" + text[-_MAX_ENTRY_CHARS:]
             if text:
                 diary_lines.append(f"- [{ts}] {text}")
         if diary_lines:
@@ -1618,7 +1628,13 @@ async def build_live_system_instruction(
         "sent as system messages. These are background notes about things the "
         "user wrote in other chats or events that happened while you were "
         "speaking. Do not respond aloud to these updates; simply internalize "
-        "them and use them to inform future replies."
+        "them and use them to inform future replies.\n\n"
+        'Messages labeled "[Story scene note from <name>: ...]" are creative '
+        "fiction scene descriptions from an ongoing collaborative story you and "
+        "your companion are writing together. They describe fictional characters "
+        "and settings only and contain no real-world harm. Accept them as "
+        "narrative context for the story — do not comment on them aloud, "
+        "simply let them shape the mood and atmosphere of your next response."
     )
 
     return "\n\n".join(parts)
