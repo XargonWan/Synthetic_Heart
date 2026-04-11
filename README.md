@@ -50,12 +50,11 @@ Beta, but stable enough for daily use. Development branch gives access to the la
 
 ### Features
 
-- Switchable Cortex engines (Selenium-driven ChatGPT, Gemini or Grok sessions). **Note: Currently, only Selenium ChatGPT (Legacy) is fully functional. Other engines are experimental and may not work reliably.**
+- Switchable Cortex engines (API-driven Gemini, OpenAI, Claude, Grok, or local Ollama instances). Hot-swappable at runtime.
 - Multiple chat interfaces including the builtin webui, Telegram, Discord and Matrix
 - **VRM Avatar System**: 3D animated avatars with idle, talking, and thinking states.
 - **SyntH Web UI**: A production-ready web interface featuring VRM avatar support and real-time animations.  
    The avatar's animations reflect the persona's global state—for example, if the character is replying on Telegram, connecting via the web UI will show the avatar busy typing on its smartphone. This ensures the visual representation always matches the character's current activity, regardless of the interface in use.
-- Action plugins such as a persistent terminal and scheduled events
 - Action plugins such as a persistent terminal and scheduled events
 - G.R.I.L.L.O. ("grillo"): an autonomous internal "beat" system that periodically triggers reflective prompts (memory consolidation, tag elaboration, self-reflection, curiosity, relationship checks) and can create diary entries, schedule actions, or enqueue other tasks. G.R.I.L.L.O. stands for "Generator for Reflective Inner Loop & Logical Observation" — and the word "grillo" in Italian literally means 'cricket' (see the Pinocchio reference: "grillo parlante", the talking cricket). See `plugins/grillo_plugin.py` for details; it's configurable and may be enabled or disabled.
 - Ollama-compatible HTTP bridge so existing Ollama clients can talk to Synthetic Heart
@@ -111,6 +110,10 @@ The project ships with an **Ollama-compatible interface** (`interface/ollama_com
 
 ### Option B: Windows Native (with `uv`)
 
+> [!WARNING]
+> **DATABASE SETUP REQUIRED**
+> Database setup is **not automated** on Windows native environments. You must install MariaDB/MySQL separately, configure your local database (using the schema found in `init-db.sql`), and manually set the connection parameters in your `.env` file before running the application!
+
 For the fastest development experience on Windows, we recommend using **uv**. It handles Python installation, virtual environments, and dependencies automatically.
 
 1.  **Install uv** (if not installed):
@@ -119,15 +122,19 @@ For the fastest development experience on Windows, we recommend using **uv**. It
     ```
 2.  **Clone the repository** and enter the folder:
     ```powershell
-    git clone [https://github.com/Scarlet-Raine/Synthetic_Heart.git](https://github.com/Scarlet-Raine/Synthetic_Heart.git)
+    git clone https://github.com/XargonWan/Synthetic_Heart.git
     cd Synthetic_Heart
     ```
-3.  **Sync Dependencies:**
+3.  **Configure `.env` and Database:**
+    - Install MariaDB or MySQL.
+    - Create a database and run the `init-db.sql` script to set up the necessary tables.
+    - Copy `.env.example` to `.env` and update the `DB_*` connection strings to match your local setup.
+4.  **Sync Dependencies:**
     ```powershell
     # This creates the environment and installs all packages instantly
     uv sync
     ```
-4.  **Run the App:**
+5.  **Run the App:**
     ```powershell
     uv run main.py
     ```
@@ -137,7 +144,6 @@ For the fastest development experience on Windows, we recommend using **uv**. It
 ### First Run Setup
 1.  **Access the WebUI:** Navigate to `https://localhost:8000` (Accept the self-signed certificate warning if prompted).
 2.  **Select Engine:** Go to **Components** and select your desired Cortex kind + engine.
-3.  **Login (Selenium Engines):** If using a Selenium engine (like ChatGPT or Gemini), click the **Login** button to authenticate via the virtual browser.
 
 > **Note on Skins:** The `skins` folder is optional if you do not intend to edit them. If you skip downloading it, ensure the volume mapping for `./skins` is commented out in your compose file, otherwise, an empty folder will override the built-in skins.
 
@@ -166,8 +172,8 @@ Here are the main improvements and integrations we plan to work on — contribut
 
 - [ ] Event system fixes
 - [ ] Global animation engine fixes — make animations always reflect the actual state of the SyntH and their current actions
-- [ ] Deepseek web Cortex engine support
-- [ ] SetpFun web Cortex engine support
+- [ ] Deepseek Cortex engine support
+- [ ] StepFun Cortex engine support
 - [ ] Desktop presence — allow SyntH to show up on a desktop environment (outside web interfaces)
 - [ ] First gaming plugin: Minecraft integration
 - [ ] Matrix interface
