@@ -588,7 +588,7 @@ class HistoryEngine:
                     f"[history_engine] Messaggi per interface_path: {path_counter}"
                 )
 
-                for m in unified_candidates[-verbosity:] if verbosity > 0 else []:
+                for m in unified_candidates:
                     # Skip if this entry's text matches the current input
                     entry_text = (
                         (m.get("text") or m.get("message_text") or "").strip()
@@ -617,6 +617,10 @@ class HistoryEngine:
                         other_lines.append(line)
 
                     seen_history.add(k)
+
+                if verbosity > 0:
+                    local_lines = local_lines[-verbosity:]
+                    other_lines = other_lines[-verbosity:]
 
                 log_debug(
                     f"[history_engine] Messaggi globali passati al prompt: {len(local_lines) + len(other_lines)} (locali: {len(local_lines)}, altri: {len(other_lines)})"

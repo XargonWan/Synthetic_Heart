@@ -12,6 +12,7 @@ from core.user_utils import get_user_display_name, get_user_usertag
 from datetime import datetime, time
 import os
 import asyncio
+from typing import cast
 
 # Default maximum prompt characters (CHARACTERS, NOT TOKENS)
 # This is used as a safe fallback when no LLM engine provides explicit limits.
@@ -619,9 +620,15 @@ async def build_json_prompt(
                     is_chat_interface = False
 
         if interface_name and is_chat_interface:
-            prompt_with_instructions["instructions_verbose"] = (
-                load_unminified_chat_instruction(interface_name)
-            )
+            verbose_instructions = load_unminified_chat_instruction(interface_name)
+            # Prepend persona to verbose instructions so ALL engines see it
+            # (most engines prefer instructions_verbose over instructions)
+            if static_persona:
+                verbose_instructions = (
+                    f"=== CRITICAL SYSTEM IDENTITY ===\n{static_persona}\n\n"
+                    f"{verbose_instructions}"
+                )
+            prompt_with_instructions["instructions_verbose"] = verbose_instructions
             log_info(
                 f"[json_prompt] 🔒 Added instructions_verbose for chat interface: {interface_name}"
             )
@@ -1028,6 +1035,8 @@ def load_json_instructions() -> str:
         "Include reply_message_id when replying to specific messages. Use thread_id from input.payload.source.thread_id when present (omit if missing).\n"
         "CLARIFICATION POLICY: If the user's intent, referent, or the subject of a follow-up is ambiguous or missing, DO NOT GUESS — ask one concise clarifying question before asserting facts or taking action. When the user asks whether you 'understood' but there is no clear context, request clarification rather than assuming.\n"
         "TIME AUTHORITY: Treat context.date, context.time, input.payload.local_date, input.payload.local_time, input.payload.local_hour, and input.payload.time_of_day as the authoritative current time context whenever present. Never infer the current time, date, or part of day from prior chat history, memories, or older assistant messages.\n"
+        "IDENTITY INTEGRITY: Stay inside the active persona in first person. Do not describe yourself from the outside, do not refer to the active persona as a separate fictional character, and do not compare yourself to that persona as if they were someone else.\n"
+        "PRONOUN CONSISTENCY: When the prompt, persona, or participant context establishes a person's pronouns or relationship role, use them consistently and do not flip them. Do not neutralize an established he/him or she/her person into singular they/them.\n"
         "LENGTH POLICY: Do NOT hardcode a target response length. Let the persona, the relationship context, and the user's tone determine how much to say. Simple factual or logistical turns can stay brief; intimate, emotional, or reflective turns may be fuller when that feels natural. Do not pad, and do not forcibly truncate a reply just to make it short.\n"
         'VOICE INPUT STYLE: When input.payload.input_source is "voice", the user spoke their message aloud. '
         "Respond in a natural, conversational spoken style: avoid markdown, bullet points, headers, and code blocks. "
@@ -1058,6 +1067,8 @@ RESPONSE SHAPE RULES:
 - Keep simple factual or logistical turns compact, but allow emotionally meaningful or intimate turns to breathe when that feels natural.
 - If the user's request or referent is ambiguous, ask one short clarifying question before responding (do NOT guess the meaning).
 - Treat current time fields in the prompt as authoritative. Never infer the present time, date, or part of day from older chat history, memories, or prior assistant messages.
+- Stay in the active persona in first person. Do not talk about yourself from the outside or as if the persona were a separate character.
+- Keep pronouns consistent with the persona and participant context. Do not flip an established he/him, she/her, or they/them reference, and do not replace an established he/him or she/her person with singular they/them.
 
 RESPONSE FORMAT (STRICT):
 - You MUST reply using ONLY valid JSON.
@@ -1547,11 +1558,14 @@ async def build_live_system_instruction(
         for p in participants:
             if not isinstance(p, dict):
                 continue
-            tag = p.get("usertag", "unknown")
-            bio = p.get("short_bio", "")
-            nicks = p.get("nicknames", [])
+            participant = cast(dict[str, object], p)
+            tag = str(participant.get("usertag") or "unknown")
+            bio = str(participant.get("short_bio") or "")
+            nicks_raw = participant.get("nicknames")
+            nicks = nicks_raw if isinstance(nicks_raw, list) else []
             nick_str = f" (also known as: {', '.join(nicks)})" if nicks else ""
-            feelings = p.get("feelings", [])
+            feelings_raw = participant.get("feelings")
+            feelings = feelings_raw if isinstance(feelings_raw, list) else []
             feel_str = (
                 f" [feelings: {', '.join(str(f) for f in feelings)}]"
                 if feelings
@@ -1642,6 +1656,8 @@ async def build_live_system_instruction(
         "Speak naturally and conversationally. "
         "Keep responses concise — a few sentences at most unless asked for detail. "
         "You can express emotions through tone and word choice. "
+        "Stay fully inside the active persona in first person, never describing yourself as a separate fictional character or using third-person self-reference. "
+        "Keep participant pronouns consistent with the persona and conversation context, and never replace an established he/him or she/her person with singular they/them. "
         "Do not output JSON, markdown, or structured data — just speak naturally."
     )
 

@@ -2,7 +2,12 @@ import asyncio
 from datetime import datetime
 from types import SimpleNamespace
 
-from core.prompt_engine import build_json_prompt
+from core.prompt_engine import (
+    build_json_prompt,
+    build_live_system_instruction,
+    load_json_instructions,
+    load_unminified_chat_instruction,
+)
 
 
 def test_build_json_prompt_reply_without_text(monkeypatch):
@@ -67,12 +72,38 @@ def test_build_json_prompt_inherits_image_data_from_context_memory(monkeypatch):
 
 
 def test_instructions_prohibit_embedded_emotion_tags():
-    from core.prompt_engine import load_json_instructions
-
     instructions = load_json_instructions()
     assert "Do NOT embed emotion tags" in instructions, (
         "Instructions should forbid embedding emotion tags in message text"
     )
+
+
+def test_instructions_enforce_first_person_identity():
+    instructions = load_json_instructions()
+    assert "Stay inside the active persona in first person" in instructions
+    assert "PRONOUN CONSISTENCY" in instructions
+    assert "Do not neutralize an established he/him or she/her person into singular they/them" in instructions
+
+
+def test_unminified_chat_instruction_enforces_identity_rules():
+    instructions = load_unminified_chat_instruction("telegram_bot")
+    assert "Stay in the active persona in first person" in instructions
+    assert "Keep pronouns consistent" in instructions
+    assert "do not replace an established he/him or she/her person with singular they/them" in instructions
+
+
+def test_build_live_system_instruction_enforces_identity_rules(monkeypatch):
+    async def dummy_gather(message, ctx):
+        return {"persona": "You are 2B."}
+
+    monkeypatch.setattr("core.action_parser.gather_static_injections", dummy_gather)
+
+    result = asyncio.run(build_live_system_instruction())
+
+    assert "You are 2B." in result
+    assert "Stay fully inside the active persona in first person" in result
+    assert "Keep participant pronouns consistent" in result
+    assert "never replace an established he/him or she/her person with singular they/them" in result
 
 
 def test_build_json_prompt_filters_actions_by_allowlist(monkeypatch):

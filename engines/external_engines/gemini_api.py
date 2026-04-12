@@ -1104,6 +1104,7 @@ class GeminiAPIPlugin(AIPluginBase):
             },
             "generationConfig": {
                 "maxOutputTokens": int(max_output_tokens),
+                "responseMimeType": "application/json",
             },
             "safetySettings": [
                 {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
