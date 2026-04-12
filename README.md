@@ -167,6 +167,26 @@ You can browse and manage Docker images for this project on [Docker Hub](https:/
 
 Pull requests are welcome! Everyone is encouraged to submit contributions—especially new components, plugins, and Cortex engines—to expand SyntH's capabilities. Please read the guidelines in the documentation before submitting.
 
+### AI-assisted development
+
+The repo ships with a full AI agent setup out of the box. If you use Claude Code, Cursor, Copilot, or similar tools, these are already wired up for you:
+
+**One-time setup after cloning:**
+```bash
+uv sync                   # installs all deps including the MCP server
+npx gitnexus analyze      # builds the code intelligence index (~1-2 min)
+```
+
+**What you get automatically:**
+
+- **`synth-logs` MCP server** (`mcp_servers/synth_logs.py`) — gives AI agents structured access to all log files across rotations. Instead of reading raw log files, agents can call `get_recent_errors()`, `search_logs()`, and `tail_log()` directly. Logs rotate fast in DEBUG mode (2000 lines), so this saves a lot of manual hunting.
+
+- **GitNexus code intelligence** — pre-configured in `.mcp.json` and `.vscode/mcp.json`. Gives agents a queryable map of the codebase: callers, callees, execution flows, and safe rename/refactor operations. Run `npx gitnexus analyze` to build or refresh the index after large changes.
+
+Both servers are pre-configured for **Claude Code** (`.mcp.json`) and **VS Code Copilot** (`.vscode/mcp.json`). No manual setup beyond the two commands above.
+
+**`AGENTS.md`** is the canonical reference for any AI agent working on this codebase — architecture overview, plugin contracts, DB schema, config keys, known issues, and debugging SOP. Read it before starting a non-trivial task.
+
 ## What's next (Planned features & fixes)
 Here are the main improvements and integrations we plan to work on — contributions are welcome:
 

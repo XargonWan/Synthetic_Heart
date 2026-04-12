@@ -49,6 +49,7 @@ dependencies = [
     "torch",
     "torchaudio",
     "gemini-cli>=0.1.0",
+    "mcp>=1.27.0",
 ]
 
 [project.optional-dependencies]

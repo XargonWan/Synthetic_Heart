@@ -203,6 +203,15 @@ When `eyes_closed > 0.5`, blink and saccade loops are automatically suspended un
 
 ## 8. Development Workflow
 
+### First-time setup after cloning
+
+```bash
+uv sync                   # install all dependencies including MCP server deps
+npx gitnexus analyze      # build the code intelligence index (one-time, ~1-2 min)
+```
+
+MCP servers (`synth-logs`, `gitnexus`) are pre-configured in `.mcp.json` and `.vscode/mcp.json` — no manual setup needed after the above two commands.
+
 ### Toolchain: Astral (`uv` + `ruff` + `ty`)
 
 | Task | Command |
@@ -284,3 +293,238 @@ docker compose -f docker-compose-dev.yml --env-file .env-dev up -d --build && rm
 ```bash
 docker exec synth-dev tail -f /app/logs/synth.log | grep -E "\[grillo\]|grillo"
 ```
+
+## 12. Known Issues & Recurring Errors
+
+> **Agent instruction:** When you encounter a bug, error pattern, or non-obvious workaround that isn't already listed here, append a new entry before finishing your session. Use the format below. Do **not** fix it unless asked — the point is to stop future agents from wasting tokens rediscovering it.
+>
+> ```
+> ### Short title  <!-- YYYY-MM-DD -->
+> **Symptom:** what shows up in logs or at runtime
+> **Location:** file(s) involved
+> **Status:** known / in progress / workaround in place
+> **Notes:** anything that helps the next agent understand it fast
+> ```
+
+---
+
+### `ai_diary` — user_message column overflow  <!-- 2026-04-13 -->
+**Symptom:** `(1406, "Data too long for column 'user_message' at row 1")` appearing repeatedly in `synth.log`, originating from `ai_diary.py` `_upsert_diary_impl`.
+**Location:** `plugins/ai_diary.py`, `init-db.sql` (`ai_diary` table, `user_message` column)
+**Status:** known, not fixed — seen multiple times per hour during active sessions.
+**Notes:** Diary entries can exceed the column's declared length. The insert fails silently (error is logged, execution continues). No data loss to the user but diary entries are dropped.
+
+---
+
+### `synth.log` rotates extremely fast in DEBUG mode  <!-- 2026-04-13 -->
+**Symptom:** Active `synth.log` has only a handful of lines; most content is in timestamped rotation files (`synth.2026-04-12_HH-MM-SS.log`).
+**Location:** `core/logging_utils.py` (`maxLines=2000` in `TimestampedRotatingFileHandler`)
+**Status:** by design — 2000 lines fills in 1–2 interactions at DEBUG level.
+**Notes:** Always use `lookback_files` parameter in the `synth-logs` MCP tools. `tail_log` and `search_logs` default to `lookback_files=2` and `lookback_files=3` respectively. `get_recent_errors` uses 5. Increase if you need more history.
+
+---
+
+### `cortex_api.log` is section-format, not standard  <!-- 2026-04-13 -->
+**Symptom:** Searching `cortex_api` via MCP returns truncated banner lines only; full LLM payloads are cut at 400 chars.
+**Location:** `logs/cortex_api.log`, `mcp_servers/synth_logs.py` (`_LARGE_PAYLOAD_FILES`)
+**Status:** known limitation — no structured parser tool exists yet for this format.
+**Notes:** The file uses `==` and `--` banner sections (`REQUEST`, `RESPONSE`, `SEND`, `RECV`). Level/time filters don't work on it. For LLM debugging, search for the banner headers (e.g. `search_logs("REQUEST", log_files=["cortex_api"])`) to find timestamps, then correlate with `synth.log` by time.
+
+---
+
+### `check_logs.py` plugin is stale  <!-- 2026-04-13 -->
+**Symptom:** Synth's own `get_logs`/`search_logs` chat actions use hardcoded `/app/logs`, old filenames (`selkies.log`, `prompt_cycle.log`), and only know about 3 numbered rotations.
+**Location:** `plugins/check_logs.py`
+**Status:** known, not fixed.
+**Notes:** For agents, use the `synth-logs` MCP server instead — it handles all rotation schemes. The plugin only matters for Synth herself using log commands during operation.
+
+---
+
+## 13. Database Quick Reference
+
+> Tables are created inline in `core/db.py` and each plugin — **`init-db.sql` only seeds a subset.** If you need a table's full column list, `grep -A20 "CREATE TABLE IF NOT EXISTS <name>"` in the relevant file.
+
+| Table | Owner | Purpose |
+|-------|-------|---------|
+| `config` | `core/db.py` | All `config_registry` persistent values — key/value store for every runtime setting |
+| `chat_history_cache` | `core/chat_history_cache.py` | Message history per `interface_path`; source of truth for prompt context |
+| `chat_session_meta` | `core/session_meta.py` | Per-interface session metadata (JSON blob) |
+| `chat_archives` | `core/chat_archives_db.py` | Long-term archived chat history |
+| `ai_diary` | `plugins/ai_diary.py` | Synth's diary entries (`content LONGTEXT`, no `user_message` column in the canonical schema — see §12 for the recurring overflow issue) |
+| `ai_diary_archive` | `plugins/ai_diary.py` | Archived diary entries |
+| `memories` | `plugins/ai_diary.py` | Long-term memory entries (`content`, `author`, `tags`, `scope`, `emotion`) |
+| `emotion_state` | `plugins/emotion_manager.py` | Current emotion intensities with timestamps for decay |
+| `emotion_diary` | `plugins/emotion_manager.py` | Historical emotion snapshots |
+| `bio` | `plugins/bio_manager.py` | Synth's self-knowledge: likes, contacts, past events, feelings (JSON arrays stored as TEXT) |
+| `recent_chats` | `plugins/recent_chats.py` / `core/db.py` | Rolling recent conversation summaries |
+| `grillo_beats` | `init-db.sql` | Scheduled autonomous beat timers (`beat_type`, `next_beat`, `enabled`) |
+| `grillo_activity_log` | `init-db.sql` | Log of executed Grillo beats with prompt/response text |
+| `grillo_action_execs` | `init-db.sql` | Individual action executions within a Grillo beat |
+| `agent_activity_log` | `init-db.sql` | Agent plugin task log (`command`, `proposer`, `trainer_id`, `result`) |
+| `agent_action_execs` | `init-db.sql` | Individual action steps within an agent task |
+| `agent_tasks` | `init-db.sql` | Structured agent task records with I/O JSON |
+| `external_endpoints` | `init-db.sql` | LLM/API endpoint registry (name, protocol, URL, key, capabilities, model list) |
+| `scheduled_events` | `plugins/event_plugin.py` | Date/time triggered events Synth should act on |
+| `blocklist` | `plugins/blocklist.py` | Blocked users/entities |
+| `chatlink` | `plugins/chat_link.py` | Cross-interface chat bridging config |
+| `message_map` | `plugins/message_map.py` | Message ID mapping across interfaces |
+
+**Key facts:**
+- All tables use `utf8mb4` / `utf8mb4_unicode_ci`. Emoji and multi-byte content is safe.
+- `interface_path` is the canonical user identifier across the codebase: `telegram_bot/12345`, `discord_bot/guild/channel`, `synth_webui/<uuid>`.
+- The `config` table is the single source of truth for runtime settings. Env vars override it at startup; DB values are used for defaults.
+
+---
+
+## 14. Config Registry Keys
+
+All keys stored in the `config` table and accessible via `config_registry.get_value(key)`. Env vars with the same name take precedence.
+
+| Key | Purpose |
+|-----|---------|
+| `BASE_CORTEX` | Default LLM engine for all interactions |
+| `GRILLO_CORTEX` | LLM engine used by Grillo autonomous beats |
+| `TRAINER_CORTEX` | LLM engine used for trainer-facing tasks |
+| `LIVE_CORTEX` | LLM engine used for live audio sessions |
+| `ACTIVE_VOX_ENGINE` | Active TTS engine |
+| `ACTIVE_AURIS_ENGINE` | Active STT engine |
+| `ACTIVE_IRIS_ENGINE` | Active vision/image engine |
+| `SYNTH_NAME` | Synth's display name |
+| `SYNTH_PROFILE` | Synth's persona profile text (injected into every prompt) |
+| `SYNTH_ALIASES` | Comma-separated name aliases Synth responds to |
+| `SYNTH_AUTONOMY_MODE` | Autonomy level: `disabled`, `always_ask`, `whitelist`, `always_approve` |
+| `TRAINER_CHAT_ID` | `interface_path` of the trainer (Scarlet) — used for direct notifications |
+| `LOG_CHAT_ID` | `interface_path` to send ERROR/WARNING log notifications to |
+| `LOG_CHAT_INTERFACE` | Interface name for LogChat delivery |
+| `LOG_CHAT_THREAD_ID` | Thread ID for LogChat (Discord threads etc.) |
+| `PROJECT_DEFAULT_LANGUAGE` | Default language for responses |
+| `PROJECT_DEFAULT_TONE` | Default response tone |
+| `INTERFACE_LANGUAGE_OVERRIDES` | JSON: per-interface language overrides |
+| `INTERFACE_TONE_OVERRIDES` | JSON: per-interface tone overrides |
+| `DIARY_HISTORY_DAYS` | How many days of diary to inject into context |
+| `EMOTION_DECAY_TAU` | Emotion decay time constant (seconds) |
+| `EMOTION_MAX_DISPLAY` | Max emotions to display in UI |
+| `ENABLE_MEMORY_SEARCH` | Enable/disable semantic memory retrieval |
+| `MEMORY_SEARCH_MAX_RESULTS` | Max memories returned per query |
+| `GRILLO_ALLOWED_ACTIONS` | Actions Grillo is permitted to execute |
+| `GRILLO_ALLOWED_SECURITY_LEVEL` | Max security level for Grillo actions |
+| `AUTONOMY_ALLOWED_ACTIONS` | Actions allowed in autonomy mode |
+| `AUTONOMY_ALLOWED_SECURITY_LEVEL` | Max security level for autonomous actions |
+| `LLM_AUTO_EXECUTE_UNSAFE_ACTIONS` | Whether to auto-execute unsafe LLM actions |
+| `AWAIT_RESPONSE_TIMEOUT` | Seconds to wait for LLM response before timeout |
+| `LIVE_VOICE_NAME` | Voice name for live audio TTS |
+| `LIVE_VOICE_STYLE` | Voice style for live audio |
+| `LIVE_HISTORY_SYNC_INTERVAL` | How often to sync chat history in live sessions |
+| `LIVE_SYNC_CHAT_HISTORY` | Whether to sync chat history in live sessions |
+| `WEBUI_ACCENT_COLOR` | WebUI theme accent color |
+| `GEMINI_API_KEY` | Gemini API key (also settable via env) |
+| `RECON_MAX_RESULTS` | Max results for recon/search operations |
+| `RECON_TIMEOUT` | Timeout for recon operations |
+| `RECON_LOG_READER_LINES` | Lines to read for log recon actions |
+| `VOSK_MODEL_PATH` | Path to VOSK STT model |
+| `CHAT_SLEEP_COMMANDS` | Commands that put Synth into sleep/quiet mode |
+| `CHAT_WAKE_COMMANDS` | Commands that wake Synth from sleep mode |
+
+---
+
+<!-- gitnexus:start -->
+# GitNexus — Code Intelligence
+
+This project is indexed by GitNexus as **synthetic_heart** (7429 symbols, 24756 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+
+> If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
+
+## Always Do
+
+- **MUST run impact analysis before editing any symbol.** Before modifying a function, class, or method, run `gitnexus_impact({target: "symbolName", direction: "upstream"})` and report the blast radius (direct callers, affected processes, risk level) to the user.
+- **MUST run `gitnexus_detect_changes()` before committing** to verify your changes only affect expected symbols and execution flows.
+- **MUST warn the user** if impact analysis returns HIGH or CRITICAL risk before proceeding with edits.
+- When exploring unfamiliar code, use `gitnexus_query({query: "concept"})` to find execution flows instead of grepping. It returns process-grouped results ranked by relevance.
+- When you need full context on a specific symbol — callers, callees, which execution flows it participates in — use `gitnexus_context({name: "symbolName"})`.
+
+## When Debugging
+
+1. `gitnexus_query({query: "<error or symptom>"})` — find execution flows related to the issue
+2. `gitnexus_context({name: "<suspect function>"})` — see all callers, callees, and process participation
+3. `READ gitnexus://repo/synthetic_heart/process/{processName}` — trace the full execution flow step by step
+4. For regressions: `gitnexus_detect_changes({scope: "compare", base_ref: "main"})` — see what your branch changed
+
+## When Refactoring
+
+- **Renaming**: MUST use `gitnexus_rename({symbol_name: "old", new_name: "new", dry_run: true})` first. Review the preview — graph edits are safe, text_search edits need manual review. Then run with `dry_run: false`.
+- **Extracting/Splitting**: MUST run `gitnexus_context({name: "target"})` to see all incoming/outgoing refs, then `gitnexus_impact({target: "target", direction: "upstream"})` to find all external callers before moving code.
+- After any refactor: run `gitnexus_detect_changes({scope: "all"})` to verify only expected files changed.
+
+## Never Do
+
+- NEVER edit a function, class, or method without first running `gitnexus_impact` on it.
+- NEVER ignore HIGH or CRITICAL risk warnings from impact analysis.
+- NEVER rename symbols with find-and-replace — use `gitnexus_rename` which understands the call graph.
+- NEVER commit changes without running `gitnexus_detect_changes()` to check affected scope.
+
+## Tools Quick Reference
+
+| Tool | When to use | Command |
+|------|-------------|---------|
+| `query` | Find code by concept | `gitnexus_query({query: "auth validation"})` |
+| `context` | 360-degree view of one symbol | `gitnexus_context({name: "validateUser"})` |
+| `impact` | Blast radius before editing | `gitnexus_impact({target: "X", direction: "upstream"})` |
+| `detect_changes` | Pre-commit scope check | `gitnexus_detect_changes({scope: "staged"})` |
+| `rename` | Safe multi-file rename | `gitnexus_rename({symbol_name: "old", new_name: "new", dry_run: true})` |
+| `cypher` | Custom graph queries | `gitnexus_cypher({query: "MATCH ..."})` |
+
+## Impact Risk Levels
+
+| Depth | Meaning | Action |
+|-------|---------|--------|
+| d=1 | WILL BREAK — direct callers/importers | MUST update these |
+| d=2 | LIKELY AFFECTED — indirect deps | Should test |
+| d=3 | MAY NEED TESTING — transitive | Test if critical path |
+
+## Resources
+
+| Resource | Use for |
+|----------|---------|
+| `gitnexus://repo/synthetic_heart/context` | Codebase overview, check index freshness |
+| `gitnexus://repo/synthetic_heart/clusters` | All functional areas |
+| `gitnexus://repo/synthetic_heart/processes` | All execution flows |
+| `gitnexus://repo/synthetic_heart/process/{name}` | Step-by-step execution trace |
+
+## Self-Check Before Finishing
+
+Before completing any code modification task, verify:
+1. `gitnexus_impact` was run for all modified symbols
+2. No HIGH/CRITICAL risk warnings were ignored
+3. `gitnexus_detect_changes()` confirms changes match expected scope
+4. All d=1 (WILL BREAK) dependents were updated
+
+## Keeping the Index Fresh
+
+After committing code changes, the GitNexus index becomes stale. Re-run analyze to update it:
+
+```bash
+npx gitnexus analyze
+```
+
+If the index previously included embeddings, preserve them by adding `--embeddings`:
+
+```bash
+npx gitnexus analyze --embeddings
+```
+
+To check whether embeddings exist, inspect `.gitnexus/meta.json` — the `stats.embeddings` field shows the count (0 means no embeddings). **Running analyze without `--embeddings` will delete any previously generated embeddings.**
+
+> Claude Code users: A PostToolUse hook handles this automatically after `git commit` and `git merge`.
+
+## CLI
+
+| Task | Read this skill file |
+|------|---------------------|
+| Understand architecture / "How does X work?" | `.claude/skills/gitnexus/gitnexus-exploring/SKILL.md` |
+| Blast radius / "What breaks if I change X?" | `.claude/skills/gitnexus/gitnexus-impact-analysis/SKILL.md` |
+| Trace bugs / "Why is X failing?" | `.claude/skills/gitnexus/gitnexus-debugging/SKILL.md` |
+| Rename / extract / split / refactor | `.claude/skills/gitnexus/gitnexus-refactoring/SKILL.md` |
+| Tools, resources, schema reference | `.claude/skills/gitnexus/gitnexus-guide/SKILL.md` |
+| Index, status, clean, wiki CLI commands | `.claude/skills/gitnexus/gitnexus-cli/SKILL.md` |
+
+<!-- gitnexus:end -->

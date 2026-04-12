@@ -1,5 +1,5 @@
 {
-  "mcpServers": {
+  "servers": {
     "gemini-api-docs-mcp": {
       "type": "http",
       "url": "https://gemini-api-docs-mcp.dev"
@@ -12,7 +12,7 @@
     "synth-logs": {
       "type": "stdio",
       "command": "uv",
-      "args": ["run", "python", "mcp_servers/synth_logs.py"]
+      "args": ["run", "--directory", "${workspaceFolder}", "python", "mcp_servers/synth_logs.py"]
     }
   }
 }
