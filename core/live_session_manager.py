@@ -17,6 +17,7 @@ sending to the Gemini Live API.
 from __future__ import annotations
 
 import asyncio
+import base64
 import re
 import time
 from typing import Any, Callable, Awaitable, ClassVar
@@ -75,6 +76,90 @@ def _clean_transcript(parts: list[str]) -> str:
     # Collapse runs of whitespace to a single space
     text = re.sub(r" {2,}", " ", text).strip()
     return text
+
+
+def _extract_model_turn_payload(message: Any) -> tuple[bytes | None, str | None]:
+    """Extract audio/text payloads from a Live API message.
+
+    Gemini 3.1 can place multiple response parts inside
+    ``server_content.model_turn.parts`` in a single server event. The SDK
+    convenience properties (``message.data`` / ``message.text``) are not
+    sufficient in every case, so prefer the structured parts and only fall
+    back to the convenience properties when needed.
+    """
+
+    audio_chunks: list[bytes] = []
+    text_parts: list[str] = []
+
+    server_content = getattr(message, "server_content", None)
+    model_turn = getattr(server_content, "model_turn", None) if server_content else None
+    parts = getattr(model_turn, "parts", None) or []
+
+    for part in parts:
+        inline_data = getattr(part, "inline_data", None)
+        if inline_data is not None:
+            mime_type = str(getattr(inline_data, "mime_type", "") or "").lower()
+            data = getattr(inline_data, "data", None)
+            if data and (not mime_type or mime_type.startswith("audio/")):
+                if isinstance(data, str):
+                    try:
+                        data = base64.b64decode(data)
+                    except Exception:
+                        data = None
+                if isinstance(data, bytes):
+                    audio_chunks.append(data)
+
+        part_text = getattr(part, "text", None)
+        if part_text:
+            text_parts.append(str(part_text))
+
+    fallback_audio = getattr(message, "data", None)
+    if not audio_chunks and isinstance(fallback_audio, bytes) and fallback_audio:
+        audio_chunks.append(fallback_audio)
+
+    fallback_text = getattr(message, "text", None)
+    if not text_parts and fallback_text:
+        text_parts.append(str(fallback_text))
+
+    audio = b"".join(audio_chunks) if audio_chunks else None
+    text = "".join(text_parts).strip() if text_parts else None
+    return audio, text
+
+
+def _build_initial_kick_text(
+    *,
+    is_reconnect: bool,
+    history_snippet: str = "",
+    initial_user_message: str | None = None,
+    initial_user_name: str | None = None,
+) -> str:
+    """Build the first text turn sent to a freshly opened live session.
+
+    Fresh sessions usually need a small kick so Gemini starts responding
+    without waiting for audio. When the live session was summoned from an
+    existing text turn, that text should become the first conversational
+    anchor instead of being ignored behind a generic greeting.
+    """
+    if is_reconnect:
+        return (
+            "[Voice session refreshed — you are continuing the same "
+            "conversation. Do NOT greet or introduce yourself again. "
+            "Simply acknowledge briefly that you're back and continue "
+            f"naturally.{history_snippet}]"
+        )
+
+    cleaned_message = " ".join((initial_user_message or "").split()).strip()
+    if cleaned_message:
+        if len(cleaned_message) > 2000:
+            cleaned_message = cleaned_message[:1999].rstrip() + "…"
+        speaker = " ".join((initial_user_name or "user").split()).strip() or "user"
+        return (
+            "[Session started from an active text conversation. "
+            f'The latest message from {speaker} was: "{cleaned_message}". '
+            "Respond naturally to that message instead of giving a generic greeting.]"
+        )
+
+    return "[Session started. Greet naturally.]"
 
 
 class LiveSessionState:
@@ -216,6 +301,11 @@ class LiveSessionManager:
         self._send_buffers: dict[int, bytearray] = {}
         # Periodic flush tasks: guild_id -> Task
         self._flush_tasks: dict[int, asyncio.Task[None]] = {}
+        # Deferred context-update flush tasks: guild_id -> Task
+        self._pending_update_flush_tasks: dict[int, asyncio.Task[None]] = {}
+        # Guild playback-state probes supplied by the Discord interface so we
+        # can avoid injecting new text while buffered audio is still speaking.
+        self._playback_active_callbacks: dict[int, Callable[[], bool]] = {}
         # Periodic history sync tasks: guild_id -> Task
         self._sync_tasks: dict[int, asyncio.Task[None]] = {}
 
@@ -318,6 +408,74 @@ class LiveSessionManager:
         """
         self._on_reconnect_failed = callback
 
+    def set_playback_active_callback(
+        self,
+        guild_id: int,
+        callback: Callable[[], bool] | None,
+    ) -> None:
+        """Register a probe that reports whether Discord is still playing audio.
+
+        Context updates that arrive while buffered audio is still being played
+        are deferred until playback settles so late text-side replies do not
+        interrupt or partially overwrite an in-flight live response.
+        """
+        if callback is None:
+            self._playback_active_callbacks.pop(guild_id, None)
+            return
+        self._playback_active_callbacks[guild_id] = callback
+
+    def _is_playback_active(self, guild_id: int) -> bool:
+        callback = self._playback_active_callbacks.get(guild_id)
+        if callback is None:
+            return False
+        try:
+            return bool(callback())
+        except Exception as exc:
+            log_debug(
+                f"[live_session] Playback probe failed for guild {guild_id}: {exc}"
+            )
+            return False
+
+    def _should_defer_context_update(
+        self,
+        guild_id: int,
+        state: LiveSessionState,
+    ) -> bool:
+        return bool(getattr(state, "generating", False)) or self._is_playback_active(
+            guild_id
+        )
+
+    def _ensure_pending_update_flush(self, guild_id: int) -> None:
+        task = self._pending_update_flush_tasks.get(guild_id)
+        if task is not None and not task.done():
+            return
+
+        async def _wait_and_flush() -> None:
+            try:
+                while True:
+                    await asyncio.sleep(0.1)
+                    state = self._sessions.get(guild_id)
+                    if not state or not state.is_active or not state._session:
+                        return
+                    if self._should_defer_context_update(guild_id, state):
+                        continue
+                    await self._flush_pending_updates(guild_id)
+                    if not state.pending_context_updates:
+                        return
+            except asyncio.CancelledError:
+                log_debug(
+                    f"[live_session] Deferred context flush cancelled for guild {guild_id}"
+                )
+            finally:
+                current = self._pending_update_flush_tasks.get(guild_id)
+                if current is asyncio.current_task():
+                    self._pending_update_flush_tasks.pop(guild_id, None)
+
+        self._pending_update_flush_tasks[guild_id] = asyncio.create_task(
+            _wait_and_flush(),
+            name=f"live_pending_context_flush_{guild_id}",
+        )
+
     async def start_session(
         self,
         guild_id: int,
@@ -325,6 +483,9 @@ class LiveSessionManager:
         system_instruction: str,
         tools: list[dict[str, Any]] | None = None,
         attachment_context: str | None = None,
+        initial_user_message: str | None = None,
+        initial_user_name: str | None = None,
+        initial_message_timestamp: str | None = None,
         is_reconnect: bool = False,
         resumption_handle: str | None = None,
     ) -> bool:
@@ -336,6 +497,14 @@ class LiveSessionManager:
             system_instruction: Full persona/system prompt text.
             tools: Optional function declarations for the Live API.
             attachment_context: Document text embedded in the system instruction.
+            initial_user_message: Optional text message that triggered the live
+                session start. When present on a fresh session, it becomes the
+                first conversational anchor instead of a generic greeting.
+            initial_user_name: Display name associated with
+                ``initial_user_message``.
+            initial_message_timestamp: ISO timestamp for the text message used
+                to seed the session. Stored as the initial history-sync cursor
+                so the same summon text is not re-injected later.
             is_reconnect: True when re-establishing after a session drop.
             resumption_handle: If provided, the new WebSocket will resume the
                 previous session's context window instead of starting fresh.
@@ -548,6 +717,8 @@ class LiveSessionManager:
             channel_id=channel_id,
         )
         state.attachment_context = attachment_context
+        if initial_message_timestamp:
+            state.last_injected_ts = initial_message_timestamp
 
         try:
             session_ctx = self._client.aio.live.connect(
@@ -641,14 +812,16 @@ class LiveSessionManager:
                             f"kick (guild {guild_id}): {_hist_err}"
                         )
 
-                _kick_text = (
-                    "[Voice session refreshed — you are continuing the same "
-                    "conversation. Do NOT greet or introduce yourself again. "
-                    "Simply acknowledge briefly that you're back and continue "
-                    f"naturally.{_history_snippet}]"
+                _kick_text = _build_initial_kick_text(
+                    is_reconnect=True,
+                    history_snippet=_history_snippet,
                 )
             else:
-                _kick_text = "[Session started. Greet naturally.]"
+                _kick_text = _build_initial_kick_text(
+                    is_reconnect=False,
+                    initial_user_message=initial_user_message,
+                    initial_user_name=initial_user_name,
+                )
             # On resumption, the server restores the full context window
             # server-side.  Sending a kick text would trigger an unsolicited
             # model response before any audio arrives — and the model may read
@@ -684,6 +857,15 @@ class LiveSessionManager:
         state = self._sessions.pop(guild_id, None)
         self._send_buffers.pop(guild_id, None)
         self._reconnect_locks.pop(guild_id, None)
+        self._playback_active_callbacks.pop(guild_id, None)
+
+        pending_flush_task = self._pending_update_flush_tasks.pop(guild_id, None)
+        if pending_flush_task and not pending_flush_task.done():
+            pending_flush_task.cancel()
+            try:
+                await pending_flush_task
+            except asyncio.CancelledError:
+                pass
 
         # Cancel the flush task
         flush_task = self._flush_tasks.pop(guild_id, None)
@@ -1049,12 +1231,15 @@ class LiveSessionManager:
         if not state or not state.is_active or not state._session:
             return
 
-        # buffer if model currently generating
-        if getattr(state, "generating", False):
+        # Buffer while Gemini is generating or while Discord is still draining
+        # already-received audio. Injecting a late text-side reply during either
+        # window can cause audible interruptions or skipped openings.
+        if self._should_defer_context_update(guild_id, state):
             state.pending_context_updates.append(text)
             log_debug(
                 f"[live_session] Buffered context update for guild {guild_id}: {text[:60]}"
             )
+            self._ensure_pending_update_flush(guild_id)
             return
 
         try:
@@ -1085,6 +1270,9 @@ class LiveSessionManager:
         if not state or not state.is_active or not state._session:
             return
         if not state.pending_context_updates:
+            return
+        if self._should_defer_context_update(guild_id, state):
+            self._ensure_pending_update_flush(guild_id)
             return
         for upd in list(state.pending_context_updates):
             try:
@@ -1265,11 +1453,13 @@ class LiveSessionManager:
 
         try:
             await state._session.send_tool_response(
-                function_responses=types.FunctionResponse(
-                    id=call_id,
-                    name=name,
-                    response=response_payload,
-                )
+                function_responses=[
+                    types.FunctionResponse(
+                        id=call_id,
+                        name=name,
+                        response=response_payload,
+                    )
+                ]
             )
             log_info(
                 f"[live_session] Sent tool response for {name!r} "
@@ -1340,6 +1530,15 @@ class LiveSessionManager:
                     _has_output_tx = bool(
                         getattr(sc, "output_transcription", None) if sc else None
                     )
+                    _audio_data, _text_data = _extract_model_turn_payload(message)
+                    if not state.generating and (
+                        _has_model_turn
+                        or _has_output_tx
+                        or _has_tool_call
+                        or bool(_audio_data)
+                        or bool(_text_data)
+                    ):
+                        state.generating = True
                     log_debug(
                         f"[live_session] MSG#{msg_count} turn={turn_count} "
                         f"guild={guild_id}: "
@@ -1350,8 +1549,8 @@ class LiveSessionManager:
                         f"tool_call={_has_tool_call} "
                         f"input_tx={_has_input_tx} "
                         f"output_tx={_has_output_tx} "
-                        f"has_data={bool(message.data)} "
-                        f"has_text={bool(message.text)}"
+                        f"has_data={bool(_audio_data)} "
+                        f"has_text={bool(_text_data)}"
                     )
 
                     # ── Bidirectional log to live_api.log ──
@@ -1379,8 +1578,8 @@ class LiveSessionManager:
                         model_turn=_has_model_turn,
                         turn_complete=_tc,
                         interrupted=_interrupted,
-                        audio_bytes=len(message.data) if message.data else 0,
-                        text=message.text,
+                        audio_bytes=len(_audio_data) if _audio_data else 0,
+                        text=_text_data,
                         input_transcript=_input_tx_text,
                         output_transcript=_output_tx_text,
                         tool_call=_tool_call_str,
@@ -1395,8 +1594,9 @@ class LiveSessionManager:
                             f"(turn {turn_count}) from Gemini (guild {guild_id})"
                         )
 
-                    # Audio — use SDK convenience property (handles inline_data decoding)
-                    audio_data = message.data
+                    # Audio/Text — Gemini 3.1 may deliver these only inside
+                    # server_content.model_turn.parts, so use structured extraction.
+                    audio_data, text = _extract_model_turn_payload(message)
                     if audio_data and self._on_audio:
                         log_debug(
                             f"[live_session] Received audio from model: "
@@ -1407,8 +1607,6 @@ class LiveSessionManager:
                         except Exception as e:
                             log_warning(f"[live_session] Audio callback error: {e}")
 
-                    # Text — use SDK convenience property (skips thought parts)
-                    text = message.text
                     if text and self._on_text:
                         try:
                             await self._on_text(guild_id, text)

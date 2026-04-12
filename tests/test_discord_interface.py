@@ -1,6 +1,7 @@
 import asyncio
 import pytest
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 from interface.discord_interface import DiscordInterface
 
@@ -334,7 +335,7 @@ async def test_flush_live_diary_at_stop(monkeypatch):
     """Stopping a live session should flush a single diary entry."""
     di = DiscordInterface(bot_token="")
     monkeypatch.setattr(
-        "cortex.live.live_base.LiveSessionManager.get_instance",
+        "engines.live.live_base.LiveSessionManager.get_instance",
         lambda: SimpleNamespace(deactivate_live_for_path=lambda ip, gid: None),
     )
     di.client = None
@@ -535,12 +536,18 @@ async def test_join_voice_no_autostart_when_no_trainer(monkeypatch):
         joined.append(cid)
         return {"status": "success"}
 
-    async def fake_start(cid, attachments=None):
+    async def fake_start(
+        cid,
+        attachments=None,
+        initial_text=None,
+        initial_sender=None,
+        initial_timestamp=None,
+    ):
         started.append(cid)
         return {"status": "success"}
 
-    di._join_voice = fake_join
-    di._start_live_voice = fake_start
+    monkeypatch.setattr(di, "_join_voice", fake_join)
+    monkeypatch.setattr(di, "_start_live_voice", fake_start)
 
     action = {
         "type": "join_voice_discord",
@@ -598,12 +605,18 @@ async def test_join_voice_autostart_when_trainer_present(monkeypatch):
         joined.append(cid)
         return {"status": "success"}
 
-    async def fake_start(cid, attachments=None):
+    async def fake_start(
+        cid,
+        attachments=None,
+        initial_text=None,
+        initial_sender=None,
+        initial_timestamp=None,
+    ):
         started.append(cid)
         return {"status": "success"}
 
-    di._join_voice = fake_join
-    di._start_live_voice = fake_start
+    monkeypatch.setattr(di, "_join_voice", fake_join)
+    monkeypatch.setattr(di, "_start_live_voice", fake_start)
 
     action = {
         "type": "join_voice_discord",
@@ -613,6 +626,74 @@ async def test_join_voice_autostart_when_trainer_present(monkeypatch):
 
     assert joined == ["123"], "channel join must happen"
     assert started == [123], "live session must auto-start when trainer is present"
+
+
+@pytest.mark.asyncio
+async def test_join_voice_autostart_falls_back_to_direct_start_for_trainer(
+    monkeypatch,
+):
+    """If Discord cache inspection fails, a trainer-requested join should still start live."""
+    try:
+        from engines.live.live_base import LiveSessionManager as _LSM
+
+        monkeypatch.setattr(_LSM, "get_instance", lambda: _LSM())
+        monkeypatch.setattr(_LSM, "is_trainer_only_voice", lambda self: False)
+    except Exception:
+        pass
+
+    trainer_id = 777
+
+    class FakeRegistry:
+        def is_trainer(self, iface: str, user_id: str) -> bool:
+            return user_id == str(trainer_id)
+
+    monkeypatch.setattr(
+        "interface.discord_interface.get_interface_registry",
+        lambda: FakeRegistry(),
+    )
+
+    di = DiscordInterface(bot_token="")
+    di.client = SimpleNamespace(
+        voice_clients=[],
+        get_channel=lambda cid: None,
+        fetch_channel=AsyncMock(side_effect=RuntimeError("cache miss")),
+    )
+
+    joined: list[str] = []
+    started: list[str] = []
+
+    async def fake_join(cid):
+        joined.append(cid)
+        return {"status": "success"}
+
+    async def fake_start(
+        cid,
+        attachments=None,
+        initial_text=None,
+        initial_sender=None,
+        initial_timestamp=None,
+    ):
+        started.append(str(cid))
+        return {"status": "success"}
+
+    monkeypatch.setattr(di, "_join_voice", fake_join)
+    monkeypatch.setattr(di, "_start_live_voice", fake_start)
+
+    original_message = SimpleNamespace(
+        text="join voice now",
+        attachments=[],
+        date=SimpleNamespace(isoformat=lambda: "2026-04-12T20:54:41+00:00"),
+        from_user=SimpleNamespace(id=trainer_id, full_name="Trainer"),
+    )
+
+    action = {
+        "type": "join_voice_discord",
+        "payload": {"channel_id": "123"},
+    }
+    await di.execute_action(action, {}, bot=None, original_message=original_message)
+
+    assert joined == ["123"]
+    assert started == ["123"]
 
 
 # ---------------------------------------------------------------------------
@@ -704,10 +785,13 @@ async def test_start_live_voice_uses_registry_engine_not_global_cortex(monkeypat
         def set_text_callback(self, cb):
             pass
 
-        def set_tool_call_callback(self, cb):
+        def set_tool_executor(self, executor):
             pass
 
         def set_turn_complete_callback(self, cb):
+            pass
+
+        def set_reconnect_failed_callback(self, cb):
             pass
 
         async def start_session(self, **kwargs) -> bool:
@@ -726,6 +810,9 @@ async def test_start_live_voice_uses_registry_engine_not_global_cortex(monkeypat
     fake_live_engine = _FakeLiveCapableEngine()
 
     class _FakeRegistry:
+        def get_engines_by_cortex(self, cortex):
+            return []
+
         def get_available_engines(self):
             return ["gemini_api"]
 
@@ -784,12 +871,6 @@ async def test_start_live_voice_uses_registry_engine_not_global_cortex(monkeypat
     )
 
     # ---- Patch helpers ----
-    monkeypatch.setattr(
-        "interface.discord_interface.build_live_system_instruction",
-        lambda: asyncio.coroutine(lambda: "system prompt")(),
-        raising=False,
-    )
-
     async def _fake_system_instruction():
         return "system prompt"
 
@@ -836,3 +917,237 @@ async def test_start_live_voice_uses_registry_engine_not_global_cortex(monkeypat
     assert state["interface_path"] == f"discord_live_{GUILD_ID}", (
         "_live_voice_state['interface_path'] must be set for deactivation"
     )
+
+
+@pytest.mark.asyncio
+async def test_start_live_voice_passes_initial_text_to_manager(monkeypatch):
+    """Fresh live sessions should receive the summon text as startup context."""
+    import interface.discord_interface as _mod
+
+    guild_id = 91
+    channel_id = 92
+    manager_started: list[dict[str, object]] = []
+
+    class FakeManager:
+        def set_audio_callback(self, cb):
+            pass
+
+        def set_text_callback(self, cb):
+            pass
+
+        def set_tool_executor(self, executor):
+            pass
+
+        def set_turn_complete_callback(self, cb):
+            pass
+
+        def set_reconnect_failed_callback(self, cb):
+            pass
+
+        async def start_session(self, **kwargs) -> bool:
+            manager_started.append(kwargs)
+            return True
+
+    fake_manager = FakeManager()
+
+    class FakeLiveEngine:
+        def get_live_session_manager(self):
+            return fake_manager
+
+    class FakeRegistry:
+        def get_engines_by_cortex(self, cortex):
+            return []
+
+        def get_available_engines(self):
+            return ["gemini_api"]
+
+        def get_engine(self, name):
+            return FakeLiveEngine() if name == "gemini_api" else None
+
+    monkeypatch.setattr(_mod, "_HAS_VOICE_RECV", True, raising=False)
+    monkeypatch.setattr(
+        "core.cortex_registry.get_cortex_registry", lambda: FakeRegistry()
+    )
+
+    import types
+
+    monkeypatch.setattr(
+        _mod, "voice_recv", types.SimpleNamespace(VoiceRecvClient=object), raising=False
+    )
+
+    fake_vc = SimpleNamespace(
+        channel=SimpleNamespace(id=channel_id, name="voice-test"),
+        is_connected=lambda: True,
+        is_playing=lambda: False,
+        is_listening=lambda: True,
+        play=lambda src: None,
+        listen=lambda sink: None,
+        move_to=lambda ch: None,
+    )
+    fake_guild = SimpleNamespace(id=guild_id, voice_client=None)
+    fake_channel = SimpleNamespace(id=channel_id, name="voice-test", guild=fake_guild)
+
+    async def fake_connect(cls=None):
+        return fake_vc
+
+    fake_channel.connect = fake_connect
+    fake_client = SimpleNamespace(
+        get_channel=lambda cid: fake_channel,
+        loop=asyncio.get_event_loop(),
+    )
+
+    async def fake_system_instruction(attachment_context=None):
+        return "system prompt"
+
+    monkeypatch.setattr(
+        "core.prompt_engine.build_live_system_instruction",
+        fake_system_instruction,
+    )
+
+    try:
+        from engines.live.live_base import LiveSessionManager as _LSM2
+
+        async def noop_activate(self, path, gid, rejoin_callback=None):
+            pass
+
+        monkeypatch.setattr(_LSM2, "activate_live_for_path", noop_activate)
+    except Exception:
+        pass
+
+    di = DiscordInterface(bot_token="")
+    di.client = fake_client
+
+    result = await di._start_live_voice(
+        channel_id,
+        initial_text="join me in voice",
+        initial_sender="Scarlet",
+        initial_timestamp="2026-04-12T18:14:22.983048+00:00",
+    )
+
+    assert result["status"] == "success"
+    assert manager_started, "manager.start_session must be called"
+    start_kwargs = manager_started[0]
+    assert start_kwargs["initial_user_message"] == "join me in voice"
+    assert start_kwargs["initial_user_name"] == "Scarlet"
+    assert (
+        start_kwargs["initial_message_timestamp"] == "2026-04-12T18:14:22.983048+00:00"
+    )
+
+
+@pytest.mark.asyncio
+async def test_start_live_voice_loads_uninitialized_live_engine(monkeypatch):
+    """_start_live_voice should load a registered live-capable engine on demand."""
+    import asyncio
+    import interface.discord_interface as _mod
+
+    guild_id = 193
+    channel_id = 194
+    manager_started: list[dict[str, object]] = []
+    load_calls: list[str] = []
+
+    class FakeManager:
+        def set_audio_callback(self, cb):
+            pass
+
+        def set_text_callback(self, cb):
+            pass
+
+        def set_tool_executor(self, executor):
+            pass
+
+        def set_turn_complete_callback(self, cb):
+            pass
+
+        def set_reconnect_failed_callback(self, cb):
+            pass
+
+        async def start_session(self, **kwargs) -> bool:
+            manager_started.append(kwargs)
+            return True
+
+    fake_manager = FakeManager()
+
+    class FakeLiveEngine:
+        def get_live_session_manager(self):
+            return fake_manager
+
+    fake_live_engine = FakeLiveEngine()
+
+    class FakeRegistry:
+        def get_engines_by_cortex(self, cortex):
+            return ["gemini_api"] if cortex == "live" else []
+
+        def get_available_engines(self):
+            return ["gemini_api"]
+
+        def get_engine(self, name):
+            return None
+
+        def load_engine(self, name):
+            load_calls.append(name)
+            if name == "gemini_api":
+                return fake_live_engine
+            raise ValueError(name)
+
+    monkeypatch.setattr(_mod, "_HAS_VOICE_RECV", True, raising=False)
+    monkeypatch.setattr(
+        "core.cortex_registry.get_cortex_registry", lambda: FakeRegistry()
+    )
+    monkeypatch.setattr(
+        "core.config_manager.config_registry.get_value",
+        lambda key, default=None, **kwargs: default,
+    )
+
+    import types
+
+    monkeypatch.setattr(
+        _mod, "voice_recv", types.SimpleNamespace(VoiceRecvClient=object), raising=False
+    )
+
+    fake_vc = SimpleNamespace(
+        channel=SimpleNamespace(id=channel_id, name="voice-test"),
+        is_connected=lambda: True,
+        is_playing=lambda: False,
+        is_listening=lambda: True,
+        play=lambda src: None,
+        listen=lambda sink: None,
+        move_to=lambda ch: None,
+    )
+    fake_guild = SimpleNamespace(id=guild_id, voice_client=None)
+    fake_channel = SimpleNamespace(id=channel_id, name="voice-test", guild=fake_guild)
+
+    async def fake_connect(cls=None):
+        return fake_vc
+
+    fake_channel.connect = fake_connect
+    fake_client = SimpleNamespace(
+        get_channel=lambda cid: fake_channel,
+        loop=asyncio.get_event_loop(),
+    )
+
+    async def fake_system_instruction(attachment_context=None):
+        return "system prompt"
+
+    monkeypatch.setattr(
+        "core.prompt_engine.build_live_system_instruction",
+        fake_system_instruction,
+    )
+
+    try:
+        from engines.live.live_base import LiveSessionManager as _LSM2
+
+        async def noop_activate(self, path, gid, rejoin_callback=None):
+            pass
+
+        monkeypatch.setattr(_LSM2, "activate_live_for_path", noop_activate)
+    except Exception:
+        pass
+
+    di = DiscordInterface(bot_token="")
+    di.client = fake_client
+
+    result = await di._start_live_voice(channel_id)
+
+    assert result["status"] == "success"
+    assert load_calls == ["gemini_api"]
+    assert manager_started, "manager.start_session must run after on-demand load"

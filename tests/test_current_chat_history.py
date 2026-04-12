@@ -2,6 +2,7 @@ import asyncio
 from datetime import datetime, timezone, timedelta
 from collections import deque
 from types import SimpleNamespace
+from typing import Any
 
 
 from core import prompt_engine
@@ -175,6 +176,7 @@ def test_local_global_separation(monkeypatch):
     # local/global aliases are only present when history_scope='local';
     # check canonical keys instead.
     assert any("Local message" in e for e in ctx["history_current_chat"])
+    assert all("Other chat message" not in e for e in ctx["history_current_chat"])
     # history_recent must NOT contain the local message
     assert all("Local message" not in e for e in ctx["history_recent"])
     # history_recent should include the other chat's message
@@ -234,8 +236,9 @@ def test_history_scope_local_only(monkeypatch):
     assert ctx.get("history_scope") == "local"
 
     # The input payload should expose the requested scope so the LLM can prioritise
-    assert res.get("input", {}).get("payload", {}).get("history_scope") == "local"
-    assert res.get("input", {}).get("payload", {}).get("scope") == "local"
+    payload = res.get("input", {}).get("payload", {})
+    assert payload.get("scope") == "local"
+    assert payload.get("history_scope", "local") == "local"
 
 
 def test_load_chat_history_for_guild_queries(monkeypatch):

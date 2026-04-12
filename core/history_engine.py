@@ -453,6 +453,16 @@ class HistoryEngine:
             try:
                 unified_candidates: List[dict] = []
 
+                for m in msgs if enable_current and interface_path else []:
+                    if not isinstance(m, dict):
+                        continue
+                    if not m.get("interface_path") and not m.get("source_path"):
+                        unified_candidates.append(
+                            {**m, "interface_path": interface_path}
+                        )
+                    else:
+                        unified_candidates.append(m)
+
                 try:
                     from core.chat_history_cache import load_global_chat_history
 
@@ -483,7 +493,22 @@ class HistoryEngine:
                             continue
 
                         if isinstance(q, (list, tuple)) or hasattr(q, "__iter__"):
-                            unified_candidates.extend(list(q))
+                            for m in list(q):
+                                if not isinstance(m, dict):
+                                    unified_candidates.append(m)
+                                    continue
+
+                                if (
+                                    isinstance(k, str)
+                                    and k
+                                    and not m.get("interface_path")
+                                    and not m.get("source_path")
+                                ):
+                                    unified_candidates.append(
+                                        {**m, "interface_path": k}
+                                    )
+                                else:
+                                    unified_candidates.append(m)
 
                 def _uni_sort_key(m: Any) -> float:
                     if not isinstance(m, dict):
@@ -551,8 +576,6 @@ class HistoryEngine:
                 input_text = (text or "").strip()
 
                 # LOG: mostra quanti messaggi e da quali path
-                from core.logging_utils import log_debug
-
                 log_debug(
                     f"[history_engine] Unified candidates totali: {len(unified_candidates)}"
                 )
@@ -599,8 +622,11 @@ class HistoryEngine:
                     f"[history_engine] Messaggi globali passati al prompt: {len(local_lines) + len(other_lines)} (locali: {len(local_lines)}, altri: {len(other_lines)})"
                 )
 
-                # Preserve legacy `history_current_chat` as the merged unified view
-                history_current_chat = local_lines + other_lines
+                # Keep the active chat stream isolated from cross-chat context.
+                # Older unrelated messages belong in `history_recent`, not inside
+                # `history_current_chat`, otherwise the model can anchor on stale
+                # external context as if it were part of the active thread.
+                history_current_chat = local_lines
                 # Ensure `history_recent` (global) contains ONLY other chats
                 history_recent = other_lines
             except Exception as e:
