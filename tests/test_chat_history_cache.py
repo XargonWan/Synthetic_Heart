@@ -189,6 +189,7 @@ async def test_save_chat_message_forwards_self_reply_to_live(monkeypatch):
     assert result is True
     assert len(calls) == 1
     assert calls[0][0] == 7
-    assert "assistant reply synced from telegram_bot/123" in calls[0][1]
-    assert "preserve the original paragraph order" in calls[0][1]
+    assert "assistant reply template synced from telegram_bot/123" in calls[0][1]
+    assert "primary loose template" in calls[0][1]
+    assert "same opening idea" in calls[0][1]
     assert calls[0][1].endswith("bot reply")

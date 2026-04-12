@@ -221,9 +221,10 @@ async def save_chat_message(
                         else:
                             if sender_name == "self":
                                 context_text = (
-                                    f"[assistant reply synced from {interface_path}] "
-                                    "If you speak or paraphrase this reply aloud, preserve the original paragraph order "
-                                    "and do not skip the opening just because time has passed.\n"
+                                    f"[assistant reply template synced from {interface_path}] "
+                                    "Use the reply below as the primary loose template for your next spoken reply to the same conversation turn. "
+                                    "Keep the same opening idea, core meaning, and paragraph order, but adapt it naturally for voice instead of reciting it verbatim. "
+                                    "Do not replace it with a generic fresh answer unless the conversation has materially changed.\n"
                                     f"{message_text}"
                                 )
                             else:
