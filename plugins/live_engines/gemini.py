@@ -34,6 +34,7 @@ loading this module is sufficient.
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 from typing import Any, AsyncIterator
 
@@ -61,6 +62,52 @@ except ImportError:
     genai = None  # type: ignore[assignment]
     _genai_types = None  # type: ignore[assignment]
     _HAS_GENAI_SDK = False
+
+    def _extract_message_parts_payload(message: Any) -> tuple[bytes | None, str | None]:
+        """Extract model-turn audio/text from a Gemini Live message.
+
+        Gemini 3.1 can bundle multiple model-turn parts in one server event. Read
+        structured parts first, then fall back to convenience properties.
+        """
+
+        audio_chunks: list[bytes] = []
+        text_parts: list[str] = []
+
+        server_content = getattr(message, "server_content", None)
+        model_turn = (
+            getattr(server_content, "model_turn", None) if server_content else None
+        )
+        parts = getattr(model_turn, "parts", None) or []
+
+        for part in parts:
+            inline_data = getattr(part, "inline_data", None)
+            if inline_data is not None:
+                mime_type = str(getattr(inline_data, "mime_type", "") or "").lower()
+                data = getattr(inline_data, "data", None)
+                if data and (not mime_type or mime_type.startswith("audio/")):
+                    if isinstance(data, str):
+                        try:
+                            data = base64.b64decode(data)
+                        except Exception:
+                            data = None
+                    if isinstance(data, bytes):
+                        audio_chunks.append(data)
+
+            part_text = getattr(part, "text", None)
+            if part_text:
+                text_parts.append(str(part_text))
+
+        fallback_audio = getattr(message, "data", None)
+        if not audio_chunks and isinstance(fallback_audio, bytes) and fallback_audio:
+            audio_chunks.append(fallback_audio)
+
+        fallback_text = getattr(message, "text", None)
+        if not text_parts and fallback_text:
+            text_parts.append(str(fallback_text))
+
+        audio = b"".join(audio_chunks) if audio_chunks else None
+        text = "".join(text_parts).strip() if text_parts else None
+        return audio, text
 
 
 class GeminiLiveEngine(LiveEngineBase):
@@ -267,11 +314,13 @@ class GeminiLiveEngine(LiveEngineBase):
 
         try:
             await entry["conn"].send_tool_response(
-                function_responses=_genai_types.FunctionResponse(
-                    id=call_id,
-                    name=name,
-                    response=response_payload,
-                )
+                function_responses=[
+                    _genai_types.FunctionResponse(
+                        id=call_id,
+                        name=name,
+                        response=response_payload,
+                    )
+                ]
             )
             log_info(
                 f"[live/gemini] Sent tool response for {name!r} "
@@ -346,7 +395,7 @@ class GeminiLiveEngine(LiveEngineBase):
                 # ----------------------------------------------------------
                 # Audio data — SDK convenience property handles decoding
                 # ----------------------------------------------------------
-                audio_data: bytes | None = getattr(message, "data", None)
+                audio_data, text = _extract_message_parts_payload(message)
                 if audio_data:
                     await queue.put(
                         LiveEvent(
@@ -358,7 +407,6 @@ class GeminiLiveEngine(LiveEngineBase):
                 # ----------------------------------------------------------
                 # Text (inline text response, not transcription)
                 # ----------------------------------------------------------
-                text: str | None = getattr(message, "text", None)
                 if text:
                     await queue.put(
                         LiveEvent(

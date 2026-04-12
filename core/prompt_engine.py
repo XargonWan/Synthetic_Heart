@@ -172,6 +172,14 @@ async def build_json_prompt(
 
     interface_path = getattr(message, "interface_path", None)
     text = getattr(message, "text", "") or ""
+    allowed_action_types_for_prompt: set[str] | None = None
+
+    if isinstance(context_memory, dict):
+        scoped_actions = context_memory.get(
+            "allowed_action_types"
+        ) or context_memory.get("allowed_actions")
+        if isinstance(scoped_actions, (list, set, tuple)):
+            allowed_action_types_for_prompt = {str(a) for a in scoped_actions if a}
 
     # Determine if context_memory is a chat history map or a context dict
     # Context dicts have keys like 'interface_path', 'system_message', etc.
@@ -661,6 +669,17 @@ async def build_json_prompt(
                 "(audio sent as multimodal content)"
             )
 
+        if allowed_action_types_for_prompt is not None:
+            full_actions = {
+                k: v
+                for k, v in full_actions.items()
+                if k in allowed_action_types_for_prompt
+            }
+            log_debug(
+                "[json_prompt] Filtered actions block to scoped allowlist: "
+                f"{sorted(allowed_action_types_for_prompt)}"
+            )
+
         # Minify to reduce token usage (lite=True also filters + strips to brief-only)
         prompt_with_instructions["actions"] = minify_actions_block(
             full_actions, lite=is_lite
@@ -1008,6 +1027,8 @@ def load_json_instructions() -> str:
         "NEVER use 'target' — always use 'interface_path' in message actions.\n"
         "Include reply_message_id when replying to specific messages. Use thread_id from input.payload.source.thread_id when present (omit if missing).\n"
         "CLARIFICATION POLICY: If the user's intent, referent, or the subject of a follow-up is ambiguous or missing, DO NOT GUESS — ask one concise clarifying question before asserting facts or taking action. When the user asks whether you 'understood' but there is no clear context, request clarification rather than assuming.\n"
+        "TIME AUTHORITY: Treat context.date, context.time, input.payload.local_date, input.payload.local_time, input.payload.local_hour, and input.payload.time_of_day as the authoritative current time context whenever present. Never infer the current time, date, or part of day from prior chat history, memories, or older assistant messages.\n"
+        "LENGTH POLICY: Do NOT hardcode a target response length. Let the persona, the relationship context, and the user's tone determine how much to say. Simple factual or logistical turns can stay brief; intimate, emotional, or reflective turns may be fuller when that feels natural. Do not pad, and do not forcibly truncate a reply just to make it short.\n"
         'VOICE INPUT STYLE: When input.payload.input_source is "voice", the user spoke their message aloud. '
         "Respond in a natural, conversational spoken style: avoid markdown, bullet points, headers, and code blocks. "
         "Keep the reply concise and suitable for text-to-speech synthesis. "
@@ -1031,10 +1052,12 @@ def load_unminified_chat_instruction(interface_name: str | None = None) -> str:
     )
 
     base = """
-CONCISE RULES (DEFAULT):
-- Keep user-facing messages short and to the point unless your persona or the user's request requires more detail.
+RESPONSE SHAPE RULES:
+- Do not force a fixed response length.
+- Let the persona, relationship context, and the user's tone determine how much to say.
+- Keep simple factual or logistical turns compact, but allow emotionally meaningful or intimate turns to breathe when that feels natural.
 - If the user's request or referent is ambiguous, ask one short clarifying question before responding (do NOT guess the meaning).
-- Expand only when the user explicitly requests more detail or context, or when your persona defines a more verbose style.
+- Treat current time fields in the prompt as authoritative. Never infer the present time, date, or part of day from older chat history, memories, or prior assistant messages.
 
 RESPONSE FORMAT (STRICT):
 - You MUST reply using ONLY valid JSON.
