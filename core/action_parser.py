@@ -924,6 +924,24 @@ async def _handle_plugin_action(
                     log_debug(
                         "[action_parser] Text unescape normalization failed (non-fatal)"
                     )
+                # Strip emotion / meta tags from outbound text so they
+                # never leak to the end-user interface.
+                if isinstance(payload, dict):
+                    _raw_text = payload.get("text")
+                    if isinstance(_raw_text, str) and "{" in _raw_text:
+                        try:
+                            from plugins.emotion_manager import (
+                                strip_emotion_tags,
+                            )
+
+                            _cleaned = strip_emotion_tags(_raw_text)
+                            if _cleaned != _raw_text:
+                                payload["text"] = _cleaned
+                                log_debug(
+                                    "[action_parser] Stripped emotion/meta tags from action payload text"
+                                )
+                        except Exception:
+                            pass
                 log_info(
                     f"[action_parser] ✉️ Dispatching message action to interface '{iface_name}'"
                 )
@@ -2294,20 +2312,72 @@ async def corrector_orchestrator(
                 extra_keys = [
                     k
                     for k in parsed.keys()
-                    if k != "actions" and k not in allowed_metadata
+                    if k != "actions"
+                    and k not in allowed_metadata
+                    and not k.startswith("meta.")
                 ]
 
                 if extra_keys:
-                    synthetic_actions = []
+                    # Mapping from interface prefix to the correct message
+                    # action type — mirrors _INTERFACE_TO_MESSAGE_ACTION in
+                    # message_chain but kept inline to avoid circular imports.
+                    _iface_msg_map: dict[str, str] = {
+                        "telegram_bot": "message_telegram_bot",
+                        "discord_bot": "message_discord_bot",
+                        "synth_webui": "message_synth_webui",
+                        "matrix_chat": "message_matrix_chat",
+                        "ollama_serve": "message_ollama_serve",
+                    }
+                    _message_like_keys = {"message", "text", "reply", "response"}
+                    ctx_ipath = (context or {}).get("interface_path")
+
+                    synthetic_actions: list[dict] = []
                     for key in extra_keys:
                         value = parsed.get(key)
-                        payload = value if isinstance(value, dict) else {"value": value}
-                        synthetic_actions.append({"type": key, "payload": payload})
+                        # Message-like keys with string values → map to a
+                        # proper interface message action so the reply
+                        # reaches the user instead of failing validation.
+                        if key in _message_like_keys and isinstance(value, str):
+                            # Skip if the same text is already in an
+                            # explicit message action (avoid duplicates).
+                            already_present = any(
+                                isinstance(a, dict)
+                                and isinstance(a.get("type"), str)
+                                and a["type"].startswith("message_")
+                                and isinstance(a.get("payload"), dict)
+                                and a["payload"].get("text") == value
+                                for a in actions
+                            )
+                            if already_present:
+                                log_debug(
+                                    f"[corrector_orchestrator] Skipping synthetic '{key}' — text already in explicit message action"
+                                )
+                                continue
+
+                            payload: dict = {"text": value}
+                            synthetic_type = key
+                            if ctx_ipath:
+                                iface_prefix = str(ctx_ipath).split("/")[0]
+                                resolved = _iface_msg_map.get(iface_prefix)
+                                if resolved:
+                                    synthetic_type = resolved
+                                payload["interface_path"] = str(ctx_ipath)
+                        elif isinstance(value, dict):
+                            payload = value
+                            synthetic_type = key
+                        else:
+                            payload = {"value": value}
+                            synthetic_type = key
+
+                        synthetic_actions.append(
+                            {"type": synthetic_type, "payload": payload}
+                        )
 
                     actions.extend(synthetic_actions)
-                    log_info(
-                        f"[corrector_orchestrator] Added {len(synthetic_actions)} synthetic actions for unregistered top-level keys: {', '.join(extra_keys)}"
-                    )
+                    if synthetic_actions:
+                        log_info(
+                            f"[corrector_orchestrator] Added {len(synthetic_actions)} synthetic actions for unregistered top-level keys: {', '.join(extra_keys)}"
+                        )
         except Exception as _e:
             log_debug(
                 f"[corrector_orchestrator] Error while processing top-level keys: {_e}"

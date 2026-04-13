@@ -83,16 +83,22 @@ _EMOTION_TAG_RE = re.compile(
     r"\s*\{\s*(?:\w+\s+-?\d+(?:\.\d+)?)(?:\s*,\s*\w+\s+-?\d+(?:\.\d+)?)*\s*\}"
 )
 
+# Meta tags like {meta.autonomous: true}, {meta.field=value} — LLM embeds
+# these as literal text when the prompt says "set a meta.autonomous flag".
+_META_TAG_RE = re.compile(r"\s*\{\s*meta\.\w+\s*[:=]\s*\w+\s*\}")
+
 
 def strip_emotion_tags(text: str) -> str:
-    """Remove emotion tags like ``{happy 8.5, love 5.0}`` from *text*.
+    """Remove emotion tags like ``{happy 8.5, love 5.0}`` and meta tags
+    like ``{meta.autonomous: true}`` from *text*.
 
-    Uses a targeted regex that only matches the ``{word number, …}`` pattern
-    so JSON, code blocks, and other brace-delimited content are left intact.
+    Uses targeted regexes that only match specific ``{…}`` patterns so JSON,
+    code blocks, and other brace-delimited content are left intact.
     """
     if not text:
         return text
     cleaned = _EMOTION_TAG_RE.sub("", text)
+    cleaned = _META_TAG_RE.sub("", cleaned)
     cleaned = re.sub(r" {2,}", " ", cleaned).strip()
     return cleaned
 

@@ -1095,7 +1095,7 @@ async def universal_send(interface_send_func, *args, text: str = None, **kwargs)
                 # Single bare action (possibly using alternative keys)
                 if any(
                     k in json_data
-                    for k in ["type", "function", "name", "plugin", "action"]
+                    for k in ["type", "function", "name", "plugin", "action", "command"]
                 ):
                     actions = [json_data]
 
@@ -1114,14 +1114,17 @@ async def universal_send(interface_send_func, *args, text: str = None, **kwargs)
                             or act.get("name")
                             or act.get("plugin")
                             or act.get("action")
+                            or act.get("command")
                         )
                     # Normalize payload
                     if "payload" not in act:
-                        # Extract arguments/parameters if they exist
+                        # Extract arguments/parameters/schema/input if they exist
                         act["payload"] = (
                             act.get("arguments")
                             or act.get("parameters")
                             or act.get("args")
+                            or act.get("schema")
+                            or act.get("input")
                         )
 
             bot = getattr(interface_send_func, "__self__", None) or (

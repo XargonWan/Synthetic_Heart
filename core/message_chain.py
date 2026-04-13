@@ -76,6 +76,28 @@ _INTERFACE_TO_MESSAGE_ACTION: Dict[str, str] = {
     "ollama_serve": "message_ollama_serve",
 }
 
+# Keys that are part of the action envelope and must NOT be swept into payload
+# when gathering flat fields.
+_ACTION_SYSTEM_KEYS = frozenset(
+    {
+        "type",
+        "payload",
+        "meta",
+        # Alternative type/payload key names (already handled above, just exclude)
+        "function",
+        "name",
+        "plugin",
+        "action",
+        "command",
+        "method",
+        "arguments",
+        "parameters",
+        "args",
+        "schema",
+        "input",
+    }
+)
+
 
 def _auto_inject_interface_path(actions: list, interface_path: Optional[str]) -> list:
     """Auto-inject missing interface_path into message actions.
@@ -97,7 +119,12 @@ def _auto_inject_interface_path(actions: list, interface_path: Optional[str]) ->
     for action in actions:
         if not isinstance(action, dict):
             continue
-        action_type = action.get("type") or action.get("action")
+        action_type = (
+            action.get("type")
+            or action.get("action")
+            or action.get("command")
+            or action.get("method")
+        )
         # Only process registered interface message action types (no hard-coded checks)
         if not action_type:
             continue
@@ -597,6 +624,8 @@ async def handle_incoming_message(
                                     or act.get("name")
                                     or act.get("plugin")
                                     or act.get("action")
+                                    or act.get("command")
+                                    or act.get("method")
                                 )
                                 if _t:
                                     act["type"] = _t
@@ -606,16 +635,33 @@ async def handle_incoming_message(
 
                             # Normalize alternative keys for payload if 'payload' is missing
                             if "payload" not in act:
-                                # Prioritize 'arguments' (OpenAI) or 'parameters' (Gemini) then 'args'
+                                # Prioritize 'arguments' (OpenAI) or 'parameters' (Gemini) then 'args'/'schema'/'input'
                                 _p = (
                                     act.get("arguments")
                                     or act.get("parameters")
                                     or act.get("args")
+                                    or act.get("schema")
+                                    or act.get("input")
                                 )
                                 if _p:
                                     act["payload"] = _p
                                     log_debug(
                                         f"[message_chain] Normalizing action payload for {act.get('type')}"
+                                    )
+
+                            # Fallback: gather flat action fields into payload
+                            if "payload" not in act and "type" in act:
+                                _extra = {
+                                    k: v
+                                    for k, v in act.items()
+                                    if k not in _ACTION_SYSTEM_KEYS
+                                }
+                                if _extra:
+                                    for k in _extra:
+                                        del act[k]
+                                    act["payload"] = _extra
+                                    log_debug(
+                                        f"[message_chain] Gathered {len(_extra)} flat fields into payload for {act.get('type')}"
                                     )
             elif isinstance(parsed, list):
                 actions = parsed
@@ -629,6 +675,8 @@ async def handle_incoming_message(
                                 or act.get("name")
                                 or act.get("plugin")
                                 or act.get("action")
+                                or act.get("command")
+                                or act.get("method")
                             )
                             if _t:
                                 act["type"] = _t
@@ -641,33 +689,70 @@ async def handle_incoming_message(
                                 act.get("arguments")
                                 or act.get("parameters")
                                 or act.get("args")
+                                or act.get("schema")
+                                or act.get("input")
                             )
                             if _p:
                                 act["payload"] = _p
                                 log_debug(
                                     f"[message_chain] Normalizing bare list action payload for {act.get('type')}"
                                 )
+
+                        # Fallback: gather flat action fields into payload
+                        if "payload" not in act and "type" in act:
+                            _extra = {
+                                k: v
+                                for k, v in act.items()
+                                if k not in _ACTION_SYSTEM_KEYS
+                            }
+                            if _extra:
+                                for k in _extra:
+                                    del act[k]
+                                act["payload"] = _extra
+                                log_debug(
+                                    f"[message_chain] Gathered {len(_extra)} flat fields into payload for {act.get('type')}"
+                                )
             elif isinstance(parsed, dict) and (
                 "type" in parsed
                 or "name" in parsed
                 or "function" in parsed
                 or "plugin" in parsed
+                or "action" in parsed
+                or "command" in parsed
+                or "method" in parsed
             ):
-                # Normalize singe-action dict (type/name/function/plugin)
+                # Normalize singe-action dict (type/name/function/plugin/command)
                 if "type" not in parsed:
                     parsed["type"] = (
                         parsed.get("function")
                         or parsed.get("name")
                         or parsed.get("plugin")
                         or parsed.get("action")
+                        or parsed.get("command")
+                        or parsed.get("method")
                     )
                 if "payload" not in parsed:
                     parsed["payload"] = (
                         parsed.get("arguments")
                         or parsed.get("parameters")
                         or parsed.get("args")
-                        or {}
+                        or parsed.get("schema")
+                        or parsed.get("input")
                     )
+                # Fallback: gather flat action fields into payload
+                if not parsed.get("payload") and "type" in parsed:
+                    _extra = {
+                        k: v for k, v in parsed.items() if k not in _ACTION_SYSTEM_KEYS
+                    }
+                    if _extra:
+                        for k in _extra:
+                            del parsed[k]
+                        parsed["payload"] = _extra
+                        log_debug(
+                            f"[message_chain] Gathered {len(_extra)} flat fields into payload for {parsed.get('type')}"
+                        )
+                if "payload" not in parsed:
+                    parsed["payload"] = {}
                 actions = [parsed]
                 log_debug(
                     f"[message_chain] Normalized single-action dict: {parsed.get('type')}"
@@ -825,7 +910,9 @@ async def handle_incoming_message(
                         extra_keys = [
                             k
                             for k in parsed.keys()
-                            if k != "actions" and k not in allowed_metadata
+                            if k != "actions"
+                            and k not in allowed_metadata
+                            and not k.startswith("meta.")
                         ]
                         if extra_keys:
                             synthetic_actions = []
