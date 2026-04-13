@@ -10,6 +10,7 @@ from core.logging_utils import log_debug, log_info, log_warning, log_error
 from typing import Dict, Any, Optional, List
 from datetime import datetime
 from core.prompt_engine import (
+    build_delivery_request,
     build_full_json_instructions,
     build_minified_json_instructions,
 )
@@ -118,6 +119,24 @@ class AutoResponseSystem:
                     "max_correction_attempts": 1,  # Limit corrections for action result responses
                 }
             }
+
+            # Phase 3: Attach PromptRequest so migrated engines can use native rendering.
+            # Engines that haven't migrated yet ignore __prompt_request entirely.
+            try:
+                _pr = await build_delivery_request(
+                    action_type=action_type,
+                    action_outputs=(
+                        action_outputs
+                        if action_outputs is not None
+                        else [{"output": str(output)}]
+                    ),
+                    interface_name=interface_name,
+                    interface_path=interface_path,
+                )
+                system_payload["__prompt_request"] = _pr
+                log_debug("[auto_response] delivery PromptRequest attached")
+            except Exception as _drq_exc:
+                log_debug(f"[auto_response] build_delivery_request skipped: {_drq_exc}")
 
             log_info(
                 f"[auto_response] Requesting LLM to deliver {action_type} output to chat {chat_id}"

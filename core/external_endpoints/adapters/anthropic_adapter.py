@@ -3,10 +3,16 @@
 
 from __future__ import annotations
 
+import time as _time
 from typing import Any
 
 import aiohttp
 
+from core.cortex_api_logger import (
+    log_cortex_request,
+    log_cortex_response,
+    sanitize_for_log,
+)
 from core.logging_utils import log_debug
 
 from core.external_endpoints.adapters.base import (
@@ -92,6 +98,7 @@ class AnthropicAdapter(BaseProtocolAdapter):
     ) -> ChatResponse:
         request_model = model or self.DEFAULT_MODEL
         system_instruction, anthropic_messages = _openai_to_anthropic(messages)
+        engine_tag = f"anthropic:{self._engine_label or 'default'}"
 
         payload: dict[str, Any] = {
             "model": request_model,
@@ -100,6 +107,14 @@ class AnthropicAdapter(BaseProtocolAdapter):
         }
         if system_instruction:
             payload["system"] = system_instruction
+
+        log_cortex_request(
+            engine_tag,
+            model=request_model,
+            url=f"{self._base_url}/v1/messages",
+            payload=sanitize_for_log(payload),
+        )
+        _req_start = _time.monotonic()
 
         try:
             async with aiohttp.ClientSession() as session:
@@ -112,6 +127,14 @@ class AnthropicAdapter(BaseProtocolAdapter):
                     data = await resp.json()
                     if resp.status != 200:
                         error_msg = data.get("error", {}).get("message", str(data))
+                        _elapsed = (_time.monotonic() - _req_start) * 1000
+                        log_cortex_response(
+                            engine_tag,
+                            model=request_model,
+                            status=resp.status,
+                            error=error_msg,
+                            elapsed_ms=_elapsed,
+                        )
                         raise RuntimeError(
                             f"[anthropic_adapter] API error {resp.status}: {error_msg}"
                         )
@@ -123,20 +146,38 @@ class AnthropicAdapter(BaseProtocolAdapter):
                         if block.get("type") == "text"
                     )
                     usage_raw = data.get("usage", {})
+                    usage = {
+                        "prompt_tokens": usage_raw.get("input_tokens", 0),
+                        "completion_tokens": usage_raw.get("output_tokens", 0),
+                        "total_tokens": (
+                            usage_raw.get("input_tokens", 0)
+                            + usage_raw.get("output_tokens", 0)
+                        ),
+                    }
+                    _elapsed = (_time.monotonic() - _req_start) * 1000
+                    log_cortex_response(
+                        engine_tag,
+                        model=data.get("model", request_model),
+                        status=200,
+                        body=content_text,
+                        usage=usage,
+                        elapsed_ms=_elapsed,
+                    )
                     return ChatResponse(
                         content=content_text,
                         model=data.get("model", request_model),
                         finish_reason=data.get("stop_reason", "stop"),
-                        usage={
-                            "prompt_tokens": usage_raw.get("input_tokens", 0),
-                            "completion_tokens": usage_raw.get("output_tokens", 0),
-                            "total_tokens": (
-                                usage_raw.get("input_tokens", 0)
-                                + usage_raw.get("output_tokens", 0)
-                            ),
-                        },
+                        usage=usage,
                     )
-        except Exception:
+        except Exception as exc:
+            if not isinstance(exc, RuntimeError):
+                _elapsed = (_time.monotonic() - _req_start) * 1000
+                log_cortex_response(
+                    engine_tag,
+                    model=request_model,
+                    error=str(exc),
+                    elapsed_ms=_elapsed,
+                )
             raise
 
     # ------------------------------------------------------------------
@@ -263,6 +304,21 @@ class AnthropicAdapter(BaseProtocolAdapter):
             "messages": messages,
             "max_tokens": kwargs.get("max_tokens", 1024),
         }
+        engine_tag = f"anthropic:{self._engine_label or 'default'}"
+
+        log_cortex_request(
+            engine_tag,
+            model=request_model,
+            url=f"{self._base_url}/v1/messages",
+            payload={
+                "task": "describe_image",
+                "mime_type": effective_mime,
+                "image_size": f"{len(image_bytes)} bytes",
+                "prompt": effective_prompt,
+            },
+        )
+        _req_start = _time.monotonic()
+
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(
@@ -273,9 +329,17 @@ class AnthropicAdapter(BaseProtocolAdapter):
                 ) as resp:
                     data = await resp.json()
                     if resp.status != 200:
+                        _elapsed = (_time.monotonic() - _req_start) * 1000
+                        log_cortex_response(
+                            engine_tag,
+                            model=request_model,
+                            status=resp.status,
+                            error=f"HTTP {resp.status}",
+                            elapsed_ms=_elapsed,
+                        )
                         return None
                     content_blocks = data.get("content", [])
-                    return (
+                    description = (
                         "".join(
                             block.get("text", "")
                             for block in content_blocks
@@ -283,6 +347,22 @@ class AnthropicAdapter(BaseProtocolAdapter):
                         )
                         or None
                     )
+                    _elapsed = (_time.monotonic() - _req_start) * 1000
+                    log_cortex_response(
+                        engine_tag,
+                        model=request_model,
+                        status=200,
+                        body=description,
+                        elapsed_ms=_elapsed,
+                    )
+                    return description
         except Exception as exc:
+            _elapsed = (_time.monotonic() - _req_start) * 1000
+            log_cortex_response(
+                engine_tag,
+                model=request_model,
+                error=str(exc),
+                elapsed_ms=_elapsed,
+            )
             log_debug(f"[anthropic_adapter] describe_image failed: {exc}")
             return None

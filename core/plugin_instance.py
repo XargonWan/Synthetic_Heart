@@ -684,7 +684,15 @@ async def handle_incoming_message(
             f"[plugin_instance] Processing {len(attachments)} multimodal attachment(s)"
         )
 
+    # Preserve __prompt_request (PromptRequest dataclass) before sanitization —
+    # sanitize_for_json converts dataclasses to plain dicts via __dict__, which
+    # breaks engine fast-paths that depend on the typed PromptRequest object.
+    _preserved_pr: object | None = (
+        prompt.get("__prompt_request") if isinstance(prompt, dict) else None
+    )
     prompt = sanitize_for_json(prompt)
+    if _preserved_pr is not None and isinstance(prompt, dict):
+        prompt["__prompt_request"] = _preserved_pr
     log_debug("🌐 JSON PROMPT built for the plugin:")
     try:
         prompt_json = json_dumps(prompt)

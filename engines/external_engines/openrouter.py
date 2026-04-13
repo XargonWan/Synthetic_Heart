@@ -632,6 +632,35 @@ class OpenRouterPlugin(AIPluginBase):
                 except (json.JSONDecodeError, ValueError):
                     pass
 
+            # === Phase 4: PromptRequest native-format path ===
+            _pr = prompt.get("__prompt_request") if isinstance(prompt, dict) else None
+            if _pr is not None:
+                from core.prompt_renderers import OpenAIRenderer
+
+                _scope = (
+                    prompt.get("scope") or prompt.get("action_scope")
+                    if isinstance(prompt, dict)
+                    else None
+                )
+                _model = self._resolve_model(scope=_scope)
+                _model_info = _catalog.get(_model)
+                _pr.supports_tool_calling = (
+                    _model_info.supports_tool_use if _model_info else False
+                )
+                _mm_parts = self._extract_multimodal_parts(prompt)
+                renderer = OpenAIRenderer(_pr)
+                _model_vis = _model_info.supports_vision if _model_info else False
+                _messages = (
+                    renderer.render_with_multimodal(_mm_parts, _model_vis)
+                    if _mm_parts
+                    else renderer.render()
+                )
+                _tools = renderer.tool_schemas()
+                _max_tok = _model_info.max_completion_tokens if _model_info else 4096
+                return await self._openai_chat_completion_from_messages(
+                    _messages, _tools, _max_tok, model=_model
+                )
+
             # Normalize prompt to text
             if isinstance(prompt, dict):
                 prompt_text = json.dumps(prompt, indent=2, ensure_ascii=False)
@@ -1067,6 +1096,130 @@ class OpenRouterPlugin(AIPluginBase):
         )
 
         return content.strip()
+
+    async def _openai_chat_completion_from_messages(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        max_tokens: int,
+        model: str | None = None,
+    ) -> str:
+        """Send pre-built messages to OpenRouter (Phase-4 PromptRequest path).
+
+        Handles both plain ``content`` responses and ``tool_calls`` responses,
+        converting the latter to SyntH's ``{"actions": [...]}`` format.
+        """
+        from core.prompt_renderers import OpenAIRenderer
+
+        base_url = str(OPENROUTER_BASE_URL).strip() or "https://openrouter.ai/api/v1"
+        api_key = str(OPENROUTER_API_KEY).strip()
+        url = f"{base_url.rstrip('/')}/chat/completions"
+        resolved_model = model or self._current_model
+
+        payload: dict[str, Any] = {
+            "model": resolved_model,
+            "messages": messages,
+            "max_tokens": max_tokens,
+        }
+        if tools:
+            payload["tools"] = tools
+            payload["tool_choice"] = "auto"
+
+        headers: dict[str, str] = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+            "HTTP-Referer": "https://github.com/synthetic-heart/synth",
+        }
+
+        log_cortex_request(
+            "openrouter",
+            model=resolved_model,
+            url=url,
+            headers=headers,
+            payload=payload,
+        )
+        _req_start = time.monotonic()
+
+        def _do_req() -> requests.Response:
+            return requests.post(url, headers=headers, json=payload, timeout=120)
+
+        max_attempts = 3
+
+        def _error_json(msg: str) -> str:
+            return json.dumps(
+                {"actions": [{"type": "system_message", "payload": {"text": msg}}]}
+            )
+
+        response: requests.Response | None = None
+        for attempt in range(max_attempts):
+            try:
+                loop = asyncio.get_event_loop()
+                resp: requests.Response = await loop.run_in_executor(None, _do_req)
+                response = resp
+            except Exception as exc:
+                if attempt < max_attempts - 1:
+                    await asyncio.sleep(min(8, 1 * (2**attempt)))
+                    continue
+                log_error(f"[openrouter] HTTP request failed: {exc}")
+                return _error_json(f"OpenRouter HTTP request failed: {exc}")
+
+            if int(resp.status_code) >= 400:  # type: ignore[arg-type]
+                if (
+                    int(resp.status_code) in {429, 500, 503, 504}  # type: ignore[arg-type]
+                    and attempt < max_attempts - 1
+                ):
+                    await asyncio.sleep(min(8, 1 * (2**attempt)))
+                    continue
+                log_error(f"[openrouter] HTTP error {resp.status_code}: {resp.text}")
+                return _error_json(f"OpenRouter HTTP error {resp.status_code}")
+            break
+
+        if response is None:
+            return _error_json("OpenRouter HTTP request failed: no response")
+
+        try:
+            data = response.json()
+        except Exception as exc:
+            log_error(f"[openrouter] Response JSON parse failed: {exc}")
+            return _error_json("OpenRouter response was not valid JSON")
+
+        if "error" in data:
+            err = data["error"]
+            if isinstance(err, dict):
+                err = err.get("message", str(err))
+            log_error(f"[openrouter] API error: {err}")
+            return _error_json(f"OpenRouter endpoint error: {err}")
+
+        choices = data.get("choices") or []
+        if not choices:
+            log_error(
+                f"[openrouter] Response missing choices (PromptRequest path): {data}"
+            )
+            return _error_json("OpenRouter response missing choices")
+
+        choice_msg = choices[0].get("message", {})
+        tool_calls = choice_msg.get("tool_calls")
+        if tool_calls:
+            result_text = OpenAIRenderer.parse_tool_call_response(data)
+        else:
+            result_text = choice_msg.get("content") or ""
+            if not result_text:
+                log_error(
+                    f"[openrouter] Response had no content (PromptRequest path): {data}"
+                )
+                return _error_json("OpenRouter response contained no content")
+
+        usage = data.get("usage")
+        _elapsed = (time.monotonic() - _req_start) * 1000
+        log_cortex_response(
+            "openrouter",
+            model=data.get("model", resolved_model),
+            status=int(getattr(response, "status_code", 0) or 0),
+            body=result_text.strip(),
+            usage=usage,
+            elapsed_ms=_elapsed,
+        )
+        return result_text.strip()
 
     # ------------------------------------------------------------------
     # System instruction

@@ -22,6 +22,7 @@ class ExternalVoxEngine(VoxEngineBase):
     ) -> None:
         self._endpoint = endpoint
         self._adapter = adapter
+        self._adapter._engine_label = endpoint.name or "vox_bridge"
         self.display_name = f"{endpoint.display_label or endpoint.name} (TTS)"
 
     @property

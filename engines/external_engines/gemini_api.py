@@ -856,8 +856,38 @@ class GeminiAPIPlugin(AIPluginBase):
                         f"[gemini_api] Processing system_message type '{sm_type}' as normal prompt"
                     )
 
-                # Standard JSON prompt from prompt_engine
-                prompt_text = json.dumps(prompt, indent=2, ensure_ascii=False)
+                # === Phase 6: PromptRequest native-format path (BEFORE json.dumps) ===
+                _pr = prompt.get("__prompt_request")  # type: ignore[arg-type]
+                if _pr is not None:
+                    multimodal_parts = await self._extract_multimodal_parts(prompt)
+                    from core.prompt_renderers import GeminiRenderer
+
+                    renderer = GeminiRenderer(_pr)
+                    rendered = (
+                        renderer.render_with_multimodal(multimodal_parts)
+                        if multimodal_parts
+                        else renderer.render()
+                    )
+                    _model_cfg = MODEL_CONFIGS.get(
+                        self._current_model, MODEL_CONFIGS[DEFAULT_MODEL]
+                    )
+                    response_text = await self._http_generate_content_from_rendered(
+                        rendered=rendered,
+                        max_output_tokens=int(
+                            _model_cfg.get("max_output_tokens", 8192)
+                        ),
+                    )
+                    log_debug(
+                        f"[gemini_api] Received response (PromptRequest path, {len(response_text)} chars)"
+                    )
+                    return response_text
+
+                # Legacy path: strip __prompt_request (non-serializable) before serializing
+                prompt_text = json.dumps(
+                    {k: v for k, v in prompt.items() if k != "__prompt_request"},
+                    indent=2,
+                    ensure_ascii=False,
+                )
             elif isinstance(prompt, str):
                 # Try to parse as JSON first
                 try:
@@ -890,7 +920,10 @@ class GeminiAPIPlugin(AIPluginBase):
             # and confusing the model (or causing the '😵' error).
             prompt_to_redact = None
             if isinstance(prompt, dict):
-                prompt_to_redact = prompt
+                # Exclude __prompt_request (non-serializable dataclass) before redaction
+                prompt_to_redact = {
+                    k: v for k, v in prompt.items() if k != "__prompt_request"
+                }
             elif isinstance(prompt, str):
                 try:
                     prompt_to_redact = json.loads(prompt)
@@ -1300,6 +1333,250 @@ class GeminiAPIPlugin(AIPluginBase):
         )
 
         return response_text
+
+    async def _http_generate_content_from_rendered(
+        self,
+        rendered: dict[str, Any],
+        max_output_tokens: int,
+    ) -> str:
+        """Phase-6 Gemini call: takes a pre-rendered dict from GeminiRenderer.
+
+        ``rendered`` is the output of ``GeminiRenderer.render()`` or
+        ``GeminiRenderer.render_with_multimodal()``:
+
+        .. code-block:: python
+
+            {
+                "system_instruction_text": str,
+                "contents": [{"role": ..., "parts": [...]}, ...],
+                "tools": [{"function_declarations": [...]}],  # optional
+            }
+
+        Handles both plain text responses and ``functionCall`` parts,
+        converting the latter to SyntH's ``{"actions": [...]}`` format.
+        """
+        from core.prompt_renderers import GeminiRenderer
+
+        base_url = (
+            str(GEMINI_API_BASE_URL).strip()
+            or "https://generativelanguage.googleapis.com"
+        )
+        api_key = str(GEMINI_API_KEY).strip()
+        if base_url.endswith("/v1") or base_url.endswith("/v1beta"):
+            versioned_base = base_url
+        else:
+            versioned_base = f"{base_url}/v1beta"
+        url = f"{versioned_base}/models/{self._current_model}:generateContent"
+
+        system_instruction_text: str = rendered.get("system_instruction_text") or ""
+        contents: list[dict[str, Any]] = rendered.get("contents") or []
+        tools_list: list[dict[str, Any]] = rendered.get("tools") or []
+
+        payload: dict[str, Any] = {
+            "contents": contents,
+            "systemInstruction": {
+                "role": "system",
+                "parts": [{"text": system_instruction_text}],
+            },
+            "generationConfig": {
+                "maxOutputTokens": max_output_tokens,
+                "responseMimeType": "application/json",
+            },
+            "safetySettings": [
+                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+                {
+                    "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+                    "threshold": "BLOCK_NONE",
+                },
+                {
+                    "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
+                    "threshold": "BLOCK_NONE",
+                },
+            ],
+        }
+        if tools_list:
+            payload["tools"] = tools_list
+
+        log_cortex_request(
+            "gemini_api",
+            model=self._current_model,
+            url=url,
+            payload=payload,
+        )
+        _req_start = _time.monotonic()
+
+        def _do_request() -> requests.Response:
+            return requests.post(
+                url, params={"key": api_key}, json=payload, timeout=120
+            )
+
+        retryable_statuses = {429, 500, 503, 504}
+        max_attempts = 3
+        response: requests.Response | None = None
+
+        for attempt in range(max_attempts):
+            try:
+                loop = asyncio.get_event_loop()
+                response = await loop.run_in_executor(None, _do_request)
+            except Exception as exc:
+                if attempt < max_attempts - 1:
+                    await asyncio.sleep(min(8, 1 * (2**attempt)))
+                    continue
+                log_error(
+                    f"[gemini_api] HTTP request failed (PromptRequest path): {exc}"
+                )
+                return json.dumps(
+                    {
+                        "actions": [
+                            {
+                                "type": "system_message",
+                                "payload": {
+                                    "text": f"⚠️ Gemini HTTP request failed: {exc}"
+                                },
+                            }
+                        ]
+                    }
+                )
+
+            if int(response.status_code) >= 400:  # type: ignore[arg-type]
+                if (
+                    int(response.status_code) in retryable_statuses  # type: ignore[arg-type]
+                    and attempt < max_attempts - 1
+                ):
+                    await asyncio.sleep(min(8, 1 * (2**attempt)))
+                    continue
+                log_error(
+                    f"[gemini_api] HTTP error {response.status_code} (PromptRequest path)"
+                )
+                return json.dumps(
+                    {
+                        "actions": [
+                            {
+                                "type": "system_message",
+                                "payload": {
+                                    "text": f"⚠️ Gemini HTTP error {response.status_code}"
+                                },
+                            }
+                        ]
+                    }
+                )
+            break
+
+        if response is None:
+            return json.dumps(
+                {
+                    "actions": [
+                        {
+                            "type": "system_message",
+                            "payload": {
+                                "text": "⚠️ Gemini HTTP request failed: no response"
+                            },
+                        }
+                    ]
+                }
+            )
+
+        try:
+            data = response.json()
+        except Exception as exc:
+            log_error(
+                f"[gemini_api] Response JSON parse failed (PromptRequest path): {exc}"
+            )
+            return json.dumps(
+                {
+                    "actions": [
+                        {
+                            "type": "system_message",
+                            "payload": {
+                                "text": "⚠️ Gemini HTTP response was not valid JSON"
+                            },
+                        }
+                    ]
+                }
+            )
+
+        if "error" in data:
+            err = data["error"]
+            err_msg = (
+                err.get("message", str(err)) if isinstance(err, dict) else str(err)
+            )
+            log_error(f"[gemini_api] API error (PromptRequest path): {err_msg}")
+            return json.dumps(
+                {
+                    "actions": [
+                        {
+                            "type": "system_message",
+                            "payload": {"text": f"⚠️ Gemini API error: {err_msg}"},
+                        }
+                    ]
+                }
+            )
+
+        candidates = data.get("candidates") or []
+        if not candidates:
+            log_error(
+                f"[gemini_api] Response missing candidates (PromptRequest path): {data}"
+            )
+            return json.dumps(
+                {
+                    "actions": [
+                        {
+                            "type": "system_message",
+                            "payload": {
+                                "text": "⚠️ Gemini HTTP response missing candidates"
+                            },
+                        }
+                    ]
+                }
+            )
+
+        content_dict = candidates[0].get("content", {})
+        parts = content_dict.get("parts") or []
+
+        # Phase 6: functionCall parts → SyntH actions format
+        func_calls = [p for p in parts if isinstance(p, dict) and "functionCall" in p]
+        if func_calls:
+            result_text = GeminiRenderer.parse_function_call_response(data)
+        else:
+            result_text = "".join(
+                part.get("text", "")
+                for part in parts
+                if isinstance(part, dict) and not part.get("thought", False)
+            ).strip()
+            if not result_text:
+                log_error(
+                    f"[gemini_api] Response had no text (PromptRequest path): {data}"
+                )
+                return json.dumps(
+                    {
+                        "actions": [
+                            {
+                                "type": "system_message",
+                                "payload": {
+                                    "text": "⚠️ Gemini HTTP response contained no text"
+                                },
+                            }
+                        ]
+                    }
+                )
+
+        _elapsed = (_time.monotonic() - _req_start) * 1000
+        usage_meta = data.get("usageMetadata") or {}
+        log_cortex_response(
+            "gemini_api",
+            model=self._current_model,
+            status=response.status_code if response else None,
+            body=result_text,
+            usage={
+                "prompt_tokens": usage_meta.get("promptTokenCount"),
+                "completion_tokens": usage_meta.get("candidatesTokenCount"),
+            }
+            if usage_meta
+            else None,
+            elapsed_ms=_elapsed,
+        )
+        return result_text
 
     # -------------------------------------------------------------------------
     # Multimodal Support Methods

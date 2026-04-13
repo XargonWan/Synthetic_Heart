@@ -9,17 +9,79 @@ to a built-in engine from the perspective of the SyntH core.
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
-import time as _time
 from typing import TYPE_CHECKING, Any
 
 from core.ai_plugin_base import AIPluginBase
-from core.cortex_api_logger import log_cortex_request, log_cortex_response
-from core.logging_utils import log_warning
+from core.logging_utils import log_debug, log_warning
 
 if TYPE_CHECKING:
     from core.external_endpoints.adapters.base import BaseProtocolAdapter
     from core.external_endpoints.models import ExternalEndpoint
+
+
+# ---------------------------------------------------------------------------
+# Multimodal extraction helper
+# ---------------------------------------------------------------------------
+
+# Keys whose values can contain lists of multimodal attachment dicts.
+_MM_KEYS: frozenset[str] = frozenset(
+    {"attachments", "images", "audio", "documents", "videos"}
+)
+# Subtree-root keys that describe action *schemas*, not actual media data.
+_SCHEMA_KEYS: frozenset[str] = frozenset({"actions", "available_actions", "schema"})
+
+
+def _extract_attachments_and_redact(
+    prompt: dict[str, Any],
+) -> tuple[dict[str, Any], list[dict[str, str]]]:
+    """Extract multimodal attachments from *prompt* and return a redacted copy.
+
+    Recursively walks the prompt dict looking for attachment items that contain
+    base64-encoded data (``data`` or ``base64`` field) alongside a ``mime_type``.
+    Those are collected as ``{"mime_type": …, "data": …}`` dicts and their
+    base64 payload is replaced with a short placeholder in the returned copy so
+    the JSON text sent to the model stays compact.
+
+    Returns:
+        A ``(redacted_prompt_copy, multimodal_parts)`` tuple.
+    """
+    redacted = copy.deepcopy(prompt)
+    parts: list[dict[str, str]] = []
+
+    def _try_extract(item: Any) -> None:
+        """If *item* looks like an attachment with base64, collect + redact it."""
+        if not isinstance(item, dict):
+            return
+        mime = item.get("mime_type") or item.get("mimeType")
+        if not mime:
+            return
+        for field in ("data", "base64"):
+            b64 = item.get(field)
+            if b64 and isinstance(b64, str) and len(b64) > 256:
+                parts.append({"mime_type": str(mime), "data": b64})
+                item[field] = f"<binary: {len(b64)} chars>"
+                return  # one data field per attachment
+
+    def _walk(node: Any) -> None:
+        if isinstance(node, dict):
+            for key in _MM_KEYS:
+                items = node.get(key)
+                if isinstance(items, list):
+                    for item in items:
+                        _try_extract(item)
+                elif isinstance(items, dict):
+                    _try_extract(items)
+            for key, val in node.items():
+                if key not in _SCHEMA_KEYS and key not in _MM_KEYS:
+                    _walk(val)
+        elif isinstance(node, list):
+            for item in node:
+                _walk(item)
+
+    _walk(redacted)
+    return redacted, parts
 
 
 class ExternalCortexEngine(AIPluginBase):
@@ -33,6 +95,7 @@ class ExternalCortexEngine(AIPluginBase):
     ) -> None:
         self._endpoint = endpoint
         self._adapter = adapter
+        self._adapter._engine_label = endpoint.name or "cortex_bridge"
         self.notify_fn = notify_fn
         self.display_name = endpoint.display_label or endpoint.name
 
@@ -91,19 +154,37 @@ class ExternalCortexEngine(AIPluginBase):
         if isinstance(messages, list):
             msg_list = messages
         elif isinstance(messages, dict):
-            prompt_text = json.dumps(messages, ensure_ascii=False)
-            msg_list = [{"role": "user", "content": prompt_text}]
+            from core.json_utils import sanitize_for_json
+
+            stripped = {k: v for k, v in messages.items() if k != "__prompt_request"}
+            redacted, mm_parts = _extract_attachments_and_redact(stripped)
+            safe = sanitize_for_json(redacted)
+            prompt_text = json.dumps(safe, ensure_ascii=False)
+            if mm_parts:
+                content_parts: list[dict[str, Any]] = [
+                    {"type": "text", "text": prompt_text}
+                ]
+                for p in mm_parts:
+                    content_parts.append(
+                        {
+                            "type": "inline_data",
+                            "inline_data": {
+                                "mime_type": p["mime_type"],
+                                "data": p["data"],
+                            },
+                        }
+                    )
+                msg_list = [{"role": "user", "content": content_parts}]
+                log_debug(
+                    f"[cortex_bridge] Extracted {len(mm_parts)} multimodal "
+                    f"part(s) from prompt dict"
+                )
+            else:
+                msg_list = [{"role": "user", "content": prompt_text}]
         else:
             msg_list = [{"role": "user", "content": str(messages)}]
 
         model = self._endpoint.default_model or None
-        endpoint_name = self._endpoint.name or "cortex_bridge"
-        log_cortex_request(
-            f"cortex_bridge:{endpoint_name}",
-            model=model or "",
-            payload={"messages": msg_list},
-        )
-        _req_start = _time.monotonic()
         max_retries, backoff = self._get_retry_settings()
         attempt = 0
         while True:
@@ -111,15 +192,6 @@ class ExternalCortexEngine(AIPluginBase):
             try:
                 chat_resp = await self._adapter.chat_completion(
                     msg_list, model=model, **self._extra_api_kwargs()
-                )
-                _elapsed = (_time.monotonic() - _req_start) * 1000
-                log_cortex_response(
-                    f"cortex_bridge:{endpoint_name}",
-                    model=chat_resp.model or model or "",
-                    status=200,
-                    body=chat_resp.content,
-                    usage=chat_resp.usage or None,
-                    elapsed_ms=_elapsed,
                 )
                 return chat_resp.content
             except Exception as exc:
@@ -134,13 +206,6 @@ class ExternalCortexEngine(AIPluginBase):
                     )
                     await asyncio.sleep(delay)
                     continue
-                _elapsed = (_time.monotonic() - _req_start) * 1000
-                log_cortex_response(
-                    f"cortex_bridge:{endpoint_name}",
-                    model=model or "",
-                    error=str(exc),
-                    elapsed_ms=_elapsed,
-                )
                 log_warning(
                     f"[cortex_bridge:{self._endpoint.name}] generate_response failed: {exc}"
                 )
@@ -160,19 +225,48 @@ class ExternalCortexEngine(AIPluginBase):
         instructions: str = (
             prompt.get("instructions_verbose") or prompt.get("instructions") or ""
         )
-        user_dict = {
-            k: v
-            for k, v in prompt.items()
-            if k not in ("instructions", "instructions_verbose")
-        }
-        user_content = json.dumps(user_dict, ensure_ascii=False)
+        # Strip keys elevated to system; sanitize the rest (handles non-serializable
+        # objects like the PromptRequest dataclass via __dict__ conversion).
+        from core.json_utils import sanitize_for_json
+
+        _skip = {"instructions", "instructions_verbose", "__prompt_request"}
+        user_dict = {k: v for k, v in prompt.items() if k not in _skip}
+
+        # Extract multimodal attachments before serialising to text so that
+        # base64 blobs don't waste context tokens on the text side.
+        redacted, mm_parts = _extract_attachments_and_redact(user_dict)
+        redacted = sanitize_for_json(redacted)
+        user_content = json.dumps(redacted, ensure_ascii=False)
+
+        # Build user message — multipart if we have attachments
+        if mm_parts:
+            content_parts: list[dict[str, Any]] = [
+                {"type": "text", "text": user_content}
+            ]
+            for p in mm_parts:
+                content_parts.append(
+                    {
+                        "type": "inline_data",
+                        "inline_data": {
+                            "mime_type": p["mime_type"],
+                            "data": p["data"],
+                        },
+                    }
+                )
+            log_debug(
+                f"[cortex_bridge] _build_messages: extracted {len(mm_parts)} "
+                f"multimodal part(s)"
+            )
+            user_msg_content: Any = content_parts
+        else:
+            user_msg_content = user_content
 
         if instructions:
             return [
                 {"role": "system", "content": str(instructions)},
-                {"role": "user", "content": user_content},
+                {"role": "user", "content": user_msg_content},
             ]
-        return [{"role": "user", "content": json.dumps(prompt, ensure_ascii=False)}]
+        return [{"role": "user", "content": user_msg_content}]
 
     async def handle_incoming_message(
         self, bot: Any, message: Any, prompt: Any

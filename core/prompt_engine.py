@@ -12,7 +12,31 @@ from core.user_utils import get_user_display_name, get_user_usertag
 from datetime import datetime, time
 import os
 import asyncio
-from typing import cast
+from typing import Any, cast
+
+# Lazily imported to avoid circular deps at module load time
+# from core.prompt_request import PromptRequest, Turn, RuntimeContext, Attachment
+
+
+# ---------------------------------------------------------------------------
+# Turn parsing — convert formatted history strings to Turn objects
+# ---------------------------------------------------------------------------
+
+# Matches: [timestamp] SenderName [optional reply]: "content"
+# Handles optional [from path] prefix. Deliberately does NOT match:
+#   [diary timestamp] ...   (diary entries — no space inside timestamp brackets)
+#   [thought timestamp] ... (thoughts)
+if not hasattr(re, "_TURN_PARSE_RE_SENTINEL"):
+    _TURN_PARSE_RE = re.compile(
+        r"^(?:\[from\s[^\]]*\]\s+)?"  # optional [from ...] prefix
+        r"\[[^\s\]]+\]\s+"  # [timestamp] — NO spaces inside brackets
+        r'([^:\["]+?)'  # sender name (group 1)
+        r"(?:\s+\[replied to [^\]]+\])?"  # optional reply annotation
+        r':\s+"(.*)"$',  # : "content" (group 2)
+        re.DOTALL,
+    )
+else:  # pragma: no cover
+    _TURN_PARSE_RE = re.compile(r"(?!)")  # no-op fallback
 
 # Default maximum prompt characters (CHARACTERS, NOT TOKENS)
 # This is used as a safe fallback when no LLM engine provides explicit limits.
@@ -111,6 +135,295 @@ def minify_actions_block(
             minified[action_name] = extract_for_llm_prompt(action_name, normalized)
 
     return minified
+
+
+# ---------------------------------------------------------------------------
+# PromptRequest assembly helpers (added in Phase 1 of the prompt rewrite)
+# ---------------------------------------------------------------------------
+
+
+def _build_context_summary(context_section: dict[str, Any]) -> str:
+    """Format moderately-stable context parts into a plain text block.
+
+    Includes: cross-chat history (history_recent), diary thoughts, tag-matched
+    memories, participant bios.  Does NOT include ``history_current_chat``
+    (which becomes ``PromptRequest.conversation_history``) or fully-dynamic
+    runtime values (current emotion values → ``RuntimeContext.emotions``).
+    """
+    parts: list[str] = []
+
+    history_recent: list[Any] = context_section.get("history_recent") or []
+    if history_recent:
+        parts.append("[Recent context from other conversations]")
+        for line in history_recent:
+            parts.append(f"- {line}")
+
+    thoughts: list[Any] = context_section.get("thoughts") or []
+    if thoughts:
+        parts.append("[Thoughts and diary entries]")
+        for t in thoughts:
+            parts.append(f"- {t}")
+
+    memories: list[Any] = context_section.get("memories") or []
+    if memories:
+        parts.append("[Relevant memories]")
+        for m in memories:
+            snippet = str(m)
+            if len(snippet) > 400:
+                snippet = snippet[:400] + "\u2026"
+            parts.append(f"- {snippet}")
+
+    participants: Any = context_section.get("participants")
+    if participants:
+        if isinstance(participants, list):
+            lines: list[str] = []
+            for p in participants:
+                if not isinstance(p, dict):
+                    continue
+                tag = str(p.get("usertag") or p.get("username") or "?")
+                bio = str(p.get("short_bio") or "")
+                nicks = p.get("nicknames")
+                nick_str = (
+                    f" (also: {', '.join(nicks)})"
+                    if isinstance(nicks, list) and nicks
+                    else ""
+                )
+                feelings = p.get("feelings")
+                feel_str = (
+                    f" [feels: {', '.join(str(f) for f in feelings)}]"
+                    if isinstance(feelings, list) and feelings
+                    else ""
+                )
+                if bio:
+                    lines.append(f"- {tag}{nick_str}: {bio}{feel_str}")
+            if lines:
+                parts.append("[People in this conversation]")
+                parts.extend(lines)
+        elif isinstance(participants, str) and participants:
+            parts.append("[People in this conversation]")
+            parts.append(participants)
+
+    available_emotions: Any = context_section.get("available_emotions")
+    if available_emotions:
+        if isinstance(available_emotions, list):
+            parts.append(
+                f"[Available emotion types]\n{', '.join(str(e) for e in available_emotions)}"
+            )
+        elif isinstance(available_emotions, str):
+            parts.append(f"[Available emotion types]\n{available_emotions}")
+
+    return "\n".join(parts)
+
+
+def _history_to_turns(
+    history_lines: list[Any],
+    synth_names: set[str],
+) -> list[Any]:  # list[Turn] — import deferred to avoid circular dep at module load
+    """Convert formatted history strings produced by HistoryEngine into Turn objects.
+
+    Entries that cannot be parsed (diary lines, malformed lines) are silently
+    skipped so they do not end up as junk turns.
+
+    Args:
+        history_lines: Lines from ``context_section["history_current_chat"]``.
+        synth_names:   Lower-cased set of Synth name + aliases for role detection.
+
+    Returns:
+        List of ``Turn`` objects; may be empty.
+    """
+    from core.prompt_request import Turn
+
+    # "self" is the canonical sender_name for the AI in history format
+    all_synth_names = synth_names | {"self"}
+
+    turns: list[Turn] = []
+    for line in history_lines:
+        if not isinstance(line, str):
+            continue
+        m = _TURN_PARSE_RE.match(line)
+        if not m:
+            continue
+        sender = m.group(1).strip()
+        content = m.group(2)
+        role = "assistant" if sender.lower() in all_synth_names else "user"
+        turns.append(Turn(role=role, content=content))
+    return turns
+
+
+def _build_pr_attachments(
+    image_data: dict[str, Any] | None,
+    raw_attachments: list[Any] | None,
+) -> list[Any]:  # list[Attachment] — import deferred
+    """Convert image_data and raw attachments dicts into Attachment objects."""
+    from core.prompt_request import Attachment
+
+    result: list[Attachment] = []
+
+    if isinstance(image_data, dict):
+        # Legacy single-image dict from image_processor
+        img_bytes = image_data.get("data") or (image_data.get("image_data") or {}).get(
+            "data"
+        )
+        mime = image_data.get("mime_type") or "image/jpeg"
+        meta = {k: v for k, v in image_data.items() if k not in ("data",)}
+        result.append(Attachment(mime_type=mime, data=img_bytes, media_metadata=meta))
+
+    for att in raw_attachments or []:
+        if not isinstance(att, dict):
+            continue
+        result.append(
+            Attachment(
+                mime_type=att.get("mime_type") or "application/octet-stream",
+                data=att.get("data"),
+                filename=att.get("filename"),
+                media_metadata=att.get("media_metadata") or {},
+            )
+        )
+
+    return result
+
+
+def _assemble_prompt_request(  # noqa: PLR0913
+    prompt_dict: dict[str, Any],
+    context_section: dict[str, Any],
+    text: str,
+    interface_name: str | None,
+    interface_path: str | None,
+    message: Any,
+    is_grillo_internal: bool,
+    beat_type: str,
+    is_voice_input: bool,
+    resolved_language: str | None,
+    resolved_message_tone: str | None,
+    image_data: dict[str, Any] | None,
+    attachments: list[Any] | None,
+    allowed_action_types: set[str] | None,
+) -> Any:  # -> PromptRequest
+    """Build a ``PromptRequest`` from the fully-assembled prompt data.
+
+    Called at the end of ``build_json_prompt()`` so engines can opt-in to the
+    new typed representation without changing existing behaviour.
+
+    All parameters are extracted from the local scope of ``build_json_prompt()``.
+    None of the heavy async work is repeated here.
+    """
+    from core.prompt_request import Attachment, PromptRequest, RuntimeContext, Turn  # noqa: F401
+
+    # ── System instruction ──────────────────────────────────────────────────
+    # Prefer verbose (persona + rules); fall back to minified instructions.
+    system_instruction: str = (
+        prompt_dict.get("instructions_verbose") or prompt_dict.get("instructions") or ""
+    )
+
+    # ── Context summary ─────────────────────────────────────────────────────
+    context_summary: str = _build_context_summary(context_section)
+
+    # ── Conversation history ─────────────────────────────────────────────────
+    # Grillo internal beats have no ongoing conversation history.
+    if is_grillo_internal:
+        conversation_history: list[Turn] = []
+    else:
+        try:
+            synth_name: str = str(
+                config_registry.get_value("SYNTH_NAME", "SyntH") or "SyntH"
+            )
+            aliases_raw: str = str(config_registry.get_value("SYNTH_ALIASES", "") or "")
+            synth_names: set[str] = {synth_name.lower()}
+            for alias in aliases_raw.split(","):
+                a = alias.strip()
+                if a:
+                    synth_names.add(a.lower())
+        except Exception:
+            synth_names = {"synth"}
+
+        history_lines: list[Any] = context_section.get("history_current_chat") or []
+        conversation_history = _history_to_turns(history_lines, synth_names)
+
+    # ── Runtime context ─────────────────────────────────────────────────────
+    try:
+        msg_timestamp: str | None = None
+        msg_date = getattr(message, "date", None)
+        if msg_date:
+            msg_timestamp = msg_date.isoformat()
+    except Exception:
+        msg_timestamp = None
+
+    from_user = getattr(message, "from_user", None)
+    username: str | None = get_user_display_name(from_user) if from_user else None
+    usertag: str | None = get_user_usertag(from_user) if from_user else None
+    message_id: int | None = getattr(message, "message_id", None)
+
+    voice_channel_id_val = context_section.get("voice_channel_id")
+    voice_channel_id_str: str | None = (
+        str(voice_channel_id_val) if voice_channel_id_val else None
+    )
+
+    emotions_nl: str | None = context_section.get("current_emotions_nl") or None
+
+    # Effective scope: use context_section's recorded scope or default to "local"
+    scope: str = str(context_section.get("history_scope") or "local")
+
+    runtime_ctx = RuntimeContext(
+        interface_name=interface_name,
+        interface_path=interface_path,
+        message_id=int(message_id) if message_id is not None else None,
+        username=username,
+        usertag=usertag,
+        timestamp=msg_timestamp,
+        input_source="voice" if is_voice_input else "text",
+        emotions=emotions_nl,
+        scope=scope,
+        language=resolved_language,
+        tone=resolved_message_tone,
+        voice_channel_id=voice_channel_id_str,
+        is_grillo_beat=is_grillo_internal,
+        beat_type=beat_type or None,
+    )
+
+    # ── Tool declarations ────────────────────────────────────────────────────
+    tool_declarations: list[Any] = []
+    try:
+        from core.live_tool_registry import LiveToolRegistry
+        from core.core_initializer import core_initializer
+
+        raw_actions: dict[str, Any] = dict(
+            core_initializer.actions_block.get("available_actions", {}) or {}
+        )
+        if allowed_action_types is not None:
+            raw_actions = {
+                k: v for k, v in raw_actions.items() if k in allowed_action_types
+            }
+        tool_declarations = LiveToolRegistry.build_manifests_from_actions(raw_actions)
+    except Exception as _td_exc:
+        log_debug(f"[json_prompt] tool_declarations build skipped: {_td_exc}")
+
+    # ── Reply context ────────────────────────────────────────────────────────
+    reply_to_dict: dict[str, Any] | None = None
+    try:
+        rply = prompt_dict.get("input", {}).get("payload", {}).get("reply_message_id")
+        if isinstance(rply, dict):
+            reply_to_dict = rply
+    except Exception:
+        pass
+
+    # ── Attachments ─────────────────────────────────────────────────────────
+    pr_attachments = _build_pr_attachments(image_data, attachments)
+
+    # ── Determine mode ───────────────────────────────────────────────────────
+    mode: str = "grillo" if is_grillo_internal else "chat"
+
+    return PromptRequest(
+        system_instruction=system_instruction,
+        tool_declarations=tool_declarations,
+        context_summary=context_summary,
+        conversation_history=conversation_history,
+        current_text=text,
+        runtime_ctx=runtime_ctx,
+        attachments=pr_attachments,
+        reply_to=reply_to_dict,
+        supports_tool_calling=False,  # engines set this when they opt-in
+        mode=mode,
+    )
 
 
 def _apply_lite_context_stripping(prompt: dict) -> dict:
@@ -752,6 +1065,31 @@ async def build_json_prompt(
     log_info(
         f"[json_prompt] ⏱️ BUILD PROMPT COMPLETE in {elapsed:.2f}s, final size: {len(json_dumps(prompt_with_instructions)) if isinstance(prompt_with_instructions, dict) else len(str(prompt_with_instructions))} chars"
     )
+
+    # === Build PromptRequest (new typed intermediate representation — Phase 1) ===
+    # Engines ignore __prompt_request in Phase 1; they opt-in by reading it when ready.
+    # This always succeeds or silently skips — zero risk to existing behaviour.
+    try:
+        prompt_with_instructions["__prompt_request"] = _assemble_prompt_request(
+            prompt_dict=prompt_with_instructions,
+            context_section=context_section,
+            text=text,
+            interface_name=interface_name,
+            interface_path=interface_path,
+            message=message,
+            is_grillo_internal=is_grillo_internal,
+            beat_type=str(_beat_type or ""),
+            is_voice_input=_is_voice_input,
+            resolved_language=resolved_language,
+            resolved_message_tone=resolved_message_tone,
+            image_data=image_data,
+            attachments=attachments,
+            allowed_action_types=allowed_action_types_for_prompt,
+        )
+        log_debug("[json_prompt] PromptRequest assembled and attached")
+    except Exception as _pr_exc:
+        log_debug(f"[json_prompt] PromptRequest assembly skipped: {_pr_exc}")
+
     return prompt_with_instructions
 
 
@@ -1137,6 +1475,113 @@ def build_minified_json_instructions() -> dict:
     except Exception as e:  # pragma: no cover - defensive
         log_warning(f"[prompt_engine] Failed to load actions block for minified: {e}")
     return {"instructions": instructions, "actions": actions}
+
+
+async def build_delivery_request(
+    action_type: str,
+    action_outputs: list[dict[str, Any]],
+    interface_name: str | None,
+    interface_path: str | None,
+) -> Any:  # -> PromptRequest
+    """Build a minimal ``PromptRequest`` for delivering action results to a user.
+
+    The LLM receives persona + a delivery instruction + the action outputs and
+    must respond with exactly one ``message_*`` action.  No chat context, no
+    history, no diary — just the delivery task.
+
+    This is the Phase 3 replacement for the two-function pattern:
+        ``build_minified_json_instructions()`` + inline instruction assembly
+    that ``auto_response.py`` currently uses.
+
+    Args:
+        action_type:    Name of the action that produced these outputs
+                        (used in the loop-prevention instruction).
+        action_outputs: List of output dicts from the completed action.
+        interface_name: Name of the target interface (e.g. ``"telegram_bot"``).
+        interface_path: Full interface path of the target user.
+
+    Returns:
+        A ``PromptRequest(mode="delivery")`` ready for ``OpenAIRenderer``.
+    """
+    import json as _json
+    from core.prompt_request import Attachment, PromptRequest, RuntimeContext  # noqa: F401
+    from core.live_tool_registry import LiveToolRegistry
+
+    # ── Gather persona for system instruction ────────────────────────────────
+    persona: str = ""
+    try:
+        from core.action_parser import gather_static_injections
+        from types import SimpleNamespace
+
+        _mock_msg = SimpleNamespace(
+            chat_id=None,
+            text="",
+            message_id=0,
+            from_user=None,
+            date=datetime.now(),
+            reply_to_message=None,
+            interface_path=interface_path,
+        )
+        _injections = await gather_static_injections(_mock_msg, {})
+        if isinstance(_injections, dict):
+            persona = str(_injections.get("persona") or "")
+    except Exception as _pe:
+        log_debug(f"[build_delivery_request] persona gather skipped: {_pe}")
+
+    # ── System instruction ────────────────────────────────────────────────────
+    base_instructions = load_json_instructions()
+    delivery_note = (
+        f"DELIVERY MODE: The following are the results from your '{action_type}' action. "
+        f"DO NOT call '{action_type}' again. "
+        "Compose a natural message to the user summarising these results. "
+        "Use only message_* actions."
+    )
+    system_instruction: str
+    if persona:
+        system_instruction = (
+            f"=== CRITICAL SYSTEM IDENTITY ===\n{persona}\n\n"
+            f"=== DELIVERY TASK ===\n{delivery_note}\n\n"
+            f"=== JSON RESPONSE INSTRUCTIONS ===\n{base_instructions}"
+        )
+    else:
+        system_instruction = f"{delivery_note}\n\n{base_instructions}"
+
+    # ── Current text — the action outputs serialised as JSON ─────────────────
+    current_text: str = _json.dumps(
+        {"action_outputs": action_outputs}, ensure_ascii=False
+    )
+
+    # ── Tool declarations — message_* actions only ────────────────────────────
+    tool_declarations: list[Any] = []
+    try:
+        from core.core_initializer import core_initializer
+
+        full_actions: dict[str, Any] = dict(
+            core_initializer.actions_block.get("available_actions", {}) or {}
+        )
+        msg_actions = {
+            k: v for k, v in full_actions.items() if k.startswith("message_")
+        }
+        tool_declarations = LiveToolRegistry.build_manifests_from_actions(msg_actions)
+    except Exception as _td_exc:
+        log_debug(f"[build_delivery_request] tool_declarations skipped: {_td_exc}")
+
+    # ── Assemble ─────────────────────────────────────────────────────────────
+
+    return PromptRequest(
+        system_instruction=system_instruction,
+        tool_declarations=tool_declarations,
+        context_summary="",
+        conversation_history=[],
+        current_text=current_text,
+        runtime_ctx=RuntimeContext(
+            interface_name=interface_name,
+            interface_path=interface_path,
+        ),
+        attachments=[],
+        supports_tool_calling=False,
+        mode="delivery",
+    )
 
 
 def _estimate_attachment_data_size(prompt: dict) -> int:

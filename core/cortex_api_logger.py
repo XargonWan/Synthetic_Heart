@@ -93,6 +93,25 @@ def _pretty_json(obj: Any, *, redact_keys: set[str] | None = None) -> str:
         return str(obj)
 
 
+def sanitize_for_log(data: Any, *, max_str_len: int = 500) -> Any:
+    """Deep-copy *data*, replacing large strings and bytes with size placeholders.
+
+    Use before passing payloads to ``log_cortex_request`` to avoid dumping
+    megabytes of base64 or binary content into the log.
+    """
+    if isinstance(data, dict):
+        return {
+            k: sanitize_for_log(v, max_str_len=max_str_len) for k, v in data.items()
+        }
+    if isinstance(data, (list, tuple)):
+        return [sanitize_for_log(item, max_str_len=max_str_len) for item in data]
+    if isinstance(data, str) and len(data) > max_str_len:
+        return f"<string: {len(data)} chars>"
+    if isinstance(data, bytes):
+        return f"<bytes: {len(data)} bytes>"
+    return data
+
+
 # ── Public helpers ────────────────────────────────────────────────────────
 
 

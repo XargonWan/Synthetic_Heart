@@ -82,14 +82,20 @@ def test_instructions_enforce_first_person_identity():
     instructions = load_json_instructions()
     assert "Stay inside the active persona in first person" in instructions
     assert "PRONOUN CONSISTENCY" in instructions
-    assert "Do not neutralize an established he/him or she/her person into singular they/them" in instructions
+    assert (
+        "Do not neutralize an established he/him or she/her person into singular they/them"
+        in instructions
+    )
 
 
 def test_unminified_chat_instruction_enforces_identity_rules():
     instructions = load_unminified_chat_instruction("telegram_bot")
     assert "Stay in the active persona in first person" in instructions
     assert "Keep pronouns consistent" in instructions
-    assert "do not replace an established he/him or she/her person with singular they/them" in instructions
+    assert (
+        "do not replace an established he/him or she/her person with singular they/them"
+        in instructions
+    )
 
 
 def test_build_live_system_instruction_enforces_identity_rules(monkeypatch):
@@ -103,7 +109,10 @@ def test_build_live_system_instruction_enforces_identity_rules(monkeypatch):
     assert "You are 2B." in result
     assert "Stay fully inside the active persona in first person" in result
     assert "Keep participant pronouns consistent" in result
-    assert "never replace an established he/him or she/her person with singular they/them" in result
+    assert (
+        "never replace an established he/him or she/her person with singular they/them"
+        in result
+    )
 
 
 def test_build_json_prompt_filters_actions_by_allowlist(monkeypatch):
@@ -153,3 +162,138 @@ def test_build_json_prompt_filters_actions_by_allowlist(monkeypatch):
         assert list(result["actions"].keys()) == ["create_personal_diary_entry"]
     finally:
         core_initializer.actions_block = original_actions_block
+
+
+def test_prompt_request_attached_to_result(monkeypatch):
+    """build_json_prompt must attach a PromptRequest under '__prompt_request'."""
+    from core.prompt_request import PromptRequest
+
+    async def dummy_gather(message, ctx):
+        return {}
+
+    monkeypatch.setattr("core.action_parser.gather_static_injections", dummy_gather)
+
+    message = SimpleNamespace(
+        chat_id=1,
+        text="hey",
+        message_id=1,
+        from_user=SimpleNamespace(full_name="user", username="user"),
+        date=datetime.utcnow(),
+    )
+
+    result = asyncio.run(build_json_prompt(message, {}, interface_name="telegram_bot"))
+
+    assert "__prompt_request" in result, (
+        "build_json_prompt must attach a PromptRequest under '__prompt_request'"
+    )
+    pr = result["__prompt_request"]
+    assert isinstance(pr, PromptRequest), f"Expected PromptRequest, got {type(pr)}"
+    assert pr.system_instruction, "system_instruction must be non-empty"
+    assert pr.current_text, "current_text must be non-empty"
+    assert pr.mode in ("chat", "grillo", "delivery", "live"), (
+        f"Unexpected mode: {pr.mode!r}"
+    )
+
+
+def test_prompt_request_mode_is_grillo_for_grillo_beat(monkeypatch):
+    """Grillo beats should produce a PromptRequest with mode='grillo'."""
+    from core.prompt_request import PromptRequest
+
+    async def dummy_gather(message, ctx):
+        return {}
+
+    monkeypatch.setattr("core.action_parser.gather_static_injections", dummy_gather)
+
+    message = SimpleNamespace(
+        chat_id=-1,
+        text="internal beat",
+        message_id=1,
+        from_user=SimpleNamespace(full_name="grillo", username="grillo"),
+        date=datetime.utcnow(),
+        interface_path="grillo/-1",
+    )
+
+    result = asyncio.run(
+        build_json_prompt(
+            message,
+            {"grillo_beat": True, "beat_type": "self_reflection"},
+            interface_name="grillo",
+        )
+    )
+
+    assert "__prompt_request" in result
+    pr = result["__prompt_request"]
+    assert isinstance(pr, PromptRequest)
+    assert pr.mode == "grillo", f"Expected mode='grillo', got {pr.mode!r}"
+    assert pr.runtime_ctx.is_grillo_beat is True
+
+
+# ── _history_to_turns tests ──────────────────────────────────────────────
+
+
+class TestHistoryToTurns:
+    """Tests for _history_to_turns: converting formatted history lines to Turn objects."""
+
+    def _call(
+        self, lines: list[str], synth_names: set[str] | None = None
+    ) -> list[object]:
+        from core.prompt_engine import _history_to_turns
+
+        return _history_to_turns(lines, synth_names or {"synth"})
+
+    def test_self_sender_becomes_assistant(self) -> None:
+        """'self' is the canonical sender_name for the AI in history format."""
+        lines = ['[13/04/26:0858] self: "Hello from the AI"']
+        turns = self._call(lines, {"2b"})
+        assert len(turns) == 1
+        assert turns[0].role == "assistant"
+        assert "Hello from the AI" in turns[0].content
+
+    def test_synth_name_becomes_assistant(self) -> None:
+        lines = ['[13/04/26:0900] 2B: "I am 2B"']
+        turns = self._call(lines, {"2b"})
+        assert len(turns) == 1
+        assert turns[0].role == "assistant"
+
+    def test_user_sender_becomes_user(self) -> None:
+        lines = ['[13/04/26:0924] Scar: "Hey there"']
+        turns = self._call(lines, {"2b"})
+        assert len(turns) == 1
+        assert turns[0].role == "user"
+        assert "Hey there" in turns[0].content
+
+    def test_mixed_conversation_roles(self) -> None:
+        lines = [
+            '[13/04/26:0924] Scar: "How are you?"',
+            '[13/04/26:0925] self: "I am great!"',
+            '[13/04/26:0926] Scar: "Good to hear"',
+        ]
+        turns = self._call(lines, {"2b"})
+        assert [t.role for t in turns] == ["user", "assistant", "user"]
+
+    def test_from_prefix_parsed_correctly(self) -> None:
+        """Lines with [from ...] prefix should still parse sender and content."""
+        lines = [
+            '[from discord_bot/123/456] [12/04/26:2035] Remuraine: "Hello"',
+            '[from discord_live_123] [12/04/26:2035] self: "Hi back"',
+        ]
+        turns = self._call(lines, {"synth"})
+        assert len(turns) == 2
+        assert turns[0].role == "user"
+        assert turns[1].role == "assistant"
+
+    def test_malformed_lines_skipped(self) -> None:
+        lines = [
+            "not a valid line",
+            42,  # type: ignore[list-item]
+            '[13/04/26:0924] Scar: "valid line"',
+        ]
+        turns = self._call(lines, {"synth"})
+        assert len(turns) == 1
+        assert turns[0].role == "user"
+
+    def test_alias_detected_as_assistant(self) -> None:
+        lines = ['[13/04/26:0900] Toobs: "My alias"']
+        turns = self._call(lines, {"2b", "toobs"})
+        assert len(turns) == 1
+        assert turns[0].role == "assistant"
