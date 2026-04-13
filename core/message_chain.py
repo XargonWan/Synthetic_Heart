@@ -577,6 +577,51 @@ async def handle_incoming_message(
                 return BLOCKED
 
             # Build actions list
+
+            # Pre-normalize: unwrap single-element arrays wrapping a
+            # standard dict response — [{"actions": [...]}, ...],
+            # [{"tool_calls": [...]}, ...], or [{"text": "...", ...}].
+            # Collapse to the inner dict so the existing dict-branch
+            # handles everything (meta, feelings, normalization, etc.).
+            if (
+                isinstance(parsed, list)
+                and len(parsed) == 1
+                and isinstance(parsed[0], dict)
+                and (
+                    "actions" in parsed[0]
+                    or "tool_calls" in parsed[0]
+                    or "text" in parsed[0]
+                )
+            ):
+                _wrapper = parsed[0]
+                _wkey = (
+                    "actions"
+                    if "actions" in _wrapper
+                    else ("tool_calls" if "tool_calls" in _wrapper else "text")
+                )
+                log_info(
+                    f'[message_chain] \U0001f504 Unwrapping [{{"{_wkey}": ...}}] '
+                    "single-element list wrapper \u2192 dict"
+                )
+                parsed = _wrapper
+
+            # Recognise 'tool_calls' as a synonym for 'actions'.  Gemini
+            # sometimes outputs {"tool_calls": [{"name": ..., "arguments": ...}]}
+            # instead of {"actions": [{"type": ..., "payload": ...}]}.
+            if (
+                isinstance(parsed, dict)
+                and "tool_calls" in parsed
+                and "actions" not in parsed
+            ):
+                tc = parsed["tool_calls"]
+                if isinstance(tc, list):
+                    log_info(
+                        f"[message_chain] \U0001f504 Normalizing top-level 'tool_calls' "
+                        f"({len(tc)} item(s)) \u2192 'actions'"
+                    )
+                    parsed["actions"] = tc
+                    del parsed["tool_calls"]
+
             if isinstance(parsed, dict) and "actions" in parsed:
                 actions = (
                     parsed["actions"] if isinstance(parsed["actions"], list) else None
@@ -855,6 +900,44 @@ async def handle_incoming_message(
                     log_warning(
                         f"[message_chain] Bare payload has interface_path "
                         f"but no inferrable action type: {_ipath}"
+                    )
+                    parsed = None
+            elif isinstance(parsed, dict) and "text" in parsed:
+                # Text-only response without actions — e.g.
+                # {"text": "...", "meta": {"autonomous": true}}
+                # The LLM returned a plain message with optional metadata
+                # but omitted the actions wrapper entirely.  Infer the
+                # correct message action from the context interface_path.
+                _ctx_ipath = ctx.get("interface_path", "") if ctx else ""
+                _ctx_iface = (
+                    _ctx_ipath.split("/")[0] if "/" in _ctx_ipath else _ctx_ipath
+                )
+                _inferred_type = _INTERFACE_TO_MESSAGE_ACTION.get(_ctx_iface)
+                if _inferred_type:
+                    _text_content = parsed.get("text", "")
+                    _payload: dict[str, Any] = {
+                        "text": _text_content,
+                        "interface_path": _ctx_ipath,
+                    }
+                    _msg_action: dict[str, Any] = {
+                        "type": _inferred_type,
+                        "payload": _payload,
+                    }
+                    # Propagate top-level meta (e.g. autonomous flag) to the action
+                    _top_meta = parsed.get("meta")
+                    if isinstance(_top_meta, dict):
+                        _msg_action["meta"] = _top_meta
+                    actions = [_msg_action]
+                    log_info(
+                        f"[message_chain] 🔄 Wrapping text-only response "
+                        f"as {_inferred_type} (no actions array, inferred "
+                        f"from context interface_path={_ctx_ipath})"
+                    )
+                else:
+                    log_warning(
+                        f"[message_chain] Text-only response but cannot "
+                        f"infer message action from interface_path: "
+                        f"{_ctx_ipath!r}"
                     )
                     parsed = None
             elif (
