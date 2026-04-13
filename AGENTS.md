@@ -340,6 +340,22 @@ docker exec synth-dev tail -f /app/logs/synth.log | grep -E "\[grillo\]|grillo"
 
 ---
 
+### Corrector returns empty when `successful_actions = []`  <!-- 2026-04-13 -->
+**Symptom:** LLM outputs actions without a `type` field (e.g. `{"arousal": 5}`). The unsupported-action check fires, sets `correction_context` with `successful_actions=[]`, and calls the corrector. The corrector told the LLM "PARTIAL SUCCESS — 0 actions succeeded, do NOT repeat successful ones", which was self-contradictory and caused the LLM to return an empty string all 4 attempts → fallback '😵'.
+**Location:** `core/transport_layer.py` → `run_corrector_middleware`, the `if correction_context:` block that builds `correction_message_text`.
+**Status:** fixed — when `successful_actions` is empty the corrector now uses a `CORRECTION NEEDED` prompt asking the LLM to resend the full response, not the "PARTIAL SUCCESS" / "do not repeat" wording that misled it.
+**Notes:** Also added `"Every action object inside 'actions' MUST have a 'type' field"` to `strict_requirements`. The root trigger is the LLM emitting bare dict actions like `{"arousal": 5}` or `{"feelings": {...}}` without a `type` key; the strict requirement now explicitly prohibits this.
+
+---
+
+### `test_corrector_on_top_level_message.py` — fake corrector never called  <!-- 2026-04-13 -->
+**Symptom:** `test_corrector_invoked_when_top_level_message_without_message_action` fails with `AssertionError: assert 'context' in {}` — the `called` dict is empty because the fake was never invoked.
+**Location:** `tests/test_corrector_on_top_level_message.py`
+**Status:** pre-existing, not fixed.
+**Notes:** The test patches `core.transport_layer.run_corrector_middleware` but `core.action_parser` imports the function at module level (`from core.transport_layer import run_corrector_middleware`), so the patch doesn't intercept calls made from inside `action_parser`. The test also needs to patch `core.action_parser.run_corrector_middleware`. Separately, in some test environment configurations `use_animation` is resolved as a registered action (PersonaManager is loaded), causing `corrector_orchestrator` to exit early with "Actions executed successfully" before selective correction even fires.
+
+---
+
 ## 13. Database Quick Reference
 
 > Tables are created inline in `core/db.py` and each plugin — **`init-db.sql` only seeds a subset.** If you need a table's full column list, `grep -A20 "CREATE TABLE IF NOT EXISTS <name>"` in the relevant file.
@@ -430,7 +446,7 @@ All keys stored in the `config` table and accessible via `config_registry.get_va
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **synthetic_heart** (7464 symbols, 24857 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **synthetic_heart** (7489 symbols, 24879 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
 

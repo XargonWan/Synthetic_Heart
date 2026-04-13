@@ -1633,34 +1633,66 @@ async def run_corrector_middleware(
                 successful = correction_context.get("successful_actions", [])
                 failed = correction_context.get("failed_actions", [])
 
-                correction_message_text = (
-                    f"PARTIAL SUCCESS - Some actions completed, others failed.\n\n"
-                    f"✅ Successfully executed {len(successful)} action(s):\n"
-                )
-                for action in successful:
-                    action_type = action.get("type", "unknown")
-                    correction_message_text += f"  - {action_type}\n"
-
-                correction_message_text += (
-                    f"\n❌ Failed {len(failed)} action(s) that need correction:\n"
-                )
-                for failed_item in failed:
-                    action = failed_item.get("action", {})
-                    action_errors = failed_item.get("errors", [])
-                    action_type = action.get("type", "unknown")
-                    correction_message_text += (
-                        f"  - {action_type}: {', '.join(action_errors)}\n"
+                if successful:
+                    # At least some actions ran — tell LLM exactly what to re-emit
+                    correction_message_text = (
+                        f"PARTIAL SUCCESS - Some actions completed, others failed.\n\n"
+                        f"✅ Successfully executed {len(successful)} action(s):\n"
                     )
+                    for action in successful:
+                        action_type = action.get("type", "unknown")
+                        correction_message_text += f"  - {action_type}\n"
 
-                if allowed_action_types:
-                    correction_message_text += f"\nAllowed action types for this scope: {', '.join(sorted(allowed_action_types))}\n"
-                correction_message_text += (
-                    "\nRequirements:\n"
-                    "1. Respond with ONLY valid JSON\n"
-                    "2. Include ONLY the missing/failed actions - do NOT repeat successful ones\n"
-                    "3. Fix validation errors in the failed actions\n"
-                    "4. Ensure you've created ALL actions from the user's original request\n"
-                )
+                    correction_message_text += (
+                        f"\n❌ Failed {len(failed)} action(s) that need correction:\n"
+                    )
+                    for failed_item in failed:
+                        action = failed_item.get("action", {})
+                        action_errors = failed_item.get("errors", [])
+                        action_type = action.get("type") or "(no type field)"
+                        correction_message_text += (
+                            f"  - {action_type}: {', '.join(action_errors)}\n"
+                        )
+
+                    if allowed_action_types:
+                        correction_message_text += f"\nAllowed action types for this scope: {', '.join(sorted(allowed_action_types))}\n"
+                    correction_message_text += (
+                        "\nRequirements:\n"
+                        "1. Respond with ONLY valid JSON\n"
+                        "2. Include ONLY the missing/failed actions - do NOT repeat successful ones\n"
+                        "3. Fix validation errors in the failed actions\n"
+                        "4. Ensure you've created ALL actions from the user's original request\n"
+                        "5. Every action object MUST have a 'type' field with a valid action name\n"
+                    )
+                else:
+                    # Nothing succeeded — treat as full correction so the LLM
+                    # knows to resend the ENTIRE response, not just a fragment.
+                    # Saying "PARTIAL SUCCESS" with 0 successes is contradictory
+                    # and causes the LLM to return an empty reply.
+                    failed_summary = ""
+                    for failed_item in failed:
+                        action = failed_item.get("action", {})
+                        action_errors = failed_item.get("errors", [])
+                        action_type = action.get("type") or "(missing 'type' field)"
+                        failed_summary += (
+                            f"  - {action_type}: {', '.join(action_errors)}\n"
+                        )
+
+                    correction_message_text = (
+                        f"CORRECTION NEEDED: Your previous response contained "
+                        f"{len(failed)} unsupported or malformed action(s) and "
+                        f"nothing was delivered to the user.\n\n"
+                        f"❌ Invalid action(s):\n"
+                        f"{failed_summary}\n"
+                        f"Requirements:\n"
+                        f"1. Respond with ONLY valid JSON\n"
+                        f"2. Include ALL actions needed to answer the user's original message\n"
+                        f"3. Every action object MUST have a 'type' field with a recognised action name\n"
+                        f"4. Do NOT use emotion names (e.g. 'arousal', 'happy') as action types — "
+                        f"emotions belong in the 'feelings' metadata object\n"
+                    )
+                    if allowed_action_types:
+                        correction_message_text += f"Allowed action types for this scope: {', '.join(sorted(allowed_action_types))}\n"
             else:
                 # Full correction: complete JSON failure
                 correction_message_text = (
@@ -1725,6 +1757,7 @@ async def run_corrector_middleware(
                 "NO markdown formatting (e.g., no ```json blocks)",
                 "NO explanations outside JSON",
                 'Emotions MUST be provided in the \'feelings\' metadata object, NEVER as top-level actions (e.g., do NOT use {"type": "happy"})',
+                "Every action object inside 'actions' MUST have a 'type' field with a valid action name - actions without a 'type' field are invalid and will be rejected",
             ]
             correction_prompt = json.dumps(correction_payload, ensure_ascii=False)
 
