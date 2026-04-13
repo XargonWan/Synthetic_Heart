@@ -220,6 +220,7 @@ class OpenRouterModel:
     supports_vision: bool = False
     supports_audio: bool = False
     supports_tool_use: bool = False
+    supports_json_mode: bool = False
     pricing_prompt: float = 0.0
     pricing_completion: float = 0.0
 
@@ -256,6 +257,7 @@ class OpenRouterModel:
         supports_tools = (
             "tools" in supported_params or "tool_choice" in supported_params
         )
+        supports_json = "response_format" in supported_params
 
         return cls(
             id=model_id,
@@ -266,6 +268,7 @@ class OpenRouterModel:
             supports_vision=supports_vision,
             supports_audio=supports_audio,
             supports_tool_use=supports_tools,
+            supports_json_mode=supports_json,
             pricing_prompt=p_prompt,
             pricing_completion=p_completion,
         )
@@ -355,7 +358,17 @@ async def _catalog_refresh_loop(base_url: str, interval_minutes: int) -> None:
 # ---------------------------------------------------------------------------
 
 # Supported image MIME types for OpenAI vision format
-_VISION_MIME_TYPES = {"image/jpeg", "image/png", "image/gif", "image/webp"}
+_VISION_MIME_TYPES = {
+    "image/jpeg",
+    "image/png",
+    "image/gif",
+    "image/webp",
+    "image/bmp",
+    "image/tiff",
+    "image/avif",
+    "image/heic",
+    "image/heif",
+}
 
 # Supported audio MIME types — sent as input_audio content parts (OpenAI format)
 _AUDIO_MIME_TYPES: dict[str, str] = {
@@ -367,6 +380,16 @@ _AUDIO_MIME_TYPES: dict[str, str] = {
     "audio/mp4": "mp4",
     "audio/webm": "webm",
     "audio/flac": "flac",
+}
+
+# Document MIME types — forwarded as data-URI image_url parts.
+# Supported by Gemini (via OpenRouter), Claude, and some GPT-4 variants.
+_DOCUMENT_MIME_TYPES = {
+    "application/pdf",
+    "text/plain",
+    "text/csv",
+    "text/html",
+    "text/markdown",
 }
 
 
@@ -919,6 +942,11 @@ class OpenRouterPlugin(AIPluginBase):
             ],
         }
 
+        # Enforce structured JSON output when the model supports it
+        model_info = _catalog.get(resolved_model)
+        if model_info and model_info.supports_json_mode:
+            payload["response_format"] = {"type": "json_object"}
+
         # ── Log the outgoing request ──────────────────────────────────
         log_cortex_request(
             "openrouter",
@@ -1060,6 +1088,32 @@ class OpenRouterPlugin(AIPluginBase):
             )
 
         content = choices[0].get("message", {}).get("content", "")
+        finish_reason = choices[0].get("finish_reason", "")
+
+        if finish_reason == "content_filter":
+            log_warning(
+                f"[openrouter] Response blocked by content filter "
+                f"(model={resolved_model}, finish_reason={finish_reason})"
+            )
+            if not content:
+                return json.dumps(
+                    {
+                        "actions": [
+                            {
+                                "type": "system_message",
+                                "payload": {
+                                    "text": "Response blocked by provider safety filter"
+                                },
+                            }
+                        ]
+                    }
+                )
+        elif finish_reason == "length":
+            log_warning(
+                f"[openrouter] Response truncated due to max_tokens limit "
+                f"(model={resolved_model})"
+            )
+
         if not content:
             log_error(f"[openrouter] Response contained no content: {data}")
             return json.dumps(
@@ -1120,10 +1174,35 @@ class OpenRouterPlugin(AIPluginBase):
             "model": resolved_model,
             "messages": messages,
             "max_tokens": max_tokens,
+            # Disable safety filters for providers that support it (Gemini).
+            # Grok has no adjustable safety — it's already minimally filtered.
+            "safety_settings": [
+                {
+                    "category": "HARM_CATEGORY_HARASSMENT",
+                    "threshold": "BLOCK_NONE",
+                },
+                {
+                    "category": "HARM_CATEGORY_HATE_SPEECH",
+                    "threshold": "BLOCK_NONE",
+                },
+                {
+                    "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+                    "threshold": "BLOCK_NONE",
+                },
+                {
+                    "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
+                    "threshold": "BLOCK_NONE",
+                },
+            ],
         }
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
+
+        # Enforce structured JSON output when the model supports it
+        model_info = _catalog.get(resolved_model)
+        if model_info and model_info.supports_json_mode:
+            payload["response_format"] = {"type": "json_object"}
 
         headers: dict[str, str] = {
             "Content-Type": "application/json",
@@ -1198,16 +1277,33 @@ class OpenRouterPlugin(AIPluginBase):
             return _error_json("OpenRouter response missing choices")
 
         choice_msg = choices[0].get("message", {})
+        finish_reason = choices[0].get("finish_reason", "")
+
+        if finish_reason == "content_filter":
+            log_warning(
+                f"[openrouter] Response blocked by content filter "
+                f"(PromptRequest path, model={resolved_model}, "
+                f"finish_reason={finish_reason})"
+            )
+        elif finish_reason == "length":
+            log_warning(
+                f"[openrouter] Response truncated due to max_tokens limit "
+                f"(PromptRequest path, model={resolved_model})"
+            )
+
         tool_calls = choice_msg.get("tool_calls")
         if tool_calls:
             result_text = OpenAIRenderer.parse_tool_call_response(data)
         else:
             result_text = choice_msg.get("content") or ""
             if not result_text:
-                log_error(
-                    f"[openrouter] Response had no content (PromptRequest path): {data}"
+                diag = (
+                    "blocked by provider safety filter"
+                    if finish_reason == "content_filter"
+                    else "contained no content"
                 )
-                return _error_json("OpenRouter response contained no content")
+                log_error(f"[openrouter] Response {diag} (PromptRequest path): {data}")
+                return _error_json(f"OpenRouter response {diag}")
 
         usage = data.get("usage")
         _elapsed = (time.monotonic() - _req_start) * 1000
@@ -1481,8 +1577,9 @@ class OpenRouterPlugin(AIPluginBase):
 
             is_image = mime_type in _VISION_MIME_TYPES
             is_audio = mime_type in _AUDIO_MIME_TYPES
+            is_document = mime_type in _DOCUMENT_MIME_TYPES
 
-            if not is_image and not is_audio:
+            if not is_image and not is_audio and not is_document:
                 if mime_type and not mime_type.startswith("application/octet"):
                     log_debug(
                         f"[openrouter] Skipping unsupported attachment: {mime_type}"
@@ -1518,6 +1615,19 @@ class OpenRouterPlugin(AIPluginBase):
                 log_debug(
                     f"[openrouter] Added image part: {mime_type} "
                     f"len={len(b64_data)} hash={_img_hash}"
+                )
+            elif is_document:
+                # Documents (PDF, text, etc.) use the same image_url data-URI
+                # format.  Providers that don't support them will ignore the
+                # part harmlessly; Gemini-via-OpenRouter handles them natively.
+                parts.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:{mime_type};base64,{b64_data}"},
+                    }
+                )
+                log_debug(
+                    f"[openrouter] Added document part: {mime_type} len={len(b64_data)}"
                 )
             else:
                 # Audio — OpenAI input_audio format
