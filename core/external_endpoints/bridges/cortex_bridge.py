@@ -100,6 +100,37 @@ class ExternalCortexEngine(AIPluginBase):
         self.display_name = endpoint.display_label or endpoint.name
 
     # ------------------------------------------------------------------
+    # Multimodal format helpers
+    # ------------------------------------------------------------------
+
+    def _format_mm_part(self, part: dict[str, str]) -> dict[str, Any]:
+        """Format a multimodal attachment dict for the endpoint's wire protocol.
+
+        Gemini expects ``{"type": "inline_data", "inline_data": {…}}``,
+        while OpenAI-compat endpoints (OpenRouter, Grok, GPT, etc.) expect
+        ``{"type": "image_url", "image_url": {"url": "data:…;base64,…"}}``.
+
+        The Gemini adapter already converts ``image_url`` → ``inline_data``
+        internally, so emitting ``image_url`` is safe for *all* protocols,
+        but we default to ``inline_data`` for Gemini to skip the conversion.
+        """
+        from core.external_endpoints.models import EndpointProtocol
+
+        mime = part["mime_type"]
+        data = part["data"]
+
+        if self._endpoint.protocol == EndpointProtocol.GEMINI:
+            return {
+                "type": "inline_data",
+                "inline_data": {"mime_type": mime, "data": data},
+            }
+        # OpenAI / Anthropic / Custom — use data-URI image_url format
+        return {
+            "type": "image_url",
+            "image_url": {"url": f"data:{mime};base64,{data}"},
+        }
+
+    # ------------------------------------------------------------------
     # Core LLM interface
     # ------------------------------------------------------------------
 
@@ -165,15 +196,7 @@ class ExternalCortexEngine(AIPluginBase):
                     {"type": "text", "text": prompt_text}
                 ]
                 for p in mm_parts:
-                    content_parts.append(
-                        {
-                            "type": "inline_data",
-                            "inline_data": {
-                                "mime_type": p["mime_type"],
-                                "data": p["data"],
-                            },
-                        }
-                    )
+                    content_parts.append(self._format_mm_part(p))
                 msg_list = [{"role": "user", "content": content_parts}]
                 log_debug(
                     f"[cortex_bridge] Extracted {len(mm_parts)} multimodal "
@@ -244,15 +267,7 @@ class ExternalCortexEngine(AIPluginBase):
                 {"type": "text", "text": user_content}
             ]
             for p in mm_parts:
-                content_parts.append(
-                    {
-                        "type": "inline_data",
-                        "inline_data": {
-                            "mime_type": p["mime_type"],
-                            "data": p["data"],
-                        },
-                    }
-                )
+                content_parts.append(self._format_mm_part(p))
             log_debug(
                 f"[cortex_bridge] _build_messages: extracted {len(mm_parts)} "
                 f"multimodal part(s)"
