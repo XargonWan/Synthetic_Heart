@@ -285,7 +285,7 @@ class DebriefActionIntentPlugin:
                         {"role": "user", "content": user_prompt},
                     ]
                 ),
-                timeout=10,
+                timeout=120,
             )
         except Exception as e:
             log_warning(f"[debrief_action_intent] LLM generation failed: {e}")

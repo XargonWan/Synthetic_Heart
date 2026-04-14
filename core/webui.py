@@ -293,11 +293,24 @@ class SynthWebUIInterface:
         attachments_root = os.getenv("SYNTH_ATTACHMENTS_ROOT")
         if attachments_root:
             self.attachments_dir = Path(attachments_root).expanduser()
+            log_info(
+                f"{LOG_PREFIX} Using attachments directory from SYNTH_ATTACHMENTS_ROOT: {self.attachments_dir}",
+                log_file=WEBUI_LOG,
+            )
         else:
             xdg_data_home = os.getenv("XDG_DATA_HOME")
-            self.attachments_dir = (
-                Path(xdg_data_home).expanduser() if xdg_data_home else Path("/config")
-            ) / "attachments"
+            if xdg_data_home:
+                self.attachments_dir = Path(xdg_data_home).expanduser() / "attachments"
+                log_info(
+                    f"{LOG_PREFIX} Using attachments directory from XDG_DATA_HOME: {self.attachments_dir}",
+                    log_file=WEBUI_LOG,
+                )
+            else:
+                self.attachments_dir = Path("/config") / "uploads"
+                log_info(
+                    f"{LOG_PREFIX} Using default attachments directory: {self.attachments_dir}",
+                    log_file=WEBUI_LOG,
+                )
         try:
             self.attachments_dir.mkdir(parents=True, exist_ok=True)
         except Exception as exc:
@@ -311,6 +324,10 @@ class SynthWebUIInterface:
                 self.attachments_dir = fallback_dir
                 log_info(
                     f"{LOG_PREFIX} Falling back to attachments directory {self.attachments_dir}",
+                    log_file=WEBUI_LOG,
+                )
+                log_warning(
+                    f"{LOG_PREFIX} Uploaded files will not persist in temporary attachments directory {self.attachments_dir}",
                     log_file=WEBUI_LOG,
                 )
             except Exception as exc2:
@@ -3019,6 +3036,13 @@ class SynthWebUIInterface:
                         log_warning(
                             f"{LOG_PREFIX} Failed to inline chat attachment data: {exc}"
                         )
+                log_debug(
+                    f"{LOG_PREFIX} Normalized webui attachment: filename={file_name}, "
+                    f"mime_type={normalized.get('mime_type')}, "
+                    f"size={normalized.get('size')}, "
+                    f"path={normalized.get('path')}, "
+                    f"inlined_data={'data' in normalized}"
+                )
                 return normalized
 
         return attachment
@@ -3042,6 +3066,16 @@ class SynthWebUIInterface:
         log_info(
             f"{LOG_PREFIX} [_handle_user_message] START: session_id={session_id}, text_len={len(text)}, text={text[:100]}"
         )
+        log_debug(
+            f"{LOG_PREFIX} [_handle_user_message] normalized_attachments={len(normalized_attachments)}"
+        )
+        for att in normalized_attachments:
+            log_debug(
+                f"{LOG_PREFIX} [_handle_user_message] attachment metadata: "
+                f"filename={att.get('filename')}, mime_type={att.get('mime_type')}, "
+                f"size={att.get('size')}, path={att.get('path')}, "
+                f"has_data={'data' in att}"
+            )
 
         # Get trainer name for the user
         trainer_name = (
@@ -3599,11 +3633,16 @@ class SynthWebUIInterface:
                     "sender": "synth",
                     "text": text,
                 }
+                # Forward attachments if present so the WebUI can render them.
+                if metadata and isinstance(metadata.get("attachments"), list):
+                    payload["attachments"] = metadata["attachments"]
+                    # Keep attachments accessible under `data` for compatibility.
+                    payload.setdefault("data", {})["attachments"] = metadata["attachments"]
+
                 # Forward metadata fields that the client can use (e.g. tts_url).
                 if metadata and metadata.get("tts_url"):
                     payload["tts_url"] = metadata["tts_url"]
-                    # Also include in `data` for clients that expect it there.
-                    payload["data"] = {"tts_url": metadata["tts_url"]}
+                    payload.setdefault("data", {})["tts_url"] = metadata["tts_url"]
 
                 await websocket.send_json(payload)
             except Exception as e:

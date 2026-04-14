@@ -1221,6 +1221,7 @@ async def _describe_attachment_images_with_iris(
 
         iris = PLUGIN_REGISTRY.get("iris_plugin")
         if iris is None:
+            log_info("[plugin_instance] Iris skip: iris_plugin not found in PLUGIN_REGISTRY")
             return None
         # Refresh config before reading _active_engine_name so we get the
         # DB-loaded value rather than the hard-coded startup default ("disabled").
@@ -1228,8 +1229,11 @@ async def _describe_attachment_images_with_iris(
             iris.refresh_config()
         except Exception:
             pass
-        if getattr(iris, "_active_engine_name", "disabled") == "disabled":
+        active_engine = getattr(iris, "_active_engine_name", "disabled")
+        if active_engine == "disabled":
+            log_info("[plugin_instance] Iris skip: active engine is 'disabled'")
             return None
+        log_info(f"[plugin_instance] Iris active engine: '{active_engine}', processing {len(attachments)} attachment(s)")
     except Exception as exc:
         log_debug(f"[plugin_instance] Iris plugin lookup failed: {exc}")
         return None
@@ -1242,11 +1246,28 @@ async def _describe_attachment_images_with_iris(
             or ""
         )
         if not mime_type.startswith(("image/", "video/")):
+            log_debug(f"[plugin_instance] Iris skip attachment: mime_type={mime_type!r} not image/video")
             continue
 
         data_b64 = attachment.get("data")
         if not data_b64 or not isinstance(data_b64, str):
-            continue
+            # Try to read from path if data is missing
+            file_path = attachment.get("path") or attachment.get("file_path")
+            if file_path:
+                try:
+                    p = Path(file_path)
+                    if p.exists() and p.is_file():
+                        data_b64 = base64.b64encode(p.read_bytes()).decode("utf-8")
+                        log_info(f"[plugin_instance] Iris: read file from path for attachment ({mime_type})")
+                    else:
+                        log_warning(f"[plugin_instance] Iris skip: no data and file not found at {file_path!r}")
+                        continue
+                except Exception as exc:
+                    log_warning(f"[plugin_instance] Iris skip: failed to read {file_path!r}: {exc}")
+                    continue
+            else:
+                log_warning(f"[plugin_instance] Iris skip: attachment has no data and no path (mime={mime_type!r})")
+                continue
 
         try:
             image_bytes = base64.b64decode(data_b64)
@@ -1269,9 +1290,12 @@ async def _describe_attachment_images_with_iris(
                 tmp.write(image_bytes)
                 tmp_path = tmp.name
 
+            log_info(f"[plugin_instance] Iris: calling describe_media for {mime_type} ({len(image_bytes)} bytes)")
             result = await iris.describe_media(tmp_path, mime_type, prompt)
             if result and result.description:
+                log_info(f"[plugin_instance] Iris: got description ({len(result.description)} chars)")
                 return result.description
+            log_info(f"[plugin_instance] Iris: describe_media returned empty result={result!r}")
         except Exception as exc:
             log_warning(f"[plugin_instance] Iris description failed: {exc}")
         finally:

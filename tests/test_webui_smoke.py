@@ -95,6 +95,16 @@ def test_uploads_route_mounted(tmp_path, monkeypatch):
     assert r.text == "hello"
 
 
+def test_attachments_directory_uses_xdg_data_home(monkeypatch, tmp_path):
+    monkeypatch.delenv("SYNTH_ATTACHMENTS_ROOT", raising=False)
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
+
+    ui = SynthWebUIInterface(autostart=False)
+
+    assert ui.attachments_dir == Path(str(tmp_path / "xdg")) / "attachments"
+    assert ui.attachments_dir.exists()
+
+
 def test_chat_attachment_upload_endpoint(tmp_path, monkeypatch):
     monkeypatch.setenv("SYNTH_ATTACHMENTS_ROOT", str(tmp_path / "attachments"))
     ui = SynthWebUIInterface(autostart=False)
@@ -109,6 +119,37 @@ def test_chat_attachment_upload_endpoint(tmp_path, monkeypatch):
     assert data.get("url", "").startswith("/uploads/")
     uploaded_name = data["url"].split("/uploads/")[1]
     assert (ui.attachments_dir / uploaded_name).exists()
+
+
+def test_send_message_forwards_attachments_to_websocket(monkeypatch):
+    ui = SynthWebUIInterface(autostart=False)
+
+    sent_payloads: list[dict[str, Any]] = []
+
+    class DummyWebSocket:
+        async def send_json(self, payload: dict[str, Any]) -> None:
+            sent_payloads.append(payload)
+
+    ui.connections["session1"] = DummyWebSocket()
+    metadata = {
+        "attachments": [
+            {
+                "url": "/uploads/test.jpg",
+                "filename": "test.jpg",
+                "mime_type": "image/jpeg",
+                "size": 123,
+            }
+        ]
+    }
+
+    import asyncio
+
+    asyncio.run(ui.send_message("session1", text="Hello", metadata=metadata))
+
+    assert len(sent_payloads) == 1
+    payload = sent_payloads[0]
+    assert payload["attachments"] == metadata["attachments"]
+    assert payload["data"]["attachments"] == metadata["attachments"]
 
 
 def test_normalize_webui_attachment_local_path(tmp_path, monkeypatch):
@@ -234,13 +275,13 @@ def test_attachments_directory_falls_back_to_temp(monkeypatch):
 
     def fake_mkdir(self, parents=False, exist_ok=False):
         if str(self).startswith("/config"):
-            raise PermissionError("Permission denied: '/config/attachments'")
+            raise PermissionError("Permission denied: '/config/uploads'")
         return original_mkdir(self, parents=parents, exist_ok=exist_ok)
 
     monkeypatch.setattr(Path, "mkdir", fake_mkdir)
 
     ui = SynthWebUIInterface(autostart=False)
 
-    assert "/config/attachments" not in str(ui.attachments_dir)
+    assert "/config/uploads" not in str(ui.attachments_dir)
     assert ui.attachments_dir.exists()
     assert str(ui.attachments_dir).startswith(tempfile.gettempdir())

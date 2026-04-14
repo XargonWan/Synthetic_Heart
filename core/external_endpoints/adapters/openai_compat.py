@@ -454,25 +454,41 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
             }
         ]
 
+        model_name = str(kwargs.get("model", "default")).lower()
+        vision_timeout = float(kwargs.pop("vision_timeout", 300))
+        if "qwen" in model_name and "enable_thinking" not in kwargs:
+            kwargs["enable_thinking"] = False
+
         payload: dict[str, Any] = {
             "model": kwargs.get("model", "default"),
             "messages": messages,
             "max_tokens": kwargs.get("max_tokens", 1024),
             "stream": False,
         }
+        if "enable_thinking" in kwargs:
+            payload["enable_thinking"] = kwargs["enable_thinking"]
+
         headers = {
             "Authorization": f"Bearer {self._api_key}",
             "Content-Type": "application/json",
         }
+        # Vision calls use only /chat/completions endpoints — generic /chat
+        # fallbacks (e.g. /v1/chat) are non-standard and return empty content
+        # on servers like LM Studio.  Qwen models may need longer response times
+        # and also support the vendor extension ``enable_thinking``.
+        vision_urls = [u for u in self._http_chat_urls() if u.endswith("completions")]
+        if not vision_urls:
+            vision_urls = self._http_chat_urls()
+
         try:
             async with aiohttp.ClientSession() as session:
-                for chat_url in self._http_chat_urls():
+                for chat_url in vision_urls:
                     try:
                         async with session.post(
                             chat_url,
                             json=payload,
                             headers=headers,
-                            timeout=aiohttp.ClientTimeout(total=120),
+                            timeout=aiohttp.ClientTimeout(total=vision_timeout),
                         ) as resp:
                             if resp.status != 200:
                                 continue
