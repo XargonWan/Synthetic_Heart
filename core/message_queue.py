@@ -132,6 +132,7 @@ async def enqueue(
     skip_mention_check: bool = False,
     original_message=None,
     response_future: asyncio.Future | None = None,
+    media_future: asyncio.Future | None = None,
 ) -> None:
     """Enqueue a message for serialized processing with rate limiting.
 
@@ -503,6 +504,7 @@ async def enqueue(
         "priority": priority,
         "history_scope": history_scope,
         "response_future": response_future,
+        "media_future": media_future,
     }
 
     global _counter
@@ -709,6 +711,31 @@ async def _consumer_loop() -> None:
             log_debug(
                 f"[QUEUE] Dequeued message from chat {item.get('chat_id')} (priority={priority}, counter={counter})"
             )
+
+            # If this item carries a media_future, media processing (Auris/Iris/download)
+            # is still in progress in handle_media_live. Block here until it resolves so
+            # the consumer slot is occupied at NORMAL_PRIORITY and no LOW_PRIORITY
+            # (Grillo) item can be extracted and started concurrently.
+            _media_future: asyncio.Future | None = item.get("media_future")
+            if _media_future is not None:
+                try:
+                    _resolved_msg = await asyncio.wait_for(_media_future, timeout=120.0)
+                    item["message"] = _resolved_msg
+                except asyncio.TimeoutError:
+                    log_warning(
+                        f"[QUEUE] media_future timed out (120 s) for chat {item.get('chat_id')}; discarding item"
+                    )
+                    continue
+                except asyncio.CancelledError:
+                    log_warning(
+                        f"[QUEUE] media_future was cancelled for chat {item.get('chat_id')}; discarding item"
+                    )
+                    continue
+                except Exception as _mf_exc:
+                    log_warning(
+                        f"[QUEUE] media_future raised {_mf_exc!r} for chat {item.get('chat_id')}; discarding item"
+                    )
+                    continue
 
             async with _get_lock():
                 batch = await compact_similar_messages(item)
@@ -1118,6 +1145,36 @@ async def _consumer_loop() -> None:
                             )
 
                     try:
+                        # Cancel any running LOW_PRIORITY background task for the
+                        # same interface_path IMMEDIATELY — before any event-loop
+                        # yields — so the Grillo task cannot make further progress
+                        # (e.g. write to chat history) between now and when we
+                        # actually start processing the user message.
+                        _existing_bg = _bg_tasks.pop(interface_path, None)
+                        if _existing_bg is not None and not _existing_bg.done():
+                            _existing_bg.cancel()
+                            log_info(
+                                f"[QUEUE] Cancelled LOW_PRIORITY background task for {interface_path} "
+                                f"(superseded by incoming user message)"
+                            )
+
+                        # Also cancel any Grillo-internal background beats (keyed as
+                        # "grillo/…"). These run under a different interface_path but
+                        # share the event loop and can interleave between Iris/Auris
+                        # analysis and LLM prompt construction inside
+                        # handle_incoming_message. Direct user requests always
+                        # take priority over background Grillo beats.
+                        for _gk in [
+                            k for k in list(_bg_tasks) if k.startswith("grillo/")
+                        ]:
+                            _gt = _bg_tasks.pop(_gk, None)
+                            if _gt is not None and not _gt.done():
+                                _gt.cancel()
+                                log_info(
+                                    f"[QUEUE] Cancelled Grillo internal beat {_gk} "
+                                    f"(user message arrived for {interface_path})"
+                                )
+
                         # Ensure the message object has normalized user fields and date
                         try:
                             ensure_message_user_fields(final.get("message"))
@@ -1135,21 +1192,6 @@ async def _consumer_loop() -> None:
                         await _broadcast_global_animation_state(
                             _resolve_generation_animation_state("start")
                         )
-
-                        # Cancel any running LOW_PRIORITY background task for the
-                        # same interface_path.  This prevents duplicate responses
-                        # when a grillo outreach beat races against a user message
-                        # for the same chat — the outreach prompt includes chat
-                        # history and the LLM would otherwise respond to the user's
-                        # message, producing a duplicate alongside the trainer
-                        # engine's proper reply.
-                        _existing_bg = _bg_tasks.pop(interface_path, None)
-                        if _existing_bg is not None and not _existing_bg.done():
-                            _existing_bg.cancel()
-                            log_info(
-                                f"[QUEUE] Cancelled LOW_PRIORITY background task for {interface_path} "
-                                f"(superseded by incoming user message)"
-                            )
 
                         # Selenium-based LLMs manage browser state and cannot be safely
                         # cancelled mid-flight. All other engines (HTTP-based Gemini, OpenAI, …)

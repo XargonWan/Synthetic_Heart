@@ -57,27 +57,40 @@ async def test_handle_media_live_transcribes(tmp_path, monkeypatch):
     orig = PLUGIN_REGISTRY.get("auris_plugin")
     PLUGIN_REGISTRY["auris_plugin"] = FakeAuris("hello world")
     try:
-        # capture calls to message_queue.enqueue
-        recorded = []
+        # capture the media_future passed to message_queue.enqueue so we can
+        # inspect the resolved MessageWrapper after handle_media_live returns.
+        all_futures: list = []
 
         async def fake_enqueue(
-            bot_arg, wrapped, interface_id, original_message, skip_mention_check
+            bot_arg,
+            wrapped,
+            interface_id=None,
+            original_message=None,
+            skip_mention_check=False,
+            media_future=None,
+            **kw,
         ):
-            recorded.append(
-                (wrapped, interface_id, original_message, skip_mention_check)
-            )
+            if media_future is not None:
+                all_futures.append(
+                    {
+                        "future": media_future,
+                        "interface_id": interface_id,
+                        "original_message": original_message,
+                        "skip_mention_check": skip_mention_check,
+                    }
+                )
 
         monkeypatch.setattr(telegram_bot.message_queue, "enqueue", fake_enqueue)
         # run once with no config emoji to check fallback icon
         monkeypatch.setattr(rh, "get_reaction_emoji", lambda: None)
         msg.set_reaction.reset_mock()
         await telegram_bot.handle_media_live(update, ctx)
-        msg.set_reaction.assert_awaited_once_with("👂")
+        msg.set_reaction.assert_awaited_once_with("\U0001f442")
         # remove the patch so later config test uses real function
         monkeypatch.setattr(rh, "get_reaction_emoji", get_reaction_emoji)
 
-        # reset recorded for second phase
-        recorded.clear()
+        # reset futures list for second phase
+        all_futures.clear()
 
         # also capture config-based reaction if set
         reacted = []
@@ -92,20 +105,24 @@ async def test_handle_media_live_transcribes(tmp_path, monkeypatch):
 
         ci.INTERFACE_REGISTRY["telegram_bot"] = object()
 
-        with patch.dict("os.environ", {"REACT_WHEN_MENTIONED": "🔥"}):
+        with patch.dict("os.environ", {"REACT_WHEN_MENTIONED": "\U0001f525"}):
             await telegram_bot.handle_media_live(update, ctx)
 
         # reaction should have been invoked
-        assert reacted == ["🔥"]
+        assert reacted == ["\U0001f525"]
 
-        assert recorded, "enqueue should have been called"
-        wrapped, iface, orig_msg, skip = recorded[0]
+        # With the media_future pattern, the final MessageWrapper is resolved
+        # onto the future rather than passed directly to enqueue().
+        assert all_futures, "enqueue should have been called with media_future"
+        finfo = all_futures[0]
+        assert finfo["future"].done(), "media_future should be resolved after handle_media_live"
+        wrapped = finfo["future"].result()
         assert wrapped.text == "hello world"
         assert getattr(wrapped, "is_voice_input", False)
         assert getattr(wrapped, "request_tts", False), "request_tts flag should be set"
-        assert iface == "telegram_bot"
-        assert orig_msg is msg
-        assert skip is True
+        assert finfo["interface_id"] == "telegram_bot"
+        assert finfo["original_message"] is msg
+        assert finfo["skip_mention_check"] is True
     finally:
         # restore registry
         if orig is None:
@@ -178,13 +195,19 @@ async def test_handle_media_live_auris_empty(monkeypatch):
     orig_auris = PLUGIN_REGISTRY.get("auris_plugin")
     PLUGIN_REGISTRY["auris_plugin"] = FakeAuris("")
 
-    # patch dispatch_media to return a fallback transcription
-    recorded = []
+    # capture the media_future so we can inspect the resolved message
+    futures: list = []
 
     async def fake_enqueue(
-        bot_arg, wrapped, interface_id=None, original_message=None, **kw
+        bot_arg,
+        wrapped,
+        interface_id=None,
+        original_message=None,
+        media_future=None,
+        **kw,
     ):
-        recorded.append((wrapped, original_message))
+        if media_future is not None:
+            futures.append((media_future, original_message))
 
     monkeypatch.setattr(telegram_bot.message_queue, "enqueue", fake_enqueue)
 
@@ -195,8 +218,10 @@ async def test_handle_media_live_auris_empty(monkeypatch):
     ):
         try:
             await telegram_bot.handle_media_live(update, ctx)
-            assert recorded, "dispatch_media result should be enqueued"
-            wrapped, orig_msg = recorded[0]
+            assert futures, "dispatch_media result should be resolved onto media_future"
+            fut, orig_msg = futures[0]
+            assert fut.done(), "media_future should be resolved after handle_media_live"
+            wrapped = fut.result()
             assert wrapped.text == "dispatch fallback"
             assert getattr(wrapped, "is_voice_input", False)
             assert getattr(wrapped, "request_tts", False)
@@ -243,13 +268,19 @@ async def test_handle_media_live_auris_empty_no_handler(monkeypatch):
     orig_auris = PLUGIN_REGISTRY.get("auris_plugin")
     PLUGIN_REGISTRY["auris_plugin"] = FakeAuris("")
 
-    # capture enqueue
-    recorded = []
+    # capture the media_future to inspect the resolved MessageWrapper
+    futures: list = []
 
     async def fake_enqueue(
-        bot_arg, wrapped, interface_id=None, original_message=None, **kw
+        bot_arg,
+        wrapped,
+        interface_id=None,
+        original_message=None,
+        media_future=None,
+        **kw,
     ):
-        recorded.append((wrapped, original_message))
+        if media_future is not None:
+            futures.append((media_future, original_message))
 
     monkeypatch.setattr(telegram_bot.message_queue, "enqueue", fake_enqueue)
 
@@ -257,10 +288,12 @@ async def test_handle_media_live_auris_empty_no_handler(monkeypatch):
     with patch("core.media_dispatcher.dispatch_media", AsyncMock(return_value=None)):
         try:
             await telegram_bot.handle_media_live(update, ctx)
-            assert recorded, (
-                "a result should be enqueued when dispatch_media returns None"
+            assert futures, (
+                "a result should be resolved onto media_future when dispatch_media returns None"
             )
-            wrapped, orig_msg = recorded[0]
+            fut, orig_msg = futures[0]
+            assert fut.done(), "media_future should be resolved after handle_media_live"
+            wrapped = fut.result()
             # text may legitimately be empty when there is no caption/transcript
             assert isinstance(wrapped.text, str)
             assert getattr(wrapped, "request_tts", False), "wrapper should request tts"
@@ -326,24 +359,32 @@ async def test_reply_to_media_with_alias_triggers_transcription(monkeypatch):
 
     orig_auris = PLUGIN_REGISTRY.get("auris_plugin")
     PLUGIN_REGISTRY["auris_plugin"] = FakeAuris("replied transcription")
-    # intercept message_queue.enqueue to capture wrapped message
+    # intercept message_queue.enqueue to capture the media_future
     from core import message_queue
 
-    recorded = []
+    futures: list = []
 
     async def fake_enqueue(
-        bot_arg, wrapped, interface_id=None, original_message=None, **kwargs
+        bot_arg,
+        wrapped,
+        interface_id=None,
+        original_message=None,
+        media_future=None,
+        **kwargs,
     ):
-        recorded.append((wrapped, original_message))
+        if media_future is not None:
+            futures.append((media_future, original_message))
         return None
 
     monkeypatch.setattr(message_queue, "enqueue", fake_enqueue)
 
     try:
         await telegram_bot.handle_message(update, ctx)
-        # ensure transcription text was sent into the queue with original media
-        assert recorded, "expected transcription to be enqueued"
-        wrapped_msg, orig_msg = recorded[0]
+        # ensure transcription resolves onto the media_future with the original media
+        assert futures, "expected media_future to be enqueued"
+        fut, orig_msg = futures[0]
+        assert fut.done(), "media_future should be resolved after handle_message"
+        wrapped_msg = fut.result()
         assert getattr(wrapped_msg, "text", None) == "replied transcription"
         assert orig_msg is original
     finally:
@@ -385,21 +426,29 @@ async def test_handle_media_live_auris_disabled_no_handler(monkeypatch):
     orig_auris = PLUGIN_REGISTRY.get("auris_plugin")
     PLUGIN_REGISTRY["auris_plugin"] = FakeAuris("")
 
-    # capture enqueue
-    recorded = []
+    # capture the media_future to inspect the resolved MessageWrapper
+    futures: list = []
 
     async def fake_enqueue(
-        bot_arg, wrapped, interface_id=None, original_message=None, **kw
+        bot_arg,
+        wrapped,
+        interface_id=None,
+        original_message=None,
+        media_future=None,
+        **kw,
     ):
-        recorded.append((wrapped, original_message))
+        if media_future is not None:
+            futures.append((media_future, original_message))
 
     monkeypatch.setattr(telegram_bot.message_queue, "enqueue", fake_enqueue)
 
     with patch("core.media_dispatcher.dispatch_media", AsyncMock(return_value=None)):
         try:
             await telegram_bot.handle_media_live(update, ctx)
-            assert recorded, "transcription or fallback should be enqueued"
-            wrapped, orig_msg = recorded[0]
+            assert futures, "transcription or fallback should be resolved onto media_future"
+            fut, orig_msg = futures[0]
+            assert fut.done(), "media_future should be resolved after handle_media_live"
+            wrapped = fut.result()
             # text may legitimately be empty when there is no caption/transcript
             assert isinstance(wrapped.text, str)
             assert getattr(wrapped, "request_tts", False), "wrapper should request tts"
