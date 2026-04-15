@@ -6,13 +6,17 @@
     },
     "gitnexus": {
       "type": "stdio",
-      "command": "npx",
-      "args": ["-y", "gitnexus@latest", "mcp"]
+      "command": "gitnexus",
+      "args": ["mcp"]
     },
     "synth-logs": {
       "type": "stdio",
       "command": "uv",
       "args": ["run", "python", "mcp_servers/synth_logs.py"]
+    },
+    "affine": {
+      "type": "stdio",
+      "command": "affine-mcp"
     }
   }
 }

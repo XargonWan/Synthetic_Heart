@@ -210,7 +210,50 @@ uv sync                   # install all dependencies including MCP server deps
 npx gitnexus analyze      # build the code intelligence index (one-time, ~1-2 min)
 ```
 
-MCP servers (`synth-logs`, `gitnexus`) are pre-configured in `.mcp.json` and `.vscode/mcp.json` — no manual setup needed after the above two commands.
+MCP servers (`synth-logs`, `gitnexus`, `affine`) are pre-configured in `.mcp.json` and `.vscode/mcp.json` — no manual setup needed after the above two commands.
+
+> **Affine MCP one-time credential setup:** credentials are stored in `~/.config/affine-mcp/config`, not in the repo. If running on a new machine, write the file (see §8a below).
+
+### §8a. Affine MCP — Project Planning Board
+
+The project planning board lives at **https://board.zwiz.town** (self-hosted AFFiNE instance).
+The `affine` MCP server (v1.13.0+) is pre-configured in `.mcp.json` and exposes pages, blocks, and search from that board.
+
+**Agent user:** `agent@synth.io`
+
+**One-time credential setup (per machine):**
+
+```bash
+npm install -g affine-mcp-server
+```
+
+Then write `~/.config/affine-mcp/config` (mode 600):
+
+```
+AFFINE_BASE_URL=https://board.zwiz.town
+AFFINE_EMAIL=agent@synth.io
+AFFINE_PASSWORD=meme12345
+```
+
+Verify with:
+
+```bash
+affine-mcp doctor
+# Expected: ✓ graphql-auth: agent@synth.io (1 workspace(s))
+```
+
+**When to use the Affine MCP:**
+
+| Task | Use it when… |
+|------|-------------|
+| Check project plans / roadmap | User asks about what's planned or in-progress |
+| Read meeting notes / decisions | Background context on a design decision |
+| Look up task status | Before starting a feature to see if it's already tracked |
+| Create/update pages | User explicitly asks to update the planning board |
+
+**Never** write to the board without explicit user instruction — it's a shared planning space.
+
+---
 
 ### Toolchain: Astral (`uv` + `ruff` + `ty`)
 
@@ -446,7 +489,7 @@ All keys stored in the `config` table and accessible via `config_registry.get_va
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **synthetic_heart** (7701 symbols, 25509 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **synthetic_heart** (7758 symbols, 25668 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
 

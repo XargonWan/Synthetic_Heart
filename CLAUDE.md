@@ -92,6 +92,12 @@ Logs rotate at 2000 lines — extremely fast in DEBUG mode (1–2 interactions).
 
 Full reference in the GitNexus section below.
 
+### affine — project planning board (https://board.zwiz.town)
+
+Use the `affine` MCP tools to read project plans, roadmap pages, meeting notes, and task status before starting any significant feature work. Write to the board only when explicitly asked.
+
+Credentials are in `~/.config/affine-mcp/config` (per-machine, not in repo). Setup instructions in `AGENTS.md` §8a.
+
 ## Debugging SOP
 
 Always follow this order — it prevents reading code you don't need:
@@ -124,7 +130,7 @@ See `AGENTS.md` for the full architecture reference, animation system details, p
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **synthetic_heart** (7701 symbols, 25509 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **synthetic_heart** (7758 symbols, 25668 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
 
