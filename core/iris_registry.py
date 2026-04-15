@@ -131,6 +131,10 @@ class IrisRegistry:
         self._instances.pop(name, None)
         log_info(f"[iris_registry] Unregistered engine '{name}'")
 
+    def get_instance(self, name: str) -> Any | None:
+        """Return the pre-built engine instance for *name*, or ``None`` if absent."""
+        return self._instances.get(name)
+
     def unload_engine(self, name: str) -> None:
         """Remove a cached engine instance (forces reload on next use)."""
         self._instances.pop(name, None)

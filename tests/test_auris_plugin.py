@@ -121,7 +121,9 @@ def test_auris_plugin_refresh_config_uses_vosk_default() -> None:
     from plugins.auris_plugin import AurisPlugin
 
     plugin = AurisPlugin.__new__(AurisPlugin)
-    with patch.object(cfg, "get_value", side_effect=lambda key, default=None, **kwargs: default):
+    with patch.object(
+        cfg, "get_value", side_effect=lambda key, default=None, **kwargs: default
+    ):
         plugin.refresh_config()
 
     assert plugin._active_engine_name == "vosk"

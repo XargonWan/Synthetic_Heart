@@ -554,15 +554,21 @@ async def handle_incoming_message(
             log_info(
                 f"[plugin_instance] Message contains {len(attachments)} attachments from user {user_id}"
             )
+            # Do NOT pass the user's text as the Iris prompt — Iris must use
+            # IRIS_DEFAULT_PROMPT (a neutral "describe this image" instruction).
+            # The user's actual question is answered by the main LLM after the
+            # Iris description is injected into the context.
             iris_description = await _describe_attachment_images_with_iris(
-                attachments, prompt=getattr(message, "text", None)
+                attachments, prompt=None
             )
             if iris_description:
                 try:
                     original_text = getattr(message, "text", "") or ""
                     description_block = f"[Iris image description: {iris_description}]"
                     if original_text:
-                        setattr(message, "text", f"{original_text}\n\n{description_block}")
+                        setattr(
+                            message, "text", f"{original_text}\n\n{description_block}"
+                        )
                     else:
                         setattr(message, "text", description_block)
                     log_info(
@@ -1221,7 +1227,9 @@ async def _describe_attachment_images_with_iris(
 
         iris = PLUGIN_REGISTRY.get("iris_plugin")
         if iris is None:
-            log_info("[plugin_instance] Iris skip: iris_plugin not found in PLUGIN_REGISTRY")
+            log_info(
+                "[plugin_instance] Iris skip: iris_plugin not found in PLUGIN_REGISTRY"
+            )
             return None
         # Refresh config before reading _active_engine_name so we get the
         # DB-loaded value rather than the hard-coded startup default ("disabled").
@@ -1233,7 +1241,9 @@ async def _describe_attachment_images_with_iris(
         if active_engine == "disabled":
             log_info("[plugin_instance] Iris skip: active engine is 'disabled'")
             return None
-        log_info(f"[plugin_instance] Iris active engine: '{active_engine}', processing {len(attachments)} attachment(s)")
+        log_info(
+            f"[plugin_instance] Iris active engine: '{active_engine}', processing {len(attachments)} attachment(s)"
+        )
     except Exception as exc:
         log_debug(f"[plugin_instance] Iris plugin lookup failed: {exc}")
         return None
@@ -1246,7 +1256,9 @@ async def _describe_attachment_images_with_iris(
             or ""
         )
         if not mime_type.startswith(("image/", "video/")):
-            log_debug(f"[plugin_instance] Iris skip attachment: mime_type={mime_type!r} not image/video")
+            log_debug(
+                f"[plugin_instance] Iris skip attachment: mime_type={mime_type!r} not image/video"
+            )
             continue
 
         data_b64 = attachment.get("data")
@@ -1258,15 +1270,23 @@ async def _describe_attachment_images_with_iris(
                     p = Path(file_path)
                     if p.exists() and p.is_file():
                         data_b64 = base64.b64encode(p.read_bytes()).decode("utf-8")
-                        log_info(f"[plugin_instance] Iris: read file from path for attachment ({mime_type})")
+                        log_info(
+                            f"[plugin_instance] Iris: read file from path for attachment ({mime_type})"
+                        )
                     else:
-                        log_warning(f"[plugin_instance] Iris skip: no data and file not found at {file_path!r}")
+                        log_warning(
+                            f"[plugin_instance] Iris skip: no data and file not found at {file_path!r}"
+                        )
                         continue
                 except Exception as exc:
-                    log_warning(f"[plugin_instance] Iris skip: failed to read {file_path!r}: {exc}")
+                    log_warning(
+                        f"[plugin_instance] Iris skip: failed to read {file_path!r}: {exc}"
+                    )
                     continue
             else:
-                log_warning(f"[plugin_instance] Iris skip: attachment has no data and no path (mime={mime_type!r})")
+                log_warning(
+                    f"[plugin_instance] Iris skip: attachment has no data and no path (mime={mime_type!r})"
+                )
                 continue
 
         try:
@@ -1290,12 +1310,18 @@ async def _describe_attachment_images_with_iris(
                 tmp.write(image_bytes)
                 tmp_path = tmp.name
 
-            log_info(f"[plugin_instance] Iris: calling describe_media for {mime_type} ({len(image_bytes)} bytes)")
+            log_info(
+                f"[plugin_instance] Iris: calling describe_media for {mime_type} ({len(image_bytes)} bytes)"
+            )
             result = await iris.describe_media(tmp_path, mime_type, prompt)
             if result and result.description:
-                log_info(f"[plugin_instance] Iris: got description ({len(result.description)} chars)")
+                log_info(
+                    f"[plugin_instance] Iris: got description ({len(result.description)} chars)"
+                )
                 return result.description
-            log_info(f"[plugin_instance] Iris: describe_media returned empty result={result!r}")
+            log_info(
+                f"[plugin_instance] Iris: describe_media returned empty result={result!r}"
+            )
         except Exception as exc:
             log_warning(f"[plugin_instance] Iris description failed: {exc}")
         finally:
@@ -1348,7 +1374,9 @@ async def _extract_multimodal_attachments(
                         or attachment.get("mime_type")
                         or ""
                     )
-                    filename = attachment.get("filename") or attachment.get("name") or ""
+                    filename = (
+                        attachment.get("filename") or attachment.get("name") or ""
+                    )
                     if not mime_type:
                         mime_type = get_mime_type(attachment.get("path"), filename)
                     if not mime_type or not is_supported_type(mime_type):

@@ -198,7 +198,11 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
                 if isinstance(key, (str, int, float))
             }
         if isinstance(capabilities, (list, tuple, set)):
-            return {str(item).lower(): True for item in capabilities if isinstance(item, (str, int, float))}
+            return {
+                str(item).lower(): True
+                for item in capabilities
+                if isinstance(item, (str, int, float))
+            }
         if isinstance(capabilities, (str, int, float)):
             return {str(capabilities).lower(): True}
         return {}
@@ -228,7 +232,10 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
         if not model.capabilities:
             return False
         keys = {key.lower() for key in model.capabilities.keys()}
-        if any(keyword in keys for keyword in ("vision", "image", "images", "multimodal", "visual")):
+        if any(
+            keyword in keys
+            for keyword in ("vision", "image", "images", "multimodal", "visual")
+        ):
             return True
         if model.capabilities.get("vision") or model.capabilities.get("image"):
             return True
@@ -454,9 +461,14 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
             }
         ]
 
-        model_name = str(kwargs.get("model", "default")).lower()
-        vision_timeout = float(kwargs.pop("vision_timeout", 300))
-        if "qwen" in model_name and "enable_thinking" not in kwargs:
+        vision_timeout = float(kwargs.pop("vision_timeout", 600))
+        # Disable chain-of-thought thinking for ALL vision calls regardless of
+        # model name — the model name in kwargs may be the endpoint alias (e.g.
+        # "perplexity"), not the actual model ID (e.g. "qwen/qwen3.5-9b").
+        # Thinking consumes the entire context window on image-description tasks
+        # and causes timeouts; the LLM answer comes from the main cortex anyway.
+        # Models that don't support this extension silently ignore the field.
+        if "enable_thinking" not in kwargs:
             kwargs["enable_thinking"] = False
 
         payload: dict[str, Any] = {
@@ -474,8 +486,7 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
         }
         # Vision calls use only /chat/completions endpoints — generic /chat
         # fallbacks (e.g. /v1/chat) are non-standard and return empty content
-        # on servers like LM Studio.  Qwen models may need longer response times
-        # and also support the vendor extension ``enable_thinking``.
+        # on servers like LM Studio.
         vision_urls = [u for u in self._http_chat_urls() if u.endswith("completions")]
         if not vision_urls:
             vision_urls = self._http_chat_urls()
@@ -621,7 +632,9 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
                             chat_url,
                             json=payload,
                             headers=headers,
-                            timeout=aiohttp.ClientTimeout(connect=10.0, sock_read=timeout),
+                            timeout=aiohttp.ClientTimeout(
+                                connect=10.0, sock_read=timeout
+                            ),
                         ) as resp:
                             if resp.status >= 400:
                                 body = await resp.text()
@@ -629,9 +642,13 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
                                 continue
                             try:
                                 data = await resp.json()
-                                message = data.get("choices", [{}])[0].get("message", {})
+                                message = data.get("choices", [{}])[0].get(
+                                    "message", {}
+                                )
                                 reply = self._extract_message_content(message)
-                                log_debug(f"[openai_compat] ping_test OK — reply: {reply!r}")
+                                log_debug(
+                                    f"[openai_compat] ping_test OK — reply: {reply!r}"
+                                )
                                 return True, reply
                             except Exception as body_exc:
                                 log_warning(

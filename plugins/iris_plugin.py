@@ -70,7 +70,20 @@ register_exposed_var(
     component="iris_plugin",
     advanced=True,
 )
-
+register_exposed_var(
+    "IRIS_DEFAULT_MODEL",
+    label="Iris Default Model",
+    default="",
+    value_type=str,
+    ui_type="string",
+    description=(
+        "Optional model name used for Iris vision requests. "
+        "When set, this model is used instead of the endpoint's default model."
+    ),
+    scope="plugins",
+    component="iris_plugin",
+    advanced=True,
+)
 
 # ---------------------------------------------------------------------------
 # Plugin class
@@ -91,6 +104,7 @@ class IrisPlugin(AIPluginBase):
         self._active_engine_name: str = "disabled"
         self._engine_settings: dict[str, Any] = {}
         self._default_prompt: str = "Describe this image in detail."
+        self._default_model: str = ""
 
         # Import built-in engine modules so they self-register.
         # Currently empty — all engines arrive via external endpoints.
@@ -110,6 +124,7 @@ class IrisPlugin(AIPluginBase):
         mime_type: str | None = None,
         prompt: str | None = None,
         engine_name: str | None = None,
+        model: str | None = None,
     ) -> IrisResult | None:
         """Analyse an image or video file and return a textual description.
 
@@ -135,6 +150,7 @@ class IrisPlugin(AIPluginBase):
             return None
 
         effective_prompt = prompt or self._default_prompt
+        effective_model = model if model is not None else self._default_model or None
         name = engine_name or self._active_engine_name
 
         try:
@@ -146,11 +162,18 @@ class IrisPlugin(AIPluginBase):
         try:
             if asyncio.iscoroutinefunction(engine.describe_image):
                 result: IrisResult | None = await engine.describe_image(
-                    file_path, mime_type, effective_prompt
+                    file_path,
+                    mime_type,
+                    effective_prompt,
+                    model=effective_model,
                 )
             else:
                 result = await asyncio.to_thread(
-                    engine.describe_image, file_path, mime_type, effective_prompt
+                    engine.describe_image,
+                    file_path,
+                    mime_type,
+                    effective_prompt,
+                    effective_model,
                 )
 
             if result is None:
@@ -178,7 +201,7 @@ class IrisPlugin(AIPluginBase):
                     "using the Iris vision subsystem."
                 ),
                 "required_fields": ["image_path"],
-                "optional_fields": ["mime_type", "prompt", "engine"],
+                "optional_fields": ["mime_type", "prompt", "engine", "model"],
             }
         }
 
@@ -209,6 +232,11 @@ class IrisPlugin(AIPluginBase):
                         "description": "Optional: override the active Iris engine name.",
                         "optional": True,
                     },
+                    "model": {
+                        "type": "string",
+                        "description": "Optional: override the model used by the Iris vision engine.",
+                        "optional": True,
+                    },
                 },
             }
         return {}
@@ -221,9 +249,14 @@ class IrisPlugin(AIPluginBase):
             mime_type: str | None = payload.get("mime_type")
             prompt: str | None = payload.get("prompt")
             engine_name: str | None = payload.get("engine")
+            model: str | None = payload.get("model")
 
             result = await self.describe_media(
-                image_path, mime_type, prompt, engine_name
+                image_path,
+                mime_type,
+                prompt,
+                engine_name,
+                model,
             )
             if result:
                 response: dict[str, Any] = {
@@ -274,6 +307,15 @@ class IrisPlugin(AIPluginBase):
                 config_registry.get_value(
                     "IRIS_DEFAULT_PROMPT",
                     "Describe this image in detail.",
+                    value_type=str,
+                    group="plugins",
+                    component="iris_plugin",
+                )
+            )
+            self._default_model = str(
+                config_registry.get_value(
+                    "IRIS_DEFAULT_MODEL",
+                    "",
                     value_type=str,
                     group="plugins",
                     component="iris_plugin",

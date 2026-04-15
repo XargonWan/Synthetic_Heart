@@ -107,9 +107,8 @@ class ExternalCortexEngine(AIPluginBase):
                 )
                 return chat_resp.content
             except Exception as exc:
-                should_retry = (
-                    attempt < max_retries
-                    and self._is_retryable_exception(exc)
+                should_retry = attempt < max_retries and self._is_retryable_exception(
+                    exc
                 )
                 if should_retry:
                     delay = backoff * (2 ** (attempt - 1))

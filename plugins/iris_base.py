@@ -68,6 +68,7 @@ class IrisEngineBase(ABC):
         file_path: str,
         mime_type: str | None = None,
         prompt: str | None = None,
+        model: str | None = None,
     ) -> IrisResult | None:
         """Analyse an image or video file and return a textual description.
 
@@ -76,6 +77,7 @@ class IrisEngineBase(ABC):
             mime_type:  Optional MIME hint, e.g. ``"image/jpeg"``, ``"image/png"``.
             prompt:     Optional free-text instruction for the engine, e.g.
                         ``"Describe what you see in detail."``
+            model:      Optional model name override for vision analysis.
 
         Returns:
             :class:`IrisResult` containing the description and, when known, the

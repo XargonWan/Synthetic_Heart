@@ -2986,6 +2986,59 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                     setupRegistrySelect('iris-engine-select', 'iris-engine-info', 'iris-engine-label', 'iris-engine-description',  data.iris || [], 'ACTIVE_IRIS_ENGINE');
                     setupRegistrySelect('live-engine-select', 'live-engine-info', 'live-engine-label', 'live-engine-description',  data.live || [], 'LIVE_CORTEX');  // persist selected live engine via LIVE_CORTEX config
 
+                    // ── Iris model selector ──────────────────────────────────
+                    const irisModelSel = document.getElementById('iris-model-select');
+                    const irisEngineSel = document.getElementById('iris-engine-select');
+
+                    const populateIrisModelSelect = (engineName) => {
+                        if (!irisModelSel) return;
+                        const engine = (data.iris || []).find((e) => e.name === engineName);
+                        const models = (engine && engine.available_models) ? engine.available_models : [];
+                        if (!models.length) {
+                            irisModelSel.style.display = 'none';
+                            irisModelSel.innerHTML = '';
+                            return;
+                        }
+                        irisModelSel.innerHTML = '';
+                        models.forEach((m) => {
+                            const opt = document.createElement('option');
+                            opt.value = m;
+                            opt.textContent = m;
+                            irisModelSel.appendChild(opt);
+                        });
+                        // Pre-select: prefer the saved global IRIS_DEFAULT_MODEL, then engine default
+                        const saved = data.iris_current_model || (engine && engine.default_model) || '';
+                        irisModelSel.value = models.includes(saved) ? saved : models[0];
+                        irisModelSel.style.display = '';
+                    };
+
+                    if (irisEngineSel) {
+                        populateIrisModelSelect(irisEngineSel.value);
+                        if (!irisEngineSel.dataset.irisModelBound) {
+                            irisEngineSel.addEventListener('change', () => populateIrisModelSelect(irisEngineSel.value));
+                            irisEngineSel.dataset.irisModelBound = '1';
+                        }
+                    }
+
+                    if (irisModelSel && !irisModelSel.dataset.bound) {
+                        irisModelSel.addEventListener('change', async () => {
+                            try {
+                                const r = await fetch('/api/config', {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({ key: 'IRIS_DEFAULT_MODEL', value: irisModelSel.value }),
+                                });
+                                if (!r.ok) throw new Error('HTTP ' + r.status);
+                                window.showToast && window.showToast('Iris model set to ' + irisModelSel.value);
+                            } catch (e) {
+                                console.error('[synth_webui] Failed to set IRIS_DEFAULT_MODEL', e);
+                                window.showToast && window.showToast('Failed to save Iris model', true);
+                            }
+                        });
+                        irisModelSel.dataset.bound = '1';
+                    }
+                    // ────────────────────────────────────────────────────────
+
                     // ── Live voice configuration ──────────────────────────────
                     const liveVoiceCfg = document.getElementById('live-voice-config');
                     const liveVoiceNameSel = document.getElementById('live-voice-name');

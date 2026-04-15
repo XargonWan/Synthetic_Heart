@@ -156,6 +156,10 @@
             modelSelect.value = ep.default_model;
         }
 
+        modelSelect.addEventListener('change', () => {
+            handleSetModel(ep.id, modelSelect.value, card);
+        });
+
         // Probe time
         if (ep.last_probe_at) {
             const probeEl = card.querySelector('.ext-ep-probe-time');
@@ -266,6 +270,35 @@
                 echoEl.textContent = `✗ ${e.message}`;
                 echoEl.style.color = 'var(--danger,#c0392b)';
             }
+        }
+    }
+
+    async function handleSetModel(id, model, card) {
+        const echoEl = card ? card.querySelector('.ext-ep-model-test-echo') : null;
+        if (echoEl) {
+            echoEl.textContent = 'Saving…';
+            echoEl.style.color = 'var(--muted)';
+        }
+        try {
+            await apiFetch(`/api/external-endpoints/${id}/model`, {
+                method: 'PUT',
+                body: JSON.stringify({ model: model || null }),
+            });
+            const endpoint = _endpoints.find((e) => e.id === id);
+            if (endpoint) {
+                endpoint.default_model = model || null;
+            }
+            if (echoEl) {
+                echoEl.textContent = model ? `✓ Saved "${model}"` : '✓ Saved';
+                echoEl.style.color = 'var(--success,#27ae60)';
+            }
+            window.SynthWebUI?.loadEnginesSummary?.();
+        } catch (e) {
+            if (echoEl) {
+                echoEl.textContent = `✗ ${e.message}`;
+                echoEl.style.color = 'var(--danger,#c0392b)';
+            }
+            await loadEndpoints();
         }
     }
 

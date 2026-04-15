@@ -155,7 +155,6 @@ async def test_iris_plugin_file_not_found_returns_none() -> None:
 @pytest.mark.asyncio
 async def test_iris_plugin_calls_engine(tmp_path) -> None:  # type: ignore[no-untyped-def]
     """Plugin calls the engine and returns IrisResult."""
-    import os
 
     from plugins.iris_base import IrisEngineBase, IrisResult
 
@@ -183,8 +182,9 @@ async def test_iris_plugin_calls_engine(tmp_path) -> None:  # type: ignore[no-un
         plugin._engine_settings = {}
         plugin._default_prompt = "Describe this image."
 
-        with patch("plugins.iris_plugin.IRIS_REGISTRY", reg), patch.object(
-            plugin, "refresh_config"
+        with (
+            patch("plugins.iris_plugin.IRIS_REGISTRY", reg),
+            patch.object(plugin, "refresh_config"),
         ):
             result = await plugin.describe_media(str(test_file), "image/jpeg")
 
@@ -194,8 +194,151 @@ async def test_iris_plugin_calls_engine(tmp_path) -> None:  # type: ignore[no-un
 
 
 @pytest.mark.asyncio
+async def test_iris_plugin_passes_model_override_to_engine(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    from plugins.iris_base import IrisEngineBase, IrisResult
+
+    class MockEngine(IrisEngineBase):
+        def describe_image(
+            self,
+            file_path: str,
+            mime_type: str | None = None,
+            prompt: str | None = None,
+            model: str | None = None,
+        ) -> IrisResult | None:
+            assert model == "chatgpt-vision"
+            return IrisResult(description="a sunny beach", language="en")
+
+    test_file = tmp_path / "test.jpg"
+    test_file.write_bytes(b"\xff\xd8\xff")
+
+    with patch("core.core_initializer.register_plugin"):
+        from plugins.iris_plugin import IrisPlugin
+        from core.iris_registry import IrisRegistry
+
+        reg = IrisRegistry()
+        reg.register_instance("mock", MockEngine(), label="Mock")
+
+        plugin = IrisPlugin.__new__(IrisPlugin)
+        plugin._active_engine_name = "mock"
+        plugin._engine_settings = {}
+        plugin._default_prompt = "Describe this image."
+
+        with (
+            patch("plugins.iris_plugin.IRIS_REGISTRY", reg),
+            patch.object(plugin, "refresh_config"),
+        ):
+            result = await plugin.describe_media(
+                str(test_file),
+                "image/jpeg",
+                prompt="Describe this image.",
+                model="chatgpt-vision",
+            )
+
+    assert result is not None
+    assert result.description == "a sunny beach"
+
+
+@pytest.mark.asyncio
+async def test_external_iris_engine_uses_model_override(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    from core.external_endpoints.bridges.iris_bridge import ExternalIrisEngine
+    from core.external_endpoints.models import EndpointProtocol, ExternalEndpoint
+
+    class DummyAdapter:
+        async def describe_image(
+            self,
+            image_bytes: bytes,
+            mime_type: str | None = None,
+            prompt: str | None = None,
+            model: str | None = None,
+            **kwargs: object,
+        ) -> str | None:
+            assert model == "chatgpt-vision"
+            return "a sunny beach"
+
+    endpoint = ExternalEndpoint(
+        id=1,
+        name="chatgpt_vision",
+        display_label="ChatGPT Vision",
+        protocol=EndpointProtocol.OPENAI,
+        base_url="https://api.openai.com",
+        api_key_enc=None,
+        enabled=True,
+        capabilities={"vision": True},
+        subsystem_map={"vision": True},
+        available_models=["chatgpt-vision"],
+        default_model="gpt-4.1-vision",
+        probe_status="success",
+        last_probe_at=None,
+        extra_config={},
+    )
+
+    adapter = DummyAdapter()
+    engine = ExternalIrisEngine(endpoint, adapter)  # type: ignore[arg-type]
+
+    test_file = tmp_path / "test.jpg"
+    test_file.write_bytes(b"\xff\xd8\xff")
+
+    result = await engine.describe_image(
+        str(test_file),
+        "image/jpeg",
+        prompt="Describe this image.",
+        model="chatgpt-vision",
+    )
+    assert result is not None
+    assert result.description == "a sunny beach"
+
+
+@pytest.mark.asyncio
+async def test_gemini_adapter_uses_model_override(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    import sys
+    from types import ModuleType
+
+    from core.external_endpoints.adapters.gemini_adapter import GeminiAdapter
+
+    dummy_client = type("DummyClient", (), {})()
+    dummy_client.models = type("DummyModels", (), {})()
+
+    def generate_content(model: str, contents: list[dict[str, object]]) -> object:
+        assert model == "chatgpt-vision"
+
+        class DummyResponse:
+            text = "a sunny beach"
+
+        return DummyResponse()
+
+    dummy_client.models.generate_content = generate_content
+
+    google_module = ModuleType("google")
+    genai_module = ModuleType("google.genai")
+    types_module = ModuleType("google.genai.types")
+
+    class DummyPart:
+        @staticmethod
+        def from_bytes(data: bytes, mime_type: str) -> dict[str, object]:
+            return {"type": "image", "data": data}
+
+    types_module.Part = DummyPart
+    genai_module.types = types_module
+    google_module.genai = genai_module
+
+    with patch.dict(sys.modules, {
+        "google": google_module,
+        "google.genai": genai_module,
+        "google.genai.types": types_module,
+    }, clear=False), patch.object(GeminiAdapter, "_get_client", return_value=dummy_client):
+        adapter = GeminiAdapter(api_key="unused")
+        result = await adapter.describe_image(
+            b"\xff\xd8\xff",
+            "image/jpeg",
+            prompt="Describe this image.",
+            model="chatgpt-vision",
+        )
+
+    assert result == "a sunny beach"
+
+
+@pytest.mark.asyncio
 async def test_describe_attachment_images_with_iris() -> None:
-    from core.core_initializer import PLUGIN_REGISTRY
     from core.iris_registry import IrisRegistry
     from core.plugin_instance import _describe_attachment_images_with_iris
     from plugins.iris_base import IrisEngineBase, IrisResult
@@ -223,13 +366,17 @@ async def test_describe_attachment_images_with_iris() -> None:
     data = base64.b64encode(b"dummy").decode("ascii")
     attachment = {"mime_type": "image/png", "data": data}
 
-    with patch("plugins.iris_plugin.IRIS_REGISTRY", reg), patch.object(
-        plugin,
-        "refresh_config",
-    ), patch.dict(
-        "core.core_initializer.PLUGIN_REGISTRY",
-        {"iris_plugin": plugin},
-        clear=True,
+    with (
+        patch("plugins.iris_plugin.IRIS_REGISTRY", reg),
+        patch.object(
+            plugin,
+            "refresh_config",
+        ),
+        patch.dict(
+            "core.core_initializer.PLUGIN_REGISTRY",
+            {"iris_plugin": plugin},
+            clear=True,
+        ),
     ):
         description = await _describe_attachment_images_with_iris(
             [attachment], prompt="Describe this image."
@@ -293,8 +440,9 @@ async def test_handle_custom_action_vision_describe(tmp_path) -> None:  # type: 
         plugin._engine_settings = {}
         plugin._default_prompt = "Describe."
 
-        with patch("plugins.iris_plugin.IRIS_REGISTRY", reg), patch.object(
-            plugin, "refresh_config"
+        with (
+            patch("plugins.iris_plugin.IRIS_REGISTRY", reg),
+            patch.object(plugin, "refresh_config"),
         ):
             response = await plugin.handle_custom_action(
                 "vision_describe",

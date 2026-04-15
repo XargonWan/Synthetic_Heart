@@ -2091,10 +2091,13 @@ class SynthWebUIInterface:
                     continue
                 is_voice_input = bool(payload.get("is_voice_input", False))
                 normalized_attachments = [
-                    self._normalize_webui_attachment(att)
-                    for att in attachments
+                    self._normalize_webui_attachment(att) for att in attachments
                 ]
-                metadata = {"attachments": normalized_attachments} if normalized_attachments else None
+                metadata = (
+                    {"attachments": normalized_attachments}
+                    if normalized_attachments
+                    else None
+                )
                 await self._append_history(session_id, "user", text, metadata=metadata)
                 # Process message in background to avoid blocking WebSocket
                 asyncio.create_task(
@@ -3015,7 +3018,7 @@ class SynthWebUIInterface:
 
         parsed = urlparse(url)
         if parsed.path.startswith("/uploads/"):
-            file_name = Path(unquote(parsed.path[len("/uploads/"):])).name
+            file_name = Path(unquote(parsed.path[len("/uploads/") :])).name
             if file_name:
                 local_path = self.attachments_dir / file_name
                 normalized = dict(attachment)
@@ -3027,11 +3030,10 @@ class SynthWebUIInterface:
                         normalized["data"] = base64.b64encode(content).decode("utf-8")
                         normalized["mime_type"] = normalized.get(
                             "mime_type",
-                            mimetypes.guess_type(str(local_path))[0] or "application/octet-stream",
+                            mimetypes.guess_type(str(local_path))[0]
+                            or "application/octet-stream",
                         )
-                        normalized["size"] = normalized.get(
-                            "size", len(content)
-                        )
+                        normalized["size"] = normalized.get("size", len(content))
                     except Exception as exc:
                         log_warning(
                             f"{LOG_PREFIX} Failed to inline chat attachment data: {exc}"
@@ -3059,8 +3061,7 @@ class SynthWebUIInterface:
         from core import message_queue
 
         normalized_attachments = [
-            self._normalize_webui_attachment(att)
-            for att in (attachments or [])
+            self._normalize_webui_attachment(att) for att in (attachments or [])
         ]
 
         log_info(
@@ -3637,7 +3638,9 @@ class SynthWebUIInterface:
                 if metadata and isinstance(metadata.get("attachments"), list):
                     payload["attachments"] = metadata["attachments"]
                     # Keep attachments accessible under `data` for compatibility.
-                    payload.setdefault("data", {})["attachments"] = metadata["attachments"]
+                    payload.setdefault("data", {})["attachments"] = metadata[
+                        "attachments"
+                    ]
 
                 # Forward metadata fields that the client can use (e.g. tts_url).
                 if metadata and metadata.get("tts_url"):
@@ -4013,7 +4016,9 @@ class SynthWebUIInterface:
             if not session_id:
                 session_id = _extract_session_id(payload.get("interface_path"))
             if not session_id and original_message is not None:
-                session_id = _extract_session_id(getattr(original_message, "interface_path", None))
+                session_id = _extract_session_id(
+                    getattr(original_message, "interface_path", None)
+                )
 
             # Ensure the payload has the correct interface_path for sending
             if session_id:
@@ -8215,6 +8220,15 @@ class SynthWebUIInterface:
             for _name in IRIS_REGISTRY.get_available_engines():
                 _meta = IRIS_REGISTRY.get_engine_meta(_name)
                 _caps = _meta.get("capabilities") or {}
+                _available_models: list[str] = []
+                _default_model: str | None = None
+                _instance = IRIS_REGISTRY.get_instance(_name)
+                if _instance is not None and hasattr(_instance, "_endpoint"):
+                    _ep = _instance._endpoint
+                    _available_models = list(
+                        getattr(_ep, "available_models", None) or []
+                    )
+                    _default_model = getattr(_ep, "default_model", None)
                 iris_data.append(
                     {
                         "name": _name,
@@ -8226,6 +8240,8 @@ class SynthWebUIInterface:
                         "details": "Active" if _name == active_iris else "",
                         "error": None,
                         "active": _name == active_iris,
+                        "available_models": _available_models,
+                        "default_model": _default_model,
                     }
                 )
         except Exception as exc:
@@ -8289,6 +8305,9 @@ class SynthWebUIInterface:
             "vox": vox_data,
             "auris": auris_data,
             "iris": iris_data,
+            "iris_current_model": (
+                config_registry.get_value("IRIS_DEFAULT_MODEL", "") or ""
+            ),
             "live": live_data,
             "interfaces": interfaces_data,
             "plugins": plugins_data,

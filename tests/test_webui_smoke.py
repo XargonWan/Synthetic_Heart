@@ -244,8 +244,10 @@ async def test_handle_user_message_normalizes_webui_attachment(tmp_path, monkeyp
         "get_session_meta",
         lambda interface_path: None,
     )
+
     async def dummy_set_session_meta(interface_path, value):
         return None
+
     monkeypatch.setattr(session_meta, "set_session_meta", dummy_set_session_meta)
 
     await ui._handle_user_message(

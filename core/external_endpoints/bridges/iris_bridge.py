@@ -30,6 +30,7 @@ class ExternalIrisEngine(IrisEngineBase):
         file_path: str,
         mime_type: str | None = None,
         prompt: str | None = None,
+        model: str | None = None,
     ) -> IrisResult | None:
         """Read *file_path* and forward image bytes to the external adapter."""
         if not os.path.exists(file_path):
@@ -46,7 +47,7 @@ class ExternalIrisEngine(IrisEngineBase):
                 image_bytes,
                 mime_type=mime_type,
                 prompt=prompt,
-                model=self._endpoint.default_model,
+                model=model or self._endpoint.default_model,
             )
         except Exception:
             return None

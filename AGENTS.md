@@ -106,9 +106,9 @@ SyntH has four named media subsystems, each with its own registry, base class, p
 Iris handles file-based image and video analysis.
 
 - **Base class**: `plugins/iris_base.py` — `IrisEngineBase(ABC)`, `IrisResult` dataclass.
-- **Plugin**: `plugins/iris_plugin.py` — public API: `await iris_plugin.describe_media(file_path, mime_type, prompt)`.
+- **Plugin**: `plugins/iris_plugin.py` — public API: `await iris_plugin.describe_media(file_path, mime_type, prompt, engine_name, model)`.
 - **Bridge**: `core/external_endpoints/bridges/iris_bridge.py` — wraps any external endpoint adapter.
-- **Adapter method**: `BaseProtocolAdapter.describe_image(image_bytes, mime_type, prompt)` — implemented in `openai_compat`, `gemini_adapter`, `anthropic_adapter`.
+- **Adapter method**: `BaseProtocolAdapter.describe_image(image_bytes, mime_type, prompt, model)` — implemented in `openai_compat`, `gemini_adapter`, `anthropic_adapter`.
 - **Media dispatcher**: `core/media_dispatcher.py` — Iris is called for `image/*` and `video/*` MIME types (step 2 in the escalation chain, between Auris and Live).
 - **Default engine**: `selenium-llm-engine` (pre-set in `init-db.sql`). No local model is bundled.
 - **WebUI**: Engine selector appears in the Engines tab (`core/webui_templates/sections/engines.html`), populated from `/api/components` → `iris` key.

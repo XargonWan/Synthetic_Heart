@@ -94,6 +94,7 @@ async def test_queue_rebinds_to_current_event_loop():
     original_lock_loop = getattr(message_queue, "_lock_loop", None)
 
     try:
+
         async def create_queue_on_other_loop():
             message_queue._get_queue()
             message_queue._get_lock()
