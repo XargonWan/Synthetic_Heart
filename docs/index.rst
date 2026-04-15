@@ -48,6 +48,8 @@ getting started.
    component_pattern
    two_phase_init_implementation
    config_management
+   prompt_engine_json_prompt
+   memory_search_and_management
    contributing
 
 Building the Documentation
