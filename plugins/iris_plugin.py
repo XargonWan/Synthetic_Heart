@@ -160,12 +160,16 @@ class IrisPlugin(AIPluginBase):
             return None
 
         try:
+            kwargs: dict[str, str] = {}
+            if effective_model is not None:
+                kwargs["model"] = effective_model
+
             if asyncio.iscoroutinefunction(engine.describe_image):
                 result: IrisResult | None = await engine.describe_image(
                     file_path,
                     mime_type,
                     effective_prompt,
-                    model=effective_model,
+                    **kwargs,
                 )
             else:
                 result = await asyncio.to_thread(
@@ -173,7 +177,7 @@ class IrisPlugin(AIPluginBase):
                     file_path,
                     mime_type,
                     effective_prompt,
-                    effective_model,
+                    **kwargs,
                 )
 
             if result is None:

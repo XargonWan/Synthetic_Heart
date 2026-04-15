@@ -1214,12 +1214,35 @@ async def _extract_image_data_from_message(message, interface_name: str):
     return image_data, has_trigger
 
 
+def _build_unviewable_media_placeholder(mime_type: str | None) -> str:
+    if mime_type:
+        return (
+            f"User attached a {mime_type} but the vision engine could not see it."
+        )
+    return "User attached a media file but the vision engine could not see it."
+
+
 async def _describe_attachment_images_with_iris(
     attachments: list[dict],
     prompt: str | None = None,
 ) -> str | None:
     """Use the configured Iris engine to describe the first image/video attachment."""
     if not attachments:
+        return None
+
+    first_media_mime_type = None
+    for attachment in attachments:
+        mime_type = str(
+            attachment.get("mime_type")
+            or attachment.get("content_type")
+            or attachment.get("type")
+            or ""
+        )
+        if mime_type.startswith(("image/", "video/")):
+            first_media_mime_type = mime_type
+            break
+
+    if first_media_mime_type is None:
         return None
 
     try:
@@ -1230,7 +1253,7 @@ async def _describe_attachment_images_with_iris(
             log_info(
                 "[plugin_instance] Iris skip: iris_plugin not found in PLUGIN_REGISTRY"
             )
-            return None
+            return _build_unviewable_media_placeholder(first_media_mime_type)
         # Refresh config before reading _active_engine_name so we get the
         # DB-loaded value rather than the hard-coded startup default ("disabled").
         try:
@@ -1240,13 +1263,13 @@ async def _describe_attachment_images_with_iris(
         active_engine = getattr(iris, "_active_engine_name", "disabled")
         if active_engine == "disabled":
             log_info("[plugin_instance] Iris skip: active engine is 'disabled'")
-            return None
+            return _build_unviewable_media_placeholder(first_media_mime_type)
         log_info(
             f"[plugin_instance] Iris active engine: '{active_engine}', processing {len(attachments)} attachment(s)"
         )
     except Exception as exc:
         log_debug(f"[plugin_instance] Iris plugin lookup failed: {exc}")
-        return None
+        return _build_unviewable_media_placeholder(first_media_mime_type)
 
     for attachment in attachments:
         mime_type = str(
@@ -1331,7 +1354,7 @@ async def _describe_attachment_images_with_iris(
                 except Exception:
                     pass
 
-    return None
+    return _build_unviewable_media_placeholder(first_media_mime_type)
 
 
 async def _extract_multimodal_attachments(

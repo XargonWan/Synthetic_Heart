@@ -132,6 +132,7 @@ async def test_iris_plugin_disabled_returns_none() -> None:
         plugin._active_engine_name = "disabled"
         plugin._engine_settings = {}
         plugin._default_prompt = "Describe this image."
+        plugin._default_model = ""
 
         result = await plugin.describe_media("/tmp/fake.jpg")
         assert result is None
@@ -147,6 +148,7 @@ async def test_iris_plugin_file_not_found_returns_none() -> None:
         plugin._active_engine_name = "myengine"
         plugin._engine_settings = {}
         plugin._default_prompt = "Describe this image."
+        plugin._default_model = ""
 
         result = await plugin.describe_media("/tmp/does_not_exist_xyz.jpg")
         assert result is None
@@ -181,6 +183,7 @@ async def test_iris_plugin_calls_engine(tmp_path) -> None:  # type: ignore[no-un
         plugin._active_engine_name = "mock"
         plugin._engine_settings = {}
         plugin._default_prompt = "Describe this image."
+        plugin._default_model = ""
 
         with (
             patch("plugins.iris_plugin.IRIS_REGISTRY", reg),
@@ -222,6 +225,7 @@ async def test_iris_plugin_passes_model_override_to_engine(tmp_path) -> None:  #
         plugin._active_engine_name = "mock"
         plugin._engine_settings = {}
         plugin._default_prompt = "Describe this image."
+        plugin._default_model = ""
 
         with (
             patch("plugins.iris_plugin.IRIS_REGISTRY", reg),
@@ -362,6 +366,7 @@ async def test_describe_attachment_images_with_iris() -> None:
     plugin._active_engine_name = "mock"
     plugin._engine_settings = {}
     plugin._default_prompt = "Describe this image."
+    plugin._default_model = ""
 
     data = base64.b64encode(b"dummy").decode("ascii")
     attachment = {"mime_type": "image/png", "data": data}
@@ -383,6 +388,75 @@ async def test_describe_attachment_images_with_iris() -> None:
         )
 
     assert description == "a red ball"
+
+
+@pytest.mark.asyncio
+async def test_describe_attachment_images_with_iris_disabled_engine_returns_placeholder() -> None:
+    from core.plugin_instance import _describe_attachment_images_with_iris
+    from plugins.iris_plugin import IrisPlugin
+
+    plugin = IrisPlugin.__new__(IrisPlugin)
+    plugin._active_engine_name = "disabled"
+    plugin._default_model = ""
+
+    attachment = {"mime_type": "image/png", "data": "ZmFrZQ=="}
+
+    with patch.dict(
+        "core.core_initializer.PLUGIN_REGISTRY",
+        {"iris_plugin": plugin},
+        clear=True,
+    ), patch.object(plugin, "refresh_config"):
+        description = await _describe_attachment_images_with_iris(
+            [attachment], prompt="Describe this image."
+        )
+
+    assert description == "User attached a image/png but the vision engine could not see it."
+
+
+@pytest.mark.asyncio
+async def test_describe_attachment_images_with_iris_engine_failure_returns_placeholder() -> None:
+    from core.iris_registry import IrisRegistry
+    from core.plugin_instance import _describe_attachment_images_with_iris
+    from plugins.iris_base import IrisEngineBase
+    from plugins.iris_plugin import IrisPlugin
+
+    class MockEngine(IrisEngineBase):
+        def describe_image(
+            self,
+            file_path: str,
+            mime_type: str | None = None,
+            prompt: str | None = None,
+        ) -> None:
+            return None
+
+    reg = IrisRegistry()
+    reg.register_instance(
+        "mock",
+        MockEngine(),
+        label="Mock",
+        capabilities={"vision": True},
+    )
+
+    plugin = IrisPlugin.__new__(IrisPlugin)
+    plugin._active_engine_name = "mock"
+    plugin._default_model = ""
+
+    attachment = {"mime_type": "image/jpeg", "data": "ZmFrZQ=="}
+
+    with (
+        patch("plugins.iris_plugin.IRIS_REGISTRY", reg),
+        patch.dict(
+            "core.core_initializer.PLUGIN_REGISTRY",
+            {"iris_plugin": plugin},
+            clear=True,
+        ),
+        patch.object(plugin, "refresh_config"),
+    ):
+        description = await _describe_attachment_images_with_iris(
+            [attachment], prompt="Describe this image."
+        )
+
+    assert description == "User attached a image/jpeg but the vision engine could not see it."
 
 
 # ---------------------------------------------------------------------------
@@ -439,6 +513,7 @@ async def test_handle_custom_action_vision_describe(tmp_path) -> None:  # type: 
         plugin._active_engine_name = "mock"
         plugin._engine_settings = {}
         plugin._default_prompt = "Describe."
+        plugin._default_model = ""
 
         with (
             patch("plugins.iris_plugin.IRIS_REGISTRY", reg),
@@ -464,6 +539,7 @@ async def test_handle_custom_action_unknown() -> None:
         plugin._active_engine_name = "disabled"
         plugin._engine_settings = {}
         plugin._default_prompt = "Describe."
+        plugin._default_model = ""
 
         response = await plugin.handle_custom_action("unknown_action", {})
 
