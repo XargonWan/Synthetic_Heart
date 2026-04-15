@@ -1689,7 +1689,12 @@ class DiaryPlugin:
             await message_queue.enqueue_low_priority(
                 None,
                 message,
-                context_memory={"diary_merge_beat": True, "diary_entry_id": entry_id},
+                context_memory={
+                    "diary_merge_beat": True,
+                    "diary_entry_id": entry_id,
+                    "allowed_action_types": ["update_diary_entry"],
+                    "skip_history": True,
+                },
                 interface_id="diary_merge",
                 original_message=None,
             )

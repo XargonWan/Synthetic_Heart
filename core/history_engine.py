@@ -293,6 +293,14 @@ class HistoryEngine:
         memories: Optional[Sequence[HistoryEntry]] = None,
         history_scope: str | None = None,
     ) -> Dict[str, Any]:
+        # Internal beats (diary consolidation, grillo, etc.) set skip_history=True
+        # in context_memory to avoid loading irrelevant chat history into the prompt.
+        if isinstance(context_memory, dict) and context_memory.get("skip_history"):
+            log_debug(
+                "[history_engine] skip_history flag set — returning empty context"
+            )
+            return {"history_current_chat": [], "history_recent": [], "thoughts": []}
+
         lite_mode = _get_bool("PROMPT_LITE_MODE", False)
 
         verbosity = max(0, _get_int("CONTEXT_VERBOSITY", 10))

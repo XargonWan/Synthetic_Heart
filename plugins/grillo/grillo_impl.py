@@ -405,6 +405,7 @@ class GrilloPlugin(AIPluginBase):
                     "allowed_action_types": self._get_allowed_action_types_for_beat(
                         beat_type
                     ),
+                    "skip_history": True,
                 },
                 "priority": False,
             }

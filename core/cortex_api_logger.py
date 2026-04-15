@@ -96,8 +96,8 @@ def _pretty_json(obj: Any, *, redact_keys: set[str] | None = None) -> str:
 def sanitize_for_log(data: Any, *, max_str_len: int = 500) -> Any:
     """Deep-copy *data*, replacing large strings and bytes with size placeholders.
 
-    Use before passing payloads to ``log_cortex_request`` to avoid dumping
-    megabytes of base64 or binary content into the log.
+    Called automatically by ``log_cortex_request``; callers may also call it
+    directly to produce compact dicts for other purposes.
     """
     if isinstance(data, dict):
         return {
@@ -137,7 +137,7 @@ def log_cortex_request(
     if headers:
         lines.append(f"Headers: {_pretty_json(headers)}")
     if payload:
-        lines.append(f"Payload:\n{_pretty_json(payload)}")
+        lines.append(f"Payload:\n{_pretty_json(sanitize_for_log(payload))}")
     logger.debug("\n".join(lines))
 
 
