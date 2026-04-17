@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any, Protocol, cast
@@ -56,9 +57,25 @@ class LangfuseTraceLike(Protocol):
 
 class NoopEmbedder:
     async def embed(self, text: str) -> list[float]:
-        # Deterministic tiny embedding stub for local usage.
-        seed = float(len(text) % 10) / 10.0
-        return [seed] * 8
+        # Deterministic lightweight embedding that matches pgvector(768).
+        # This avoids model downloads and runs well on low-resource devices.
+        dimensions = 768
+        vector: list[float] = [0.0] * dimensions
+        normalized_text = text.strip().lower()
+        if not normalized_text:
+            return vector
+
+        for token in normalized_text.split():
+            digest = hashlib.sha256(token.encode("utf-8")).digest()
+            index = int.from_bytes(digest[:2], "little") % dimensions
+            sign = 1.0 if digest[2] % 2 == 0 else -1.0
+            weight = 0.25 + (digest[3] / 255.0) * 0.75
+            vector[index] += sign * weight
+
+        norm = sum(value * value for value in vector) ** 0.5
+        if norm > 0:
+            vector = [value / norm for value in vector]
+        return vector
 
 
 @dataclass(slots=True)

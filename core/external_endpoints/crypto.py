@@ -19,7 +19,30 @@ from pathlib import Path
 
 from cryptography.fernet import Fernet
 
-_SECRET_FILE = Path("/config/.synth_secret")
+
+def _resolve_secret_file() -> Path:
+    """Resolve where the Fernet key should be persisted.
+
+    Priority:
+    1. ``SYNTH_SECRET_FILE`` environment override.
+    2. Container-style ``/config/.synth_secret`` when writable.
+    3. User-local fallback ``~/.synthetic_heart/.synth_secret`` for native runs.
+    """
+
+    override = os.environ.get("SYNTH_SECRET_FILE", "").strip()
+    if override:
+        return Path(override).expanduser()
+
+    container_path = Path("/config/.synth_secret")
+    try:
+        container_path.parent.mkdir(parents=True, exist_ok=True)
+        return container_path
+    except OSError:
+        # Native/Windows fallback where /config is not writable.
+        return Path.home() / ".synthetic_heart" / ".synth_secret"
+
+
+_SECRET_FILE = _resolve_secret_file()
 
 _fernet: Fernet | None = None
 

@@ -84,7 +84,9 @@ def parse_args() -> argparse.Namespace:
         default="chat_history_cache,memories,ai_diary",
         help="Comma-separated sources: chat_history_cache, memories, ai_diary",
     )
-    parser.add_argument("--dry-run", action="store_true", help="Do not write to SOUL DB")
+    parser.add_argument(
+        "--dry-run", action="store_true", help="Do not write to SOUL DB"
+    )
     return parser.parse_args()
 
 
@@ -147,7 +149,9 @@ def _json_list(value: Any) -> list[str]:
     return [str(value).strip()]
 
 
-def _emotion_snapshot_from_labels(labels: list[str], intensity: float) -> dict[str, float]:
+def _emotion_snapshot_from_labels(
+    labels: list[str], intensity: float
+) -> dict[str, float]:
     joy_words = {"joy", "happy", "glad", "excited", "love"}
     fear_words = {"fear", "anxious", "worried", "nervous", "scared"}
     sad_words = {"sad", "lonely", "depressed", "down"}
@@ -181,7 +185,9 @@ def _dominant_emotion(snapshot: dict[str, float]) -> str:
     return top
 
 
-def _build_emotional_tag(labels: list[str], intensity: float, valence: float) -> EmotionalTag:
+def _build_emotional_tag(
+    labels: list[str], intensity: float, valence: float
+) -> EmotionalTag:
     norm_intensity = max(0.0, min(1.0, intensity))
     norm_valence = max(-1.0, min(1.0, valence))
     snapshot = _emotion_snapshot_from_labels(labels, norm_intensity)
@@ -351,7 +357,9 @@ class LegacyToSoulMigrator:
                 session_id=f"legacy/memories/{scope}",
                 episodic_trace=content,
                 atomic_facts=atomic_facts,
-                emotional_tag=_build_emotional_tag(labels, intensity=intensity, valence=0.0),
+                emotional_tag=_build_emotional_tag(
+                    labels, intensity=intensity, valence=0.0
+                ),
                 foresight_signals=[],
                 timestamp=_as_utc(row.get("timestamp")),
                 embedding=None,
@@ -402,7 +410,9 @@ class LegacyToSoulMigrator:
             else:
                 episodic_trace = content
 
-            session_bits = [value for value in [interface_name, chat_id, thread_id] if value]
+            session_bits = [
+                value for value in [interface_name, chat_id, thread_id] if value
+            ]
             session_suffix = "/".join(session_bits) if session_bits else "legacy"
 
             atomic_facts = [
@@ -456,7 +466,9 @@ class LegacyToSoulMigrator:
         print(f"Days lookback: {self.config.days}")
         print(f"Batch size: {self.config.batch_size}")
         print(f"Sources: {', '.join(sorted(self.config.sources))}")
-        print(f"MariaDB: {self.config.maria_user}@{self.config.maria_host}:{self.config.maria_port}/{self.config.maria_database}")
+        print(
+            f"MariaDB: {self.config.maria_user}@{self.config.maria_host}:{self.config.maria_port}/{self.config.maria_database}"
+        )
         print(f"SOUL Postgres DSN: {self.config.soul_postgres_dsn}")
 
     def _print_summary(self) -> None:

@@ -5091,6 +5091,7 @@ class SynthWebUIInterface:
         Never raises — errors are captured and returned as a failed probe dict.
         """
         import asyncio
+        import os
 
         try:
             from core.external_endpoints.probe import probe_endpoint
@@ -5099,7 +5100,12 @@ class SynthWebUIInterface:
             if ep is None:
                 return {"status": "failed", "error": "Endpoint not found"}
 
-            result = await asyncio.wait_for(probe_endpoint(ep, api_key), timeout=40.0)
+            timeout_seconds = float(
+                os.getenv("EXTERNAL_ENDPOINT_PROBE_TIMEOUT_SECONDS", "20")
+            )
+            result = await asyncio.wait_for(
+                probe_endpoint(ep, api_key), timeout=timeout_seconds
+            )
             await reg.set_probe_result(
                 ep_id,
                 status=result.status,
@@ -5115,7 +5121,10 @@ class SynthWebUIInterface:
             }
         except asyncio.TimeoutError:
             log_warning(f"{LOG_PREFIX} auto-probe timed out for ep_id={ep_id}")
-            return {"status": "failed", "error": "Probe timed out (40 s)"}
+            return {
+                "status": "failed",
+                "error": f"Probe timed out ({os.getenv('EXTERNAL_ENDPOINT_PROBE_TIMEOUT_SECONDS', '20')} s)",
+            }
         except Exception as exc:
             log_warning(f"{LOG_PREFIX} auto-probe failed for ep_id={ep_id}: {exc}")
             return {"status": "failed", "error": str(exc)}
@@ -5260,7 +5269,6 @@ class SynthWebUIInterface:
         """POST /api/external-endpoints/{ep_id}/probe — probe capabilities."""
         try:
             from core.external_endpoints.crypto import decrypt_api_key
-            from core.external_endpoints.probe import probe_endpoint
             from core.external_endpoints.registry import get_external_endpoint_registry
 
             reg = get_external_endpoint_registry()
@@ -5269,19 +5277,13 @@ class SynthWebUIInterface:
                 raise HTTPException(status_code=404, detail="Endpoint not found")
 
             api_key = decrypt_api_key(ep.api_key_enc or "")
-            result = await probe_endpoint(ep, api_key)
-            await reg.set_probe_result(
-                ep_id,
-                status=result.status,
-                capabilities=result.capabilities,
-                models=result.models,
-            )
+            probe_data = await self._run_auto_probe(ep_id, api_key, reg)
             return JSONResponse(
                 {
-                    "status": result.status,
-                    "capabilities": result.capabilities,
-                    "models": result.models,
-                    "error": result.error_message,
+                    "status": probe_data.get("status", "failed"),
+                    "capabilities": probe_data.get("capabilities", {}),
+                    "models": probe_data.get("models", []),
+                    "error": probe_data.get("error", ""),
                 }
             )
         except HTTPException:

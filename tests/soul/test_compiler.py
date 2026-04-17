@@ -77,6 +77,8 @@ async def test_post_session_compile_resolves_relative_time() -> None:
 
     assert len(ids) == 1
     cell = repo.memcells[ids[0]]
+    assert cell.embedding is not None
+    assert len(cell.embedding) == 768
     assert "week of 2026-04-06" in cell.episodic_trace
     assert "week of 2026-04-20" in cell.atomic_facts[0]
 

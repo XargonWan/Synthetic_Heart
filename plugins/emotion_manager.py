@@ -475,6 +475,105 @@ class EmotionManager(PluginBase):
             log_error(f"[emotion_manager] Error loading emotions: {e}")
             return {}
 
+    async def _log_emotion_diary_entry(
+        self, cur: Any, emotion: str, intensity: float
+    ) -> None:
+        """Write an entry to emotion_diary with legacy-schema compatibility.
+
+        Older deployments may have a plugin-defined emotion_diary schema that
+        differs from the emotion_manager schema (for example, missing
+        ``timestamp`` or using a non-auto-increment ``id``). This method adapts
+        the INSERT to available columns so emotion updates never fail.
+        """
+
+        try:
+            await cur.execute("SHOW COLUMNS FROM emotion_diary")
+            column_rows = await cur.fetchall()
+        except Exception as e:
+            log_warning(
+                f"[emotion_manager] Could not inspect emotion_diary schema: {e}"
+            )
+            return
+
+        columns: dict[str, dict[str, str | None]] = {}
+        for row in column_rows:
+            if isinstance(row, dict):
+                field = str(row.get("Field", ""))
+                columns[field] = {
+                    "null": row.get("Null"),
+                    "default": row.get("Default"),
+                    "extra": row.get("Extra"),
+                }
+            else:
+                field = str(row[0]) if len(row) > 0 else ""
+                columns[field] = {
+                    "null": row[2] if len(row) > 2 else None,
+                    "default": row[4] if len(row) > 4 else None,
+                    "extra": row[5] if len(row) > 5 else None,
+                }
+
+        if not columns:
+            return
+
+        sql_columns: list[str] = []
+        sql_values: list[str] = []
+        params: list[Any] = []
+
+        id_meta = columns.get("id")
+        id_requires_value = False
+        if id_meta is not None:
+            extra = str(id_meta.get("extra") or "").lower()
+            null_flag = str(id_meta.get("null") or "").upper()
+            default_val = id_meta.get("default")
+            id_requires_value = (
+                "auto_increment" not in extra
+                and null_flag == "NO"
+                and default_val in (None, "")
+            )
+
+        if id_requires_value:
+            sql_columns.append("id")
+            sql_values.append("%s")
+            params.append(f"emotion:{emotion}:{int(datetime.now().timestamp() * 1000)}")
+
+        payload: list[tuple[str, Any]] = [
+            ("source", "emotion_manager"),
+            ("event", "set_emotion"),
+            ("emotion", emotion),
+            ("intensity", intensity),
+            ("state", "active"),
+            ("trigger_condition", "manual_or_tag"),
+            ("decision_logic", "set_emotion"),
+            ("next_check", None),
+        ]
+
+        for col_name, value in payload:
+            if col_name in columns:
+                sql_columns.append(col_name)
+                sql_values.append("%s")
+                params.append(value)
+
+        if "timestamp" in columns:
+            sql_columns.append("timestamp")
+            sql_values.append("%s")
+            params.append(datetime.now())
+
+        if not sql_columns:
+            return
+
+        sql = (
+            "INSERT INTO emotion_diary ("
+            + ", ".join(sql_columns)
+            + ") VALUES ("
+            + ", ".join(sql_values)
+            + ")"
+        )
+
+        try:
+            await cur.execute(sql, tuple(params))
+        except Exception as e:
+            log_warning(f"[emotion_manager] emotion_diary insert skipped: {e}")
+
     async def set_emotion(self, emotion: str, intensity: float):
         """Set a single emotion intensity.
 
@@ -524,22 +623,9 @@ class EmotionManager(PluginBase):
                             (emotion, intensity),
                         )
 
-                    # Log to diary within the same transaction
-                    await cur.execute(
-                        """
-                        INSERT INTO emotion_diary 
-                        (source, event, emotion, intensity, state, trigger_condition, timestamp)
-                        VALUES (%s, %s, %s, %s, %s, %s, NOW())
-                        """,
-                        (
-                            "emotion_manager",
-                            "set_emotion",
-                            emotion,
-                            intensity,
-                            "active",
-                            "manual_or_tag",
-                        ),
-                    )
+                    # Log to diary within the same transaction. This uses a
+                    # schema-adaptive writer to support legacy table variants.
+                    await self._log_emotion_diary_entry(cur, emotion, intensity)
 
                     await conn.commit()
 
