@@ -142,39 +142,54 @@ def minify_actions_block(
 # ---------------------------------------------------------------------------
 
 
-def _build_context_summary(context_section: dict[str, Any]) -> str:
+def _build_context_summary(
+    context_section: dict[str, Any], is_grillo_internal: bool = False
+) -> str:
     """Format moderately-stable context parts into a plain text block.
 
     Includes: cross-chat history (history_recent), diary thoughts, tag-matched
     memories, participant bios.  Does NOT include ``history_current_chat``
     (which becomes ``PromptRequest.conversation_history``) or fully-dynamic
     runtime values (current emotion values → ``RuntimeContext.emotions``).
+
+    For Grillo internal beats (is_grillo_internal=True), this returns a MINIMAL
+    context with only persona and optionally recent diary entries — no cross-chat
+    history, no participant bios, minimal memories.
     """
     parts: list[str] = []
 
-    history_recent: list[Any] = context_section.get("history_recent") or []
-    if history_recent:
-        parts.append("[Recent context from other conversations]")
-        for line in history_recent:
-            parts.append(f"- {line}")
+    # Grillo internal beats skip cross-chat history and participants
+    if not is_grillo_internal:
+        history_recent: list[Any] = context_section.get("history_recent") or []
+        if history_recent:
+            parts.append("[Recent context from other conversations]")
+            for line in history_recent:
+                parts.append(f"- {line}")
 
     thoughts: list[Any] = context_section.get("thoughts") or []
-    if thoughts:
-        parts.append("[Thoughts and diary entries]")
-        for t in thoughts:
-            parts.append(f"- {t}")
+    if not is_grillo_internal:
+        # Grillo internal beats skip recent diary thoughts
+        if thoughts:
+            parts.append("[Thoughts and diary entries]")
+            for t in thoughts:
+                parts.append(f"- {t}")
 
     memories: list[Any] = context_section.get("memories") or []
-    if memories:
+    if not is_grillo_internal:
+        # Grillo internal beats use minimal memories (top 1-2 only)
         parts.append("[Relevant memories]")
-        for m in memories:
+        for m in memories[:2]:  # Limit to 2 most recent for Grillo
             snippet = str(m)
             if len(snippet) > 400:
                 snippet = snippet[:400] + "\u2026"
             parts.append(f"- {snippet}")
+    elif is_grillo_internal and memories:
+        # Grillo internal beats show only minimal memory indicator
+        parts.append(f"[{len(memories)} relevant memories available]")
 
     participants: Any = context_section.get("participants")
-    if participants:
+    # Grillo internal beats skip participant bios entirely
+    if not is_grillo_internal and participants:
         if isinstance(participants, list):
             lines: list[str] = []
             for p in participants:
@@ -316,7 +331,9 @@ def _assemble_prompt_request(  # noqa: PLR0913
     )
 
     # ── Context summary ─────────────────────────────────────────────────────
-    context_summary: str = _build_context_summary(context_section)
+    context_summary: str = _build_context_summary(
+        context_section, is_grillo_internal=is_grillo_internal
+    )
 
     # ── Conversation history ─────────────────────────────────────────────────
     # Grillo internal beats have no ongoing conversation history.

@@ -345,7 +345,7 @@ OPENAPI_SUPPORTS_AUDIO = config_registry.get_var(
 
 OPENAPI_SUPPORTS_TOOLS = config_registry.get_var(
     "OPENAPI_SUPPORTS_TOOLS",
-    False,
+    True,  # Enabled by default for native PromptRequest rendering
     label="Enable Tool/Function Calling",
     description="Enable tool/function calling.",
     group="llm",

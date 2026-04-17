@@ -156,8 +156,8 @@ Always follow this order — it prevents reading code you don't need:
 3. `cortex_sessions(limit=20)` then `cortex_analyze(N)` — inspect prompt assembly + LLM actions
 4. `get_config()` / `get_emotion_state()` / `get_memories()` — inspect live DB state if relevant
 5. `gitnexus_query("<error keyword or symptom>")` — find the relevant execution flow
-6. `gitnexus_context("<suspect function>")` — full caller/callee map before touching anything
-7. Read source files last, scoped only to what the above pointed at
+5. `gitnexus_context("<suspect function>")` — full caller/callee map before touching anything
+6. Read source files last, scoped only to what the above pointed at
 
 ## Token Traps — Never Do These
 
@@ -181,7 +181,7 @@ See `AGENTS.md` for the full architecture reference, animation system details, p
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **synthetic_heart** (7801 symbols, 25828 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **synthetic_heart** (7730 symbols, 25646 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
 

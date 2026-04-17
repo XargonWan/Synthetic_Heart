@@ -1542,8 +1542,8 @@ class EventPlugin(AIPluginBase):
     def _create_silent_bot(self):
         """Create a bot that silently logs actions instead of sending them."""
 
-        class SilentBot:
-            async def send_message(self, **kwargs):
+        class SilentBot:  # Internal logging class - methods NOT exposed as actions
+            async def _log_message(self, **kwargs):
                 text = kwargs.get("text", "")
                 chat_id = kwargs.get("chat_id")
                 log_debug(
@@ -1792,7 +1792,7 @@ Weekly recurring reminder:
             def __init__(self, event_plugin):
                 self.event_plugin = event_plugin
 
-            async def send_message(self, **kwargs):
+            async def _log_message(self, **kwargs):
                 """Handle LLM responses and delegate to action parser."""
                 text = kwargs.get("text", "")
                 chat_id = kwargs.get("chat_id")

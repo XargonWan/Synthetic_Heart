@@ -14,6 +14,16 @@
       "command": "uv",
       "args": ["run", "python", "mcp_servers/synth_logs.py"]
     },
+    "synth-db": {
+      "type": "stdio",
+      "command": "uv",
+      "args": ["run", "python", "mcp_servers/synth_db.py"]
+    },
+    "synth-cortex": {
+      "type": "stdio",
+      "command": "uv",
+      "args": ["run", "python", "mcp_servers/synth_cortex.py"]
+    },
     "affine": {
       "type": "stdio",
       "command": "affine-mcp"
