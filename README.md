@@ -122,6 +122,25 @@ By default, SOUL uses in-memory persistence. To enable persistent SOUL storage:
 3. Restart the stack:
    - `docker compose up -d --build`
 
+#### Optional: Migrate Existing MariaDB memories into SOUL
+
+If your Synth already has months of history, you can import legacy data into SOUL `mem_cells`.
+
+1. Ensure SOUL Postgres is running and schema is applied:
+   - Linux/macOS: `bash scripts/bootstrap_soul_postgres.sh`
+   - Windows PowerShell: `./scripts/bootstrap_soul_postgres.ps1`
+2. Run a dry-run first:
+   - `uv run python scripts/migrate_legacy_to_soul.py --dry-run --days 180`
+3. Run the real migration:
+   - `uv run python scripts/migrate_legacy_to_soul.py --days 180`
+4. Verify results in Postgres:
+   - `SELECT COUNT(*) FROM mem_cells;`
+
+Migration notes:
+- Sources migrated: `chat_history_cache`, `memories`, `ai_diary`
+- IDs are deterministic (`legacy:<table>:<id>`), so reruns are safe (upsert behavior)
+- The script uses `SOUL_POSTGRES_DSN` for the destination and `DB_*` values for legacy MariaDB source
+
 ### Option B: Windows Native (with `uv`)
 
 > [!WARNING]
