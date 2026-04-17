@@ -6,8 +6,8 @@
     },
     "gitnexus": {
       "type": "stdio",
-      "command": "gitnexus",
-      "args": ["mcp"]
+      "command": "npx",
+      "args": ["gitnexus", "mcp"]
     },
     "synth-logs": {
       "type": "stdio",

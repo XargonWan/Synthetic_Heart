@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 
-
 from core.external_endpoints.bridges.cortex_bridge import (
     _extract_attachments_and_redact,
 )

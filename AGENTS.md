@@ -399,6 +399,14 @@ docker exec synth-dev tail -f /app/logs/synth.log | grep -E "\[grillo\]|grillo"
 
 ---
 
+### GitNexus MCP server fails to start in some VS Code sessions  <!-- 2026-04-17 -->
+**Symptom:** Calls to GitNexus MCP tools return `MCP server could not be started: Process exited with code 1`.
+**Location:** VS Code MCP runtime / `gitnexus` server startup (not tied to a single repo file).
+**Status:** known, intermittent.
+**Notes:** When this occurs, agents cannot run `gitnexus_query` / `gitnexus_impact` / `gitnexus_context`. Use fallback discovery (`grep_search`, `file_search`, symbol/reference tools) and keep edits conservative until MCP health is restored.
+
+---
+
 ## 13. Database Quick Reference
 
 > Tables are created inline in `core/db.py` and each plugin — **`init-db.sql` only seeds a subset.** If you need a table's full column list, `grep -A20 "CREATE TABLE IF NOT EXISTS <name>"` in the relevant file.
@@ -463,6 +471,11 @@ All keys stored in the `config` table and accessible via `config_registry.get_va
 | `DIARY_HISTORY_DAYS` | How many days of diary to inject into context |
 | `EMOTION_DECAY_TAU` | Emotion decay time constant (seconds) |
 | `EMOTION_MAX_DISPLAY` | Max emotions to display in UI |
+| `SOUL_PLUGIN_ENABLED` | Enable/disable SOUL runtime orchestration plugin |
+| `SOUL_COMPILE_IDLE_SECONDS` | Idle seconds before SOUL compiles buffered transcript |
+| `SOUL_SCHEDULER_INTERVAL_SECONDS` | Scheduler tick interval for SOUL compile/rollup checks |
+| `SOUL_REPOSITORY_BACKEND` | SOUL persistence backend selector (`memory` or `postgres`) |
+| `SOUL_POSTGRES_DSN` | PostgreSQL DSN used when SOUL backend is `postgres` |
 | `ENABLE_MEMORY_SEARCH` | Enable/disable semantic memory retrieval |
 | `MEMORY_SEARCH_MAX_RESULTS` | Max memories returned per query |
 | `GRILLO_ALLOWED_ACTIONS` | Actions Grillo is permitted to execute |
@@ -489,7 +502,7 @@ All keys stored in the `config` table and accessible via `config_registry.get_va
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **synthetic_heart** (7801 symbols, 25828 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **synthetic_heart** (8166 symbols, 26718 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
 

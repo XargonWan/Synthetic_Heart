@@ -11,7 +11,7 @@ from core.prompt_renderers import (
     OpenAIRenderer,
     TextRenderer,
 )
-from core.prompt_request import Attachment, PromptRequest, RuntimeContext, Turn
+from core.prompt_request import PromptRequest, RuntimeContext, Turn
 
 
 # ---------------------------------------------------------------------------

@@ -7,7 +7,7 @@
     "gitnexus": {
       "type": "stdio",
       "command": "npx",
-      "args": ["-y", "gitnexus@latest", "mcp"]
+      "args": ["gitnexus", "mcp"]
     },
     "synth-logs": {
       "type": "stdio",
