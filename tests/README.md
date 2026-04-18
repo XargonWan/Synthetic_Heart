@@ -94,7 +94,7 @@ async def test_message_processing():
 def test_prompt_structure():
     from core.prompt_engine import build_full_json_instructions
 
-    instructions = build_full_json_instructions(mock_actions)
+    instructions = load_json_instructions()
     parsed = json.loads(instructions)
 
     assert "available_actions" in parsed

@@ -65,6 +65,14 @@ class RuleBasedMemCellExtractor:
                 if intent:
                     facts.append(f"User|has_intention|{intent}")
 
+        # Fallback: keep one short deterministic summary fact so memcells
+        # are not structurally empty when no explicit pattern is matched.
+        if not facts:
+            first_sentence = re.split(r"[\.\n!?]", transcript, maxsplit=1)[0].strip()
+            if first_sentence:
+                summary = first_sentence[:160]
+                facts.append(f"Conversation|summary|{summary}")
+
         return list(dict.fromkeys(facts))
 
     def _infer_emotion_snapshot(self, transcript: str) -> dict[str, float]:
@@ -90,6 +98,7 @@ class RuleBasedMemCellExtractor:
         self, transcript: str, current_date: date
     ) -> list[ForesightSignalModel]:
         foresight: list[ForesightSignalModel] = []
+        lower = transcript.lower()
 
         for match in re.finditer(r"\b(\d{4}-\d{2}-\d{2})\b", transcript):
             iso = match.group(1)
@@ -107,6 +116,31 @@ class RuleBasedMemCellExtractor:
                         emotional_implication={"fear": 0.1, "joy": 0.1},
                     )
                 )
+
+        # Relative-time cues that commonly indicate near-future intent.
+        relative_markers: list[tuple[str, int]] = [
+            ("tomorrow", 1),
+            ("next week", 7),
+            ("later today", 0),
+            ("tonight", 0),
+            ("soon", 2),
+        ]
+        for marker, delta_days in relative_markers:
+            if marker not in lower:
+                continue
+            valid_until = (
+                current_date
+                if delta_days == 0
+                else current_date.fromordinal(current_date.toordinal() + delta_days)
+            )
+            foresight.append(
+                ForesightSignalModel(
+                    content=f"Potential follow-up implied by phrase '{marker}'",
+                    valid_until=valid_until,
+                    trigger="relative_time_mention",
+                    emotional_implication={"joy": 0.1, "fear": 0.05},
+                )
+            )
 
         return foresight
 

@@ -58,6 +58,24 @@ System Components
     ``needs_component_reload`` automatically trigger a reload of the owning Cortex engine
     after an update, allowing API keys to be applied without restarting the whole system.
 
+Prompt Assembly
+---------------
+
+Prompt assembly is now centered on the typed
+``core.prompt_request.PromptRequest`` model.
+
+- ``core.prompt_engine.build_prompt_request()`` is the canonical builder.
+- ``build_json_prompt()`` remains as a deprecated alias for compatibility.
+- The builder still returns a compatibility dict for older callers, but it now
+    attaches the typed request under ``__prompt_request``.
+- Migrated engines render the typed request natively through
+    ``core.prompt_renderers`` instead of serializing the full prompt as one
+    indented JSON blob.
+
+This split lets the runtime preserve conversation turns, keep system
+instructions stable for caching, and handle chat, grillo, delivery, and live
+prompt modes without forcing every engine down the same text-only path.
+
 ``plugins``
     Action providers that extend synth's capabilities (terminal access, weather, file operations, etc.). Each plugin:
     

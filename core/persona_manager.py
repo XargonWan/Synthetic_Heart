@@ -1202,6 +1202,11 @@ class PersonaManager(PluginBase):
         matches = re.findall(pattern, text, re.IGNORECASE)
 
         for match in matches:
+            # Ignore JSON/object-style blocks (e.g. {"date": "April 10"})
+            # to avoid false positives like "april 10" being parsed as an emotion.
+            if ":" in match or '"' in match or "'" in match:
+                continue
+
             # Split by comma and process each emotion
             emotion_parts = [part.strip() for part in match.split(",")]
 

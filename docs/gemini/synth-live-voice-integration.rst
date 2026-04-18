@@ -58,7 +58,7 @@ Key files
      - Purpose
    * - ``core/live_session_manager.py``
      - Session lifecycle, audio I/O, receive loop, tool call dispatch, reconnect logic
-   * - ``cortex/llm_provider/gemini_api.py``
+   * - ``engines/external_engines/gemini_api.py``
      - ``get_live_session_manager()`` factory, ``start_live_voice_session()`` / ``stop_live_voice_session()`` wrappers
    * - ``core/prompt_engine.py``
      - ``build_live_system_instruction()`` — condensed persona for live sessions

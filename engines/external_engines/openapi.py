@@ -35,8 +35,10 @@ from core.ai_plugin_base import AIPluginBase
 from core.config_manager import config_registry
 from core.cortex_api_logger import log_cortex_request, log_cortex_response
 from core.logging_utils import log_debug, log_error, log_info, log_warning
+from core.prompt_request import PromptRequest
 
 ENGINE_LABEL = "Generic OpenAPI — connect to any OpenAI-compatible endpoint"
+_LEGACY_DICT_PROMPT_WARNED = False
 
 # ---------------------------------------------------------------------------
 # WebUI variable registration (always visible so keys can be set before use)
@@ -895,7 +897,13 @@ class OpenAPIPlugin(AIPluginBase):
             # === Phase 4: PromptRequest native-format path ===
             # When build_json_prompt() has attached a PromptRequest, use OpenAIRenderer
             # to produce a native messages list instead of a single JSON blob.
-            _pr = prompt.get("__prompt_request") if isinstance(prompt, dict) else None
+            _pr: PromptRequest | None = None
+            if isinstance(prompt, PromptRequest):
+                _pr = prompt
+            elif isinstance(prompt, dict):
+                candidate = prompt.get("__prompt_request")
+                if isinstance(candidate, PromptRequest):
+                    _pr = candidate
             if _pr is not None:
                 from core.prompt_renderers import OpenAIRenderer
 
@@ -922,9 +930,19 @@ class OpenAPIPlugin(AIPluginBase):
                     _messages, _tools, _max_tok
                 )
 
+            if isinstance(prompt, dict):
+                global _LEGACY_DICT_PROMPT_WARNED
+                if not _LEGACY_DICT_PROMPT_WARNED:
+                    log_debug(
+                        "[openapi] dict prompt fallback path used (missing __prompt_request)"
+                    )
+                    _LEGACY_DICT_PROMPT_WARNED = True
+
             # Normalize prompt to text
             if isinstance(prompt, dict):
-                prompt_text = json.dumps(prompt, indent=2, ensure_ascii=False)
+                prompt_text = json.dumps(
+                    prompt, ensure_ascii=False, separators=(",", ":")
+                )
             elif isinstance(prompt, str):
                 prompt_text = prompt
             else:
@@ -937,7 +955,9 @@ class OpenAPIPlugin(AIPluginBase):
 
             if isinstance(prompt, dict) and multimodal_parts:
                 redacted = self._copy_and_redact_data(prompt)
-                prompt_text = json.dumps(redacted, indent=2, ensure_ascii=False)
+                prompt_text = json.dumps(
+                    redacted, ensure_ascii=False, separators=(",", ":")
+                )
 
             log_debug(
                 f"[openapi] Sending prompt ({len(prompt_text)} chars) to {self._current_model}"
@@ -951,6 +971,31 @@ class OpenAPIPlugin(AIPluginBase):
                 if model
                 else int(OPENAPI_DEFAULT_MAX_TOKENS)
             )
+
+            if isinstance(prompt, dict):
+                legacy_messages: list[dict[str, Any]] = [
+                    {"role": "system", "content": system_instruction}
+                ]
+                if multimodal_parts:
+                    has_vision = bool(OPENAPI_SUPPORTS_VISION)
+                    content_parts: list[dict[str, Any]] = []
+                    if has_vision:
+                        for part in multimodal_parts:
+                            content_parts.append(part)
+                    else:
+                        log_warning(
+                            f"[openapi] Vision disabled; skipping {len(multimodal_parts)} image part(s)"
+                        )
+                    content_parts.append({"type": "text", "text": prompt_text})
+                    legacy_messages.append({"role": "user", "content": content_parts})
+                else:
+                    legacy_messages.append({"role": "user", "content": prompt_text})
+
+                response_text = await self._openai_chat_completion_from_messages(
+                    legacy_messages, [], max_tokens
+                )
+                log_debug(f"[openapi] Received response ({len(response_text)} chars)")
+                return response_text
 
             response_text = await self._openai_chat_completion(
                 prompt_text=prompt_text,

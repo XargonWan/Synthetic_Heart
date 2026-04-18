@@ -86,7 +86,7 @@ class MessagePlugin:
         """Handle message action execution using the interface registry."""
 
         payload = action.get("payload", {})
-        text = payload.get("text", "")
+        text = payload.get("text") or payload.get("content") or ""
         interface_path = payload.get("interface_path")
         target = payload.get("target")
         thread_id = payload.get("thread_id")
@@ -279,7 +279,7 @@ class MessagePlugin:
             send_payload["interface_path"] = rebuilt_interface_path
 
         try:
-            await handler.send_message(send_payload, original_message)
+            await handler.send_message(send_payload, original_message=original_message)
             log_info(
                 f"[message_plugin] Message successfully sent to {target} (thread: {thread_id}, reply_to: {reply_to})"
             )

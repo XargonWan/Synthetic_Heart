@@ -1,7 +1,7 @@
 # core/prompt_request.py
 """Engine-agnostic intermediate prompt representation.
 
-``PromptRequest`` replaces the raw ``dict`` that ``build_json_prompt()`` currently
+``PromptRequest`` replaces the raw ``dict`` that ``build_prompt_request()`` currently
 returns as its sole output.  Every LLM engine renders it natively using a
 dedicated renderer (see ``core/prompt_renderers.py``).
 
@@ -71,7 +71,7 @@ class PromptRequest:
     """Engine-agnostic intermediate prompt representation.
 
     Engines render this into their native wire format.  The legacy dict
-    (returned by ``build_json_prompt()``) is kept as-is; this object is
+    (returned by ``build_prompt_request()``) is kept as-is; this object is
     attached to it under the ``"__prompt_request"`` key so engines can
     opt-in incrementally.
 

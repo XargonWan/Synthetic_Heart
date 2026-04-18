@@ -1221,6 +1221,53 @@ async def universal_send(interface_send_func, *args, text: str = None, **kwargs)
                     f"[transport] Filtered {len(cross_interface_actions)} cross-interface actions, processing {len(current_interface_actions)} for {current_interface}"
                 )
 
+            # Facial-expression tags must be parsed from message payload text,
+            # not from the raw LLM response envelope.
+            try:
+                from core.core_initializer import PLUGIN_REGISTRY
+
+                facial_plugin = next(
+                    (
+                        p
+                        for p in PLUGIN_REGISTRY.values()
+                        if hasattr(p, "process_message_text")
+                    ),
+                    None,
+                )
+                if facial_plugin:
+                    session_id = str(
+                        interface_path
+                        or kwargs.get("chat_id")
+                        or context.get("original_chat_id")
+                        or "default"
+                    )
+                    for action in current_interface_actions:
+                        action_type = str(action.get("type") or "")
+                        payload = action.get("payload")
+                        if not action_type.startswith("message_") or not isinstance(
+                            payload, dict
+                        ):
+                            continue
+                        payload_text = payload.get("text")
+                        if (
+                            not isinstance(payload_text, str)
+                            or "[em" not in payload_text
+                        ):
+                            continue
+                        cleaned = await facial_plugin.process_message_text(
+                            payload_text,
+                            session_id=session_id,
+                        )
+                        if isinstance(cleaned, str) and cleaned != payload_text:
+                            payload["text"] = cleaned
+                            log_debug(
+                                f"[transport] Applied facial expression cleanup for {action_type}"
+                            )
+            except Exception as facial_exc:
+                log_debug(
+                    f"[transport] Facial payload processing skipped due to error: {facial_exc}"
+                )
+
             # Only process actions for current interface
             if current_interface_actions:
                 # Diagnostic: list action types and payload summaries
@@ -1822,15 +1869,19 @@ async def run_corrector_middleware(
                     )
                 except Exception:
                     pass
-                corrected = str(corrected)
+                try:
+                    corrected = str(corrected)
+                except Exception as e:
+                    log_error(f"[corrector_middleware] Failed to coerce to str: {e}")
+                    corrected = ""
 
             # Log corrected result type/length
             try:
                 log_debug(
                     f"[corrector_middleware] LLM returned type={type(corrected)} len={(len(corrected) if isinstance(corrected, str) else 'N/A')}"
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                log_debug(f"[corrector_middleware] Failed to log corrected result: {e}")
 
             if corrected and isinstance(corrected, str):
                 log_debug(

@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 from core.prompt_engine import (
     build_json_prompt,
+    build_live_prompt_request,
     build_live_system_instruction,
     load_json_instructions,
     load_unminified_chat_instruction,
@@ -33,14 +34,11 @@ def test_build_json_prompt_reply_without_text(monkeypatch):
     assert (
         result["input"]["payload"]["reply_message_id"]["text"] == "[Non-text content]"
     )
-    # For chat-like interfaces we expect an unminified verbose instruction block
-    assert "instructions_verbose" in result, (
-        "Expected verbose chat instruction for chat interfaces"
-    )
-    assert (
-        "You are participating in a live chat conversation"
-        in result["instructions_verbose"]
-    )
+    # Phase 8: transport prompt no longer carries instructions_verbose.
+    assert "instructions_verbose" not in result
+    pr = result.get("__prompt_request")
+    assert pr is not None
+    assert "MASTER INSTRUCTION" in pr.system_instruction
 
 
 def test_build_json_prompt_inherits_image_data_from_context_memory(monkeypatch):
@@ -113,6 +111,35 @@ def test_build_live_system_instruction_enforces_identity_rules(monkeypatch):
         "never replace an established he/him or she/her person with singular they/them"
         in result
     )
+
+
+def test_build_live_prompt_request_returns_live_mode(monkeypatch):
+    from core.prompt_request import PromptRequest
+
+    async def dummy_gather(message, ctx):
+        return {"persona": "You are 2B."}
+
+    monkeypatch.setattr("core.action_parser.gather_static_injections", dummy_gather)
+
+    req = asyncio.run(build_live_prompt_request())
+    assert isinstance(req, PromptRequest)
+    assert req.mode == "live"
+    assert "You are 2B." in req.system_instruction
+
+
+def test_build_live_system_instruction_matches_live_renderer(monkeypatch):
+    from core.prompt_renderers import LiveRenderer
+
+    async def dummy_gather(message, ctx):
+        return {"persona": "You are 2B."}
+
+    monkeypatch.setattr("core.action_parser.gather_static_injections", dummy_gather)
+
+    req = asyncio.run(build_live_prompt_request())
+    rendered = LiveRenderer(req).render_as_text()
+    built = asyncio.run(build_live_system_instruction())
+
+    assert built == rendered
 
 
 def test_build_json_prompt_filters_actions_by_allowlist(monkeypatch):
@@ -226,6 +253,8 @@ def test_prompt_request_mode_is_grillo_for_grillo_beat(monkeypatch):
     assert isinstance(pr, PromptRequest)
     assert pr.mode == "grillo", f"Expected mode='grillo', got {pr.mode!r}"
     assert pr.runtime_ctx.is_grillo_beat is True
+    assert "GRILLO INTERNAL MODE" in result.get("instructions", "")
+    assert "DO NOT emit any message_* action" in result.get("instructions", "")
 
 
 # ── _history_to_turns tests ──────────────────────────────────────────────

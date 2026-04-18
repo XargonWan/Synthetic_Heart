@@ -38,6 +38,7 @@ import base64
 import logging
 from typing import Any, AsyncIterator
 
+from core.genai_client_utils import harden_genai_client_for_async_close
 from core.logging_utils import log_error, log_info, log_warning
 from plugins.live_base import (
     LiveEngineBase,
@@ -172,6 +173,7 @@ class GeminiLiveEngine(LiveEngineBase):
             api_key=api_key,
             http_options={"api_version": "v1alpha"},
         )
+        client = harden_genai_client_for_async_close(client)
         queue: asyncio.Queue[LiveEvent | object] = asyncio.Queue()
 
         try:

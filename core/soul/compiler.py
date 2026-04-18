@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any, Protocol, cast
@@ -113,6 +114,8 @@ class SoulCompiler:
             for raw_cell in extracted:
                 episodic_trace = resolver.resolve_text(raw_cell.episodic_trace)
                 atomic_facts = [resolver.resolve_text(f) for f in raw_cell.atomic_facts]
+                if not atomic_facts:
+                    atomic_facts = self._fallback_atomic_facts(episodic_trace)
                 embedding = await self.embedder.embed(episodic_trace)
 
                 cell_timestamp = raw_cell.timestamp
@@ -144,6 +147,22 @@ class SoulCompiler:
                     pass
 
         return created_ids
+
+    async def backfill_embeddings(self, *, limit: int = 200) -> int:
+        """Backfill vector embeddings for existing MemCells missing vectors."""
+
+        updated = 0
+        missing_cells = await self.repository.list_memcells_missing_embeddings(
+            limit=limit
+        )
+        for cell in missing_cells:
+            text = cell.episodic_trace.strip()
+            if not text:
+                continue
+            cell.embedding = await self.embedder.embed(text)
+            await self.repository.upsert_memcell(cell)
+            updated += 1
+        return updated
 
     async def async_consolidate(self) -> list[str]:
         """Consolidate unconsolidated MemCells into MemScenes."""
@@ -290,6 +309,13 @@ class SoulCompiler:
                 )
             )
         return signals
+
+    @staticmethod
+    def _fallback_atomic_facts(episodic_trace: str) -> list[str]:
+        first_sentence = re.split(r"[\.\n!?]", episodic_trace, maxsplit=1)[0].strip()
+        if not first_sentence:
+            return []
+        return [f"Conversation|summary|{first_sentence[:160]}"]
 
 
 # Lightweight default strategy implementations for tests and local dry-runs.

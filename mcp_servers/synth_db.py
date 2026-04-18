@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""MCP server exposing the Synthetic Heart MariaDB database to AI agents.
+"""MCP server exposing the Synthetic Heart database (MariaDB or PostgreSQL) to AI agents.
 
 Provides read-only and carefully guarded write access so agents can diagnose
 state, inspect config, and make safe corrections without risking corruption.
@@ -25,12 +25,22 @@ delete_memory        -- delete a memory by id
 
 Connection
 ----------
-Reads DB_HOST, DB_PORT, DB_USER, DB_PASS, DB_NAME from environment.
-Defaults match the dev container: host=localhost, port=3306, user/pass/db=synth.
+Reads DB_TYPE, DB_HOST, DB_PORT, DB_USER, DB_PASS, DB_NAME from environment.
+- DB_TYPE: "mariadb" (default) or "postgres"
+- MariaDB defaults: host=localhost, port=3306, user/pass/db=synth
+- PostgreSQL defaults: host=localhost, port=5432, user/pass/db=synth
+
+Required packages:
+- MariaDB: pip install pymysql
+- PostgreSQL: pip install psycopg2-binary
 
 Usage (stdio transport, registered in .mcp.json)
 -------------------------------------------------
+    # For MariaDB (default)
     uv run python mcp_servers/synth_db.py
+
+    # For PostgreSQL
+    DB_TYPE=postgres uv run python mcp_servers/synth_db.py
 """
 
 from __future__ import annotations
@@ -39,31 +49,84 @@ import os
 import re
 from typing import Any, Optional
 
-import pymysql
-import pymysql.cursors
 from mcp.server.fastmcp import FastMCP
+
+# Import both database drivers
+try:
+    import pymysql
+    import pymysql.cursors
+
+    PYMYSQL_AVAILABLE = True
+except ImportError:
+    PYMYSQL_AVAILABLE = False
+
+try:
+    import psycopg2
+    import psycopg2.extras
+
+    PSYCOPG2_AVAILABLE = True
+except ImportError:
+    PSYCOPG2_AVAILABLE = False
 
 # ---------------------------------------------------------------------------
 # Connection helpers
 # ---------------------------------------------------------------------------
 
 
+def _get_db_type() -> str:
+    """Get database type from environment, default to mariadb."""
+    return os.getenv("DB_TYPE", "mariadb").lower()
+
+
 def _db_kwargs() -> dict[str, Any]:
-    return {
-        "host": os.getenv("DB_HOST", "localhost"),
-        "port": int(os.getenv("DB_PORT", "3306")),
-        "user": os.getenv("DB_USER", "synth"),
-        "password": os.getenv("DB_PASS", "synth"),
-        "database": os.getenv("DB_NAME", "synth"),
-        "charset": "utf8mb4",
-        "cursorclass": pymysql.cursors.DictCursor,
-        "connect_timeout": 5,
-        "autocommit": False,
-    }
+    """Get database connection kwargs based on DB_TYPE."""
+    db_type = _get_db_type()
+
+    if db_type == "mariadb":
+        if not PYMYSQL_AVAILABLE:
+            raise ImportError(
+                "pymysql is required for MariaDB connections but not installed"
+            )
+        return {
+            "host": os.getenv("DB_HOST", "localhost"),
+            "port": int(os.getenv("DB_PORT", "3306")),
+            "user": os.getenv("DB_USER", "synth"),
+            "password": os.getenv("DB_PASS", "synth"),
+            "database": os.getenv("DB_NAME", "synth"),
+            "charset": "utf8mb4",
+            "cursorclass": pymysql.cursors.DictCursor,
+            "connect_timeout": 5,
+            "autocommit": False,
+        }
+    elif db_type == "postgres":
+        if not PSYCOPG2_AVAILABLE:
+            raise ImportError(
+                "psycopg2 is required for PostgreSQL connections but not installed"
+            )
+        return {
+            "host": os.getenv("DB_HOST", "localhost"),
+            "port": int(os.getenv("DB_PORT", "5432")),
+            "user": os.getenv("DB_USER", "synth"),
+            "password": os.getenv("DB_PASS", "synth"),
+            "database": os.getenv("DB_NAME", "synth"),
+            "cursor_factory": psycopg2.extras.RealDictCursor,
+            "connect_timeout": 5,
+        }
+    else:
+        raise ValueError(f"Unsupported DB_TYPE: {db_type}. Use 'mariadb' or 'postgres'")
 
 
-def _connect() -> pymysql.connections.Connection:
-    return pymysql.connect(**_db_kwargs())
+def _connect() -> Any:
+    """Create database connection based on DB_TYPE."""
+    db_type = _get_db_type()
+    kwargs = _db_kwargs()
+
+    if db_type == "mariadb":
+        return pymysql.connect(**kwargs)
+    elif db_type == "postgres":
+        return psycopg2.connect(**kwargs)
+    else:
+        raise ValueError(f"Unsupported DB_TYPE: {db_type}")
 
 
 # ---------------------------------------------------------------------------
@@ -127,15 +190,30 @@ def list_tables() -> str:
     """
     try:
         conn = _connect()
+        db_type = _get_db_type()
         with conn:
             with conn.cursor() as cur:
-                cur.execute("SHOW TABLES")
-                tables: list[str] = [list(row.values())[0] for row in cur.fetchall()]
+                if db_type == "mariadb":
+                    cur.execute("SHOW TABLES")
+                    tables: list[str] = [
+                        list(row.values())[0] for row in cur.fetchall()
+                    ]
+                    quote_char = "`"
+                else:  # postgres
+                    cur.execute(
+                        "SELECT table_name FROM information_schema.tables "
+                        "WHERE table_schema = 'public' ORDER BY table_name"
+                    )
+                    tables = [row["table_name"] for row in cur.fetchall()]
+                    quote_char = '"'
+
                 lines: list[str] = [f"{'TABLE':<40} {'ROWS':>8}", "-" * 52]
                 for tbl in sorted(tables):
                     safe_tbl = re.sub(r"[^\w]", "", tbl)
                     try:
-                        cur.execute(f"SELECT COUNT(*) AS cnt FROM `{safe_tbl}`")
+                        cur.execute(
+                            f"SELECT COUNT(*) AS cnt FROM {quote_char}{safe_tbl}{quote_char}"
+                        )
                         cnt: Any = (cur.fetchone() or {}).get("cnt", "?")
                     except Exception:
                         cnt = "?"
@@ -156,28 +234,55 @@ def describe_table(table: str) -> str:
     safe_table = re.sub(r"[^\w]", "", table)
     if not safe_table:
         return "Invalid table name."
+
     try:
         conn = _connect()
+        db_type = _get_db_type()
         with conn:
             with conn.cursor() as cur:
-                cur.execute(f"DESCRIBE `{safe_table}`")
-                rows = cur.fetchall()
-        if not rows:
-            return f"Table '{table}' not found or has no columns."
-        lines: list[str] = [
-            f"Schema for '{table}':\n",
-            f"  {'Field':<30} {'Type':<25} {'Null':<6} {'Key':<6} {'Default'}",
-            "  " + "-" * 78,
-        ]
-        for row in rows:
-            lines.append(
-                f"  {str(row.get('Field', '')):<30}"
-                f" {str(row.get('Type', '')):<25}"
-                f" {str(row.get('Null', '')):<6}"
-                f" {str(row.get('Key', '')):<6}"
-                f" {str(row.get('Default', ''))}"
-            )
-        return "\n".join(lines)
+                if db_type == "mariadb":
+                    cur.execute(f"DESCRIBE `{safe_table}`")
+                    rows = cur.fetchall()
+                    if not rows:
+                        return f"Table '{table}' not found or has no columns."
+                    lines: list[str] = [
+                        f"Schema for '{table}':\n",
+                        f"  {'Field':<30} {'Type':<25} {'Null':<6} {'Key':<6} {'Default'}",
+                        "  " + "-" * 78,
+                    ]
+                    for row in rows:
+                        lines.append(
+                            f"  {str(row.get('Field', '')):<30}"
+                            f" {str(row.get('Type', '')):<25}"
+                            f" {str(row.get('Null', '')):<6}"
+                            f" {str(row.get('Key', '')):<6}"
+                            f" {str(row.get('Default', ''))}"
+                        )
+                else:  # postgres
+                    cur.execute(
+                        "SELECT column_name, data_type, is_nullable, column_default "
+                        "FROM information_schema.columns "
+                        "WHERE table_name = %s AND table_schema = 'public' "
+                        "ORDER BY ordinal_position",
+                        (safe_table,),
+                    )
+                    rows = cur.fetchall()
+                    if not rows:
+                        return f"Table '{table}' not found or has no columns."
+                    lines: list[str] = [
+                        f"Schema for '{table}':\n",
+                        f"  {'Column':<30} {'Type':<25} {'Nullable':<8} {'Default'}",
+                        "  " + "-" * 70,
+                    ]
+                    for row in rows:
+                        nullable = "YES" if row.get("is_nullable") == "YES" else "NO"
+                        lines.append(
+                            f"  {str(row.get('column_name', '')):<30}"
+                            f" {str(row.get('data_type', '')):<25}"
+                            f" {nullable:<8}"
+                            f" {str(row.get('column_default', '') or '')}"
+                        )
+                return "\n".join(lines)
     except Exception as exc:
         return f"DB error: {exc}"
 
@@ -436,14 +541,23 @@ def set_config(key: str, value: str, confirm: bool = False) -> str:
         )
     try:
         conn = _connect()
+        db_type = _get_db_type()
         with conn:
             with conn.cursor() as cur:
-                cur.execute(
-                    "INSERT INTO config (config_key, value)"
-                    " VALUES (%s, %s)"
-                    " ON DUPLICATE KEY UPDATE value = VALUES(value)",
-                    (key, value),
-                )
+                if db_type == "mariadb":
+                    cur.execute(
+                        "INSERT INTO config (config_key, value)"
+                        " VALUES (%s, %s)"
+                        " ON DUPLICATE KEY UPDATE value = VALUES(value)",
+                        (key, value),
+                    )
+                else:  # postgres
+                    cur.execute(
+                        "INSERT INTO config (config_key, value)"
+                        " VALUES (%s, %s)"
+                        " ON CONFLICT (config_key) DO UPDATE SET value = EXCLUDED.value",
+                        (key, value),
+                    )
             conn.commit()
         return f"OK — config['{key}'] = '{value}'"
     except Exception as exc:

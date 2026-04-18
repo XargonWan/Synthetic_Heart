@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime, timezone
 from typing import Any, Protocol, cast
+
+from core.logging_utils import log_info
 
 from .models import (
     DspExtraction,
@@ -12,8 +15,105 @@ from .models import (
     ForesightSignal,
     KgTriple,
     MemCell,
+    MemCellRecall,
     MemScene,
+    compute_memcell_salience,
 )
+
+
+_WORD_RE = re.compile(r"[a-z0-9']+")
+
+
+def _clamp_score(value: float, minimum: float = 0.0, maximum: float = 1.0) -> float:
+    return max(minimum, min(maximum, float(value)))
+
+
+def _tokenize_search_text(text: str) -> set[str]:
+    return {
+        token for token in _WORD_RE.findall((text or "").lower()) if len(token) >= 3
+    }
+
+
+def _cosine_similarity(
+    query_embedding: list[float] | None,
+    cell_embedding: list[float] | None,
+) -> float:
+    if not query_embedding or not cell_embedding:
+        return 0.0
+    if len(query_embedding) != len(cell_embedding):
+        return 0.0
+    similarity = sum(
+        float(query_value) * float(cell_value)
+        for query_value, cell_value in zip(
+            query_embedding, cell_embedding, strict=False
+        )
+    )
+    return _clamp_score(similarity)
+
+
+def _lexical_overlap_score(query_tokens: set[str], cell: MemCell) -> float:
+    if not query_tokens:
+        return 0.0
+    haystack_tokens = _tokenize_search_text(
+        f"{cell.episodic_trace} {' '.join(cell.atomic_facts)}"
+    )
+    if not haystack_tokens:
+        return 0.0
+    overlap = len(query_tokens & haystack_tokens) / max(len(query_tokens), 1)
+    return _clamp_score(overlap)
+
+
+def _recency_score(timestamp: datetime, now: datetime) -> float:
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=timezone.utc)
+    age_seconds = max(0.0, (now - timestamp.astimezone(timezone.utc)).total_seconds())
+    half_life_seconds = 14 * 24 * 3600
+    return _clamp_score(0.5 ** (age_seconds / half_life_seconds))
+
+
+def _build_recall_match(
+    *,
+    cell: MemCell,
+    similarity: float,
+    lexical_score: float,
+    session_id: str | None,
+    now: datetime,
+) -> MemCellRecall:
+    recency = _recency_score(cell.timestamp, now)
+    salience = compute_memcell_salience(
+        emotional_intensity=abs(float(cell.emotional_tag.intensity)),
+        retrieval_count=cell.retrieval_count,
+        recency_score=recency,
+        explicit_importance=cell.explicit_importance,
+    )
+    same_session_boost = 0.08 if session_id and cell.session_id == session_id else 0.0
+    active_foresight = [
+        signal for signal in cell.foresight_signals if signal.valid_until >= now.date()
+    ]
+    foresight_boost = min(
+        0.06,
+        max((float(signal.priority) for signal in active_foresight), default=0.0)
+        * 0.06,
+    )
+    score = (
+        _clamp_score(similarity) * 0.58
+        + _clamp_score(lexical_score) * 0.16
+        + _clamp_score(salience) * 0.20
+        + same_session_boost
+        + foresight_boost
+    )
+    return MemCellRecall(
+        cell=cell,
+        similarity=_clamp_score(similarity),
+        lexical_score=_clamp_score(lexical_score),
+        score=score,
+    )
+
+
+def _passes_recall_floor(match: MemCellRecall, session_id: str | None) -> bool:
+    if session_id and match.cell.session_id == session_id:
+        return match.score >= 0.16 or max(match.similarity, match.lexical_score) >= 0.08
+    return match.score >= 0.22 and max(match.similarity, match.lexical_score) >= 0.10
 
 
 class SoulRepository(Protocol):
@@ -40,6 +140,20 @@ class SoulRepository(Protocol):
     async def add_dsp_extraction(self, extraction: DspExtraction) -> None: ...
 
     async def list_recent_dsp_extractions(self, limit: int) -> list[DspExtraction]: ...
+
+    async def list_memcells_missing_embeddings(
+        self, limit: int = 200
+    ) -> list[MemCell]: ...
+
+    async def recall_memories(
+        self,
+        *,
+        query_text: str,
+        query_embedding: list[float],
+        session_id: str | None = None,
+        limit: int = 5,
+        candidate_limit: int | None = None,
+    ) -> list[MemCellRecall]: ...
 
     async def get_active_dsp(self) -> DspVersion | None: ...
 
@@ -105,6 +219,47 @@ class InMemorySoulRepository:
         items = sorted(self.dsp_extractions, key=lambda x: x.extracted_at, reverse=True)
         return items[:limit]
 
+    async def list_memcells_missing_embeddings(self, limit: int = 200) -> list[MemCell]:
+        missing = [c for c in self.memcells.values() if not c.embedding]
+        missing.sort(key=lambda c: c.timestamp)
+        return missing[:limit]
+
+    async def recall_memories(
+        self,
+        *,
+        query_text: str,
+        query_embedding: list[float],
+        session_id: str | None = None,
+        limit: int = 5,
+        candidate_limit: int | None = None,
+    ) -> list[MemCellRecall]:
+        del limit
+        candidate_cap = max(1, candidate_limit or 20)
+        query_tokens = _tokenize_search_text(query_text)
+        now = datetime.now(timezone.utc)
+        matches: list[MemCellRecall] = []
+
+        for cell in self.memcells.values():
+            if not cell.episodic_trace.strip():
+                continue
+            similarity = _cosine_similarity(query_embedding, cell.embedding)
+            lexical_score = _lexical_overlap_score(query_tokens, cell)
+            match = _build_recall_match(
+                cell=cell,
+                similarity=similarity,
+                lexical_score=lexical_score,
+                session_id=session_id,
+                now=now,
+            )
+            if _passes_recall_floor(match, session_id):
+                matches.append(match)
+
+        matches.sort(
+            key=lambda match: (match.score, match.similarity, match.cell.timestamp),
+            reverse=True,
+        )
+        return matches[:candidate_cap]
+
     async def get_active_dsp(self) -> DspVersion | None:
         return self.active_dsp
 
@@ -127,6 +282,7 @@ class PostgresSoulRepository:
     min_pool_size: int = 1
     max_pool_size: int = 5
     _pool: Any | None = field(default=None, init=False, repr=False)
+    _schema_bootstrapped: bool = field(default=False, init=False, repr=False)
 
     async def _get_pool(self) -> Any:
         if self._pool is not None:
@@ -141,7 +297,152 @@ class PostgresSoulRepository:
             max_size=self.max_pool_size,
             server_settings={"search_path": self.schema},
         )
+        await self._ensure_schema(self._pool)
         return self._pool
+
+    async def _ensure_schema(self, pool: Any) -> None:
+        if self._schema_bootstrapped:
+            return
+
+        # Mirror scripts/sql/soul_memory_postgres.sql at runtime so dropped
+        # SOUL tables are recreated automatically on startup.
+        statements = [
+            "CREATE EXTENSION IF NOT EXISTS vector",
+            "CREATE EXTENSION IF NOT EXISTS pg_trgm",
+            """
+            CREATE TABLE IF NOT EXISTS mem_cells (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                episodic_trace TEXT NOT NULL,
+                atomic_facts JSONB NOT NULL DEFAULT '[]'::jsonb,
+                emotional_tag JSONB NOT NULL,
+                foresight_signals JSONB NOT NULL DEFAULT '[]'::jsonb,
+                timestamp TIMESTAMPTZ NOT NULL,
+                retrieval_count INTEGER NOT NULL DEFAULT 0,
+                explicit_importance REAL NOT NULL DEFAULT 0,
+                consolidated BOOLEAN NOT NULL DEFAULT FALSE,
+                scene_id TEXT,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS mem_cell_vectors (
+                mem_cell_id TEXT PRIMARY KEY REFERENCES mem_cells(id) ON DELETE CASCADE,
+                embedding VECTOR(768) NOT NULL
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_mem_cells_timestamp ON mem_cells (timestamp DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_mem_cells_session_id ON mem_cells (session_id)",
+            "CREATE INDEX IF NOT EXISTS idx_mem_cells_consolidated ON mem_cells (consolidated)",
+            "CREATE INDEX IF NOT EXISTS idx_mem_cells_atomic_facts_gin ON mem_cells USING gin (atomic_facts)",
+            """
+            CREATE INDEX IF NOT EXISTS idx_mem_cells_episodic_trace_tsv
+                ON mem_cells USING gin (to_tsvector('simple', episodic_trace))
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_mem_cells_episodic_trace_trgm
+                ON mem_cells USING gin (episodic_trace gin_trgm_ops)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_mem_cell_vectors_hnsw
+                ON mem_cell_vectors USING hnsw (embedding vector_cosine_ops)
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS mem_scenes (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                cell_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+                created_at TIMESTAMPTZ NOT NULL,
+                updated_at TIMESTAMPTZ NOT NULL
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS kg_triples (
+                id BIGSERIAL PRIMARY KEY,
+                subject TEXT NOT NULL,
+                predicate TEXT NOT NULL,
+                object TEXT NOT NULL,
+                valid_from TIMESTAMPTZ NOT NULL,
+                valid_until TIMESTAMPTZ,
+                scene_id TEXT
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_kg_triples_subject ON kg_triples(subject)",
+            "CREATE INDEX IF NOT EXISTS idx_kg_triples_predicate ON kg_triples(predicate)",
+            "CREATE INDEX IF NOT EXISTS idx_kg_triples_temporal ON kg_triples(valid_from, valid_until)",
+            """
+            CREATE TABLE IF NOT EXISTS foresight_signals (
+                id BIGSERIAL PRIMARY KEY,
+                content TEXT NOT NULL,
+                valid_until DATE NOT NULL,
+                trigger TEXT NOT NULL,
+                emotional_implication JSONB NOT NULL DEFAULT '{}'::jsonb,
+                source_cell_id TEXT,
+                priority REAL NOT NULL DEFAULT 0.5,
+                archived BOOLEAN NOT NULL DEFAULT FALSE,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_foresight_active
+                ON foresight_signals(valid_until, archived)
+                WHERE archived = FALSE
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS dsp_extractions (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                extracted_at TIMESTAMPTZ NOT NULL,
+                user_facts JSONB NOT NULL DEFAULT '[]'::jsonb,
+                user_preferences JSONB NOT NULL DEFAULT '[]'::jsonb,
+                ai_self_facts JSONB NOT NULL DEFAULT '[]'::jsonb
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS dsp_versions (
+                id TEXT PRIMARY KEY,
+                content TEXT NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL,
+                archived_at TIMESTAMPTZ,
+                active BOOLEAN NOT NULL DEFAULT TRUE
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_dsp_versions_active
+                ON dsp_versions(active)
+                WHERE active = TRUE
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS soul_emotion_snapshots (
+                id BIGSERIAL PRIMARY KEY,
+                joy REAL NOT NULL,
+                fear REAL NOT NULL,
+                sad REAL NOT NULL,
+                anger REAL NOT NULL,
+                source TEXT NOT NULL,
+                context TEXT,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS soul_metrics (
+                metric_key TEXT NOT NULL,
+                metric_value DOUBLE PRECISION NOT NULL,
+                measured_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                PRIMARY KEY(metric_key, measured_at)
+            )
+            """,
+        ]
+
+        async with pool.acquire() as conn:
+            for statement in statements:
+                await conn.execute(statement)
+
+        self._schema_bootstrapped = True
+        log_info("[soul_repo] Ensured SOUL postgres schema exists")
 
     async def close(self) -> None:
         if self._pool is not None:
@@ -432,6 +733,145 @@ class PostgresSoulRepository:
             )
             for row in rows
         ]
+
+    async def list_memcells_missing_embeddings(self, limit: int = 200) -> list[MemCell]:
+        pool = await self._get_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT
+                    c.id, c.session_id, c.episodic_trace, c.atomic_facts, c.emotional_tag,
+                    c.foresight_signals, c.timestamp, c.retrieval_count, c.explicit_importance,
+                    c.consolidated, c.scene_id
+                FROM mem_cells c
+                LEFT JOIN mem_cell_vectors v ON v.mem_cell_id = c.id
+                WHERE v.mem_cell_id IS NULL
+                  AND c.episodic_trace IS NOT NULL
+                  AND c.episodic_trace <> ''
+                ORDER BY c.updated_at DESC
+                LIMIT $1
+                """,
+                limit,
+            )
+        return [self._row_to_memcell(row) for row in rows]
+
+    async def recall_memories(
+        self,
+        *,
+        query_text: str,
+        query_embedding: list[float],
+        session_id: str | None = None,
+        limit: int = 5,
+        candidate_limit: int | None = None,
+    ) -> list[MemCellRecall]:
+        del limit
+        normalized_query = " ".join((query_text or "").split())[:400]
+        if not normalized_query:
+            return []
+
+        candidate_cap = max(1, candidate_limit or 20)
+        vector_literal = self._vector_literal(query_embedding)
+        pool = await self._get_pool()
+        async with pool.acquire() as conn:
+            vector_rows = await conn.fetch(
+                """
+                SELECT
+                    c.id, c.session_id, c.episodic_trace, c.atomic_facts, c.emotional_tag,
+                    c.foresight_signals, c.timestamp, c.retrieval_count, c.explicit_importance,
+                    c.consolidated, c.scene_id,
+                    (1 - (v.embedding <=> $1::vector)) AS vector_similarity,
+                    GREATEST(
+                        similarity(c.episodic_trace, $2),
+                        similarity(COALESCE(c.atomic_facts::text, ''), $2)
+                    ) AS lexical_score
+                FROM mem_cells c
+                JOIN mem_cell_vectors v ON v.mem_cell_id = c.id
+                WHERE c.episodic_trace <> ''
+                ORDER BY v.embedding <=> $1::vector ASC, c.timestamp DESC
+                LIMIT $3
+                """,
+                vector_literal,
+                normalized_query,
+                candidate_cap,
+            )
+
+            text_rows: list[Any] = []
+            if len(normalized_query) >= 3:
+                text_rows = list(
+                    await conn.fetch(
+                        """
+                        SELECT
+                            c.id, c.session_id, c.episodic_trace, c.atomic_facts, c.emotional_tag,
+                            c.foresight_signals, c.timestamp, c.retrieval_count, c.explicit_importance,
+                            c.consolidated, c.scene_id,
+                            COALESCE((1 - (v.embedding <=> $2::vector)), 0.0) AS vector_similarity,
+                            GREATEST(
+                                similarity(c.episodic_trace, $1),
+                                similarity(COALESCE(c.atomic_facts::text, ''), $1),
+                                ts_rank(
+                                    to_tsvector(
+                                        'simple',
+                                        c.episodic_trace || ' ' || COALESCE(c.atomic_facts::text, '')
+                                    ),
+                                    websearch_to_tsquery('simple', $1)
+                                )
+                            ) AS lexical_score
+                        FROM mem_cells c
+                        LEFT JOIN mem_cell_vectors v ON v.mem_cell_id = c.id
+                        WHERE c.episodic_trace <> ''
+                          AND (
+                              c.episodic_trace % $1
+                              OR COALESCE(c.atomic_facts::text, '') % $1
+                              OR to_tsvector(
+                                  'simple',
+                                  c.episodic_trace || ' ' || COALESCE(c.atomic_facts::text, '')
+                              ) @@ websearch_to_tsquery('simple', $1)
+                          )
+                        ORDER BY lexical_score DESC, c.timestamp DESC
+                        LIMIT $3
+                        """,
+                        normalized_query,
+                        vector_literal,
+                        candidate_cap,
+                    )
+                )
+
+        merged_rows: dict[str, dict[str, Any]] = {}
+        for row in [*vector_rows, *text_rows]:
+            row_data = dict(row)
+            row_id = str(row_data["id"])
+            existing = merged_rows.get(row_id)
+            if existing is None:
+                merged_rows[row_id] = row_data
+                continue
+            existing["vector_similarity"] = max(
+                float(existing.get("vector_similarity") or 0.0),
+                float(row_data.get("vector_similarity") or 0.0),
+            )
+            existing["lexical_score"] = max(
+                float(existing.get("lexical_score") or 0.0),
+                float(row_data.get("lexical_score") or 0.0),
+            )
+
+        now = datetime.now(timezone.utc)
+        matches: list[MemCellRecall] = []
+        for row in merged_rows.values():
+            cell = self._row_to_memcell(row)
+            match = _build_recall_match(
+                cell=cell,
+                similarity=float(row.get("vector_similarity") or 0.0),
+                lexical_score=float(row.get("lexical_score") or 0.0),
+                session_id=session_id,
+                now=now,
+            )
+            if _passes_recall_floor(match, session_id):
+                matches.append(match)
+
+        matches.sort(
+            key=lambda match: (match.score, match.similarity, match.cell.timestamp),
+            reverse=True,
+        )
+        return matches[:candidate_cap]
 
     async def get_active_dsp(self) -> DspVersion | None:
         pool = await self._get_pool()

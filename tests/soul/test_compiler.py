@@ -8,6 +8,7 @@ from core.soul.compiler import (
     RuleBasedSummaryBuilder,
     SoulCompiler,
 )
+from core.soul.models import EmotionalTag, MemCell
 from core.soul.repository import InMemorySoulRepository
 from core.soul.schemas import DspExtractionModel, MemCellExtractionModel
 
@@ -55,6 +56,33 @@ class FakeDspExtractor:
             user_preferences=["Prefers concise technical responses"],
             ai_self_facts=[],
         )
+
+
+class FakeNoFactsExtractor:
+    async def extract_memcells(
+        self, *, transcript: str, current_date: date
+    ) -> list[MemCellExtractionModel]:
+        return [
+            MemCellExtractionModel.model_validate(
+                {
+                    "episodic_trace": "We discussed refactoring and test priorities.",
+                    "atomic_facts": [],
+                    "emotional_tag": {
+                        "state_snapshot": {
+                            "joy": 0.0,
+                            "fear": 0.0,
+                            "sad": 0.0,
+                            "anger": 0.0,
+                        },
+                        "dominant_emotion": "neutral",
+                        "intensity": 0.0,
+                        "valence": 0.0,
+                    },
+                    "foresight_signals": [],
+                    "timestamp": datetime(2026, 4, 18, 12, 0, tzinfo=timezone.utc),
+                }
+            )
+        ]
 
 
 @pytest.mark.asyncio
@@ -135,3 +163,65 @@ async def test_nightly_rollup_bootstraps_dsp() -> None:
     assert result_2["dsp_updated"] == 1
     assert repo.active_dsp is not None
     assert "<user_profile>" in repo.active_dsp.content
+
+
+@pytest.mark.asyncio
+async def test_post_session_compile_adds_fallback_atomic_fact() -> None:
+    repo = InMemorySoulRepository()
+    compiler = SoulCompiler(
+        repository=repo,
+        memcell_extractor=FakeNoFactsExtractor(),
+        dsp_extractor=FakeDspExtractor(),
+        dsp_builder=RuleBasedDspBuilder(),
+        summary_builder=RuleBasedSummaryBuilder(),
+        embedder=NoopEmbedder(),
+    )
+
+    ids = await compiler.post_session_compile(
+        current_date=date(2026, 4, 18),
+        transcript="discussion",
+        session_id="session-2",
+    )
+
+    assert len(ids) == 1
+    facts = repo.memcells[ids[0]].atomic_facts
+    assert facts
+    assert facts[0].startswith("Conversation|summary|")
+
+
+@pytest.mark.asyncio
+async def test_backfill_embeddings_updates_missing_vectors() -> None:
+    repo = InMemorySoulRepository()
+    cell = MemCell(
+        id="session-3:1",
+        episodic_trace="Need to follow up tomorrow about release checks.",
+        atomic_facts=[
+            "Conversation|summary|Need to follow up tomorrow about release checks"
+        ],
+        emotional_tag=EmotionalTag(
+            state_snapshot={"joy": 0.0, "fear": 0.0, "sad": 0.0, "anger": 0.0},
+            dominant_emotion="neutral",
+            intensity=0.0,
+            valence=0.0,
+        ),
+        foresight_signals=[],
+        timestamp=datetime(2026, 4, 18, 13, 0, tzinfo=timezone.utc),
+        session_id="session-3",
+        embedding=None,
+    )
+    repo.memcells[cell.id] = cell
+
+    compiler = SoulCompiler(
+        repository=repo,
+        memcell_extractor=FakeMemCellExtractor(),
+        dsp_extractor=FakeDspExtractor(),
+        dsp_builder=RuleBasedDspBuilder(),
+        summary_builder=RuleBasedSummaryBuilder(),
+        embedder=NoopEmbedder(),
+    )
+
+    updated = await compiler.backfill_embeddings(limit=10)
+
+    assert updated == 1
+    assert repo.memcells[cell.id].embedding is not None
+    assert len(repo.memcells[cell.id].embedding or []) == 768

@@ -25,12 +25,34 @@ import json
 import os
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import aiomysql
 
 from core.soul.models import EmotionalTag, MemCell
 from core.soul.repository import PostgresSoulRepository
+
+
+def _load_repo_env_defaults() -> None:
+    env_path = Path(__file__).resolve().parents[1] / ".env"
+    if not env_path.exists():
+        return
+
+    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if not key:
+            continue
+
+        value = value.strip()
+        if value[:1] in {'"', "'"} and value[-1:] == value[:1]:
+            value = value[1:-1]
+        os.environ.setdefault(key, value)
 
 
 @dataclass(slots=True)
@@ -91,6 +113,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def build_config(args: argparse.Namespace) -> MigrationConfig:
+    _load_repo_env_defaults()
     sources = {
         item.strip().lower()
         for item in args.sources.split(",")
@@ -98,11 +121,17 @@ def build_config(args: argparse.Namespace) -> MigrationConfig:
     }
 
     return MigrationConfig(
-        maria_host=os.getenv("DB_HOST", "synth-db"),
-        maria_port=int(os.getenv("DB_PORT", "3306")),
-        maria_user=os.getenv("DB_USER", "synth"),
-        maria_password=os.getenv("DB_PASSWORD", "synth"),
-        maria_database=os.getenv("DB_NAME", "synth"),
+        maria_host=os.getenv("SOURCE_DB_HOST", os.getenv("DB_HOST", "synth-db")),
+        maria_port=int(os.getenv("SOURCE_DB_PORT", os.getenv("DB_PORT", "3306"))),
+        maria_user=os.getenv("SOURCE_DB_USER", os.getenv("DB_USER", "synth")),
+        maria_password=os.getenv(
+            "SOURCE_DB_PASSWORD",
+            os.getenv(
+                "SOURCE_DB_PASS",
+                os.getenv("DB_PASSWORD", os.getenv("DB_PASS", "synth")),
+            ),
+        ),
+        maria_database=os.getenv("SOURCE_DB_NAME", os.getenv("DB_NAME", "synth")),
         soul_postgres_dsn=os.getenv(
             "SOUL_POSTGRES_DSN",
             "postgresql://soul:soul@synth-soul-db:5432/soul_memory",

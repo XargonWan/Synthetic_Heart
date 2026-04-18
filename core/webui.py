@@ -61,6 +61,7 @@ import mimetypes
 
 BRAND_NAME = "Synthetic Heart"
 INTERFACE_NAME = "synth_webui"
+EXTERNAL_ENDPOINT_PROBE_TIMEOUT_SECONDS = 300.0
 
 # exposed configuration variable to toggle experimental multi-session mode
 register_exposed_var(
@@ -3505,7 +3506,11 @@ class SynthWebUIInterface:
         if isinstance(payload_or_chat_id, dict):
             payload = payload_or_chat_id
             # Accept both "text" (standard) and "value" (legacy synthetic-action mapping)
-            text = payload.get("text") or payload.get("value") or text
+            payload_text = (
+                payload.get("text") or payload.get("value") or payload.get("content")
+            )
+            if payload_text is not None:
+                text = payload_text
             chat_id = (
                 payload.get("interface_path")
                 or payload.get("target")
@@ -3520,6 +3525,14 @@ class SynthWebUIInterface:
                 text = kwargs.get("text")
             if metadata is None and isinstance(kwargs.get("metadata"), dict):
                 metadata = kwargs.get("metadata")
+
+        # Guard against accidental object leakage (e.g. original_message passed as
+        # positional arg by callers). Only strings are valid outbound message text.
+        if text is not None and not isinstance(text, str):
+            log_warning(
+                f"{LOG_PREFIX} send_message got non-string text type={type(text).__name__}; dropping"
+            )
+            return
 
         if not text or not chat_id:
             log_warning(f"{LOG_PREFIX} send_message missing text or chat_id")
@@ -3592,6 +3605,9 @@ class SynthWebUIInterface:
             writing_action_id = existing_writing[-1]
             writing_pushed = True
 
+        # Normalize metadata before websocket/history/DB use to avoid serialization errors.
+        safe_metadata = self._clean_for_json(metadata) if metadata is not None else None
+
         # If websocket is present attempt to send; otherwise persist for later replay
         if websocket:
             try:
@@ -3601,19 +3617,19 @@ class SynthWebUIInterface:
                     "text": text,
                 }
                 # Forward metadata fields that the client can use (e.g. tts_url).
-                if metadata and metadata.get("tts_url"):
-                    payload["tts_url"] = metadata["tts_url"]
+                if safe_metadata and safe_metadata.get("tts_url"):
+                    payload["tts_url"] = safe_metadata["tts_url"]
                     # Also include in `data` for clients that expect it there.
-                    payload["data"] = {"tts_url": metadata["tts_url"]}
+                    payload["data"] = {"tts_url": safe_metadata["tts_url"]}
 
-                await websocket.send_json(payload)
+                await websocket.send_json(self._clean_for_json(payload))
             except Exception as e:
                 log_warning(
                     f"{LOG_PREFIX} Failed to send websocket message to {session_id}: {e}"
                 )
 
         # Append to in-memory history so reconnect will replay it
-        await self._append_history(session_id, "synth", text, metadata=metadata)
+        await self._append_history(session_id, "synth", text, metadata=safe_metadata)
 
         # Save SyntH's response via core chat_context_manager
         if not skip_history:
@@ -3621,7 +3637,9 @@ class SynthWebUIInterface:
                 from core.chat_context_manager import save_response_message
 
                 msg_interface_path = f"{INTERFACE_NAME}/{chat_id}"
-                await save_response_message(msg_interface_path, text, metadata=metadata)
+                await save_response_message(
+                    msg_interface_path, text, metadata=safe_metadata
+                )
             except Exception as e:
                 log_debug(
                     f"{LOG_PREFIX} Failed to save response via context_manager: {e}"
@@ -5101,7 +5119,10 @@ class SynthWebUIInterface:
                 return {"status": "failed", "error": "Endpoint not found"}
 
             timeout_seconds = float(
-                os.getenv("EXTERNAL_ENDPOINT_PROBE_TIMEOUT_SECONDS", "20")
+                os.getenv(
+                    "EXTERNAL_ENDPOINT_PROBE_TIMEOUT_SECONDS",
+                    str(EXTERNAL_ENDPOINT_PROBE_TIMEOUT_SECONDS),
+                )
             )
             result = await asyncio.wait_for(
                 probe_endpoint(ep, api_key), timeout=timeout_seconds
@@ -5123,7 +5144,7 @@ class SynthWebUIInterface:
             log_warning(f"{LOG_PREFIX} auto-probe timed out for ep_id={ep_id}")
             return {
                 "status": "failed",
-                "error": f"Probe timed out ({os.getenv('EXTERNAL_ENDPOINT_PROBE_TIMEOUT_SECONDS', '20')} s)",
+                "error": f"Probe timed out ({os.getenv('EXTERNAL_ENDPOINT_PROBE_TIMEOUT_SECONDS', str(EXTERNAL_ENDPOINT_PROBE_TIMEOUT_SECONDS))} s)",
             }
         except Exception as exc:
             log_warning(f"{LOG_PREFIX} auto-probe failed for ep_id={ep_id}: {exc}")
@@ -5315,7 +5336,10 @@ class SynthWebUIInterface:
 
             api_key = decrypt_api_key(ep.api_key_enc or "")
             adapter = get_adapter_for_endpoint(ep, api_key)
-            ok, echo = await adapter.ping_test(model=model, timeout=30.0)
+            ok, echo = await adapter.ping_test(
+                model=model,
+                timeout=EXTERNAL_ENDPOINT_PROBE_TIMEOUT_SECONDS,
+            )
             return JSONResponse(
                 {
                     "ok": ok,

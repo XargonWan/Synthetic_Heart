@@ -51,6 +51,7 @@ Beta, but stable enough for daily use. Development branch gives access to the la
 ### Features
 
 - Switchable Cortex engines (API-driven Gemini, OpenAI, Claude, Grok, or local Ollama instances). Hot-swappable at runtime.
+- Typed prompt pipeline with native renderers for OpenAI-compatible, Anthropic, Gemini, external-endpoint, and Live engine paths.
 - Multiple chat interfaces including the builtin webui, Telegram, Discord and Matrix
 - **VRM Avatar System**: 3D animated avatars with idle, talking, and thinking states.
 - **SyntH Web UI**: A production-ready web interface featuring VRM avatar support and real-time animations.  
@@ -96,7 +97,7 @@ The project ships with an **Ollama-compatible interface** (`interface/ollama_com
 ### Option A: Docker (Recommended)
 
 1.  Clone this repository or simply download the `docker-compose.yml` and the `skins` folder (see the note below).
-2.  **[OPTIONAL]** Copy `.env.example` to `.env` to customize the deployment.
+2.  **[OPTIONAL]** Copy `.env.example` to `.env` to customize the deployment. The example file is trimmed to common deployment overrides; use `docs/compose_env_vars.rst` if you need the full advanced env reference.
 3.  Start the stack:
     ```bash
     docker compose up -d --build

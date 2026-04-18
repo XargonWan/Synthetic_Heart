@@ -11,7 +11,6 @@ import aiohttp
 from core.cortex_api_logger import (
     log_cortex_request,
     log_cortex_response,
-    sanitize_for_log,
 )
 from core.logging_utils import log_debug
 
@@ -112,7 +111,7 @@ class AnthropicAdapter(BaseProtocolAdapter):
             engine_tag,
             model=request_model,
             url=f"{self._base_url}/v1/messages",
-            payload=sanitize_for_log(payload),
+            payload=payload,
         )
         _req_start = _time.monotonic()
 

@@ -9,6 +9,7 @@ to a built-in engine from the perspective of the SyntH core.
 from __future__ import annotations
 
 import asyncio
+import base64
 import copy
 import json
 from typing import TYPE_CHECKING, Any
@@ -130,6 +131,32 @@ class ExternalCortexEngine(AIPluginBase):
             "image_url": {"url": f"data:{mime};base64,{data}"},
         }
 
+    def _build_mm_parts_from_prompt_request(self, req: Any) -> list[dict[str, Any]]:
+        """Convert ``PromptRequest.attachments`` into OpenAI-style content parts."""
+        parts: list[dict[str, Any]] = []
+        attachments = getattr(req, "attachments", [])
+        for attachment in attachments:
+            mime = getattr(attachment, "mime_type", None)
+            if not isinstance(mime, str) or not mime:
+                continue
+
+            data = getattr(attachment, "data", None)
+            if isinstance(data, bytes):
+                b64_data = base64.b64encode(data).decode("ascii")
+                parts.append(
+                    self._format_mm_part({"mime_type": mime, "data": b64_data})
+                )
+                continue
+            if isinstance(data, str) and data:
+                parts.append(self._format_mm_part({"mime_type": mime, "data": data}))
+                continue
+
+            url = getattr(attachment, "url", None)
+            if isinstance(url, str) and url:
+                parts.append({"type": "image_url", "image_url": {"url": url}})
+
+        return parts
+
     # ------------------------------------------------------------------
     # Core LLM interface
     # ------------------------------------------------------------------
@@ -184,28 +211,8 @@ class ExternalCortexEngine(AIPluginBase):
         # Normalise to a messages list, same way openrouter/gemini handle the prompt
         if isinstance(messages, list):
             msg_list = messages
-        elif isinstance(messages, dict):
-            from core.json_utils import sanitize_for_json
-
-            stripped = {k: v for k, v in messages.items() if k != "__prompt_request"}
-            redacted, mm_parts = _extract_attachments_and_redact(stripped)
-            safe = sanitize_for_json(redacted)
-            prompt_text = json.dumps(safe, ensure_ascii=False)
-            if mm_parts:
-                content_parts: list[dict[str, Any]] = [
-                    {"type": "text", "text": prompt_text}
-                ]
-                for p in mm_parts:
-                    content_parts.append(self._format_mm_part(p))
-                msg_list = [{"role": "user", "content": content_parts}]
-                log_debug(
-                    f"[cortex_bridge] Extracted {len(mm_parts)} multimodal "
-                    f"part(s) from prompt dict"
-                )
-            else:
-                msg_list = [{"role": "user", "content": prompt_text}]
         else:
-            msg_list = [{"role": "user", "content": str(messages)}]
+            msg_list = self._build_messages(messages)
 
         model = self._endpoint.default_model or None
         max_retries, backoff = self._get_retry_settings()
@@ -241,9 +248,53 @@ class ExternalCortexEngine(AIPluginBase):
         dict and places it as a ``system`` role message so the LLM receives explicit
         instructions rather than a single raw JSON blob in the user turn.
         """
+        try:
+            from core.prompt_request import PromptRequest
+            from core.prompt_renderers import OpenAIRenderer
+
+            if isinstance(prompt, PromptRequest):
+                renderer = OpenAIRenderer(prompt)
+                mm_parts = self._build_mm_parts_from_prompt_request(prompt)
+                if mm_parts:
+                    supports_vision = bool(
+                        (self._endpoint.capabilities or {}).get("vision")
+                    )
+                    return renderer.render_with_multimodal(
+                        mm_parts,
+                        supports_vision=supports_vision,
+                    )
+                return renderer.render()
+        except Exception as exc:
+            log_debug(
+                f"[cortex_bridge] direct PromptRequest rendering fallback to text: {exc}"
+            )
+
         if not isinstance(prompt, dict):
             content: str = prompt if isinstance(prompt, str) else str(prompt)
             return [{"role": "user", "content": content}]
+
+        prompt_request = prompt.get("__prompt_request")
+        if prompt_request is not None:
+            try:
+                from core.prompt_renderers import OpenAIRenderer
+                from core.prompt_request import PromptRequest
+
+                if isinstance(prompt_request, PromptRequest):
+                    renderer = OpenAIRenderer(prompt_request)
+                    mm_parts = self._build_mm_parts_from_prompt_request(prompt_request)
+                    if mm_parts:
+                        supports_vision = bool(
+                            (self._endpoint.capabilities or {}).get("vision")
+                        )
+                        return renderer.render_with_multimodal(
+                            mm_parts,
+                            supports_vision=supports_vision,
+                        )
+                    return renderer.render()
+            except Exception as exc:
+                log_debug(
+                    f"[cortex_bridge] PromptRequest rendering fallback to dict path: {exc}"
+                )
 
         instructions: str = (
             prompt.get("instructions_verbose") or prompt.get("instructions") or ""

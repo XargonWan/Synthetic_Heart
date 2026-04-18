@@ -1,34 +1,41 @@
-Chat interface instructions
+Chat Interface Instructions
 ===========================
 
-This document describes the new unminified chat instruction that is injected
-into prompts when a message arrives from a chat-like interface (Telegram,
-Discord, Web UI). The instruction appears under `instructions_verbose` in the
-prompt JSON and is intentionally kept human-readable and not minified.
+Chat interfaces still receive an explicit chat-oriented instruction block, but
+the prompt rewrite changed where that instruction lives in the runtime.
 
-Behavior
---------
+Current behavior
+----------------
 
-- The prompt builder (`core.prompt_engine.build_json_prompt`) will add
-  `instructions_verbose` when the `interface_name` indicates a chat interface.
-- This field must be preserved during any prompt reduction and will be
-  delivered to LLM wrappers as a `system` role message (unminified) so the LLM
-  receives explicit guidance.
-- The instruction reminds the LLM to be concise for chat usage and reiterates
-  the exact JSON response format the system expects.
+- ``core.prompt_engine.build_prompt_request()`` is now the canonical builder.
+- It still prepares compatibility keys such as ``instructions_verbose`` and
+  ``instructions`` for legacy callers.
+- The typed prompt path copies that chat-specific guidance into
+  ``PromptRequest.system_instruction``.
+- Renderer-backed engines consume the typed system instruction directly instead
+  of rebuilding a system message from a monolithic JSON prompt blob.
 
-Notes for implementers
-----------------------
+Compatibility notes
+-------------------
 
-- Cortex engines (Selenium, OpenAI, Gemini, etc.) should check for
-  `instructions_verbose` in the prompt and prepend it as a system message
-  before sending the request to the backend.
-- `instructions_verbose` is protected in `reduce_prompt_for_llm_limit`, so it
-  will not be removed when the prompt is reduced to fit model limits.
+- ``core.prompt_engine.build_json_prompt()`` remains as a deprecated alias.
+- The returned compatibility dict still carries ``instructions_verbose`` for
+  engines that have not migrated yet.
+- Prompt reduction keeps the stable instruction block intact before the typed
+  request is attached under ``__prompt_request``.
+
+Guidance for engine authors
+---------------------------
+
+- Prefer ``PromptRequest`` + a renderer from ``core.prompt_renderers``.
+- Treat ``PromptRequest.system_instruction`` as the canonical system prompt.
+- Only fall back to ``instructions_verbose`` / ``instructions`` when handling
+  a legacy dict that does not carry ``__prompt_request``.
 
 See also
 --------
 
-- core/prompt_engine.py
-- core/selenium_llm_base.py
-- llm_engines_dev/openai_chatgpt.py
+- ``core/prompt_engine.py``
+- ``core/prompt_request.py``
+- ``core/prompt_renderers.py``
+- :doc:`prompt_pipeline`

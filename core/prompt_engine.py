@@ -2,6 +2,7 @@
 
 import random
 import re
+import time as time_module
 
 from core.db import get_conn_ctx
 from core.synth_tagging import extract_tags, expand_tags
@@ -9,7 +10,7 @@ from core.logging_utils import log_debug, log_info, log_warning, log_error
 from core.json_utils import dumps as json_dumps
 from core.config_manager import config_registry
 from core.user_utils import get_user_display_name, get_user_usertag
-from datetime import datetime, time
+from datetime import datetime, timezone
 import os
 import asyncio
 from typing import Any, cast
@@ -43,6 +44,8 @@ else:  # pragma: no cover
 # The actual value comes from the active LLM engine's configuration.
 # For model limits, see the individual cortex/llm_provider/* engines, e.g. MODEL_LIMITS_MAP["default"]
 DEFAULT_MAX_PROMPT_CHARS = None  # Will be set dynamically from LLM engine
+
+_LEGACY_BUILD_JSON_PROMPT_WARNED = False
 
 # Chat history limit
 CHAT_HISTORY_LIMIT = config_registry.get_var(
@@ -137,6 +140,29 @@ def minify_actions_block(
     return minified
 
 
+def _memory_merge_key(memory: Any) -> str:
+    if isinstance(memory, dict):
+        source = memory.get("source")
+        item_id = memory.get("id")
+        snippet = (
+            memory.get("snippet") or memory.get("content") or memory.get("summary")
+        )
+        return f"{source}::{item_id}::{snippet}"
+    return str(memory)
+
+
+def _merge_memory_entries(existing: list[Any], incoming: list[Any]) -> list[Any]:
+    merged = list(existing or [])
+    seen = {_memory_merge_key(item) for item in merged}
+    for item in incoming or []:
+        item_key = _memory_merge_key(item)
+        if item_key in seen:
+            continue
+        merged.append(item)
+        seen.add(item_key)
+    return merged
+
+
 # ---------------------------------------------------------------------------
 # PromptRequest assembly helpers (added in Phase 1 of the prompt rewrite)
 # ---------------------------------------------------------------------------
@@ -147,16 +173,31 @@ def _build_context_summary(
 ) -> str:
     """Format moderately-stable context parts into a plain text block.
 
-    Includes: cross-chat history (history_recent), diary thoughts, tag-matched
-    memories, participant bios.  Does NOT include ``history_current_chat``
-    (which becomes ``PromptRequest.conversation_history``) or fully-dynamic
-    runtime values (current emotion values → ``RuntimeContext.emotions``).
+    Includes: current date/time/location, cross-chat history (history_recent),
+    diary thoughts, tag-matched memories, participant bios.  Does NOT include
+    ``history_current_chat`` (which becomes ``PromptRequest.conversation_history``)
+    or fully-dynamic runtime values (current emotion values → ``RuntimeContext.emotions``).
 
     For Grillo internal beats (is_grillo_internal=True), this returns a MINIMAL
     context with only persona and optionally recent diary entries — no cross-chat
     history, no participant bios, minimal memories.
     """
     parts: list[str] = []
+
+    # Always inject current date / time / location so the model knows when it is.
+    # These come from time_plugin.get_static_injection() merged into context_section.
+    _date_val: str = str(context_section.get("date") or "").strip()
+    _time_val: str = str(context_section.get("time") or "").strip()
+    _loc_val: str = str(context_section.get("location") or "").strip()
+    _time_lines: list[str] = []
+    if _date_val:
+        _time_lines.append(f"Date: {_date_val}")
+    if _time_val:
+        _time_lines.append(f"Time: {_time_val}")
+    if _loc_val:
+        _time_lines.append(f"Location: {_loc_val}")
+    if _time_lines:
+        parts.append("[Current time & context]\n" + "\n".join(_time_lines))
 
     # Grillo internal beats skip cross-chat history and participants
     if not is_grillo_internal:
@@ -217,15 +258,6 @@ def _build_context_summary(
         elif isinstance(participants, str) and participants:
             parts.append("[People in this conversation]")
             parts.append(participants)
-
-    available_emotions: Any = context_section.get("available_emotions")
-    if available_emotions:
-        if isinstance(available_emotions, list):
-            parts.append(
-                f"[Available emotion types]\n{', '.join(str(e) for e in available_emotions)}"
-            )
-        elif isinstance(available_emotions, str):
-            parts.append(f"[Available emotion types]\n{available_emotions}")
 
     return "\n".join(parts)
 
@@ -316,10 +348,10 @@ def _assemble_prompt_request(  # noqa: PLR0913
 ) -> Any:  # -> PromptRequest
     """Build a ``PromptRequest`` from the fully-assembled prompt data.
 
-    Called at the end of ``build_json_prompt()`` so engines can opt-in to the
+    Called at the end of ``build_prompt_request()`` so engines can opt-in to the
     new typed representation without changing existing behaviour.
 
-    All parameters are extracted from the local scope of ``build_json_prompt()``.
+    All parameters are extracted from the local scope of ``build_prompt_request()``.
     None of the heavy async work is repeated here.
     """
     from core.prompt_request import Attachment, PromptRequest, RuntimeContext, Turn  # noqa: F401
@@ -329,6 +361,22 @@ def _assemble_prompt_request(  # noqa: PLR0913
     system_instruction: str = (
         prompt_dict.get("instructions_verbose") or prompt_dict.get("instructions") or ""
     )
+
+    # Keep stable emotion taxonomy/instructions in the system block, not context_summary.
+    available_emotions: Any = context_section.get("available_emotions")
+    if available_emotions:
+        if isinstance(available_emotions, list):
+            _emotion_types = ", ".join(str(e) for e in available_emotions)
+        else:
+            _emotion_types = str(available_emotions)
+        if _emotion_types.strip():
+            system_instruction = (
+                f"{system_instruction}\n\n"
+                "AVAILABLE EMOTION TYPES: "
+                f"{_emotion_types}. "
+                "Adjust emotional state via structured actions only "
+                "(prefer update_emotion_state with an emotions map)."
+            )
 
     # ── Context summary ─────────────────────────────────────────────────────
     context_summary: str = _build_context_summary(
@@ -364,6 +412,12 @@ def _assemble_prompt_request(  # noqa: PLR0913
             msg_timestamp = msg_date.isoformat()
     except Exception:
         msg_timestamp = None
+
+    # Override with local date+time from time_plugin injections (authoritative local time).
+    _ctx_date = str(context_section.get("date") or "").strip()
+    _ctx_time = str(context_section.get("time") or "").strip()
+    if _ctx_date or _ctx_time:
+        msg_timestamp = " ".join(p for p in [_ctx_date, _ctx_time] if p)
 
     from_user = getattr(message, "from_user", None)
     username: str | None = get_user_display_name(from_user) if from_user else None
@@ -468,7 +522,7 @@ def _apply_lite_context_stripping(prompt: dict) -> dict:
     return prompt
 
 
-async def build_json_prompt(
+async def build_prompt_request(
     message,
     context_memory,
     interface_name: str | None = None,
@@ -477,7 +531,7 @@ async def build_json_prompt(
     max_chars: int | None = None,
     history_scope: str | None = None,
 ) -> dict:
-    """Build the JSON prompt expected by plugins.
+    """Build the prompt payload expected by plugins.
 
     Parameters
     ----------
@@ -609,19 +663,7 @@ async def build_json_prompt(
                     recon_instructions.append(str(c.get("content")))
 
         if recon_memories:
-            # Deduplicate by snippet/id
-            existing = set()
-            for m in memories:
-                if isinstance(m, dict):
-                    key = f"{m.get('source')}::{m.get('id')}::{m.get('snippet')}"
-                else:
-                    key = str(m)
-                existing.add(key)
-            for m in recon_memories:
-                key = f"{m.get('source')}::{m.get('id')}::{m.get('snippet')}"
-                if key not in existing:
-                    memories.append(m)
-                    existing.add(key)
+            memories = _merge_memory_entries(memories, recon_memories)
 
         resolved_language = await resolve_language(
             contributions=recon_contributions,
@@ -648,7 +690,7 @@ async def build_json_prompt(
             effective_history_scope = context_memory.get("history_scope")
 
         history_engine = HistoryEngine()
-        context_section = await history_engine.build_context(
+        context_section: dict[str, Any] = await history_engine.build_context(
             message=message,
             context_memory=context_memory,
             interface_name=interface_name,
@@ -698,6 +740,10 @@ async def build_json_prompt(
                     f"[json_prompt] 👤 Extracted persona for instructions ({len(static_persona) if static_persona else 0} chars)"
                 )
 
+            soul_recalled_memories = injections.pop("soul_recalled_memories", [])
+            if not isinstance(soul_recalled_memories, list):
+                soul_recalled_memories = [soul_recalled_memories]
+
             # Add remaining injections to context (but drop deprecated legacy keys)
             context_section.update(injections)
             # Deprecated (migrated to HistoryEngine)
@@ -710,6 +756,11 @@ async def build_json_prompt(
             ):
                 if legacy_key in context_section:
                     context_section.pop(legacy_key, None)
+            if soul_recalled_memories:
+                context_section["memories"] = _merge_memory_entries(
+                    list(context_section.get("memories") or []),
+                    soul_recalled_memories,
+                )
             log_info(
                 f"[json_prompt] ✅ Updated context_section with injections. Keys now: {list(context_section.keys())}"
             )
@@ -897,6 +948,26 @@ async def build_json_prompt(
     except Exception as e:
         log_warning(f"[json_prompt] Failed to add recon instructions: {e}")
 
+    # Grillo internal beats are non-user-facing. Without an explicit guardrail,
+    # some models invent unsupported message actions (e.g. message_grillo),
+    # which triggers correction retries and stalls beat throughput.
+    if is_grillo_internal:
+        allowed_list = []
+        if isinstance(allowed_action_types_for_prompt, set):
+            allowed_list = sorted(str(a) for a in allowed_action_types_for_prompt if a)
+
+        grillo_guard = (
+            "GRILLO INTERNAL MODE: This is an internal autonomous beat, not a user chat. "
+            "DO NOT emit any message_* action and DO NOT emit send_message. "
+            "Prefer create_personal_diary_entry for reflective output."
+        )
+        if allowed_list:
+            grillo_guard += (
+                f" Allowed actions for this beat: {', '.join(allowed_list)}."
+            )
+
+        json_instructions = f"{grillo_guard} {json_instructions}"
+
     # Keep `instructions` strictly minified (single-line) for token efficiency and tests.
     try:
         json_instructions = " ".join((json_instructions or "").split())
@@ -906,64 +977,11 @@ async def build_json_prompt(
     # Interface-specific instructions are provided via the available actions block
     # No hardcoded interface references - plugins define their own instructions
 
-    prompt_with_instructions = {
+    prompt_with_instructions: dict[str, Any] = {
         "context": context_section,
         "input": input_section,
         "instructions": json_instructions,
     }
-
-    # For chat-like interfaces, include an explicit unminified instruction block.
-    # Detection strategy: prefer dynamic inference from available actions (so custom
-    # interfaces work without code changes), but fall back to a static list of known
-    # chat interface names so unit tests (where core_initializer is not running) pass.
-    _KNOWN_CHAT_INTERFACES = frozenset(
-        {"telegram", "discord", "webui", "synth_webui", "telegram_bot", "discord_bot"}
-    )
-    try:
-        is_chat_interface = False
-        if interface_name:
-            # Fast-path: static list covers the common cases and works in tests.
-            if interface_name in _KNOWN_CHAT_INTERFACES:
-                is_chat_interface = True
-            else:
-                # Dynamic path: infer from the loaded actions block.
-                try:
-                    from core.core_initializer import core_initializer
-
-                    available_actions = core_initializer.actions_block.get(
-                        "available_actions", {}
-                    )
-                    for action_type, schema in available_actions.items():
-                        if not isinstance(
-                            action_type, str
-                        ) or not action_type.startswith("message_"):
-                            continue
-                        owner = (
-                            str(schema.get("source", ""))
-                            if isinstance(schema, dict)
-                            else ""
-                        )
-                        if interface_name in owner:
-                            is_chat_interface = True
-                            break
-                except Exception:
-                    is_chat_interface = False
-
-        if interface_name and is_chat_interface:
-            verbose_instructions = load_unminified_chat_instruction(interface_name)
-            # Prepend persona to verbose instructions so ALL engines see it
-            # (most engines prefer instructions_verbose over instructions)
-            if static_persona:
-                verbose_instructions = (
-                    f"=== CRITICAL SYSTEM IDENTITY ===\n{static_persona}\n\n"
-                    f"{verbose_instructions}"
-                )
-            prompt_with_instructions["instructions_verbose"] = verbose_instructions
-            log_info(
-                f"[json_prompt] 🔒 Added instructions_verbose for chat interface: {interface_name}"
-            )
-    except Exception as e:
-        log_warning(f"[json_prompt] Failed to add instructions_verbose: {e}")
 
     # Record full prompt size BEFORE injecting actions/minification so callers
     # can decide split based on the original size.
@@ -1110,6 +1128,36 @@ async def build_json_prompt(
     return prompt_with_instructions
 
 
+async def build_json_prompt(
+    message,
+    context_memory,
+    interface_name: str | None = None,
+    image_data: dict | None = None,
+    attachments: list[dict] | None = None,
+    max_chars: int | None = None,
+    history_scope: str | None = None,
+) -> dict:
+    """Deprecated alias for ``build_prompt_request``.
+
+    Kept for backward compatibility while callers migrate to the new symbol.
+    """
+    global _LEGACY_BUILD_JSON_PROMPT_WARNED
+    if not _LEGACY_BUILD_JSON_PROMPT_WARNED:
+        log_debug(
+            "[prompt_engine] build_json_prompt is deprecated; use build_prompt_request"
+        )
+        _LEGACY_BUILD_JSON_PROMPT_WARNED = True
+    return await build_prompt_request(
+        message=message,
+        context_memory=context_memory,
+        interface_name=interface_name,
+        image_data=image_data,
+        attachments=attachments,
+        max_chars=max_chars,
+        history_scope=history_scope,
+    )
+
+
 async def search_memories(tags=None, scope=None, limit=5):
     if not tags:
         return []
@@ -1237,14 +1285,17 @@ async def free_memory_search(query: str, limit: int = 5):
 
     results = []
     # Provide more helpful debug: print the DB target being used (if available)
+    read_db_config: Any = None
     try:
-        from core.db import _read_db_config
-    except Exception:
-        _read_db_config = None
+        from core.db import _read_db_config as _db_config_reader
 
-    if _read_db_config:
+        read_db_config = _db_config_reader
+    except Exception:
+        read_db_config = None
+
+    if read_db_config:
         try:
-            db_host, db_port, db_user, db_pass, db_name = _read_db_config()
+            db_host, db_port, db_user, db_pass, db_name = read_db_config()
             log_debug(
                 f"[free_memory_search] DB target: {db_user}@{db_host}:{db_port}/{db_name}"
             )
@@ -1254,7 +1305,7 @@ async def free_memory_search(query: str, limit: int = 5):
     # Try acquiring a connection and executing the query with retries up to 2 attempts
     rows = []
     max_attempts = 2
-    start_time = time.time()
+    start_time = time_module.time()
     for attempt in range(1, max_attempts + 1):
         try:
             async with get_conn_ctx() as conn:
@@ -1285,7 +1336,9 @@ async def free_memory_search(query: str, limit: int = 5):
                 )
                 return []
 
-    log_info(f"[free_memory_search] Query completed in {time.time() - start_time:.3f}s")
+    log_info(
+        f"[free_memory_search] Query completed in {time_module.time() - start_time:.3f}s"
+    )
 
     for r in rows:
         src, _id, ts, content = r
@@ -1358,7 +1411,7 @@ async def build_prompt(
     # === LOGGING SU FILE ===
     try:
         os.makedirs(os.path.dirname(log_path), exist_ok=True)
-        timestamp = datetime.utcnow().isoformat()
+        timestamp = datetime.now(timezone.utc).isoformat()
         with open(log_path, "a", encoding="utf-8") as log_file:
             log_file.write(f"\n[{timestamp}] --- REASONING CYCLE ---\n")
             log_file.write(f"> User text: {user_text.strip()}\n")
@@ -1400,7 +1453,7 @@ def load_json_instructions() -> str:
         'RESPONSE FORMAT: {"actions": [{"type": "action_name", "payload": { ... }}] }\n'
         "Key rules: ALWAYS use 'type' and 'payload', one action object per array entry. Do NOT add any text outside the JSON."
         "Do NOT embed emotion tags, annotations, or bracketed markers inside message text (e.g., '{happy 6.0}')."
-        "If you need to indicate an emotional state, include it as structured data in the JSON (e.g., a 'feelings' object or an action payload) and never inside the plain message content."
+        "If you need to indicate an emotional state, use a structured action payload (prefer update_emotion_state) and never embed emotional markers inside plain message content."
     )
 
     # Minify: remove leading/trailing spaces from each line, collapse multiple spaces
@@ -1432,68 +1485,6 @@ RESPONSE FORMAT (STRICT):
     return header + base
 
 
-def build_full_json_instructions() -> dict:
-    """Return combined JSON instructions and available actions block.
-
-    Returns the optimized set of available actions (schema + brief) so the model
-    is aware of every capability without wasting tokens on examples/verbose docs.
-    """
-    instructions = load_json_instructions()
-    actions = {}
-    try:
-        from core.core_initializer import core_initializer
-        from core.action_schema_converter import extract_for_llm_prompt
-        from core.json_utils import dumps as json_dumps
-
-        full_actions = core_initializer.actions_block.get("available_actions", {})
-
-        # Optimize: Minify actions for the main prompt to save context
-        # The corrector will access full schemas/examples if needed.
-        for name, definition in full_actions.items():
-            actions[name] = extract_for_llm_prompt(name, definition)
-
-        try:
-            log_debug(
-                f"[prompt_engine] Optimized actions block: {len(json_dumps(full_actions))} -> {len(json_dumps(actions))} chars"
-            )
-        except Exception:
-            pass
-
-    except Exception as e:  # pragma: no cover - defensive
-        log_warning(f"[prompt_engine] Failed to load actions block: {e}")
-    return {"instructions": instructions, "actions": actions}
-
-
-def build_minified_json_instructions() -> dict:
-    """Return minified JSON instructions and actions block for auto_response.
-
-    This version is optimized for scenarios where the LLM needs to be told
-    "generate output for this action" rather than full interaction contexts.
-
-    Used in auto_response when:
-    - Delivering action outputs back to users
-    - Handling event reminders
-    - Processing autonomous LLM tasks
-
-    Returns minified actions (without full descriptions) to reduce token usage.
-    Full instructions are included but kept concise.
-    """
-    instructions = load_json_instructions()
-    actions = {}
-    try:
-        from core.core_initializer import core_initializer
-
-        full_actions = core_initializer.actions_block.get("available_actions", {})
-        # Use minified version to reduce token usage in auto_response scenarios
-        actions = minify_actions_block(full_actions)
-        log_debug(
-            f"[minified_json_instructions] Actions block minified: {len(json_dumps(full_actions))} -> {len(json_dumps(actions))} chars"
-        )
-    except Exception as e:  # pragma: no cover - defensive
-        log_warning(f"[prompt_engine] Failed to load actions block for minified: {e}")
-    return {"instructions": instructions, "actions": actions}
-
-
 async def build_delivery_request(
     action_type: str,
     action_outputs: list[dict[str, Any]],
@@ -1506,9 +1497,8 @@ async def build_delivery_request(
     must respond with exactly one ``message_*`` action.  No chat context, no
     history, no diary — just the delivery task.
 
-    This is the Phase 3 replacement for the two-function pattern:
-        ``build_minified_json_instructions()`` + inline instruction assembly
-    that ``auto_response.py`` currently uses.
+    This is the Phase 3 replacement for legacy inline assembly paths in
+    ``auto_response.py``.
 
     Args:
         action_type:    Name of the action that produced these outputs
@@ -1620,8 +1610,9 @@ def _estimate_attachment_data_size(prompt: dict) -> int:
                 if key in multimodal_keys and isinstance(value, list):
                     for item in value:
                         if isinstance(item, dict):
+                            item_dict = cast(dict[str, Any], item)
                             for df in data_fields:
-                                v = item.get(df)
+                                v = item_dict.get(df)
                                 if isinstance(v, str) and len(v) > 1024:
                                     total += len(v)
                 elif isinstance(value, (dict, list)):
@@ -1925,12 +1916,12 @@ def reduce_json_text_for_transmission(json_text: str, max_chars: int) -> str:
 # ---------------------------------------------------------------------------
 
 
-async def build_live_system_instruction(
+async def build_live_prompt_request(
     message: object = None,
     context_memory: object = None,
     attachment_context: str | None = None,
-) -> str:
-    """Build a condensed system instruction for Gemini Live API sessions.
+) -> Any:  # -> PromptRequest
+    """Build a ``PromptRequest(mode='live')`` for live voice sessions.
 
     The Live API has a smaller context window (128k tokens) and system
     instructions are set once at session start.  This produces a compact
@@ -1945,7 +1936,7 @@ async def build_live_system_instruction(
             in the system instruction (e.g. from Discord attachments).
 
     Returns:
-        A plain-text system instruction for the Live API.
+        ``PromptRequest`` containing the assembled live instruction text.
     """
     injections: dict[str, object] = {}
     try:
@@ -2024,7 +2015,9 @@ async def build_live_system_instruction(
             tag = str(participant.get("usertag") or "unknown")
             bio = str(participant.get("short_bio") or "")
             nicks_raw = participant.get("nicknames")
-            nicks = nicks_raw if isinstance(nicks_raw, list) else []
+            nicks = (
+                [str(nick) for nick in nicks_raw] if isinstance(nicks_raw, list) else []
+            )
             nick_str = f" (also known as: {', '.join(nicks)})" if nicks else ""
             feelings_raw = participant.get("feelings")
             feelings = feelings_raw if isinstance(feelings_raw, list) else []
@@ -2138,4 +2131,38 @@ async def build_live_system_instruction(
         "simply let them shape the mood and atmosphere of your next response."
     )
 
-    return "\n\n".join(parts)
+    rendered_instruction = "\n\n".join(parts)
+    from core.prompt_request import PromptRequest, RuntimeContext
+
+    return PromptRequest(
+        system_instruction=rendered_instruction,
+        context_summary="",
+        conversation_history=[],
+        current_text="",
+        runtime_ctx=RuntimeContext(interface_name="live", input_source="voice"),
+        attachments=[],
+        mode="live",
+    )
+
+
+async def build_live_system_instruction(
+    message: object = None,
+    context_memory: object = None,
+    attachment_context: str | None = None,
+) -> str:
+    """Build and render the condensed plain-text live system instruction."""
+    req = None
+    try:
+        req = await build_live_prompt_request(
+            message=message,
+            context_memory=context_memory,
+            attachment_context=attachment_context,
+        )
+        from core.prompt_renderers import LiveRenderer
+
+        return LiveRenderer(req).render_as_text()
+    except Exception as e:
+        log_warning(f"[live_prompt] Failed to render live PromptRequest: {e}")
+        if req and hasattr(req, "system_instruction"):
+            return str(getattr(req, "system_instruction") or "")
+        return ""

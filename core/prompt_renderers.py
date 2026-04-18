@@ -616,3 +616,22 @@ class TextRenderer:
                     lines.append(f"{m.name}: {m.description[:80]}")
 
         return "\n".join(lines)
+
+
+class LiveRenderer:
+    """Renderer for ``PromptRequest(mode='live')`` plain-text instructions.
+
+    The Live API callers expect one flat instruction string, so this renderer
+    intentionally does not emit message arrays or JSON scaffolding.
+    """
+
+    def __init__(self, req: PromptRequest) -> None:
+        self.req = req
+
+    def render_as_text(self) -> str:
+        chunks: list[str] = []
+        if self.req.system_instruction:
+            chunks.append(self.req.system_instruction)
+        if self.req.context_summary:
+            chunks.append(self.req.context_summary)
+        return "\n\n".join(chunks).strip()

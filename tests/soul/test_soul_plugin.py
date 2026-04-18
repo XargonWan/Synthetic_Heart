@@ -58,6 +58,35 @@ async def test_force_compile_clears_interface_buffer() -> None:
 
 
 @pytest.mark.asyncio
+async def test_static_injection_recalls_relevant_memories() -> None:
+    plugin = SoulPlugin()
+    interface_path = "telegram_bot/999"
+
+    seed_message = SimpleNamespace(
+        interface_path=interface_path,
+        text="Scarlet loves jasmine tea and cozy rainy evenings.",
+        caption=None,
+    )
+    await plugin.get_static_injection(seed_message, {"interface_path": interface_path})
+    await plugin._compile_interface(interface_path)
+
+    recall_message = SimpleNamespace(
+        interface_path=interface_path,
+        text="What tea does Scarlet love again?",
+        caption=None,
+    )
+    payload = await plugin.get_static_injection(
+        recall_message, {"interface_path": interface_path}
+    )
+
+    recalled = payload.get("soul_recalled_memories")
+
+    assert isinstance(recalled, list)
+    recalled_entries = [str(entry) for entry in recalled]
+    assert any("jasmine tea" in entry.lower() for entry in recalled_entries)
+
+
+@pytest.mark.asyncio
 async def test_scheduler_tick_compiles_idle_sessions() -> None:
     plugin = SoulPlugin()
 

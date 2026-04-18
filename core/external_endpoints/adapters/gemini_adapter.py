@@ -9,8 +9,8 @@ from typing import Any, AsyncIterator
 from core.cortex_api_logger import (
     log_cortex_request,
     log_cortex_response,
-    sanitize_for_log,
 )
+from core.genai_client_utils import harden_genai_client_for_async_close
 from core.logging_utils import log_warning
 
 from core.external_endpoints.adapters.base import (
@@ -90,7 +90,9 @@ class GeminiAdapter(BaseProtocolAdapter):
         try:
             from google import genai
 
-            return genai.Client(api_key=self._api_key)
+            return harden_genai_client_for_async_close(
+                genai.Client(api_key=self._api_key)
+            )
         except ImportError as exc:
             raise RuntimeError(
                 "[gemini_adapter] The 'google-genai' package is required."
@@ -150,13 +152,11 @@ class GeminiAdapter(BaseProtocolAdapter):
             log_cortex_request(
                 engine_tag,
                 model=request_model,
-                payload=sanitize_for_log(
-                    {
-                        "system_instruction": system_instruction or None,
-                        "contents": contents,
-                        "response_mime_type": config_kwargs.get("response_mime_type"),
-                    }
-                ),
+                payload={
+                    "system_instruction": system_instruction or None,
+                    "contents": contents,
+                    "response_mime_type": config_kwargs.get("response_mime_type"),
+                },
             )
 
             def _sync_generate() -> Any:
@@ -168,8 +168,10 @@ class GeminiAdapter(BaseProtocolAdapter):
                     else None,
                 )
 
-            response = await asyncio.get_event_loop().run_in_executor(
-                None, _sync_generate
+            request_timeout_s = float(kwargs.get("timeout", 120) or 120)
+            response = await asyncio.wait_for(
+                asyncio.get_event_loop().run_in_executor(None, _sync_generate),
+                timeout=request_timeout_s,
             )
             content_text = ""
             finish = "stop"
@@ -232,10 +234,18 @@ class GeminiAdapter(BaseProtocolAdapter):
                 )
 
             _elapsed = (_time.monotonic() - _req_start) * 1000
+            logged_body: Any = content_text
+            if not content_text:
+                logged_body = {
+                    "empty_response": True,
+                    "finish_reason": finish,
+                    "block_reason": block_reason,
+                }
             log_cortex_response(
                 engine_tag,
                 model=request_model,
-                body=content_text,
+                status=200,
+                body=logged_body,
                 elapsed_ms=_elapsed,
             )
 
@@ -244,11 +254,32 @@ class GeminiAdapter(BaseProtocolAdapter):
                 model=request_model,
                 finish_reason=finish,
             )
+        except asyncio.CancelledError:
+            _elapsed = (_time.monotonic() - _req_start) * 1000
+            log_cortex_response(
+                engine_tag,
+                model=request_model,
+                status=499,
+                error="request cancelled",
+                elapsed_ms=_elapsed,
+            )
+            raise
+        except asyncio.TimeoutError:
+            _elapsed = (_time.monotonic() - _req_start) * 1000
+            log_cortex_response(
+                engine_tag,
+                model=request_model,
+                status=504,
+                error="request timed out",
+                elapsed_ms=_elapsed,
+            )
+            raise
         except Exception as exc:
             _elapsed = (_time.monotonic() - _req_start) * 1000
             log_cortex_response(
                 engine_tag,
                 model=request_model,
+                status=500,
                 error=str(exc),
                 elapsed_ms=_elapsed,
             )
@@ -300,6 +331,38 @@ class GeminiAdapter(BaseProtocolAdapter):
             return len(models) > 0
         except Exception:
             return False
+
+    async def ping_test(
+        self,
+        model: str | None = None,
+        timeout: float = 15.0,
+    ) -> tuple[bool, str]:
+        """Send a minimal generate_content call to verify Gemini API connectivity."""
+        import asyncio
+
+        client = self._get_client()
+        request_model = model or self.DEFAULT_MODEL
+        try:
+
+            def _sync_ping() -> str:
+                response = client.models.generate_content(
+                    model=request_model,
+                    contents=[{"role": "user", "parts": [{"text": "ping"}]}],
+                )
+                try:
+                    return response.text or "ok"
+                except Exception:
+                    return "ok"
+
+            reply = await asyncio.wait_for(
+                asyncio.get_event_loop().run_in_executor(None, _sync_ping),
+                timeout=timeout,
+            )
+            return True, reply
+        except asyncio.TimeoutError:
+            return False, f"ping timed out after {timeout}s"
+        except Exception as exc:
+            return False, repr(exc)
 
     async def probe_capabilities(self) -> dict[str, bool]:
         caps: dict[str, bool] = {

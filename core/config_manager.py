@@ -690,6 +690,8 @@ class ConfigRegistry:
         """
         try:
             try:
+                import core.db as db_module
+
                 from core.db import get_conn_ctx, ensure_core_tables
             except ImportError as e:
                 # Circular import during initialization - skip DB persist
@@ -701,6 +703,7 @@ class ConfigRegistry:
 
             log_debug(f"[config] Ensuring core tables before persisting '{key}'")
             await ensure_core_tables()
+            db_module._db_initialized = True
 
             log_debug(
                 f"[config] Attempting to acquire DB connection to persist '{key}'"
@@ -772,7 +775,9 @@ class ConfigRegistry:
                             log_debug(
                                 f"[config] Schema error persisting '{key}': {msg}; running ensure_core_tables() and retrying persist"
                             )
-                            await ensure_core_tables()
+                            if not getattr(db_module, "_db_initialized", False):
+                                await ensure_core_tables()
+                                db_module._db_initialized = True
                             # retry the same persist steps once
                             recreated = False
                             async with conn.cursor() as cur:

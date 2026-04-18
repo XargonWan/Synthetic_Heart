@@ -29,6 +29,7 @@ from core.ai_plugin_base import AIPluginBase
 from core.config_manager import config_registry
 from core.cortex_api_logger import log_cortex_request, log_cortex_response
 from core.logging_utils import log_debug, log_error, log_info, log_warning
+from core.prompt_request import PromptRequest
 
 ENGINE_LABEL = "Anthropic Claude — Claude-family models via Messages API"
 
@@ -391,7 +392,13 @@ class AnthropicPlugin(AIPluginBase):
                     pass
 
             # === Phase 5: PromptRequest native-format path (with prompt caching) ===
-            _pr = prompt.get("__prompt_request") if isinstance(prompt, dict) else None
+            _pr: PromptRequest | None = None
+            if isinstance(prompt, PromptRequest):
+                _pr = prompt
+            elif isinstance(prompt, dict):
+                candidate = prompt.get("__prompt_request")
+                if isinstance(candidate, PromptRequest):
+                    _pr = candidate
             if _pr is not None:
                 from core.prompt_renderers import AnthropicRenderer
 
@@ -412,15 +419,31 @@ class AnthropicPlugin(AIPluginBase):
                     api_key=api_key,
                 )
 
-            # Serialize prompt to text
+            # Fallback path: still support non-PromptRequest callers without
+            # rebuilding a legacy JSON blob prompt pipeline.
             if isinstance(prompt, dict):
-                prompt_text = json.dumps(prompt, indent=2, ensure_ascii=False)
+                prompt_text = json.dumps(
+                    {k: v for k, v in prompt.items() if k != "__prompt_request"},
+                    ensure_ascii=False,
+                )
             elif isinstance(prompt, str):
                 prompt_text = prompt
             else:
                 prompt_text = str(prompt)
 
             image_parts = _extract_image_parts(prompt)
+
+            if isinstance(prompt, dict):
+                content: list[dict[str, Any]] = []
+                if image_parts:
+                    content.extend(image_parts)
+                content.append({"type": "text", "text": prompt_text})
+                return await self._call_api_with_messages(
+                    rendered_system=[],
+                    messages=[{"role": "user", "content": content}],
+                    tools=[],
+                    api_key=api_key,
+                )
 
             return await self._call_api(
                 prompt_text=prompt_text,

@@ -32,17 +32,15 @@ class FacialExpressionPlugin(PluginBase):
     corresponding WebSocket packets at the appropriate times.
     """
 
-    def get_supported_actions(self) -> Dict[str, Any]:
-        # produce a static injection with instructions and the available
-        # expressions read from the default persona (Rei) to make the list
-        # dynamic and overridable by skins.
-        from core.persona_manager import get_persona_manager
-
+    def _build_expression_instructions(self) -> str:
+        # Build static guidance from the active persona so expression names
+        # stay in sync with skin-level overrides.
         persona_json: Optional[Dict] = None
         pm = get_persona_manager()
-        if pm and getattr(pm, "_current_persona", None):
+        current_persona = getattr(pm, "_current_persona", None) if pm else None
+        if pm and current_persona and getattr(current_persona, "name", None):
             try:
-                persona_json = pm._load_persona_json(pm._current_persona.name)
+                persona_json = pm._load_persona_json(current_persona.name)
             except Exception:
                 persona_json = None
         expr_section = (
@@ -85,7 +83,25 @@ class FacialExpressionPlugin(PluginBase):
                 "\nOnly use these when responding to interfaces that support face rendering."
             )
         )
-        return {"facial_expression_helper": instructions}
+        return instructions
+
+    def get_supported_actions(self) -> Dict[str, Any]:
+        # Advertise a valid static_inject schema so core action registration
+        # can merge plugin fields without runtime type errors.
+        return {
+            "static_inject": {
+                "description": "Provide facial-expression guidance for prompt injection",
+                "required_params": {},
+                "optional_params": {},
+            }
+        }
+
+    def get_static_injection(
+        self,
+        message: Optional[Any] = None,
+        context_memory: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        return {"facial_expression_guidance": self._build_expression_instructions()}
 
     async def process_message_text(
         self,
@@ -106,9 +122,10 @@ class FacialExpressionPlugin(PluginBase):
             # load persona.json to access char-rate settings
             persona_json: Optional[Dict] = None
             pm = get_persona_manager()
-            if pm and getattr(pm, "_current_persona", None):
+            current_persona = getattr(pm, "_current_persona", None) if pm else None
+            if pm and current_persona and getattr(current_persona, "name", None):
                 try:
-                    persona_json = pm._load_persona_json(pm._current_persona.name)
+                    persona_json = pm._load_persona_json(current_persona.name)
                 except Exception:
                     persona_json = None
             chars_per_sec = (
@@ -189,14 +206,21 @@ class FacialExpressionPlugin(PluginBase):
             if item.name and expr_section:
                 entry = expr_section.get(item.name)
                 if entry is not None:
-                    raw = entry.get("targets", {})
-                    if raw:
-                        resolved_targets = {
-                            k: float(v) * item.intensity for k, v in raw.items()
-                        }
+                    if not isinstance(entry, dict):
+                        log_debug(
+                            f"{_LOG_PREFIX} ignoring malformed expression '{item.name}': "
+                            f"expected dict, got {type(entry).__name__}"
+                        )
                     else:
-                        # Expression with empty targets (e.g. "neutral") → clear
-                        is_clear = True
+                        raw = entry.get("targets", {})
+                        if isinstance(raw, dict) and raw:
+                            resolved_targets = {
+                                str(k): float(v) * item.intensity
+                                for k, v in raw.items()
+                            }
+                        else:
+                            # Expression with empty/invalid targets (e.g. "neutral") → clear
+                            is_clear = True
             if is_clear:
                 log_debug(f"{_LOG_PREFIX} event '{item.name}' → clear (empty targets)")
                 await karada.push_face_expression(None, 0)

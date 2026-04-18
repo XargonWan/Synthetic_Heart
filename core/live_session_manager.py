@@ -22,6 +22,7 @@ import re
 import time
 from typing import Any, Callable, Awaitable, ClassVar
 
+from core.genai_client_utils import harden_genai_client_for_async_close
 from core.logging_utils import log_debug, log_error, log_info, log_warning
 from core.live_api_logger import log_live_send, log_live_recv, log_live_session_event
 from core.live_tool_executor import LiveToolExecutor
@@ -279,6 +280,7 @@ class LiveSessionManager:
             api_key=api_key.strip(),
             http_options={"api_version": "v1alpha"},
         )
+        self._client = harden_genai_client_for_async_close(self._client)
         # guild_id -> LiveSessionState
         self._sessions: dict[int, LiveSessionState] = {}
         # Callbacks

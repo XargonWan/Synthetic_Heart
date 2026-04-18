@@ -474,7 +474,9 @@ async def handle_incoming_message(
                         }
 
                         # Try to send corrector message
-                        asyncio.create_task(run_action(corrector_action, message))
+                        asyncio.create_task(
+                            run_action(corrector_action, ctx, bot, message)
+                        )
                         log_info(
                             "[message_chain] ✓ Corrector action scheduled for invalid emotions"
                         )
@@ -1100,7 +1102,10 @@ async def handle_incoming_message(
                     # context path to avoid unnecessary corrector loops.
                     if ctx_interface_path:
                         for act in actions:
-                            if isinstance(act, dict) and act.get("type") == "message":
+                            if isinstance(act, dict) and act.get("type") in (
+                                "message",
+                                "send_message",
+                            ):
                                 if ctx_interface_path.startswith("telegram_bot"):
                                     act["type"] = "message_telegram_bot"
                                 elif ctx_interface_path.startswith("discord_bot"):

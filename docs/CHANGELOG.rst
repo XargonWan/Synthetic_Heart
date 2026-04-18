@@ -1,6 +1,25 @@
 Changelog
 =========
 
+2026-04-18 - Prompt Pipeline Rewrite Completed
+----------------------------------------------
+
+- Change: prompt assembly now centers on ``core.prompt_engine.build_prompt_request()`` and the typed ``PromptRequest`` model instead of treating every prompt as a single indented JSON blob.
+- Add: ``core/prompt_request.py`` and ``core/prompt_renderers.py`` as the canonical intermediate representation and renderer layer.
+- Add: dedicated prompt modes for chat, grillo, delivery, and live flows.
+- Change: migrated engine paths now render prompts natively:
+
+	- ``engines/external_engines/openapi.py`` via ``OpenAIRenderer``
+	- ``engines/external_engines/openrouter.py`` via ``OpenAIRenderer``
+	- ``engines/external_engines/anthropic.py`` via ``AnthropicRenderer``
+	- ``engines/external_engines/gemini_api.py`` via ``GeminiRenderer``
+	- ``core/external_endpoints/bridges/cortex_bridge.py`` via ``OpenAIRenderer``
+
+- Change: auto-response delivery now attaches ``PromptRequest(mode='delivery')`` built by ``build_delivery_request()``.
+- Change: live voice assembly now goes through ``build_live_prompt_request()`` and ``LiveRenderer``.
+- Change: ``build_json_prompt()`` remains only as a deprecated compatibility alias.
+- Docs: added prompt-pipeline documentation, updated prompt-related engine docs, trimmed ``.env.example`` to common operator-facing settings, and kept the advanced env catalog in ``docs/compose_env_vars.rst``.
+
 2026-02-17 - Improvements
 -------------------------
 

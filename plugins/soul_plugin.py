@@ -18,7 +18,7 @@ from core.soul.compiler import (
     SoulCompiler,
 )
 from core.soul.emotion_engine import EmotionalEngine
-from core.soul.models import EmotionalEvent, EmotionalState
+from core.soul.models import EmotionalEvent, EmotionalState, MemCellRecall
 from core.soul.repository import (
     InMemorySoulRepository,
     PostgresSoulRepository,
@@ -89,6 +89,10 @@ class _SessionState:
     last_decay_applied: datetime = field(
         default_factory=lambda: datetime.now(timezone.utc)
     )
+
+
+_SOUL_RECALL_LIMIT = 5
+_SOUL_RECALL_CANDIDATE_LIMIT = 24
 
 
 class SoulPlugin(PluginBase):
@@ -224,6 +228,17 @@ class SoulPlugin(PluginBase):
         active_dsp = await self._repo.get_active_dsp()
         foresight = await self._repo.list_active_foresight_signals(now.date())
         turn_delta = self._emotion_engine.to_turn_delta_payload(session.emotional_state)
+        recalled_memories: list[str] = []
+
+        if incoming_text:
+            try:
+                recalled_memories = await self._recall_memories(
+                    interface_path=interface_path,
+                    incoming_text=incoming_text,
+                    session=session,
+                )
+            except Exception as exc:
+                log_warning(f"[soul_plugin] Memory recall failed: {exc}")
 
         foresight_lines = [
             f"- {signal.content} (until {signal.valid_until.isoformat()})"
@@ -253,6 +268,7 @@ class SoulPlugin(PluginBase):
                 }
                 for signal in foresight[:8]
             ],
+            "soul_recalled_memories": recalled_memories,
         }
 
     async def _scheduler_loop(self) -> None:
@@ -274,6 +290,12 @@ class SoulPlugin(PluginBase):
             ):
                 await self._compile_interface(interface_path)
 
+        backfilled = await self._compiler.backfill_embeddings(limit=50)
+        if backfilled > 0:
+            log_info(
+                f"[soul_plugin] Backfilled {backfilled} missing memcell embeddings"
+            )
+
         today = now.date()
         if self._last_rollup_date != today:
             await self._run_rollup_now()
@@ -285,7 +307,7 @@ class SoulPlugin(PluginBase):
             return 0
 
         transcript = "\n".join(lines)
-        safe_session_id = re.sub(r"[^a-zA-Z0-9_:\-]", "_", interface_path)
+        safe_session_id = self._normalize_session_id(interface_path)
 
         created = await self._compiler.post_session_compile(
             current_date=datetime.now(timezone.utc).date(),
@@ -310,11 +332,13 @@ class SoulPlugin(PluginBase):
 
     async def _run_rollup_now(self) -> dict[str, int]:
         transcript = await self._build_daily_transcript()
+        backfilled = await self._compiler.backfill_embeddings(limit=500)
         result = await self._compiler.nightly_rollup(
             current_date=datetime.now(timezone.utc).date(),
             transcript=transcript,
             session_id="nightly",
         )
+        result["embeddings_backfilled"] = backfilled
         log_info(f"[soul_plugin] Nightly rollup result: {result}")
         return result
 
@@ -362,6 +386,101 @@ class SoulPlugin(PluginBase):
         if len(self._buffers[interface_path]) > 200:
             self._buffers[interface_path] = self._buffers[interface_path][-200:]
 
+    async def _recall_memories(
+        self,
+        *,
+        interface_path: str,
+        incoming_text: str,
+        session: _SessionState,
+    ) -> list[str]:
+        normalized_query = self._normalize_query_text(incoming_text)
+        if len(normalized_query) < 5:
+            return []
+
+        query_embedding = await self._compiler.embedder.embed(normalized_query)
+        safe_session_id = self._normalize_session_id(interface_path)
+        candidates = await self._repo.recall_memories(
+            query_text=normalized_query,
+            query_embedding=query_embedding,
+            session_id=safe_session_id,
+            limit=_SOUL_RECALL_LIMIT,
+            candidate_limit=_SOUL_RECALL_CANDIDATE_LIMIT,
+        )
+        if not candidates:
+            return []
+
+        reranked: list[MemCellRecall] = []
+        seen_ids: set[str] = set()
+        for match in candidates:
+            cell = match.cell
+            if cell.id in seen_ids:
+                continue
+            memory_emotion = self._normalize_memory_emotion(
+                cell.emotional_tag.dominant_emotion
+            )
+            if memory_emotion is not None:
+                match.score = self._emotion_engine.mood_congruent_boost(
+                    session.emotional_state,
+                    memory_emotion,
+                    match.score,
+                )
+            reranked.append(match)
+            seen_ids.add(cell.id)
+
+        reranked.sort(
+            key=lambda match: (match.score, match.similarity, match.cell.timestamp),
+            reverse=True,
+        )
+        selected = reranked[:_SOUL_RECALL_LIMIT]
+
+        for match in selected:
+            try:
+                match.cell.retrieval_count += 1
+                await self._repo.upsert_memcell(match.cell)
+            except Exception as exc:
+                log_debug(
+                    f"[soul_plugin] Failed to persist retrieval count for {match.cell.id}: {exc}"
+                )
+
+        return [
+            self._format_recalled_memory(match, active_session_id=safe_session_id)
+            for match in selected
+        ]
+
+    def _format_recalled_memory(
+        self,
+        match: MemCellRecall,
+        *,
+        active_session_id: str,
+    ) -> str:
+        cell = match.cell
+        trace = re.sub(r"\s+", " ", cell.episodic_trace).strip()
+        if len(trace) > 220:
+            trace = trace[:220].rstrip() + "..."
+
+        fact_text = "; ".join(
+            self._render_atomic_fact(fact)
+            for fact in cell.atomic_facts[:2]
+            if self._render_atomic_fact(fact)
+        )
+        if fact_text:
+            trace = f"{trace} Key facts: {fact_text}"
+
+        header_parts = [
+            "SOUL",
+            cell.timestamp.astimezone(timezone.utc).date().isoformat(),
+        ]
+        if cell.session_id == active_session_id:
+            header_parts.append("same chat")
+
+        memory_emotion = self._normalize_memory_emotion(
+            cell.emotional_tag.dominant_emotion
+        )
+        if memory_emotion and memory_emotion != "neutral":
+            header_parts.append(f"emotion={memory_emotion}")
+
+        return f"[{' | '.join(header_parts)}] {trace}".strip()
+
     def _extract_interface_path(
         self, message: Any, context_memory: dict[str, Any] | None
     ) -> str:
@@ -377,6 +496,46 @@ class SoulPlugin(PluginBase):
             return ""
         text = getattr(message, "text", None) or getattr(message, "caption", None)
         return str(text or "").strip()
+
+    @staticmethod
+    def _normalize_query_text(text: str) -> str:
+        return " ".join((text or "").split())[:400]
+
+    @staticmethod
+    def _normalize_session_id(interface_path: str) -> str:
+        return re.sub(r"[^a-zA-Z0-9_:\-]", "_", interface_path)
+
+    @staticmethod
+    def _normalize_memory_emotion(label: str | None) -> str | None:
+        normalized = str(label or "").strip().lower()
+        if not normalized:
+            return None
+        emotion_map = {
+            "joy": "joy",
+            "happy": "joy",
+            "love": "joy",
+            "fear": "fear",
+            "afraid": "fear",
+            "anxious": "fear",
+            "worried": "fear",
+            "sad": "sad",
+            "loss": "sad",
+            "lonely": "sad",
+            "anger": "anger",
+            "angry": "anger",
+            "frustrated": "anger",
+            "frustration": "anger",
+            "neutral": "neutral",
+        }
+        return emotion_map.get(normalized)
+
+    @staticmethod
+    def _render_atomic_fact(fact: str) -> str:
+        parts = [part.strip() for part in str(fact or "").split("|") if part.strip()]
+        if len(parts) == 3:
+            predicate = parts[1].replace("_", " ")
+            return f"{parts[0]} {predicate} {parts[2]}"
+        return str(fact or "").strip()
 
     def _infer_emotional_event(self, text: str) -> EmotionalEvent:
         lower = text.lower()

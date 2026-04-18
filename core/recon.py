@@ -1,8 +1,14 @@
 import asyncio
 import json
+import threading
+import time
 from typing import Any, Dict, List, Tuple
 from core.logging_utils import log_debug, log_info, log_warning
 from core.config_manager import config_registry
+
+_RECON_HINT_CACHE: dict[str, dict[str, Any]] = {}
+_lingua_detector: Any | None = None
+_lingua_detector_lock = threading.Lock()
 
 # Expose config flags
 try:
@@ -136,8 +142,124 @@ try:
         component="recon",
         needs_component_reload=False,
     )
+    register_exposed_var(
+        "RECON_HINT_CACHE_TTL_SECONDS",
+        label="Recon Hint Cache TTL (s)",
+        default=300,
+        value_type=int,
+        ui_type="number",
+        description="TTL in seconds for cached Recon language/tone hints",
+        scope="agent",
+        component="recon",
+        needs_component_reload=False,
+        advanced=True,
+    )
+    register_exposed_var(
+        "RECON_LOCAL_LANGUAGE_PRECHECK",
+        label="Recon Local Language Precheck",
+        default=True,
+        value_type=bool,
+        ui_type="bool",
+        description="Use local lingua language detection before invoking Recon LLM",
+        scope="agent",
+        component="recon",
+        needs_component_reload=False,
+        advanced=True,
+    )
 except Exception:
     pass
+
+
+def _get_lingua_detector() -> Any | None:
+    global _lingua_detector
+    if _lingua_detector is not None:
+        return _lingua_detector
+    with _lingua_detector_lock:
+        if _lingua_detector is not None:
+            return _lingua_detector
+        try:
+            from lingua import LanguageDetectorBuilder
+
+            _lingua_detector = (
+                LanguageDetectorBuilder.from_all_languages()
+                .with_minimum_relative_distance(0.1)
+                .build()
+            )
+            log_debug("[recon] lingua detector initialized")
+        except Exception as exc:
+            log_debug(f"[recon] lingua unavailable: {exc}")
+    return _lingua_detector
+
+
+def _detect_language_locally(text: str | None) -> str | None:
+    if not text or not text.strip():
+        return None
+    detector = _get_lingua_detector()
+    if detector is None:
+        return None
+    try:
+        lang = detector.detect_language_of(text)
+        if lang is None:
+            return None
+        return str(lang.iso_code_639_1.name).lower()
+    except Exception:
+        return None
+
+
+def _get_hint_cache_ttl_seconds() -> int:
+    try:
+        ttl = int(
+            config_registry.get_value(
+                "RECON_HINT_CACHE_TTL_SECONDS", 300, value_type=int
+            )
+            or 300
+        )
+        return max(0, ttl)
+    except Exception:
+        return 300
+
+
+def _make_hint_cache_key(interface_path: str | None, text: str | None) -> str | None:
+    normalized = (text or "").strip().lower()
+    if not normalized:
+        return None
+    iface = (interface_path or "_").strip()
+    # Keep keys bounded while preserving enough text for stable deduplication.
+    return f"{iface}::{normalized[:512]}"
+
+
+def _get_cached_hint(key: str | None) -> dict[str, Any] | None:
+    if not key:
+        return None
+    cached = _RECON_HINT_CACHE.get(key)
+    if not cached:
+        return None
+    if float(cached.get("expires_at", 0.0)) < time.time():
+        _RECON_HINT_CACHE.pop(key, None)
+        return None
+    return dict(cached)
+
+
+def _set_cached_hint(
+    key: str | None,
+    *,
+    language_code: str | None,
+    message_tone: str | None,
+    conversation_tone: str | None,
+) -> None:
+    if not key:
+        return
+    ttl = _get_hint_cache_ttl_seconds()
+    if ttl <= 0:
+        return
+    if not language_code and not message_tone and not conversation_tone:
+        return
+    _RECON_HINT_CACHE[key] = {
+        "language_code": language_code,
+        "message_tone": message_tone,
+        "conversation_tone": conversation_tone,
+        "expires_at": time.time() + float(ttl),
+    }
 
 
 def _parse_mapping(value: Any) -> dict:
@@ -364,11 +486,20 @@ async def gather_recon_contributions(
         log_warning(f"[recon] Failed to access PLUGIN_REGISTRY: {e}")
         plugins = []
 
-    eligible = [
-        p
-        for p in plugins
-        if hasattr(p, "get_recon_contributions") and _plugin_enabled(p, "RECON")
-    ]
+    eligible = []
+    for p in plugins:
+        has_combined = all(
+            hasattr(p, attr)
+            for attr in (
+                "get_recon_key",
+                "get_recon_instruction",
+                "parse_recon_response",
+            )
+        )
+        if (has_combined or hasattr(p, "get_recon_contributions")) and _plugin_enabled(
+            p, "RECON"
+        ):
+            eligible.append(p)
 
     if not eligible:
         log_debug("[recon] No recon-capable plugins registered; skipping Recon")
@@ -448,56 +579,147 @@ async def gather_recon_contributions(
     )
     log_debug(f"[recon] user_prompt:\n{user_prompt}")
 
-    # Single LLM call
-    engine = None
-    try:
-        from core.config import derive_cortex_scope, get_active_cortex_engine
-        from core.cortex_registry import get_cortex_registry
+    interface_path = getattr(message, "interface_path", None)
+    cache_key = _make_hint_cache_key(interface_path, user_message_section)
 
-        scope = derive_cortex_scope(
-            context_memory if isinstance(context_memory, dict) else None
+    # Local lingua pre-check for lightweight language hints before expensive LLM path.
+    use_local_precheck = bool(
+        config_registry.get_value(
+            "RECON_LOCAL_LANGUAGE_PRECHECK", True, value_type=bool
         )
-        active_cortex = await get_active_cortex_engine(scope=scope)
-        registry = get_cortex_registry()
-        engine = registry.get_engine(active_cortex) or registry.load_engine(
-            active_cortex
+    )
+    local_language = None
+    if use_local_precheck:
+        local_language = _detect_language_locally(user_message_section)
+        if not local_language and _is_outreach:
+            local_language = _detect_language_locally(local_text)
+
+    keys_set = set(keys)
+    needs_language = "language_hint" in keys_set
+    needs_tone = "tone_hint" in keys_set
+
+    parsed: dict[str, Any] | None = None
+    cached_hint = _get_cached_hint(cache_key)
+    if cached_hint:
+        has_lang = bool(cached_hint.get("language_code"))
+        has_tone = bool(
+            cached_hint.get("message_tone") or cached_hint.get("conversation_tone")
         )
-    except Exception as e:
-        log_warning(f"[recon] Failed to load active Cortex engine: {e}")
+        if (not needs_language or has_lang) and (not needs_tone or has_tone):
+            parsed = {}
+            if has_lang:
+                parsed["language_hint"] = {
+                    "language_code": str(cached_hint.get("language_code")),
+                }
+            if has_tone:
+                parsed["tone_hint"] = {
+                    "message_tone": cached_hint.get("message_tone"),
+                    "conversation_tone": cached_hint.get("conversation_tone"),
+                }
+            log_debug("[recon] Hint cache hit — skipping Recon LLM call")
+
+    # If only language is required and local precheck found a value, skip LLM.
+    if parsed is None and local_language and needs_language and not needs_tone:
+        parsed = {"language_hint": {"language_code": local_language}}
+        log_debug(
+            f"[recon] Local lingua precheck resolved language={local_language}; skipping Recon LLM call"
+        )
+
+    if parsed is None:
+        # Single LLM call
         engine = None
+        try:
+            from core.config import derive_cortex_scope, get_active_cortex_engine
+            from core.cortex_registry import get_cortex_registry
 
-    if not engine or not hasattr(engine, "generate_response"):
-        log_warning(
-            "[recon] Active Cortex engine missing generate_response; skipping Recon"
-        )
-        return []
+            scope = derive_cortex_scope(
+                context_memory if isinstance(context_memory, dict) else None
+            )
+            try:
+                active_cortex = await get_active_cortex_engine(scope=scope)
+            except TypeError:
+                # Backward/test compatibility: some monkeypatched helpers still
+                # expose the older no-kwargs signature.
+                active_cortex = await get_active_cortex_engine()
+            registry = get_cortex_registry()
+            engine = registry.get_engine(active_cortex) or registry.load_engine(
+                active_cortex
+            )
+        except Exception as e:
+            log_warning(f"[recon] Failed to load active Cortex engine: {e}")
+            engine = None
 
-    try:
-        llm_text = await asyncio.wait_for(
-            engine.generate_response(
-                [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ]
-            ),
-            timeout=timeout,
-        )
-        log_debug(f"[recon] LLM response:\n{llm_text}")
-    except Exception as e:
-        log_warning(f"[recon] Combined Recon LLM call failed: {e}")
-        return []
+        if not engine or not hasattr(engine, "generate_response"):
+            log_warning(
+                "[recon] Active Cortex engine missing generate_response; continuing with empty Recon payload"
+            )
+            parsed = {}
 
-    try:
-        from core.transport_layer import extract_json_from_text
+        llm_text = None
+        if parsed is None and engine is not None:
+            try:
+                llm_text = await asyncio.wait_for(
+                    engine.generate_response(
+                        [
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": user_prompt},
+                        ]
+                    ),
+                    timeout=timeout,
+                )
+                log_debug(f"[recon] LLM response:\n{llm_text}")
+            except Exception as e:
+                log_warning(f"[recon] Combined Recon LLM call failed: {e}")
+                llm_text = None
 
-        parsed = extract_json_from_text(llm_text, return_metadata=False)
-    except Exception:
-        parsed = None
+        if llm_text is not None:
+            try:
+                from core.transport_layer import extract_json_from_text
+
+                parsed = extract_json_from_text(llm_text, return_metadata=False)
+            except Exception:
+                parsed = None
+        elif parsed is None:
+            parsed = {}
+
+    if isinstance(parsed, dict) and local_language:
+        lang_obj = parsed.get("language_hint")
+        if needs_language and (
+            not isinstance(lang_obj, dict) or not lang_obj.get("language_code")
+        ):
+            parsed["language_hint"] = {"language_code": local_language}
+            log_debug(
+                f"[recon] Applied local lingua fallback language={local_language}"
+            )
 
     if not isinstance(parsed, dict):
         log_warning("[recon] Combined Recon response did not parse as JSON object")
         log_debug(f"[recon] parsed output: {parsed!r}")
         return []
+
+    try:
+        _lang_obj = parsed.get("language_hint")
+        _tone_obj = parsed.get("tone_hint")
+        _set_cached_hint(
+            cache_key,
+            language_code=(
+                str(_lang_obj.get("language_code")).strip()
+                if isinstance(_lang_obj, dict) and _lang_obj.get("language_code")
+                else None
+            ),
+            message_tone=(
+                str(_tone_obj.get("message_tone")).strip() or None
+                if isinstance(_tone_obj, dict)
+                else None
+            ),
+            conversation_tone=(
+                str(_tone_obj.get("conversation_tone")).strip() or None
+                if isinstance(_tone_obj, dict)
+                else None
+            ),
+        )
+    except Exception:
+        pass
 
     # Dispatch responses to plugins
     # normalize keywords into single-word tokens before dispatching to plugins

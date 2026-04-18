@@ -23,6 +23,7 @@ dependencies = [
     "pycryptodome>=3.23.0",
     "pydantic>=2.12.5",
     "pymysql>=1.1.2",
+    "psycopg2-binary>=2.9.0",
     "python-dotenv>=1.2.1",
     "python-multipart>=0.0.22",
     "python-telegram-bot>=22.6",
@@ -51,6 +52,7 @@ dependencies = [
     "torchaudio",
     "gemini-cli>=0.1.0",
     "mcp>=1.27.0",
+    "langfuse>=2.60.10",
 ]
 
 [project.optional-dependencies]

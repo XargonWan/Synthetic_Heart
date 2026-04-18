@@ -19,7 +19,6 @@ import httpx
 from core.cortex_api_logger import (
     log_cortex_request,
     log_cortex_response,
-    sanitize_for_log,
 )
 from core.logging_utils import log_debug, log_warning
 
@@ -117,7 +116,7 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
             engine_tag,
             model=request_model,
             url=self._sdk_base_url(),
-            payload=sanitize_for_log({"messages": messages}),
+            payload={"messages": messages},
         )
         _req_start = _time.monotonic()
 
@@ -177,7 +176,7 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
             engine_tag,
             model=request_model,
             url=self._sdk_base_url(),
-            payload=sanitize_for_log({"messages": messages, "stream": True}),
+            payload={"messages": messages, "stream": True},
         )
         _req_start = _time.monotonic()
         _accumulated: list[str] = []

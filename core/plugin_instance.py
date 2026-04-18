@@ -1,6 +1,6 @@
 # core/plugin_instance.py
 
-from core.prompt_engine import build_json_prompt
+from core.prompt_engine import build_prompt_request
 from core.cortex_registry import get_cortex_registry
 import asyncio
 import contextvars
@@ -617,7 +617,7 @@ async def handle_incoming_message(
                         )
 
                 log_debug(f"[plugin_instance] Exception path - max_chars={max_chars}")
-                prompt = await build_json_prompt(
+                prompt = await build_prompt_request(
                     message,
                     {},
                     interface_name,
@@ -667,9 +667,9 @@ async def handle_incoming_message(
                 )
 
             log_debug(
-                f"[plugin_instance] Passing max_chars={max_chars} to build_json_prompt()"
+                f"[plugin_instance] Passing max_chars={max_chars} to build_prompt_request()"
             )
-            prompt = await build_json_prompt(
+            prompt = await build_prompt_request(
                 message,
                 context_memory_or_prompt,
                 interface_name,
@@ -678,21 +678,19 @@ async def handle_incoming_message(
                 max_chars=max_chars,
             )
 
-    # Multimodal attachments already extracted and passed to build_json_prompt above
+    # Multimodal attachments already extracted and passed to build_prompt_request above
     if attachments:
         log_info(
             f"[plugin_instance] Processing {len(attachments)} multimodal attachment(s)"
         )
 
-    # Preserve __prompt_request (PromptRequest dataclass) before sanitization —
-    # sanitize_for_json converts dataclasses to plain dicts via __dict__, which
-    # breaks engine fast-paths that depend on the typed PromptRequest object.
-    _preserved_pr: object | None = (
-        prompt.get("__prompt_request") if isinstance(prompt, dict) else None
-    )
+    # Pull typed PromptRequest out of the transport dict before sanitization.
+    # Engines receive this object directly; the transport prompt remains JSON-safe.
+    prompt_request_obj: object | None = None
+    if isinstance(prompt, dict):
+        prompt_request_obj = prompt.pop("__prompt_request", None)
+
     prompt = sanitize_for_json(prompt)
-    if _preserved_pr is not None and isinstance(prompt, dict):
-        prompt["__prompt_request"] = _preserved_pr
     log_debug("🌐 JSON PROMPT built for the plugin:")
     try:
         prompt_json = json_dumps(prompt)
@@ -707,7 +705,7 @@ async def handle_incoming_message(
         pre_size = None
         try:
             if isinstance(prompt, dict):
-                # Prefer explicit pre_reduction_size if provided by build_json_prompt
+                # Prefer explicit pre_reduction_size if provided by build_prompt_request
                 pre_size = prompt.get("__pre_reduction_size", None)
                 # If not present, compute a fallback (note: this is post-reduction size)
                 if pre_size is None:
@@ -776,7 +774,12 @@ async def handle_incoming_message(
             log_error("[plugin_instance] No LLM plugin loaded, cannot process message")
             raise ValueError("No LLM plugin loaded")
 
-        result = await effective_plugin.handle_incoming_message(bot, message, prompt)
+        prompt_for_engine = (
+            prompt_request_obj if prompt_request_obj is not None else prompt
+        )
+        result = await effective_plugin.handle_incoming_message(
+            bot, message, prompt_for_engine
+        )
         try:
             _log_llm_traffic(prompt, result, interface)
         except Exception as e:

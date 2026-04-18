@@ -11,8 +11,7 @@ from typing import Dict, Any, Optional, List
 from datetime import datetime
 from core.prompt_engine import (
     build_delivery_request,
-    build_full_json_instructions,
-    build_minified_json_instructions,
+    load_json_instructions,
 )
 from core.action_parser import CORRECTOR_RETRIES
 
@@ -93,8 +92,7 @@ class AutoResponseSystem:
             mock_message.chat.first_name = "AutoResponse"
             mock_message.chat.type = "private"
 
-            # Use minified version to reduce token usage in auto_response scenarios
-            full_json = build_minified_json_instructions()
+            json_rules = load_json_instructions()
             if action_outputs is not None:
                 message_block = {"action_outputs": action_outputs}
             else:
@@ -114,7 +112,7 @@ class AutoResponseSystem:
                     "action_type": action_type,  # Track which action produced these results
                     "instruction": loop_prevention_instruction,
                     "message": message_block,
-                    "full_json_instructions": full_json,
+                    "full_json_instructions": json_rules,
                     "is_action_result_delivery": True,  # Flag for downstream loop prevention
                     "max_correction_attempts": 1,  # Limit corrections for action result responses
                 }
@@ -211,7 +209,7 @@ async def request_llm_delivery(
             f"[auto_response] 📤 INTERFACE_TO_LLM: Processing {reason or 'autonomous'} request via interface"
         )
         try:
-            full_json = build_full_json_instructions()
+            json_rules = load_json_instructions()
             if isinstance(context, dict) and context.get("input", {}).get("type") in {
                 "event",
                 "event_reminder",
@@ -223,7 +221,7 @@ async def request_llm_delivery(
                     "system_message": {
                         "type": "event_reminder",
                         "message": context,
-                        "full_json_instructions": full_json,
+                        "full_json_instructions": json_rules,
                     }
                 }
             else:
@@ -232,7 +230,7 @@ async def request_llm_delivery(
                     "system_message": {
                         "type": "output",
                         "message": context,
-                        "full_json_instructions": full_json,
+                        "full_json_instructions": json_rules,
                     }
                 }
 

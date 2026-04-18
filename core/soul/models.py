@@ -45,6 +45,16 @@ class MemCell:
 
 
 @dataclass(slots=True)
+class MemCellRecall:
+    """Ranked memory recall candidate for prompt-time retrieval."""
+
+    cell: MemCell
+    similarity: float
+    lexical_score: float
+    score: float
+
+
+@dataclass(slots=True)
 class MemScene:
     """Thematic cluster of memory cells."""
 
