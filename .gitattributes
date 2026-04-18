@@ -1,0 +1,36 @@
+# Auto detect text files and perform LF normalization
+* text=auto
+
+# Shell scripts and S6 service files MUST use LF line endings
+# CRLF breaks s6-rc-compile ("longrun\r" is invalid) and bash execution
+*.sh text eol=lf
+webtop/s6-services/*/run text eol=lf
+webtop/s6-services/*/type text eol=lf
+
+# Python files should use LF
+*.py text eol=lf
+
+# SQL files should use LF
+*.sql text eol=lf
+
+# Windows-specific scripts can keep CRLF
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+*.cmd text eol=crlf
+
+# Binary files - no normalization
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.vrm binary
+*.vroid binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.eot binary
+*.mp3 binary
+*.wav binary
+*.ogg binary
+*.mp4 binary

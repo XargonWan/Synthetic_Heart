@@ -149,12 +149,26 @@ RUN chmod +x /etc/s6-overlay/s6-rc.d/websockify/run && \
     echo websockify > /etc/s6-overlay/s6-rc.d/user/contents.d/websockify && \
     chown -R abc:abc /etc/s6-overlay/s6-rc.d/websockify
 
+# Strip Windows CRLF line endings from all scripts and S6 service files.
+# On Windows, Git may convert LF→CRLF on checkout, which breaks s6-rc-compile
+# (it rejects "longrun\r") and causes shell script issues inside the container.
+RUN sed -i 's/\r$//' /etc/s6-overlay/s6-rc.d/synth/type \
+    /etc/s6-overlay/s6-rc.d/synth/run \
+    /etc/s6-overlay/s6-rc.d/websockify/type \
+    /etc/s6-overlay/s6-rc.d/websockify/run \
+    /app/synth.sh \
+    /usr/local/bin/cleanup_chrome.sh
+
 # Final cleanup
 RUN mv /usr/bin/thunar /usr/bin/thunar-real && \
   rm -f /etc/xdg/autostart/xfce4-power-manager.desktop /etc/xdg/autostart/xscreensaver.desktop && \
   rm -rf /tmp/*
 
 COPY webtop/root /
+
+# Strip CRLF from webtop/root scripts (copied after the sed above)
+RUN sed -i 's/\r$//' /usr/bin/thunar \
+    /config/defaults/startwm.sh 2>/dev/null || true
 
 # Permissions
 RUN chown -R abc:abc /app && \
