@@ -325,11 +325,18 @@ async def test_gemini_adapter_uses_model_override(tmp_path) -> None:  # type: ig
     genai_module.types = types_module
     google_module.genai = genai_module
 
-    with patch.dict(sys.modules, {
-        "google": google_module,
-        "google.genai": genai_module,
-        "google.genai.types": types_module,
-    }, clear=False), patch.object(GeminiAdapter, "_get_client", return_value=dummy_client):
+    with (
+        patch.dict(
+            sys.modules,
+            {
+                "google": google_module,
+                "google.genai": genai_module,
+                "google.genai.types": types_module,
+            },
+            clear=False,
+        ),
+        patch.object(GeminiAdapter, "_get_client", return_value=dummy_client),
+    ):
         adapter = GeminiAdapter(api_key="unused")
         result = await adapter.describe_image(
             b"\xff\xd8\xff",
@@ -391,7 +398,9 @@ async def test_describe_attachment_images_with_iris() -> None:
 
 
 @pytest.mark.asyncio
-async def test_describe_attachment_images_with_iris_disabled_engine_returns_placeholder() -> None:
+async def test_describe_attachment_images_with_iris_disabled_engine_returns_placeholder() -> (
+    None
+):
     from core.plugin_instance import _describe_attachment_images_with_iris
     from plugins.iris_plugin import IrisPlugin
 
@@ -401,20 +410,28 @@ async def test_describe_attachment_images_with_iris_disabled_engine_returns_plac
 
     attachment = {"mime_type": "image/png", "data": "ZmFrZQ=="}
 
-    with patch.dict(
-        "core.core_initializer.PLUGIN_REGISTRY",
-        {"iris_plugin": plugin},
-        clear=True,
-    ), patch.object(plugin, "refresh_config"):
+    with (
+        patch.dict(
+            "core.core_initializer.PLUGIN_REGISTRY",
+            {"iris_plugin": plugin},
+            clear=True,
+        ),
+        patch.object(plugin, "refresh_config"),
+    ):
         description = await _describe_attachment_images_with_iris(
             [attachment], prompt="Describe this image."
         )
 
-    assert description == "User attached a image/png but the vision engine could not see it."
+    assert (
+        description
+        == "User attached a image/png but the vision engine could not see it."
+    )
 
 
 @pytest.mark.asyncio
-async def test_describe_attachment_images_with_iris_engine_failure_returns_placeholder() -> None:
+async def test_describe_attachment_images_with_iris_engine_failure_returns_placeholder() -> (
+    None
+):
     from core.iris_registry import IrisRegistry
     from core.plugin_instance import _describe_attachment_images_with_iris
     from plugins.iris_base import IrisEngineBase
@@ -456,7 +473,10 @@ async def test_describe_attachment_images_with_iris_engine_failure_returns_place
             [attachment], prompt="Describe this image."
         )
 
-    assert description == "User attached a image/jpeg but the vision engine could not see it."
+    assert (
+        description
+        == "User attached a image/jpeg but the vision engine could not see it."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -522,6 +542,64 @@ async def test_handle_custom_action_vision_describe(tmp_path) -> None:  # type: 
             response = await plugin.handle_custom_action(
                 "vision_describe",
                 {"image_path": str(test_file), "mime_type": "image/png"},
+            )
+
+    assert response["status"] == "success"
+    assert response["description"] == "mountains"
+    assert response["language"] == "en"
+    assert response["confidence"] == 0.9
+
+
+@pytest.mark.asyncio
+async def test_execute_action_vision_describe_uses_current_attachment() -> None:  # type: ignore[no-untyped-def]
+    from plugins.iris_base import IrisEngineBase, IrisResult
+
+    class MockEngine(IrisEngineBase):
+        def describe_image(
+            self,
+            file_path: str,
+            mime_type: str | None = None,
+            prompt: str | None = None,
+        ) -> IrisResult | None:
+            with open(file_path, "rb") as fh:
+                assert fh.read() == b"\x89PNG"
+            assert mime_type == "image/png"
+            return IrisResult(description="mountains", language="en", confidence=0.9)
+
+    attachment_b64 = base64.b64encode(b"\x89PNG").decode("ascii")
+    fake_message = types.SimpleNamespace(
+        interface_path="custom/123",
+        attachments=[
+            {
+                "mime_type": "image/png",
+                "filename": "img.png",
+                "data": attachment_b64,
+            }
+        ],
+    )
+
+    with patch("core.core_initializer.register_plugin"):
+        from plugins.iris_plugin import IrisPlugin
+        from core.iris_registry import IrisRegistry
+
+        reg = IrisRegistry()
+        reg.register_instance("mock", MockEngine(), label="Mock")
+
+        plugin = IrisPlugin.__new__(IrisPlugin)
+        plugin._active_engine_name = "mock"
+        plugin._engine_settings = {}
+        plugin._default_prompt = "Describe."
+        plugin._default_model = ""
+
+        with (
+            patch("plugins.iris_plugin.IRIS_REGISTRY", reg),
+            patch.object(plugin, "refresh_config"),
+        ):
+            response = await plugin.execute_action(
+                {"type": "vision_describe", "payload": {}},
+                {},
+                None,
+                fake_message,
             )
 
     assert response["status"] == "success"

@@ -446,7 +446,9 @@ async def handle_incoming_message(
                         }
 
                         # Try to send corrector message
-                        asyncio.create_task(run_action(corrector_action, message))
+                        asyncio.create_task(
+                            run_action(corrector_action, ctx, bot, message)
+                        )
                         log_info(
                             "[message_chain] ✓ Corrector action scheduled for invalid emotions"
                         )
@@ -787,6 +789,22 @@ async def handle_incoming_message(
 
                 # Only enforce this for LLM-originated responses
                 if is_from_cortex and isinstance(actions, list):
+                    try:
+                        scoped_actions = ctx.get("allowed_action_types") or ctx.get(
+                            "allowed_actions"
+                        )
+                        if isinstance(scoped_actions, (list, set, tuple)):
+                            supported_action_types.update(
+                                str(action_type)
+                                for action_type in scoped_actions
+                                if action_type
+                            )
+                    except Exception as e:
+                        log_debug(
+                            "[message_chain] Failed to merge scoped allowed action "
+                            f"types into runtime supported set: {e}"
+                        )
+
                     # quick mapping: some models may output a generic "message"
                     # action when they really intend to send text to the current
                     # interface.  Convert it to a concrete type based on the

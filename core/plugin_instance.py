@@ -13,7 +13,11 @@ import os
 import tempfile
 from pathlib import Path
 from core.logging_utils import log_debug, log_info, log_warning, log_error
-from core.json_utils import dumps as json_dumps, sanitize_for_json
+from core.json_utils import (
+    dumps as json_dumps,
+    redact_multimodal_for_logging,
+    sanitize_for_json,
+)
 from core.image_processor import get_image_processor, process_image_message
 from core.abstract_context import AbstractContext, AbstractUser, AbstractMessage
 from core.mention_utils import is_message_for_bot
@@ -719,7 +723,10 @@ async def handle_incoming_message(
         )
         # debug log of the full prompt content for reconstruction
         try:
-            log_debug(f"[flow] prompt content: {json_dumps(prompt)}")
+            log_debug(
+                "[flow] prompt content: "
+                + json_dumps(redact_multimodal_for_logging(prompt))
+            )
         except Exception:
             pass
     except Exception:
@@ -776,7 +783,11 @@ async def handle_incoming_message(
             log_error(f"[plugin_instance] Failed to log LLM traffic: {e}")
         # debug log response for full transaction replay
         try:
-            log_debug(f"[flow] LLM raw response: {result}")
+            redacted_result = redact_multimodal_for_logging(result)
+            if isinstance(redacted_result, (dict, list)):
+                log_debug("[flow] LLM raw response: " + json_dumps(redacted_result))
+            else:
+                log_debug(f"[flow] LLM raw response: {redacted_result}")
         except Exception:
             pass
 
@@ -1021,12 +1032,17 @@ def _log_llm_traffic(prompt, response, interface_name):
             log_prompt.pop("actions", None)
         except Exception:
             pass
+    try:
+        log_prompt = redact_multimodal_for_logging(log_prompt)
+        log_response = redact_multimodal_for_logging(response)
+    except Exception:
+        log_response = response
 
     entry = {
         "timestamp": datetime.utcnow().isoformat(),
         "interface": interface_name,
         "input_context": log_prompt,
-        "response": response,
+        "response": log_response,
     }
 
     try:
@@ -1216,9 +1232,7 @@ async def _extract_image_data_from_message(message, interface_name: str):
 
 def _build_unviewable_media_placeholder(mime_type: str | None) -> str:
     if mime_type:
-        return (
-            f"User attached a {mime_type} but the vision engine could not see it."
-        )
+        return f"User attached a {mime_type} but the vision engine could not see it."
     return "User attached a media file but the vision engine could not see it."
 
 

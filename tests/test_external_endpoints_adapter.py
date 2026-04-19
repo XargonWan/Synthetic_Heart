@@ -5,6 +5,7 @@ import pytest
 
 from core.external_endpoints.adapters.base import ModelInfo
 from core.external_endpoints.adapters.openai_compat import OpenAICompatAdapter
+from core.external_endpoints.models import EndpointProtocol, ExternalEndpoint
 
 
 class FakeAiohttpResponse:
@@ -337,10 +338,20 @@ async def test_openai_compat_chat_completion_uses_reasoning_content(monkeypatch)
 async def test_external_cortex_engine_falls_back_to_first_available_model(monkeypatch):
     from core.external_endpoints.bridges.cortex_bridge import ExternalCortexEngine
 
-    endpoint = SimpleNamespace(
+    endpoint = ExternalEndpoint(
+        id=1,
         name="lmstudio",
-        default_model=None,
+        display_label="LM Studio",
+        protocol=EndpointProtocol.OPENAI,
+        base_url="http://localhost:1234",
+        api_key_enc=None,
+        enabled=True,
+        capabilities={},
+        subsystem_map={"cortex": True},
         available_models=["qwen/qwen3.5-9b"],
+        default_model=None,
+        probe_status="success",
+        last_probe_at=None,
         extra_config={},
     )
     called: dict[str, Any] = {}
@@ -355,6 +366,67 @@ async def test_external_cortex_engine_falls_back_to_first_available_model(monkey
 
     assert response == "ok"
     assert called["model"] == "qwen/qwen3.5-9b"
+
+
+@pytest.mark.asyncio
+async def test_external_cortex_engine_redacts_prompt_and_sends_multimodal_parts():
+    from core.external_endpoints.bridges.cortex_bridge import ExternalCortexEngine
+
+    endpoint = ExternalEndpoint(
+        id=2,
+        name="lmstudio",
+        display_label="LM Studio",
+        protocol=EndpointProtocol.OPENAI,
+        base_url="http://localhost:1234",
+        api_key_enc=None,
+        enabled=True,
+        capabilities={},
+        subsystem_map={"cortex": True},
+        available_models=["default"],
+        default_model="default",
+        probe_status="success",
+        last_probe_at=None,
+        extra_config={},
+    )
+    captured: dict[str, Any] = {}
+
+    class FakeAdapter:
+        async def chat_completion(self, messages, model=None, **kwargs):
+            captured["messages"] = messages
+            captured["model"] = model
+            return SimpleNamespace(content="ok", model=model)
+
+    engine = ExternalCortexEngine(endpoint, FakeAdapter())
+    prompt = {
+        "instructions_verbose": "Use valid JSON.",
+        "input": {
+            "payload": {
+                "text": "What is in this image?",
+                "attachments": [
+                    {
+                        "mime_type": "image/png",
+                        "filename": "img.png",
+                        "data": "YWJjZA==",
+                    }
+                ],
+            }
+        },
+    }
+
+    response = await engine.handle_incoming_message(None, None, prompt)
+
+    assert response == "ok"
+    assert captured["model"] == "default"
+    assert captured["messages"][0]["role"] == "system"
+    assert captured["messages"][0]["content"] == "Use valid JSON."
+
+    user_content = captured["messages"][1]["content"]
+    assert isinstance(user_content, list)
+    assert user_content[0]["type"] == "text"
+    assert "<redacted: 8 chars>" in user_content[0]["text"]
+    assert "YWJjZA==" not in user_content[0]["text"]
+    assert user_content[1]["type"] == "image_url"
+    assert user_content[1]["image_url"]["url"] == "data:image/png;base64,YWJjZA=="
 
 
 @pytest.mark.asyncio

@@ -104,6 +104,7 @@ BASE_CORTEX = config_registry.get_var(
     group="core",
     component="cortex",
     hidden=True,  # Managed via the Cortex Engines component selector
+    allow_env_override=False,
 )
 
 GRILLO_CORTEX = config_registry.get_var(
@@ -114,6 +115,7 @@ GRILLO_CORTEX = config_registry.get_var(
     group="core",
     component="cortex",
     hidden=True,  # Managed via the Cortex Engines scope selectors
+    allow_env_override=False,
 )
 
 TRAINER_CORTEX = config_registry.get_var(
@@ -126,6 +128,7 @@ TRAINER_CORTEX = config_registry.get_var(
     group="core",
     component="cortex",
     hidden=True,  # Managed via the Cortex Engines scope selectors
+    allow_env_override=False,
 )
 
 LIVE_CORTEX = config_registry.get_var(
@@ -136,6 +139,7 @@ LIVE_CORTEX = config_registry.get_var(
     group="core",
     component="cortex",
     hidden=True,  # Managed via the Cortex Engines scope selectors
+    allow_env_override=False,
 )
 
 # ----------------------------------------------------------------------
