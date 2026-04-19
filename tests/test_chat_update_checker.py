@@ -11,10 +11,16 @@ async def test_detects_new_messages(monkeypatch):
 
     # Simulate DB responses
     async def fake_execute(query, params=()):
-        if "MAX(last_active)" in query:
+        if "MAX(UNIX_TIMESTAMP(timestamp))" in query or "MAX(last_active)" in query:
             return [(1000.0,)]
-        elif "WHERE last_active >" in query:
-            return [("chat_a", 950.0), ("chat_b", 999.0)]
+        elif (
+            "WHERE UNIX_TIMESTAMP(timestamp) > %s" in query
+            or "WHERE last_active >" in query
+        ):
+            return [
+                ("telegram_bot/chat_a", "Jay", "u1", 950.0),
+                ("telegram_bot/chat_b", "Kay", "u2", 999.0),
+            ]
         return []
 
     monkeypatch.setattr("core.chat_update_checker.execute_query", fake_execute)
@@ -34,7 +40,7 @@ async def test_no_updates(monkeypatch):
     checker = cuc.get_chat_update_checker()
 
     async def fake_execute(query, params=()):
-        if "MAX(last_active)" in query:
+        if "MAX(UNIX_TIMESTAMP(timestamp))" in query or "MAX(last_active)" in query:
             return [(1000.0,)]
         return []
 
@@ -73,7 +79,7 @@ async def test_db_unavailable_fallback(monkeypatch):
 @pytest.mark.asyncio
 async def test_start_creates_task():
     checker = cuc.get_chat_update_checker()
-    task = checker.start()
+    checker.start()
     # start() should create an asyncio.Task in running loop
     assert checker._task is not None
     assert isinstance(checker._task, asyncio.Task)

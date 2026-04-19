@@ -28,6 +28,84 @@ from core.config_manager import config_registry
 LEVELS = ["low", "medium", "high"]
 
 
+def register_action_safety_config() -> None:
+    """Register the configuration keys used by action safety checks."""
+
+    config_registry.get_var(
+        "SYNTH_AUTONOMY_MODE",
+        "suggest",
+        value_type=str,
+        label="Synth Autonomy Mode",
+        description=(
+            "Autonomy level: 'passive' (respond only), 'suggest' (propose actions), "
+            "'whitelisted' (automatically execute only AUTONOMY_ALLOWED_ACTIONS), "
+            "'autonomous' (execute actions up to AUTONOMY_ALLOWED_SECURITY_LEVEL)."
+        ),
+        constraints={"choices": ["passive", "suggest", "whitelisted", "autonomous"]},
+        group="synth",
+        component="persona",
+    )
+    config_registry.get_var(
+        "AUTONOMY_ALLOWED_ACTIONS",
+        [],
+        value_type="json",
+        label="Autonomy Allowed Actions",
+        description=(
+            "List of action types the synth may execute automatically when running in "
+            "'whitelisted' mode."
+        ),
+        group="synth",
+        component="persona",
+    )
+    config_registry.get_var(
+        "AUTONOMY_ALLOWED_SECURITY_LEVEL",
+        "high",
+        value_type=str,
+        label="Autonomy Allowed Security Level",
+        description=(
+            "Highest action security level the synth may auto-execute in 'autonomous' mode."
+        ),
+        constraints={"choices": LEVELS},
+        group="synth",
+        component="persona",
+    )
+    config_registry.get_var(
+        "GRILLO_ALLOWED_ACTIONS",
+        [],
+        value_type="json",
+        label="Grillo Allowed Actions",
+        description=(
+            "List of action types Grillo may execute regardless of the configured security threshold."
+        ),
+        group="grillo",
+        component="grillo",
+    )
+    config_registry.get_var(
+        "GRILLO_ALLOWED_SECURITY_LEVEL",
+        "medium",
+        value_type=str,
+        label="Grillo Allowed Security Level",
+        description="Highest action security level Grillo may auto-execute.",
+        constraints={"choices": LEVELS},
+        group="grillo",
+        component="grillo",
+    )
+    config_registry.get_var(
+        "LLM_AUTO_EXECUTE_UNSAFE_ACTIONS",
+        False,
+        value_type=bool,
+        label="LLM auto-execute unsafe actions",
+        description=(
+            "Global override to allow execution of actions flagged safe=false when they originate from the LLM."
+        ),
+        group="synth",
+        component="persona",
+    )
+
+
+register_action_safety_config()
+
+
 def _coerce_level(level: str) -> str:
     if not level:
         return "low"
@@ -65,8 +143,7 @@ def is_action_allowed_for_execution(
     Returns a tuple: (allowed, reason, metadata)
     """
     try:
-        action_type = action.get("type")
-        payload = action.get("payload") or {}
+        action_type = str(action.get("type") or "")
 
         # 1) Respect explicit safe flag
         safe_flag = action.get("safe", True)
@@ -83,7 +160,7 @@ def is_action_allowed_for_execution(
         # 2) Determine declared security level
         declared = _get_declared_action_metadata(action_type)
         declared_level = _coerce_level(
-            declared.get("security_level") or declared.get("security", None)
+            str(declared.get("security_level") or declared.get("security") or "")
         )
 
         # 3) External effects bump
@@ -116,14 +193,6 @@ def is_action_allowed_for_execution(
         synth_mode = str(
             config_registry.get_value("SYNTH_AUTONOMY_MODE", "suggest") or "suggest"
         ).lower()
-
-        # If developer explicitly marked action as low, treat as low and allow always
-        if declared_level == "low":
-            return (
-                True,
-                "allowed: declared low security",
-                {"security_level": "low", "declared": declared},
-            )
 
         # Special-case: Grillo beats may have their own threshold
         is_grillo_beat = bool(context and context.get("grillo_beat"))
@@ -159,14 +228,6 @@ def is_action_allowed_for_execution(
             return True, "allowed: human-triggered", {"security_level": declared_level}
 
         # From LLM -> apply synth_mode policies
-        if synth_mode == "suggest":
-            # Proposal-only for anything above low (low already returned earlier)
-            return (
-                False,
-                "blocked: synth in 'suggest' mode, proposals only for non-low actions",
-                {"security_level": declared_level},
-            )
-
         if synth_mode == "whitelisted":
             allowed_autonomy = (
                 config_registry.get_value("AUTONOMY_ALLOWED_ACTIONS", []) or []
@@ -178,6 +239,22 @@ def is_action_allowed_for_execution(
                     {"security_level": declared_level},
                 )
             return False, "blocked: not whitelisted", {"security_level": declared_level}
+
+        # Low-security LLM actions remain auto-executable outside explicit whitelist mode.
+        if declared_level == "low":
+            return (
+                True,
+                "allowed: declared low security",
+                {"security_level": "low", "declared": declared},
+            )
+
+        if synth_mode == "suggest":
+            # Proposal-only for anything above low (low already returned earlier)
+            return (
+                False,
+                "blocked: synth in 'suggest' mode, proposals only for non-low actions",
+                {"security_level": declared_level},
+            )
 
         if synth_mode == "autonomous":
             # Check configured allowed level (default high)

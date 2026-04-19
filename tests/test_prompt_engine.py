@@ -1,6 +1,7 @@
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone
 from types import SimpleNamespace
+from typing import Any, Sequence
 
 from core.prompt_engine import (
     build_json_prompt,
@@ -22,7 +23,7 @@ def test_build_json_prompt_reply_without_text(monkeypatch):
         text="hello",
         message_id=1,
         from_user=SimpleNamespace(full_name="user", username="user"),
-        date=datetime.utcnow(),
+        date=datetime.now(timezone.utc),
         reply_to_message=SimpleNamespace(
             message_id=2,
             from_user=SimpleNamespace(full_name="bot", username="bot"),
@@ -52,7 +53,7 @@ def test_build_json_prompt_inherits_image_data_from_context_memory(monkeypatch):
         text="hello",
         message_id=1,
         from_user=SimpleNamespace(full_name="user", username="user"),
-        date=datetime.utcnow(),
+        date=datetime.now(timezone.utc),
     )
 
     image_data = {
@@ -127,6 +128,53 @@ def test_build_live_prompt_request_returns_live_mode(monkeypatch):
     assert "You are 2B." in req.system_instruction
 
 
+def test_build_json_prompt_demotes_persona_preferences_to_context_summary(monkeypatch):
+    async def dummy_gather(message, ctx):
+        return {
+            "persona": "PERSONA IDENTITY:\nName: 2B\nProfile: You are 2B.",
+            "persona_preferences": "Likes: tea\nDislikes: liars",
+        }
+
+    monkeypatch.setattr("core.action_parser.gather_static_injections", dummy_gather)
+
+    message = SimpleNamespace(
+        chat_id=1,
+        text="hey",
+        message_id=1,
+        from_user=SimpleNamespace(full_name="user", username="user"),
+        date=datetime.now(timezone.utc),
+    )
+
+    result = asyncio.run(build_json_prompt(message, {}, interface_name="telegram_bot"))
+
+    assert "Likes: tea" not in result["instructions"]
+    assert "Dislikes: liars" not in result["instructions"]
+
+    pr = result["__prompt_request"]
+    assert "Likes: tea" not in pr.system_instruction
+    assert "Dislikes: liars" not in pr.system_instruction
+    assert "[Persona background]" in pr.context_summary
+    assert "Likes: tea" in pr.context_summary
+    assert "Dislikes: liars" in pr.context_summary
+
+
+def test_build_live_prompt_request_keeps_persona_preferences(monkeypatch):
+    async def dummy_gather(message, ctx):
+        return {
+            "persona": "You are 2B.",
+            "persona_preferences": "Likes: tea\nDislikes: liars",
+        }
+
+    monkeypatch.setattr("core.action_parser.gather_static_injections", dummy_gather)
+
+    req = asyncio.run(build_live_prompt_request())
+
+    assert "You are 2B." in req.system_instruction
+    assert "Background preferences and interests:" in req.system_instruction
+    assert "Likes: tea" in req.system_instruction
+    assert "Dislikes: liars" in req.system_instruction
+
+
 def test_build_live_system_instruction_matches_live_renderer(monkeypatch):
     from core.prompt_renderers import LiveRenderer
 
@@ -172,7 +220,7 @@ def test_build_json_prompt_filters_actions_by_allowlist(monkeypatch):
             text="internal beat",
             message_id=1,
             from_user=SimpleNamespace(full_name="grillo", username="grillo"),
-            date=datetime.utcnow(),
+            date=datetime.now(timezone.utc),
             interface_path="grillo/-1",
         )
 
@@ -205,7 +253,7 @@ def test_prompt_request_attached_to_result(monkeypatch):
         text="hey",
         message_id=1,
         from_user=SimpleNamespace(full_name="user", username="user"),
-        date=datetime.utcnow(),
+        date=datetime.now(timezone.utc),
     )
 
     result = asyncio.run(build_json_prompt(message, {}, interface_name="telegram_bot"))
@@ -236,7 +284,7 @@ def test_prompt_request_mode_is_grillo_for_grillo_beat(monkeypatch):
         text="internal beat",
         message_id=1,
         from_user=SimpleNamespace(full_name="grillo", username="grillo"),
-        date=datetime.utcnow(),
+        date=datetime.now(timezone.utc),
         interface_path="grillo/-1",
     )
 
@@ -264,11 +312,11 @@ class TestHistoryToTurns:
     """Tests for _history_to_turns: converting formatted history lines to Turn objects."""
 
     def _call(
-        self, lines: list[str], synth_names: set[str] | None = None
-    ) -> list[object]:
+        self, lines: Sequence[object], synth_names: set[str] | None = None
+    ) -> list[Any]:
         from core.prompt_engine import _history_to_turns
 
-        return _history_to_turns(lines, synth_names or {"synth"})
+        return _history_to_turns(list(lines), synth_names or {"synth"})
 
     def test_self_sender_becomes_assistant(self) -> None:
         """'self' is the canonical sender_name for the AI in history format."""
@@ -314,7 +362,7 @@ class TestHistoryToTurns:
     def test_malformed_lines_skipped(self) -> None:
         lines = [
             "not a valid line",
-            42,  # type: ignore[list-item]
+            42,
             '[13/04/26:0924] Scar: "valid line"',
         ]
         turns = self._call(lines, {"synth"})

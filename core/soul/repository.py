@@ -770,6 +770,7 @@ class PostgresSoulRepository:
             return []
 
         candidate_cap = max(1, candidate_limit or 20)
+        query_tokens = _tokenize_search_text(normalized_query)
         vector_literal = self._vector_literal(query_embedding)
         pool = await self._get_pool()
         async with pool.acquire() as conn:
@@ -779,19 +780,14 @@ class PostgresSoulRepository:
                     c.id, c.session_id, c.episodic_trace, c.atomic_facts, c.emotional_tag,
                     c.foresight_signals, c.timestamp, c.retrieval_count, c.explicit_importance,
                     c.consolidated, c.scene_id,
-                    (1 - (v.embedding <=> $1::vector)) AS vector_similarity,
-                    GREATEST(
-                        similarity(c.episodic_trace, $2),
-                        similarity(COALESCE(c.atomic_facts::text, ''), $2)
-                    ) AS lexical_score
+                    (1 - (v.embedding <=> $1::vector)) AS vector_similarity
                 FROM mem_cells c
                 JOIN mem_cell_vectors v ON v.mem_cell_id = c.id
                 WHERE c.episodic_trace <> ''
                 ORDER BY v.embedding <=> $1::vector ASC, c.timestamp DESC
-                LIMIT $3
+                LIMIT $2
                 """,
                 vector_literal,
-                normalized_query,
                 candidate_cap,
             )
 
@@ -799,35 +795,31 @@ class PostgresSoulRepository:
             if len(normalized_query) >= 3:
                 text_rows = list(
                     await conn.fetch(
+                        # Keep SQL candidate selection on indexed episodic-trace
+                        # expressions; richer episodic-trace + atomic-facts overlap is
+                        # scored in Python after fetch.
                         """
                         SELECT
                             c.id, c.session_id, c.episodic_trace, c.atomic_facts, c.emotional_tag,
                             c.foresight_signals, c.timestamp, c.retrieval_count, c.explicit_importance,
                             c.consolidated, c.scene_id,
-                            COALESCE((1 - (v.embedding <=> $2::vector)), 0.0) AS vector_similarity,
-                            GREATEST(
-                                similarity(c.episodic_trace, $1),
-                                similarity(COALESCE(c.atomic_facts::text, ''), $1),
-                                ts_rank(
-                                    to_tsvector(
-                                        'simple',
-                                        c.episodic_trace || ' ' || COALESCE(c.atomic_facts::text, '')
-                                    ),
-                                    websearch_to_tsquery('simple', $1)
-                                )
-                            ) AS lexical_score
+                            COALESCE((1 - (v.embedding <=> $2::vector)), 0.0) AS vector_similarity
                         FROM mem_cells c
                         LEFT JOIN mem_cell_vectors v ON v.mem_cell_id = c.id
                         WHERE c.episodic_trace <> ''
                           AND (
                               c.episodic_trace % $1
-                              OR COALESCE(c.atomic_facts::text, '') % $1
-                              OR to_tsvector(
-                                  'simple',
-                                  c.episodic_trace || ' ' || COALESCE(c.atomic_facts::text, '')
-                              ) @@ websearch_to_tsquery('simple', $1)
+                              OR to_tsvector('simple', c.episodic_trace)
+                                  @@ websearch_to_tsquery('simple', $1)
                           )
-                        ORDER BY lexical_score DESC, c.timestamp DESC
+                        ORDER BY GREATEST(
+                                 similarity(c.episodic_trace, $1),
+                                 ts_rank(
+                                     to_tsvector('simple', c.episodic_trace),
+                                     websearch_to_tsquery('simple', $1)
+                                 )
+                             ) DESC,
+                             c.timestamp DESC
                         LIMIT $3
                         """,
                         normalized_query,
@@ -848,19 +840,16 @@ class PostgresSoulRepository:
                 float(existing.get("vector_similarity") or 0.0),
                 float(row_data.get("vector_similarity") or 0.0),
             )
-            existing["lexical_score"] = max(
-                float(existing.get("lexical_score") or 0.0),
-                float(row_data.get("lexical_score") or 0.0),
-            )
 
         now = datetime.now(timezone.utc)
         matches: list[MemCellRecall] = []
         for row in merged_rows.values():
             cell = self._row_to_memcell(row)
+            lexical_score = _lexical_overlap_score(query_tokens, cell)
             match = _build_recall_match(
                 cell=cell,
                 similarity=float(row.get("vector_similarity") or 0.0),
-                lexical_score=float(row.get("lexical_score") or 0.0),
+                lexical_score=lexical_score,
                 session_id=session_id,
                 now=now,
             )

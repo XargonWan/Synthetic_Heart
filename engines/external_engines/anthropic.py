@@ -241,6 +241,7 @@ class AnthropicPlugin(AIPluginBase):
     """Anthropic Claude LLM Engine using the Messages REST API."""
 
     display_name = "Anthropic Claude"
+    supports_prompt_request = True
 
     def __init__(self, notify_fn: Any = None) -> None:
         from core.notifier import set_notifier

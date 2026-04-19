@@ -685,7 +685,8 @@ async def handle_incoming_message(
         )
 
     # Pull typed PromptRequest out of the transport dict before sanitization.
-    # Engines receive this object directly; the transport prompt remains JSON-safe.
+    # Only PromptRequest-aware engines receive this object directly; legacy
+    # engines keep the sanitized transport dict until they opt in.
     prompt_request_obj: object | None = None
     if isinstance(prompt, dict):
         prompt_request_obj = prompt.pop("__prompt_request", None)
@@ -774,9 +775,11 @@ async def handle_incoming_message(
             log_error("[plugin_instance] No LLM plugin loaded, cannot process message")
             raise ValueError("No LLM plugin loaded")
 
-        prompt_for_engine = (
-            prompt_request_obj if prompt_request_obj is not None else prompt
-        )
+        prompt_for_engine = prompt
+        if prompt_request_obj is not None and bool(
+            getattr(effective_plugin, "supports_prompt_request", False)
+        ):
+            prompt_for_engine = prompt_request_obj
         result = await effective_plugin.handle_incoming_message(
             bot, message, prompt_for_engine
         )

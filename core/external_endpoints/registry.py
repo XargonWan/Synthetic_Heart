@@ -193,7 +193,7 @@ class ExternalEndpointRegistry:
             return await self.get_endpoint(endpoint_id)
 
         set_clauses.append("updated_at = %s")
-        params.append(datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"))
+        params.append(datetime.now(timezone.utc))
         params.append(endpoint_id)
 
         sql = f"UPDATE external_endpoints SET {', '.join(set_clauses)} WHERE id = %s"
@@ -296,7 +296,7 @@ class ExternalEndpointRegistry:
                     "updated_at = %s WHERE id = %s",
                     (
                         json.dumps(mapping),
-                        datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+                        datetime.now(timezone.utc),
                         endpoint_id,
                     ),
                 )
@@ -371,7 +371,7 @@ class ExternalEndpointRegistry:
                     "updated_at = %s WHERE id = %s AND default_model IS NULL",
                     (
                         model,
-                        datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+                        datetime.now(timezone.utc),
                         endpoint_id,
                     ),
                 )
@@ -433,7 +433,7 @@ class ExternalEndpointRegistry:
                     "updated_at = %s WHERE id = %s",
                     (
                         model or None,
-                        datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+                        datetime.now(timezone.utc),
                         endpoint_id,
                     ),
                 )

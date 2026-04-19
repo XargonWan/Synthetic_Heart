@@ -528,16 +528,20 @@ async def gather_recon_contributions(
         log_debug("[recon] No combined recon plugins available; skipping Recon")
         return []
 
+    recon_specs = []
+    for plugin in recon_plugins:
+        key = str(plugin.get_recon_key())
+        instruction = str(plugin.get_recon_instruction())
+        recon_specs.append((plugin, key, instruction))
+
     # Build combined system prompt
-    keys = [p.get_recon_key() for p in recon_plugins]
+    keys = [key for _, key, _ in recon_specs]
     system_lines = [
         "This is a Recon prompt, please execute what is requested below:",
         "Return ONLY valid JSON with the following keys:",
         ", ".join(keys) + ".",
     ]
-    for plugin in recon_plugins:
-        key = plugin.get_recon_key()
-        instruction = plugin.get_recon_instruction()
+    for _, key, instruction in recon_specs:
         system_lines.append(f"- {key}: {instruction}")
     system_lines.append(
         "IMPORTANT for language_hint: base your language detection ONLY on the "
@@ -682,7 +686,12 @@ async def gather_recon_contributions(
         elif parsed is None:
             parsed = {}
 
-    if isinstance(parsed, dict) and local_language:
+    if not isinstance(parsed, dict):
+        log_warning("[recon] Combined Recon response did not parse as JSON object")
+        log_debug(f"[recon] parsed output: {parsed!r}")
+        parsed = {}
+
+    if local_language:
         lang_obj = parsed.get("language_hint")
         if needs_language and (
             not isinstance(lang_obj, dict) or not lang_obj.get("language_code")
@@ -691,11 +700,6 @@ async def gather_recon_contributions(
             log_debug(
                 f"[recon] Applied local lingua fallback language={local_language}"
             )
-
-    if not isinstance(parsed, dict):
-        log_warning("[recon] Combined Recon response did not parse as JSON object")
-        log_debug(f"[recon] parsed output: {parsed!r}")
-        return []
 
     try:
         _lang_obj = parsed.get("language_hint")
@@ -725,8 +729,7 @@ async def gather_recon_contributions(
     # normalize keywords into single-word tokens before dispatching to plugins
     norm_keywords = await _normalize_keywords_list(keywords)
 
-    for plugin in recon_plugins:
-        key = plugin.get_recon_key()
+    for plugin, key, _ in recon_specs:
         plugin_name = plugin.__class__.__name__
         data = parsed.get(key)
         log_debug(f"[recon] dispatching parsed data to {plugin_name}: {data!r}")

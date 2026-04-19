@@ -99,6 +99,56 @@ _ACTION_SYSTEM_KEYS = frozenset(
 )
 
 
+def _normalize_message_payload_text(actions: list) -> list:
+    """Promote legacy message payload text aliases to payload.text.
+
+    LLMs occasionally emit message-like actions with keys such as ``body`` or
+    ``content`` instead of the canonical ``text`` field required by validation.
+    Normalize those aliases in-place before validation/correction so valid reply
+    intents do not trigger an unnecessary corrective round-trip.
+
+    Args:
+        actions: List of action dicts to normalize.
+
+    Returns:
+        The same list with legacy text aliases copied into ``payload.text``.
+    """
+    if not actions:
+        return actions
+
+    for action in actions:
+        if not isinstance(action, dict):
+            continue
+
+        action_type = action.get("type") or action.get("action")
+        if not isinstance(action_type, str):
+            continue
+        if action_type not in (
+            "message",
+            "send_message",
+        ) and not action_type.startswith("message_"):
+            continue
+
+        payload = action.get("payload")
+        if not isinstance(payload, dict):
+            continue
+
+        existing_text = payload.get("text")
+        if isinstance(existing_text, str) and existing_text.strip():
+            continue
+
+        for legacy_key in ("body", "content", "message", "value"):
+            legacy_value = payload.get(legacy_key)
+            if isinstance(legacy_value, str) and legacy_value.strip():
+                payload["text"] = legacy_value
+                log_debug(
+                    f"[message_chain] Normalized payload.{legacy_key} -> payload.text for {action_type}"
+                )
+                break
+
+    return actions
+
+
 def _auto_inject_interface_path(actions: list, interface_path: Optional[str]) -> list:
     """Auto-inject missing interface_path into message actions.
 
@@ -1079,6 +1129,7 @@ async def handle_incoming_message(
 
                 ctx_interface_path = ctx.get("interface_path") if ctx else None
                 actions = _normalize_message_unknown(actions, ctx_interface_path)
+                actions = _normalize_message_payload_text(actions)
                 # Auto-inject interface_path into message actions that are missing it
                 # This prevents validation failures and avoids costly LLM correction calls
                 actions = _auto_inject_interface_path(actions, ctx_interface_path)
@@ -1101,17 +1152,30 @@ async def handle_incoming_message(
                     # interface.  Convert it to a concrete type based on the
                     # context path to avoid unnecessary corrector loops.
                     if ctx_interface_path:
+                        interface_prefix = (
+                            ctx_interface_path.split("/")[0]
+                            if "/" in ctx_interface_path
+                            else ctx_interface_path
+                        )
+                        resolved_message_type = _INTERFACE_TO_MESSAGE_ACTION.get(
+                            interface_prefix, "message_synth_webui"
+                        )
+                        rewrote_generic_message_action = False
                         for act in actions:
                             if isinstance(act, dict) and act.get("type") in (
                                 "message",
                                 "send_message",
                             ):
-                                if ctx_interface_path.startswith("telegram_bot"):
-                                    act["type"] = "message_telegram_bot"
-                                elif ctx_interface_path.startswith("discord_bot"):
-                                    act["type"] = "message_discord_bot"
-                                else:
-                                    act["type"] = "message_synth_webui"
+                                act["type"] = resolved_message_type
+                                rewrote_generic_message_action = True
+
+                        if rewrote_generic_message_action:
+                            # Re-run interface_path injection now that generic
+                            # aliases have been rewritten to supported
+                            # interface-specific action types.
+                            actions = _auto_inject_interface_path(
+                                actions, ctx_interface_path
+                            )
 
                     unsupported = []
                     for idx, act in enumerate(actions):

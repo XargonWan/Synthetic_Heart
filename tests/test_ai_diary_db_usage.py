@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime
 import pytest
 
 import plugins.ai_diary as ai_diary
@@ -202,3 +203,88 @@ async def test_on_debrief_uses_postgres_string_agg(monkeypatch):
 
     assert "string_agg" in str(captured["query"])
     assert "GROUP_CONCAT" not in str(captured["query"])
+
+
+@pytest.mark.asyncio
+async def test_on_debrief_enqueues_merge_source_ids(monkeypatch):
+    captured: dict[str, object] = {}
+
+    async def fake_fetchall(query, params=None):
+        return [
+            {
+                "id": 42,
+                "combined": "one\n\n---\n\ntwo",
+                "row_count": 2,
+                "source_ids": "41,42",
+                "first_timestamp": "2026-04-18T21:00:00+00:00",
+            }
+        ]
+
+    async def fake_enqueue_low_priority(
+        _priority,
+        _message,
+        context_memory=None,
+        interface_id=None,
+        original_message=None,
+    ):
+        captured["context_memory"] = context_memory
+        captured["interface_id"] = interface_id
+
+    ai_diary.PLUGIN_ENABLED = True
+    monkeypatch.setattr(ai_diary, "_get_db_type", lambda: "postgres")
+    monkeypatch.setattr(ai_diary, "_fetchall", fake_fetchall)
+    monkeypatch.setattr(
+        "core.message_queue.enqueue_low_priority",
+        fake_enqueue_low_priority,
+    )
+
+    plugin = object.__new__(ai_diary.DiaryPlugin)
+    await plugin.on_debrief([], [], [], {}, object())
+
+    assert captured["interface_id"] == "diary_merge"
+    assert captured["context_memory"]["diary_merge_source_ids"] == [41, 42]
+    assert (
+        captured["context_memory"]["diary_merge_timestamp"]
+        == "2026-04-18T21:00:00+00:00"
+    )
+
+
+def test_update_diary_entry_archives_merged_source_rows(monkeypatch):
+    executed: list[tuple[str, tuple]] = []
+    archived: dict[str, object] = {}
+
+    async def fake_execute(query, params=()):
+        executed.append((query, params))
+        return None
+
+    monkeypatch.setattr(ai_diary, "_execute", fake_execute)
+    monkeypatch.setattr(ai_diary, "_run", lambda coro: asyncio.run(coro))
+
+    def fake_archive_diary_entries(entry_ids):
+        archived["ids"] = list(entry_ids)
+        return {"success": True, "archived_count": len(entry_ids)}
+
+    monkeypatch.setattr(ai_diary, "archive_diary_entries", fake_archive_diary_entries)
+
+    plugin = object.__new__(ai_diary.DiaryPlugin)
+    result = plugin.execute_action(
+        {
+            "type": "update_diary_entry",
+            "payload": {"id": 42, "content": "merged prose"},
+        },
+        {
+            "diary_merge_source_ids": [41, 42, 41],
+            "diary_merge_timestamp": "2026-04-18T21:00:00+00:00",
+        },
+        None,
+        None,
+    )
+
+    assert result["success"] is True
+    assert executed == [
+        (
+            "UPDATE ai_diary SET content=%s, timestamp=%s WHERE id=%s",
+            ("merged prose", datetime.fromisoformat("2026-04-18T21:00:00+00:00"), 42),
+        )
+    ]
+    assert archived["ids"] == [41]

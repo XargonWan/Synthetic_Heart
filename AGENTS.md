@@ -519,6 +519,86 @@ docker exec synth-dev tail -f /app/logs/synth.log | grep -E "\[grillo\]|grillo"
 
 ---
 
+### `send_message` alias rewrite could trigger avoidable correction on `body` payloads  <!-- 2026-04-18 -->
+**Symptom:** Langfuse traces can show an initial LLM reply like `{"type":"send_message","payload":{"body":"..."}}` that is semantically fine, but validation fails after internal normalization rewrites the type to `message_telegram_bot` without a canonical `payload.text` field. The corrector retry then succeeds, making the first correction look unnecessarily "stupid".
+**Location:** `core/message_chain.py`, LLM-originated action normalization before validation.
+**Status:** fixed.
+**Notes:** The message chain now promotes legacy text aliases (`body`, `content`, `message`, `value`) into `payload.text` before validation and reruns `interface_path` injection after rewriting generic `message` / `send_message` actions to concrete `message_*` types.
+
+---
+
+### OpenAI-compatible external endpoint probe ignored configured adapter timeout  <!-- 2026-04-19 -->
+**Symptom:** Fresh OpenAI-compatible endpoints (for example OpenRouter) can log `ping_test exception ... Connection timeout` and `list_models HTTP fallback failed ... TimeoutError()` during auto-probe even when the endpoint-level probe timeout is configured much higher, leaving `available_models` empty in the UI.
+**Location:** `core/external_endpoints/adapters/openai_compat.py` (`_list_models_via_http`, `ping_test`), `core/external_endpoints/probe.py` timeout plumbing.
+**Status:** fixed.
+**Notes:** The adapter was built with `endpoint.extra_config.timeout`, but `list_models()` still hardcoded a 40s HTTP timeout and `ping_test()` defaulted to 30s with a 10s connect timeout unless a caller overrode it manually. The adapter now uses its configured timeout for both model discovery and ping probes by default.
+
+---
+
+### `external_endpoints.updated_at` string writes can fail on Postgres-backed endpoint registry paths  <!-- 2026-04-19 -->
+**Symptom:** Runtime warnings like `ext endpoint model DB persist failed: invalid input for query argument $2: '2026-04-18 22:08:45' (expected a datetime.date or datetime.datetime instance, got 'str')` can appear when saving endpoint state such as default model selection.
+**Location:** `core/external_endpoints/registry.py` (`update_endpoint`, `set_subsystem_map`, `_auto_set_default_model`, `set_default_model`).
+**Status:** fixed.
+**Notes:** Several registry writes formatted `updated_at` as a string while other paths already passed real timezone-aware `datetime` objects. The registry now binds real UTC datetimes consistently, matching the Postgres-compatible probe result path.
+
+---
+
+### Queued trainer notifications could lose `skip_history` and pollute prompt context  <!-- 2026-04-19 -->
+**Symptom:** Engine-switch notifications like `✅ Cortex engine dynamically updated to ...` could appear in `chat_history_cache` / `history_recent`, especially during startup or interface registration races.
+**Location:** `core/notifier.py` (`flush_pending_for_interface`), `core/history_engine.py`.
+**Status:** fixed.
+**Notes:** The direct `notify_trainer()` path already sent `skip_history=True`, but queued trainer notifications were flushed later without that flag. The flush path now preserves `skip_history`, and the history builder ignores these legacy self-notification rows so old DB pollution stops affecting prompt context.
+
+---
+
+### `ai_diary` consolidation could recursively re-merge whole days and bloat Gemini prompts  <!-- 2026-04-19 -->
+**Symptom:** Langfuse shows very large `@diary_merge` prompts with repeated diary fragments, and Gemini generations can stretch into ~100s while prompt reduction still fails to get under the size cap.
+**Location:** `plugins/ai_diary.py` (`DiaryPlugin.on_debrief`, `DiaryPlugin.execute_action` for `update_diary_entry`).
+**Status:** fixed.
+**Notes:** The consolidation beat grouped all rows for a day, updated only one row, and left the source rows in place; subsequent merges could concatenate the already-merged blob plus the originals again. The merge beat now carries exact source row IDs and the original merge timestamp through context, and `update_diary_entry` archives the merged source fragments after writing the consolidated row.
+
+---
+
+### OpenAI-compatible image turns could be silently downgraded to text after a stale probe  <!-- 2026-04-19 -->
+**Symptom:** Image-only or image-plus-text turns reach prompt construction with attachments present, but the external endpoint request contains only text parts, so OpenRouter-compatible models appear to ignore the image.
+**Location:** `core/external_endpoints/bridges/cortex_bridge.py`, `core/external_endpoints/adapters/openai_compat.py`, `core/external_endpoints/probe.py`.
+**Status:** fixed.
+**Notes:** Fresh probes could persist `capabilities["vision"] = false` and `capabilities["cortex"] = false` when `ping_test()` / `_probe_vision_support()` fell back to the invalid model name `"default"`. The Cortex bridge then trusted the stale endpoint-level `vision` flag and silently stripped `image_url` parts even after the user selected a real model. Probes now resolve a concrete model before sending test requests, and the bridge forwards image parts when a vision mapping or explicit model selection exists so multimodal turns are not silently flattened.
+
+---
+
+### OpenAI-compatible image-only turns could hallucinate non-visible details  <!-- 2026-04-19 -->
+**Symptom:** Requests with a real `image_url` attachment can still produce invented details (for example a nonexistent blindfold) when the user sends only an image and no caption.
+**Location:** `core/prompt_renderers.py` (`OpenAIRenderer.render_with_multimodal`).
+**Status:** fixed.
+**Notes:** The multipart current-turn text companion previously contained only the runtime prefix when `current_text` was empty, leaving the model free to fill gaps from prior chat context. The OpenAI renderer now adds an explicit grounding instruction for image attachments, telling the model to describe only clearly visible details and to admit uncertainty for ambiguous content.
+
+---
+
+### SOUL `async_consolidate` ran on every idle compile  <!-- 2026-04-19 -->
+**Symptom:** Langfuse shows frequent `async_consolidate` traces that look like diary-consolidation churn, often on every idle transcript flush.
+**Location:** `plugins/soul_plugin.py` (`SoulPlugin._compile_interface`).
+**Status:** fixed.
+**Notes:** The SOUL plugin called `self._compiler.async_consolidate()` after every `post_session_compile()`, so routine idle compiles emitted consolidation work and traces far too often. The plugin now throttles background consolidation with a cooldown while `soul_force_compile` still bypasses the cooldown for explicit manual compiles.
+
+---
+
+### SOUL Postgres recall could full-scan memcells and trip static injection timeouts  <!-- 2026-04-19 -->
+**Symptom:** Runtime logs show `get_static_injection() on SoulPlugin timed out after 5s` even though memcells and embeddings are present in Postgres; direct profiling shows `PostgresSoulRepository.recall_memories()` taking about 5.2 seconds on warm calls.
+**Location:** `core/soul/repository.py` (`PostgresSoulRepository.recall_memories`), SOUL Postgres tables `mem_cells` / `mem_cell_vectors`.
+**Status:** fixed.
+**Notes:** The lexical fallback query used unindexed `atomic_facts::text` trigram checks plus a composite `to_tsvector(episodic_trace || atomic_facts::text)` expression, forcing a sequential scan over `mem_cells`. Candidate selection now stays on indexed `episodic_trace` trigram/tsvector expressions and computes richer episodic-trace-plus-atomic-facts lexical overlap in Python after fetch. Live probe on `2026-04-19` dropped warm repo recall from about `5.2s` to about `3.3s` end-to-end static injection. When verifying SOUL state, query the separate `SOUL_POSTGRES_DSN` store directly; the `synth-db` MCP points at the legacy `synth` schema and cannot see `mem_cells`.
+
+---
+
+### SOUL recall could inject diary-merge housekeeping into live prompts  <!-- 2026-04-19 -->
+**Symptom:** User-facing prompt context could include `soul_recalled_memories` entries such as `[DIARY CONSOLIDATION - INTERNAL SYSTEM TASK] ...` or `Performed update_diary_entry action`, leaking maintenance-only traces into normal chat turns.
+**Location:** `plugins/soul_plugin.py` (`SoulPlugin._recall_memories`).
+**Status:** fixed.
+**Notes:** SOUL memcells do not carry an explicit internal-task flag, so the live prompt path now filters diary-merge and nightly housekeeping traces before formatting recalled memories. This keeps normal same-chat recall intact while excluding consolidation-only prompt noise.
+
+---
+
 ## 13. Database Quick Reference
 
 > Tables are created inline in `core/db.py` and each plugin — **`init-db.sql` only seeds a subset.** If you need a table's full column list, `grep -A20 "CREATE TABLE IF NOT EXISTS <name>"` in the relevant file.
@@ -614,7 +694,7 @@ All keys stored in the `config` table and accessible via `config_registry.get_va
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **synthetic_heart** (8673 symbols, 28213 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **synthetic_heart** (8874 symbols, 28708 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
 

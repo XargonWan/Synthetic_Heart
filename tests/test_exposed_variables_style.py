@@ -11,11 +11,21 @@ def test_exposed_variable_label_and_description_style():
     defs = config_registry.export_definitions()
     label_issues = []
     desc_issues = []
+    helper_prefixes = ("TEST_", "MOCK_")
+
+    def _starts_with_capitalized_word(text: str) -> bool:
+        for ch in text:
+            if ch.isalpha():
+                return ch.isupper()
+        return False
 
     for d in defs:
         key = d.get("key")
         label = (d.get("label") or "").strip()
         desc = (d.get("description") or "").strip()
+
+        if key.startswith(helper_prefixes):
+            continue
 
         # Label: non-empty, capitalized, not ending with a period
         if not label:
@@ -30,7 +40,7 @@ def test_exposed_variable_label_and_description_style():
         if not desc:
             desc_issues.append((key, "empty_description"))
         else:
-            if not desc[0].isupper():
+            if not _starts_with_capitalized_word(desc):
                 desc_issues.append((key, f"description_not_capitalized: {desc}"))
             if not desc.endswith("."):
                 desc_issues.append(

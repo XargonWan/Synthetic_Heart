@@ -501,7 +501,7 @@ def _resolve_api_key() -> str:
         pass
     import os
 
-    return os.environ.get("GEMINI_API_KEY", os.environ.get("GOOGLE_API_KEY", ""))
+    return os.environ.get("GOOGLE_API_KEY", "")
 
 
 # ---------------------------------------------------------------------------

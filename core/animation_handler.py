@@ -153,6 +153,14 @@ class KaradaStateServer:
         """
         self.webui = webui
         log_debug("[KaradaStateServer] WebUI reference set")
+        try:
+            connections = getattr(webui, "connections", None)
+            if isinstance(connections, dict):
+                from core.karada_ws_transport import WebSocketTransport
+
+                self.add_transport(WebSocketTransport(connections))
+        except Exception:
+            pass
         # Register a lightweight summary callback so the WebUI can broadcast
         # the canonical animation state to all connected clients whenever it
         # changes. This is different from the full 'animation' command (which
@@ -186,20 +194,35 @@ class KaradaStateServer:
     # Transport management
     # ------------------------------------------------------------------
 
+    def _is_same_transport_target(
+        self, existing: KaradaTransport, candidate: KaradaTransport
+    ) -> bool:
+        if existing is candidate:
+            return True
+
+        existing_connections = getattr(existing, "_connections", None)
+        candidate_connections = getattr(candidate, "_connections", None)
+        return (
+            type(existing) is type(candidate)
+            and existing_connections is not None
+            and existing_connections is candidate_connections
+        )
+
     def add_transport(self, transport: KaradaTransport) -> None:
         """Register a transport for delivering payloads to clients.
 
         Args:
             transport: A concrete :class:`KaradaTransport` implementation.
         """
-        if transport not in self._transports:
-            self._transports.append(transport)
-            log_debug(
-                f"[KaradaStateServer] Transport added: {type(transport).__name__}"
-            )
-            # Start the watchdog when the first transport arrives
-            if len(self._transports) == 1:
-                self.start_watchdog()
+        for existing in self._transports:
+            if self._is_same_transport_target(existing, transport):
+                return
+
+        self._transports.append(transport)
+        log_debug(f"[KaradaStateServer] Transport added: {type(transport).__name__}")
+        # Start the watchdog when the first transport arrives
+        if len(self._transports) == 1:
+            self.start_watchdog()
 
     def remove_transport(self, transport: KaradaTransport) -> None:
         """Un-register a previously added transport."""

@@ -38,6 +38,6 @@ def test_debug_minimize_tool_present_in_index_template():
     q = Path(__file__).parent.parent / "res" / "synth_webui" / "js" / "debug-window.mjs"
     assert q.exists(), f"File not found: {q}"
     qtxt = q.read_text(encoding="utf-8")
-    assert "title: 'Minimize'" in qtxt or 'title: "Minimize"' in qtxt, (
+    assert "Minimize" in qtxt and "minimize('debug')" in qtxt, (
         "Minimize tool not present in debug-window.mjs header tools"
     )

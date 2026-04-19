@@ -67,7 +67,7 @@ async def test_message_chain_triggers_corrector_for_unregistered_action(monkeypa
     msg.from_cortex = True
 
     # Call the message chain as if the source was LLM
-    result = await message_chain.handle_incoming_message(
+    await message_chain.handle_incoming_message(
         bot=None,
         message=msg,
         text='{"actions":[{"type":"message","payload":{"text":"hello","interface_path":"telegram_bot/123"}}]}',
@@ -131,7 +131,7 @@ async def test_message_chain_triggers_corrector_for_unregistered_top_level_key(
         chat_id=123, interface_path="telegram_bot/123", from_cortex=True
     )
 
-    result = await message_chain.handle_incoming_message(
+    await message_chain.handle_incoming_message(
         bot=None,
         message=msg,
         text='{"actions": [{"type": "create_personal_diary_entry", "payload": {"interaction_summary": "x"}}], "message": "ciao"}',
@@ -236,6 +236,70 @@ async def test_normalize_message_unknown_obeys_supported_actions(monkeypatch):
     actions2 = [{"type": "message_unknown", "payload": {"text": "hi"}}]
     normalized2 = message_chain._normalize_message_unknown(actions2, "telegram_bot/123")
     assert normalized2[0]["type"] == "message_unknown"
+
+
+@pytest.mark.asyncio
+async def test_send_message_body_alias_is_normalized_before_validation(monkeypatch):
+    captured = {"actions": None, "corrector_calls": 0}
+
+    async def fake_corrector(
+        text, bot=None, context=None, chat_id=None, thread_id=None
+    ):
+        captured["corrector_calls"] += 1
+        return None
+
+    def fake_extract_json(text, return_metadata=False):
+        return (
+            {
+                "actions": [
+                    {
+                        "type": "send_message",
+                        "payload": {
+                            "body": "ping pong",
+                            "interface_path": "telegram_bot/123",
+                        },
+                    }
+                ]
+            },
+            {},
+        )
+
+    async def fake_run_actions(actions, ctx, bot, message):
+        captured["actions"] = actions
+        return {"processed": actions, "failed_actions": [], "errors": []}
+
+    monkeypatch.setattr(
+        action_parser,
+        "get_supported_action_types",
+        lambda: {"message_telegram_bot"},
+    )
+    monkeypatch.setattr(
+        "core.transport_layer.run_corrector_middleware",
+        fake_corrector,
+    )
+    monkeypatch.setattr(
+        "core.transport_layer.extract_json_from_text",
+        fake_extract_json,
+    )
+    monkeypatch.setattr("core.action_parser.run_actions", fake_run_actions)
+
+    msg = SimpleNamespace(
+        chat_id=123, interface_path="telegram_bot/123", from_cortex=True
+    )
+
+    result = await message_chain.handle_incoming_message(
+        bot=None,
+        message=msg,
+        text='{"actions":[{"type":"send_message","payload":{"body":"ping pong","interface_path":"telegram_bot/123"}}]}',
+        source="llm",
+        context={},
+    )
+
+    assert result == message_chain.ACTIONS_EXECUTED
+    assert captured["corrector_calls"] == 0
+    assert captured["actions"] is not None
+    assert captured["actions"][0]["type"] == "message_telegram_bot"
+    assert captured["actions"][0]["payload"]["text"] == "ping pong"
 
 
 @pytest.mark.asyncio

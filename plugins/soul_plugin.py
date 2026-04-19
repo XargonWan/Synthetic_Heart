@@ -17,8 +17,9 @@ from core.soul.compiler import (
     RuleBasedSummaryBuilder,
     SoulCompiler,
 )
+from core.soul.fastembed_embedder import FastEmbedder
 from core.soul.emotion_engine import EmotionalEngine
-from core.soul.models import EmotionalEvent, EmotionalState, MemCellRecall
+from core.soul.models import EmotionalEvent, EmotionalState, MemCell, MemCellRecall
 from core.soul.repository import (
     InMemorySoulRepository,
     PostgresSoulRepository,
@@ -93,6 +94,7 @@ class _SessionState:
 
 _SOUL_RECALL_LIMIT = 5
 _SOUL_RECALL_CANDIDATE_LIMIT = 24
+_SOUL_CONSOLIDATE_COOLDOWN_SECONDS = 900
 
 
 class SoulPlugin(PluginBase):
@@ -103,6 +105,8 @@ class SoulPlugin(PluginBase):
     """
 
     display_name = "SOUL Plugin"
+    allow_static_injection_stale_fallback = True
+    static_injection_cache_ttl_seconds = 300.0
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         super().__init__(config)
@@ -114,12 +118,36 @@ class SoulPlugin(PluginBase):
             dsp_extractor=RuleBasedDspExtractor(),
             dsp_builder=RuleBasedDspBuilder(),
             summary_builder=RuleBasedSummaryBuilder(),
-            embedder=NoopEmbedder(),
+            embedder=self._build_embedder(),
         )
         self._buffers: dict[str, list[str]] = {}
         self._sessions: dict[str, _SessionState] = {}
         self._scheduler_task: asyncio.Task[None] | None = None
         self._last_rollup_date: date | None = None
+        self._last_consolidated_at: datetime | None = None
+
+    def _build_embedder(self) -> Any:
+        from importlib.util import find_spec
+        from core.config_manager import config_registry
+
+        backend = str(
+            config_registry.get_value(
+                "SOUL_REPOSITORY_BACKEND", "memory", value_type=str
+            )
+            or "memory"
+        )
+        if backend == "postgres":
+            model_id = "BAAI/bge-base-en-v1.5"
+            try:
+                if find_spec("fastembed") is None:
+                    raise ModuleNotFoundError("fastembed")
+                log_info(f"[soul_plugin] Using FastEmbedder model={model_id}")
+                return FastEmbedder(model_id=model_id)
+            except Exception as exc:
+                log_warning(
+                    f"[soul_plugin] FastEmbedder unavailable ({exc}), falling back to NoopEmbedder"
+                )
+        return NoopEmbedder()
 
     async def start(self) -> None:
         if not self._is_enabled():
@@ -301,7 +329,12 @@ class SoulPlugin(PluginBase):
             await self._run_rollup_now()
             self._last_rollup_date = today
 
-    async def _compile_interface(self, interface_path: str) -> int:
+    async def _compile_interface(
+        self,
+        interface_path: str,
+        *,
+        force_consolidate: bool = False,
+    ) -> int:
         lines = self._buffers.get(interface_path, [])
         if not lines:
             return 0
@@ -314,20 +347,42 @@ class SoulPlugin(PluginBase):
             transcript=transcript,
             session_id=safe_session_id,
         )
-        await self._compiler.async_consolidate()
+        consolidated = await self._maybe_consolidate(force=force_consolidate)
 
         self._buffers[interface_path] = []
-        log_info(f"[soul_plugin] Compiled {len(created)} memcells for {interface_path}")
+        log_info(
+            f"[soul_plugin] Compiled {len(created)} memcells for {interface_path} "
+            f"(consolidated {consolidated} scene(s))"
+        )
         return len(created)
+
+    async def _maybe_consolidate(self, *, force: bool = False) -> int:
+        now = datetime.now(timezone.utc)
+
+        if not force and self._last_consolidated_at is not None:
+            elapsed = (now - self._last_consolidated_at).total_seconds()
+            if elapsed < _SOUL_CONSOLIDATE_COOLDOWN_SECONDS:
+                log_debug(
+                    "[soul_plugin] Skipping async_consolidate: cooldown active "
+                    f"({elapsed:.0f}s < {_SOUL_CONSOLIDATE_COOLDOWN_SECONDS}s)"
+                )
+                return 0
+
+        scene_ids = await self._compiler.async_consolidate()
+        self._last_consolidated_at = now
+        return len(scene_ids)
 
     async def _force_compile(self, interface_path: str | None = None) -> dict[str, int]:
         if interface_path:
-            count = await self._compile_interface(interface_path)
+            count = await self._compile_interface(
+                interface_path,
+                force_consolidate=True,
+            )
             return {"compiled_memcells": count}
 
         total = 0
         for key in list(self._buffers.keys()):
-            total += await self._compile_interface(key)
+            total += await self._compile_interface(key, force_consolidate=True)
         return {"compiled_memcells": total}
 
     async def _run_rollup_now(self) -> dict[str, int]:
@@ -415,6 +470,8 @@ class SoulPlugin(PluginBase):
             cell = match.cell
             if cell.id in seen_ids:
                 continue
+            if self._should_exclude_recalled_memory(cell):
+                continue
             memory_emotion = self._normalize_memory_emotion(
                 cell.emotional_tag.dominant_emotion
             )
@@ -446,6 +503,19 @@ class SoulPlugin(PluginBase):
             self._format_recalled_memory(match, active_session_id=safe_session_id)
             for match in selected
         ]
+
+    @staticmethod
+    def _should_exclude_recalled_memory(cell: MemCell) -> bool:
+        session_id = str(cell.session_id or "").strip().lower()
+        trace = " ".join(str(cell.episodic_trace or "").split()).lower()
+
+        if session_id == "nightly" or session_id.startswith("diary_merge:"):
+            return True
+
+        return (
+            "[diary consolidation" in trace
+            or "performed update_diary_entry action" in trace
+        )
 
     def _format_recalled_memory(
         self,

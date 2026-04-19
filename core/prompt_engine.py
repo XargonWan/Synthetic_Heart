@@ -54,7 +54,7 @@ CHAT_HISTORY_LIMIT = config_registry.get_var(
     label="Chat History Length",
     description="Number of recent messages to include in chat history context.",
     group="core",
-    component="prompt_engine",
+    component="conversation",
     value_type=int,
 )
 
@@ -76,8 +76,18 @@ DIARY_HISTORY_DAYS = config_registry.get_var(
     label="Diary History Days",
     description="Number of days of AI diary history to include in context.",
     group="core",
-    component="prompt_engine",
+    component="diary",
     value_type=int,
+)
+
+INCLUDE_LOCAL_TIME_IN_PROMPTS = config_registry.get_var(
+    "INCLUDE_LOCAL_TIME_IN_PROMPTS",
+    True,
+    label="Include local time in prompts",
+    description="Whether to add authoritative local date, time, hour, and time-of-day fields to prompt payloads.",
+    group="core",
+    component="prompt_engine",
+    value_type=bool,
 )
 
 
@@ -198,6 +208,10 @@ def _build_context_summary(
         _time_lines.append(f"Location: {_loc_val}")
     if _time_lines:
         parts.append("[Current time & context]\n" + "\n".join(_time_lines))
+
+    persona_preferences = str(context_section.get("persona_preferences") or "").strip()
+    if persona_preferences:
+        parts.append("[Persona background]\n" + persona_preferences)
 
     # Grillo internal beats skip cross-chat history and participants
     if not is_grillo_internal:
@@ -416,6 +430,7 @@ def _assemble_prompt_request(  # noqa: PLR0913
     # Override with local date+time from time_plugin injections (authoritative local time).
     _ctx_date = str(context_section.get("date") or "").strip()
     _ctx_time = str(context_section.get("time") or "").strip()
+    _ctx_time_of_day = str(context_section.get("time_of_day") or "").strip()
     if _ctx_date or _ctx_time:
         msg_timestamp = " ".join(p for p in [_ctx_date, _ctx_time] if p)
 
@@ -441,6 +456,7 @@ def _assemble_prompt_request(  # noqa: PLR0913
         username=username,
         usertag=usertag,
         timestamp=msg_timestamp,
+        time_of_day=_ctx_time_of_day or None,
         input_source="voice" if is_voice_input else "text",
         emotions=emotions_nl,
         scope=scope,
@@ -780,6 +796,32 @@ async def build_prompt_request(
             f"[json_prompt] Retrieved interface_path from context dict: {interface_path}"
         )
 
+    local_time_fields: dict[str, Any] = {}
+    try:
+        include_local_time = bool(
+            config_registry.get_value(
+                "INCLUDE_LOCAL_TIME_IN_PROMPTS", True, value_type=bool
+            )
+        )
+    except Exception:
+        include_local_time = True
+
+    if include_local_time:
+        try:
+            from core.time_zone_utils import get_local_time_fields
+
+            local_time_fields = await get_local_time_fields(
+                getattr(message, "date", None), interface_path=interface_path
+            )
+        except Exception as e:
+            log_debug(f"[json_prompt] Failed to compute local time fields: {e}")
+            local_time_fields = {}
+
+    if local_time_fields:
+        context_section.setdefault("date", local_time_fields.get("local_date"))
+        context_section.setdefault("time", local_time_fields.get("local_time"))
+        context_section.setdefault("time_of_day", local_time_fields.get("time_of_day"))
+
     # Determine message input source for the LLM ("voice" | "text").
     # Only mark as voice for the *current* message; never stored in chat_history,
     # so the model cannot mistakenly infer that past messages were also voice.
@@ -815,6 +857,8 @@ async def build_prompt_request(
             else "local"
         ),
     }
+    if local_time_fields:
+        input_payload.update(local_time_fields)
     # debug: log full prompt payload for reconstruction
     try:
         full_text = json_dumps(input_payload)
@@ -1442,6 +1486,7 @@ def load_json_instructions() -> str:
         "NEVER use 'target' — always use 'interface_path' in message actions.\n"
         "Include reply_message_id when replying to specific messages. Use thread_id from input.payload.source.thread_id when present (omit if missing).\n"
         "CLARIFICATION POLICY: If the user's intent, referent, or the subject of a follow-up is ambiguous or missing, DO NOT GUESS — ask one concise clarifying question before asserting facts or taking action. When the user asks whether you 'understood' but there is no clear context, request clarification rather than assuming.\n"
+        "REFERENCE CLARITY: When the user refers indirectly to a person, message, post, image, clip, or quoted content, refer to its author or speaker in a clear generic way and avoid vague or impersonal wording that obscures who created or said it.\n"
         "TIME AUTHORITY: Treat context.date, context.time, input.payload.local_date, input.payload.local_time, input.payload.local_hour, and input.payload.time_of_day as the authoritative current time context whenever present. Never infer the current time, date, or part of day from prior chat history, memories, or older assistant messages.\n"
         "IDENTITY INTEGRITY: Stay inside the active persona in first person. Do not describe yourself from the outside, do not refer to the active persona as a separate fictional character, and do not compare yourself to that persona as if they were someone else.\n"
         "PRONOUN CONSISTENCY: When the prompt, persona, or participant context establishes a person's pronouns or relationship role, use them consistently and do not flip them. Do not neutralize an established he/him or she/her person into singular they/them.\n"
@@ -1474,6 +1519,7 @@ RESPONSE SHAPE RULES:
 - Let the persona, relationship context, and the user's tone determine how much to say.
 - Keep simple factual or logistical turns compact, but allow emotionally meaningful or intimate turns to breathe when that feels natural.
 - If the user's request or referent is ambiguous, ask one short clarifying question before responding (do NOT guess the meaning).
+- When the user refers indirectly to a person, message, post, image, clip, or quoted content, refer to its author or speaker in a clear generic way and avoid vague or impersonal wording.
 - Treat current time fields in the prompt as authoritative. Never infer the present time, date, or part of day from older chat history, memories, or prior assistant messages.
 - Stay in the active persona in first person. Do not talk about yourself from the outside or as if the persona were a separate character.
 - Keep pronouns consistent with the persona and participant context. Do not flip an established he/him, she/her, or they/them reference, and do not replace an established he/him or she/her person with singular they/them.
@@ -1516,6 +1562,7 @@ async def build_delivery_request(
 
     # ── Gather persona for system instruction ────────────────────────────────
     persona: str = ""
+    persona_preferences: str = ""
     try:
         from core.action_parser import gather_static_injections
         from types import SimpleNamespace
@@ -1532,6 +1579,7 @@ async def build_delivery_request(
         _injections = await gather_static_injections(_mock_msg, {})
         if isinstance(_injections, dict):
             persona = str(_injections.get("persona") or "")
+            persona_preferences = str(_injections.get("persona_preferences") or "")
     except Exception as _pe:
         log_debug(f"[build_delivery_request] persona gather skipped: {_pe}")
 
@@ -1578,7 +1626,11 @@ async def build_delivery_request(
     return PromptRequest(
         system_instruction=system_instruction,
         tool_declarations=tool_declarations,
-        context_summary="",
+        context_summary=(
+            f"[Persona background]\n{persona_preferences}"
+            if persona_preferences
+            else ""
+        ),
         conversation_history=[],
         current_text=current_text,
         runtime_ctx=RuntimeContext(
@@ -1954,6 +2006,10 @@ async def build_live_prompt_request(
     persona = injections.pop("persona", "")
     if persona and isinstance(persona, str):
         parts.append(persona)
+
+    persona_preferences = injections.pop("persona_preferences", "")
+    if persona_preferences and isinstance(persona_preferences, str):
+        parts.append("Background preferences and interests:\n" + persona_preferences)
 
     # --- Safety / gasmask ---
     gasmask = injections.pop("gasmask_protection", "")

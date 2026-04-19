@@ -22,21 +22,22 @@ from core.prompt_request import PromptRequest, RuntimeContext, Turn
 def _make_manifest(
     name: str = "send_message",
     description: str = "Send a text reply",
-    params: list[dict] | None = None,
+    params: list[MagicMock] | None = None,
 ) -> MagicMock:
     """Return a duck-typed ToolManifest mock."""
     m = MagicMock()
     m.name = name
     m.description = description
-    params = params or [
-        MagicMock(
-            name="text",
-            type="string",
-            description="The reply text",
-            required=True,
-            enum=None,
-        )
-    ]
+    if params is None:
+        params = [
+            MagicMock(
+                name="text",
+                type="string",
+                description="The reply text",
+                required=True,
+                enum=None,
+            )
+        ]
     # Patch .name attribute on each param mock
     for i, p in enumerate(params):
         if not isinstance(p, MagicMock):
@@ -166,6 +167,26 @@ class TestOpenAIRenderer:
         types = [p.get("type") for p in last["content"]]
         assert "image_url" in types
         assert "text" in types
+
+    def test_multimodal_image_only_turn_adds_grounding_text(self) -> None:
+        req = _basic_request()
+        req.current_text = ""
+        renderer = OpenAIRenderer(req)
+        image_part = {
+            "type": "image_url",
+            "image_url": {"url": "data:image/png;base64,abc"},
+        }
+
+        messages = renderer.render_with_multimodal([image_part])
+
+        last = messages[-1]
+        text_part = next(part for part in last["content"] if part.get("type") == "text")
+        assert "attached 1 image" in text_part["text"]
+        assert "no accompanying text" in text_part["text"]
+        assert (
+            "Do not infer hidden, obscured, or non-visible features"
+            in text_part["text"]
+        )
 
     def test_parse_tool_call_response_returns_action_json(self) -> None:
         data = {

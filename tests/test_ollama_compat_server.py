@@ -20,16 +20,23 @@ async def test_streaming_deltas_and_processing_chunk(monkeypatch):
     monkeypatch.setattr("core.session_meta.set_session_meta", fake_set_session_meta)
 
     # Simulate plugin_instance producing a delayed string response
-    async def fake_handle_incoming_message(
-        interface, message_obj, context_memory, iface_id
+    async def fake_enqueue_and_wait(
+        *,
+        bot,
+        message,
+        context_memory=None,
+        history_scope=None,
+        priority=None,
+        interface_id=None,
+        skip_mention_check=None,
+        original_message=None,
+        timeout=None,
     ):
         # small delay to emulate generation
         await asyncio.sleep(0.01)
         return "hello from synth"
 
-    monkeypatch.setattr(
-        "core.plugin_instance.handle_incoming_message", fake_handle_incoming_message
-    )
+    monkeypatch.setattr("core.message_queue.enqueue_and_wait", fake_enqueue_and_wait)
 
     payload = {"messages": [{"role": "user", "content": "ciao"}], "stream": True}
 
@@ -68,14 +75,21 @@ async def test_streaming_deltas_and_processing_chunk(monkeypatch):
 async def test_nonstream_completion_includes_text(monkeypatch):
     server = OllamaCompatServer()
 
-    async def fake_handle_incoming_message(
-        interface, message_obj, context_memory, iface_id
+    async def fake_enqueue_and_wait(
+        *,
+        bot,
+        message,
+        context_memory=None,
+        history_scope=None,
+        priority=None,
+        interface_id=None,
+        skip_mention_check=None,
+        original_message=None,
+        timeout=None,
     ):
         return "hello from synth"
 
-    monkeypatch.setattr(
-        "core.plugin_instance.handle_incoming_message", fake_handle_incoming_message
-    )
+    monkeypatch.setattr("core.message_queue.enqueue_and_wait", fake_enqueue_and_wait)
 
     payload = {"messages": [{"role": "user", "content": "ciao"}], "stream": False}
     resp = await server._handle_chat_payload(payload)

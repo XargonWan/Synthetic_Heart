@@ -17,7 +17,7 @@ def test_disabled_plugin_actions_not_registered():
             self.enabled = False
 
         def get_supported_actions(self):
-            return {"tts_speak": {"description": "fake tts"}}
+            return {"fake_tts_speak": {"description": "fake tts"}}
 
     try:
         PLUGIN_REGISTRY["fake_tts"] = FakePlugin()
@@ -26,7 +26,7 @@ def test_disabled_plugin_actions_not_registered():
         asyncio.run(core_initializer._build_actions_block())
 
         available = core_initializer.actions_block.get("available_actions", {})
-        assert "tts_speak" not in available
+        assert "fake_tts_speak" not in available
 
     finally:
         # Restore registry

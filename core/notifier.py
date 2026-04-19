@@ -429,7 +429,9 @@ def flush_pending_for_interface(interface_name: str) -> None:
 
         async def send():
             try:
-                await iface.send_message({"text": msg, "target": trainer_id})
+                await iface.send_message(
+                    {"text": msg, "target": trainer_id, "skip_history": True}
+                )
             except Exception as e:  # pragma: no cover - best effort
                 log_warning(
                     f"[notifier] Failed to flush pending notify via {interface_name}: {repr(e)}",

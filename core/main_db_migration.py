@@ -68,25 +68,105 @@ class TableMigrationResult:
 
 
 def build_default_migration_config() -> MainDbMigrationConfig:
+    try:
+        from core.config_manager import config_registry
+
+        db_host = str(
+            config_registry.get_value(
+                "DB_HOST",
+                "localhost",
+                label="Database Host",
+                description="Hostname or IP address for the database server.",
+                value_type=str,
+                group="core",
+                component="core",
+            )
+            or "localhost"
+        )
+        db_port = int(
+            config_registry.get_value(
+                "DB_PORT",
+                3306,
+                label="Database Port",
+                description="Port used to connect to the database server.",
+                value_type=int,
+                group="core",
+                component="core",
+            )
+            or 3306
+        )
+        db_user = str(
+            config_registry.get_value(
+                "DB_USER",
+                "synth",
+                label="Database User",
+                description="Username for database connection.",
+                value_type=str,
+                group="core",
+                component="core",
+            )
+            or "synth"
+        )
+        db_pass = str(
+            config_registry.get_value(
+                "DB_PASS",
+                "synth",
+                label="Database Password",
+                description="Password for database connection.",
+                value_type=str,
+                group="core",
+                component="core",
+            )
+            or "synth"
+        )
+        db_name = str(
+            config_registry.get_value(
+                "DB_NAME",
+                "synth",
+                label="Database Name",
+                description="Name of the database/schema to use.",
+                value_type=str,
+                group="core",
+                component="core",
+            )
+            or "synth"
+        )
+        soul_postgres_dsn = (
+            config_registry.get_value(
+                "SOUL_POSTGRES_DSN",
+                "",
+                label="SOUL Postgres DSN",
+                description="PostgreSQL DSN used when the SOUL repository backend is postgres.",
+                value_type=str,
+                group="plugins",
+                component="soul_plugin",
+            )
+            or ""
+        )
+    except Exception:
+        db_host = "localhost"
+        db_port = 3306
+        db_user = "synth"
+        db_pass = "synth"
+        db_name = "synth"
+        soul_postgres_dsn = ""
+
     target_dsn = (
         os.getenv("TARGET_POSTGRES_DSN")
         or os.getenv("DATABASE_URL")
         or os.getenv("APP_POSTGRES_DSN")
-        or os.getenv("SOUL_POSTGRES_DSN")
+        or soul_postgres_dsn
         or ""
     )
     return MainDbMigrationConfig(
-        source_host=os.getenv("SOURCE_DB_HOST", os.getenv("DB_HOST", "localhost")),
-        source_port=int(os.getenv("SOURCE_DB_PORT", os.getenv("DB_PORT", "3306"))),
-        source_user=os.getenv("SOURCE_DB_USER", os.getenv("DB_USER", "synth")),
+        source_host=os.getenv("SOURCE_DB_HOST", db_host),
+        source_port=int(os.getenv("SOURCE_DB_PORT", str(db_port))),
+        source_user=os.getenv("SOURCE_DB_USER", db_user),
         source_password=os.getenv(
             "SOURCE_DB_PASSWORD",
-            os.getenv(
-                "SOURCE_DB_PASS",
-                os.getenv("DB_PASSWORD", os.getenv("DB_PASS", "synth")),
-            ),
+            os.getenv("SOURCE_DB_PASS", os.getenv("DB_PASSWORD", db_pass)),
         ),
-        source_database=os.getenv("SOURCE_DB_NAME", os.getenv("DB_NAME", "synth")),
+        source_database=os.getenv("SOURCE_DB_NAME", db_name),
         target_dsn=target_dsn,
     )
 

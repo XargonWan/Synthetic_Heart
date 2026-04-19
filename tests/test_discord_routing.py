@@ -15,10 +15,9 @@ def test_send_message_extracts_channel_from_interface_path(monkeypatch):
         captured["kwargs"] = kwargs
         return None
 
-    # Patch the transport layer to intercept the call
-    import core.transport_layer as tl
-
-    monkeypatch.setattr(tl, "universal_send", fake_universal_send)
+    monkeypatch.setattr(
+        "interface.discord_interface.universal_send", fake_universal_send
+    )
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)

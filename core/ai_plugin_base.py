@@ -15,6 +15,8 @@ class AIPluginBase:
     Each plugin (OpenAI, Claude, Manual, etc.) may implement the desired methods.
     """
 
+    supports_prompt_request = False
+
     async def handle_incoming_message(self, bot, message, prompt):
         """Process a message using a pre-built prompt."""
         raise NotImplementedError("handle_incoming_message not implemented")

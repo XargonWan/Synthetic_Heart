@@ -1,5 +1,9 @@
 -- SOUL memory foundation schema (PostgreSQL + pgvector)
 -- v1: phase-1 baseline from SOUL-REWRITE-TASK.md
+--
+-- EMBEDDING_DIM placeholder: the setup wizard substitutes {EMBEDDING_DIM} with
+-- the dimension of the chosen embedder model (e.g. 768, 384, 3072) before
+-- applying this file.  Do not hard-code a dimension here.
 
 CREATE EXTENSION IF NOT EXISTS vector;
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
@@ -22,7 +26,7 @@ CREATE TABLE IF NOT EXISTS mem_cells (
 
 CREATE TABLE IF NOT EXISTS mem_cell_vectors (
     mem_cell_id TEXT PRIMARY KEY REFERENCES mem_cells(id) ON DELETE CASCADE,
-    embedding VECTOR(768) NOT NULL
+    embedding VECTOR({EMBEDDING_DIM}) NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_mem_cells_timestamp ON mem_cells (timestamp DESC);

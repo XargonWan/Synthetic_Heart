@@ -465,3 +465,94 @@ async def test_set_probe_result_uses_datetime_objects_for_probe_timestamps(
     assert params[4].tzinfo == timezone.utc
     assert params[5] == 5
     assert captured["committed"] is True
+
+
+@pytest.mark.asyncio
+async def test_auto_set_default_model_uses_datetime_objects(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeCursor:
+        async def execute(self, query, params=None):
+            captured["query"] = query
+            captured["params"] = params
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class FakeConn:
+        def cursor(self, *args, **kwargs):
+            return FakeCursor()
+
+        async def commit(self):
+            captured["committed"] = True
+
+    class FakeConnCtx:
+        async def __aenter__(self):
+            return FakeConn()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    registry = ExternalEndpointRegistry()
+
+    monkeypatch.setattr("core.db.get_conn_ctx", lambda: FakeConnCtx())
+
+    await registry._auto_set_default_model(5, "gemini-3-flash-preview")
+
+    params = captured["params"]
+    assert isinstance(params, tuple)
+    assert params[0] == "gemini-3-flash-preview"
+    assert isinstance(params[1], datetime)
+    assert params[1].tzinfo == timezone.utc
+    assert params[2] == 5
+    assert captured["committed"] is True
+
+
+@pytest.mark.asyncio
+async def test_set_default_model_uses_datetime_objects(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeCursor:
+        async def execute(self, query, params=None):
+            captured["query"] = query
+            captured["params"] = params
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class FakeConn:
+        def cursor(self, *args, **kwargs):
+            return FakeCursor()
+
+        async def commit(self):
+            captured["committed"] = True
+
+    class FakeConnCtx:
+        async def __aenter__(self):
+            return FakeConn()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    registry = ExternalEndpointRegistry()
+
+    monkeypatch.setattr(
+        "core.external_endpoints.registry._ensure_table", AsyncMock(return_value=None)
+    )
+    monkeypatch.setattr("core.db.get_conn_ctx", lambda: FakeConnCtx())
+
+    await registry.set_default_model(5, "gemini-3-flash-preview")
+
+    params = captured["params"]
+    assert isinstance(params, tuple)
+    assert params[0] == "gemini-3-flash-preview"
+    assert isinstance(params[1], datetime)
+    assert params[1].tzinfo == timezone.utc
+    assert params[2] == 5
+    assert captured["committed"] is True

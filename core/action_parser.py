@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Tuple
 from core.logging_utils import log_debug, log_info, log_warning, log_error
 from core.validation_registry import get_validation_registry
 from core.config_manager import config_registry
+from core.action_safety import register_action_safety_config
 from core.image_processor import RESTRICT_ACTIONS
 import json
 from core.transport_layer import run_corrector_middleware
@@ -17,8 +18,10 @@ from core.core_initializer import INTERFACE_REGISTRY
 # Global dictionary to track retry attempts per chat/message thread for the corrector
 # Use a ConfigVar so consumers always see the latest value (set via WebUI/API)
 CORRECTOR_RETRIES = config_registry.get_var("CORRECTOR_RETRIES", 2)
+register_action_safety_config()
 
 _retry_tracker = {}
+_STATIC_INJECTION_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 
 
 def _extract_json_local(text: str):
@@ -156,9 +159,9 @@ async def _grillo_recent_same_message(
         return False
     try:
         from core.db import execute_query
-        from datetime import datetime, timedelta
+        from datetime import datetime, timedelta, timezone
 
-        threshold = datetime.utcnow() - timedelta(seconds=window)
+        threshold = datetime.now(timezone.utc) - timedelta(seconds=window)
         rows = await execute_query(
             """
             SELECT COUNT(*)
@@ -328,7 +331,41 @@ def get_supported_action_types() -> set[str]:
     except Exception as e:  # pragma: no cover - defensive
         log_debug(f"[action_parser] Error loading interface actions: {e}")
 
+    # Action metadata published by the core initializer should count as known
+    # action types even when the corresponding handler is intentionally absent.
+    # This lets safety policy classify them before dispatch.
+    supported_types.update(_get_core_declared_action_types())
+
     return supported_types
+
+
+def _get_core_declared_action_types() -> set[str]:
+    """Return action types declared in core_initializer.actions_block."""
+
+    try:
+        from core.core_initializer import core_initializer
+
+        available_actions = (core_initializer.actions_block or {}).get(
+            "available_actions", {}
+        )
+        if isinstance(available_actions, dict):
+            return set(available_actions.keys())
+    except Exception as e:
+        log_debug(f"[action_parser] Error loading core action metadata: {e}")
+
+    return set()
+
+
+def _get_builtin_interface_message_action_types() -> set[str]:
+    """Return canonical built-in interface message action types."""
+
+    return {
+        "message_telegram_bot",
+        "message_discord_bot",
+        "message_synth_webui",
+        "message_matrix_chat",
+        "message_ollama_serve",
+    }
 
 
 def _normalize_payload(action_type: str, payload: dict) -> None:
@@ -543,7 +580,9 @@ def validate_action(
         return False, ["action must be a dict"]
 
     # Validate action type - with specific action names, interface is implicit
-    supported_types = get_supported_action_types()
+    supported_types = set(get_supported_action_types())
+    supported_types.update(_get_core_declared_action_types())
+    supported_types.update(_get_builtin_interface_message_action_types())
     action_type = action.get("type")
     if not action_type:
         errors.append("Missing 'type'")
@@ -1029,10 +1068,13 @@ async def _handle_plugin_action(
 
                             persona_json = None
                             pm = get_persona_manager()
-                            if pm and getattr(pm, "_current_persona", None):
+                            current_persona = (
+                                getattr(pm, "_current_persona", None) if pm else None
+                            )
+                            if pm and current_persona is not None:
                                 try:
                                     persona_json = pm._load_persona_json(
-                                        pm._current_persona.name
+                                        current_persona.name
                                     )
                                 except Exception:
                                     persona_json = None
@@ -2095,6 +2137,36 @@ async def gather_static_injections(message=None, context_memory=None):
             async def _run_injection(p=plugin):
                 name = p.__class__.__name__
                 start = time.time()
+                cache_key = f"{p.__class__.__module__}.{p.__class__.__qualname__}"
+                allow_stale_fallback = bool(
+                    getattr(p, "allow_static_injection_stale_fallback", False)
+                )
+                cache_ttl_seconds = float(
+                    getattr(p, "static_injection_cache_ttl_seconds", 0.0) or 0.0
+                )
+
+                def _stale_fallback(reason: str) -> dict[str, Any]:
+                    if not allow_stale_fallback:
+                        return {}
+
+                    cached_entry = _STATIC_INJECTION_CACHE.get(cache_key)
+                    if not cached_entry:
+                        return {}
+
+                    cached_at, cached_payload = cached_entry
+                    age_seconds = time.time() - cached_at
+                    if cache_ttl_seconds > 0 and age_seconds > cache_ttl_seconds:
+                        _STATIC_INJECTION_CACHE.pop(cache_key, None)
+                        log_warning(
+                            f"[action_parser] Stale static injection cache for {name} expired after {age_seconds:.1f}s"
+                        )
+                        return {}
+
+                    log_warning(
+                        f"[action_parser] Using cached static injection for {name} after {reason} ({age_seconds:.1f}s old)"
+                    )
+                    return dict(cached_payload)
+
                 try:
                     # Enforce a strict timeout per-plugin to prevent hangs
                     async def _inner():
@@ -2115,7 +2187,7 @@ async def gather_static_injections(message=None, context_memory=None):
                         log_error(
                             f"[action_parser] ⏰ get_static_injection() on {name} timed out after 5s"
                         )
-                        return {}
+                        return _stale_fallback("timeout")
 
                     duration = time.time() - start
                     if duration > 0.1:
@@ -2127,12 +2199,19 @@ async def gather_static_injections(message=None, context_memory=None):
                             f"[action_parser] ✅ get_static_injection() on {name} took {duration:.3f}s"
                         )
 
-                    return res if isinstance(res, dict) else {}
+                    if isinstance(res, dict):
+                        if allow_stale_fallback:
+                            _STATIC_INJECTION_CACHE[cache_key] = (
+                                time.time(),
+                                dict(res),
+                            )
+                        return res
+                    return {}
                 except Exception as e:
                     log_error(
                         f"[action_parser] Error in get_static_injection() on {name}: {e}"
                     )
-                    return {}
+                    return _stale_fallback("error")
 
             tasks.append(_run_injection())
             plugin_names.append(plugin.__class__.__name__)

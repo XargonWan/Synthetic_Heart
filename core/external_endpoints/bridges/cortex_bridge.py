@@ -157,6 +157,35 @@ class ExternalCortexEngine(AIPluginBase):
 
         return parts
 
+    def _supports_vision_for_mm_parts(self, mm_parts: list[dict[str, Any]]) -> bool:
+        """Decide whether image parts should be forwarded for this request."""
+        has_image_parts = any(part.get("type") == "image_url" for part in mm_parts)
+        if not has_image_parts:
+            return True
+
+        if bool((self._endpoint.capabilities or {}).get("vision")):
+            return True
+
+        try:
+            if bool(self._endpoint.effective_subsystem_map().get("vision")):
+                return True
+        except Exception:
+            pass
+
+        if self._endpoint.default_model:
+            log_debug(
+                f"[cortex_bridge:{self._endpoint.name}] forwarding image parts "
+                f"despite endpoint vision flag being false because default_model="
+                f"{self._endpoint.default_model!r} is set"
+            )
+            return True
+
+        log_warning(
+            f"[cortex_bridge:{self._endpoint.name}] dropping image parts because "
+            "the endpoint is not marked vision-capable and no explicit model is set"
+        )
+        return False
+
     # ------------------------------------------------------------------
     # Core LLM interface
     # ------------------------------------------------------------------
@@ -256,9 +285,7 @@ class ExternalCortexEngine(AIPluginBase):
                 renderer = OpenAIRenderer(prompt)
                 mm_parts = self._build_mm_parts_from_prompt_request(prompt)
                 if mm_parts:
-                    supports_vision = bool(
-                        (self._endpoint.capabilities or {}).get("vision")
-                    )
+                    supports_vision = self._supports_vision_for_mm_parts(mm_parts)
                     return renderer.render_with_multimodal(
                         mm_parts,
                         supports_vision=supports_vision,
@@ -283,9 +310,7 @@ class ExternalCortexEngine(AIPluginBase):
                     renderer = OpenAIRenderer(prompt_request)
                     mm_parts = self._build_mm_parts_from_prompt_request(prompt_request)
                     if mm_parts:
-                        supports_vision = bool(
-                            (self._endpoint.capabilities or {}).get("vision")
-                        )
+                        supports_vision = self._supports_vision_for_mm_parts(mm_parts)
                         return renderer.render_with_multimodal(
                             mm_parts,
                             supports_vision=supports_vision,

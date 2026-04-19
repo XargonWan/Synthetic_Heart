@@ -1,6 +1,8 @@
 # plugins/message_plugin.py
 """Message plugin for handling text message actions."""
 
+from difflib import SequenceMatcher
+
 from core.logging_utils import log_debug, log_info, log_warning, log_error
 from core.core_initializer import INTERFACE_REGISTRY
 from core.config_manager import config_registry
@@ -165,6 +167,11 @@ class MessagePlugin:
         is_outreach = (
             isinstance(context, dict) and context.get("beat_type") == "outreach"
         )
+        activity_log_id = None
+        if isinstance(context, dict):
+            activity_log_id = context.get("activity_log_id") or context.get(
+                "grillo_activity_log_id"
+            )
 
         if (
             not is_outreach
@@ -190,7 +197,7 @@ class MessagePlugin:
                 suppress_enabled = True
 
             try:
-                from core.chat_history_cache import get_last_message
+                from core.chat_history_cache import get_last_message, load_chat_history
 
                 target_interface_path = (
                     rebuilt_interface_path
@@ -241,7 +248,66 @@ class MessagePlugin:
                                 log_info(
                                     f"[message_plugin] Suppressing Grillo message to {target_interface_path} (last msg from synth)"
                                 )
+                                try:
+                                    from plugins.grillo.grillo_impl import GrilloPlugin
+
+                                    await GrilloPlugin.record_suppressed_event(
+                                        activity_log_id=activity_log_id,
+                                        reason="last msg from synth",
+                                    )
+                                except Exception as suppression_error:
+                                    log_debug(
+                                        f"[message_plugin] Failed to record Grillo suppression event: {suppression_error}"
+                                    )
                                 return
+
+                        similarity_threshold = float(
+                            config_registry.get_value(
+                                "GRILLO_DUP_SIMILARITY_THRESHOLD",
+                                0.85,
+                                label="Grillo Duplicate Similarity Threshold",
+                                description=(
+                                    "Similarity threshold above which Grillo suppresses outbound messages that are too close to recent public-chat text."
+                                ),
+                                value_type=float,
+                                group="grillo",
+                                component="grillo",
+                            )
+                        )
+                        candidate_text = str(text or "").strip().lower()
+                        if candidate_text:
+                            recent_history = await load_chat_history(
+                                target_interface_path
+                            )
+                            for entry in recent_history or []:
+                                previous_text = (
+                                    str(entry.get("text") or "").strip().lower()
+                                )
+                                if not previous_text:
+                                    continue
+                                similarity = SequenceMatcher(
+                                    None, candidate_text, previous_text
+                                ).ratio()
+                                if similarity >= similarity_threshold:
+                                    log_info(
+                                        f"[message_plugin] Suppressing Grillo message to {target_interface_path} (similarity={similarity:.2f})"
+                                    )
+                                    try:
+                                        from plugins.grillo.grillo_impl import (
+                                            GrilloPlugin,
+                                        )
+
+                                        await GrilloPlugin.record_suppressed_event(
+                                            activity_log_id=activity_log_id,
+                                            reason=(
+                                                f"duplicate similarity={similarity:.2f}"
+                                            ),
+                                        )
+                                    except Exception as suppression_error:
+                                        log_debug(
+                                            f"[message_plugin] Failed to record Grillo suppression event: {suppression_error}"
+                                        )
+                                    return
 
             except Exception as e:
                 log_debug(f"[message_plugin] Grillo suppression check failed: {e}")

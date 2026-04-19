@@ -32,6 +32,12 @@ async def test_switch_active_cortex_notifies_on_success():
         patch("core.config.set_base_cortex", new=AsyncMock()) as mock_set_active,
         patch("core.plugin_instance.load_plugin", new=AsyncMock()) as mock_load_plugin,
         patch("core.cortex_registry.get_cortex_registry", return_value=mock_registry),
+        patch(
+            "core.config.config_registry.get_value",
+            side_effect=lambda key, default="": (
+                "selenium_chatgpt" if key == "BASE_CORTEX" else default
+            ),
+        ),
         patch("core.notifier.notify_trainer") as mock_notify,
     ):
         await switch_active_cortex_engine("manual", use_hot_swap=True)
@@ -83,6 +89,41 @@ async def test_switch_active_cortex_notifies_on_failure():
 
 
 @pytest.mark.asyncio
+async def test_flush_pending_for_interface_preserves_skip_history(
+    monkeypatch,
+):
+    import core.core_initializer as core_initializer
+    import core.notifier as notifier
+
+    captured = []
+    delivered = asyncio.Event()
+
+    class FakeInterface:
+        async def send_message(self, payload):
+            captured.append(payload)
+            delivered.set()
+
+    original_pending = list(notifier._pending_interface_msgs)
+    notifier._pending_interface_msgs[:] = [("synth_webui", "session-1", "queued")]
+    monkeypatch.setattr(
+        core_initializer,
+        "INTERFACE_REGISTRY",
+        {"synth_webui": FakeInterface()},
+    )
+
+    try:
+        notifier.flush_pending_for_interface("synth_webui")
+        await asyncio.wait_for(delivered.wait(), timeout=1)
+
+        assert captured == [
+            {"text": "queued", "target": "session-1", "skip_history": True}
+        ]
+        assert notifier._pending_interface_msgs == []
+    finally:
+        notifier._pending_interface_msgs[:] = original_pending
+
+
+@pytest.mark.asyncio
 async def test_cortex_command_uses_switch_active_cortex():
     from core import command_registry
 
@@ -90,7 +131,7 @@ async def test_cortex_command_uses_switch_active_cortex():
         "core.config.switch_active_cortex_engine", new=AsyncMock()
     ) as mock_switch:
         res = await command_registry.cortex_command("manual")
-        mock_switch.assert_awaited_with("manual", use_hot_swap=False)
+        mock_switch.assert_awaited_with("manual", use_hot_swap=True)
         assert "Cortex engine dynamically updated" in res
 
 
@@ -190,7 +231,7 @@ async def test_cortex_command_fqdn_sets_engine():
         ) as mock_switch,
     ):
         res = await command_registry.cortex_command("llm_provider/manual")
-        mock_switch.assert_awaited_with("manual", use_hot_swap=False)
+        mock_switch.assert_awaited_with("manual", use_hot_swap=True)
         assert "dynamically updated to `manual`" in res
 
 

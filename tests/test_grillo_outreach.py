@@ -42,7 +42,7 @@ async def test_get_context_snippets_pulls_memories(monkeypatch):
         def cursor(self):
             return DummyCursor()
 
-    async def mock_get_conn_ctx():
+    def mock_get_conn_ctx():
         return DummyConn()
 
     import core.db as cdb

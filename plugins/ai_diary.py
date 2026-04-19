@@ -21,6 +21,23 @@ from core.cortex_registry import get_cortex_registry
 from core.db import get_conn_ctx, _get_db_type
 from core.logging_utils import log_error, log_info, log_debug, log_warning
 
+try:
+    from core.variables_engine import register_exposed_var
+
+    register_exposed_var(
+        "DIARY_CONTEXT_MAX_CHARS",
+        label="Diary Context Max Chars",
+        default=8000,
+        value_type=int,
+        ui_type="number",
+        description="Maximum number of diary characters allowed in prompt context after diary entries are trimmed.",
+        scope="core",
+        component="diary",
+        advanced=True,
+    )
+except Exception:
+    pass
+
 # Injection priority for diary entries
 INJECTION_PRIORITY = 8  # Low priority - diary is sacrificial
 
@@ -1643,14 +1660,58 @@ class DiaryPlugin:
             if not entry_id or not new_content:
                 return {"success": False, "error": "id and content are required"}
             try:
-                _run(
-                    _execute(
-                        "UPDATE ai_diary SET content=%s, timestamp=NOW() WHERE id=%s",
-                        (new_content, int(entry_id)),
-                    )
+                merge_timestamp = (
+                    context.get("diary_merge_timestamp") if context else None
                 )
+                if isinstance(merge_timestamp, str):
+                    try:
+                        merge_timestamp = datetime.fromisoformat(
+                            merge_timestamp.replace("Z", "+00:00")
+                        )
+                    except Exception:
+                        merge_timestamp = None
+
+                if merge_timestamp is not None:
+                    _run(
+                        _execute(
+                            "UPDATE ai_diary SET content=%s, timestamp=%s WHERE id=%s",
+                            (new_content, merge_timestamp, int(entry_id)),
+                        )
+                    )
+                else:
+                    _run(
+                        _execute(
+                            "UPDATE ai_diary SET content=%s WHERE id=%s",
+                            (new_content, int(entry_id)),
+                        )
+                    )
+
+                merged_source_ids = (
+                    context.get("diary_merge_source_ids") if context else []
+                )
+                stale_entry_ids: List[int] = []
+                seen_ids: set[int] = set()
+                for raw_id in merged_source_ids or []:
+                    try:
+                        parsed_id = int(raw_id)
+                    except Exception:
+                        continue
+                    if parsed_id == int(entry_id) or parsed_id in seen_ids:
+                        continue
+                    seen_ids.add(parsed_id)
+                    stale_entry_ids.append(parsed_id)
+
+                if stale_entry_ids:
+                    archive_result = archive_diary_entries(stale_entry_ids)
+                    if not archive_result.get("success"):
+                        log_warning(
+                            "[ai_diary] Consolidation archived row cleanup failed for "
+                            f"entry {entry_id}: {archive_result.get('error')}"
+                        )
+
                 log_info(
                     f"[ai_diary] Diary entry {entry_id} consolidated to clean prose"
+                    f" (archived {len(stale_entry_ids)} source fragments)"
                 )
                 return {"success": True, "message": f"Diary entry {entry_id} updated"}
             except Exception as e:
@@ -1693,11 +1754,12 @@ class DiaryPlugin:
             if _get_db_type() == "postgres":
                 rows = await _fetchall(
                     """
-                    SELECT id, combined, row_count
+                    SELECT id, combined, row_count, source_ids, first_timestamp
                     FROM (
                         SELECT
                             MAX(id) AS id,
                             string_agg(content, E'\n\n---\n\n' ORDER BY id ASC) AS combined,
+                            string_agg(id::text, ',' ORDER BY id ASC) AS source_ids,
                             COUNT(*) AS row_count,
                             MIN(timestamp) AS first_timestamp
                         FROM ai_diary
@@ -1714,14 +1776,24 @@ class DiaryPlugin:
                 rows = await _fetchall(
                     """
                     SELECT
-                        MAX(id) AS id,
-                        GROUP_CONCAT(content ORDER BY id ASC SEPARATOR '\n\n---\n\n') AS combined,
-                        COUNT(*) AS row_count
-                    FROM ai_diary
-                    WHERE timestamp >= DATE_SUB(CURDATE(), INTERVAL 7 DAY)
-                    GROUP BY DATE(timestamp)
-                    HAVING row_count > 1 OR combined LIKE %s
-                    ORDER BY MIN(timestamp) ASC
+                        id,
+                        combined,
+                        row_count,
+                        source_ids,
+                        first_timestamp
+                    FROM (
+                        SELECT
+                            MAX(id) AS id,
+                            GROUP_CONCAT(content ORDER BY id ASC SEPARATOR '\n\n---\n\n') AS combined,
+                            GROUP_CONCAT(id ORDER BY id ASC SEPARATOR ',') AS source_ids,
+                            COUNT(*) AS row_count,
+                            MIN(timestamp) AS first_timestamp
+                        FROM ai_diary
+                        WHERE timestamp >= DATE_SUB(CURDATE(), INTERVAL 7 DAY)
+                        GROUP BY DATE(timestamp)
+                    ) daily_entries
+                    WHERE row_count > 1 OR combined LIKE %s
+                    ORDER BY first_timestamp ASC
                     LIMIT 1
                     """,
                     ("%---%",),
@@ -1737,6 +1809,19 @@ class DiaryPlugin:
         entry_id: int = row["id"]
         content: str = row["combined"] or ""
         row_count: int = row["row_count"]
+        source_ids_raw = row.get("source_ids") or ""
+        source_entry_ids: List[int] = []
+        for raw_id in str(source_ids_raw).split(","):
+            raw_id = raw_id.strip()
+            if not raw_id:
+                continue
+            try:
+                source_entry_ids.append(int(raw_id))
+            except Exception:
+                continue
+        if not source_entry_ids:
+            source_entry_ids = [int(entry_id)]
+        first_timestamp = row.get("first_timestamp")
 
         if "---" not in content and row_count <= 1:
             return
@@ -1787,6 +1872,8 @@ class DiaryPlugin:
                 context_memory={
                     "diary_merge_beat": True,
                     "diary_entry_id": entry_id,
+                    "diary_merge_source_ids": source_entry_ids,
+                    "diary_merge_timestamp": first_timestamp,
                     "allowed_action_types": ["update_diary_entry"],
                     "skip_history": True,
                 },

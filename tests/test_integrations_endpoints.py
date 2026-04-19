@@ -8,15 +8,22 @@ from core.webui import SynthWebUIInterface
 async def test_post_chat_integration_message_calls_message_chain(monkeypatch):
     webui = SynthWebUIInterface(autostart=False)
 
-    async def fake_handle_incoming_message(
-        bot, message, text, source="interface", context=None, **kwargs
+    async def fake_enqueue_and_wait(
+        *,
+        bot,
+        message,
+        context_memory=None,
+        history_scope=None,
+        priority=None,
+        interface_id=None,
+        skip_mention_check=None,
+        original_message=None,
+        timeout=None,
     ):
         # Simulate successful processing
         return "ACTIONS_EXECUTED"
 
-    monkeypatch.setattr(
-        "core.message_chain.handle_incoming_message", fake_handle_incoming_message
-    )
+    monkeypatch.setattr("core.message_queue.enqueue_and_wait", fake_enqueue_and_wait)
 
     payload = {
         "source": "test_integration",

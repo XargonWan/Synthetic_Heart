@@ -2,15 +2,17 @@
 
 import asyncio
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from fastapi.testclient import TestClient
+from starlette.requests import Request
 
 from core.external_endpoints.bridges.cortex_bridge import ExternalCortexEngine
 from core.external_endpoints.models import EndpointProtocol, ExternalEndpoint
-from core.prompt_request import PromptRequest, RuntimeContext, Turn
+from core.prompt_request import Attachment, PromptRequest, RuntimeContext, Turn
 from core.webui import SynthWebUIInterface
 
 
@@ -195,6 +197,32 @@ def test_handle_incoming_message_prefers_prompt_request_rendering(monkeypatch):
     assert "legacy-input" not in str(sent_messages[-1]["content"])
 
 
+def test_handle_incoming_message_forwards_image_parts_with_selected_model() -> None:
+    endpoint = _make_endpoint(default_model="x-ai/grok-4.1-fast")
+    endpoint.capabilities = {"vision": False}
+    adapter_mock = MagicMock()
+    adapter_mock.chat_completion = AsyncMock(return_value=MagicMock(content="ok"))
+    bridge = ExternalCortexEngine(endpoint, adapter_mock)
+
+    req = PromptRequest(
+        system_instruction="SYSTEM RULES",
+        current_text="",
+        runtime_ctx=RuntimeContext(username="scarlet"),
+        attachments=[Attachment(mime_type="image/png", data="AAAA")],
+        mode="chat",
+    )
+
+    result = asyncio.run(bridge.handle_incoming_message(None, None, req))
+
+    assert result == "ok"
+    await_args = adapter_mock.chat_completion.await_args
+    assert await_args is not None
+    sent_messages = await_args.args[0]
+    last_content = sent_messages[-1]["content"]
+    assert isinstance(last_content, list)
+    assert any(part.get("type") == "image_url" for part in last_content)
+
+
 @pytest.mark.asyncio
 async def test_run_auto_probe_uses_300_second_default(monkeypatch):
     webui = SynthWebUIInterface(autostart=False)
@@ -261,7 +289,7 @@ async def test_ping_external_endpoint_uses_300_second_timeout(monkeypatch):
             return_value=adapter,
         ),
     ):
-        response = await webui.ping_external_endpoint(1, DummyRequest())
+        response = await webui.ping_external_endpoint(1, cast(Request, DummyRequest()))
 
     assert response.status_code == 200
     ping_test.assert_awaited_once_with(

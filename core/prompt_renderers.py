@@ -65,6 +65,49 @@ def _build_runtime_prefix(ctx: RuntimeContext) -> str:
     return "[" + " | ".join(parts) + "] "
 
 
+def _build_multimodal_turn_text(
+    ctx: RuntimeContext,
+    current_text: str,
+    multimodal_parts: list[dict[str, Any]],
+) -> str:
+    """Build the text companion for a multimodal current turn.
+
+    Image-only turns are especially prone to hallucinated details when they carry
+    no user caption. Add a short grounding instruction so OpenAI-compatible
+    models describe only visible content instead of filling gaps from prior chat
+    context.
+    """
+
+    segments: list[str] = []
+
+    prefix = _build_runtime_prefix(ctx).strip()
+    if prefix:
+        segments.append(prefix)
+
+    user_text = current_text.strip()
+    image_count = sum(1 for part in multimodal_parts if part.get("type") == "image_url")
+    if image_count:
+        if user_text:
+            segments.append(
+                f"The user attached {image_count} image(s). Ground your reply only "
+                "in clearly visible details from the attached image(s). Do not "
+                "infer hidden, obscured, or non-visible features. If something is "
+                "ambiguous, say that you are unsure."
+            )
+        else:
+            segments.append(
+                f"The user attached {image_count} image(s) with no accompanying "
+                "text. Describe only clearly visible details from the attached "
+                "image(s). Do not infer hidden, obscured, or non-visible features. "
+                "If something is ambiguous, say that you are unsure."
+            )
+
+    if user_text:
+        segments.append(user_text)
+
+    return "\n\n".join(segment for segment in segments if segment)
+
+
 def _manifest_to_openai_schema(manifest: "ToolManifest") -> dict[str, Any]:
     """Convert a ``ToolManifest`` to the OpenAI function-calling JSON schema."""
     params: dict[str, Any] = {
@@ -233,8 +276,11 @@ class OpenAIRenderer:
         if not multimodal_parts:
             return messages
 
-        prefix = _build_runtime_prefix(self.req.runtime_ctx)
-        text = prefix + (self.req.current_text or "")
+        text = _build_multimodal_turn_text(
+            self.req.runtime_ctx,
+            self.req.current_text or "",
+            multimodal_parts,
+        )
 
         content_parts: list[dict[str, Any]] = []
         for part in multimodal_parts:

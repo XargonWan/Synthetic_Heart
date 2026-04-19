@@ -269,6 +269,30 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
             return True
         return False
 
+    async def _resolve_probe_model(
+        self,
+        *,
+        models: list[ModelInfo] | None = None,
+        prefer_vision: bool = False,
+    ) -> str | None:
+        model_infos = models
+        if model_infos is None:
+            try:
+                model_infos = await self.list_models()
+            except Exception:
+                return None
+
+        if prefer_vision:
+            for model in model_infos:
+                if model.id and self._supports_vision_capability(model):
+                    return model.id
+
+        for model in model_infos:
+            if model.id:
+                return model.id
+
+        return None
+
     def _resolve_http_url(self, path: str) -> str:
         parsed = urlparse(self._base_url)
         base_path = parsed.path.rstrip("/")
@@ -298,6 +322,8 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
     async def _list_models_via_http(self) -> list[ModelInfo]:
         import aiohttp
 
+        effective_timeout = float(self._timeout or 300.0)
+
         def _parse_list(data: Any) -> list[ModelInfo]:
             if data is None:
                 return []
@@ -319,7 +345,12 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
                     async with session.get(
                         url,
                         headers={"Authorization": f"Bearer {self._api_key}"},
-                        timeout=aiohttp.ClientTimeout(total=40),
+                        timeout=aiohttp.ClientTimeout(
+                            total=effective_timeout,
+                            connect=effective_timeout,
+                            sock_connect=effective_timeout,
+                            sock_read=effective_timeout,
+                        ),
                     ) as resp:
                         if resp.status != 200:
                             log_warning(
@@ -576,7 +607,12 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
             log_warning(f"[openai_compat] describe_image failed: {exc}")
             return None
 
-    async def _probe_vision_support(self) -> bool:
+    async def _probe_vision_support(
+        self,
+        *,
+        model: str | None = None,
+        models: list[ModelInfo] | None = None,
+    ) -> bool:
         import base64
 
         import aiohttp
@@ -592,7 +628,9 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
         data_url = f"data:image/png;base64,{base64.b64encode(tiny_png).decode('ascii')}"
         prompt = "Describe this image in detail."
         payload = {
-            "model": "default",
+            "model": model
+            or await self._resolve_probe_model(models=models, prefer_vision=True)
+            or "default",
             "messages": [
                 {
                     "role": "user",
@@ -646,7 +684,7 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
     async def ping_test(
         self,
         model: str | None = None,
-        timeout: float = 30.0,
+        timeout: float | None = None,
     ) -> tuple[bool, str]:
         """Send a minimal chat 'ping' to verify cortex connectivity.
 
@@ -655,8 +693,9 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
         success, ``(False, error_str)`` on failure.
 
         Two-phase timeout strategy:
-        - TCP connect must succeed within 10 s (hard failure).
-        - Body read uses ``timeout`` seconds (soft): if the server already
+                - TCP connect uses the effective probe timeout (explicit ``timeout``
+                    when provided, otherwise the adapter's configured timeout).
+                - Body read uses the same effective timeout (soft): if the server already
           returned HTTP 200 but the model is still generating (e.g. thinking/
           reasoning models like Qwen3.5), a body-read timeout is treated as a
           *reachability success* — ``(True, '')`` — rather than a failure.
@@ -665,9 +704,14 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
         """
         import aiohttp
 
+        effective_timeout = float(
+            timeout if timeout is not None else (self._timeout or 30.0)
+        )
+        request_model = model or await self._resolve_probe_model() or "default"
+
         chat_url = self._http_chat_url()
         payload: dict[str, Any] = {
-            "model": model or "default",
+            "model": request_model,
             "messages": [{"role": "user", "content": "ping"}],
             "stream": False,
             "max_tokens": 16,
@@ -685,7 +729,11 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
                     chat_url,
                     json=payload,
                     headers=headers,
-                    timeout=aiohttp.ClientTimeout(connect=10.0, sock_read=timeout),
+                    timeout=aiohttp.ClientTimeout(
+                        connect=effective_timeout,
+                        sock_connect=effective_timeout,
+                        sock_read=effective_timeout,
+                    ),
                 ) as resp:
                     if resp.status >= 400:
                         body = await resp.text()
@@ -742,7 +790,7 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
                     capabilities["vision"] = True
                     break
             if not capabilities["vision"]:
-                capabilities["vision"] = await self._probe_vision_support()
+                capabilities["vision"] = await self._probe_vision_support(models=models)
         except Exception:
             pass
 

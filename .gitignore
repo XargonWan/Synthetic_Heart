@@ -49,8 +49,8 @@ dist/
 build/
 site/
 logs/
+skins/2B/
 skins/2B/persona.json
-skins/Rekku
 skins/temp
 !skins/temp/README.md
 docker-compose-*.yml

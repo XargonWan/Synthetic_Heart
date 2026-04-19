@@ -258,6 +258,29 @@ def _dedup_key(text: str) -> str:
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
+def _is_ignored_prompt_history_entry(entry: HistoryEntry) -> bool:
+    if not isinstance(entry, dict):
+        return False
+
+    metadata = entry.get("metadata")
+    if isinstance(metadata, dict) and metadata.get("skip_history"):
+        return True
+
+    sender = str(entry.get("sender_name") or entry.get("username") or "").lower()
+    text = str(
+        entry.get("text") or entry.get("message_text") or entry.get("content") or ""
+    )
+    if sender != "self":
+        return False
+
+    return text.startswith(
+        (
+            "✅ Cortex engine dynamically updated to `",
+            "❌ Failed to switch Cortex to `",
+        )
+    )
+
+
 async def _call_with_supported_kwargs(obj: Any, method_name: str, **kwargs):
     fn = getattr(obj, method_name, None)
     if fn is None:
@@ -446,6 +469,8 @@ class HistoryEngine:
                         log_debug(f"[history_engine] live merge skipped: {_e}")
 
                 for m in msgs[-verbosity:] if verbosity > 0 else []:
+                    if _is_ignored_prompt_history_entry(m):
+                        continue
                     line = _entry_to_text_with_source(
                         m, current_interface_path=interface_path
                     )
@@ -542,6 +567,9 @@ class HistoryEngine:
                     # Filter out internal system messages (e.g. Grillo tags, Pattern Analysis)
                     # Queste tipicamente appaiono su '.../-1' come monologhi di sistema.
                     def _is_internal_noise(m: dict) -> bool:
+                        if _is_ignored_prompt_history_entry(m):
+                            return True
+
                         path = str(m.get("interface_path", "") or "")
                         if not path.endswith("/-1"):
                             return False
@@ -687,6 +715,8 @@ class HistoryEngine:
                 if candidates:
                     candidates.sort(key=_sort_key)
                 for m in candidates[-verbosity:] if verbosity > 0 else []:
+                    if _is_ignored_prompt_history_entry(m):
+                        continue
                     line = _entry_to_text_with_source(
                         m, current_interface_path=interface_path
                     )
@@ -748,6 +778,8 @@ class HistoryEngine:
                 for raw in list(c.entries)[
                     : max_items or (verbosity if verbosity > 0 else None)
                 ]:
+                    if _is_ignored_prompt_history_entry(raw):
+                        continue
                     line = _entry_to_text_with_source(
                         raw, current_interface_path=interface_path
                     )

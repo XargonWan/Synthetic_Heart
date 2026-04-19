@@ -16,6 +16,6 @@ def test_main_imports_chat_module():
     p = Path(__file__).parent.parent / "res" / "synth_webui" / "js" / "main.js"
     assert p.exists(), f"File not found: {p}"
     txt = p.read_text(encoding="utf-8")
-    assert "import('./chat-window.mjs')" in txt, (
+    assert "import('./chat-window.mjs" in txt and "createChatWindow" in txt, (
         "main.js does not dynamically import chat-window.mjs"
     )

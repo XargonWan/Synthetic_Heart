@@ -10,8 +10,8 @@ def create_client():
 
 def test_existing_descriptor_returns_file():
     client = create_client()
-    # Look Around.fbx.json exists in repo; API should return its parsed contents
-    r = client.get("/api/skins/Rei/animations/idle/Look%20Around.fbx.json")
+    # Look Around.fbx.json exists in skin_change; API should return its parsed contents
+    r = client.get("/api/skins/Rei/animations/skin_change/Look%20Around.fbx.json")
     assert r.status_code == 200
     data = r.json()
     assert data.get("play_once") is True

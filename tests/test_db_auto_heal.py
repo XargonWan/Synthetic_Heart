@@ -42,6 +42,23 @@ class FakeConnection:
     def __init__(self, shared_state):
         self._state = shared_state
 
+    async def execute(self, query, *args):
+        # allow backend/session-setting queries used during connection setup
+        if isinstance(query, str) and (
+            query.strip().upper().startswith("SET SESSION MAX_EXECUTION_TIME")
+            or query.strip().upper().startswith("SET STATEMENT_TIMEOUT")
+        ):
+            return "SET"
+
+        calls = self._state.setdefault("calls", 0)
+        if calls == 0:
+            self._state["calls"] = 1
+            raise Exception("1146: Table 'synth.fake_table' doesn't exist")
+        return "INSERT 0 1"
+
+    async def fetch(self, query, *args):
+        return []
+
     def cursor(self, *args, **kwargs):
         # Return an async context manager cursor
         return FakeCursor(self._state)

@@ -53,6 +53,7 @@ dependencies = [
     "gemini-cli>=0.1.0",
     "mcp>=1.27.0",
     "langfuse>=2.60.10",
+    "fastembed>=0.3.6",
 ]
 
 [project.optional-dependencies]
@@ -126,7 +127,10 @@ exclude = [
 ]
 
 [tool.uv]
-required-environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]
+required-environments = [
+    "sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "sys_platform == 'win32' and platform_machine == 'AMD64'",
+]
 
 [tool.uv.sources]
 kittentts = { url = "https://github.com/KittenML/KittenTTS/releases/download/0.8.1/kittentts-0.8.1-py3-none-any.whl" }

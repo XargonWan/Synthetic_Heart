@@ -416,6 +416,7 @@ class OpenRouterPlugin(AIPluginBase):
     """OpenRouter LLM Engine using the OpenAI-compatible REST API."""
 
     display_name = "OpenRouter"
+    supports_prompt_request = True
 
     def __init__(self, notify_fn: Any = None) -> None:
         from core.notifier import set_notifier

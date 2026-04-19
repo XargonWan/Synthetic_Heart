@@ -854,7 +854,6 @@ class EventPlugin(AIPluginBase):
             # Extract lateness info
             is_late = event.get("is_late", False)
             minutes_late = event.get("minutes_late", 0)
-            scheduled_time = event.get("scheduled_time", "unknown")
 
             # Log execution with lateness info
             if is_late:
@@ -937,13 +936,10 @@ class EventPlugin(AIPluginBase):
                     # Extract chat_id from interface_path for compatibility
                     # Format: telegram_bot/chat_id or telegram_bot/chat_id/thread_id
                     chat_id = None
-                    thread_id = None
                     if interface_path:
                         parts = interface_path.split("/")
                         if len(parts) >= 2:
                             chat_id = parts[1]  # Extract chat_id
-                        if len(parts) >= 3:
-                            thread_id = parts[2]  # Extract thread_id if present
 
                     synthetic_message = SimpleNamespace(
                         message_id=f"scheduled_event_{event_id}",
@@ -1086,7 +1082,13 @@ class EventPlugin(AIPluginBase):
             injections = await gather_static_injections()
             if isinstance(injections, dict):
                 # Keep only essential keys for event reminders, skip heavy diary/persona data
-                allowed_keys = {"persona", "weather", "current_time", "instructions"}
+                allowed_keys = {
+                    "persona",
+                    "persona_preferences",
+                    "weather",
+                    "current_time",
+                    "instructions",
+                }
                 reduced_injections = {
                     k: v for k, v in injections.items() if k in allowed_keys
                 }

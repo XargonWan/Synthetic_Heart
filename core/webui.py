@@ -290,14 +290,22 @@ class SynthWebUIInterface:
         # initialise skin hint based on whatever active_vrm we found
         self._current_skin = self._derive_skin_from_active_vrm()
 
-        # Attachments storage: prefer explicit env var, then XDG_DATA_HOME, then /config
+        # Attachments storage: prefer explicit env var, then XDG_DATA_HOME,
+        # then a platform default. On Windows, /config becomes a drive-root
+        # path, so prefer a temp-backed local directory instead.
         attachments_root = os.getenv("SYNTH_ATTACHMENTS_ROOT")
         if attachments_root:
             self.attachments_dir = Path(attachments_root).expanduser()
         else:
             xdg_data_home = os.getenv("XDG_DATA_HOME")
             self.attachments_dir = (
-                Path(xdg_data_home).expanduser() if xdg_data_home else Path("/config")
+                Path(xdg_data_home).expanduser()
+                if xdg_data_home
+                else (
+                    Path(tempfile.gettempdir()) / "synth_webui"
+                    if os.name == "nt"
+                    else Path("/config")
+                )
             ) / "attachments"
         try:
             self.attachments_dir.mkdir(parents=True, exist_ok=True)
@@ -1212,6 +1220,8 @@ class SynthWebUIInterface:
                     config_registry.get_value(
                         "ACTIVE_IRIS_ENGINE",
                         "disabled",
+                        label="Active Iris Engine",
+                        description="Name of the active Iris vision engine. Set to 'disabled' to turn off the Iris subsystem.",
                         value_type=str,
                         group="plugins",
                         component="iris_plugin",
@@ -2950,11 +2960,117 @@ class SynthWebUIInterface:
         animation_file: str,
         descriptor: Optional[Dict[str, Any]],
     ) -> None:
-        """No-op stub kept for external plugin compatibility.
+        """Broadcast a lightweight animation-state summary to connected clients."""
+        if not self.connections:
+            return
 
-        Lightweight state summaries are superseded by the ``vrm_face`` channel
-        for emotion data and ``vrm_animation`` for animation state.
-        """
+        current: Dict[str, Any] = {}
+        if self.animation_handler:
+            try:
+                current = self.animation_handler.get_current_animation_state() or {}
+            except Exception:
+                current = {}
+
+        animation_state = dict(current.get("animation_state") or {})
+        if not animation_state:
+            animation_state = {
+                "action": getattr(state, "value", state),
+                "phase": "loop",
+                "animation": current.get("animation") or animation_file,
+                "descriptor": descriptor,
+                "timing": None,
+                "expressions": descriptor.get("expressions")
+                if isinstance(descriptor, dict)
+                else None,
+                "blink": descriptor.get("blink")
+                if isinstance(descriptor, dict)
+                else None,
+                "eye_movement": descriptor.get("eye_movement")
+                if isinstance(descriptor, dict)
+                else None,
+                "emotions": None,
+                "lipsync": (
+                    descriptor.get("lipsync")
+                    if isinstance(descriptor, dict) and "lipsync" in descriptor
+                    else False
+                ),
+            }
+
+        emotions = None
+        try:
+            emotion_mgr = None
+            emotion_manager_cls = None
+            try:
+                from plugins.emotion_manager import EmotionManager
+
+                emotion_manager_cls = EmotionManager
+            except Exception:
+                emotion_manager_cls = None
+
+            try:
+                from core.core_initializer import PLUGIN_REGISTRY
+
+                if isinstance(PLUGIN_REGISTRY, dict):
+                    candidate = PLUGIN_REGISTRY.get("emotion_manager")
+                    if candidate is not None and hasattr(
+                        candidate, "get_emotion_state"
+                    ):
+                        if emotion_manager_cls is None or isinstance(
+                            candidate, emotion_manager_cls
+                        ):
+                            emotion_mgr = candidate
+            except Exception:
+                emotion_mgr = None
+
+            if emotion_mgr is None and emotion_manager_cls is not None:
+                try:
+                    emotion_mgr = emotion_manager_cls()
+                except Exception:
+                    emotion_mgr = None
+
+            emotions_raw = None
+            if emotion_mgr is not None and hasattr(emotion_mgr, "get_emotion_state"):
+                emotions_raw_maybe = emotion_mgr.get_emotion_state()
+                emotions_raw = (
+                    await emotions_raw_maybe
+                    if asyncio.iscoroutine(emotions_raw_maybe)
+                    else emotions_raw_maybe
+                )
+
+            if isinstance(emotions_raw, dict) and emotions_raw:
+                emotions_filtered = {
+                    key: value
+                    for key, value in emotions_raw.items()
+                    if isinstance(value, (int, float)) and value >= 0.1
+                }
+                if emotions_filtered:
+                    dominant, _ = max(
+                        emotions_filtered.items(), key=lambda item: item[1]
+                    )
+                    emotions = {
+                        "dominant": dominant,
+                        "values": emotions_filtered,
+                    }
+        except Exception:
+            emotions = None
+
+        animation_state["emotions"] = emotions
+
+        message = {
+            "type": "animation_state",
+            "state": current.get("state") or getattr(state, "value", state),
+            "animation": current.get("animation") or animation_file,
+            "descriptor": current.get("descriptor") or descriptor,
+            "animation_state": animation_state,
+        }
+
+        for session_id, websocket in list(self.connections.items()):
+            try:
+                await websocket.send_json(message)
+            except Exception as exc:
+                log_warning(
+                    f"{LOG_PREFIX} Failed to broadcast animation state to {session_id}: {exc}"
+                )
 
     async def get_animation_state(self):
         """HTTP endpoint that returns a lightweight animation state summary.
@@ -6427,16 +6543,28 @@ class SynthWebUIInterface:
                         rows = rows[:per_page]
 
                     for row in rows:
-                        timestamp_str = self._dt_to_utc_iso(row[3])
                         import json as _json
 
-                        raw_meta = row[4]
+                        if isinstance(row, dict):
+                            raw_interface_path = row.get("interface_path")
+                            raw_sender_name = row.get("sender_name")
+                            raw_message_text = row.get("message_text")
+                            raw_timestamp = row.get("timestamp")
+                            raw_meta = row.get("metadata")
+                        else:
+                            raw_interface_path = row[0]
+                            raw_sender_name = row[1]
+                            raw_message_text = row[2]
+                            raw_timestamp = row[3]
+                            raw_meta = row[4] if len(row) > 4 else None
+
+                        timestamp_str = self._dt_to_utc_iso(raw_timestamp)
                         parsed_meta = _json.loads(raw_meta) if raw_meta else None
                         messages.append(
                             {
-                                "interface_path": row[0],
-                                "sender_name": row[1],
-                                "message_text": row[2],
+                                "interface_path": raw_interface_path,
+                                "sender_name": raw_sender_name,
+                                "message_text": raw_message_text,
                                 "timestamp": timestamp_str,
                                 "metadata": parsed_meta,
                             }
@@ -6470,6 +6598,28 @@ class SynthWebUIInterface:
             )
 
         except Exception as exc:
+            error_text = str(exc)
+            lowered_error = error_text.lower()
+            if (
+                "asyncpg is not installed" in lowered_error
+                or "aiomysql is not installed" in lowered_error
+                or "db unavailable" in lowered_error
+            ):
+                log_warning(
+                    f"{LOG_PREFIX} Chat history DB unavailable; returning empty history payload: {exc}"
+                )
+                return JSONResponse(
+                    {
+                        "success": True,
+                        "messages": [],
+                        "interface_paths": [],
+                        "page": page,
+                        "per_page": per_page,
+                        "total_count": 0,
+                        "total_pages": 0,
+                    }
+                )
+
             log_error(f"{LOG_PREFIX} Failed to fetch chat history: {exc}")
             return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
 
@@ -8091,7 +8241,14 @@ class SynthWebUIInterface:
 
             active_auris: str | None = None
             try:
-                active_auris = config_registry.get_value("ACTIVE_AURIS_ENGINE", None)
+                active_auris = config_registry.get_value(
+                    "ACTIVE_AURIS_ENGINE",
+                    None,
+                    label="Active Auris Engine",
+                    description="Name of the active Auris speech-to-text engine. Set to 'disabled' to turn off the Auris subsystem.",
+                    component="auris_plugin",
+                    group="plugins",
+                )
             except Exception:
                 pass
             # add disabled option first
@@ -8186,7 +8343,14 @@ class SynthWebUIInterface:
 
             active_iris: str | None = None
             try:
-                active_iris = config_registry.get_value("ACTIVE_IRIS_ENGINE", None)
+                active_iris = config_registry.get_value(
+                    "ACTIVE_IRIS_ENGINE",
+                    None,
+                    label="Active Iris Engine",
+                    description="Name of the active Iris vision engine. Set to 'disabled' to turn off the Iris subsystem.",
+                    component="iris_plugin",
+                    group="plugins",
+                )
             except Exception:
                 pass
             iris_data.append(

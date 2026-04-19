@@ -341,6 +341,7 @@ class GeminiAPIPlugin(AIPluginBase):
     """
 
     display_name = "Gemini API"
+    supports_prompt_request = True
 
     def __init__(self, notify_fn=None):
         from core.notifier import set_notifier

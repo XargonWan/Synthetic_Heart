@@ -4,8 +4,10 @@
 import json
 import re
 import asyncio
+from inspect import isawaitable
 from typing import Any, Dict, Optional
 from types import SimpleNamespace
+from core.config_manager import config_registry
 from core.logging_utils import log_debug, log_warning, log_error, log_info
 
 # Interface-specific utilities are loaded dynamically by interfaces.
@@ -17,6 +19,17 @@ LAST_JSON_ERROR_INFO: Optional[str] = None
 # Track chat_ids for which core initiated a system-message correction request
 # Format: {chat_id: timestamp} to allow timeout cleanup
 _EXPECTING_SYSTEM_REPLY: dict = {}
+
+# Register the timeout used when waiting for a system reply to a correction prompt.
+AWAIT_RESPONSE_TIMEOUT = config_registry.get_var(
+    "AWAIT_RESPONSE_TIMEOUT",
+    600,
+    label="Await Response Timeout",
+    description="Maximum time in seconds to wait for a system reply after requesting a correction before the expectation expires.",
+    value_type=int,
+    group="core",
+    component="core",
+)
 
 
 # Helpers for sanitizing and extracting JSON from noisy LLM outputs
@@ -67,14 +80,30 @@ def _find_json_substrings(s: str, max_window: int = 20000):
                     break
 
 
+async def _call_interface_send(interface_send_func, *args, **kwargs):
+    try:
+        result = interface_send_func(*args, **kwargs)
+        if isawaitable(result):
+            return await result
+        return result
+    except TypeError as exc:
+        if "message_thread_id" not in kwargs or "message_thread_id" not in str(exc):
+            raise
+        retry_kwargs = dict(kwargs)
+        retry_kwargs.pop("message_thread_id", None)
+        log_debug(
+            "[transport] Retrying send without message_thread_id after unsupported kwarg"
+        )
+        result = interface_send_func(*args, **retry_kwargs)
+        if isawaitable(result):
+            return await result
+        return result
+
+
 def _get_system_reply_timeout():
     """Get the system reply timeout from config, default to 10 minutes."""
     try:
-        # Prefer config_registry so UI/API changes are respected at runtime
-        from core.config_manager import config_registry
-
-        timeout = int(config_registry.get_value("AWAIT_RESPONSE_TIMEOUT", 600))
-        return timeout
+        return int(AWAIT_RESPONSE_TIMEOUT)
     except (ValueError, TypeError):
         return 600  # 10 minutes default
 
@@ -516,10 +545,14 @@ def _attempt_recover_actions_from_text(
                 if ip_match:
                     interface_path = ip_match.group(1)
 
+                if candidate.startswith("message_") and not interface_path:
+                    continue
+
                 # Build recovered action and append
                 recovered_action = {"type": candidate, "payload": {"text": safe_text}}
                 if interface_path:
                     recovered_action["payload"]["interface_path"] = interface_path
+                recovered_action["metadata"] = {"heuristic_recovery": True}
 
                 # Append recovered action only if not present already
                 found_json.setdefault("actions", [])
@@ -1067,6 +1100,11 @@ async def universal_send(interface_send_func, *args, text: str = None, **kwargs)
     for param in excluded_params:
         kwargs.pop(param, None)
 
+    async def _send_text(message_text: str):
+        return await _call_interface_send(
+            interface_send_func, *args, text=message_text, **kwargs
+        )
+
     # Log LLM response for debugging
     if text:
         preview = text[:200] + "..." if len(text) > 200 else text
@@ -1101,7 +1139,7 @@ async def universal_send(interface_send_func, *args, text: str = None, **kwargs)
 
             if not actions:
                 log_debug(f"[transport] No actions found in JSON: {json_data}")
-                return await interface_send_func(*args, text=text, **kwargs)
+                return await _send_text(text)
 
             # Normalize all actions to the standard (type, payload) format
             log_debug(f"[transport] Normalizing {len(actions)} actions before dispatch")
@@ -1135,7 +1173,7 @@ async def universal_send(interface_send_func, *args, text: str = None, **kwargs)
                 log_warning(
                     "[transport] Could not extract bot instance for action parsing"
                 )
-                return await interface_send_func(*args, text=text, **kwargs)
+                return await _send_text(text)
 
             # Create message context for actions
             message = SimpleNamespace()
@@ -1146,7 +1184,7 @@ async def universal_send(interface_send_func, *args, text: str = None, **kwargs)
                 log_warning(
                     f"[transport] Invalid chat_id for action processing: {chat_id_value}"
                 )
-                return await interface_send_func(*args, text=text, **kwargs)
+                return await _send_text(text)
 
             # Coerce numeric string to int when possible for internal consistency
             if (
@@ -1179,7 +1217,7 @@ async def universal_send(interface_send_func, *args, text: str = None, **kwargs)
                 Exception
             ) as e:  # pragma: no cover - executed when action_parser missing
                 log_warning(f"[transport] action parser unavailable: {e}")
-                return await interface_send_func(*args, text=text, **kwargs)
+                return await _send_text(text)
 
             # Determine current interface from bot
             current_interface = "unknown"  # default fallback
@@ -1326,7 +1364,7 @@ async def universal_send(interface_send_func, *args, text: str = None, **kwargs)
                             f"[transport] Sending companion text alongside JSON actions: {len(companion_text)} chars"
                         )
                         # Send the companion text as a separate message after the actions
-                        await interface_send_func(*args, text=companion_text, **kwargs)
+                        await _send_text(companion_text)
 
                 return
             else:
@@ -1334,7 +1372,7 @@ async def universal_send(interface_send_func, *args, text: str = None, **kwargs)
                 log_debug(
                     f"[transport] No actions for current interface {current_interface}, sending as plain text"
                 )
-                return await interface_send_func(*args, text=text, **kwargs)
+                return await _send_text(text)
 
         except Exception as e:
             log_warning(f"[transport] Failed to process JSON actions: {e}")
@@ -1348,13 +1386,13 @@ async def universal_send(interface_send_func, *args, text: str = None, **kwargs)
         log_debug(
             f"[flow] transport.non_json -> forwarding plain text (no JSON detected, no corrector triggered) chat_id={kwargs.get('chat_id')}"
         )
-        return await interface_send_func(*args, text=text, **kwargs)
+        return await _send_text(text)
 
     # Send as normal text
     log_debug(
         f"[flow] transport.forward_plain -> calling interface_send_func for chat_id={kwargs.get('chat_id')}"
     )
-    return await interface_send_func(*args, text=text, **kwargs)
+    return await _send_text(text)
 
 
 # Re-entry guard removed: rely solely on the corrector retry counter to avoid loops
@@ -2500,338 +2538,3 @@ async def notify_corrector_of_system_message(
     except Exception as e:
         log_debug(f"[transport] notify_corrector_of_system_message failed: {e}")
     return
-    try:
-        json_payload = None
-        json_metadata = None
-        if text and text.strip():
-            try:
-                json_payload, json_metadata = extract_json_from_text(
-                    text, return_metadata=True
-                )
-            except Exception:
-                json_payload = None
-                json_metadata = None
-
-        # Check if JSON was corrupted during parsing
-        is_corrupted = json_metadata and (
-            json_metadata.get("recovered", False)
-            or json_metadata.get("unparsed_content", "")
-        )
-
-        if is_corrupted:
-            log_warning(
-                "[llm_to_interface] 🔧 Corrupted JSON detected - activating corrector to regenerate damaged actions"
-            )
-            log_debug(
-                f"[llm_to_interface] Unparsed content ({len(json_metadata.get('unparsed_content', ''))} chars): {json_metadata.get('unparsed_content', '')[:200]}..."
-            )
-
-        # Check if LLM returned plain text with NO JSON at all (violates LLM instructions)
-        is_plain_text_only = not json_payload and text and text.strip()
-        if is_plain_text_only:
-            log_warning(
-                "[llm_to_interface] ⚠️ LLM returned plain text with NO JSON - violates instructions! Activating corrector to request JSON format"
-            )
-
-        # Detect correction/system payloads (top-level "system_message") OR corrupted JSON OR plain text only
-        if (
-            (isinstance(json_payload, dict) and "system_message" in json_payload)
-            or is_corrupted
-            or is_plain_text_only
-        ):
-            try:
-                # Determine bot instance from args if present
-                bot = args[0] if args and len(args) > 0 else None
-
-                # Attempt to determine chat_id from kwargs or positional args
-                chat_id = kwargs.get("chat_id")
-                if chat_id is None and len(args) > 1:
-                    maybe = args[1]
-                    if isinstance(maybe, (int, str)):
-                        chat_id = maybe
-
-                # Sanitize chat_id: accept int or numeric string; set None otherwise
-                try:
-                    if isinstance(chat_id, str):
-                        s = chat_id.strip()
-                        if s == "" or not s.lstrip("-").isdigit():
-                            # invalid/empty string -> normalize to None
-                            log_debug(
-                                f"[llm_to_interface] Sanitizing invalid chat_id '{chat_id}' -> None"
-                            )
-                            chat_id = None
-                        else:
-                            chat_id = int(s)
-                    elif isinstance(chat_id, int):
-                        pass
-                    else:
-                        chat_id = None
-                except Exception:
-                    log_debug(
-                        f"[llm_to_interface] Could not coerce chat_id '{chat_id}' to int; setting to None"
-                    )
-                    chat_id = None
-
-                # Build lightweight message and context objects for orchestrator
-                from types import SimpleNamespace
-                from datetime import datetime
-
-                message = SimpleNamespace()
-                message.chat_id = chat_id
-                message.text = ""
-                message.original_text = text
-                message.thread_id = kwargs.get("thread_id")
-                # Mark this message as originating from the AI/cortex layer so the
-                # orchestrator will process it.  The `is_llm_response` flag is also
-                # set earlier, but we propagate a concrete attribute here for
-                # downstream code.
-                message.from_cortex = True
-                message.date = datetime.utcnow()
-
-                current_interface = kwargs.get("interface") or (
-                    getattr(bot, "get_interface_id", lambda: "unknown")()
-                    if bot
-                    else "unknown"
-                )
-                corrector_context = {
-                    "interface": current_interface,
-                    "original_chat_id": chat_id,
-                    "original_thread_id": kwargs.get("thread_id"),
-                    "original_text": text[:500] if text else "",
-                    "from_cortex": True,
-                }
-
-                # If JSON is corrupted, extract already-completed actions from the recovered JSON
-                completed_actions = []
-                if is_corrupted and json_payload:
-                    log_info(
-                        "[llm_to_interface] Extracting completed actions from corrupted JSON"
-                    )
-                    # Extract actions from recovered JSON
-                    if isinstance(json_payload, dict) and "actions" in json_payload:
-                        recovered_actions = json_payload.get("actions", [])
-                        if isinstance(recovered_actions, list):
-                            completed_actions = [
-                                a.get("type")
-                                for a in recovered_actions
-                                if isinstance(a, dict) and "type" in a
-                            ]
-                            log_info(
-                                f"[llm_to_interface] Found {len(completed_actions)} actions in recovered JSON: {completed_actions}"
-                            )
-
-                # Delegate to the parser orchestrator (will call corrector middleware as needed)
-                from core import action_parser
-
-                orchestrator_result = await action_parser.corrector_orchestrator(
-                    text,
-                    corrector_context,
-                    bot,
-                    message,
-                    completed_actions=completed_actions if is_corrupted else None,
-                    force_correction=is_plain_text_only,  # Force corrector to run for plain text
-                )
-
-                if orchestrator_result is True:
-                    log_debug(
-                        "[llm_to_interface] corrector_orchestrator executed actions; not forwarding text"
-                    )
-                    return None
-                elif orchestrator_result is False:
-                    log_warning(
-                        "[llm_to_interface] corrector_orchestrator blocked message; not forwarding"
-                    )
-                    return None
-                else:
-                    log_debug(
-                        "[llm_to_interface] corrector_orchestrator returned None; forwarding as usual"
-                    )
-
-            except Exception as e:
-                import traceback
-
-                log_warning(f"[llm_to_interface] Orchestrator handling failed: {e}")
-                log_debug(f"[llm_to_interface] Traceback: {traceback.format_exc()}")
-                # On failure, avoid forwarding suspicious payload to interface
-                return None
-
-    except Exception:
-        # Defensive: any unexpected issue parsing LLM output should not crash forwarding
-        pass
-
-    # Forward into the neutral universal send which will parse JSON/actions
-    # Delegate to central message chain for unified handling of LLM-origin and interface-origin messages
-    try:
-        from core.message_chain import handle_incoming_message
-
-        # Determine source: if this path was called from llm_to_interface we set is_llm_response
-        source = "llm" if kwargs.get("is_llm_response", False) else "interface"
-        # Build a message object compatible with message_chain
-        from types import SimpleNamespace
-        from datetime import datetime
-
-        message = SimpleNamespace()
-        # Try to extract chat_id from kwargs/args
-        chat_id = kwargs.get("chat_id")
-        if chat_id is None and args:
-            maybe = args[1] if len(args) > 1 else None
-            chat_id = maybe if isinstance(maybe, (int, str)) else None
-        message.chat_id = chat_id
-        message.text = ""
-        message.original_text = text
-        message.thread_id = kwargs.get("thread_id")
-        message.date = datetime.utcnow()
-        # If this chat_id is marked as expecting a system/LLM reply from the
-        # corrector middleware, consume it here and do not re-enter the message
-        # chain. This avoids infinite correction/forwarding loops.
-        # However, only consume if the message actually looks like a correction response.
-        try:
-            if chat_id is not None and _is_expecting_system_reply(str(chat_id)):
-                # Check if this is actually a correction response by looking for typical patterns
-                is_correction_response = isinstance(text, str) and (
-                    "system_message" in text
-                    or text.strip().startswith('{"actions":')
-                    or "correction" in text.lower()
-                    or "corrected" in text.lower()
-                )
-
-                if is_correction_response:
-                    _remove_system_reply_expectation(str(chat_id))
-                    log_debug(
-                        f"[llm_to_interface] Consuming expected system reply for chat_id={chat_id}; not forwarding to message_chain"
-                    )
-                    return None
-                else:
-                    # This doesn't look like a correction response, might be a normal message
-                    # Log a warning and let it through
-                    log_warning(
-                        f"[llm_to_interface] Expected system reply for chat_id={chat_id} but message doesn't look like correction. Allowing through."
-                    )
-                    _remove_system_reply_expectation(
-                        str(chat_id)
-                    )  # Clear the expectation anyway
-        except Exception:
-            pass
-        # Pass through to message chain
-        result = await handle_incoming_message(
-            bot=getattr(interface_send_func, "__self__", None) or None,
-            message=message,
-            text=text,
-            source=source,
-            context=kwargs.get("context", None),
-            **kwargs,
-        )
-
-        # At this point the message_chain has completed. If this was an LLM plain-text
-        # reply (no JSON was present originally) we optionally run the Grillo checker in
-        # the background to detect and propose missing actions.
-        try:
-            # Ensure we only trigger for LLM-origin responses (plain-text or JSON)
-            # but skip system/correction payloads (they are handled by corrector).
-            if kwargs.get("is_llm_response", False) and not (
-                isinstance(json_payload, dict) and "system_message" in json_payload
-            ):
-                # Avoid double-invoking Grillo on the same message
-                already_checked = False
-                try:
-                    already_checked = getattr(message, "grillo_checked", False)
-                except Exception:
-                    already_checked = False
-
-                if not already_checked:
-                    # Respect config that allows async vs sync execution for tests
-                    try:
-                        from core.config_manager import config_registry
-
-                        async_check = bool(
-                            config_registry.get_value(
-                                "GRILLO_ACTION_CHECK_ASYNC",
-                                True,
-                                value_type=bool,
-                                group="grillo",
-                                component="grillo",
-                            )
-                        )
-                    except Exception:
-                        async_check = True
-
-                    # Build minimal context to pass through
-                    checker_context = kwargs.get("context") or {}
-                    checker_context = dict(checker_context)
-                    # Attach last_action_result from message if present
-                    if hasattr(message, "last_action_result"):
-                        checker_context["last_action_result"] = getattr(
-                            message, "last_action_result"
-                        )
-                    # Attach the final chain result (ACTIONS_EXECUTED / FORWARD_AS_TEXT / etc.)
-                    try:
-                        checker_context["chain_result"] = result
-                    except Exception:
-                        pass
-
-                    # Get an original_user_message when available in context
-                    original_user_message = (
-                        checker_context.get("original_user_message")
-                        or checker_context.get("original_text")
-                        or ""
-                    )
-
-                    if async_check:
-                        try:
-                            log_info(
-                                f"[grillo] Scheduling checker for chat_id={getattr(message, 'chat_id', None)} chain_result={result}"
-                            )
-                            asyncio.create_task(
-                                _grillo_fire_and_forget(
-                                    getattr(interface_send_func, "__self__", None)
-                                    or None,
-                                    message,
-                                    original_user_message,
-                                    text,
-                                    checker_context,
-                                )
-                            )
-                            # Mark as scheduled
-                            try:
-                                setattr(message, "grillo_checked", True)
-                            except Exception:
-                                pass
-                        except Exception as e:
-                            log_debug(
-                                "[llm_to_interface] Failed to schedule Grillo checker task: "
-                                + str(e)
-                            )
-                    else:
-                        # Synchronous for testing convenience
-                        try:
-                            await _grillo_fire_and_forget(
-                                getattr(interface_send_func, "__self__", None) or None,
-                                message,
-                                original_user_message,
-                                text,
-                                checker_context,
-                            )
-                            try:
-                                setattr(message, "grillo_checked", True)
-                            except Exception:
-                                pass
-                        except Exception:
-                            log_debug(
-                                "[llm_to_interface] Grillo checker synchronous call failed"
-                            )
-        except Exception:
-            log_debug(
-                "[llm_to_interface] Grillo checker invocation encountered an error"
-            )
-
-        if result == "ACTIONS_EXECUTED" or result == "BLOCKED":
-            # Orchestrator handled or blocked: nothing to forward
-            return None
-        elif result == "LLM_FAILED":
-            # LLM failed and fallback message was already sent: nothing more to forward
-            return None
-        # Else forward as usual
-        return await universal_send(interface_send_func, *args, text=text, **kwargs)
-    except Exception as e:
-        log_warning(f"[transport] message_chain delegation failed: {e}")
-        return await universal_send(interface_send_func, *args, text=text, **kwargs)

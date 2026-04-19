@@ -12,16 +12,9 @@ async def test_build_dream_prompt_contains_instructions():
     assert "Fragments:" in prompt
     assert "create_personal_diary_entry" in prompt
     assert '"autonomous": true' in prompt
-    # deduplication instruction should be present
-    assert (
-        "check the fragments" in prompt.lower()
-        or "avoid repeating" in prompt.lower()
-        or "do not repeat" in prompt.lower()
-    )
-    # Ensure the shared GRILLO_INSTRUCTIONS are included
-    import plugins.grillo.common_instructions as ci
-
-    assert ci.GRILLO_INSTRUCTIONS.strip()[:40] in prompt
+    assert "Rely SOLELY on the provided fragments" in prompt
+    assert "Do NOT output any text outside a valid JSON object" in prompt
+    assert "INSTRUCTIONS (dream):" in prompt
 
 
 @pytest.mark.asyncio
@@ -77,7 +70,7 @@ async def test_collect_fragments_with_mocks(monkeypatch):
         def cursor(self):
             return DummyCursor()
 
-    async def mock_get_conn_ctx():
+    def mock_get_conn_ctx():
         return DummyConn()
 
     import core.db as cdb
