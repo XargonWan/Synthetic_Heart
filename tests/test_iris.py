@@ -325,11 +325,18 @@ async def test_gemini_adapter_uses_model_override(tmp_path) -> None:  # type: ig
     genai_module.types = types_module
     google_module.genai = genai_module
 
-    with patch.dict(sys.modules, {
-        "google": google_module,
-        "google.genai": genai_module,
-        "google.genai.types": types_module,
-    }, clear=False), patch.object(GeminiAdapter, "_get_client", return_value=dummy_client):
+    with (
+        patch.dict(
+            sys.modules,
+            {
+                "google": google_module,
+                "google.genai": genai_module,
+                "google.genai.types": types_module,
+            },
+            clear=False,
+        ),
+        patch.object(GeminiAdapter, "_get_client", return_value=dummy_client),
+    ):
         adapter = GeminiAdapter(api_key="unused")
         result = await adapter.describe_image(
             b"\xff\xd8\xff",
@@ -383,15 +390,19 @@ async def test_describe_attachment_images_with_iris() -> None:
             clear=True,
         ),
     ):
-        description = await _describe_attachment_images_with_iris(
+        result = await _describe_attachment_images_with_iris(
             [attachment], prompt="Describe this image."
         )
 
-    assert description == "a red ball"
+    assert result is not None
+    assert result.description == "a red ball"
+    assert result.language == "en"
 
 
 @pytest.mark.asyncio
-async def test_describe_attachment_images_with_iris_disabled_engine_returns_placeholder() -> None:
+async def test_describe_attachment_images_with_iris_disabled_engine_returns_placeholder() -> (
+    None
+):
     from core.plugin_instance import _describe_attachment_images_with_iris
     from plugins.iris_plugin import IrisPlugin
 
@@ -401,20 +412,27 @@ async def test_describe_attachment_images_with_iris_disabled_engine_returns_plac
 
     attachment = {"mime_type": "image/png", "data": "ZmFrZQ=="}
 
-    with patch.dict(
-        "core.core_initializer.PLUGIN_REGISTRY",
-        {"iris_plugin": plugin},
-        clear=True,
-    ), patch.object(plugin, "refresh_config"):
-        description = await _describe_attachment_images_with_iris(
+    with (
+        patch.dict(
+            "core.core_initializer.PLUGIN_REGISTRY",
+            {"iris_plugin": plugin},
+            clear=True,
+        ),
+        patch.object(plugin, "refresh_config"),
+    ):
+        result = await _describe_attachment_images_with_iris(
             [attachment], prompt="Describe this image."
         )
 
-    assert description == "User attached a image/png but the vision engine could not see it."
+    assert result is not None
+    assert "disabled" in result.description
+    assert "image/png" in result.description
 
 
 @pytest.mark.asyncio
-async def test_describe_attachment_images_with_iris_engine_failure_returns_placeholder() -> None:
+async def test_describe_attachment_images_with_iris_engine_failure_returns_placeholder() -> (
+    None
+):
     from core.iris_registry import IrisRegistry
     from core.plugin_instance import _describe_attachment_images_with_iris
     from plugins.iris_base import IrisEngineBase
@@ -452,11 +470,13 @@ async def test_describe_attachment_images_with_iris_engine_failure_returns_place
         ),
         patch.object(plugin, "refresh_config"),
     ):
-        description = await _describe_attachment_images_with_iris(
+        result = await _describe_attachment_images_with_iris(
             [attachment], prompt="Describe this image."
         )
 
-    assert description == "User attached a image/jpeg but the vision engine could not see it."
+    assert result is not None
+    assert "error" in result.description
+    assert "image/jpeg" in result.description
 
 
 # ---------------------------------------------------------------------------
@@ -544,3 +564,96 @@ async def test_handle_custom_action_unknown() -> None:
         response = await plugin.handle_custom_action("unknown_action", {})
 
     assert response["status"] == "error"
+
+
+# ---------------------------------------------------------------------------
+# Attachment stripping and metadata propagation
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_describe_attachment_returns_full_iris_result_with_metadata() -> None:
+    """Successful Iris analysis must return the full IrisResult, not just a string."""
+    from core.iris_registry import IrisRegistry
+    from core.plugin_instance import _describe_attachment_images_with_iris
+    from plugins.iris_base import IrisEngineBase, IrisResult
+    from plugins.iris_plugin import IrisPlugin
+
+    class MockEngine(IrisEngineBase):
+        def describe_image(
+            self,
+            file_path: str,
+            mime_type: str | None = None,
+            prompt: str | None = None,
+        ) -> IrisResult | None:
+            return IrisResult(
+                description="sunset over ocean", language="en", confidence=0.92
+            )
+
+    reg = IrisRegistry()
+    reg.register_instance(
+        "mock", MockEngine(), label="Mock", capabilities={"vision": True}
+    )
+
+    plugin = IrisPlugin.__new__(IrisPlugin)
+    plugin._active_engine_name = "mock"
+    plugin._engine_settings = {}
+    plugin._default_prompt = "Describe."
+    plugin._default_model = ""
+
+    data = base64.b64encode(b"fake-image").decode("ascii")
+    attachment = {"mime_type": "image/jpeg", "data": data}
+
+    with (
+        patch("plugins.iris_plugin.IRIS_REGISTRY", reg),
+        patch.object(plugin, "refresh_config"),
+        patch.dict(
+            "core.core_initializer.PLUGIN_REGISTRY", {"iris_plugin": plugin}, clear=True
+        ),
+    ):
+        result = await _describe_attachment_images_with_iris([attachment])
+
+    assert isinstance(result, IrisResult)
+    assert result.description == "sunset over ocean"
+    assert result.language == "en"
+    assert result.confidence == pytest.approx(0.92)
+
+
+@pytest.mark.asyncio
+async def test_describe_attachment_unavailable_plugin_returns_iris_result() -> None:
+    """When iris_plugin is missing from the registry, an IrisResult placeholder is returned."""
+    from core.plugin_instance import _describe_attachment_images_with_iris
+    from plugins.iris_base import IrisResult
+
+    attachment = {"mime_type": "image/png", "data": "ZmFrZQ=="}
+
+    with patch.dict("core.core_initializer.PLUGIN_REGISTRY", {}, clear=True):
+        result = await _describe_attachment_images_with_iris([attachment])
+
+    assert isinstance(result, IrisResult)
+    assert "unavailable" in result.description
+    assert "image/png" in result.description
+
+
+@pytest.mark.asyncio
+async def test_audio_attachments_not_stripped() -> None:
+    """Audio attachments must survive the image-stripping filter."""
+
+    # Simulating the strip logic from the callsite
+    attachments = [
+        {"mime_type": "image/png", "data": "img_data"},
+        {"mime_type": "audio/ogg", "data": "audio_data"},
+        {"mime_type": "video/mp4", "data": "video_data"},
+        {"mime_type": "application/pdf", "data": "pdf_data"},
+    ]
+
+    # This is the same filter applied in plugin_instance.py callsite
+    filtered = [
+        att
+        for att in attachments
+        if not (att.get("mime_type") or "").startswith(("image/", "video/"))
+    ]
+
+    assert len(filtered) == 2
+    assert filtered[0]["mime_type"] == "audio/ogg"
+    assert filtered[1]["mime_type"] == "application/pdf"

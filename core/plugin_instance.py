@@ -558,13 +558,19 @@ async def handle_incoming_message(
             # IRIS_DEFAULT_PROMPT (a neutral "describe this image" instruction).
             # The user's actual question is answered by the main LLM after the
             # Iris description is injected into the context.
-            iris_description = await _describe_attachment_images_with_iris(
+            iris_result = await _describe_attachment_images_with_iris(
                 attachments, prompt=None
             )
-            if iris_description:
+            if iris_result is not None:
                 try:
                     original_text = getattr(message, "text", "") or ""
-                    description_block = f"[Iris image description: {iris_description}]"
+                    # Build a structured block with all available metadata.
+                    parts: list[str] = [iris_result.description]
+                    if iris_result.language:
+                        parts.append(f"language: {iris_result.language}")
+                    if iris_result.confidence is not None:
+                        parts.append(f"confidence: {iris_result.confidence:.2f}")
+                    description_block = "[Iris vision: " + " | ".join(parts) + "]"
                     if original_text:
                         setattr(
                             message, "text", f"{original_text}\n\n{description_block}"
@@ -572,12 +578,27 @@ async def handle_incoming_message(
                     else:
                         setattr(message, "text", description_block)
                     log_info(
-                        "[plugin_instance] Appended Iris image description to prompt text"
+                        "[plugin_instance] Appended Iris vision analysis to prompt text"
                     )
                 except Exception as exc:
                     log_warning(
-                        f"[plugin_instance] Could not append Iris image description to message text: {exc}"
+                        f"[plugin_instance] Could not append Iris description to message text: {exc}"
                     )
+
+            # Strip image/video base64 data from attachments so the Cortex
+            # engine does not receive raw vision bytes.  Iris already provided
+            # a textual description (or a placeholder).  Audio and document
+            # attachments are kept intact for engines that support them natively.
+            attachments = [
+                att
+                for att in attachments
+                if not (
+                    att.get("mime_type")
+                    or att.get("content_type")
+                    or att.get("type")
+                    or ""
+                ).startswith(("image/", "video/"))
+            ]
 
         if isinstance(context_memory_or_prompt, str):
             try:
@@ -1214,19 +1235,39 @@ async def _extract_image_data_from_message(message, interface_name: str):
     return image_data, has_trigger
 
 
-def _build_unviewable_media_placeholder(mime_type: str | None) -> str:
-    if mime_type:
-        return (
-            f"User attached a {mime_type} but the vision engine could not see it."
-        )
-    return "User attached a media file but the vision engine could not see it."
+def _build_unviewable_media_placeholder(
+    mime_type: str | None,
+    reason: str = "unavailable",
+) -> str:
+    """Build a text placeholder informing the Cortex that media was received but not analysed.
+
+    Args:
+        mime_type: MIME type of the attachment (e.g. ``"image/png"``).
+        reason:    Why the vision analysis could not run.
+                   Typical values: ``"disabled"``, ``"unavailable"``, ``"error"``.
+    """
+    media_label = mime_type or "media file"
+    return (
+        f"The user sent a {media_label} attachment. "
+        f"The Iris vision subsystem is currently {reason}, so the image content "
+        "cannot be analysed. Acknowledge the attachment and let the user know "
+        "that vision capabilities are not available right now."
+    )
 
 
 async def _describe_attachment_images_with_iris(
     attachments: list[dict],
     prompt: str | None = None,
-) -> str | None:
-    """Use the configured Iris engine to describe the first image/video attachment."""
+) -> "IrisResult | None":  # noqa: F821
+    """Use the configured Iris engine to describe the first image/video attachment.
+
+    Returns the full :class:`IrisResult` (including *language* and *confidence*
+    metadata) rather than a bare description string.  When the engine is
+    disabled or the analysis fails, a synthetic ``IrisResult`` is returned
+    whose *description* contains an informative placeholder for the Cortex.
+    """
+    from plugins.iris_base import IrisResult
+
     if not attachments:
         return None
 
@@ -1253,7 +1294,11 @@ async def _describe_attachment_images_with_iris(
             log_info(
                 "[plugin_instance] Iris skip: iris_plugin not found in PLUGIN_REGISTRY"
             )
-            return _build_unviewable_media_placeholder(first_media_mime_type)
+            return IrisResult(
+                description=_build_unviewable_media_placeholder(
+                    first_media_mime_type, reason="unavailable"
+                )
+            )
         # Refresh config before reading _active_engine_name so we get the
         # DB-loaded value rather than the hard-coded startup default ("disabled").
         try:
@@ -1263,13 +1308,21 @@ async def _describe_attachment_images_with_iris(
         active_engine = getattr(iris, "_active_engine_name", "disabled")
         if active_engine == "disabled":
             log_info("[plugin_instance] Iris skip: active engine is 'disabled'")
-            return _build_unviewable_media_placeholder(first_media_mime_type)
+            return IrisResult(
+                description=_build_unviewable_media_placeholder(
+                    first_media_mime_type, reason="disabled"
+                )
+            )
         log_info(
             f"[plugin_instance] Iris active engine: '{active_engine}', processing {len(attachments)} attachment(s)"
         )
     except Exception as exc:
         log_debug(f"[plugin_instance] Iris plugin lookup failed: {exc}")
-        return _build_unviewable_media_placeholder(first_media_mime_type)
+        return IrisResult(
+            description=_build_unviewable_media_placeholder(
+                first_media_mime_type, reason="unavailable"
+            )
+        )
 
     for attachment in attachments:
         mime_type = str(
@@ -1341,7 +1394,7 @@ async def _describe_attachment_images_with_iris(
                 log_info(
                     f"[plugin_instance] Iris: got description ({len(result.description)} chars)"
                 )
-                return result.description
+                return result
             log_info(
                 f"[plugin_instance] Iris: describe_media returned empty result={result!r}"
             )
@@ -1354,7 +1407,11 @@ async def _describe_attachment_images_with_iris(
                 except Exception:
                     pass
 
-    return _build_unviewable_media_placeholder(first_media_mime_type)
+    return IrisResult(
+        description=_build_unviewable_media_placeholder(
+            first_media_mime_type, reason="error"
+        )
+    )
 
 
 async def _extract_multimodal_attachments(
