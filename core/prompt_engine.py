@@ -5,7 +5,7 @@ import random
 from core.db import get_conn_ctx
 from core.synth_tagging import extract_tags, expand_tags
 from core.logging_utils import log_debug, log_info, log_warning, log_error
-from core.json_utils import dumps as json_dumps
+from core.json_utils import dumps as json_dumps, redact_multimodal_for_logging
 from core.config_manager import config_registry
 from core.user_utils import get_user_display_name, get_user_usertag
 from datetime import datetime, time
@@ -322,15 +322,6 @@ async def build_json_prompt(
         )
         context_section = {"memories": memories}
 
-    # Expose chosen history_scope to downstream plugins/engines explicitly
-    try:
-        if effective_history_scope:
-            input_payload.setdefault("history_scope", effective_history_scope)
-    except Exception:
-        pass
-
-    # (moved) prompt logging will occur later once input_payload exists
-
     # === 3. Recon contributions (prompt 0) ===
     # Note: raw contributions are NOT included — their memories are already
     # merged into the top-level `memories` list.  Only metadata is kept.
@@ -422,9 +413,14 @@ async def build_json_prompt(
             else "local"
         ),
     }
+
+    # Expose chosen history_scope to downstream plugins/engines explicitly.
+    if effective_history_scope:
+        input_payload.setdefault("history_scope", effective_history_scope)
+
     # debug: log full prompt payload for reconstruction
     try:
-        full_text = json_dumps(input_payload)
+        full_text = json_dumps(redact_multimodal_for_logging(input_payload))
         log_debug(
             f"[json_prompt] ⏹️ Final prompt built ({len(full_text)} chars): {full_text}"
         )
@@ -520,8 +516,14 @@ async def build_json_prompt(
     }
 
     # Debug output for both sections
-    log_debug("[json_prompt] context = " + json_dumps(context_section))
-    log_debug("[json_prompt] input = " + json_dumps(input_section))
+    log_debug(
+        "[json_prompt] context = "
+        + json_dumps(redact_multimodal_for_logging(context_section))
+    )
+    log_debug(
+        "[json_prompt] input = "
+        + json_dumps(redact_multimodal_for_logging(input_section))
+    )
 
     # Add JSON instructions to the prompt
     json_instructions = load_json_instructions()
