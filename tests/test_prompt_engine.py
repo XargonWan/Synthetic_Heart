@@ -82,6 +82,7 @@ def test_instructions_prohibit_embedded_emotion_tags():
 def test_instructions_enforce_first_person_identity():
     instructions = load_json_instructions()
     assert "Stay inside the active persona in first person" in instructions
+    assert "treat that as stale style noise" in instructions
     assert "PRONOUN CONSISTENCY" in instructions
     assert (
         "Do not neutralize an established he/him or she/her person into singular they/them"
@@ -92,6 +93,7 @@ def test_instructions_enforce_first_person_identity():
 def test_unminified_chat_instruction_enforces_identity_rules():
     instructions = load_unminified_chat_instruction("telegram_bot")
     assert "Stay in the active persona in first person" in instructions
+    assert "Treat that as stale style noise" in instructions
     assert "Keep pronouns consistent" in instructions
     assert (
         "do not replace an established he/him or she/her person with singular they/them"
@@ -160,11 +162,12 @@ def test_build_json_prompt_demotes_persona_preferences_to_context_summary(monkey
     assert "Dislikes: liars" in pr.context_summary
 
 
-def test_build_context_summary_frames_time_and_location_as_ambient() -> None:
+def test_build_context_summary_keeps_exact_runtime_facts_implicit_by_default() -> None:
     summary = _build_context_summary(
         {
             "date": "2026-04-20",
             "time": "21:27 CEST",
+            "time_of_day": "late evening",
             "location": "Sečovlje,Slovenia",
         }
     )
@@ -172,8 +175,109 @@ def test_build_context_summary_frames_time_and_location_as_ambient() -> None:
     assert "[Ambient runtime context]" in summary
     assert "Use these runtime facts only when they matter" in summary
     assert "Do not quote them verbatim in ordinary replies" in summary
+    assert "Current part of day: late evening." in summary
+    assert "Current local time: 21:27 CEST" not in summary
+    assert "Current local setting: Sečovlje,Slovenia" not in summary
+
+
+def test_build_context_summary_can_surface_exact_runtime_facts_when_requested() -> None:
+    summary = _build_context_summary(
+        {
+            "date": "2026-04-20",
+            "time": "21:27 CEST",
+            "location": "Sečovlje,Slovenia",
+        },
+        include_explicit_runtime_facts=True,
+    )
+
+    assert "Current date: 2026-04-20" in summary
     assert "Current local time: 21:27 CEST" in summary
     assert "Current local setting: Sečovlje,Slovenia" in summary
+
+
+def test_build_json_prompt_gates_exact_runtime_facts_by_current_turn(monkeypatch):
+    async def dummy_gather(message, ctx):
+        return {"location": "Sečovlje,Slovenia"}
+
+    async def dummy_local_time_fields(message_date, interface_path=None):
+        return {
+            "local_date": "2026-04-20",
+            "local_time": "21:27 CEST",
+            "time_of_day": "late evening",
+        }
+
+    monkeypatch.setattr("core.action_parser.gather_static_injections", dummy_gather)
+    monkeypatch.setattr(
+        "core.time_zone_utils.get_local_time_fields", dummy_local_time_fields
+    )
+
+    message = SimpleNamespace(
+        chat_id=1,
+        text="How are you feeling?",
+        message_id=1,
+        from_user=SimpleNamespace(full_name="user", username="user"),
+        date=datetime.now(timezone.utc),
+    )
+
+    result = asyncio.run(build_json_prompt(message, {}, interface_name="telegram_bot"))
+    summary = result["__prompt_request"].context_summary
+    assert "Current part of day: late evening." in summary
+    assert "Current local time: 21:27 CEST" not in summary
+    assert "Current local setting: Sečovlje,Slovenia" not in summary
+
+    message.text = "What time is it there?"
+    explicit = asyncio.run(
+        build_json_prompt(message, {}, interface_name="telegram_bot")
+    )
+    explicit_summary = explicit["__prompt_request"].context_summary
+    assert "Current local time: 21:27 CEST" in explicit_summary
+    assert "Current local setting: Sečovlje,Slovenia" in explicit_summary
+
+
+def test_build_live_prompt_request_keeps_runtime_facts_ambient_by_default(monkeypatch):
+    async def dummy_gather(message, ctx):
+        return {
+            "persona": "You are 2B.",
+            "date": "2026-04-20",
+            "time": "21:27 CEST",
+            "time_of_day": "late evening",
+            "location": "Sečovlje,Slovenia",
+        }
+
+    monkeypatch.setattr("core.action_parser.gather_static_injections", dummy_gather)
+
+    req = asyncio.run(
+        build_live_prompt_request(message=SimpleNamespace(text="How are you feeling?"))
+    )
+
+    assert "Ambient runtime context:" in req.system_instruction
+    assert "Current part of day: late evening." in req.system_instruction
+    assert "Time: 21:27 CEST" not in req.system_instruction
+    assert "Location: Sečovlje,Slovenia" not in req.system_instruction
+
+
+def test_build_live_prompt_request_surfaces_exact_runtime_facts_when_requested(
+    monkeypatch,
+):
+    async def dummy_gather(message, ctx):
+        return {
+            "persona": "You are 2B.",
+            "date": "2026-04-20",
+            "time": "21:27 CEST",
+            "location": "Sečovlje,Slovenia",
+        }
+
+    monkeypatch.setattr("core.action_parser.gather_static_injections", dummy_gather)
+
+    req = asyncio.run(
+        build_live_prompt_request(
+            message=SimpleNamespace(text="What time is it there?")
+        )
+    )
+
+    assert "Date: 2026-04-20" in req.system_instruction
+    assert "Time: 21:27 CEST" in req.system_instruction
+    assert "Location: Sečovlje,Slovenia" in req.system_instruction
 
 
 def test_build_live_prompt_request_keeps_persona_preferences(monkeypatch):

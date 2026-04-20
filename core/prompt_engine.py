@@ -208,17 +208,40 @@ def _merge_memory_entries(existing: list[Any], incoming: list[Any]) -> list[Any]
     return merged
 
 
+_EXPLICIT_RUNTIME_FACT_REQUEST_RE = re.compile(
+    r"(?ix)\b("
+    r"what(?:'s| is)?\s+(?:the\s+)?(?:time|date|day|timezone|location|weather)\b|"
+    r"(?:what|which)\s+(?:day|date|time|timezone|city)\b|"
+    r"where\s+(?:am|are)\b|"
+    r"current\s+(?:time|date|location|weather)\b|"
+    r"local\s+(?:time|date|timezone)\b|"
+    r"\b(?:schedule|scheduling|appointment|meeting|eta|arrive|arrival|depart|departure)\b"
+    r")"
+)
+
+
+def _turn_requests_explicit_runtime_facts(text: str | None) -> bool:
+    """Return True when the current turn needs exact time/date/location facts."""
+
+    candidate = str(text or "").strip()
+    if not candidate:
+        return False
+    return bool(_EXPLICIT_RUNTIME_FACT_REQUEST_RE.search(candidate))
+
+
 # ---------------------------------------------------------------------------
 # PromptRequest assembly helpers (added in Phase 1 of the prompt rewrite)
 # ---------------------------------------------------------------------------
 
 
 def _build_context_summary(
-    context_section: dict[str, Any], is_grillo_internal: bool = False
+    context_section: dict[str, Any],
+    is_grillo_internal: bool = False,
+    include_explicit_runtime_facts: bool = False,
 ) -> str:
     """Format moderately-stable context parts into a plain text block.
 
-    Includes: current date/time/location, cross-chat history (history_recent),
+    Includes: ambient runtime context, cross-chat history (history_recent),
     diary thoughts, tag-matched memories, participant bios.  Does NOT include
     ``history_current_chat`` (which becomes ``PromptRequest.conversation_history``)
     or fully-dynamic runtime values (current emotion values → ``RuntimeContext.emotions``).
@@ -229,27 +252,33 @@ def _build_context_summary(
     """
     parts: list[str] = []
 
-    # Always inject current date / time / location so the model can reason with
-    # them when needed, but frame them as ambient facts rather than ready-made
-    # reply text. These come from time_plugin.get_static_injection() merged into
-    # context_section.
+    # Keep runtime facts in the background for ordinary chat turns. Exact values
+    # are only surfaced when the current turn explicitly needs them.
     _date_val: str = str(context_section.get("date") or "").strip()
     _time_val: str = str(context_section.get("time") or "").strip()
+    _time_of_day_val: str = str(context_section.get("time_of_day") or "").strip()
     _loc_val: str = str(context_section.get("location") or "").strip()
     _time_lines: list[str] = []
-    if _date_val or _time_val or _loc_val:
+    if _date_val or _time_val or _time_of_day_val or _loc_val:
         _time_lines.append(
             "Use these runtime facts only when they matter for scheduling, logistics, time-sensitive reasoning, or natural scene-setting."
         )
         _time_lines.append(
             "Do not quote them verbatim in ordinary replies unless the user asked for them or they are genuinely necessary."
         )
-    if _date_val:
-        _time_lines.append(f"Current date: {_date_val}")
-    if _time_val:
-        _time_lines.append(f"Current local time: {_time_val}")
-    if _loc_val:
-        _time_lines.append(f"Current local setting: {_loc_val}")
+    if include_explicit_runtime_facts:
+        if _date_val:
+            _time_lines.append(f"Current date: {_date_val}")
+        if _time_val:
+            _time_lines.append(f"Current local time: {_time_val}")
+        if _loc_val:
+            _time_lines.append(f"Current local setting: {_loc_val}")
+    elif _time_of_day_val:
+        _time_lines.append(f"Current part of day: {_time_of_day_val}.")
+    elif _date_val or _time_val or _loc_val:
+        _time_lines.append(
+            "Exact local date, time, and location are available to the system when needed, but should stay in the background for ordinary replies."
+        )
     if _time_lines:
         parts.append("[Ambient runtime context]\n" + "\n".join(_time_lines))
 
@@ -636,7 +665,11 @@ def _assemble_prompt_request(  # noqa: PLR0913
 
     # ── Context summary ─────────────────────────────────────────────────────
     context_summary: str = _build_context_summary(
-        context_section, is_grillo_internal=is_grillo_internal
+        context_section,
+        is_grillo_internal=is_grillo_internal,
+        include_explicit_runtime_facts=(
+            is_grillo_internal or _turn_requests_explicit_runtime_facts(text)
+        ),
     )
 
     # ── Conversation history ─────────────────────────────────────────────────
@@ -1734,6 +1767,7 @@ def load_json_instructions() -> str:
         "CLARIFICATION POLICY: If the user's intent, referent, or the subject of a follow-up is ambiguous or missing, DO NOT GUESS — ask one concise clarifying question before asserting facts or taking action. When the user asks whether you 'understood' but there is no clear context, request clarification rather than assuming.\n"
         "REFERENCE CLARITY: When the user refers indirectly to a person, message, post, image, clip, or quoted content, refer to its author or speaker in a clear generic way and avoid vague or impersonal wording that obscures who created or said it.\n"
         "TIME AUTHORITY: Treat context.date, context.time, input.payload.local_date, input.payload.local_time, input.payload.local_hour, and input.payload.time_of_day as the authoritative current time context whenever present. Never infer the current time, date, or part of day from prior chat history, memories, or older assistant messages.\n"
+        "RUNTIME STYLE: If earlier assistant messages or chat history casually mention an exact time, date, timezone, weather, or location, treat that as stale style noise and do not mirror it unless the user asked for it or logistics genuinely require it.\n"
         "IDENTITY INTEGRITY: Stay inside the active persona in first person. Do not describe yourself from the outside, do not refer to the active persona as a separate fictional character, and do not compare yourself to that persona as if they were someone else.\n"
         "PRONOUN CONSISTENCY: When the prompt, persona, or participant context establishes a person's pronouns or relationship role, use them consistently and do not flip them. Do not neutralize an established he/him or she/her person into singular they/them.\n"
         "LENGTH POLICY: Do NOT hardcode a target response length. Let the persona, the relationship context, and the user's tone determine how much to say. Simple factual or logistical turns can stay brief; intimate, emotional, or reflective turns may be fuller when that feels natural. Do not pad, and do not forcibly truncate a reply just to make it short.\n"
@@ -1767,6 +1801,7 @@ RESPONSE SHAPE RULES:
 - If the user's request or referent is ambiguous, ask one short clarifying question before responding (do NOT guess the meaning).
 - When the user refers indirectly to a person, message, post, image, clip, or quoted content, refer to its author or speaker in a clear generic way and avoid vague or impersonal wording.
 - Treat current time fields in the prompt as authoritative. Never infer the present time, date, or part of day from older chat history, memories, or prior assistant messages.
+- Do not mirror or continue earlier assistant wording that casually volunteered exact time, date, timezone, weather, or location. Treat that as stale style noise unless the user asked for it or logistics genuinely require it.
 - Use time and location as ambient context, not a catchphrase. Do not volunteer the exact clock time, timezone, date, or precise location in ordinary replies unless the user asked for it or it is genuinely needed for scheduling, travel, logistics, or natural scene-setting.
 - Do not open or pad ordinary replies with copied runtime facts such as `at 17:43 CEST` or `right here in Sečovlje`. If those facts matter, weave them in naturally and only when relevant.
 - Stay in the active persona in first person. Do not talk about yourself from the outside or as if the persona were a separate character.
@@ -2248,6 +2283,14 @@ async def build_live_prompt_request(
     except Exception as e:
         log_warning(f"[live_prompt] Failed to gather injections for Live API: {e}")
 
+    live_user_text = ""
+    if message is not None:
+        raw_live_text = getattr(message, "text", None) or getattr(
+            message, "caption", None
+        )
+        if raw_live_text is not None:
+            live_user_text = str(raw_live_text)
+
     parts: list[str] = []
 
     # --- Persona identity ---
@@ -2295,13 +2338,29 @@ async def build_live_prompt_request(
             )
 
     # --- Date/time/location ---
-    time_parts: list[str] = []
-    for key in ("location", "date", "time"):
-        val = injections.pop(key, "")
-        if val and isinstance(val, str):
-            time_parts.append(f"{key.capitalize()}: {val}")
-    if time_parts:
-        parts.append("Current context:\n" + "\n".join(time_parts))
+    date_val = str(injections.pop("date", "") or "").strip()
+    time_val = str(injections.pop("time", "") or "").strip()
+    time_of_day_val = str(injections.pop("time_of_day", "") or "").strip()
+    location_val = str(injections.pop("location", "") or "").strip()
+    if date_val or time_val or time_of_day_val or location_val:
+        time_parts = [
+            "Use time, date, and location as ambient context for scheduling, logistics, or natural scene-setting only.",
+            "Do not volunteer or copy exact runtime facts in ordinary replies unless the user explicitly asked for them.",
+        ]
+        if _turn_requests_explicit_runtime_facts(live_user_text):
+            if location_val:
+                time_parts.append(f"Location: {location_val}")
+            if date_val:
+                time_parts.append(f"Date: {date_val}")
+            if time_val:
+                time_parts.append(f"Time: {time_val}")
+        elif time_of_day_val:
+            time_parts.append(f"Current part of day: {time_of_day_val}.")
+        else:
+            time_parts.append(
+                "Keep the exact local date, time, and location in the background unless the conversation specifically needs them."
+            )
+        parts.append("Ambient runtime context:\n" + "\n".join(time_parts))
 
     # --- Weather ---
     weather = injections.pop("weather", "")
