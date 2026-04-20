@@ -806,18 +806,35 @@ async def handle_incoming_message(
                         )
 
                     # quick mapping: some models may output a generic "message"
-                    # action when they really intend to send text to the current
-                    # interface.  Convert it to a concrete type based on the
-                    # context path to avoid unnecessary corrector loops.
+                    # or plain "text" / "reply" / "response" action when they
+                    # really intend to send text to the current interface.
+                    # Convert it to a concrete type based on the context path
+                    # to avoid unnecessary corrector loops.
+                    _GENERIC_MSG_TYPES = ("message", "text", "reply", "response")
                     if ctx_interface_path:
                         for act in actions:
-                            if isinstance(act, dict) and act.get("type") == "message":
+                            if (
+                                isinstance(act, dict)
+                                and act.get("type") in _GENERIC_MSG_TYPES
+                            ):
                                 if ctx_interface_path.startswith("telegram_bot"):
                                     act["type"] = "message_telegram_bot"
                                 elif ctx_interface_path.startswith("discord_bot"):
                                     act["type"] = "message_discord_bot"
                                 else:
                                     act["type"] = "message_synth_webui"
+                                # Ensure the action has a payload dict with a
+                                # "text" key so downstream handlers can find
+                                # the message content regardless of whether
+                                # the LLM used a flat or nested format.
+                                if not isinstance(act.get("payload"), dict):
+                                    text_val = (
+                                        act.get("text")
+                                        or act.get("content")
+                                        or act.get("message")
+                                    )
+                                    if isinstance(text_val, str):
+                                        act["payload"] = {"text": text_val}
 
                     unsupported = []
                     for idx, act in enumerate(actions):
@@ -836,24 +853,43 @@ async def handle_incoming_message(
                             )
 
                     if unsupported:
-                        log_warning(
-                            f"[message_chain] 🚨 Detected unsupported action types from LLM: {[u['action'].get('type') or u['action'].get('action') for u in unsupported]} - requesting correction"
-                        )
-                        # Attach correction context and force correction path
-                        correction_context = {
-                            "successful_actions": [],
-                            "successful_types": [],
-                            "failed_actions": unsupported,
-                            "had_json_errors": False,
-                            "original_text": text,
-                        }
-                        try:
-                            if hasattr(message, "__dict__"):
-                                message.correction_context = correction_context
-                        except Exception:
-                            pass
+                        bad_indices = frozenset(u["index"] for u in unsupported)
+                        remaining_valid = [
+                            act
+                            for idx, act in enumerate(actions)
+                            if idx not in bad_indices
+                        ]
 
-                        parsed = None  # Trigger the corrector loop below
+                        if remaining_valid:
+                            # Some valid actions remain — drop only the unrecognised
+                            # ones so the response can still be delivered without
+                            # triggering (and likely exhausting) the corrector.
+                            log_warning(
+                                f"[message_chain] 🚨 Dropping {len(unsupported)} unsupported action "
+                                f"type(s): {[u['action'].get('type') or u['action'].get('action') for u in unsupported]} "
+                                "— continuing with valid actions"
+                            )
+                            actions = remaining_valid
+                        else:
+                            # All actions are unsupported — request correction
+                            log_warning(
+                                f"[message_chain] 🚨 Detected unsupported action types from LLM: {[u['action'].get('type') or u['action'].get('action') for u in unsupported]} - requesting correction"
+                            )
+                            # Attach correction context and force correction path
+                            correction_context = {
+                                "successful_actions": [],
+                                "successful_types": [],
+                                "failed_actions": unsupported,
+                                "had_json_errors": False,
+                                "original_text": text,
+                            }
+                            try:
+                                if hasattr(message, "__dict__"):
+                                    message.correction_context = correction_context
+                            except Exception:
+                                pass
+
+                            parsed = None  # Trigger the corrector loop below
 
             # Synthera Emotion Forwarding: copy dominant feeling into tts_speak payload
             if (

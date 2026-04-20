@@ -185,6 +185,26 @@ class IrisPlugin(AIPluginBase):
             if result is None:
                 return None
 
+            # Sanity-check: reject responses that look like JSON action payloads
+            # (e.g. {"actions": [...]}).  This happens when the vision engine is
+            # backed by a session-aware LLM (Gemini Web via selenium) that
+            # responds in the trained SyntH action schema instead of describing
+            # the image in plain text.
+            desc = result.description.strip() if result.description else ""
+            if desc.startswith("{"):
+                try:
+                    import json as _json
+
+                    _parsed = _json.loads(desc)
+                    if isinstance(_parsed, dict) and "actions" in _parsed:
+                        log_warning(
+                            f"[iris_plugin] Engine '{name}' returned JSON actions instead of "
+                            "a vision description — discarding invalid response"
+                        )
+                        return None
+                except (ValueError, TypeError):
+                    pass  # Not valid JSON — keep the response as-is
+
             log_info(
                 f"[iris_plugin] Vision analysis via '{name}': "
                 f"{result.description[:80]!r} (lang={result.language!r})"

@@ -558,12 +558,18 @@ async def handle_incoming_message(
             log_info(
                 f"[plugin_instance] Message contains {len(attachments)} attachments from user {user_id}"
             )
-            # Do NOT pass the user's text as the Iris prompt — Iris must use
-            # IRIS_DEFAULT_PROMPT (a neutral "describe this image" instruction).
+            # Do NOT pass the user's text as the Iris prompt — Iris must
+            # receive a neutral plain-text instruction so the vision engine
+            # returns a description rather than formatted/structured output.
             # The user's actual question is answered by the main LLM after the
             # Iris description is injected into the context.
+            _IRIS_PLAIN_TEXT_PROMPT = (
+                "IMPORTANT: Respond in plain conversational text only. "
+                "Do NOT use JSON, XML or any structured format. "
+                "Simply describe what you see in the image."
+            )
             iris_result = await _describe_attachment_images_with_iris(
-                attachments, prompt=None
+                attachments, prompt=_IRIS_PLAIN_TEXT_PROMPT
             )
             if iris_result is not None:
                 try:
@@ -1405,7 +1411,16 @@ async def _describe_attachment_images_with_iris(
             log_info(
                 f"[plugin_instance] Iris: calling describe_media for {mime_type} ({len(image_bytes)} bytes)"
             )
-            result = await iris.describe_media(tmp_path, mime_type, prompt)
+            try:
+                result = await asyncio.wait_for(
+                    iris.describe_media(tmp_path, mime_type, prompt),
+                    timeout=120.0,
+                )
+            except asyncio.TimeoutError:
+                log_warning(
+                    f"[plugin_instance] Iris: describe_media timed out after 120s for {mime_type}"
+                )
+                result = None
             if result and result.description:
                 log_info(
                     f"[plugin_instance] Iris: got description ({len(result.description)} chars)"
