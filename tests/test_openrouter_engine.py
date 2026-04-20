@@ -176,7 +176,9 @@ class TestModelResolution:
         routes = {"scopes": {"grillo": "anthropic/claude-haiku-3.5"}}
         mock_var = MagicMock()
         mock_var.value = routes
-        with patch("engines.external_engines.openrouter.OPENROUTER_MODEL_ROUTES", mock_var):
+        with patch(
+            "engines.external_engines.openrouter.OPENROUTER_MODEL_ROUTES", mock_var
+        ):
             result = plugin._resolve_model(scope="grillo")
         assert result == "anthropic/claude-haiku-3.5"
 
@@ -185,7 +187,9 @@ class TestModelResolution:
         routes = {"actions": {"create_personal_diary_entry": "meta-llama/llama-3-70b"}}
         mock_var = MagicMock()
         mock_var.value = routes
-        with patch("engines.external_engines.openrouter.OPENROUTER_MODEL_ROUTES", mock_var):
+        with patch(
+            "engines.external_engines.openrouter.OPENROUTER_MODEL_ROUTES", mock_var
+        ):
             result = plugin._resolve_model(action_type="create_personal_diary_entry")
         assert result == "meta-llama/llama-3-70b"
 
@@ -194,7 +198,9 @@ class TestModelResolution:
         routes = {"actions": {"message_*": "openai/gpt-4o"}}
         mock_var = MagicMock()
         mock_var.value = routes
-        with patch("engines.external_engines.openrouter.OPENROUTER_MODEL_ROUTES", mock_var):
+        with patch(
+            "engines.external_engines.openrouter.OPENROUTER_MODEL_ROUTES", mock_var
+        ):
             result = plugin._resolve_model(action_type="message_telegram_bot")
         assert result == "openai/gpt-4o"
 
@@ -206,7 +212,9 @@ class TestModelResolution:
         }
         mock_var = MagicMock()
         mock_var.value = routes
-        with patch("engines.external_engines.openrouter.OPENROUTER_MODEL_ROUTES", mock_var):
+        with patch(
+            "engines.external_engines.openrouter.OPENROUTER_MODEL_ROUTES", mock_var
+        ):
             result = plugin._resolve_model(
                 scope="grillo", action_type="create_personal_diary_entry"
             )
@@ -596,4 +604,3 @@ class TestCapabilities:
 
         _catalog.models = {}
         _catalog.last_fetched = 0.0
-

@@ -26,6 +26,20 @@ def test_parser_records_error_on_unescaped_quotes():
     )
 
 
+def test_parser_recovers_literal_newlines_inside_json_strings():
+    corrupted = (
+        '{"actions":[{"type":"send_message","payload":{"interface_path":'
+        '"telegram_bot/5208932647","message":"First line\n\nSecond line"}}]}'
+    ).replace("\\n", "\n")
+
+    obj, meta = extract_json_from_text(corrupted, return_metadata=True)
+
+    assert obj is not None
+    assert obj["actions"][0]["type"] == "send_message"
+    assert obj["actions"][0]["payload"]["message"] == "First line\n\nSecond line"
+    assert meta.get("recovered") is True
+
+
 def test_attempted_action_description_for_unknown_action():
     # If the LLM tries to use an action name that doesn't exist, we still
     # want the corrector to receive a helpful hint containing the available

@@ -54,6 +54,7 @@ dependencies = [
     "mcp>=1.27.0",
     "langfuse>=2.60.10",
     "fastembed>=0.3.6",
+    "pypdf>=6.10.2",
 ]
 
 [project.optional-dependencies]

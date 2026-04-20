@@ -599,6 +599,134 @@ docker exec synth-dev tail -f /app/logs/synth.log | grep -E "\[grillo\]|grillo"
 
 ---
 
+### Selective correction context could store counts instead of action lists  <!-- 2026-04-19 -->
+**Symptom:** `corrector_middleware` could log `object of type 'int' has no len()` or `'int' object is not iterable` immediately after `Using payload_thread_id=...`, then exhaust retries without returning corrected JSON.
+**Location:** `core/action_parser.py` (`_request_selective_correction`), `core/transport_layer.py` (`run_corrector_middleware`).
+**Status:** fixed.
+**Notes:** `_request_selective_correction` stored integer counts in `correction_context.successful_actions` / `failed_actions`, but the transport-layer corrector expects iterable action/error records when building the selective-correction prompt. The producer now stores the real action lists plus explicit `successful_count` / `failed_count` fields, and the consumer defensively normalizes legacy malformed contexts.
+
+---
+
+### Telegram multimodal extraction assumed every optional media attribute exists  <!-- 2026-04-19 -->
+**Symptom:** Runtime logs could show `Error extracting Telegram attachments: 'types.SimpleNamespace' object has no attribute 'photo'`, and attachment extraction aborted before reaching later media fields.
+**Location:** `core/multimodal_attachment.py` (`extract_multimodal_from_telegram`).
+**Status:** fixed.
+**Notes:** The Telegram extractor read `message.photo`, `message.document`, `message.audio`, `message.voice`, `message.video`, `message.video_note`, and `message.sticker` directly. Partial PTB message objects and test doubles do not guarantee those attributes exist. The extractor now uses `getattr(..., None)` for every optional field and treats missing sticker flags as false.
+
+---
+
+### Async diary commands called sync diary retrieval on the event-loop thread  <!-- 2026-04-19 -->
+**Symptom:** Trainer diary commands could trip sync/async bridge errors while fetching diary entries from an async context, and `core/generic_commands.py` also imported a stale helper name (`last_chats_command_generic`) that no longer existed in `core.recent_chats`.
+**Location:** `core/command_registry.py` (`diary_command`, `context_command`), `core/generic_commands.py` (`generic_diary_command`, import of `last_chats_command_generic`).
+**Status:** fixed.
+**Notes:** The async command handlers now offload `get_recent_entries(...)` via `asyncio.to_thread(...)` instead of calling the sync diary bridge directly on the active loop thread. `generic_commands` now imports `last_chats_command` under the expected alias, and `command_registry.context_command` was aligned with the actual `core.context` API (`set_context_state` / `get_context_state`).
+
+---
+
+### Recovered JSON with extra trailing content could drop later actions silently  <!-- 2026-04-20 -->
+**Symptom:** Runtime logs could show `JSON recovered after ... parsing errors`, followed by a successful `message_*` action execution and `All actions executed successfully despite JSON recovery`, even though the raw LLM response still contained additional malformed actions later in the payload. The recovered first action would run, but later diary/emotion/animation actions could be lost without a correction pass.
+**Location:** `core/message_chain.py` (`handle_incoming_message` recovery/correction branch), `core/transport_layer.py` (`extract_json_from_text`).
+**Status:** fixed.
+**Notes:** The message chain now treats `recovered=True` plus retained extra text as a selective-correction case, even when the salvaged actions themselves executed successfully. This preserves already-run actions while asking the corrector for the dropped remainder instead of silently terminating the loop.
+
+---
+
+### External cortex bridge dropped PromptRequest and fell back to legacy JSON flattening  <!-- 2026-04-20 -->
+**Symptom:** External endpoint-backed cortex engines (for example OpenRouter via `ExternalCortexEngine`) could log classic `system + giant user blob` requests even when `build_prompt_request()` had attached a `__prompt_request`. MCP traces showed large serialized prompt dicts in the last user turn instead of the renderer's structured messages.
+**Location:** `core/plugin_instance.py` (`prompt.pop("__prompt_request", None)` handoff), `core/external_endpoints/bridges/cortex_bridge.py` (`ExternalCortexEngine`).
+**Status:** fixed.
+**Notes:** `plugin_instance` only forwards the typed prompt object when the resolved engine advertises `supports_prompt_request`. The bridge already knew how to render `PromptRequest`, but did not set the flag, so the typed object was stripped and the bridge always fell back to the legacy dict path. `ExternalCortexEngine.supports_prompt_request = True` now keeps the typed prompt alive end-to-end.
+
+---
+
+### External OpenAI-compatible PDF attachments were serialized as image parts  <!-- 2026-04-20 -->
+**Symptom:** Uploading a PDF manual through an external OpenAI-compatible cortex endpoint (for example OpenRouter → xAI Grok) could fail with `Invalid request content: Invalid base64-encoded image.` MCP traces showed the last user turn containing `{"type":"image_url","image_url":{"url":"data:application/pdf;base64,..."}}`.
+**Location:** `core/external_endpoints/bridges/cortex_bridge.py` (`ExternalCortexEngine._format_mm_part`, `_build_mm_parts_from_prompt_request`), `core/prompt_renderers.py` (`_build_multimodal_turn_text`, `OpenAIRenderer.render_with_multimodal`).
+**Status:** fixed.
+**Notes:** The external bridge treated every non-Gemini binary attachment as an OpenAI `image_url` data URI, so PDFs were mislabeled as images and rejected by providers that validate image content. OpenAI-compatible document attachments are now converted into document-aware prompt context: extracted document text is injected into the final user turn when available, and image-only/scanned PDFs fall back to attached page images plus explicit prompt guidance so vision-capable models can read visible text from the document pages. Gemini endpoints still receive native inline document data.
+
+---
+
+### External endpoint adapters still do not use native tool calls end-to-end  <!-- 2026-04-20 -->
+**Symptom:** Even after PromptRequest rendering, external endpoint-backed cortex engines can still rely on freeform JSON-in-text responses instead of native tool calls. MCP traces for external OpenRouter-backed turns may show `messages` only, with no observable `tools` payload, and malformed multi-action JSON can still occur.
+**Location:** `core/external_endpoints/bridges/cortex_bridge.py` (`generate_response` only forwards `messages`), `core/external_endpoints/adapters/openai_compat.py` (`chat_completion` returns `message.content` only, no tool-call parsing), plus other external adapters.
+**Status:** known, not fixed.
+**Notes:** The PromptRequest handoff bug is fixed, so external bridges now render structured messages, but the external adapter stack still lacks a full tool-declaration and tool-call-response path comparable to the built-in OpenRouter engine. Until that lands, external endpoints remain vulnerable to malformed text JSON in multi-action replies.
+
+---
+
+### Selective correction retried safety-blocked actions and wasted an extra LLM call  <!-- 2026-04-20 -->
+**Symptom:** After a user-visible `message_*` action succeeded, logs could still show a second OpenRouter call from `corrector_middleware` that returned `{"actions":[]}` because the only remaining failed action was already marked `unfixable` (for example `update_emotion_state` blocked by safety policy / whitelist).
+**Location:** `core/action_parser.py` (`_request_selective_correction`).
+**Status:** fixed.
+**Notes:** `_request_selective_correction()` now filters out failed actions marked `unfixable` before building the correction prompt. If every failed action is unfixable, the helper skips the corrector entirely instead of burning an extra round-trip that can only return an empty action list.
+
+---
+
+### Literal newlines inside JSON strings could trigger a spurious corrector round-trip  <!-- 2026-04-20 -->
+**Symptom:** Runtime logs could show a raw LLM reply that already looks like `{"actions":[...]}`, followed by repeated `Invalid control character` parse errors and `LLM returned non-JSON output; activating corrector to request JSON format`. A second LLM call then re-emits the same message with properly escaped newlines.
+**Location:** `core/transport_layer.py` (`extract_json_from_text`).
+**Status:** fixed.
+**Notes:** Some external OpenAI-compatible models can emit literal newline, carriage-return, or tab characters inside quoted `payload.message` / `payload.text` strings instead of escaped JSON sequences. `extract_json_from_text()` now tries an additional variant that escapes control characters only while inside JSON string literals, so otherwise-valid action payloads recover locally without falling into the corrector loop.
+
+---
+
+### Legacy `diary_entry` action alias could trigger an avoidable correction hop  <!-- 2026-04-20 -->
+**Symptom:** OpenRouter-backed manual turns could return a mostly valid action list such as `send_message` + `update_emotion_state` + `diary_entry`, then log `Detected unsupported action types from LLM: ['diary_entry']` and spend one extra corrector request only to rename the diary action to `create_personal_diary_entry`.
+**Location:** `core/message_chain.py` (`handle_incoming_message` normalization path before unsupported-action validation).
+**Status:** fixed.
+**Notes:** The message chain already normalized generic message aliases, but it did not rewrite the legacy diary action name before checking supported action types. `diary_entry` is now normalized in-place to `create_personal_diary_entry`, so mixed manual replies can execute directly without a correction round-trip.
+
+---
+
+### Legacy `diary` action and diary payload aliases could still force correction or drop diary metadata  <!-- 2026-04-20 -->
+**Symptom:** OpenRouter-backed manual turns could recover into a valid action list such as `send_message` + `update_emotion_state` + `diary`, then still log `Detected unsupported action types from LLM: ['diary']` and make one avoidable correction call. Even when the corrector renamed the action to `create_personal_diary_entry`, payload keys like `entry`, `summary`, and `thought` could bypass the diary plugin's canonical `interaction_summary` / `personal_thought` fields.
+**Location:** `core/message_chain.py` normalization helpers before unsupported-action validation and action execution.
+**Status:** fixed.
+**Notes:** The message chain now normalizes both legacy diary action names (`diary`, `diary_entry`) and legacy diary payload keys (`entry`, `summary`, `thought`) into the canonical diary action schema before validation. This lets recovered manual replies execute without a corrector hop and preserves diary metadata for downstream diary creation.
+
+---
+
+### Standalone `thought` action could still force correction instead of populating diary metadata  <!-- 2026-04-20 -->
+**Symptom:** OpenRouter-backed manual turns could return `send_message` + `diary` + `thought`, log `Detected unsupported action types from LLM: ['thought']`, and spend a correction round-trip only to drop the reflective thought from the final action list.
+**Location:** `core/message_chain.py` diary normalization helpers before unsupported-action validation.
+**Status:** fixed.
+**Notes:** Some replies emitted `thought` as a separate legacy action object instead of a `create_personal_diary_entry.payload.personal_thought` field. The message chain now folds a standalone `thought` action into the paired diary action before validation, preserving `personal_thought` metadata and avoiding the correction hop.
+
+---
+
+### `chat_history_cache` deduplication query still used MySQL `DATE_SUB(... INTERVAL ...)` syntax  <!-- 2026-04-20 -->
+**Symptom:** Live manual turns could log `Deduplication check failed: syntax error at or near "5"` from `chat_history_cache`, then continue after skipping the duplicate check.
+**Location:** `core/chat_history_cache.py` (`save_chat_message`, duplicate-message guard query).
+**Status:** fixed.
+**Notes:** The Postgres SQL translator already rewrote `UTC_TIMESTAMP()` but not MySQL's `DATE_SUB(..., INTERVAL 5 SECOND)` form. The deduplication check now computes the 5-second cutoff in Python and passes it as a normal query parameter, keeping the save path dialect-neutral.
+
+---
+
+### `chat_update_checker` DB polling still used MySQL `UNIX_TIMESTAMP(...)` syntax  <!-- 2026-04-20 -->
+**Symptom:** Runtime logs could show `DB query failed, falling back to in-memory check: function unix_timestamp(timestamp with time zone) does not exist` while polling for new non-self chat activity.
+**Location:** `core/chat_update_checker.py` (`ChatUpdateChecker._check_once`).
+**Status:** fixed.
+**Notes:** The checker used `MAX(UNIX_TIMESTAMP(timestamp))` and `WHERE UNIX_TIMESTAMP(timestamp) > %s`, which works on MySQL but fails on Postgres. The polling path now queries raw timestamps, converts DB values to epoch seconds in Python, and passes a timezone-aware `datetime` cutoff back into the follow-up query so both backends stay compatible.
+
+---
+
+### SOUL static injection could time out on internal `grillo/-1` turns  <!-- 2026-04-20 -->
+**Symptom:** Runtime logs could show `get_static_injection() on SoulPlugin timed out after 5s` during internal Grillo memory-consolidation prompt assembly, even though the prompt later completed without any `soul_*` injections.
+**Location:** `plugins/soul_plugin.py` (`SoulPlugin.get_static_injection`).
+**Status:** fixed.
+**Notes:** SOUL runtime recall is useful for real user/session interfaces, but not for internal Grillo control turns like `grillo/-1`. The plugin now short-circuits static injection for internal Grillo interfaces before session bookkeeping or repository recall, avoiding wasted recall work and eliminating this fresh timeout path.
+
+---
+
+### Grillo outreach synthetic message ids could skip PromptRequest assembly  <!-- 2026-04-20 -->
+**Symptom:** Grillo outreach turns could log `PromptRequest assembly skipped: invalid literal for int() with base 10: 'grillo_outreach_0'`, then fall back to the legacy flattened prompt path even though normal manual turns were already using `__prompt_request`.
+**Location:** `core/prompt_engine.py` (`_assemble_prompt_request`, `RuntimeContext.message_id` assignment).
+**Status:** fixed.
+**Notes:** Outreach beats synthesize string message ids like `grillo_outreach_0`. `_assemble_prompt_request()` previously coerced every `message_id` through `int(...)`, so typed prompt assembly aborted for those turns. The runtime now tolerates non-numeric message ids by leaving `RuntimeContext.message_id` unset instead of crashing, which keeps structured prompt rendering enabled for outreach beats.
+
+---
+
 ## 13. Database Quick Reference
 
 > Tables are created inline in `core/db.py` and each plugin — **`init-db.sql` only seeds a subset.** If you need a table's full column list, `grep -A20 "CREATE TABLE IF NOT EXISTS <name>"` in the relevant file.
@@ -694,7 +822,7 @@ All keys stored in the `config` table and accessible via `config_registry.get_va
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **synthetic_heart** (8874 symbols, 28708 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **synthetic_heart** (9044 symbols, 29174 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
 

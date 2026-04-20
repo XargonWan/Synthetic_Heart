@@ -2,9 +2,12 @@ import asyncio
 from datetime import datetime
 
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 from zoneinfo import ZoneInfo
 
 import core.plugin_instance as plugin_instance
+from core.external_endpoints.bridges.cortex_bridge import ExternalCortexEngine
+from core.external_endpoints.models import EndpointProtocol, ExternalEndpoint
 from core.prompt_request import PromptRequest
 
 
@@ -148,3 +151,50 @@ def test_plugin_instance_uses_prompt_request_for_opted_in_engines(monkeypatch):
     prompt_sent = captured.get("prompt")
     assert isinstance(prompt_sent, PromptRequest)
     assert prompt_sent.current_text == "task run"
+
+
+def test_plugin_instance_forwards_prompt_request_to_external_bridge(monkeypatch):
+    prebuilt = {
+        "input": {
+            "payload": {
+                "text": "task run",
+                "source": {"interface_path": "agent:task"},
+            }
+        },
+        "system_message": {"type": "agent_iteration"},
+    }
+
+    endpoint = ExternalEndpoint(
+        id=1,
+        name="my_ep",
+        display_label="My EP",
+        protocol=EndpointProtocol.OPENAI,
+        base_url="http://localhost:11435",
+        api_key_enc=None,
+        enabled=True,
+        capabilities={},
+        subsystem_map={"cortex": True},
+        available_models=["model-a"],
+        default_model="model-a",
+        probe_status="success",
+        last_probe_at=None,
+        extra_config={},
+    )
+    adapter_mock = MagicMock()
+    adapter_mock.chat_completion = AsyncMock(return_value=MagicMock(content="ok"))
+    bridge = ExternalCortexEngine(endpoint, adapter_mock)
+
+    _route_to_fake_plugin(monkeypatch, bridge)
+
+    asyncio.run(
+        plugin_instance.handle_incoming_message(
+            bot=None, message=None, context_memory_or_prompt=prebuilt
+        )
+    )
+
+    await_args = adapter_mock.chat_completion.await_args
+    assert await_args is not None
+    sent_messages = await_args.args[0]
+    assert sent_messages[-1]["role"] == "user"
+    assert "task run" in str(sent_messages[-1]["content"])
+    assert "input" not in str(sent_messages[-1]["content"])

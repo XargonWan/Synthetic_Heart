@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
+from typing import Any, cast
 
 import pytest
 
@@ -30,6 +31,32 @@ async def test_static_injection_contains_soul_keys() -> None:
     assert "soul_session_state" in payload
     assert "soul_turn_emotion_delta" in payload
     assert "soul_active_foresight" in payload
+
+
+@pytest.mark.asyncio
+async def test_static_injection_skips_internal_grillo_interface() -> None:
+    plugin = SoulPlugin()
+    plugin._repo = SimpleNamespace(
+        get_active_dsp=AsyncMock(return_value=None),
+        list_active_foresight_signals=AsyncMock(return_value=[]),
+    )
+    recall_memories_mock = AsyncMock(return_value=["should not be used"])
+    plugin._recall_memories = cast(Any, recall_memories_mock)
+
+    message = SimpleNamespace(
+        interface_path="grillo/-1",
+        text="[G.R.I.L.L.O. Memory Consolidation]",
+        caption=None,
+    )
+
+    payload = await plugin.get_static_injection(
+        message, {"interface_path": "grillo/-1", "grillo_beat": True}
+    )
+
+    assert payload == {}
+    plugin._repo.get_active_dsp.assert_not_awaited()
+    plugin._repo.list_active_foresight_signals.assert_not_awaited()
+    recall_memories_mock.assert_not_awaited()
 
 
 @pytest.mark.asyncio

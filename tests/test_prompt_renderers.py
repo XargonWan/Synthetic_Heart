@@ -188,6 +188,47 @@ class TestOpenAIRenderer:
             in text_part["text"]
         )
 
+    def test_multimodal_document_turn_adds_note_without_forwarding_binary(self) -> None:
+        req = _basic_request(current_text="Can you inspect this manual?")
+        renderer = OpenAIRenderer(req)
+        document_part = {
+            "type": "document",
+            "document": {
+                "mime_type": "application/pdf",
+                "filename": "manual.pdf",
+            },
+        }
+
+        messages = renderer.render_with_multimodal([document_part])
+
+        last = messages[-1]
+        assert last["role"] == "user"
+        assert isinstance(last["content"], list)
+        assert [part.get("type") for part in last["content"]] == ["text"]
+        assert "manual.pdf" in last["content"][0]["text"]
+        assert "did not forward the raw document binary" in last["content"][0]["text"]
+
+    def test_multimodal_document_turn_embeds_extracted_text(self) -> None:
+        req = _basic_request(current_text="Summarize the attached manual.")
+        renderer = OpenAIRenderer(req)
+        document_part = {
+            "type": "document",
+            "document": {
+                "mime_type": "application/pdf",
+                "filename": "manual.pdf",
+                "extracted_text": "[Page 1]\nMotor spec page",
+            },
+        }
+
+        messages = renderer.render_with_multimodal([document_part])
+
+        last = messages[-1]
+        assert last["role"] == "user"
+        assert isinstance(last["content"], list)
+        assert [part.get("type") for part in last["content"]] == ["text"]
+        assert "extracted text from the attachment" in last["content"][0]["text"]
+        assert "Motor spec page" in last["content"][0]["text"]
+
     def test_parse_tool_call_response_returns_action_json(self) -> None:
         data = {
             "choices": [

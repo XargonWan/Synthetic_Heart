@@ -245,6 +245,7 @@ async def test_generate_response_no_api_key(monkeypatch):
         parsed = None
     assert not (isinstance(parsed, dict) and "actions" in parsed)
 
+
 def test_copy_and_redact_data_nested():
     """Test that nested attachment data is properly redacted."""
     from engines.external_engines.gemini_api import GeminiAPIPlugin
@@ -256,9 +257,7 @@ def test_copy_and_redact_data_nested():
         "context": {
             "nested": {
                 "deeply": {
-                    "attachments": [
-                        {"mime_type": "application/pdf", "data": fake_data}
-                    ]
+                    "attachments": [{"mime_type": "application/pdf", "data": fake_data}]
                 }
             }
         }
@@ -381,10 +380,8 @@ def test_copy_and_redact_data_ignores_schema():
     redacted = plugin._copy_and_redact_data(prompt)
 
     # The description should NOT be redacted because it doesn't look like an attachment
-    description = redacted["actions"]["some_action"]["schema"]["properties"][
-        "data"
-    ]["description"]
+    description = redacted["actions"]["some_action"]["schema"]["properties"]["data"][
+        "description"
+    ]
     assert description == "some data description"
     assert "<redacted" not in description
-
-

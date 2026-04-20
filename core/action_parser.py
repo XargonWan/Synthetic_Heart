@@ -1230,9 +1230,19 @@ async def _request_selective_correction(
 ):
     """Request LLM to fix only the failed actions, while preserving successful ones."""
 
+    fixable_failed_actions = [
+        failed for failed in failed_actions if not failed.get("unfixable")
+    ]
+    unfixable_failed_count = len(failed_actions) - len(fixable_failed_actions)
+    if not fixable_failed_actions:
+        log_info(
+            "[action_parser] Skipping selective correction because all failed actions are unfixable"
+        )
+        return
+
     # Build clear correction prompt
     successful_count = len(successful_actions)
-    failed_count = len(failed_actions)
+    failed_count = len(fixable_failed_actions)
 
     # Extract successful action types for context
     successful_types = [action.get("type", "unknown") for action in successful_actions]
@@ -1282,7 +1292,7 @@ async def _request_selective_correction(
     error_details = []
     # we'll also note globally whether any unknown action types occurred
     unknown_actions: list[str] = []
-    for failed in failed_actions:
+    for failed in fixable_failed_actions:
         action = failed["action"]
         errors = failed["errors"]
         action_type = action.get("type", "unknown")
@@ -1378,11 +1388,17 @@ Respond with JSON containing only the corrected actions (not the successful ones
 IMPORTANT: Do not include the {successful_count} actions that were already executed successfully ({", ".join(successful_types) if successful_types else "none"}).
 """
 
+    if unfixable_failed_count:
+        instruction += "\nDo not retry actions that were blocked by safety policy or otherwise marked unfixable."
+
     correction_context = {
         "previous_response_status": "partial_success",
-        "successful_actions": successful_count,
+        "successful_actions": successful_actions,
         "successful_types": successful_types,
-        "failed_actions": failed_count,
+        "successful_count": successful_count,
+        "failed_actions": fixable_failed_actions,
+        "failed_count": failed_count,
+        "unfixable_failed_count": unfixable_failed_count,
         "correction_needed": True,
         "instruction": instruction,
     }

@@ -656,9 +656,17 @@ async def extract_multimodal_from_telegram(
                 )
                 return []
 
+        photos = getattr(message, "photo", None)
+        document = getattr(message, "document", None)
+        audio = getattr(message, "audio", None)
+        voice = getattr(message, "voice", None)
+        video = getattr(message, "video", None)
+        video_note = getattr(message, "video_note", None)
+        sticker = getattr(message, "sticker", None)
+
         # Handle photos (Telegram sends multiple sizes, get largest)
-        if message.photo:
-            photo = message.photo[-1]  # Last is largest
+        if photos:
+            photo = photos[-1]  # Last is largest
             try:
                 file = await bot.get_file(photo.file_id)
                 file_bytes = await file.download_as_bytearray()
@@ -677,8 +685,8 @@ async def extract_multimodal_from_telegram(
                 log_warning(f"[multimodal] Failed to download Telegram photo: {e}")
 
         # Handle documents (PDFs, etc.)
-        if message.document:
-            doc = message.document
+        if document:
+            doc = document
             mime_type = doc.mime_type or get_mime_type(None, doc.file_name)
 
             if is_supported_type(mime_type):
@@ -707,8 +715,7 @@ async def extract_multimodal_from_telegram(
                 )
 
         # Handle audio files
-        if message.audio:
-            audio = message.audio
+        if audio:
             mime_type = audio.mime_type or get_mime_type(None, audio.file_name)
 
             if is_supported_type(mime_type):
@@ -731,8 +738,7 @@ async def extract_multimodal_from_telegram(
                     log_warning(f"[multimodal] Failed to download Telegram audio: {e}")
 
         # Handle voice messages
-        if message.voice:
-            voice = message.voice
+        if voice:
             mime_type = voice.mime_type or "audio/ogg"  # Telegram voice is usually OGG
 
             if is_supported_type(mime_type):
@@ -752,8 +758,7 @@ async def extract_multimodal_from_telegram(
                     log_warning(f"[multimodal] Failed to download Telegram voice: {e}")
 
         # Handle video files
-        if message.video:
-            video = message.video
+        if video:
             mime_type = video.mime_type or "video/mp4"  # Default to mp4
 
             if is_supported_type(mime_type):
@@ -816,8 +821,7 @@ async def extract_multimodal_from_telegram(
                 log_debug(f"[multimodal] Skipping unsupported video type: {mime_type}")
 
         # Handle video notes (round videos) - these are small circular videos
-        if message.video_note:
-            video_note = message.video_note
+        if video_note:
             # Video notes are always mp4, and typically small (up to 1 minute)
             file_size = getattr(video_note, "file_size", 0) or 0
             if file_size <= 20 * 1024 * 1024:  # 20MB limit
@@ -868,11 +872,10 @@ async def extract_multimodal_from_telegram(
 
         # Handle stickers (as images if static)
         if (
-            message.sticker
-            and not message.sticker.is_animated
-            and not message.sticker.is_video
+            sticker
+            and not getattr(sticker, "is_animated", False)
+            and not getattr(sticker, "is_video", False)
         ):
-            sticker = message.sticker
             try:
                 file = await bot.get_file(sticker.file_id)
                 file_bytes = await file.download_as_bytearray()

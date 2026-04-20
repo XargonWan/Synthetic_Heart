@@ -27,7 +27,7 @@ import requests
 import base64
 import mimetypes
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
     from core.live_session_manager import LiveSessionManager
@@ -554,18 +554,21 @@ class GeminiAPIPlugin(AIPluginBase):
 
             response = await self.client.aio.models.generate_content(
                 model=model_id,
-                contents=[
-                    types.Content(
-                        parts=[
-                            types.Part(text=prompt),
-                            types.Part(
-                                inline_data=types.Blob(
-                                    mime_type=mime_type, data=file_data
-                                )
-                            ),
-                        ]
-                    )
-                ],
+                contents=cast(
+                    Any,
+                    [
+                        types.Content(
+                            parts=[
+                                types.Part(text=prompt),
+                                types.Part(
+                                    inline_data=types.Blob(
+                                        mime_type=mime_type, data=file_data
+                                    )
+                                ),
+                            ]
+                        )
+                    ],
+                ),
                 config=types.GenerateContentConfig(
                     system_instruction=(
                         "You are a speech-to-text transcription system. "
@@ -573,6 +576,24 @@ class GeminiAPIPlugin(AIPluginBase):
                         "interpretation, response, or JSON."
                     ),
                     response_mime_type="text/plain",
+                    safety_settings=[
+                        types.SafetySetting(
+                            category=types.HarmCategory.HARM_CATEGORY_HARASSMENT,
+                            threshold=types.HarmBlockThreshold.OFF,
+                        ),
+                        types.SafetySetting(
+                            category=types.HarmCategory.HARM_CATEGORY_HATE_SPEECH,
+                            threshold=types.HarmBlockThreshold.OFF,
+                        ),
+                        types.SafetySetting(
+                            category=types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
+                            threshold=types.HarmBlockThreshold.OFF,
+                        ),
+                        types.SafetySetting(
+                            category=types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
+                            threshold=types.HarmBlockThreshold.OFF,
+                        ),
+                    ],
                 ),
             )
 
@@ -822,7 +843,7 @@ class GeminiAPIPlugin(AIPluginBase):
         finally:
             self._current_request_meta = None
 
-    async def generate_response(self, messages: object) -> str:  # type: ignore[override]
+    async def generate_response(self, messages: object) -> str:
         """Send prompt to Gemini API and receive the response.
 
         Args:
@@ -849,8 +870,9 @@ class GeminiAPIPlugin(AIPluginBase):
                 and hasattr(prompt, "mode")
             ):
                 from core.prompt_renderers import GeminiRenderer
+                from core.prompt_request import PromptRequest
 
-                renderer = GeminiRenderer(prompt)
+                renderer = GeminiRenderer(cast(PromptRequest, prompt))
                 rendered = renderer.render()
                 _model_cfg = MODEL_CONFIGS.get(
                     self._current_model, MODEL_CONFIGS[DEFAULT_MODEL]
@@ -1192,15 +1214,15 @@ class GeminiAPIPlugin(AIPluginBase):
                 "responseMimeType": "application/json",
             },
             "safetySettings": [
-                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "OFF"},
+                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "OFF"},
                 {
                     "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
-                    "threshold": "BLOCK_NONE",
+                    "threshold": "OFF",
                 },
                 {
                     "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
-                    "threshold": "BLOCK_NONE",
+                    "threshold": "OFF",
                 },
             ],
         }
@@ -1381,15 +1403,15 @@ class GeminiAPIPlugin(AIPluginBase):
                 "responseMimeType": "application/json",
             },
             "safetySettings": [
-                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "OFF"},
+                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "OFF"},
                 {
                     "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
-                    "threshold": "BLOCK_NONE",
+                    "threshold": "OFF",
                 },
                 {
                     "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
-                    "threshold": "BLOCK_NONE",
+                    "threshold": "OFF",
                 },
             ],
         }
@@ -2163,7 +2185,7 @@ class GeminiAurisAdapter:
             for name in reg.get_available_engines():
                 if "gemini" in name.lower():
                     try:
-                        return reg.load_engine(name)  # type: ignore[return-value]
+                        return reg.load_engine(name)
                     except Exception:
                         continue
         except Exception as exc:

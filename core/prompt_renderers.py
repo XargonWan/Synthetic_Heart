@@ -86,6 +86,41 @@ def _build_multimodal_turn_text(
 
     user_text = current_text.strip()
     image_count = sum(1 for part in multimodal_parts if part.get("type") == "image_url")
+    document_descriptions: list[str] = []
+    document_text_sections: list[str] = []
+    document_page_image_sections: list[str] = []
+    for part in multimodal_parts:
+        if part.get("type") != "document":
+            continue
+        document = part.get("document")
+        if not isinstance(document, dict):
+            continue
+        mime_type = str(document.get("mime_type") or "application/octet-stream")
+        filename = str(document.get("filename") or "").strip()
+        label = filename or mime_type
+        if filename:
+            document_descriptions.append(f"{filename} ({mime_type})")
+        else:
+            document_descriptions.append(mime_type)
+        extracted_text = str(document.get("extracted_text") or "").strip()
+        if extracted_text:
+            section = f"=== Document: {label} ===\n{extracted_text}"
+            if bool(document.get("extracted_text_truncated")):
+                section += "\n[Excerpt truncated by system]"
+            document_text_sections.append(section)
+        page_image_count = int(document.get("page_image_count") or 0)
+        if page_image_count > 0 and not extracted_text:
+            section = (
+                f"=== Document: {label} ===\n"
+                f"This document appears to be image-only or scanned. "
+                f"{page_image_count} extracted page image(s) from the document are attached "
+                "as images in this same user turn. Read any visible text from those page "
+                "images before answering."
+            )
+            if bool(document.get("page_images_truncated")):
+                section += "\nOnly the first extracted page image(s) were attached."
+            document_page_image_sections.append(section)
+
     if image_count:
         if user_text:
             segments.append(
@@ -100,6 +135,35 @@ def _build_multimodal_turn_text(
                 "text. Describe only clearly visible details from the attached "
                 "image(s). Do not infer hidden, obscured, or non-visible features. "
                 "If something is ambiguous, say that you are unsure."
+            )
+
+    if document_descriptions:
+        preview = ", ".join(document_descriptions[:3])
+        if len(document_descriptions) > 3:
+            preview = preview + f", +{len(document_descriptions) - 3} more"
+        if document_text_sections:
+            segments.append(
+                f"The user attached {len(document_descriptions)} document(s): {preview}. "
+                "The raw document binary was not forwarded to this OpenAI-compatible "
+                "chat request, but extracted text from the attachment(s) is included "
+                "below for you to read, summarize, and quote."
+            )
+            segments.extend(document_text_sections)
+        elif document_page_image_sections:
+            segments.append(
+                f"The user attached {len(document_descriptions)} document(s): {preview}. "
+                "The raw document binary was not forwarded directly, but page images "
+                "extracted from the document are attached in this turn. Read visible text "
+                "from those page images when answering questions about the document."
+            )
+            segments.extend(document_page_image_sections)
+        else:
+            segments.append(
+                f"The user attached {len(document_descriptions)} document(s): {preview}. "
+                "This OpenAI-compatible chat request did not forward the raw document "
+                "binary to the model. Do not claim to have read document contents that "
+                "were not provided in text. If exact document analysis is needed, ask "
+                "the user for an excerpt or for a document-capable route."
             )
 
     if user_text:
@@ -287,6 +351,8 @@ class OpenAIRenderer:
             ptype = part.get("type", "")
             if ptype == "image_url" and not supports_vision:
                 continue  # silently drop unsupported vision parts
+            if ptype not in {"image_url", "input_audio"}:
+                continue
             content_parts.append(part)
         content_parts.append({"type": "text", "text": text})
 

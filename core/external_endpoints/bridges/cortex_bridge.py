@@ -12,7 +12,7 @@ import asyncio
 import base64
 import copy
 import json
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from core.ai_plugin_base import AIPluginBase
 from core.logging_utils import log_debug, log_warning
@@ -88,6 +88,8 @@ def _extract_attachments_and_redact(
 class ExternalCortexEngine(AIPluginBase):
     """AIPluginBase implementation backed by an external endpoint adapter."""
 
+    supports_prompt_request = True
+
     def __init__(
         self,
         endpoint: "ExternalEndpoint",
@@ -104,12 +106,21 @@ class ExternalCortexEngine(AIPluginBase):
     # Multimodal format helpers
     # ------------------------------------------------------------------
 
-    def _format_mm_part(self, part: dict[str, str]) -> dict[str, Any]:
+    _OPENAI_AUDIO_FORMATS: ClassVar[dict[str, str]] = {
+        "audio/wav": "wav",
+        "audio/x-wav": "wav",
+        "audio/mpeg": "mp3",
+        "audio/mp3": "mp3",
+    }
+
+    def _format_mm_part(self, part: dict[str, Any]) -> dict[str, Any]:
         """Format a multimodal attachment dict for the endpoint's wire protocol.
 
         Gemini expects ``{"type": "inline_data", "inline_data": {…}}``,
-        while OpenAI-compat endpoints (OpenRouter, Grok, GPT, etc.) expect
-        ``{"type": "image_url", "image_url": {"url": "data:…;base64,…"}}``.
+        while OpenAI-compat endpoints (OpenRouter, Grok, GPT, etc.) only get
+        raw binary parts for media types the wire format can express directly.
+        Documents are downgraded to metadata-only placeholders so PDF bytes are
+        not mislabeled as images.
 
         The Gemini adapter already converts ``image_url`` → ``inline_data``
         internally, so emitting ``image_url`` is safe for *all* protocols,
@@ -118,17 +129,48 @@ class ExternalCortexEngine(AIPluginBase):
         from core.external_endpoints.models import EndpointProtocol
 
         mime = part["mime_type"]
-        data = part["data"]
+        data = part.get("data", "")
+        filename = part.get("filename")
+        extracted_text = part.get("extracted_text")
+        extracted_text_truncated = bool(part.get("extracted_text_truncated"))
+        page_image_count = int(part.get("page_image_count") or 0)
+        page_images_truncated = bool(part.get("page_images_truncated"))
 
         if self._endpoint.protocol == EndpointProtocol.GEMINI:
             return {
                 "type": "inline_data",
                 "inline_data": {"mime_type": mime, "data": data},
             }
-        # OpenAI / Anthropic / Custom — use data-URI image_url format
+
+        if mime.startswith("image/"):
+            return {
+                "type": "image_url",
+                "image_url": {"url": f"data:{mime};base64,{data}"},
+            }
+
+        audio_format = self._OPENAI_AUDIO_FORMATS.get(mime.lower())
+        if audio_format:
+            return {
+                "type": "input_audio",
+                "input_audio": {"data": data, "format": audio_format},
+            }
+
+        document_part: dict[str, Any] = {
+            "type": "document",
+            "document": {"mime_type": mime},
+        }
+        if isinstance(filename, str) and filename:
+            document_part["document"]["filename"] = filename
+        if isinstance(extracted_text, str) and extracted_text.strip():
+            document_part["document"]["extracted_text"] = extracted_text
+            if extracted_text_truncated:
+                document_part["document"]["extracted_text_truncated"] = True
+        if page_image_count > 0:
+            document_part["document"]["page_image_count"] = page_image_count
+            if page_images_truncated:
+                document_part["document"]["page_images_truncated"] = True
         return {
-            "type": "image_url",
-            "image_url": {"url": f"data:{mime};base64,{data}"},
+            **document_part,
         }
 
     def _build_mm_parts_from_prompt_request(self, req: Any) -> list[dict[str, Any]]:
@@ -140,20 +182,67 @@ class ExternalCortexEngine(AIPluginBase):
             if not isinstance(mime, str) or not mime:
                 continue
 
+            filename = getattr(attachment, "filename", None)
+            part_meta: dict[str, Any] = {"mime_type": mime}
+            if isinstance(filename, str) and filename:
+                part_meta["filename"] = filename
+            media_metadata = getattr(attachment, "media_metadata", None)
+            page_images: list[dict[str, Any]] = []
+            if isinstance(media_metadata, dict):
+                extracted_text = media_metadata.get("extracted_text")
+                if isinstance(extracted_text, str) and extracted_text.strip():
+                    part_meta["extracted_text"] = extracted_text
+                    if bool(media_metadata.get("extracted_text_truncated")):
+                        part_meta["extracted_text_truncated"] = True
+                raw_page_images = media_metadata.get("page_images")
+                if isinstance(raw_page_images, list):
+                    for raw_page_image in raw_page_images:
+                        if not isinstance(raw_page_image, dict):
+                            continue
+                        page_mime = raw_page_image.get("mime_type")
+                        page_data = raw_page_image.get("data")
+                        if not isinstance(page_mime, str) or not isinstance(
+                            page_data, str
+                        ):
+                            continue
+                        page_part: dict[str, Any] = {
+                            "mime_type": page_mime,
+                            "data": page_data,
+                        }
+                        page_filename = raw_page_image.get("filename")
+                        if isinstance(page_filename, str) and page_filename:
+                            page_part["filename"] = page_filename
+                        page_images.append(page_part)
+                if page_images:
+                    part_meta["page_image_count"] = len(page_images)
+                    if bool(media_metadata.get("page_images_truncated")):
+                        part_meta["page_images_truncated"] = True
+
+            built_part: dict[str, Any] | None = None
+
             data = getattr(attachment, "data", None)
             if isinstance(data, bytes):
                 b64_data = base64.b64encode(data).decode("ascii")
-                parts.append(
-                    self._format_mm_part({"mime_type": mime, "data": b64_data})
-                )
-                continue
-            if isinstance(data, str) and data:
-                parts.append(self._format_mm_part({"mime_type": mime, "data": data}))
-                continue
+                part_meta["data"] = b64_data
+                built_part = self._format_mm_part(part_meta)
+            elif isinstance(data, str) and data:
+                part_meta["data"] = data
+                built_part = self._format_mm_part(part_meta)
+            else:
+                url = getattr(attachment, "url", None)
+                if isinstance(url, str) and url:
+                    if mime.startswith("image/"):
+                        built_part = {"type": "image_url", "image_url": {"url": url}}
+                    else:
+                        built_part = self._format_mm_part(part_meta)
+                elif part_meta.get("extracted_text") or page_images:
+                    built_part = self._format_mm_part(part_meta)
 
-            url = getattr(attachment, "url", None)
-            if isinstance(url, str) and url:
-                parts.append({"type": "image_url", "image_url": {"url": url}})
+            if built_part is not None:
+                parts.append(built_part)
+
+            for page_image in page_images:
+                parts.append(self._format_mm_part(page_image))
 
         return parts
 

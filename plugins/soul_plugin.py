@@ -226,6 +226,12 @@ class SoulPlugin(PluginBase):
             return {}
 
         interface_path = self._extract_interface_path(message, context_memory)
+        if interface_path.startswith("grillo/"):
+            log_debug(
+                "[soul_plugin] Skipping SOUL static injection for internal Grillo interface"
+            )
+            return {}
+
         now = datetime.now(timezone.utc)
 
         session = self._sessions.get(interface_path)

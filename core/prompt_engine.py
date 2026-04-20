@@ -1,5 +1,7 @@
 # core/prompt_engine.py
 
+import base64
+import mimetypes
 import random
 import re
 import time as time_module
@@ -44,6 +46,39 @@ else:  # pragma: no cover
 # The actual value comes from the active LLM engine's configuration.
 # For model limits, see the individual cortex/llm_provider/* engines, e.g. MODEL_LIMITS_MAP["default"]
 DEFAULT_MAX_PROMPT_CHARS = None  # Will be set dynamically from LLM engine
+
+_ATTACHMENT_TEXT_CHAR_LIMIT = 12000
+_PDF_PAGE_IMAGE_LIMIT = 4
+_ATTACHMENT_TEXT_MIME_TYPES = {
+    "application/json",
+    "application/xml",
+    "application/javascript",
+    "application/x-javascript",
+}
+_ATTACHMENT_TEXT_EXTENSIONS = (
+    ".txt",
+    ".md",
+    ".csv",
+    ".log",
+    ".json",
+    ".xml",
+    ".yaml",
+    ".yml",
+    ".toml",
+    ".ini",
+    ".cfg",
+    ".conf",
+    ".py",
+    ".js",
+    ".ts",
+    ".html",
+    ".css",
+    ".sh",
+    ".bat",
+    ".rst",
+    ".tex",
+    ".sql",
+)
 
 _LEGACY_BUILD_JSON_PROMPT_WARNED = False
 
@@ -332,16 +367,214 @@ def _build_pr_attachments(
     for att in raw_attachments or []:
         if not isinstance(att, dict):
             continue
+        mime_type = att.get("mime_type") or "application/octet-stream"
+        filename = att.get("filename")
+        media_metadata = dict(att.get("media_metadata") or {})
+        extracted_text = media_metadata.get("extracted_text")
+        if not isinstance(extracted_text, str) or not extracted_text.strip():
+            extracted_text, was_truncated = _extract_attachment_text_preview(
+                mime_type=mime_type,
+                filename=filename,
+                data=att.get("data"),
+            )
+            if extracted_text:
+                media_metadata["extracted_text"] = extracted_text
+                if was_truncated:
+                    media_metadata["extracted_text_truncated"] = True
+            elif mime_type == "application/pdf" or str(filename or "").lower().endswith(
+                ".pdf"
+            ):
+                page_images, page_images_truncated = _extract_pdf_page_images(
+                    filename=filename,
+                    data=att.get("data"),
+                )
+                if page_images:
+                    media_metadata["page_images"] = page_images
+                    if page_images_truncated:
+                        media_metadata["page_images_truncated"] = True
         result.append(
             Attachment(
-                mime_type=att.get("mime_type") or "application/octet-stream",
+                mime_type=mime_type,
                 data=att.get("data"),
-                filename=att.get("filename"),
-                media_metadata=att.get("media_metadata") or {},
+                filename=filename,
+                media_metadata=media_metadata,
             )
         )
 
     return result
+
+
+def _extract_attachment_text_preview(
+    mime_type: str | None,
+    filename: str | None,
+    data: Any,
+) -> tuple[str | None, bool]:
+    """Extract a bounded text preview from textual or PDF attachments."""
+
+    mime = str(mime_type or "").lower()
+    filename_lower = str(filename or "").lower()
+
+    raw_bytes = _coerce_attachment_bytes(data)
+    if not raw_bytes:
+        return None, False
+
+    is_pdf = mime == "application/pdf" or filename_lower.endswith(".pdf")
+    is_textual = mime.startswith("text/") or mime in _ATTACHMENT_TEXT_MIME_TYPES
+    if not is_textual and filename_lower:
+        is_textual = filename_lower.endswith(_ATTACHMENT_TEXT_EXTENSIONS)
+
+    if is_pdf:
+        try:
+            from io import BytesIO
+
+            from pypdf import PdfReader
+
+            reader = PdfReader(BytesIO(raw_bytes))
+            page_chunks: list[str] = []
+            for page_num, page in enumerate(reader.pages, start=1):
+                page_text = str(page.extract_text() or "").strip()
+                if not page_text:
+                    continue
+                page_chunks.append(f"[Page {page_num}]\n{page_text}")
+                joined = "\n\n".join(page_chunks)
+                if len(joined) >= _ATTACHMENT_TEXT_CHAR_LIMIT:
+                    return _truncate_attachment_text(joined)
+
+            if page_chunks:
+                return _truncate_attachment_text("\n\n".join(page_chunks))
+        except Exception as exc:
+            log_warning(
+                f"[prompt_engine] Failed to extract PDF text from {filename or 'attachment'}: {exc}"
+            )
+        return None, False
+
+    if not is_textual:
+        return None, False
+
+    text = raw_bytes.decode("utf-8", errors="replace").strip()
+    if not text:
+        return None, False
+    return _truncate_attachment_text(text)
+
+
+def _extract_pdf_page_images(
+    filename: str | None,
+    data: Any,
+) -> tuple[list[dict[str, str]], bool]:
+    """Extract up to a small number of page images from a scanned PDF."""
+
+    raw_bytes = _coerce_attachment_bytes(data)
+    if not raw_bytes:
+        return [], False
+
+    try:
+        from io import BytesIO
+
+        from pypdf import PdfReader
+
+        reader = PdfReader(BytesIO(raw_bytes))
+        stem = os.path.splitext(filename or "document")[0] or "document"
+        images: list[dict[str, str]] = []
+        truncated = False
+
+        for page_num, page in enumerate(reader.pages, start=1):
+            if len(images) >= _PDF_PAGE_IMAGE_LIMIT:
+                truncated = True
+                break
+
+            try:
+                page_images = list(page.images)
+            except Exception as exc:
+                log_debug(
+                    f"[prompt_engine] Failed to inspect PDF page images for {filename or 'attachment'} page {page_num}: {exc}"
+                )
+                continue
+
+            if not page_images:
+                continue
+
+            # Prefer the largest image on the page; scanned PDFs typically have
+            # one dominant full-page raster image.
+            page_image = max(
+                page_images,
+                key=lambda candidate: len(getattr(candidate, "data", b"") or b""),
+            )
+            image_bytes = getattr(page_image, "data", b"") or b""
+            if not isinstance(image_bytes, bytes) or not image_bytes:
+                continue
+
+            image_name = str(getattr(page_image, "name", "") or "")
+            image_mime = _guess_binary_mime_type(image_name, image_bytes)
+            if not image_mime.startswith("image/"):
+                continue
+
+            ext = mimetypes.guess_extension(image_mime) or ".bin"
+            images.append(
+                {
+                    "mime_type": image_mime,
+                    "data": base64.b64encode(image_bytes).decode("ascii"),
+                    "filename": f"{stem}_page_{page_num}{ext}",
+                }
+            )
+
+        return images, truncated
+    except Exception as exc:
+        log_warning(
+            f"[prompt_engine] Failed to extract PDF page images from {filename or 'attachment'}: {exc}"
+        )
+        return [], False
+
+
+def _coerce_attachment_bytes(data: Any) -> bytes | None:
+    """Best-effort decode for attachment payloads stored as raw bytes or base64."""
+
+    if isinstance(data, bytes):
+        return data
+    if isinstance(data, bytearray):
+        return bytes(data)
+    if not isinstance(data, str) or not data:
+        return None
+
+    try:
+        return base64.b64decode(data, validate=True)
+    except Exception:
+        return data.encode("utf-8", errors="replace")
+
+
+def _guess_binary_mime_type(filename: str | None, data: bytes) -> str:
+    """Infer a MIME type from filename and common binary signatures."""
+
+    guessed, _ = mimetypes.guess_type(filename or "")
+    if guessed:
+        return guessed
+
+    signatures: tuple[tuple[bytes, str], ...] = (
+        (b"\x89PNG\r\n\x1a\n", "image/png"),
+        (b"\xff\xd8\xff", "image/jpeg"),
+        (b"GIF87a", "image/gif"),
+        (b"GIF89a", "image/gif"),
+        (b"BM", "image/bmp"),
+        (b"II*\x00", "image/tiff"),
+        (b"MM\x00*", "image/tiff"),
+        (b"RIFF", "image/webp"),
+    )
+    for prefix, mime_type in signatures:
+        if data.startswith(prefix):
+            if mime_type == "image/webp" and len(data) >= 12 and data[8:12] != b"WEBP":
+                continue
+            return mime_type
+    return "application/octet-stream"
+
+
+def _truncate_attachment_text(text: str) -> tuple[str | None, bool]:
+    """Trim extracted attachment text to a prompt-safe bound."""
+
+    cleaned = text.strip()
+    if not cleaned:
+        return None, False
+    if len(cleaned) <= _ATTACHMENT_TEXT_CHAR_LIMIT:
+        return cleaned, False
+    return cleaned[:_ATTACHMENT_TEXT_CHAR_LIMIT].rstrip() + "\n[... truncated]", True
 
 
 def _assemble_prompt_request(  # noqa: PLR0913
@@ -437,7 +670,11 @@ def _assemble_prompt_request(  # noqa: PLR0913
     from_user = getattr(message, "from_user", None)
     username: str | None = get_user_display_name(from_user) if from_user else None
     usertag: str | None = get_user_usertag(from_user) if from_user else None
-    message_id: int | None = getattr(message, "message_id", None)
+    message_id: int | str | None = getattr(message, "message_id", None)
+    try:
+        runtime_message_id = int(message_id) if message_id is not None else None
+    except (TypeError, ValueError):
+        runtime_message_id = None
 
     voice_channel_id_val = context_section.get("voice_channel_id")
     voice_channel_id_str: str | None = (
@@ -452,7 +689,7 @@ def _assemble_prompt_request(  # noqa: PLR0913
     runtime_ctx = RuntimeContext(
         interface_name=interface_name,
         interface_path=interface_path,
-        message_id=int(message_id) if message_id is not None else None,
+        message_id=runtime_message_id,
         username=username,
         usertag=usertag,
         timestamp=msg_timestamp,

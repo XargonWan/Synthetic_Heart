@@ -26,7 +26,7 @@ is treated as a correctable error; the corrector will request valid JSON format.
 
 import asyncio
 from types import SimpleNamespace
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, cast
 
 from core.logging_utils import log_debug, log_info, log_warning, log_error
 from core.config_manager import config_registry
@@ -62,8 +62,9 @@ def get_failed_message_text() -> str:
     """Get the fallback message when LLM fails."""
     fallback = FAILED_MESSAGE_TEXT
     # Ensure we return a string (ConfigVar might be returned)
-    if hasattr(fallback, "get_value"):
-        fallback = fallback.get_value()
+    get_value = getattr(fallback, "get_value", None)
+    if callable(get_value):
+        fallback = get_value()
     return str(fallback)
 
 
@@ -74,6 +75,11 @@ _INTERFACE_TO_MESSAGE_ACTION: Dict[str, str] = {
     "synth_webui": "message_synth_webui",
     "matrix_chat": "message_matrix_chat",
     "ollama_serve": "message_ollama_serve",
+}
+
+_ACTION_TYPE_ALIASES: Dict[str, str] = {
+    "diary": "create_personal_diary_entry",
+    "diary_entry": "create_personal_diary_entry",
 }
 
 # Keys that are part of the action envelope and must NOT be swept into payload
@@ -147,6 +153,121 @@ def _normalize_message_payload_text(actions: list) -> list:
                 break
 
     return actions
+
+
+def _normalize_action_type_aliases(actions: list) -> list:
+    """Rewrite legacy action aliases to their canonical registered names."""
+
+    if not actions:
+        return actions
+
+    for action in actions:
+        if not isinstance(action, dict):
+            continue
+
+        action_type = action.get("type") or action.get("action")
+        if not isinstance(action_type, str):
+            continue
+
+        canonical_type = _ACTION_TYPE_ALIASES.get(action_type)
+        if not canonical_type or canonical_type == action_type:
+            continue
+
+        action["type"] = canonical_type
+        log_debug(
+            f"[message_chain] Normalized action type alias: {action_type} -> {canonical_type}"
+        )
+
+    return actions
+
+
+def _normalize_diary_payload_fields(actions: list) -> list:
+    """Promote legacy diary payload keys to canonical create_personal_diary_entry fields."""
+
+    if not actions:
+        return actions
+
+    legacy_field_map = {
+        "entry": "interaction_summary",
+        "summary": "interaction_summary",
+        "thought": "personal_thought",
+    }
+
+    diary_action: dict[str, Any] | None = None
+    for action in actions:
+        if not isinstance(action, dict):
+            continue
+
+        action_type = action.get("type") or action.get("action")
+        if action_type != "create_personal_diary_entry":
+            continue
+
+        payload = action.get("payload")
+        if isinstance(payload, dict):
+            diary_action = action
+            break
+
+    normalized_actions = []
+
+    for action in actions:
+        if not isinstance(action, dict):
+            normalized_actions.append(action)
+            continue
+
+        action_type = action.get("type") or action.get("action")
+        if action_type == "thought":
+            payload = action.get("payload")
+            diary_payload = diary_action.get("payload") if diary_action else None
+            if isinstance(payload, dict) and isinstance(diary_payload, dict):
+                thought_value = payload.get("personal_thought") or payload.get(
+                    "thought"
+                )
+                existing_thought = diary_payload.get("personal_thought")
+                if isinstance(thought_value, str) and thought_value.strip():
+                    if isinstance(existing_thought, str) and existing_thought.strip():
+                        if thought_value.strip() not in existing_thought:
+                            diary_payload["personal_thought"] = (
+                                f"{existing_thought}\n\n{thought_value}"
+                            )
+                    else:
+                        diary_payload["personal_thought"] = thought_value
+                if not diary_payload.get("timestamp") and payload.get("timestamp"):
+                    diary_payload["timestamp"] = payload["timestamp"]
+                log_debug(
+                    "[message_chain] Folded legacy thought action into create_personal_diary_entry"
+                )
+                continue
+
+            normalized_actions.append(action)
+            continue
+
+        if action_type != "create_personal_diary_entry":
+            normalized_actions.append(action)
+            continue
+
+        payload = action.get("payload")
+        if not isinstance(payload, dict):
+            normalized_actions.append(action)
+            continue
+
+        for legacy_field, canonical_field in legacy_field_map.items():
+            canonical_value = payload.get(canonical_field)
+            if isinstance(canonical_value, str) and canonical_value.strip():
+                continue
+
+            legacy_value = payload.get(legacy_field)
+            if not isinstance(legacy_value, str) or not legacy_value.strip():
+                continue
+
+            payload[canonical_field] = legacy_value
+            log_debug(
+                "[message_chain] Normalized diary payload field: "
+                f"{legacy_field} -> {canonical_field}"
+            )
+
+        normalized_actions.append(action)
+
+    return normalized_actions
 
 
 def _auto_inject_interface_path(actions: list, interface_path: Optional[str]) -> list:
@@ -272,7 +393,10 @@ def _normalize_message_unknown(actions: list, interface_path: Optional[str]) -> 
 
 
 async def send_llm_fallback_message(
-    bot, message: SimpleNamespace, failure_reason: str, context: dict = None
+    bot,
+    message: SimpleNamespace,
+    failure_reason: str,
+    context: dict[str, Any] | None = None,
 ) -> str:
     """Send fallback message when LLM fails and log the failure reason.
 
@@ -284,8 +408,9 @@ async def send_llm_fallback_message(
     """
     fallback_text = get_failed_message_text()
     # Ensure fallback_text is a string (ConfigVar might be returned)
-    if hasattr(fallback_text, "get_value"):
-        fallback_text = fallback_text.get_value()
+    fallback_get_value = getattr(fallback_text, "get_value", None)
+    if callable(fallback_get_value):
+        fallback_text = fallback_get_value()
     fallback_text = str(fallback_text)
     chat_id = getattr(message, "chat_id", None)
     # Preserve thread_id when available so the fallback message is routed to the
@@ -389,7 +514,7 @@ async def handle_incoming_message(
     from core.transport_layer import extract_json_from_text, run_corrector_middleware
     from core.action_parser import run_actions, CORRECTOR_RETRIES
     from types import SimpleNamespace
-    from datetime import datetime
+    from datetime import datetime, timezone
 
     # Extract interface_path early for debug tracing
     _entry_interface_path = kwargs.get("interface_path") or (
@@ -419,7 +544,7 @@ async def handle_incoming_message(
         message.chat_id = kwargs.get("chat_id")
         message.text = ""
         message.interface_path = kwargs.get("interface_path")
-        message.date = datetime.utcnow()
+        message.date = datetime.now(timezone.utc)
 
     # Default context
     ctx = context or {}
@@ -595,11 +720,7 @@ async def handle_incoming_message(
         metadata = {}
         try:
             log_info("[message_chain] Attempting to extract JSON from text...")
-            _maybe = extract_json_from_text(text, return_metadata=True)
-            if asyncio.iscoroutine(_maybe):
-                parsed, metadata = await _maybe
-            else:
-                parsed, metadata = _maybe
+            parsed, metadata = extract_json_from_text(text, return_metadata=True)
             log_info(
                 f"[message_chain] JSON extraction completed: parsed={parsed is not None} recovered={metadata.get('recovered')}"
             )
@@ -688,6 +809,7 @@ async def handle_incoming_message(
                     # Normalize OpenAI tool calling format (name/parameters) to type/payload
                     for i, act in enumerate(actions):
                         if isinstance(act, dict):
+                            act = cast(dict[str, Any], act)
                             # Normalize legacy single-key action objects inside the
                             # actions array, e.g. {"create_personal_diary_entry": {...}}
                             # to the canonical {"type": ..., "payload": ...} format.
@@ -708,7 +830,7 @@ async def handle_incoming_message(
                                         "type": action_name,
                                         "payload": normalized_payload,
                                     }
-                                    act = actions[i]
+                                    act = cast(dict[str, Any], actions[i])
                                     log_info(
                                         "[message_chain] 🔄 Normalized legacy single-key action object inside actions array: "
                                         f"{action_name}"
@@ -765,6 +887,7 @@ async def handle_incoming_message(
                 # Normalize OpenAI tool calling format for bare list responses
                 for i, act in enumerate(actions):
                     if isinstance(act, dict):
+                        act = cast(dict[str, Any], act)
                         # Normalize type
                         if "type" not in act:
                             _t = (
@@ -1081,13 +1204,22 @@ async def handle_incoming_message(
                                     "reply",
                                     "response",
                                 ) and isinstance(value, str):
+
+                                    def _matches_existing_message(action: Any) -> bool:
+                                        if not isinstance(action, dict):
+                                            return False
+                                        action_type = action.get("type")
+                                        if not isinstance(action_type, str):
+                                            return False
+                                        if not action_type.startswith("message_"):
+                                            return False
+                                        payload = action.get("payload")
+                                        if not isinstance(payload, dict):
+                                            return False
+                                        return payload.get("text") == value
+
                                     already_present = any(
-                                        isinstance(a, dict)
-                                        and isinstance(a.get("type"), str)
-                                        and a.get("type").startswith("message_")
-                                        and isinstance(a.get("payload"), dict)
-                                        and a["payload"].get("text") == value
-                                        for a in actions
+                                        _matches_existing_message(a) for a in actions
                                     )
                                     if already_present:
                                         log_debug(
@@ -1129,6 +1261,8 @@ async def handle_incoming_message(
 
                 ctx_interface_path = ctx.get("interface_path") if ctx else None
                 actions = _normalize_message_unknown(actions, ctx_interface_path)
+                actions = _normalize_action_type_aliases(actions)
+                actions = _normalize_diary_payload_fields(actions)
                 actions = _normalize_message_payload_text(actions)
                 # Auto-inject interface_path into message actions that are missing it
                 # This prevents validation failures and avoids costly LLM correction calls
@@ -1230,7 +1364,8 @@ async def handle_incoming_message(
                         }
                         if valid_feelings:
                             dominant_emotion = max(
-                                valid_feelings, key=valid_feelings.get
+                                valid_feelings.keys(),
+                                key=lambda emotion_name: valid_feelings[emotion_name],
                             )
                             if valid_feelings[dominant_emotion] > 0:
                                 log_debug(
@@ -1300,6 +1435,7 @@ async def handle_incoming_message(
                             current_message_action_types = []
 
                     if isinstance(actions, list):
+                        actions = cast(list[dict[str, Any]], actions)
                         # ========================================
                         # STRIP TTS FROM AUTONOMOUS MESSAGES
                         # ========================================
@@ -1308,7 +1444,9 @@ async def handle_incoming_message(
                         has_autonomous_message = False
                         for action in actions:
                             if isinstance(action, dict):
-                                action_meta = action.get("meta", {})
+                                action_meta = action.get("meta")
+                                if not isinstance(action_meta, dict):
+                                    action_meta = {}
                                 action_name = action.get("action") or action.get("type")
                                 # Check if this is an autonomous message action
                                 if action_meta.get("autonomous", False) is True:
@@ -1334,8 +1472,11 @@ async def handle_incoming_message(
                             if tts_to_remove:
                                 for i in reversed(tts_to_remove):
                                     removed = actions.pop(i)
+                                    removed_payload = removed.get("payload")
+                                    if not isinstance(removed_payload, dict):
+                                        removed_payload = {}
                                     log_debug(
-                                        f"[message_chain] 🔇 Stripped TTS from autonomous message: {removed.get('payload', {}).get('text', '')[:40]}..."
+                                        f"[message_chain] 🔇 Stripped TTS from autonomous message: {removed_payload.get('text', '')[:40]}..."
                                     )
 
                         for action in actions:
@@ -1353,7 +1494,12 @@ async def handle_incoming_message(
 
                     # Auto-inject TTS if there's a user response but no tts_speak
                     # Only for actual user-facing interfaces (not internal like grillo)
-                    if has_user_response and not has_tts and user_message_action:
+                    if (
+                        has_user_response
+                        and not has_tts
+                        and user_message_action
+                        and isinstance(actions, list)
+                    ):
                         # Check if this is for a user-facing interface
                         user_facing_interfaces = [
                             "discord_bot",
@@ -1388,18 +1534,22 @@ async def handle_incoming_message(
                         # Check for autonomous messages (Grillo outreach, dreams, etc.)
                         # These are system-initiated, not user-response, so they shouldn't get TTS
                         action_meta = (
-                            user_message_action.get("meta", {})
+                            user_message_action.get("meta")
                             if isinstance(user_message_action, dict)
                             else {}
                         )
+                        if not isinstance(action_meta, dict):
+                            action_meta = {}
                         is_autonomous = action_meta.get("autonomous", False) is True
 
                         # Check for system startup/internal message patterns
                         payload = (
-                            user_message_action.get("payload", {})
+                            user_message_action.get("payload")
                             if isinstance(user_message_action, dict)
                             else {}
                         )
+                        if not isinstance(payload, dict):
+                            payload = {}
                         text_to_speak = (
                             payload.get("text")
                             or payload.get("content")
@@ -1611,7 +1761,8 @@ async def handle_incoming_message(
                                     actions[:] = [
                                         a
                                         for a in actions
-                                        if (a.get("action") or a.get("type"))
+                                        if isinstance(a, dict)
+                                        and (a.get("action") or a.get("type"))
                                         not in current_message_action_types
                                     ]
                                     tts_action = {
@@ -1831,6 +1982,17 @@ async def handle_incoming_message(
                                 f"[message_chain] Skipping correction for {len(unfixable_failures)} unfixable policy errors: {unfixable_types}"
                             )
 
+                        recovered_with_extra_text = bool(
+                            metadata.get("recovered", False)
+                            and (
+                                metadata.get("had_extra_text", False)
+                                or metadata.get("prefix_length", 0)
+                                or metadata.get("suffix_length", 0)
+                                or metadata.get("unparsed_content", "")
+                                or metadata.get("recovery_attempts", 0)
+                            )
+                        )
+
                         needs_correction = len(fixable_failures) > 0 or metadata.get(
                             "recovered", False
                         )
@@ -1852,10 +2014,26 @@ async def handle_incoming_message(
                         if needs_correction and (
                             source == "llm" or getattr(message, "from_cortex", False)
                         ):
-                            # Some actions failed or JSON was corrupted - request selective correction
-                            log_warning(
-                                f"[message_chain] {len(failed)} actions failed, requesting correction for missing/invalid actions"
-                            )
+                            # Some actions failed or JSON was corrupted - request selective correction.
+                            # If recovery left extra trailing content, we may have silently dropped
+                            # additional actions after executing the ones we could salvage.
+                            if len(failed) > 0:
+                                log_warning(
+                                    f"[message_chain] {len(failed)} actions failed, requesting correction for missing/invalid actions"
+                                )
+                            elif recovered_with_extra_text:
+                                extra_chars = int(
+                                    metadata.get("prefix_length", 0)
+                                ) + int(metadata.get("suffix_length", 0))
+                                log_warning(
+                                    "[message_chain] Recovered LLM JSON still had extra trailing content "
+                                    f"({extra_chars} chars, {metadata.get('error_count', 0)} parse errors); "
+                                    "requesting correction for dropped actions"
+                                )
+                            else:
+                                log_warning(
+                                    "[message_chain] JSON recovery requires correction despite no execution failures"
+                                )
 
                             # Build correction context with info about what succeeded and what failed
                             correction_context = {
@@ -1877,7 +2055,7 @@ async def handle_incoming_message(
 
                             # Set parsed = None to trigger correction path
                             # But keep the successful actions already executed
-                            if len(failed) > 0:
+                            if len(failed) > 0 or recovered_with_extra_text:
                                 parsed = (
                                     None  # This will trigger the correction loop below
                                 )

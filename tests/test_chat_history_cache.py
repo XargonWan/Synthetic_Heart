@@ -193,3 +193,50 @@ async def test_save_chat_message_forwards_self_reply_to_live(monkeypatch):
     assert "primary loose template" in calls[0][1]
     assert "same opening idea" in calls[0][1]
     assert calls[0][1].endswith("bot reply")
+
+
+@pytest.mark.asyncio
+async def test_save_chat_message_uses_parametrized_dedup_cutoff(monkeypatch):
+    executed: list[tuple[str, tuple[object, ...] | None]] = []
+
+    class DummyCursor:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            pass
+
+        async def execute(self, q, params: tuple[object, ...] | None = None):
+            executed.append((q, params))
+
+        async def fetchone(self):
+            return None
+
+    class DummyConn:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            pass
+
+        def cursor(self):
+            return DummyCursor()
+
+    monkeypatch.setattr(chat_history_cache, "get_conn_ctx", lambda: DummyConn())
+
+    result = await chat_history_cache.save_chat_message(
+        interface_path="telegram_bot/123",
+        message_text="hello again",
+        sender_name="Alice",
+        sender_id="alice123",
+        timestamp=datetime.now(UTC),
+    )
+
+    assert result is True
+    dedup_query, dedup_params = executed[0]
+    assert "DATE_SUB" not in dedup_query
+    assert "UTC_TIMESTAMP()" not in dedup_query
+    assert "timestamp > %s" in dedup_query
+    assert dedup_params is not None
+    assert len(dedup_params) == 3
+    assert isinstance(dedup_params[2], datetime)

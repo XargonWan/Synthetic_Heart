@@ -10,7 +10,7 @@ cached in a database table and limited to the configured CHAT_HISTORY_LIMIT.
 
 import asyncio
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from collections import deque
 from typing import Any
 from core.db import get_conn_ctx
@@ -116,15 +116,16 @@ async def save_chat_message(
                 # Deduplication: Check for identical message text within last 5 seconds for this interface
                 # This prevents double-logging from different pipeline stages (e.g. generation vs dispatch)
                 try:
+                    dedup_cutoff = datetime.now(timezone.utc) - timedelta(seconds=5)
                     await cur.execute(
                         """
                         SELECT id FROM chat_history_cache 
                         WHERE interface_path = %s 
                         AND message_text = %s 
-                        AND timestamp > DATE_SUB(UTC_TIMESTAMP(), INTERVAL 5 SECOND)
+                        AND timestamp > %s
                         LIMIT 1
                         """,
-                        (interface_path, message_text),
+                        (interface_path, message_text, dedup_cutoff),
                     )
                     if await cur.fetchone():
                         log_debug(

@@ -223,6 +223,85 @@ def test_handle_incoming_message_forwards_image_parts_with_selected_model() -> N
     assert any(part.get("type") == "image_url" for part in last_content)
 
 
+def test_handle_incoming_message_downgrades_pdf_to_document_note() -> None:
+    endpoint = _make_endpoint(default_model="x-ai/grok-4.1-fast")
+    adapter_mock = MagicMock()
+    adapter_mock.chat_completion = AsyncMock(return_value=MagicMock(content="ok"))
+    bridge = ExternalCortexEngine(endpoint, adapter_mock)
+
+    req = PromptRequest(
+        system_instruction="SYSTEM RULES",
+        current_text="Can you read this manual?",
+        runtime_ctx=RuntimeContext(username="scarlet"),
+        attachments=[
+            Attachment(
+                mime_type="application/pdf",
+                data="AAAA",
+                filename="manual.pdf",
+                media_metadata={"extracted_text": "[Page 1]\nMotor spec page"},
+            )
+        ],
+        mode="chat",
+    )
+
+    result = asyncio.run(bridge.handle_incoming_message(None, None, req))
+
+    assert result == "ok"
+    await_args = adapter_mock.chat_completion.await_args
+    assert await_args is not None
+    sent_messages = await_args.args[0]
+    last_content = sent_messages[-1]["content"]
+    assert isinstance(last_content, list)
+    assert not any(part.get("type") == "image_url" for part in last_content)
+    text_part = next(part for part in last_content if part.get("type") == "text")
+    assert "manual.pdf" in text_part["text"]
+    assert "extracted text from the attachment" in text_part["text"]
+    assert "Motor spec page" in text_part["text"]
+
+
+def test_handle_incoming_message_forwards_scanned_pdf_page_images() -> None:
+    endpoint = _make_endpoint(default_model="x-ai/grok-4.1-fast")
+    adapter_mock = MagicMock()
+    adapter_mock.chat_completion = AsyncMock(return_value=MagicMock(content="ok"))
+    bridge = ExternalCortexEngine(endpoint, adapter_mock)
+
+    req = PromptRequest(
+        system_instruction="SYSTEM RULES",
+        current_text="Can you read this scanned manual?",
+        runtime_ctx=RuntimeContext(username="scarlet"),
+        attachments=[
+            Attachment(
+                mime_type="application/pdf",
+                data="AAAA",
+                filename="manual.pdf",
+                media_metadata={
+                    "page_images": [
+                        {
+                            "mime_type": "image/png",
+                            "data": "BBBB",
+                            "filename": "manual_page_1.png",
+                        }
+                    ]
+                },
+            )
+        ],
+        mode="chat",
+    )
+
+    result = asyncio.run(bridge.handle_incoming_message(None, None, req))
+
+    assert result == "ok"
+    await_args = adapter_mock.chat_completion.await_args
+    assert await_args is not None
+    sent_messages = await_args.args[0]
+    last_content = sent_messages[-1]["content"]
+    assert isinstance(last_content, list)
+    assert any(part.get("type") == "image_url" for part in last_content)
+    text_part = next(part for part in last_content if part.get("type") == "text")
+    assert "manual.pdf" in text_part["text"]
+    assert "page images extracted from the document" in text_part["text"]
+
+
 @pytest.mark.asyncio
 async def test_run_auto_probe_uses_300_second_default(monkeypatch):
     webui = SynthWebUIInterface(autostart=False)

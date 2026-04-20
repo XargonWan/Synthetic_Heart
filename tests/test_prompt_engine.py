@@ -1,3 +1,4 @@
+import base64
 import asyncio
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -303,6 +304,102 @@ def test_prompt_request_mode_is_grillo_for_grillo_beat(monkeypatch):
     assert pr.runtime_ctx.is_grillo_beat is True
     assert "GRILLO INTERNAL MODE" in result.get("instructions", "")
     assert "DO NOT emit any message_* action" in result.get("instructions", "")
+
+
+def test_prompt_request_attaches_for_grillo_outreach_with_string_message_id(
+    monkeypatch,
+):
+    async def dummy_gather(message, ctx):
+        return {}
+
+    monkeypatch.setattr("core.action_parser.gather_static_injections", dummy_gather)
+
+    message = SimpleNamespace(
+        chat_id="123456",
+        text="[G.R.I.L.L.O. OUTREACH] check in",
+        message_id="grillo_outreach_0",
+        from_user=SimpleNamespace(full_name="grillo", username="grillo"),
+        date=datetime.now(timezone.utc),
+        interface_path="telegram_bot/123456",
+    )
+
+    result = asyncio.run(
+        build_json_prompt(
+            message,
+            {"grillo_beat": True, "beat_type": "outreach"},
+            interface_name="telegram_bot",
+        )
+    )
+
+    assert "__prompt_request" in result
+    pr = result["__prompt_request"]
+    assert pr.current_text == "[G.R.I.L.L.O. OUTREACH] check in"
+    assert pr.runtime_ctx.interface_path == "telegram_bot/123456"
+    assert pr.runtime_ctx.message_id is None
+
+
+def test_build_pr_attachments_extracts_pdf_text(monkeypatch):
+    from core.prompt_engine import _build_pr_attachments
+
+    monkeypatch.setattr(
+        "core.prompt_engine._extract_attachment_text_preview",
+        lambda mime_type, filename, data: ("[Page 1]\nMotor spec page", False),
+    )
+
+    attachments = _build_pr_attachments(
+        None,
+        [
+            {
+                "mime_type": "application/pdf",
+                "filename": "manual.pdf",
+                "data": base64.b64encode(b"%PDF-1.4 fake").decode("ascii"),
+            }
+        ],
+    )
+
+    assert len(attachments) == 1
+    assert (
+        attachments[0].media_metadata["extracted_text"] == "[Page 1]\nMotor spec page"
+    )
+
+
+def test_build_pr_attachments_extracts_pdf_page_images_when_text_missing(monkeypatch):
+    from core.prompt_engine import _build_pr_attachments
+
+    monkeypatch.setattr(
+        "core.prompt_engine._extract_attachment_text_preview",
+        lambda mime_type, filename, data: (None, False),
+    )
+    monkeypatch.setattr(
+        "core.prompt_engine._extract_pdf_page_images",
+        lambda filename, data: (
+            [
+                {
+                    "mime_type": "image/png",
+                    "data": "BBBB",
+                    "filename": "manual_page_1.png",
+                }
+            ],
+            False,
+        ),
+    )
+
+    attachments = _build_pr_attachments(
+        None,
+        [
+            {
+                "mime_type": "application/pdf",
+                "filename": "manual.pdf",
+                "data": base64.b64encode(b"%PDF-1.4 fake").decode("ascii"),
+            }
+        ],
+    )
+
+    assert len(attachments) == 1
+    assert (
+        attachments[0].media_metadata["page_images"][0]["filename"]
+        == "manual_page_1.png"
+    )
 
 
 # ── _history_to_turns tests ──────────────────────────────────────────────
