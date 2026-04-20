@@ -69,3 +69,7 @@ git_*.txt
 .ruff_cache
 _[Bb]uild
 .gitnexus
+
+# Local installer outputs and downloaded packaging dependencies
+installer/Output/
+installer/vendor/*.msi
