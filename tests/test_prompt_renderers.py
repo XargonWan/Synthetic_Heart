@@ -134,6 +134,18 @@ class TestOpenAIRenderer:
         # Runtime context prefix should appear before the text
         assert "from:Tester" in last or "Tester" in last
 
+    def test_runtime_prefix_omits_exact_timestamp_from_current_turn(self) -> None:
+        req = _basic_request()
+        req.runtime_ctx.timestamp = "2026-04-20 17:43 CEST (15:43 UTC)"
+        renderer = OpenAIRenderer(req)
+
+        messages = renderer.render()
+
+        last = messages[-1]["content"]
+        assert "2026-04-20 17:43 CEST" not in last
+        assert "lang:en" in last
+        assert "from:Tester" in last
+
     def test_no_tools_when_disabled(self) -> None:
         req = _basic_request(supports_tool_calling=False)
         req.tool_declarations = [_make_tool()]

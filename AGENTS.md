@@ -727,6 +727,14 @@ docker exec synth-dev tail -f /app/logs/synth.log | grep -E "\[grillo\]|grillo"
 
 ---
 
+### Exact runtime timestamps could make trainer replies over-mention time and location  <!-- 2026-04-20 -->
+**Symptom:** Ordinary trainer replies could keep volunteering lines like `at 17:43 CEST right here in ...` even when the user did not ask for the time or location, making every response feel overly anchored to prompt metadata.
+**Location:** `core/prompt_renderers.py` (`_build_runtime_prefix`), `core/prompt_engine.py` (`load_unminified_chat_instruction`).
+**Status:** fixed.
+**Notes:** The current-turn runtime prefix injected the exact timestamp into every rendered user message, while the shared chat instruction only said to treat time fields as authoritative and did not tell the model to keep them in the background. The prompt stack now omits the exact timestamp from the per-turn prefix and explicitly tells the model to use time and location as ambient context unless precise details are actually needed.
+
+---
+
 ## 13. Database Quick Reference
 
 > Tables are created inline in `core/db.py` and each plugin — **`init-db.sql` only seeds a subset.** If you need a table's full column list, `grep -A20 "CREATE TABLE IF NOT EXISTS <name>"` in the relevant file.

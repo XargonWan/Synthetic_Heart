@@ -16,6 +16,9 @@ def test_unminified_chat_instruction_prioritizes_fresh_time_and_natural_length()
     lowered = text.lower()
 
     assert "treat current time fields in the prompt as authoritative" in lowered
+    assert "use time and location as ambient context" in lowered
+    assert "do not volunteer the exact clock time" in lowered
+    assert "do not open or pad ordinary replies with copied runtime facts" in lowered
     assert (
         "let the persona, relationship context, and the user's tone determine how much to say"
         in lowered

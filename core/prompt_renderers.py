@@ -36,8 +36,6 @@ def _build_runtime_prefix(ctx: RuntimeContext) -> str:
     Example output: ``[2026-04-13 15:30 | scope:local | lang:en | from:Scarlet]``
     """
     parts: list[str] = []
-    if ctx.timestamp:
-        parts.append(ctx.timestamp)
     if ctx.scope and ctx.scope != "local":
         parts.append(f"scope:{ctx.scope}")
     if ctx.language:

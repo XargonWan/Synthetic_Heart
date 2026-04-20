@@ -229,20 +229,29 @@ def _build_context_summary(
     """
     parts: list[str] = []
 
-    # Always inject current date / time / location so the model knows when it is.
-    # These come from time_plugin.get_static_injection() merged into context_section.
+    # Always inject current date / time / location so the model can reason with
+    # them when needed, but frame them as ambient facts rather than ready-made
+    # reply text. These come from time_plugin.get_static_injection() merged into
+    # context_section.
     _date_val: str = str(context_section.get("date") or "").strip()
     _time_val: str = str(context_section.get("time") or "").strip()
     _loc_val: str = str(context_section.get("location") or "").strip()
     _time_lines: list[str] = []
+    if _date_val or _time_val or _loc_val:
+        _time_lines.append(
+            "Use these runtime facts only when they matter for scheduling, logistics, time-sensitive reasoning, or natural scene-setting."
+        )
+        _time_lines.append(
+            "Do not quote them verbatim in ordinary replies unless the user asked for them or they are genuinely necessary."
+        )
     if _date_val:
-        _time_lines.append(f"Date: {_date_val}")
+        _time_lines.append(f"Current date: {_date_val}")
     if _time_val:
-        _time_lines.append(f"Time: {_time_val}")
+        _time_lines.append(f"Current local time: {_time_val}")
     if _loc_val:
-        _time_lines.append(f"Location: {_loc_val}")
+        _time_lines.append(f"Current local setting: {_loc_val}")
     if _time_lines:
-        parts.append("[Current time & context]\n" + "\n".join(_time_lines))
+        parts.append("[Ambient runtime context]\n" + "\n".join(_time_lines))
 
     persona_preferences = str(context_section.get("persona_preferences") or "").strip()
     if persona_preferences:
@@ -1758,6 +1767,8 @@ RESPONSE SHAPE RULES:
 - If the user's request or referent is ambiguous, ask one short clarifying question before responding (do NOT guess the meaning).
 - When the user refers indirectly to a person, message, post, image, clip, or quoted content, refer to its author or speaker in a clear generic way and avoid vague or impersonal wording.
 - Treat current time fields in the prompt as authoritative. Never infer the present time, date, or part of day from older chat history, memories, or prior assistant messages.
+- Use time and location as ambient context, not a catchphrase. Do not volunteer the exact clock time, timezone, date, or precise location in ordinary replies unless the user asked for it or it is genuinely needed for scheduling, travel, logistics, or natural scene-setting.
+- Do not open or pad ordinary replies with copied runtime facts such as `at 17:43 CEST` or `right here in Sečovlje`. If those facts matter, weave them in naturally and only when relevant.
 - Stay in the active persona in first person. Do not talk about yourself from the outside or as if the persona were a separate character.
 - Keep pronouns consistent with the persona and participant context. Do not flip an established he/him, she/her, or they/them reference, and do not replace an established he/him or she/her person with singular they/them.
 

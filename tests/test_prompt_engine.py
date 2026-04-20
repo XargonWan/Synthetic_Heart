@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from typing import Any, Sequence
 
 from core.prompt_engine import (
+    _build_context_summary,
     build_json_prompt,
     build_live_prompt_request,
     build_live_system_instruction,
@@ -157,6 +158,22 @@ def test_build_json_prompt_demotes_persona_preferences_to_context_summary(monkey
     assert "[Persona background]" in pr.context_summary
     assert "Likes: tea" in pr.context_summary
     assert "Dislikes: liars" in pr.context_summary
+
+
+def test_build_context_summary_frames_time_and_location_as_ambient() -> None:
+    summary = _build_context_summary(
+        {
+            "date": "2026-04-20",
+            "time": "21:27 CEST",
+            "location": "Sečovlje,Slovenia",
+        }
+    )
+
+    assert "[Ambient runtime context]" in summary
+    assert "Use these runtime facts only when they matter" in summary
+    assert "Do not quote them verbatim in ordinary replies" in summary
+    assert "Current local time: 21:27 CEST" in summary
+    assert "Current local setting: Sečovlje,Slovenia" in summary
 
 
 def test_build_live_prompt_request_keeps_persona_preferences(monkeypatch):
