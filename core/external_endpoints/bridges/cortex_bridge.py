@@ -9,11 +9,15 @@ to a built-in engine from the perspective of the SyntH core.
 from __future__ import annotations
 
 import asyncio
+import base64
+import copy
 import json
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from core.ai_plugin_base import AIPluginBase
 from core.logging_utils import log_warning
+from core.external_endpoints.models import EndpointProtocol
 
 if TYPE_CHECKING:
     from core.external_endpoints.adapters.base import BaseProtocolAdapter
@@ -88,11 +92,8 @@ class ExternalCortexEngine(AIPluginBase):
         # Normalise to a messages list, same way openrouter/gemini handle the prompt
         if isinstance(messages, list):
             msg_list = messages
-        elif isinstance(messages, dict):
-            prompt_text = json.dumps(messages, ensure_ascii=False)
-            msg_list = [{"role": "user", "content": prompt_text}]
         else:
-            msg_list = [{"role": "user", "content": str(messages)}]
+            msg_list = self._build_messages(messages)
 
         model = self._endpoint.default_model
         if not model and self._endpoint.available_models:
@@ -142,14 +143,151 @@ class ExternalCortexEngine(AIPluginBase):
             for k, v in prompt.items()
             if k not in ("instructions", "instructions_verbose")
         }
-        user_content = json.dumps(user_dict, ensure_ascii=False)
+        redacted_user_dict = self._copy_and_redact_data(user_dict)
+        user_content: str | list[dict[str, Any]] = json.dumps(
+            redacted_user_dict, ensure_ascii=False
+        )
+
+        if self._endpoint.protocol == EndpointProtocol.OPENAI:
+            multimodal_parts = self._extract_multimodal_parts(user_dict)
+            if multimodal_parts:
+                user_content = [
+                    {
+                        "type": "text",
+                        "text": json.dumps(redacted_user_dict, ensure_ascii=False),
+                    },
+                    *multimodal_parts,
+                ]
 
         if instructions:
             return [
                 {"role": "system", "content": str(instructions)},
                 {"role": "user", "content": user_content},
             ]
-        return [{"role": "user", "content": json.dumps(prompt, ensure_ascii=False)}]
+        return [{"role": "user", "content": user_content}]
+
+    def _extract_multimodal_parts(self, prompt: Any) -> list[dict[str, Any]]:
+        """Extract OpenAI-style multimodal content parts from a SyntH prompt."""
+        parts: list[dict[str, Any]] = []
+
+        if isinstance(prompt, str):
+            try:
+                prompt = json.loads(prompt)
+            except (json.JSONDecodeError, ValueError):
+                return parts
+
+        if not isinstance(prompt, dict):
+            return parts
+
+        multimodal_keys = {"attachments", "images", "videos"}
+        schema_only_keys = {"actions", "available_actions", "schema"}
+        attachments: list[dict[str, Any]] = []
+
+        def collect_recursive(container: Any) -> None:
+            if isinstance(container, dict):
+                for key in multimodal_keys:
+                    if key in container:
+                        items = container[key]
+                        if isinstance(items, list):
+                            for item in items:
+                                if isinstance(item, dict):
+                                    attachments.append(item)
+                                elif isinstance(item, str):
+                                    default_mime = {
+                                        "images": "image/jpeg",
+                                        "videos": "video/mp4",
+                                    }.get(key, "application/octet-stream")
+                                    attachments.append(
+                                        {"path": item, "mime_type": default_mime}
+                                    )
+                        elif isinstance(items, dict):
+                            attachments.append(items)
+                for key, value in container.items():
+                    if key in schema_only_keys:
+                        continue
+                    collect_recursive(value)
+            elif isinstance(container, list):
+                for item in container:
+                    collect_recursive(item)
+
+        collect_recursive(prompt)
+
+        for att in attachments:
+            if not isinstance(att, dict):
+                continue
+
+            mime_type = str(att.get("mime_type") or att.get("mimeType") or "")
+            file_path = str(att.get("path") or att.get("file_path") or "")
+
+            if file_path and not mime_type:
+                import mimetypes as mt
+
+                mime_type, _ = mt.guess_type(file_path)
+                mime_type = mime_type or "application/octet-stream"
+
+            if not mime_type.startswith("image/"):
+                continue
+
+            b64_data = att.get("data") or att.get("base64", "")
+            if not b64_data and file_path:
+                try:
+                    path = Path(file_path)
+                    if path.exists() and path.is_file():
+                        b64_data = base64.b64encode(path.read_bytes()).decode("utf-8")
+                except Exception:
+                    continue
+
+            if not b64_data:
+                continue
+
+            parts.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{mime_type};base64,{b64_data}"},
+                }
+            )
+
+        return parts
+
+    def _copy_and_redact_data(self, prompt: dict[str, Any]) -> dict[str, Any]:
+        """Deep copy a prompt and remove heavy base64 attachment payloads."""
+        redacted = copy.deepcopy(prompt)
+        multimodal_keys = {"attachments", "images", "audio", "documents", "videos"}
+        data_fields = {"data", "base64"}
+        attachment_fields = {
+            "mime_type",
+            "mimeType",
+            "path",
+            "file_path",
+            "data",
+            "base64",
+        }
+
+        def redact_item(item: dict[str, Any]) -> None:
+            if not isinstance(item, dict) or not (item.keys() & attachment_fields):
+                return
+            for field in data_fields:
+                if field in item:
+                    item[field] = f"<redacted: {len(str(item[field]))} chars>"
+
+        def redact_recursive(container: Any) -> None:
+            if isinstance(container, dict):
+                for key in multimodal_keys:
+                    if key in container:
+                        items = container[key]
+                        if isinstance(items, list):
+                            for item in items:
+                                redact_item(item)
+                        elif isinstance(items, dict):
+                            redact_item(items)
+                for value in container.values():
+                    redact_recursive(value)
+            elif isinstance(container, list):
+                for item in container:
+                    redact_recursive(item)
+
+        redact_recursive(redacted)
+        return redacted
 
     async def handle_incoming_message(
         self, bot: Any, message: Any, prompt: Any

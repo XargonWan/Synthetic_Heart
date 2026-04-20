@@ -551,6 +551,64 @@ async def test_handle_custom_action_vision_describe(tmp_path) -> None:  # type: 
 
 
 @pytest.mark.asyncio
+async def test_execute_action_vision_describe_uses_current_attachment() -> None:  # type: ignore[no-untyped-def]
+    from plugins.iris_base import IrisEngineBase, IrisResult
+
+    class MockEngine(IrisEngineBase):
+        def describe_image(
+            self,
+            file_path: str,
+            mime_type: str | None = None,
+            prompt: str | None = None,
+        ) -> IrisResult | None:
+            with open(file_path, "rb") as fh:
+                assert fh.read() == b"\x89PNG"
+            assert mime_type == "image/png"
+            return IrisResult(description="mountains", language="en", confidence=0.9)
+
+    attachment_b64 = base64.b64encode(b"\x89PNG").decode("ascii")
+    fake_message = types.SimpleNamespace(
+        interface_path="custom/123",
+        attachments=[
+            {
+                "mime_type": "image/png",
+                "filename": "img.png",
+                "data": attachment_b64,
+            }
+        ],
+    )
+
+    with patch("core.core_initializer.register_plugin"):
+        from plugins.iris_plugin import IrisPlugin
+        from core.iris_registry import IrisRegistry
+
+        reg = IrisRegistry()
+        reg.register_instance("mock", MockEngine(), label="Mock")
+
+        plugin = IrisPlugin.__new__(IrisPlugin)
+        plugin._active_engine_name = "mock"
+        plugin._engine_settings = {}
+        plugin._default_prompt = "Describe."
+        plugin._default_model = ""
+
+        with (
+            patch("plugins.iris_plugin.IRIS_REGISTRY", reg),
+            patch.object(plugin, "refresh_config"),
+        ):
+            response = await plugin.execute_action(
+                {"type": "vision_describe", "payload": {}},
+                {},
+                None,
+                fake_message,
+            )
+
+    assert response["status"] == "success"
+    assert response["description"] == "mountains"
+    assert response["language"] == "en"
+    assert response["confidence"] == 0.9
+
+
+@pytest.mark.asyncio
 async def test_handle_custom_action_unknown() -> None:
     with patch("core.core_initializer.register_plugin"):
         from plugins.iris_plugin import IrisPlugin

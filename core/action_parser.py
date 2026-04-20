@@ -6,6 +6,7 @@ import inspect
 import time
 from typing import Any, Dict, List, Tuple
 
+from core.json_utils import dumps as json_dumps, redact_multimodal_for_logging
 from core.logging_utils import log_debug, log_info, log_warning, log_error
 from core.validation_registry import get_validation_registry
 from core.config_manager import config_registry
@@ -1087,7 +1088,10 @@ async def _handle_plugin_action(
                 log_info(
                     f"[action_parser] 🚀 Delegating action to {plugin.__class__.__name__}: type={action_type} interface={plugin_iface}"
                 )
-                log_debug(f"[action_parser] 📦 Action payload: {payload}")
+                log_debug(
+                    "[action_parser] 📦 Action payload: "
+                    + json_dumps(redact_multimodal_for_logging(payload))
+                )
 
                 result = plugin.execute_action(
                     new_action, context, bot, original_message
@@ -1927,7 +1931,10 @@ def _generate_context_tags(
 
 async def parse_action(action: dict, bot, message):
     """Parse and execute a single action."""
-    log_debug(f"[action_parser] Received action: {action}")
+    log_debug(
+        "[action_parser] Received action: "
+        + json_dumps(redact_multimodal_for_logging(action))
+    )
 
     action_type = action.get("type")
     interface = action.get("interface")
@@ -1943,7 +1950,7 @@ async def parse_action(action: dict, bot, message):
         + ", Interface: "
         + str(interface)
         + ", Payload: "
-        + str(payload)
+        + json_dumps(redact_multimodal_for_logging(payload))
     )
 
     # First allow the active LLM plugin to handle custom actions

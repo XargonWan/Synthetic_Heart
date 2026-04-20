@@ -1,7 +1,20 @@
+import copy
 import json
+import re
 from collections.abc import Mapping, Sequence
-from typing import Optional, Dict
+from typing import Any, Optional, Dict
 from core.logging_utils import log_debug, log_info, log_warning
+
+
+_INLINE_MEDIA_KEYS = {
+    "image_path",
+    "audio_path",
+    "video_path",
+    "file_path",
+    "path",
+}
+_BASE64_KEYS = {"data", "base64"}
+_BASE64_LIST_PATTERN = re.compile(r"(?:^|_)b64(?:$|_)", re.IGNORECASE)
 
 
 def custom_json_encoder(obj):
@@ -30,6 +43,76 @@ def sanitize_for_json(obj):
         if hasattr(obj, "__dict__"):
             return sanitize_for_json(obj.__dict__)
         return str(obj)
+
+
+def _looks_like_inline_media_value(value: str) -> bool:
+    compact = "".join(value.split())
+    if not compact:
+        return False
+    if compact.startswith("data:") and ";base64," in compact:
+        return True
+    if len(compact) < 256:
+        return False
+    if not re.fullmatch(r"[A-Za-z0-9+/=_-]+", compact):
+        return False
+    return True
+
+
+def _redacted_text(label: str, value: Any) -> str:
+    return f"<{label}: {len(str(value))} chars>"
+
+
+def _redact_multimodal_value(key: str, value: Any) -> Any:
+    if key in _BASE64_KEYS and isinstance(value, str):
+        return _redacted_text("redacted", value)
+
+    if _BASE64_LIST_PATTERN.search(key):
+        if isinstance(value, str):
+            return _redacted_text("redacted", value)
+        if isinstance(value, list):
+            return [
+                _redacted_text("redacted", item) if isinstance(item, str) else item
+                for item in value
+            ]
+
+    if key in _INLINE_MEDIA_KEYS and isinstance(value, str):
+        if _looks_like_inline_media_value(value):
+            return _redacted_text("redacted-inline-media", value)
+
+    return value
+
+
+def _redact_multimodal_recursive(obj: Any) -> Any:
+    if isinstance(obj, Mapping):
+        redacted: dict[Any, Any] = {}
+        for key, value in obj.items():
+            key_str = str(key)
+            maybe_redacted = _redact_multimodal_value(key_str, value)
+            if maybe_redacted is not value:
+                redacted[key] = maybe_redacted
+            else:
+                redacted[key] = _redact_multimodal_recursive(value)
+        return redacted
+
+    if isinstance(obj, Sequence) and not isinstance(obj, (str, bytes, bytearray)):
+        return [_redact_multimodal_recursive(value) for value in obj]
+
+    return obj
+
+
+def redact_multimodal_for_logging(obj: Any) -> Any:
+    """Return a deep-copied log-safe view with heavy multimodal data redacted."""
+    if isinstance(obj, str):
+        stripped = obj.lstrip()
+        if stripped.startswith(("{", "[")):
+            try:
+                parsed = json.loads(obj)
+            except Exception:
+                return obj
+            return _redact_multimodal_recursive(parsed)
+        return obj
+
+    return _redact_multimodal_recursive(copy.deepcopy(obj))
 
 
 def extract_json_from_text(text: str, return_metadata: bool = False) -> Optional[Dict]:

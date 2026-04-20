@@ -122,6 +122,8 @@ class ConfigDefinition:
     hidden: bool = False
     # If True, the config is read-only in the UI (no edits allowed)
     readonly: bool = False
+    # If False, ignore environment variables for this key and load from DB/default.
+    allow_env_override: bool = True
 
     value: Any = None
     raw_value: Optional[str] = None
@@ -175,6 +177,7 @@ class ConfigRegistry:
         needs_component_reload: bool = False,
         readonly: bool = False,
         hidden: bool = False,
+        allow_env_override: bool = True,
     ) -> Any:
         """Return the typed value for ``key`` or register it if unknown."""
 
@@ -192,6 +195,7 @@ class ConfigRegistry:
             needs_component_reload=needs_component_reload,
             readonly=readonly,
             hidden=hidden,
+            allow_env_override=allow_env_override,
             constraints=constraints,
             getter=getter,
             setter=setter,
@@ -219,6 +223,7 @@ class ConfigRegistry:
         needs_component_reload: bool = False,
         readonly: bool = False,
         hidden: bool = False,
+        allow_env_override: bool = True,
     ) -> ConfigVar:
         """
         Return a ConfigVar that auto-updates when the config changes.
@@ -249,6 +254,7 @@ class ConfigRegistry:
             needs_component_reload=needs_component_reload,
             hidden=hidden,
             readonly=readonly,
+            allow_env_override=allow_env_override,
             constraints=constraints,
             getter=getter,
             setter=setter,
@@ -474,6 +480,7 @@ class ConfigRegistry:
         needs_component_reload: bool = False,
         hidden: bool = False,
         readonly: bool = False,
+        allow_env_override: bool = True,
         constraints: Optional[Dict[str, Any]],
         getter: Optional[Callable[[], Any]] = None,
         setter: Optional[Callable[[Any], None]] = None,
@@ -499,6 +506,7 @@ class ConfigRegistry:
             needs_component_reload=needs_component_reload,
             hidden=hidden,
             readonly=readonly,
+            allow_env_override=allow_env_override,
         )
         self._definitions[key] = definition
         log_debug(f"[config] Registered setting '{key}' (component={component})")
@@ -536,7 +544,11 @@ class ConfigRegistry:
         env_value = os.getenv(definition.key)
         # Treat empty env values as "not set" so DB can take precedence.
         # This is important when env files contain placeholders like KEY=.
-        if env_value is not None and str(env_value).strip() != "":
+        if (
+            definition.allow_env_override
+            and env_value is not None
+            and str(env_value).strip() != ""
+        ):
             definition.env_override = True
             definition.env_value = env_value
             definition.raw_value = env_value
