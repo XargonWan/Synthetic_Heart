@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from core.logging_utils import log_info, log_debug, log_warning, log_error
@@ -42,6 +43,31 @@ CHAT_UPDATE_CHECKER_ENABLED = bool(
         component="core",
     )
 )
+
+
+def _coerce_epoch_seconds(value: Any) -> float | None:
+    """Normalize DB timestamp values to epoch seconds."""
+
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc).timestamp()
+        return value.astimezone(timezone.utc).timestamp()
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except ValueError:
+            try:
+                parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except ValueError:
+                return None
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed.astimezone(timezone.utc).timestamp()
+    return None
 
 
 class ChatUpdateChecker:
@@ -91,7 +117,7 @@ class ChatUpdateChecker:
             # Query DB for most recent non-self message timestamp
             rows = await execute_query(
                 """
-                SELECT MAX(UNIX_TIMESTAMP(timestamp)) as max_ts
+                                SELECT MAX(timestamp) as max_ts
                 FROM chat_history_cache
                 WHERE COALESCE(sender_id, '') NOT IN (%s, %s)
                   AND COALESCE(sender_name, '') NOT IN (%s, %s)
@@ -111,7 +137,11 @@ class ChatUpdateChecker:
                     "[chat_update_checker] No non-self chat_history_cache rows found (max_ts is None)"
                 )
             else:
-                max_ts_float = float(max_ts)
+                max_ts_float = _coerce_epoch_seconds(max_ts)
+                if max_ts_float is None:
+                    raise ValueError(
+                        f"Unsupported timestamp value returned from chat_history_cache: {max_ts!r}"
+                    )
                 log_debug(
                     f"[chat_update_checker] max_ts={max_ts_float}, last_known={self._last_known_ts}"
                 )
@@ -126,17 +156,20 @@ class ChatUpdateChecker:
                         log_debug("[chat_update_checker] Initialized last_known_ts")
                     elif max_ts_float > self._last_known_ts:
                         updated = True
+                        since_dt = datetime.fromtimestamp(
+                            self._last_known_ts, tz=timezone.utc
+                        )
                         # Get chats that updated since last known ts (non-self only)
                         rows2 = await execute_query(
                             """
-                            SELECT interface_path, sender_name, sender_id, UNIX_TIMESTAMP(timestamp) as ts
+                            SELECT interface_path, sender_name, sender_id, timestamp as ts
                             FROM chat_history_cache
-                            WHERE UNIX_TIMESTAMP(timestamp) > %s
+                            WHERE timestamp > %s
                               AND COALESCE(sender_id, '') NOT IN (%s, %s)
                               AND COALESCE(sender_name, '') NOT IN (%s, %s)
                             ORDER BY timestamp ASC
                             """,
-                            (self._last_known_ts, "self", "synth", "self", "synth"),
+                            (since_dt, "self", "synth", "self", "synth"),
                         )
                         log_debug(
                             f"[chat_update_checker] Found {len(rows2) if rows2 else 0} non-self messages since last_known (consume)"
@@ -149,13 +182,17 @@ class ChatUpdateChecker:
                                 interface_path = r[0]
                                 last_active = r[3]
 
+                            last_active_epoch = _coerce_epoch_seconds(last_active)
+                            if last_active_epoch is None:
+                                continue
+
                             chat_id = interface_path
                             if isinstance(interface_path, str):
                                 parts = interface_path.split("/")
                                 if len(parts) > 1:
                                     chat_id = parts[1]
                             new_messages.append(
-                                {"chat_id": chat_id, "last_active": float(last_active)}
+                                {"chat_id": chat_id, "last_active": last_active_epoch}
                             )
 
                         if not new_messages:
@@ -176,16 +213,19 @@ class ChatUpdateChecker:
                         )
                     elif max_ts_float > self._last_known_ts:
                         updated = True
+                        since_dt = datetime.fromtimestamp(
+                            self._last_known_ts, tz=timezone.utc
+                        )
                         rows2 = await execute_query(
                             """
-                            SELECT interface_path, sender_name, sender_id, UNIX_TIMESTAMP(timestamp) as ts
+                            SELECT interface_path, sender_name, sender_id, timestamp as ts
                             FROM chat_history_cache
-                            WHERE UNIX_TIMESTAMP(timestamp) > %s
+                            WHERE timestamp > %s
                               AND COALESCE(sender_id, '') NOT IN (%s, %s)
                               AND COALESCE(sender_name, '') NOT IN (%s, %s)
                             ORDER BY timestamp ASC
                             """,
-                            (self._last_known_ts, "self", "synth", "self", "synth"),
+                            (since_dt, "self", "synth", "self", "synth"),
                         )
                         log_debug(
                             f"[chat_update_checker] Found {len(rows2) if rows2 else 0} non-self messages since last_known (peek)"
@@ -198,13 +238,17 @@ class ChatUpdateChecker:
                                 interface_path = r[0]
                                 last_active = r[3]
 
+                            last_active_epoch = _coerce_epoch_seconds(last_active)
+                            if last_active_epoch is None:
+                                continue
+
                             chat_id = interface_path
                             if isinstance(interface_path, str):
                                 parts = interface_path.split("/")
                                 if len(parts) > 1:
                                     chat_id = parts[1]
                             new_messages.append(
-                                {"chat_id": chat_id, "last_active": float(last_active)}
+                                {"chat_id": chat_id, "last_active": last_active_epoch}
                             )
 
         except Exception as e:

@@ -1,10 +1,16 @@
 Auto-Response System
-===================
+====================
 
 Overview
 --------
 
 The Auto-Response System enables interfaces to deliver their output back to users through the LLM, maintaining context and allowing the AI to format and comment on results appropriately.
+
+Since the prompt rewrite, auto-response delivery no longer depends only on a
+raw ``system_message`` block. The delivery path now also attaches a typed
+``PromptRequest(mode='delivery')`` built by
+``core.prompt_engine.build_delivery_request()`` so migrated engines can render
+delivery prompts natively.
 
 Problem Solved
 --------------
@@ -43,8 +49,8 @@ The new system ensures all responses flow through the LLM:
          │
          ▼
     ┌─────────────┐
-    │ Auto-       │ ──→ Preserves context (chat_id, command, etc.)
-    │ Response    │     Sends output + context to LLM
+    │ Auto-       │ ──→ Preserves context and builds
+    │ Response    │     system_message + PromptRequest(delivery)
     └─────────────┘
          │
          ▼
@@ -70,14 +76,16 @@ Located in ``core/auto_response.py``:
     class AutoResponseSystem:
         async def request_llm_response(
             self, 
-            output: str, 
+            output: str | None,
             original_context: Dict[str, Any],
             action_type: str,
-            command: str = None
+            command: str = None,
+            action_outputs: list[dict[str, Any]] | None = None,
         ):
-            # Creates mock message with output
-            # Enqueues LLM request with context
-            # LLM processes and delivers response
+            # Creates a synthetic message carrying delivery context
+            # Builds a compatibility system_message payload
+            # Attaches PromptRequest(mode="delivery") on __prompt_request
+            # Enqueues the request for normal message-chain processing
 
 2. Interface Integration
 ~~~~~~~~~~~~~~~~~~~~~~~~
@@ -135,6 +143,10 @@ repeat the previous request while adjusting only the invalid portion.
 
 All system messages also contain a ``full_json_instructions`` block that
 reminds the LLM of the JSON format and available actions.
+
+For migrated engines, the same payload also carries ``__prompt_request`` with a
+typed delivery request. This keeps the legacy correction/delivery semantics
+while allowing renderer-backed engines to use native message/tool formats.
 
 These system messages are ignored during JSON extraction, preventing
 unintended actions.

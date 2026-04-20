@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "gemini-api-docs-mcp": {
+      "url": "https://gemini-api-docs-mcp.dev"
+    }
+  }
+}

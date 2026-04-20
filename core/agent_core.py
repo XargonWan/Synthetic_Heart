@@ -13,7 +13,9 @@ core utilities (plugin_instance, action_parser, etc.).
 from __future__ import annotations
 
 import asyncio
+import importlib
 import json
+import sys
 from typing import Any, Dict, Optional
 
 from core.logging_utils import log_debug, log_info, log_warning, log_error
@@ -66,6 +68,25 @@ class AgentLoopManager:
             # Best-effort; ignore commit failures
             pass
 
+    async def _get_conn_ctx(self) -> Any:
+        try:
+            import core as core_package
+
+            db_module = getattr(core_package, "db", None)
+        except Exception:
+            db_module = None
+
+        if db_module is None:
+            db_module = sys.modules.get("core.db")
+        if db_module is None:
+            db_module = importlib.import_module("core.db")
+
+        get_conn_ctx = getattr(db_module, "get_conn_ctx")
+        conn_ctx = get_conn_ctx()
+        if asyncio.iscoroutine(conn_ctx):
+            conn_ctx = await conn_ctx
+        return conn_ctx
+
     async def _create_agent_task(
         self,
         engine: str,
@@ -73,9 +94,8 @@ class AgentLoopManager:
         metadata: Optional[Dict[str, Any]] = None,
     ) -> Optional[int]:
         try:
-            from core.db import get_conn_ctx
-
-            async with get_conn_ctx() as conn:
+            conn_ctx = await self._get_conn_ctx()
+            async with conn_ctx as conn:
                 async with conn.cursor() as cur:
                     await cur.execute(
                         """
@@ -101,9 +121,8 @@ class AgentLoopManager:
         if not task_id:
             return
         try:
-            from core.db import get_conn_ctx
-
-            async with get_conn_ctx() as conn:
+            conn_ctx = await self._get_conn_ctx()
+            async with conn_ctx as conn:
                 async with conn.cursor() as cur:
                     await cur.execute(
                         "UPDATE agent_tasks SET status=%s WHERE id=%s",
@@ -120,9 +139,9 @@ class AgentLoopManager:
             return
         try:
             import json
-            from core.db import get_conn_ctx
 
-            async with get_conn_ctx() as conn:
+            conn_ctx = await self._get_conn_ctx()
+            async with conn_ctx as conn:
                 async with conn.cursor() as cur:
                     # Fetch existing iterations_meta
                     await cur.execute(
@@ -152,9 +171,9 @@ class AgentLoopManager:
     ) -> None:
         try:
             import json
-            from core.db import get_conn_ctx
 
-            async with get_conn_ctx() as conn:
+            conn_ctx = await self._get_conn_ctx()
+            async with conn_ctx as conn:
                 async with conn.cursor() as cur:
                     await cur.execute(
                         "UPDATE agent_tasks SET status=%s, output=%s WHERE id=%s",
@@ -250,7 +269,6 @@ class AgentLoopManager:
                     from core.action_parser import run_actions
                     from types import SimpleNamespace
                     from core.notifier import notify_intelligent
-                    from core.db import get_conn_ctx
                     import time
                 except Exception as e:
                     log_error(f"[agent_core] Failed to import runtime helpers: {e}")
@@ -373,7 +391,8 @@ class AgentLoopManager:
 
                 # If any plugin created a proposal (agent_activity_log.status='proposed') recently, pause and wait for approval
                 try:
-                    async with get_conn_ctx() as conn:
+                    conn_ctx = await self._get_conn_ctx()
+                    async with conn_ctx as conn:
                         async with conn.cursor() as cur:
                             await cur.execute(
                                 "SELECT id, command, request_ts FROM agent_activity_log WHERE status=%s ORDER BY request_ts DESC LIMIT 1",

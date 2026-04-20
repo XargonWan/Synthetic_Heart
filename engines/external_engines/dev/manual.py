@@ -179,7 +179,7 @@ class ManualAIPlugin(AIPluginBase):
                 "[manual] Missing trainer ID for telegram_bot; proceeding with fallback (test/limited env)"
             )
 
-        prompt_json = json.dumps(prompt, ensure_ascii=False, indent=2)
+        prompt_json = json.dumps(prompt, ensure_ascii=False, separators=(",", ":"))
         try:
             # Use telegram_bot.safe_send if tests monkeypatch it, otherwise use imported safe_send
             from interface import telegram_bot as _telegram_bot_module

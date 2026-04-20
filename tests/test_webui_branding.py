@@ -22,17 +22,17 @@ def test_no_subtitle_in_templates():
     from pathlib import Path
 
     tpl_base = Path("core/webui_templates/base.html").read_text(encoding="utf-8")
-    tpl_index = Path("core/webui_templates/synth_webui_index.html").read_text(
+    tpl_shell = Path("core/webui_templates/synth_webui_shell.html").read_text(
         encoding="utf-8"
     )
     assert "Synthetic Heart Command Console" not in tpl_base
-    assert "Synthetic Heart Command Console" not in tpl_index
+    assert "Synthetic Heart Command Console" not in tpl_shell
 
 
 def test_manifest_and_icons_present():
     from pathlib import Path
 
-    tpl = Path("core/webui_templates/synth_webui_index.html").read_text(
+    tpl = Path("core/webui_templates/synth_webui_shell.html").read_text(
         encoding="utf-8"
     )
     assert "manifest.webmanifest" in tpl

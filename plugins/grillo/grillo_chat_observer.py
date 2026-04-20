@@ -542,6 +542,7 @@ class GrilloChatObserverPlugin:
         # Ask the LLM to think like a helpful participant: choose which recent message(s) you'd naturally reply to and propose short, human replies.
         propose_clause = (
             "Think like a helpful human reading these snippets: which message(s) would you naturally reply to, and what would you say? "
+            "Do NOT propose messages that are conceptually duplicate of what already appears in the snippets. "
             "Do NOT address or mention the WebUI or any system/internal labels (for example: 'webui' or 'system'); write as if speaking directly to the human participant(s) in the conversation."
         )
         if self.propose_only:

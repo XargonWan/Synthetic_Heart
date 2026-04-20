@@ -141,18 +141,18 @@ class GrilloOutreachPlugin:
 
     async def _has_recent_activity(self, hours: int = 24) -> bool:
         """Check if there's been user activity in the last N hours."""
+        from datetime import datetime, timedelta, timezone
+
         try:
             from core.db import get_conn_ctx
 
+            cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
             async with get_conn_ctx() as conn:
                 async with conn.cursor() as cur:
                     await cur.execute(
-                        """
-                        SELECT COUNT(*) FROM ai_diary 
-                        WHERE timestamp > DATE_SUB(NOW(), INTERVAL %s HOUR)
-                        AND user_message IS NOT NULL
-                        """,
-                        (hours,),
+                        "SELECT COUNT(*) FROM ai_diary"
+                        " WHERE timestamp > %s AND user_message IS NOT NULL",
+                        (cutoff,),
                     )
                     row = await cur.fetchone()
                     return bool(row and row[0] > 0)
@@ -219,6 +219,12 @@ class GrilloOutreachPlugin:
         if not allowed_interfaces:
             return None, None
 
+        def _is_valid_chat_id(value: Optional[str]) -> bool:
+            if value is None:
+                return False
+            normalized = str(value).strip().lower()
+            return normalized not in {"", "-1", "none", "null"}
+
         # Try to get the last active chat and its interface via chat_path_map
         try:
             import core.recent_chats as recent_chats
@@ -240,17 +246,27 @@ class GrilloOutreachPlugin:
                     if len(parts) >= 2:
                         interface_name = parts[0]
                         # Check if this interface is in our allowed list
-                        if interface_name in allowed_interfaces:
+                        chat_id_str = str(chat_id).strip()
+                        if interface_name in allowed_interfaces and _is_valid_chat_id(
+                            chat_id_str
+                        ):
                             log_info(
                                 f"[grillo_outreach] Using last active interface: {interface_name}, chat: {chat_id}"
                             )
-                            return interface_name, str(chat_id)
+                            return interface_name, chat_id_str
 
             log_debug(
                 "[grillo_outreach] No recent chat matched via chat_path_map, trying chat_history_cache"
             )
         except Exception as e:
             log_warning(f"[grillo_outreach] Error getting last active chat: {e}")
+
+        # If explicit target chat IDs are configured, prefer them before DB fallback.
+        if self.target_chat_ids:
+            chat_ids = [c.strip() for c in self.target_chat_ids.split(",") if c.strip()]
+            for configured_chat_id in chat_ids:
+                if _is_valid_chat_id(configured_chat_id):
+                    return allowed_interfaces[0], configured_chat_id
 
         # Fallback A: query chat_history_cache directly for a recent interface_path
         try:
@@ -275,10 +291,11 @@ class GrilloOutreachPlugin:
                             parts = interface_path.split("/")
                             if len(parts) >= 2:
                                 resolved_chat_id = parts[1]
-                                log_info(
-                                    f"[grillo_outreach] Recovered target from chat_history_cache: {interface_path}"
-                                )
-                                return interface, resolved_chat_id
+                                if _is_valid_chat_id(resolved_chat_id):
+                                    log_info(
+                                        f"[grillo_outreach] Recovered target from chat_history_cache: {interface_path}"
+                                    )
+                                    return interface, resolved_chat_id
         except Exception as e:
             log_warning(
                 f"[grillo_outreach] Error querying chat_history_cache for target: {e}"
@@ -288,11 +305,7 @@ class GrilloOutreachPlugin:
         interface = allowed_interfaces[0]  # Use first configured interface
         chat_id: Optional[str] = None
 
-        if self.target_chat_ids:
-            chat_ids = [c.strip() for c in self.target_chat_ids.split(",") if c.strip()]
-            if chat_ids:
-                chat_id = chat_ids[0]  # Use first configured chat
-        else:
+        if not self.target_chat_ids:
             # Try to get trainer's chat ID from config
             try:
                 if "telegram" in interface.lower():
@@ -303,6 +316,9 @@ class GrilloOutreachPlugin:
                     )
             except Exception:
                 pass
+
+        if not _is_valid_chat_id(chat_id):
+            chat_id = None
 
         return interface, chat_id
 

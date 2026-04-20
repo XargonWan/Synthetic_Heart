@@ -411,7 +411,7 @@ class ConfigRegistry:
     def export_definitions(self) -> List[Dict[str, Any]]:
         """Return all registered definitions with current state for the API."""
         exported: List[Dict[str, Any]] = []
-        for defn in self._definitions.values():
+        for defn in list(self._definitions.values()):
             if not defn.loaded:
                 try:
                     self._load_definition_sync(defn)
@@ -433,7 +433,7 @@ class ConfigRegistry:
                 {
                     "key": defn.key,
                     "label": defn.label,
-                    "description": defn.description,
+                    "description": self._normalize_export_description(defn.description),
                     "value": self._export_value(defn),
                     "default": self._export_default(defn),
                     "group": defn.group,
@@ -454,6 +454,14 @@ class ConfigRegistry:
         return sorted(
             exported, key=lambda item: (item["group"], item["component"], item["label"])
         )
+
+    def _normalize_export_description(self, description: Any) -> str:
+        text = " ".join(str(description or "").split())
+        if not text:
+            return ""
+        if not text.endswith("."):
+            text += "."
+        return text
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -480,6 +488,52 @@ class ConfigRegistry:
     ) -> ConfigDefinition:
         existing = self._definitions.get(key)
         if existing:
+            # Allow later, richer registrations to backfill placeholder metadata
+            # from earlier get_value/get_var calls that used defaults only.
+            can_backfill_placeholder_metadata = (
+                not existing.component
+                or existing.component == "exposed"
+                or (
+                    existing.component == "core"
+                    and (not existing.label or existing.label == key)
+                    and not str(existing.description or "").strip()
+                )
+            )
+            if label and (not existing.label or existing.label == key):
+                existing.label = label
+            if description and not str(existing.description or "").strip():
+                existing.description = description
+            if component and can_backfill_placeholder_metadata:
+                existing.component = component
+            if group and (
+                not existing.group
+                or (existing.group == "core" and can_backfill_placeholder_metadata)
+            ):
+                existing.group = group
+            if value_type is not str and existing.value_type is str:
+                existing.value_type = value_type
+            if default not in (None, "") and existing.default in (None, ""):
+                existing.default = default
+            if advanced:
+                existing.advanced = True
+            if sensitive:
+                existing.sensitive = True
+            if needs_component_reload:
+                existing.needs_component_reload = True
+            if hidden:
+                existing.hidden = True
+            if readonly:
+                existing.readonly = True
+            if constraints and not existing.constraints:
+                existing.constraints = constraints
+            if getter is not None and existing.getter is None:
+                existing.getter = getter
+            if setter is not None and existing.setter is None:
+                existing.setter = setter
+            if tags:
+                merged_tags = set(existing.tags)
+                merged_tags.update(tags)
+                existing.tags = list(merged_tags)
             return existing
 
         definition = ConfigDefinition(
@@ -690,6 +744,8 @@ class ConfigRegistry:
         """
         try:
             try:
+                import core.db as db_module
+
                 from core.db import get_conn_ctx, ensure_core_tables
             except ImportError as e:
                 # Circular import during initialization - skip DB persist
@@ -701,6 +757,7 @@ class ConfigRegistry:
 
             log_debug(f"[config] Ensuring core tables before persisting '{key}'")
             await ensure_core_tables()
+            db_module._db_initialized = True
 
             log_debug(
                 f"[config] Attempting to acquire DB connection to persist '{key}'"
@@ -772,7 +829,9 @@ class ConfigRegistry:
                             log_debug(
                                 f"[config] Schema error persisting '{key}': {msg}; running ensure_core_tables() and retrying persist"
                             )
-                            await ensure_core_tables()
+                            if not getattr(db_module, "_db_initialized", False):
+                                await ensure_core_tables()
+                                db_module._db_initialized = True
                             # retry the same persist steps once
                             recreated = False
                             async with conn.cursor() as cur:

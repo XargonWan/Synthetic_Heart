@@ -1,4 +1,5 @@
 import pytest
+from pathlib import Path
 
 
 @pytest.mark.asyncio
@@ -66,10 +67,8 @@ async def test_message_action_types_can_be_overridden(monkeypatch):
 def test_transport_layer_example_is_generic():
     import core.transport_layer as tl
 
-    content = tl.__file__ and open(tl.__file__).read()
-    assert "message_<interface>_bot" in content, (
+    content = tl.__file__ and Path(tl.__file__).read_text(encoding="utf-8")
+    assert 'originating_interface or "<interface>"' in content
+    assert "message_{iface_label}" in content, (
         "Transport layer example should use a generic interface placeholder"
     )
-    assert (
-        "message_telegram_bot" in content or True
-    )  # keep safe if file contains other references elsewhere

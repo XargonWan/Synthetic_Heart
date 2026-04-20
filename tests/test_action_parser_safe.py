@@ -25,7 +25,9 @@ async def test_llm_action_safe_false_blocked_by_default(monkeypatch):
     import core.action_parser as ap
 
     ap._ACTION_PLUGINS = []
-    ap.get_supported_action_types = lambda: set(["create_personal_diary_entry"])
+    monkeypatch.setattr(
+        ap, "get_supported_action_types", lambda: {"create_personal_diary_entry"}
+    )
 
     res = await run_actions(
         [action], context={}, bot=None, original_message=original_message
@@ -62,7 +64,9 @@ async def test_llm_action_safe_true_allowed_in_suggest_mode_if_low(monkeypatch):
     import core.action_parser as ap
 
     ap._ACTION_PLUGINS = [FakeDiary()]
-    ap.get_supported_action_types = lambda: set(["create_personal_diary_entry"])
+    monkeypatch.setattr(
+        ap, "get_supported_action_types", lambda: {"create_personal_diary_entry"}
+    )
 
     action = {
         "type": "create_personal_diary_entry",
@@ -103,7 +107,9 @@ async def test_autonomous_mode_executes_safe(monkeypatch):
     import core.action_parser as ap
 
     ap._ACTION_PLUGINS = [FakeDiary()]
-    ap.get_supported_action_types = lambda: set(["create_personal_diary_entry"])
+    monkeypatch.setattr(
+        ap, "get_supported_action_types", lambda: {"create_personal_diary_entry"}
+    )
 
     action = {
         "type": "create_personal_diary_entry",

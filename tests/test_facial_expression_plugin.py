@@ -228,3 +228,45 @@ async def test_neutral_expression_clears(monkeypatch):
     assert dummy.sent[1] == (None, 0)
     # Last: final clear at end of audio
     assert dummy.sent[-1] == (None, 0)
+
+
+@pytest.mark.asyncio
+async def test_malformed_expression_entry_is_ignored(monkeypatch):
+    """Malformed expression definitions should not crash timeline playback."""
+    plugin = FacialExpressionPlugin()
+    dummy = DummyKarada()
+    monkeypatch.setattr(
+        "plugins.facial_expression_plugin.get_karada_state_server", lambda: dummy
+    )
+    expr_section = {
+        "grin": "not-a-dict",
+    }
+    events = [
+        FacialExpressionEvent(position=0, name="grin", intensity=0.9),
+    ]
+
+    await plugin._play_expression_timeline(
+        events,
+        total_chars=10,
+        session_id="x",
+        chars_per_sec=100,
+        expr_section=expr_section,
+    )
+
+    # Event is tolerated and followed by final clear.
+    assert dummy.sent[-1] == (None, 0)
+
+    def test_static_inject_schema_and_payload():
+        plugin = FacialExpressionPlugin()
+        actions = plugin.get_supported_actions()
+
+        assert "static_inject" in actions
+        schema = actions["static_inject"]
+        assert isinstance(schema, dict)
+        assert "required_params" in schema
+        assert "optional_params" in schema
+
+        payload = plugin.get_static_injection()
+        assert isinstance(payload, dict)
+        assert "facial_expression_guidance" in payload
+        assert "[em_" in payload["facial_expression_guidance"]

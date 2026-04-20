@@ -17,79 +17,6 @@ from core.core_initializer import register_plugin
 from core.action_parser import CORRECTOR_RETRIES
 
 
-def _build_event_reminder_instructions(
-    event_id: int,
-    description: str,
-    is_late: bool,
-    scheduled_time: str,
-    lateness_context: str,
-    original_context: str = None,
-) -> str:
-    """Build event reminder instructions with extracted metadata and original conversation context."""
-    import re
-
-    # Extract interface_path from description: [interface_path: telegram_bot/chat_id/thread_id]
-    interface_match = re.search(r"\[interface_path:\s*([^\]]+)\]", description)
-    interface_path = interface_match.group(1).strip() if interface_match else None
-
-    # Remove metadata from display text
-    clean_description = re.sub(r"\s*\[interface_path:\s*[^\]]+\]\s*", "", description)
-
-    # Build instruction text with metadata clearly shown
-    metadata_info = ""
-    if interface_path:
-        metadata_info = f"\n\n⚙️ DELIVERY INFO: Use interface_path '{interface_path}' for message delivery"
-
-    # Include original context if available
-    context_section = ""
-    if original_context:
-        context_section = f"\n\n📋 ORIGINAL CONTEXT:\n{original_context}\n"
-
-    instructions = f"""SCHEDULED REMINDER #{event_id} {"(LATE)" if is_late else "(ON TIME)"}
-
-Reminder: {clean_description}
-Scheduled for: {scheduled_time}
-Status: {lateness_context}{metadata_info}{context_section}
-
-This is a reminder you set for yourself. Freely decide whether and how to act:
-
-1. If it's a reminder that requires action (e.g. "remember Jay"), decide what to do
-2. If it's an internal thought, you might decide to do nothing or something else
-3. If it's late, deliver it but communicate that it's late
-4. You are NOT obliged to send messages - assess if it's really needed
-
-You can respond with any action (message, etc.) or combination of actions.
-If you decide to do nothing, the JSON should not contain any action.
-
-AVAILABLE ACTIONS:
-
-**schedule_message** - Schedule a message to be sent after a delay OR at a specific time
-  With delay: {{"text": "message", "send_in": "10 seconds|5 minutes|1 hour"}}
-  With specific time: {{"text": "message", "send_at": "HH:MM|YYYY-MM-DD HH:MM|2025-11-20T09:00:00|1735142400"}}
-  Examples:
-  - Delay: {{"type": "schedule_message", "payload": {{"text": "Hello!", "send_in": "1 minute"}}}}
-  - Specific time today: {{"type": "schedule_message", "payload": {{"text": "Buongiorno!", "send_at": "09:30"}}}}
-  - Specific date: {{"type": "schedule_message", "payload": {{"text": "Ricordati!", "send_at": "2025-11-21 10:00"}}}}
-
-**message_telegram_bot** - Send a message immediately via Telegram
-  payload: {{"text": "message", "interface_path": "telegram_bot/CHAT_ID"}}
-  IMPORTANT: If you have interface_path info above, use it! Example with actual interface_path:
-  {{"type": "message_telegram_bot", "payload": {{"text": "Hello!", "interface_path": "telegram_bot/-1003098886330"}}}}
-
-**event** - Create a future reminder/event
-  payload: {{"date": "YYYY-MM-DD", "time": "HH:MM", "description": "...", "repeat": "none|daily|weekly|monthly"}}
-  Example: {{"type": "event", "payload": {{"date": "2025-07-22", "time": "15:30", "description": "Remember to check if Jay replied", "repeat": "none"}}}}
-
-For recurring events, use repeat values:
-- "none": single reminder (default)
-- "daily": repeat every day
-- "weekly": repeat every week
-- "monthly": repeat every month
-- "always": keep active indefinitely"""
-
-    return instructions.strip()
-
-
 class EventPlugin(AIPluginBase):
     """Plugin that stores future events without using an LLM."""
 
@@ -927,7 +854,6 @@ class EventPlugin(AIPluginBase):
             # Extract lateness info
             is_late = event.get("is_late", False)
             minutes_late = event.get("minutes_late", 0)
-            scheduled_time = event.get("scheduled_time", "unknown")
 
             # Log execution with lateness info
             if is_late:
@@ -1010,13 +936,10 @@ class EventPlugin(AIPluginBase):
                     # Extract chat_id from interface_path for compatibility
                     # Format: telegram_bot/chat_id or telegram_bot/chat_id/thread_id
                     chat_id = None
-                    thread_id = None
                     if interface_path:
                         parts = interface_path.split("/")
                         if len(parts) >= 2:
                             chat_id = parts[1]  # Extract chat_id
-                        if len(parts) >= 3:
-                            thread_id = parts[2]  # Extract thread_id if present
 
                     synthetic_message = SimpleNamespace(
                         message_id=f"scheduled_event_{event_id}",
@@ -1159,7 +1082,13 @@ class EventPlugin(AIPluginBase):
             injections = await gather_static_injections()
             if isinstance(injections, dict):
                 # Keep only essential keys for event reminders, skip heavy diary/persona data
-                allowed_keys = {"persona", "weather", "current_time", "instructions"}
+                allowed_keys = {
+                    "persona",
+                    "persona_preferences",
+                    "weather",
+                    "current_time",
+                    "instructions",
+                }
                 reduced_injections = {
                     k: v for k, v in injections.items() if k in allowed_keys
                 }
@@ -1206,6 +1135,11 @@ class EventPlugin(AIPluginBase):
 
         interface_match = re.search(r"\[interface_path:\s*([^\]]+)\]", description)
         interface_path = interface_match.group(1).strip() if interface_match else None
+        interface_name = (
+            interface_path.split("/", 1)[0]
+            if isinstance(interface_path, str) and "/" in interface_path
+            else interface_path
+        )
 
         result = {
             "context": context,
@@ -1231,15 +1165,34 @@ class EventPlugin(AIPluginBase):
                     else datetime.utcnow().isoformat() + "+00:00"
                 ),
             },
-            "instructions": _build_event_reminder_instructions(
-                event_id,
-                description,
-                is_late,
-                scheduled_time,
-                lateness_context,
-                original_context=event.get("original_context"),
-            ),
         }
+
+        # Build PromptRequest delivery path for migrated engines while keeping
+        # the legacy context/input/instructions keys for compatibility.
+        try:
+            from core.prompt_engine import build_delivery_request
+
+            action_outputs = [
+                {
+                    "event_id": event_id,
+                    "description": description,
+                    "date": date_str,
+                    "time": time_str,
+                    "scheduled_time": scheduled_time,
+                    "is_late": is_late,
+                    "minutes_late": minutes_late,
+                    "lateness_context": lateness_context,
+                    "interface_path": interface_path,
+                }
+            ]
+            result["__prompt_request"] = await build_delivery_request(
+                action_type="event_reminder",
+                action_outputs=action_outputs,
+                interface_name=interface_name,
+                interface_path=interface_path,
+            )
+        except Exception as e:
+            log_debug(f"[event_plugin] build_delivery_request skipped: {e}")
 
         # Make all datetime objects JSON-serializable before returning
         log_debug(
@@ -1542,8 +1495,8 @@ class EventPlugin(AIPluginBase):
     def _create_silent_bot(self):
         """Create a bot that silently logs actions instead of sending them."""
 
-        class SilentBot:
-            async def send_message(self, **kwargs):
+        class SilentBot:  # Internal logging class - methods NOT exposed as actions
+            async def _log_message(self, **kwargs):
                 text = kwargs.get("text", "")
                 chat_id = kwargs.get("chat_id")
                 log_debug(
@@ -1709,6 +1662,13 @@ class EventPlugin(AIPluginBase):
         except Exception as e:
             log_warning(f"[event_plugin] Failed to gather static injections: {e}")
 
+        try:
+            from core.prompt_engine import load_json_instructions
+
+            json_rules = load_json_instructions()
+        except Exception:
+            json_rules = "Respond with strict JSON actions only."
+
         return {
             "context": context,
             "input": {
@@ -1730,58 +1690,10 @@ class EventPlugin(AIPluginBase):
                     "scope": "local",
                 },
             },
-            "instructions": """
-You can use {"type": "event"} to schedule a reminder in the future.
-
-IMPORTANT RULES for event actions:
-- The payload MUST contain:
-    • "date": YYYY-MM-DD
-    • "description": natural language reminder (not a command or action)
-- The payload CAN optionally contain:
-    • "time": HH:MM (default "00:00")
-    • "repeat": how often to repeat the event
-      - "none" (default)
-      - "daily"
-      - "weekly"
-      - "monthly"
-      - "always"
-- DO NOT include nested "action", "message", or any other structure inside the event.
-  The plugin will decide later how to handle the reminder.
-
-Valid examples:
-
-Single reminder (default):
-{
-  "type": "event",
-  "payload": {
-    "date": "2025-07-22",
-    "time": "15:30",
-    "description": "Remind Jay to check the system logs for errors"
-  }
-}
-
-Daily recurring reminder:
-{
-  "type": "event",
-  "payload": {
-    "date": "2025-07-22",
-    "time": "09:00",
-    "description": "Daily standup meeting reminder",
-    "repeat": "daily"
-  }
-}
-
-Weekly recurring reminder:
-{
-  "type": "event",
-  "payload": {
-    "date": "2025-07-22",
-    "time": "14:00",
-    "description": "Weekly team sync",
-    "repeat": "weekly"
-  }
-}
-        """.strip(),
+            "instructions": (
+                json_rules
+                + "\n\nEvent reminder mode: interpret input.type='scheduled_event' and decide actions accordingly."
+            ),
             "interface_instructions": "SCHED: Single JSON reply",
         }
 
@@ -1792,7 +1704,7 @@ Weekly recurring reminder:
             def __init__(self, event_plugin):
                 self.event_plugin = event_plugin
 
-            async def send_message(self, **kwargs):
+            async def _log_message(self, **kwargs):
                 """Handle LLM responses and delegate to action parser."""
                 text = kwargs.get("text", "")
                 chat_id = kwargs.get("chat_id")

@@ -4,31 +4,36 @@ from pathlib import Path
 
 
 def test_mobile_auto_restore_comment_present():
-    tpl = Path("core/webui_templates/synth_webui_index.html").read_text(
+    legacy_tpl = Path("core/webui_templates/synth_webui_index.html").read_text(
         encoding="utf-8"
     )
-    # Ensure mobile-specific behavior exists: chat toggle visible and home-stage padding removed
-    assert ".chat-toggle-btn" in tpl
-    assert "@media (max-width: 768px)" in tpl
-    assert ".home-stage" in tpl
-    # Ensure header bottom border is removed on mobile and home-stage expands to 100vh
-    assert "border-bottom: none" in tpl or "border-bottom: 1px solid" not in tpl
-    assert "var(--topbar-height" in tpl and "calc(100vh -" in tpl
-    # Ensure mobile nav overlays above chat/toggle and archive modal and is fixed when open
-    assert "nav.main-nav" in tpl and "z-index: 10600" in tpl
-    # When open, it should be positioned fixed and with very high z-index
-    assert (
-        "nav.main-nav.open" in tpl
-        and "position: fixed" in tpl
-        and "z-index: 20000" in tpl
+    shell_tpl = Path("core/webui_templates/synth_webui_shell.html").read_text(
+        encoding="utf-8"
     )
-    # Ensure nav has a close button available on mobile
-    assert ".nav-close" in tpl
-    # Ensure JS recalculates nav position based on header bounds
-    assert "getBoundingClientRect" in tpl or "header.top-bar" in tpl
-    # Ensure any floating resize handles are accounted for when menu opens
-    assert ".chat-resize-handle" in tpl
-    # Ensure archive modal has mobile fullscreen behavior
-    assert (
-        "const isMobileArchive" in tpl and "z-index: 10500" in tpl and "left: 0;" in tpl
+    base_tpl = Path("core/webui_templates/base.html").read_text(encoding="utf-8")
+    home_tpl = Path("core/webui_templates/sections/home.html").read_text(
+        encoding="utf-8"
     )
+    main_js = Path("res/synth_webui/js/main.js").read_text(encoding="utf-8")
+
+    # Legacy index remains present, but runtime behavior moved into shell + modular JS.
+    assert "runtime uses synth_webui_shell.html + modular JS" in legacy_tpl
+
+    # Chat restore button and home-stage layout live in current shell/home templates.
+    assert ".chat-toggle-btn" in shell_tpl
+    assert ".home-stage" in shell_tpl
+    assert "var(--topbar-height" in shell_tpl and "calc(100vh -" in shell_tpl
+    assert 'id="chat-toggle"' in home_tpl and 'id="chat"' in home_tpl
+
+    # Mobile navigation overlay behavior lives in base.html now.
+    assert "@media (max-width: 768px)" in base_tpl
+    assert "nav.main-nav" in base_tpl
+    assert "nav.main-nav.open" in base_tpl
+    assert "position: fixed" in base_tpl
+    assert "z-index: 20000" in base_tpl
+    assert "border-bottom: none" in base_tpl
+
+    # Chat window restore logic and legacy mobile key migration live in modular JS.
+    assert "legacyRectMobileKey" in main_js
+    assert "legacyStateMobileKey" in main_js
+    assert "getBoundingClientRect" in main_js

@@ -161,6 +161,11 @@ INSERT IGNORE INTO config (`config_key`, `value`) VALUES ('BASE_CORTEX', 'seleni
 INSERT IGNORE INTO config (`config_key`, `value`) VALUES ('GRILLO_CORTEX', 'Default');
 INSERT IGNORE INTO config (`config_key`, `value`) VALUES ('TRAINER_CORTEX', 'Default');
 INSERT IGNORE INTO config (`config_key`, `value`) VALUES ('ACTIVE_IRIS_ENGINE', 'selenium-llm-engine');
+INSERT IGNORE INTO config (`config_key`, `value`) VALUES ('SOUL_PLUGIN_ENABLED', '1');
+INSERT IGNORE INTO config (`config_key`, `value`) VALUES ('SOUL_COMPILE_IDLE_SECONDS', '300');
+INSERT IGNORE INTO config (`config_key`, `value`) VALUES ('SOUL_SCHEDULER_INTERVAL_SECONDS', '60');
+INSERT IGNORE INTO config (`config_key`, `value`) VALUES ('SOUL_REPOSITORY_BACKEND', 'memory');
+INSERT IGNORE INTO config (`config_key`, `value`) VALUES ('SOUL_POSTGRES_DSN', '');
 
 -- Grant privileges to synth user from any host
 GRANT ALL PRIVILEGES ON synth.* TO 'synth'@'%' IDENTIFIED BY 'synth';

@@ -23,11 +23,21 @@ except Exception:  # pragma: no cover - executed when aiomysql missing
     # when aiomysql is not installed.
     aiomysql = SimpleNamespace(  # type: ignore
         Connection=object,
+        DictCursor=object,
         Cursor=object,
         connect=_missing_connect,
         create_pool=_missing_connect,
     )
 
+if not hasattr(aiomysql, "DictCursor"):
+    aiomysql.DictCursor = object  # type: ignore[attr-defined]
+
+from core.db_backends import (
+    PostgresCompatConnection,
+    create_postgres_pool,
+    postgres_driver_available,
+    probe_postgres_connection,
+)
 from core.logging_utils import log_debug, log_info, log_warning, log_error
 from core.config_manager import config_registry
 import os
@@ -38,10 +48,18 @@ import os
 # read database configuration lazily from `config_registry` when needed
 # instead of at module import time. This prevents partially-initialized
 # module errors during startup.
+def _get_db_type() -> str:
+    value = os.getenv("SYNTH_DB_TYPE", os.getenv("DB_TYPE", "mariadb"))
+    normalized = str(value or "mariadb").strip().lower()
+    return normalized if normalized in {"mariadb", "postgres"} else "mariadb"
+
+
 def _read_db_config():
     """Return DB_HOST, DB_PORT, DB_USER, DB_PASS, DB_NAME reading from
     config_registry when available, otherwise from environment or defaults.
     """
+    backend = _get_db_type()
+    default_port = 5432 if backend == "postgres" else 3306
     # DB connection settings must be environment-driven.
     # If a previous run persisted an incorrect DB_HOST (e.g. "localhost") into
     # config_registry/DB, preferring that value can lock the system out of DB.
@@ -54,9 +72,9 @@ def _read_db_config():
     # Start from env (or hard defaults if env is missing)
     host = env_host or "localhost"
     try:
-        port = int(env_port) if env_port is not None else 3306
+        port = int(env_port) if env_port is not None else default_port
     except Exception:
-        port = 3306
+        port = default_port
     user = env_user or "synth"
     passwd = env_pass or "synth"
     dbname = env_name or "synth"
@@ -88,16 +106,27 @@ async def wait_for_db(max_attempts=10, delay=3):
             log_debug(
                 f"[db] Attempt {attempt}: connecting to {user}@{host}:{port}/{dbname}"
             )
-            conn = await aiomysql.connect(
-                host=host,
-                port=port,
-                user=user,
-                password=passwd,
-                db=dbname,
-                autocommit=True,
-            )
+            if _get_db_type() == "postgres":
+                conn = await probe_postgres_connection(
+                    host=host,
+                    port=port,
+                    user=user,
+                    password=passwd,
+                    database=dbname,
+                    dsn=os.getenv("DATABASE_URL") or os.getenv("DB_DSN"),
+                )
+                await conn.close()
+            else:
+                conn = await aiomysql.connect(
+                    host=host,
+                    port=port,
+                    user=user,
+                    password=passwd,
+                    db=dbname,
+                    autocommit=True,
+                )
+                conn.close()
             log_debug("[db] Successfully connected to the database!")
-            conn.close()
             return True
         except Exception as e:
             log_warning(f"[db] Connection failed: {e}")
@@ -176,6 +205,7 @@ async def get_pool():
                                 "DB_POOL_MINSIZE",
                                 1,
                                 label="DB Pool Min Size",
+                                description="Minimum number of open database connections to keep in each event loop pool.",
                                 group="database",
                                 component="core",
                                 advanced=True,
@@ -192,6 +222,7 @@ async def get_pool():
                                 "DB_POOL_MAXSIZE",
                                 60,
                                 label="DB Pool Max Size",
+                                description="Maximum number of open database connections allowed in each event loop pool.",
                                 group="database",
                                 component="core",
                                 advanced=True,
@@ -215,17 +246,31 @@ async def get_pool():
                 log_info(
                     f"[db] Creating pool with minsize={DB_POOL_MINSIZE} maxsize={DB_POOL_MAXSIZE}"
                 )
-                new_pool = await aiomysql.create_pool(
-                    host=host,
-                    port=port,
-                    user=user,
-                    password=passwd,
-                    db=dbname,
-                    autocommit=True,
-                    minsize=DB_POOL_MINSIZE,
-                    maxsize=DB_POOL_MAXSIZE,
-                    pool_recycle=300,  # Recycle connections every 5 minutes (was 3600s) to prevent zombie connections
-                )
+                if _get_db_type() == "postgres":
+                    if not postgres_driver_available():
+                        raise RuntimeError("asyncpg is not installed")
+                    new_pool = await create_postgres_pool(
+                        host=host,
+                        port=port,
+                        user=user,
+                        password=passwd,
+                        database=dbname,
+                        minsize=DB_POOL_MINSIZE,
+                        maxsize=DB_POOL_MAXSIZE,
+                        dsn=os.getenv("DATABASE_URL") or os.getenv("DB_DSN"),
+                    )
+                else:
+                    new_pool = await aiomysql.create_pool(
+                        host=host,
+                        port=port,
+                        user=user,
+                        password=passwd,
+                        db=dbname,
+                        autocommit=True,
+                        minsize=DB_POOL_MINSIZE,
+                        maxsize=DB_POOL_MAXSIZE,
+                        pool_recycle=300,  # Recycle connections every 5 minutes (was 3600s) to prevent zombie connections
+                    )
                 # Store the pool keyed by the loop id so concurrent event loops
                 # get a pool bound to their loop (avoids cross-loop use errors).
                 _pools_by_loop[loop_id] = new_pool
@@ -269,10 +314,11 @@ def get_pool_debug_info(max_stacks: int = 3) -> dict:
         return {"active_connections": _active_conn_count}
 
 
-async def get_conn() -> aiomysql.Connection:
-    """Return an async MariaDB connection from the connection pool."""
+async def get_conn() -> Any:
+    """Return an async connection from the primary database pool."""
     global _last_db_log_time
     global _active_conn_count
+    backend = _get_db_type()
     try:
         now = time.time()
         if now - _last_db_log_time > _DB_LOG_THROTTLE_SEC:
@@ -292,8 +338,9 @@ async def get_conn() -> aiomysql.Connection:
     try:
         conn = await asyncio.wait_for(pool.acquire(), timeout=30.0)
     except asyncio.CancelledError:
-        # Preserve cancellation semantics but log for debugging
-        log_error("[db] get_conn cancelled while waiting for pool.acquire()")
+        # Preserve cancellation semantics but avoid surfacing expected
+        # shutdown/abort cancellations as runtime errors.
+        log_debug("[db] get_conn cancelled while waiting for pool.acquire()")
         raise
     except asyncio.TimeoutError:
         log_error(
@@ -303,58 +350,94 @@ async def get_conn() -> aiomysql.Connection:
             "Database connection pool exhausted - timeout acquiring connection"
         )
 
-    # Set query timeout to prevent long-running queries from holding connections indefinitely
-    try:
-        async with conn.cursor() as cur:
-            await cur.execute(
-                "SET SESSION max_execution_time=30000"
-            )  # 30 second timeout per query
-    except Exception as e:
-        # Some MySQL/MariaDB servers (or older versions) don't support
-        # the `max_execution_time` session variable (error 1193 / "Unknown system variable").
-        # Treat that specific case as informational but warn only once to avoid log spamming.
+    # Set query timeout to prevent long-running queries from holding connections indefinitely.
+    if backend == "postgres":
         try:
-            msg = str(e)
-            if "Unknown system variable 'max_execution_time'" in msg or "1193" in msg:
-                try:
-                    # report the unsupported-variable condition only the first time
-                    global _max_execution_time_unsupported_reported
-                    if not _max_execution_time_unsupported_reported:
-                        log_warning(
-                            "[db] DB server does not support session max_execution_time; query timeouts will not be enforced (first occurrence): %s"
-                            % msg
+            await conn.execute("SET statement_timeout = 30000")
+        except Exception as e:
+            log_error(f"[db] Could not set postgres statement_timeout: {e}")
+    else:
+        # Prefer MySQL's max_execution_time (ms) and fall back to MariaDB's
+        # max_statement_time (seconds) when needed.
+        try:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SET SESSION max_execution_time=30000"
+                )  # 30 second timeout per query
+        except Exception as e:
+            # Some MySQL/MariaDB servers (or older versions) don't support
+            # the `max_execution_time` session variable (error 1193 / "Unknown system variable").
+            # Treat that specific case as informational but warn only once to avoid log spamming.
+            try:
+                msg = str(e)
+                fallback_applied = False
+                if (
+                    "Unknown system variable 'max_execution_time'" in msg
+                    or "1193" in msg
+                ):
+                    # MariaDB commonly exposes max_statement_time instead.
+                    try:
+                        async with conn.cursor() as cur:
+                            await cur.execute("SET SESSION max_statement_time=30")
+                        log_debug(
+                            "[db] Applied fallback query timeout via max_statement_time"
                         )
-                        _max_execution_time_unsupported_reported = True
-                except Exception:
-                    # Fallback to debug logging if something goes wrong updating the flag
-                    log_debug(
-                        f"[db] Could not set query timeout (ignoring unsupported var): {e}"
+                        fallback_applied = True
+                    except Exception:
+                        pass
+
+                if (
+                    (not fallback_applied)
+                    and msg
+                    and (
+                        "Unknown system variable 'max_execution_time'" in msg
+                        or "1193" in msg
                     )
-            else:
-                # Other errors are unexpected — log as error so maintainers notice
+                ):
+                    try:
+                        # report the unsupported-variable condition only the first time
+                        global _max_execution_time_unsupported_reported
+                        if not _max_execution_time_unsupported_reported:
+                            log_warning(
+                                "[db] DB server does not support session max_execution_time; query timeouts will not be enforced (first occurrence): %s"
+                                % msg
+                            )
+                            _max_execution_time_unsupported_reported = True
+                    except Exception:
+                        # Fallback to debug logging if something goes wrong updating the flag
+                        log_debug(
+                            f"[db] Could not set query timeout (ignoring unsupported var): {e}"
+                        )
+                elif not fallback_applied:
+                    # Other errors are unexpected — log as error so maintainers notice
+                    log_error(f"[db] Could not set query timeout: {e}")
+            except Exception:
                 log_error(f"[db] Could not set query timeout: {e}")
-        except Exception:
-            log_error(f"[db] Could not set query timeout: {e}")
+
+    wrapped_conn = (
+        PostgresCompatConnection(conn, pool) if backend == "postgres" else conn
+    )
+    wrapped_pool = None if backend == "postgres" else pool
 
     # Track active connections for monitoring/leak detection
     try:
         _active_conn_count += 1
         try:
-            _conn_acquired_times[id(conn)] = time.time()
+            _conn_acquired_times[id(wrapped_conn)] = time.time()
             # Capture a short stack trace at acquisition time to help diagnose
             # where connections are being held without release.
             try:
                 import traceback
 
                 stack = traceback.format_stack(limit=8)
-                _conn_acquired_stacks[id(conn)] = "".join(stack)
+                _conn_acquired_stacks[id(wrapped_conn)] = "".join(stack)
             except Exception:
                 pass
         except Exception:
             pass
         # Warn when we're close to pool capacity
         try:
-            maxsize = getattr(pool, "maxsize", None)
+            maxsize = getattr(pool, "maxsize", getattr(pool, "_maxsize", None))
             # Only warn if we're at or very close to pool limit
             # For small pools (size 1-2), require actual connection pressure
             # For larger pools, warn when within 2 of limit
@@ -407,6 +490,28 @@ async def get_conn() -> aiomysql.Connection:
         def __getattr__(self, item):
             return getattr(self._conn, item)
 
+        async def commit(self):
+            import inspect
+
+            commit_fn = getattr(self._conn, "commit", None)
+            if not callable(commit_fn):
+                return None
+            result = commit_fn()
+            if inspect.isawaitable(result):
+                return await result
+            return result
+
+        async def rollback(self):
+            import inspect
+
+            rollback_fn = getattr(self._conn, "rollback", None)
+            if not callable(rollback_fn):
+                return None
+            result = rollback_fn()
+            if inspect.isawaitable(result):
+                return await result
+            return result
+
         def close(self):
             """Synchronous close that releases connection back to pool immediately.
 
@@ -415,15 +520,24 @@ async def get_conn() -> aiomysql.Connection:
             to avoid connection leaks.
             """
             global _active_conn_count
+            release_result = None
             try:
-                # Release directly to pool - this is synchronous and safe
+                # Release directly to pool - this is synchronous and safe.
                 if self._pool and hasattr(self._pool, "release"):
                     try:
-                        self._pool.release(self._conn)
+                        release_result = self._pool.release(self._conn)
+                    except Exception:
+                        pass
+                else:
+                    try:
+                        close_fn = getattr(self._conn, "close", None)
+                        if callable(close_fn):
+                            release_result = close_fn()
                     except Exception:
                         pass
 
                 log_debug("[db] Connection released to pool")
+                return release_result
             finally:
                 try:
                     _active_conn_count = max(0, _active_conn_count - 1)
@@ -467,6 +581,19 @@ async def get_conn() -> aiomysql.Connection:
 
                 return _null_ctx()
 
+            # Translate our DictCursor sentinel for raw aiomysql connections.
+            # PostgresCompatConnection handles it natively via __name__ check.
+            if args and any(a is DictCursor for a in args):
+                try:
+                    from core.db_backends import PostgresCompatConnection as _PgConn
+
+                    if not isinstance(self._conn, _PgConn):
+                        args = tuple(
+                            aiomysql.DictCursor if a is DictCursor else a for a in args
+                        )
+                except Exception:
+                    pass
+
             real_cursor_obj = real_cursor_call(*args, **kwargs)
 
             import inspect
@@ -503,13 +630,15 @@ async def get_conn() -> aiomysql.Connection:
                             return res
                         except Exception as exc:
                             msg = str(exc) or ""
+                            query_text = str(a[0]) if a else ""
                             is_schema_error = (
                                 "1146" in msg
                                 or "doesn't exist" in msg
                                 or "1054" in msg
                                 or "Unknown column" in msg
                             )
-                            if AUTO_HEAL and is_schema_error:
+                            skip_auto_heal = " config " in f" {query_text.lower()} "
+                            if AUTO_HEAL and is_schema_error and not skip_auto_heal:
                                 _log_warning(
                                     f"[db] Schema error detected during DB execute: {msg}. Attempting auto-heal."
                                 )
@@ -583,11 +712,23 @@ async def get_conn() -> aiomysql.Connection:
 
                 async def __aenter__(self):
                     try:
-                        # If underlying call returned a coroutine that needs awaiting,
-                        # handle that first and wrap the resulting cursor.
-                        if self._cursor is None and inspect.isawaitable(self._real):
-                            cur = await self._real
-                            self._cursor = self._wrap_cursor_obj(cur)
+                        # If the cursor has not been materialized yet, resolve the
+                        # underlying cursor source first.
+                        if self._cursor is None:
+                            if inspect.isawaitable(self._real):
+                                cur = await self._real
+                                self._cursor = self._wrap_cursor_obj(cur)
+                            elif hasattr(self._real, "__aenter__"):
+                                cm = self._real
+                                enter_res = cm.__aenter__()
+                                if inspect.isawaitable(enter_res):
+                                    cur = await enter_res
+                                else:
+                                    cur = enter_res
+                                self._cursor = self._wrap_cursor_obj(cur)
+                                self._entered_cm = cm
+                            else:
+                                self._cursor = self._wrap_cursor_obj(self._real)
 
                         # If the underlying cursor is itself an async context manager,
                         # prefer to delegate to its __aenter__ for any setup logic.
@@ -608,6 +749,14 @@ async def get_conn() -> aiomysql.Connection:
                         raise
 
                 async def __aexit__(self, exc_type, exc, tb):
+                    if self._entered_cm is not None:
+                        try:
+                            exit_res = self._entered_cm.__aexit__(exc_type, exc, tb)
+                            if inspect.isawaitable(exit_res):
+                                await exit_res
+                        except Exception:
+                            pass
+
                     # If the underlying cursor provides __aexit__, use it.
                     try:
                         exit_fn = getattr(self._cursor, "__aexit__", None)
@@ -631,7 +780,7 @@ async def get_conn() -> aiomysql.Connection:
 
             return _CursorWrapper(real_cursor_obj)
 
-    return _ConnProxy(conn, pool)
+    return _ConnProxy(wrapped_conn, wrapped_pool)
 
 
 class _ConnContext:
@@ -658,6 +807,16 @@ class _ConnContext:
                 pass
 
 
+class DictCursor:
+    """Cross-DB sentinel requesting dict-mode rows from get_conn_ctx().
+
+    Pass as the cursor argument:  ``async with conn.cursor(DictCursor) as cur:``
+
+    On MariaDB the real ``aiomysql.DictCursor`` is used; the Postgres compat
+    layer detects this class by ``__name__`` and enables its own dict mode.
+    """
+
+
 def get_conn_ctx():
     """Return an async context manager for acquiring/releasing a DB connection.
 
@@ -675,15 +834,21 @@ async def release_conn(conn):
     if not conn:
         return
     try:
+        import inspect
+
         # Attempt to close the connection which returns it to the pool
         try:
-            conn.close()
+            close_result = conn.close()
+            if inspect.isawaitable(close_result):
+                await close_result
         except Exception:
             # Some aiomysql internals may expose pool.release; attempt it as fallback
             try:
                 pool = await get_pool()
                 if hasattr(pool, "release"):
-                    pool.release(conn)
+                    release_result = pool.release(conn)
+                    if inspect.isawaitable(release_result):
+                        await release_result
             except Exception:
                 pass
 
@@ -714,6 +879,97 @@ async def test_connection() -> bool:
     except Exception as e:
         print(f"[test_connection] Error: {e}")
         return False
+
+
+def _row_value(row: Any, index: int, key: str) -> Any:
+    """Read a column from tuple-like or dict-like DB rows."""
+    if row is None:
+        return None
+    if isinstance(row, dict):
+        return row.get(key)
+    try:
+        return row[index]
+    except Exception:
+        try:
+            return row[key]
+        except Exception:
+            return None
+
+
+def _pick_preferred_cortex(candidates: set[str]) -> str | None:
+    names = [str(name) for name in candidates if name]
+    if not names:
+        return None
+    return sorted(
+        names, key=lambda name: (0 if "selenium" in name.lower() else 1, name)
+    )[0]
+
+
+async def _heal_cortex_config(cur: Any) -> None:
+    """Normalize stale cortex config without clobbering valid built-in engines."""
+    try:
+        from core.cortex_registry import get_cortex_registry
+
+        registry = get_cortex_registry()
+        registered_engines = set(registry.get_available_engines())
+    except Exception:
+        registry = None
+        registered_engines = set()
+
+    if not registered_engines:
+        return
+
+    enabled_endpoints: set[str] = set()
+    try:
+        await cur.execute("SELECT name FROM external_endpoints WHERE enabled")
+        for row in await cur.fetchall():
+            name = _row_value(row, 0, "name")
+            if name:
+                enabled_endpoints.add(str(name))
+    except Exception:
+        pass
+
+    valid_names = {name for name in registered_engines | enabled_endpoints if name}
+    if not valid_names:
+        return
+
+    await cur.execute(
+        "SELECT config_key, value FROM config "
+        "WHERE config_key IN ('BASE_CORTEX', 'GRILLO_CORTEX', 'TRAINER_CORTEX', 'LIVE_CORTEX')"
+    )
+    current: dict[str, str] = {}
+    for row in await cur.fetchall():
+        key = _row_value(row, 0, "config_key")
+        value = _row_value(row, 1, "value")
+        if key:
+            current[str(key)] = "" if value is None else str(value)
+
+    updates: list[tuple[str, str]] = []
+    for key in ("TRAINER_CORTEX", "GRILLO_CORTEX", "LIVE_CORTEX"):
+        value = current.get(key, "")
+        if value and value not in ("Default", "None") and value not in valid_names:
+            updates.append((key, "Default"))
+
+    base_value = current.get("BASE_CORTEX", "")
+    if base_value and base_value not in valid_names:
+        fallback = _pick_preferred_cortex(enabled_endpoints)
+        if fallback is None and registry is not None:
+            try:
+                default_engine = registry.get_default_engine()
+            except Exception:
+                default_engine = None
+            if default_engine in valid_names:
+                fallback = str(default_engine)
+        if fallback is None:
+            fallback = _pick_preferred_cortex(registered_engines)
+        if fallback and base_value != fallback:
+            updates.append(("BASE_CORTEX", fallback))
+
+    for key, value in updates:
+        await cur.execute(
+            "UPDATE config SET value = %s WHERE config_key = %s",
+            (value, key),
+        )
 
 
 async def init_db() -> None:
@@ -751,52 +1007,13 @@ async def init_db() -> None:
                 )
 
                 # Runtime migration: heal cortex config keys that may have been
-                # corrupted by the stale-engine fallback bug.  The invariant is:
-                #   - Scope overrides (TRAINER/GRILLO/LIVE_CORTEX) must be 'Default'
-                #     unless they explicitly name a configured external endpoint.
-                #   - BASE_CORTEX must name a configured external endpoint; if it
-                #     doesn't, switch to the best available one (selenium-first).
+                # corrupted by the stale-engine fallback bug. Config values may point
+                # to either built-in cortex engine ids (for example `gemini_api`) or
+                # enabled external endpoint names.
                 # Wrapped in a separate try/except because external_endpoints may
                 # not exist on a first run (it is created by the plugin layer).
                 try:
-                    # 1. Reset scope overrides that point to unconfigured names.
-                    await cur.execute(
-                        """
-                        UPDATE config
-                        SET value = 'Default'
-                        WHERE config_key IN ('TRAINER_CORTEX', 'GRILLO_CORTEX', 'LIVE_CORTEX')
-                          AND value NOT IN ('', 'Default', 'None')
-                          AND NOT EXISTS (
-                              SELECT 1 FROM external_endpoints
-                              WHERE name = config.value AND enabled = 1
-                          )
-                        """
-                    )
-                    # 2. Reset BASE_CORTEX if it points to a name not in external_endpoints.
-                    #    Only switch when there IS at least one enabled external endpoint.
-                    await cur.execute(
-                        """
-                        UPDATE config AS c
-                        SET c.value = (
-                            SELECT e.name
-                            FROM external_endpoints e
-                            WHERE e.enabled = 1
-                            ORDER BY
-                                CASE WHEN e.name LIKE '%%selenium%%' THEN 0 ELSE 1 END,
-                                e.id
-                            LIMIT 1
-                        )
-                        WHERE c.config_key = 'BASE_CORTEX'
-                          AND NOT EXISTS (
-                              SELECT 1 FROM external_endpoints ee
-                              WHERE ee.name = c.value AND ee.enabled = 1
-                          )
-                          AND EXISTS (
-                              SELECT 1 FROM external_endpoints ex
-                              WHERE ex.enabled = 1
-                          )
-                        """
-                    )
+                    await _heal_cortex_config(cur)
                 except Exception:
                     pass  # external_endpoints table may not exist yet on a fresh install
 
@@ -830,6 +1047,56 @@ async def ensure_plugin_tables() -> None:
     hit 1146 "Table doesn't exist" errors.
     """
     try:
+        from contextlib import asynccontextmanager
+
+        async def _resolve_conn_ctx() -> Any:
+            import inspect
+
+            conn_ctx = get_conn_ctx()
+            if inspect.isawaitable(conn_ctx):
+                return await conn_ctx
+            return conn_ctx
+
+        @asynccontextmanager
+        async def _cursor_ctx(conn: Any):
+            import inspect
+
+            cursor_obj = conn.cursor()
+            if inspect.isawaitable(cursor_obj):
+                cursor_obj = await cursor_obj
+
+            enter_fn = getattr(cursor_obj, "__aenter__", None)
+            exit_fn = getattr(cursor_obj, "__aexit__", None)
+            if callable(enter_fn) and callable(exit_fn):
+                cur = enter_fn()
+                if inspect.isawaitable(cur):
+                    cur = await cur
+                try:
+                    yield cur
+                except Exception as exc:
+                    exit_result = exit_fn(type(exc), exc, exc.__traceback__)
+                    if inspect.isawaitable(exit_result):
+                        suppress = await exit_result
+                    else:
+                        suppress = exit_result
+                    if suppress:
+                        return
+                    raise
+                else:
+                    exit_result = exit_fn(None, None, None)
+                    if inspect.isawaitable(exit_result):
+                        await exit_result
+                return
+
+            try:
+                yield cursor_obj
+            finally:
+                close_fn = getattr(cursor_obj, "close", None)
+                if callable(close_fn):
+                    result = close_fn()
+                    if inspect.isawaitable(result):
+                        await result
+
         # Some plugin tables reference `ai_diary` — ensure diary table first if available
         try:
             from plugins.ai_diary import init_diary_table
@@ -851,8 +1118,9 @@ async def ensure_plugin_tables() -> None:
                 # The `plugins.ai_diary` implementation is still authoritative and
                 # must perform any schema migrations (adding columns / changing
                 # types) — the placeholder prevents hard failures only.
-                async with get_conn_ctx() as _conn:
-                    async with _conn.cursor() as _cur:
+                conn_ctx = await _resolve_conn_ctx()
+                async with conn_ctx as _conn:
+                    async with _cursor_ctx(_conn) as _cur:
                         await _cur.execute("""
                             CREATE TABLE IF NOT EXISTS ai_diary (
                                 id INT AUTO_INCREMENT PRIMARY KEY,
@@ -882,8 +1150,9 @@ async def ensure_plugin_tables() -> None:
                     f"[db] Failed to create minimal placeholder ai_diary tables: {_fallback_err}"
                 )
 
-        async with get_conn_ctx() as conn:
-            async with conn.cursor() as cur:
+        conn_ctx = await _resolve_conn_ctx()
+        async with conn_ctx as conn:
+            async with _cursor_ctx(conn) as cur:
                 # bio (plugin)
                 await cur.execute(
                     """
@@ -1264,7 +1533,9 @@ async def insert_scheduled_event(
                     (
                         date,
                         time,
-                        next_run_utc.strftime("%Y-%m-%d %H:%M:%S"),
+                        next_run_utc
+                        if _get_db_type() == "postgres"
+                        else next_run_utc.strftime("%Y-%m-%d %H:%M:%S"),
                         recurrence_type or "none",
                         description,
                         created_by,
@@ -1305,7 +1576,13 @@ async def get_due_events(
     # Query: find events that are due (not delivered and next_run is within advance window)
     # All timestamps stored in DB are already in UTC (converted during insert)
     check_str = check_time.strftime("%Y-%m-%d %H:%M:%S")
-    query = "SELECT * FROM scheduled_events WHERE delivered = 0 AND next_run <= %s ORDER BY id"
+    is_postgres = _get_db_type() == "postgres"
+    query = (
+        "SELECT * FROM scheduled_events WHERE delivered = FALSE AND next_run <= %s ORDER BY id"
+        if is_postgres
+        else "SELECT * FROM scheduled_events WHERE delivered = 0 AND next_run <= %s ORDER BY id"
+    )
+    query_param = check_time if is_postgres else check_str
     log_debug(
         f"[get_due_events] Executing query with UTC time (+ {advance_minutes}min): {check_str}"
     )
@@ -1315,7 +1592,7 @@ async def get_due_events(
         async with get_conn_ctx() as conn:
             async with conn.cursor(aiomysql.DictCursor) as cur:
                 await safe_db_execute(
-                    cur, query, (check_str,), ensure_fn=ensure_core_tables
+                    cur, query, (query_param,), ensure_fn=ensure_core_tables
                 )
                 rows = await cur.fetchall()
                 log_debug(f"[get_due_events] Retrieved {len(rows)} rows")

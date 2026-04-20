@@ -18,6 +18,7 @@ from __future__ import annotations
 from core.ai_plugin_base import AIPluginBase
 from core.config_manager import config_registry
 from core.cortex_api_logger import log_cortex_request, log_cortex_response
+from core.genai_client_utils import harden_genai_client_for_async_close
 from core.logging_utils import log_debug, log_info, log_warning, log_error
 import json
 import asyncio
@@ -26,7 +27,7 @@ import requests
 import base64
 import mimetypes
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
     from core.live_session_manager import LiveSessionManager
@@ -103,7 +104,20 @@ GEMINI_API_BASE_URL = config_registry.get_var(
 
 # Model configuration — Gemini 3.x family (April 2026)
 MODEL_CONFIGS = {
+    "gemini-1.5-flash": {
+        "label": "Gemini 1.5 Flash",
+        "description": "Fast multimodal model",
+        "max_output_tokens": 8192,
+        "max_prompt_chars": 1000000,
+    },
+    "gemini-1.5-pro": {
+        "label": "Gemini 1.5 Pro",
+        "description": "Complex reasoning multimodal model",
+        "max_output_tokens": 8192,
+        "max_prompt_chars": 2000000,
+    },
     "gemini-3.1-pro-preview": {
+        "label": "Gemini 3.1 Pro (Preview)",
         "description": "Gemini 3.1 Pro (Preview) — best reasoning, agentic workflows",
         "thinking": True,
         "default_thinking_level": "high",
@@ -111,6 +125,7 @@ MODEL_CONFIGS = {
         "max_prompt_chars": 1000000,
     },
     "gemini-3.1-pro-preview-customtools": {
+        "label": "Gemini 3.1 Pro Custom Tools",
         "description": "Gemini 3.1 Pro Custom Tools — optimised for custom tool use",
         "thinking": True,
         "default_thinking_level": "high",
@@ -118,6 +133,7 @@ MODEL_CONFIGS = {
         "max_prompt_chars": 1000000,
     },
     "gemini-3-flash-preview": {
+        "label": "Gemini 3 Flash (Preview)",
         "description": "Gemini 3 Flash (Preview) — fast multimodal + search grounding",
         "thinking": True,
         "default_thinking_level": "high",
@@ -125,6 +141,7 @@ MODEL_CONFIGS = {
         "max_prompt_chars": 1000000,
     },
     "gemini-3.1-flash-lite-preview": {
+        "label": "Gemini 3.1 Flash-Lite (Preview)",
         "description": "Gemini 3.1 Flash-Lite (Preview) — cost-efficient, high-volume",
         "thinking": True,
         "default_thinking_level": "minimal",
@@ -132,6 +149,7 @@ MODEL_CONFIGS = {
         "max_prompt_chars": 1000000,
     },
     "gemini-3.1-flash-image-preview": {
+        "label": "Gemini 3.1 Flash Image (Preview)",
         "description": "Gemini 3.1 Flash Image (Preview) — image generation + editing",
         "thinking": True,
         "default_thinking_level": "minimal",
@@ -139,6 +157,84 @@ MODEL_CONFIGS = {
         "max_prompt_chars": 1000000,
     },
 }
+
+_LEGACY_DICT_PROMPT_WARNED = False
+
+
+def sync_discover_models() -> None:
+    """Fetch available models from the Gemini API and update MODEL_CONFIGS.
+
+    This is called during initialization to ensure the model list is up-to-date.
+    """
+    global MODEL_CONFIGS, MODEL_LIMITS_MAP
+    api_key = str(GEMINI_API_KEY).strip()
+    if not api_key:
+        return
+
+    try:
+        base_url = (
+            str(GEMINI_API_BASE_URL).strip()
+            or "https://generativelanguage.googleapis.com"
+        )
+        if base_url.endswith("/v1") or base_url.endswith("/v1beta"):
+            versioned_base = base_url
+        else:
+            versioned_base = f"{base_url}/v1beta"
+
+        url = f"{versioned_base}/models"
+        response = requests.get(url, params={"key": api_key}, timeout=10)
+        if response.status_code != 200:
+            log_warning(
+                f"[gemini_api] Model discovery failed: HTTP {response.status_code}"
+            )
+            return
+
+        data = response.json()
+        models = data.get("models", [])
+        if not models:
+            return
+
+        new_configs = {}
+        for m in models:
+            name = m.get("name", "")
+            if name.startswith("models/"):
+                model_id = name[7:]
+            else:
+                model_id = name
+
+            # Only include models that support content generation
+            if "generateContent" not in m.get("supportedGenerationMethods", []):
+                continue
+
+            # Skip experimental or internal names unless they are already known
+            if "-experimental" in model_id and model_id not in MODEL_CONFIGS:
+                continue
+
+            display_name = m.get("displayName", model_id)
+            new_configs[model_id] = {
+                "label": display_name,
+                "description": m.get("description", ""),
+                "max_output_tokens": m.get("outputTokenLimit", 8192),
+                "max_prompt_chars": m.get("inputTokenLimit", 1000000),
+                "thinking": m.get("thinking", False) or "thinking" in model_id.lower(),
+            }
+
+        if new_configs:
+            # Merge with existing configs to preserve any special flags (like thinking levels)
+            for mid, cfg in new_configs.items():
+                if mid in MODEL_CONFIGS:
+                    MODEL_CONFIGS[mid].update(cfg)
+                else:
+                    MODEL_CONFIGS[mid] = cfg
+
+            log_info(f"[gemini_api] Discovered {len(new_configs)} models from API.")
+
+            # Update limits map
+            for mid, cfg in MODEL_CONFIGS.items():
+                MODEL_LIMITS_MAP[mid] = cfg["max_prompt_chars"]
+    except Exception as e:
+        log_warning(f"[gemini_api] Error discovering models: {e}")
+
 
 DEFAULT_MODEL = "gemini-3-flash-preview"
 
@@ -153,8 +249,18 @@ def _get_gemini_model() -> str:
     from core.config import get_current_model
 
     current = get_current_model()
+    if not current:
+        return DEFAULT_MODEL
+    # If the current model is one we just discovered (or is in our list), use it
     if current in MODEL_CONFIGS:
         return current
+
+    # If it's a model in 'models/{id}' format, normalize it
+    if current.startswith("models/"):
+        normalized = current[7:]
+        if normalized in MODEL_CONFIGS:
+            return normalized
+
     return DEFAULT_MODEL
 
 
@@ -162,16 +268,20 @@ def _set_gemini_model(value: str) -> None:
     from core.config import set_current_model
 
     model = str(value).strip()
-    if model not in MODEL_CONFIGS:
-        model = DEFAULT_MODEL
-    set_current_model(model)
-    try:
-        from core.plugin_instance import plugin as active_plugin
+    # Normalize if user pasted the full 'models/' path
+    if model.startswith("models/"):
+        model = model[7:]
 
-        if active_plugin and hasattr(active_plugin, "set_current_model"):
-            active_plugin.set_current_model(model)
-    except Exception:
-        pass
+    if model not in MODEL_CONFIGS:
+        # If not found, try a refresh in case it's a new model
+        sync_discover_models()
+
+    if model not in MODEL_CONFIGS:
+        log_warning(f"[gemini_api] Attempted to set unknown model: {model}")
+        # We allow it anyway as the API might support it even if not listed
+        # but we don't change the DEFAULT_MODEL.
+
+    set_current_model(model)
 
 
 try:
@@ -202,7 +312,8 @@ GEMINI_MODEL = config_registry.get_var(
     group="llm",
     component="gemini_api",
     tags=["cortex_engine"],
-    constraints={"choices": list(MODEL_CONFIGS.keys())},
+    # We remove static choices to allow dynamic discovery to reflect in the UI
+    # The WebUI Engines tab uses get_supported_models() which is dynamic.
     getter=_get_gemini_model,
     setter=_set_gemini_model,
 )
@@ -230,10 +341,10 @@ class GeminiAPIPlugin(AIPluginBase):
     """
 
     display_name = "Gemini API"
+    supports_prompt_request = True
 
     def __init__(self, notify_fn=None):
         from core.notifier import set_notifier
-        from core.config import get_current_model
 
         if notify_fn:
             set_notifier(notify_fn)
@@ -244,9 +355,8 @@ class GeminiAPIPlugin(AIPluginBase):
             )
             set_notifier(self._notify_fn)
 
-        self._current_model = str(GEMINI_MODEL) or get_current_model() or DEFAULT_MODEL
-        if self._current_model not in MODEL_CONFIGS:
-            self._current_model = DEFAULT_MODEL
+        # Always attempt to refresh the model list on startup
+        sync_discover_models()
 
         # Track current request metadata for error handling
         self._current_request_meta = None
@@ -262,6 +372,7 @@ class GeminiAPIPlugin(AIPluginBase):
                     api_key=str(GEMINI_API_KEY).strip(),
                     http_options={"api_version": "v1alpha"},
                 )
+                self.client = harden_genai_client_for_async_close(self.client)
                 log_info(
                     "[gemini_api] Google GenAI Client initialized for Live API (v1alpha)"
                 )
@@ -270,6 +381,11 @@ class GeminiAPIPlugin(AIPluginBase):
 
         log_info(f"[gemini_api] Initialized with model: {self._current_model}")
 
+    @property
+    def _current_model(self) -> str:
+        """The currently active model, always in sync with the configuration."""
+        return _get_gemini_model()
+
     def get_health_status(self):
         """Return (ok, error_message) indicating whether the engine is ready."""
         if not GEMINI_API_KEY or not str(GEMINI_API_KEY).strip():
@@ -277,8 +393,8 @@ class GeminiAPIPlugin(AIPluginBase):
         return True, ""
 
     def get_supported_models(self) -> list[str]:
-        """Return available model names."""
-        return list(MODEL_CONFIGS.keys())
+        """Return available model names, including those discovered from API."""
+        return sorted(list(MODEL_CONFIGS.keys()))
 
     def get_current_model(self) -> str:
         """Return the currently active model."""
@@ -357,11 +473,8 @@ class GeminiAPIPlugin(AIPluginBase):
             log_warning(f"[gemini_api] detach_agent failed: {e}")
 
     def set_current_model(self, name: str):
-        """Set the active model."""
-        if name not in self.get_supported_models():
-            raise ValueError(f"Unsupported model: {name}")
-        self._current_model = name
-        log_info(f"[gemini_api] Active model updated: {name}")
+        """Set the active model and update the configuration."""
+        _set_gemini_model(name)
 
     def get_rate_limit(self):
         """Return rate limiting parameters.
@@ -441,18 +554,21 @@ class GeminiAPIPlugin(AIPluginBase):
 
             response = await self.client.aio.models.generate_content(
                 model=model_id,
-                contents=[
-                    types.Content(
-                        parts=[
-                            types.Part(text=prompt),
-                            types.Part(
-                                inline_data=types.Blob(
-                                    mime_type=mime_type, data=file_data
-                                )
-                            ),
-                        ]
-                    )
-                ],
+                contents=cast(
+                    Any,
+                    [
+                        types.Content(
+                            parts=[
+                                types.Part(text=prompt),
+                                types.Part(
+                                    inline_data=types.Blob(
+                                        mime_type=mime_type, data=file_data
+                                    )
+                                ),
+                            ]
+                        )
+                    ],
+                ),
                 config=types.GenerateContentConfig(
                     system_instruction=(
                         "You are a speech-to-text transcription system. "
@@ -460,6 +576,24 @@ class GeminiAPIPlugin(AIPluginBase):
                         "interpretation, response, or JSON."
                     ),
                     response_mime_type="text/plain",
+                    safety_settings=[
+                        types.SafetySetting(
+                            category=types.HarmCategory.HARM_CATEGORY_HARASSMENT,
+                            threshold=types.HarmBlockThreshold.OFF,
+                        ),
+                        types.SafetySetting(
+                            category=types.HarmCategory.HARM_CATEGORY_HATE_SPEECH,
+                            threshold=types.HarmBlockThreshold.OFF,
+                        ),
+                        types.SafetySetting(
+                            category=types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
+                            threshold=types.HarmBlockThreshold.OFF,
+                        ),
+                        types.SafetySetting(
+                            category=types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
+                            threshold=types.HarmBlockThreshold.OFF,
+                        ),
+                    ],
                 ),
             )
 
@@ -709,7 +843,7 @@ class GeminiAPIPlugin(AIPluginBase):
         finally:
             self._current_request_meta = None
 
-    async def generate_response(self, messages: object) -> str:  # type: ignore[override]
+    async def generate_response(self, messages: object) -> str:
         """Send prompt to Gemini API and receive the response.
 
         Args:
@@ -729,6 +863,29 @@ class GeminiAPIPlugin(AIPluginBase):
 
         try:
             # Handle different prompt formats
+            if (
+                not isinstance(prompt, dict)
+                and hasattr(prompt, "system_instruction")
+                and hasattr(prompt, "runtime_ctx")
+                and hasattr(prompt, "mode")
+            ):
+                from core.prompt_renderers import GeminiRenderer
+                from core.prompt_request import PromptRequest
+
+                renderer = GeminiRenderer(cast(PromptRequest, prompt))
+                rendered = renderer.render()
+                _model_cfg = MODEL_CONFIGS.get(
+                    self._current_model, MODEL_CONFIGS[DEFAULT_MODEL]
+                )
+                response_text = await self._http_generate_content_from_rendered(
+                    rendered=rendered,
+                    max_output_tokens=int(_model_cfg.get("max_output_tokens", 8192)),
+                )
+                log_debug(
+                    f"[gemini_api] Received response (PromptRequest direct path, {len(response_text)} chars)"
+                )
+                return response_text
+
             if isinstance(prompt, dict):
                 # Check for system_message - but only trigger correction for ERROR types
                 # "output" type system_messages are just action results and should be processed normally
@@ -748,8 +905,75 @@ class GeminiAPIPlugin(AIPluginBase):
                         f"[gemini_api] Processing system_message type '{sm_type}' as normal prompt"
                     )
 
-                # Standard JSON prompt from prompt_engine
-                prompt_text = json.dumps(prompt, indent=2, ensure_ascii=False)
+                # === Phase 6: PromptRequest native-format path (BEFORE json.dumps) ===
+                _pr = prompt.get("__prompt_request")  # type: ignore[arg-type]
+                if _pr is not None:
+                    multimodal_parts = await self._extract_multimodal_parts(prompt)
+                    from core.prompt_renderers import GeminiRenderer
+
+                    renderer = GeminiRenderer(_pr)
+                    rendered = (
+                        renderer.render_with_multimodal(multimodal_parts)
+                        if multimodal_parts
+                        else renderer.render()
+                    )
+                    _model_cfg = MODEL_CONFIGS.get(
+                        self._current_model, MODEL_CONFIGS[DEFAULT_MODEL]
+                    )
+                    response_text = await self._http_generate_content_from_rendered(
+                        rendered=rendered,
+                        max_output_tokens=int(
+                            _model_cfg.get("max_output_tokens", 8192)
+                        ),
+                    )
+                    log_debug(
+                        f"[gemini_api] Received response (PromptRequest path, {len(response_text)} chars)"
+                    )
+                    return response_text
+
+                global _LEGACY_DICT_PROMPT_WARNED
+                if not _LEGACY_DICT_PROMPT_WARNED:
+                    log_debug(
+                        "[gemini_api] dict prompt fallback path used (missing __prompt_request)"
+                    )
+                    _LEGACY_DICT_PROMPT_WARNED = True
+
+                # Fallback path: construct a minimal PromptRequest and render it
+                # natively instead of sending a raw JSON blob.
+                multimodal_parts = await self._extract_multimodal_parts(prompt)
+                prompt_to_redact = {
+                    k: v for k, v in prompt.items() if k != "__prompt_request"
+                }
+                prompt_redacted = self._copy_and_redact_data(prompt_to_redact)
+                prompt_text = json.dumps(prompt_redacted, ensure_ascii=False)
+                system_instruction = self._build_system_instruction(prompt)
+
+                from core.prompt_renderers import GeminiRenderer
+                from core.prompt_request import PromptRequest
+
+                fallback_req = PromptRequest(
+                    system_instruction=system_instruction,
+                    current_text=prompt_text,
+                    mode="chat",
+                )
+                renderer = GeminiRenderer(fallback_req)
+                rendered = (
+                    renderer.render_with_multimodal(multimodal_parts)
+                    if multimodal_parts
+                    else renderer.render()
+                )
+                _model_cfg = MODEL_CONFIGS.get(
+                    self._current_model, MODEL_CONFIGS[DEFAULT_MODEL]
+                )
+                response_text = await self._http_generate_content_from_rendered(
+                    rendered=rendered,
+                    max_output_tokens=int(_model_cfg.get("max_output_tokens", 8192)),
+                )
+                log_debug(
+                    "[gemini_api] Received response (fallback PromptRequest path, "
+                    f"{len(response_text)} chars)"
+                )
+                return response_text
             elif isinstance(prompt, str):
                 # Try to parse as JSON first
                 try:
@@ -782,7 +1006,10 @@ class GeminiAPIPlugin(AIPluginBase):
             # and confusing the model (or causing the '😵' error).
             prompt_to_redact = None
             if isinstance(prompt, dict):
-                prompt_to_redact = prompt
+                # Exclude __prompt_request (non-serializable dataclass) before redaction
+                prompt_to_redact = {
+                    k: v for k, v in prompt.items() if k != "__prompt_request"
+                }
             elif isinstance(prompt, str):
                 try:
                     prompt_to_redact = json.loads(prompt)
@@ -794,7 +1021,7 @@ class GeminiAPIPlugin(AIPluginBase):
             if prompt_to_redact:
                 prompt_redacted = self._copy_and_redact_data(prompt_to_redact)
                 # Regenerate prompt_text from reduced version
-                prompt_text = json.dumps(prompt_redacted, indent=2, ensure_ascii=False)
+                prompt_text = json.dumps(prompt_redacted, ensure_ascii=False)
                 if len(prompt_text) < len(str(prompt)):
                     log_debug(
                         f"[gemini_api] Redacted heavy data from prompt: {len(str(prompt))} -> {len(prompt_text)} chars"
@@ -955,27 +1182,20 @@ class GeminiAPIPlugin(AIPluginBase):
         max_output_tokens: int,
         multimodal_parts: list[dict] | None = None,
     ) -> str:
-        """Generate content using the Gemini REST API.
-
-        Args:
-            prompt_text: The text prompt to send
-            system_instruction: System instruction for the model
-            max_output_tokens: Maximum tokens in response
-            multimodal_parts: Optional list of multimodal inline_data parts
-        """
+        """Generate content using the Gemini REST API."""
         base_url = (
             str(GEMINI_API_BASE_URL).strip()
             or "https://generativelanguage.googleapis.com"
         )
         api_key = str(GEMINI_API_KEY).strip()
-        if base_url.endswith("/v1") or base_url.endswith("/v1beta"):
-            versioned_base = base_url
-        else:
-            versioned_base = f"{base_url}/v1beta"
+        versioned_base = (
+            base_url
+            if base_url.endswith("/v1") or base_url.endswith("/v1beta")
+            else f"{base_url}/v1beta"
+        )
         url = f"{versioned_base}/models/{self._current_model}:generateContent"
 
-        # Build the parts list - multimodal content first, then text
-        user_parts = []
+        user_parts: list[dict[str, Any]] = []
         if multimodal_parts:
             user_parts.extend(multimodal_parts)
             log_debug(
@@ -984,152 +1204,123 @@ class GeminiAPIPlugin(AIPluginBase):
         user_parts.append({"text": prompt_text})
 
         payload = {
-            "contents": [
-                {
-                    "role": "user",
-                    "parts": user_parts,
-                }
-            ],
+            "contents": [{"role": "user", "parts": user_parts}],
             "systemInstruction": {
                 "role": "system",
                 "parts": [{"text": system_instruction}],
             },
             "generationConfig": {
                 "maxOutputTokens": int(max_output_tokens),
+                "responseMimeType": "application/json",
             },
             "safetySettings": [
-                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "OFF"},
+                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "OFF"},
                 {
                     "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
-                    "threshold": "BLOCK_NONE",
+                    "threshold": "OFF",
                 },
                 {
                     "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
-                    "threshold": "BLOCK_NONE",
+                    "threshold": "OFF",
                 },
             ],
         }
 
-        # ── Log the outgoing request ──────────────────────────────────
         log_cortex_request(
-            "gemini_api",
-            model=self._current_model,
-            url=url,
-            payload=payload,
+            "gemini_api", model=self._current_model, url=url, payload=payload
         )
         _req_start = _time.monotonic()
 
-        def _do_request():
+        def _do_request() -> requests.Response:
             return requests.post(
-                url,
-                params={"key": api_key},
-                json=payload,
-                timeout=120,  # Increased timeout for multimodal requests
+                url, params={"key": api_key}, json=payload, timeout=120
+            )
+
+        def _log_and_json_error(
+            text: str,
+            *,
+            status: int | None = None,
+            error: str | None = None,
+        ) -> str:
+            _elapsed_local = (_time.monotonic() - _req_start) * 1000
+            log_cortex_response(
+                "gemini_api",
+                model=self._current_model,
+                status=status,
+                error=error or text,
+                elapsed_ms=_elapsed_local,
+            )
+            return json.dumps(
+                {"actions": [{"type": "system_message", "payload": {"text": text}}]}
             )
 
         retryable_statuses = {429, 500, 503, 504}
         max_attempts = 3
-        response = None
+        response: requests.Response | None = None
 
         for attempt in range(max_attempts):
             try:
                 loop = asyncio.get_event_loop()
                 response = await loop.run_in_executor(None, _do_request)
+            except asyncio.CancelledError:
+                _elapsed = (_time.monotonic() - _req_start) * 1000
+                log_cortex_response(
+                    "gemini_api",
+                    model=self._current_model,
+                    error="request cancelled",
+                    elapsed_ms=_elapsed,
+                )
+                raise
             except Exception as e:
                 if attempt < max_attempts - 1:
-                    delay = min(8, 1 * (2**attempt))
-                    log_warning(
-                        f"[gemini_api] HTTP request failed (attempt {attempt + 1}/{max_attempts}): {e}. "
-                        f"Retrying in {delay}s"
-                    )
-                    await asyncio.sleep(delay)
+                    await asyncio.sleep(min(8, 1 * (2**attempt)))
                     continue
                 log_error(f"[gemini_api] HTTP request failed: {e}")
-                return json.dumps(
-                    {
-                        "actions": [
-                            {
-                                "type": "system_message",
-                                "payload": {
-                                    "text": f"⚠️ Gemini HTTP request failed: {str(e)}"
-                                },
-                            }
-                        ]
-                    }
+                return _log_and_json_error(
+                    f"⚠️ Gemini HTTP request failed: {e}", error=str(e)
                 )
 
-            if response.status_code >= 400:
-                if (
-                    response.status_code in retryable_statuses
-                    and attempt < max_attempts - 1
-                ):
-                    delay = min(8, 1 * (2**attempt))
-                    log_warning(
-                        f"[gemini_api] HTTP error {response.status_code} (attempt {attempt + 1}/{max_attempts}). "
-                        f"Retrying in {delay}s"
-                    )
-                    await asyncio.sleep(delay)
+            status_code = int(response.status_code or 0)
+            if status_code >= 400:
+                if status_code in retryable_statuses and attempt < max_attempts - 1:
+                    await asyncio.sleep(min(8, 1 * (2**attempt)))
                     continue
                 log_error(
                     f"[gemini_api] HTTP error {response.status_code}: {response.text}"
                 )
-                return json.dumps(
-                    {
-                        "actions": [
-                            {
-                                "type": "system_message",
-                                "payload": {
-                                    "text": f"⚠️ Gemini HTTP error {response.status_code}: {response.text}"
-                                },
-                            }
-                        ]
-                    }
+                return _log_and_json_error(
+                    f"⚠️ Gemini HTTP error {response.status_code}: {response.text}",
+                    status=status_code,
+                    error=response.text,
                 )
             break
 
         if response is None:
-            return json.dumps(
-                {
-                    "actions": [
-                        {
-                            "type": "system_message",
-                            "payload": {
-                                "text": "⚠️ Gemini HTTP request failed: no response"
-                            },
-                        }
-                    ]
-                }
+            return _log_and_json_error(
+                "⚠️ Gemini HTTP request failed: no response", error="no response"
             )
 
         try:
             data = response.json()
         except Exception as e:
             log_error(f"[gemini_api] HTTP response JSON parse failed: {e}")
-            return json.dumps(
-                {
-                    "actions": [
-                        {
-                            "type": "system_message",
-                            "payload": {
-                                "text": "⚠️ Gemini HTTP response was not valid JSON"
-                            },
-                        }
-                    ]
-                }
+            return _log_and_json_error(
+                "⚠️ Gemini HTTP response was not valid JSON",
+                status=response.status_code,
+                error=str(e),
             )
 
-        # Log error responses from the API
         if "error" in data:
-            _elapsed = (_time.monotonic() - _req_start) * 1000
             err = data["error"]
             err_msg = (
                 err.get("message", str(err)) if isinstance(err, dict) else str(err)
             )
+            _elapsed = (_time.monotonic() - _req_start) * 1000
             log_cortex_response(
                 "gemini_api",
                 model=self._current_model,
-                status=response.status_code if response else None,
+                status=response.status_code,
                 error=err_msg,
                 elapsed_ms=_elapsed,
             )
@@ -1137,58 +1328,246 @@ class GeminiAPIPlugin(AIPluginBase):
         candidates = data.get("candidates") or []
         if not candidates:
             log_error(f"[gemini_api] HTTP response missing candidates: {data}")
-            return json.dumps(
-                {
-                    "actions": [
-                        {
-                            "type": "system_message",
-                            "payload": {
-                                "text": "⚠️ Gemini HTTP response missing candidates"
-                            },
-                        }
-                    ]
-                }
+            return _log_and_json_error(
+                "⚠️ Gemini HTTP response missing candidates",
+                status=response.status_code,
+                error="missing candidates",
             )
 
         content = candidates[0].get("content", {})
         parts = content.get("parts") or []
         response_text = "".join(
-            part.get("text", "") for part in parts if isinstance(part, dict)
+            part.get("text", "")
+            for part in parts
+            if isinstance(part, dict) and not part.get("thought", False)
         ).strip()
-
         if not response_text:
             log_error(f"[gemini_api] HTTP response contained no text: {data}")
-            return json.dumps(
-                {
-                    "actions": [
-                        {
-                            "type": "system_message",
-                            "payload": {
-                                "text": "⚠️ Gemini HTTP response contained no text"
-                            },
-                        }
-                    ]
-                }
+            return _log_and_json_error(
+                "⚠️ Gemini HTTP response contained no text",
+                status=response.status_code,
+                error="empty response text",
             )
 
-        # ── Log the response ────────────────────────────────────────────
         _elapsed = (_time.monotonic() - _req_start) * 1000
         usage_meta = data.get("usageMetadata") or {}
         log_cortex_response(
             "gemini_api",
             model=self._current_model,
-            status=response.status_code if response else None,
+            status=response.status_code,
             body=response_text,
-            usage={
-                "prompt_tokens": usage_meta.get("promptTokenCount"),
-                "completion_tokens": usage_meta.get("candidatesTokenCount"),
-            }
-            if usage_meta
-            else None,
+            usage=(
+                {
+                    "prompt_tokens": usage_meta.get("promptTokenCount"),
+                    "completion_tokens": usage_meta.get("candidatesTokenCount"),
+                }
+                if usage_meta
+                else None
+            ),
             elapsed_ms=_elapsed,
         )
-
         return response_text
+
+    async def _http_generate_content_from_rendered(
+        self,
+        rendered: dict[str, Any],
+        max_output_tokens: int,
+    ) -> str:
+        """Phase-6 Gemini call using a renderer-produced payload."""
+        from core.prompt_renderers import GeminiRenderer
+
+        base_url = (
+            str(GEMINI_API_BASE_URL).strip()
+            or "https://generativelanguage.googleapis.com"
+        )
+        api_key = str(GEMINI_API_KEY).strip()
+        versioned_base = (
+            base_url
+            if base_url.endswith("/v1") or base_url.endswith("/v1beta")
+            else f"{base_url}/v1beta"
+        )
+        url = f"{versioned_base}/models/{self._current_model}:generateContent"
+
+        system_instruction_text: str = rendered.get("system_instruction_text") or ""
+        contents: list[dict[str, Any]] = rendered.get("contents") or []
+        tools_list: list[dict[str, Any]] = rendered.get("tools") or []
+
+        payload: dict[str, Any] = {
+            "contents": contents,
+            "systemInstruction": {
+                "role": "system",
+                "parts": [{"text": system_instruction_text}],
+            },
+            "generationConfig": {
+                "maxOutputTokens": max_output_tokens,
+                "responseMimeType": "application/json",
+            },
+            "safetySettings": [
+                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "OFF"},
+                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "OFF"},
+                {
+                    "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+                    "threshold": "OFF",
+                },
+                {
+                    "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
+                    "threshold": "OFF",
+                },
+            ],
+        }
+        if tools_list:
+            payload["tools"] = tools_list
+
+        log_cortex_request(
+            "gemini_api", model=self._current_model, url=url, payload=payload
+        )
+        _req_start = _time.monotonic()
+
+        def _do_request() -> requests.Response:
+            return requests.post(
+                url, params={"key": api_key}, json=payload, timeout=120
+            )
+
+        def _log_and_json_error(
+            text: str,
+            *,
+            status: int | None = None,
+            error: str | None = None,
+        ) -> str:
+            _elapsed_local = (_time.monotonic() - _req_start) * 1000
+            log_cortex_response(
+                "gemini_api",
+                model=self._current_model,
+                status=status,
+                error=error or text,
+                elapsed_ms=_elapsed_local,
+            )
+            return json.dumps(
+                {"actions": [{"type": "system_message", "payload": {"text": text}}]}
+            )
+
+        retryable_statuses = {429, 500, 503, 504}
+        max_attempts = 3
+        response: requests.Response | None = None
+
+        for attempt in range(max_attempts):
+            try:
+                loop = asyncio.get_event_loop()
+                response = await loop.run_in_executor(None, _do_request)
+            except asyncio.CancelledError:
+                _elapsed = (_time.monotonic() - _req_start) * 1000
+                log_cortex_response(
+                    "gemini_api",
+                    model=self._current_model,
+                    error="request cancelled",
+                    elapsed_ms=_elapsed,
+                )
+                raise
+            except Exception as exc:
+                if attempt < max_attempts - 1:
+                    await asyncio.sleep(min(8, 1 * (2**attempt)))
+                    continue
+                log_error(
+                    f"[gemini_api] HTTP request failed (PromptRequest path): {exc}"
+                )
+                return _log_and_json_error(
+                    f"⚠️ Gemini HTTP request failed: {exc}", error=str(exc)
+                )
+
+            status_code = int(response.status_code or 0)
+            if status_code >= 400:
+                if status_code in retryable_statuses and attempt < max_attempts - 1:
+                    await asyncio.sleep(min(8, 1 * (2**attempt)))
+                    continue
+                log_error(
+                    f"[gemini_api] HTTP error {response.status_code} (PromptRequest path)"
+                )
+                return _log_and_json_error(
+                    f"⚠️ Gemini HTTP error {response.status_code}",
+                    status=status_code,
+                    error=response.text,
+                )
+            break
+
+        if response is None:
+            return _log_and_json_error(
+                "⚠️ Gemini HTTP request failed: no response", error="no response"
+            )
+
+        try:
+            data = response.json()
+        except Exception as exc:
+            log_error(
+                f"[gemini_api] Response JSON parse failed (PromptRequest path): {exc}"
+            )
+            return _log_and_json_error(
+                "⚠️ Gemini HTTP response was not valid JSON",
+                status=response.status_code,
+                error=str(exc),
+            )
+
+        if "error" in data:
+            err = data["error"]
+            err_msg = (
+                err.get("message", str(err)) if isinstance(err, dict) else str(err)
+            )
+            log_error(f"[gemini_api] API error (PromptRequest path): {err_msg}")
+            return _log_and_json_error(
+                f"⚠️ Gemini API error: {err_msg}",
+                status=response.status_code,
+                error=err_msg,
+            )
+
+        candidates = data.get("candidates") or []
+        if not candidates:
+            log_error(
+                f"[gemini_api] Response missing candidates (PromptRequest path): {data}"
+            )
+            return _log_and_json_error(
+                "⚠️ Gemini HTTP response missing candidates",
+                status=response.status_code,
+                error="missing candidates",
+            )
+
+        content_dict = candidates[0].get("content", {})
+        parts = content_dict.get("parts") or []
+        func_calls = [p for p in parts if isinstance(p, dict) and "functionCall" in p]
+        if func_calls:
+            result_text = GeminiRenderer.parse_function_call_response(data)
+        else:
+            result_text = "".join(
+                part.get("text", "")
+                for part in parts
+                if isinstance(part, dict) and not part.get("thought", False)
+            ).strip()
+            if not result_text:
+                log_error(
+                    f"[gemini_api] Response had no text (PromptRequest path): {data}"
+                )
+                return _log_and_json_error(
+                    "⚠️ Gemini HTTP response contained no text",
+                    status=response.status_code,
+                    error="empty response text",
+                )
+
+        _elapsed = (_time.monotonic() - _req_start) * 1000
+        usage_meta = data.get("usageMetadata") or {}
+        log_cortex_response(
+            "gemini_api",
+            model=self._current_model,
+            status=response.status_code,
+            body=result_text,
+            usage=(
+                {
+                    "prompt_tokens": usage_meta.get("promptTokenCount"),
+                    "completion_tokens": usage_meta.get("candidatesTokenCount"),
+                }
+                if usage_meta
+                else None
+            ),
+            elapsed_ms=_elapsed,
+        )
+        return result_text
 
     # -------------------------------------------------------------------------
     # Multimodal Support Methods
@@ -1806,7 +2185,7 @@ class GeminiAurisAdapter:
             for name in reg.get_available_engines():
                 if "gemini" in name.lower():
                     try:
-                        return reg.load_engine(name)  # type: ignore[return-value]
+                        return reg.load_engine(name)
                     except Exception:
                         continue
         except Exception as exc:

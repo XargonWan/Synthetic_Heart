@@ -11,7 +11,7 @@ def test_autonomy_default_is_suggest():
     assert defn.default == "suggest"
 
 
-def test_autonomy_has_choices_constraint_and_exposed_combobox():
+def test_autonomy_has_choices_constraint_and_exposed_select():
     defn = config_registry._definitions.get("SYNTH_AUTONOMY_MODE")
     assert defn is not None
     assert defn.constraints and "choices" in defn.constraints
@@ -22,12 +22,12 @@ def test_autonomy_has_choices_constraint_and_exposed_combobox():
         "autonomous",
     ]
 
-    # Check exposed var registration for combobox UI
+    # Check exposed var registration for select UI
     from core.variables_engine import exposed_vars
 
     exposed_def = exposed_vars.get_definition("SYNTH_AUTONOMY_MODE")
     assert exposed_def is not None
-    assert exposed_def.ui_type == "combobox"
+    assert exposed_def.ui_type == "select"
     assert exposed_def.options == ["passive", "suggest", "whitelisted", "autonomous"]
     # Tooltip should explain difference between whitelisted and autonomous
     assert "automatically execute ONLY actions" in exposed_def.description

@@ -32,14 +32,17 @@ class FakeAiohttpResponse:
 class FakeAiohttpSession:
     def __init__(self):
         self.calls: list[str] = []
+        self.request_kwargs: list[dict[str, Any]] = []
         self.responses: list[FakeAiohttpResponse] = []
 
     def get(self, url: str, *args, **kwargs):
         self.calls.append(url)
+        self.request_kwargs.append(kwargs)
         return self.responses.pop(0)
 
     def post(self, url: str, *args, **kwargs):
         self.calls.append(url)
+        self.request_kwargs.append(kwargs)
         return self.responses.pop(0)
 
     async def __aenter__(self):
@@ -111,6 +114,30 @@ async def test_openai_compat_list_models_prefers_v1_path(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_openai_compat_list_models_uses_adapter_timeout(monkeypatch):
+    data = [{"id": "grok", "object": "model", "name": "Grok"}]
+    adapter = OpenAICompatAdapter(
+        base_url="http://localhost:14848", api_key="x", timeout=300.0
+    )
+
+    session = FakeAiohttpSession()
+    session.responses = [FakeAiohttpResponse(status=200, payload={"data": data})]
+
+    import aiohttp
+
+    monkeypatch.setattr(aiohttp, "ClientSession", lambda: session)
+
+    models = await adapter.list_models()
+
+    assert len(models) == 1
+    timeout = session.request_kwargs[0]["timeout"]
+    assert timeout.total == 300.0
+    assert timeout.connect == 300.0
+    assert timeout.sock_connect == 300.0
+    assert timeout.sock_read == 300.0
+
+
+@pytest.mark.asyncio
 async def test_openai_compat_probe_capabilities_reads_model_capabilities(monkeypatch):
     adapter = OpenAICompatAdapter(base_url="http://localhost:14848", api_key="x")
 
@@ -149,8 +176,12 @@ async def test_openai_compat_probe_capabilities_probes_image_support(monkeypatch
 
     session = FakeAiohttpSession()
     session.responses = [
-        FakeAiohttpResponse(status=200, payload={"data": [{"id": "chat-only", "object": "model"}]}),
-        FakeAiohttpResponse(status=200, payload={"choices": [{"message": {"content": "ok"}}]}),
+        FakeAiohttpResponse(
+            status=200, payload={"data": [{"id": "chat-only", "object": "model"}]}
+        ),
+        FakeAiohttpResponse(
+            status=200, payload={"choices": [{"message": {"content": "ok"}}]}
+        ),
         FakeAiohttpResponse(status=404, payload={}, body=b""),
         FakeAiohttpResponse(status=404, payload={}, body=b""),
     ]
@@ -164,16 +195,24 @@ async def test_openai_compat_probe_capabilities_probes_image_support(monkeypatch
     assert caps["vision"] is True
     assert caps["auris"] is False
     assert caps["vox"] is False
+    assert session.request_kwargs[1]["json"]["model"] == "chat-only"
 
 
 @pytest.mark.asyncio
-async def test_openai_compat_probe_capabilities_detects_vision_for_gemini_flash(monkeypatch):
+async def test_openai_compat_probe_capabilities_detects_vision_for_gemini_flash(
+    monkeypatch,
+):
     adapter = OpenAICompatAdapter(base_url="http://localhost:14848", api_key="x")
 
     session = FakeAiohttpSession()
     session.responses = [
-        FakeAiohttpResponse(status=200, payload={"data": [{"id": "gemini-2.5-flash", "object": "model"}]}),
-        FakeAiohttpResponse(status=200, payload={"choices": [{"message": {"content": "ok"}}]}),
+        FakeAiohttpResponse(
+            status=200,
+            payload={"data": [{"id": "gemini-2.5-flash", "object": "model"}]},
+        ),
+        FakeAiohttpResponse(
+            status=200, payload={"choices": [{"message": {"content": "ok"}}]}
+        ),
         FakeAiohttpResponse(status=404, payload={}, body=b""),
         FakeAiohttpResponse(status=404, payload={}, body=b""),
     ]
@@ -215,8 +254,10 @@ class FakePingResponse:
 class FakePingSession:
     def __init__(self, response: FakePingResponse) -> None:
         self._response = response
+        self.last_kwargs: dict[str, Any] | None = None
 
     def post(self, *args, **kwargs):
+        self.last_kwargs = kwargs
         return self._response
 
     async def __aenter__(self):
@@ -259,6 +300,58 @@ async def test_openai_compat_ping_test_http_error(monkeypatch):
 
     assert ok is False
     assert "500" in echo
+
+
+@pytest.mark.asyncio
+async def test_openai_compat_ping_test_defaults_to_adapter_timeout(monkeypatch):
+    adapter = OpenAICompatAdapter(
+        base_url="http://fake-host", api_key="x", timeout=300.0
+    )
+
+    fake_resp = FakePingResponse(
+        status=200, body={"choices": [{"message": {"content": "pong"}}]}
+    )
+    fake_session = FakePingSession(fake_resp)
+
+    import aiohttp
+
+    monkeypatch.setattr(aiohttp, "ClientSession", lambda: fake_session)
+
+    ok, echo = await adapter.ping_test()
+
+    assert ok is True
+    assert echo == "pong"
+    assert fake_session.last_kwargs is not None
+    timeout = fake_session.last_kwargs["timeout"]
+    assert timeout.connect == 300.0
+    assert timeout.sock_connect == 300.0
+    assert timeout.sock_read == 300.0
+
+
+@pytest.mark.asyncio
+async def test_openai_compat_ping_test_uses_listed_model_when_unspecified(monkeypatch):
+    adapter = OpenAICompatAdapter(base_url="http://fake-host", api_key="x")
+
+    fake_resp = FakePingResponse(
+        status=200, body={"choices": [{"message": {"content": "pong"}}]}
+    )
+    fake_session = FakePingSession(fake_resp)
+
+    import aiohttp
+
+    monkeypatch.setattr(aiohttp, "ClientSession", lambda: fake_session)
+
+    async def fake_list_models():
+        return [type("Model", (), {"id": "x-ai/grok-4.1-fast", "capabilities": {}})()]
+
+    monkeypatch.setattr(adapter, "list_models", fake_list_models)
+
+    ok, echo = await adapter.ping_test()
+
+    assert ok is True
+    assert echo == "pong"
+    assert fake_session.last_kwargs is not None
+    assert fake_session.last_kwargs["json"]["model"] == "x-ai/grok-4.1-fast"
 
 
 @pytest.mark.asyncio

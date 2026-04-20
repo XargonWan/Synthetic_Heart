@@ -12,14 +12,21 @@ def test_manifest_display_fullscreen():
 def test_service_worker_exists_and_registered():
     from pathlib import Path
 
-    tpl = Path("core/webui_templates/synth_webui_index.html").read_text(
+    shell_tpl = Path("core/webui_templates/synth_webui_shell.html").read_text(
         encoding="utf-8"
     )
-    assert "serviceWorker" in tpl and "service-worker.js" in tpl
+    base_tpl = Path("core/webui_templates/base.html").read_text(encoding="utf-8")
+    init_js = Path("res/synth_webui/js/init.js").read_text(encoding="utf-8")
+
+    assert "manifest.webmanifest" in shell_tpl
+    assert "manifest.webmanifest" in base_tpl
+    assert "serviceWorker" in init_js and "service-worker.js" in init_js
     assert Path("res/synth_webui/static/service-worker.js").exists()
     # Ensure generated icons exist
     assert Path("res/synth_webui/static/synth_icon_180.png").exists()
     assert Path("res/synth_webui/static/synth_icon_192.png").exists()
     assert Path("res/synth_webui/static/synth_icon_512.png").exists()
     # install button presence
-    assert "synth-install-btn" in tpl
+    assert "synth-install-btn" in shell_tpl
+    assert "synth-install-btn" in init_js
+    assert "__synthDeferredPrompt" in init_js

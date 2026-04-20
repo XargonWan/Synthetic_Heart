@@ -2,6 +2,7 @@ import asyncio
 from datetime import datetime, timezone, timedelta
 from collections import deque
 from types import SimpleNamespace
+from typing import Any
 
 
 from core import prompt_engine
@@ -175,6 +176,7 @@ def test_local_global_separation(monkeypatch):
     # local/global aliases are only present when history_scope='local';
     # check canonical keys instead.
     assert any("Local message" in e for e in ctx["history_current_chat"])
+    assert all("Other chat message" not in e for e in ctx["history_current_chat"])
     # history_recent must NOT contain the local message
     assert all("Local message" not in e for e in ctx["history_recent"])
     # history_recent should include the other chat's message
@@ -234,8 +236,84 @@ def test_history_scope_local_only(monkeypatch):
     assert ctx.get("history_scope") == "local"
 
     # The input payload should expose the requested scope so the LLM can prioritise
-    assert res.get("input", {}).get("payload", {}).get("history_scope") == "local"
-    assert res.get("input", {}).get("payload", {}).get("scope") == "local"
+    payload = res.get("input", {}).get("payload", {})
+    assert payload.get("scope") == "local"
+    assert payload.get("history_scope", "local") == "local"
+
+
+def test_unified_history_keeps_local_messages_when_global_tail_is_busy(monkeypatch):
+    monkeypatch.setattr("core.action_parser.gather_static_injections", _dummy_gather)
+    monkeypatch.setattr(
+        "core.history_engine._get_int",
+        lambda key, default: 3 if key == "CONTEXT_VERBOSITY" else default,
+    )
+
+    now = datetime.utcnow().replace(tzinfo=timezone.utc)
+    interface = "telegram_bot/777"
+
+    local_old = _make_msg("Alice", "Local oldest", now - timedelta(minutes=8))
+    local_mid = _make_msg("Alice", "Local middle", now - timedelta(minutes=6))
+    local_new = _make_msg("Alice", "Local newest", now - timedelta(minutes=4))
+    other_1 = _make_msg("Eve", "Other one", now - timedelta(minutes=3))
+    other_2 = _make_msg("Mallory", "Other two", now - timedelta(minutes=2))
+    other_3 = _make_msg("Trent", "Other three", now - timedelta(minutes=1))
+
+    context_memory = {
+        interface: deque([local_old, local_mid, local_new]),
+        "discord_bot/1": deque([{**other_1, "interface_path": "discord_bot/1"}]),
+        "discord_bot/2": deque([{**other_2, "interface_path": "discord_bot/2"}]),
+        "discord_bot/3": deque([{**other_3, "interface_path": "discord_bot/3"}]),
+    }
+
+    async def _fake_cache_load(ip):
+        assert ip == interface
+        return deque([local_old, local_mid, local_new])
+
+    async def _fake_global_load(limit=10):
+        return deque(
+            [
+                {**local_old, "interface_path": interface},
+                {**local_mid, "interface_path": interface},
+                {**local_new, "interface_path": interface},
+                {**other_1, "interface_path": "discord_bot/1"},
+                {**other_2, "interface_path": "discord_bot/2"},
+                {**other_3, "interface_path": "discord_bot/3"},
+            ]
+        )
+
+    monkeypatch.setattr("core.chat_history_cache.load_chat_history", _fake_cache_load)
+    monkeypatch.setattr(
+        "core.chat_history_cache.load_global_chat_history", _fake_global_load
+    )
+
+    message = SimpleNamespace(
+        interface_path=interface,
+        text="current input",
+        message_id=12,
+        from_user=SimpleNamespace(full_name="user", username="user"),
+        date=now,
+    )
+
+    res = asyncio.run(
+        prompt_engine.build_json_prompt(
+            message, context_memory, interface_name="telegram"
+        )
+    )
+
+    current_entries = res["context"].get("history_current_chat", [])
+    recent_entries = res["context"].get("history_recent", [])
+
+    assert len(current_entries) == 3
+    assert any("Local oldest" in e for e in current_entries)
+    assert any("Local middle" in e for e in current_entries)
+    assert any("Local newest" in e for e in current_entries)
+    assert all("Other one" not in e for e in current_entries)
+
+    assert len(recent_entries) == 3
+    assert any("Other one" in e for e in recent_entries)
+    assert any("Other two" in e for e in recent_entries)
+    assert any("Other three" in e for e in recent_entries)
+    assert all("Local newest" not in e for e in recent_entries)
 
 
 def test_load_chat_history_for_guild_queries(monkeypatch):

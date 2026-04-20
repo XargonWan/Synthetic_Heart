@@ -23,6 +23,7 @@ class ExternalIrisEngine(IrisEngineBase):
     ) -> None:
         self._endpoint = endpoint
         self._adapter = adapter
+        self._adapter._engine_label = endpoint.name or "iris_bridge"
         self.display_name = f"{endpoint.display_label or endpoint.name} (Vision)"
 
     def describe_image(

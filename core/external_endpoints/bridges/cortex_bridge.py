@@ -9,19 +9,86 @@ to a built-in engine from the perspective of the SyntH core.
 from __future__ import annotations
 
 import asyncio
+import base64
+import copy
 import json
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from core.ai_plugin_base import AIPluginBase
-from core.logging_utils import log_warning
+from core.logging_utils import log_debug, log_warning
 
 if TYPE_CHECKING:
     from core.external_endpoints.adapters.base import BaseProtocolAdapter
     from core.external_endpoints.models import ExternalEndpoint
 
 
+# ---------------------------------------------------------------------------
+# Multimodal extraction helper
+# ---------------------------------------------------------------------------
+
+# Keys whose values can contain lists of multimodal attachment dicts.
+_MM_KEYS: frozenset[str] = frozenset(
+    {"attachments", "images", "audio", "documents", "videos"}
+)
+# Subtree-root keys that describe action *schemas*, not actual media data.
+_SCHEMA_KEYS: frozenset[str] = frozenset({"actions", "available_actions", "schema"})
+
+
+def _extract_attachments_and_redact(
+    prompt: dict[str, Any],
+) -> tuple[dict[str, Any], list[dict[str, str]]]:
+    """Extract multimodal attachments from *prompt* and return a redacted copy.
+
+    Recursively walks the prompt dict looking for attachment items that contain
+    base64-encoded data (``data`` or ``base64`` field) alongside a ``mime_type``.
+    Those are collected as ``{"mime_type": …, "data": …}`` dicts and their
+    base64 payload is replaced with a short placeholder in the returned copy so
+    the JSON text sent to the model stays compact.
+
+    Returns:
+        A ``(redacted_prompt_copy, multimodal_parts)`` tuple.
+    """
+    redacted = copy.deepcopy(prompt)
+    parts: list[dict[str, str]] = []
+
+    def _try_extract(item: Any) -> None:
+        """If *item* looks like an attachment with base64, collect + redact it."""
+        if not isinstance(item, dict):
+            return
+        mime = item.get("mime_type") or item.get("mimeType")
+        if not mime:
+            return
+        for field in ("data", "base64"):
+            b64 = item.get(field)
+            if b64 and isinstance(b64, str) and len(b64) > 256:
+                parts.append({"mime_type": str(mime), "data": b64})
+                item[field] = f"<binary: {len(b64)} chars>"
+                return  # one data field per attachment
+
+    def _walk(node: Any) -> None:
+        if isinstance(node, dict):
+            for key in _MM_KEYS:
+                items = node.get(key)
+                if isinstance(items, list):
+                    for item in items:
+                        _try_extract(item)
+                elif isinstance(items, dict):
+                    _try_extract(items)
+            for key, val in node.items():
+                if key not in _SCHEMA_KEYS and key not in _MM_KEYS:
+                    _walk(val)
+        elif isinstance(node, list):
+            for item in node:
+                _walk(item)
+
+    _walk(redacted)
+    return redacted, parts
+
+
 class ExternalCortexEngine(AIPluginBase):
     """AIPluginBase implementation backed by an external endpoint adapter."""
+
+    supports_prompt_request = True
 
     def __init__(
         self,
@@ -31,8 +98,182 @@ class ExternalCortexEngine(AIPluginBase):
     ) -> None:
         self._endpoint = endpoint
         self._adapter = adapter
+        self._adapter._engine_label = endpoint.name or "cortex_bridge"
         self.notify_fn = notify_fn
         self.display_name = endpoint.display_label or endpoint.name
+
+    # ------------------------------------------------------------------
+    # Multimodal format helpers
+    # ------------------------------------------------------------------
+
+    _OPENAI_AUDIO_FORMATS: ClassVar[dict[str, str]] = {
+        "audio/wav": "wav",
+        "audio/x-wav": "wav",
+        "audio/mpeg": "mp3",
+        "audio/mp3": "mp3",
+    }
+
+    def _format_mm_part(self, part: dict[str, Any]) -> dict[str, Any]:
+        """Format a multimodal attachment dict for the endpoint's wire protocol.
+
+        Gemini expects ``{"type": "inline_data", "inline_data": {…}}``,
+        while OpenAI-compat endpoints (OpenRouter, Grok, GPT, etc.) only get
+        raw binary parts for media types the wire format can express directly.
+        Documents are downgraded to metadata-only placeholders so PDF bytes are
+        not mislabeled as images.
+
+        The Gemini adapter already converts ``image_url`` → ``inline_data``
+        internally, so emitting ``image_url`` is safe for *all* protocols,
+        but we default to ``inline_data`` for Gemini to skip the conversion.
+        """
+        from core.external_endpoints.models import EndpointProtocol
+
+        mime = part["mime_type"]
+        data = part.get("data", "")
+        filename = part.get("filename")
+        extracted_text = part.get("extracted_text")
+        extracted_text_truncated = bool(part.get("extracted_text_truncated"))
+        page_image_count = int(part.get("page_image_count") or 0)
+        page_images_truncated = bool(part.get("page_images_truncated"))
+
+        if self._endpoint.protocol == EndpointProtocol.GEMINI:
+            return {
+                "type": "inline_data",
+                "inline_data": {"mime_type": mime, "data": data},
+            }
+
+        if mime.startswith("image/"):
+            return {
+                "type": "image_url",
+                "image_url": {"url": f"data:{mime};base64,{data}"},
+            }
+
+        audio_format = self._OPENAI_AUDIO_FORMATS.get(mime.lower())
+        if audio_format:
+            return {
+                "type": "input_audio",
+                "input_audio": {"data": data, "format": audio_format},
+            }
+
+        document_part: dict[str, Any] = {
+            "type": "document",
+            "document": {"mime_type": mime},
+        }
+        if isinstance(filename, str) and filename:
+            document_part["document"]["filename"] = filename
+        if isinstance(extracted_text, str) and extracted_text.strip():
+            document_part["document"]["extracted_text"] = extracted_text
+            if extracted_text_truncated:
+                document_part["document"]["extracted_text_truncated"] = True
+        if page_image_count > 0:
+            document_part["document"]["page_image_count"] = page_image_count
+            if page_images_truncated:
+                document_part["document"]["page_images_truncated"] = True
+        return {
+            **document_part,
+        }
+
+    def _build_mm_parts_from_prompt_request(self, req: Any) -> list[dict[str, Any]]:
+        """Convert ``PromptRequest.attachments`` into OpenAI-style content parts."""
+        parts: list[dict[str, Any]] = []
+        attachments = getattr(req, "attachments", [])
+        for attachment in attachments:
+            mime = getattr(attachment, "mime_type", None)
+            if not isinstance(mime, str) or not mime:
+                continue
+
+            filename = getattr(attachment, "filename", None)
+            part_meta: dict[str, Any] = {"mime_type": mime}
+            if isinstance(filename, str) and filename:
+                part_meta["filename"] = filename
+            media_metadata = getattr(attachment, "media_metadata", None)
+            page_images: list[dict[str, Any]] = []
+            if isinstance(media_metadata, dict):
+                extracted_text = media_metadata.get("extracted_text")
+                if isinstance(extracted_text, str) and extracted_text.strip():
+                    part_meta["extracted_text"] = extracted_text
+                    if bool(media_metadata.get("extracted_text_truncated")):
+                        part_meta["extracted_text_truncated"] = True
+                raw_page_images = media_metadata.get("page_images")
+                if isinstance(raw_page_images, list):
+                    for raw_page_image in raw_page_images:
+                        if not isinstance(raw_page_image, dict):
+                            continue
+                        page_mime = raw_page_image.get("mime_type")
+                        page_data = raw_page_image.get("data")
+                        if not isinstance(page_mime, str) or not isinstance(
+                            page_data, str
+                        ):
+                            continue
+                        page_part: dict[str, Any] = {
+                            "mime_type": page_mime,
+                            "data": page_data,
+                        }
+                        page_filename = raw_page_image.get("filename")
+                        if isinstance(page_filename, str) and page_filename:
+                            page_part["filename"] = page_filename
+                        page_images.append(page_part)
+                if page_images:
+                    part_meta["page_image_count"] = len(page_images)
+                    if bool(media_metadata.get("page_images_truncated")):
+                        part_meta["page_images_truncated"] = True
+
+            built_part: dict[str, Any] | None = None
+
+            data = getattr(attachment, "data", None)
+            if isinstance(data, bytes):
+                b64_data = base64.b64encode(data).decode("ascii")
+                part_meta["data"] = b64_data
+                built_part = self._format_mm_part(part_meta)
+            elif isinstance(data, str) and data:
+                part_meta["data"] = data
+                built_part = self._format_mm_part(part_meta)
+            else:
+                url = getattr(attachment, "url", None)
+                if isinstance(url, str) and url:
+                    if mime.startswith("image/"):
+                        built_part = {"type": "image_url", "image_url": {"url": url}}
+                    else:
+                        built_part = self._format_mm_part(part_meta)
+                elif part_meta.get("extracted_text") or page_images:
+                    built_part = self._format_mm_part(part_meta)
+
+            if built_part is not None:
+                parts.append(built_part)
+
+            for page_image in page_images:
+                parts.append(self._format_mm_part(page_image))
+
+        return parts
+
+    def _supports_vision_for_mm_parts(self, mm_parts: list[dict[str, Any]]) -> bool:
+        """Decide whether image parts should be forwarded for this request."""
+        has_image_parts = any(part.get("type") == "image_url" for part in mm_parts)
+        if not has_image_parts:
+            return True
+
+        if bool((self._endpoint.capabilities or {}).get("vision")):
+            return True
+
+        try:
+            if bool(self._endpoint.effective_subsystem_map().get("vision")):
+                return True
+        except Exception:
+            pass
+
+        if self._endpoint.default_model:
+            log_debug(
+                f"[cortex_bridge:{self._endpoint.name}] forwarding image parts "
+                f"despite endpoint vision flag being false because default_model="
+                f"{self._endpoint.default_model!r} is set"
+            )
+            return True
+
+        log_warning(
+            f"[cortex_bridge:{self._endpoint.name}] dropping image parts because "
+            "the endpoint is not marked vision-capable and no explicit model is set"
+        )
+        return False
 
     # ------------------------------------------------------------------
     # Core LLM interface
@@ -88,11 +329,8 @@ class ExternalCortexEngine(AIPluginBase):
         # Normalise to a messages list, same way openrouter/gemini handle the prompt
         if isinstance(messages, list):
             msg_list = messages
-        elif isinstance(messages, dict):
-            prompt_text = json.dumps(messages, ensure_ascii=False)
-            msg_list = [{"role": "user", "content": prompt_text}]
         else:
-            msg_list = [{"role": "user", "content": str(messages)}]
+            msg_list = self._build_messages(messages)
 
         model = self._endpoint.default_model or None
         max_retries, backoff = self._get_retry_settings()
@@ -105,9 +343,8 @@ class ExternalCortexEngine(AIPluginBase):
                 )
                 return chat_resp.content
             except Exception as exc:
-                should_retry = (
-                    attempt < max_retries
-                    and self._is_retryable_exception(exc)
+                should_retry = attempt < max_retries and self._is_retryable_exception(
+                    exc
                 )
                 if should_retry:
                     delay = backoff * (2 ** (attempt - 1))
@@ -129,26 +366,87 @@ class ExternalCortexEngine(AIPluginBase):
         dict and places it as a ``system`` role message so the LLM receives explicit
         instructions rather than a single raw JSON blob in the user turn.
         """
+        try:
+            from core.prompt_request import PromptRequest
+            from core.prompt_renderers import OpenAIRenderer
+
+            if isinstance(prompt, PromptRequest):
+                renderer = OpenAIRenderer(prompt)
+                mm_parts = self._build_mm_parts_from_prompt_request(prompt)
+                if mm_parts:
+                    supports_vision = self._supports_vision_for_mm_parts(mm_parts)
+                    return renderer.render_with_multimodal(
+                        mm_parts,
+                        supports_vision=supports_vision,
+                    )
+                return renderer.render()
+        except Exception as exc:
+            log_debug(
+                f"[cortex_bridge] direct PromptRequest rendering fallback to text: {exc}"
+            )
+
         if not isinstance(prompt, dict):
             content: str = prompt if isinstance(prompt, str) else str(prompt)
             return [{"role": "user", "content": content}]
 
+        prompt_request = prompt.get("__prompt_request")
+        if prompt_request is not None:
+            try:
+                from core.prompt_renderers import OpenAIRenderer
+                from core.prompt_request import PromptRequest
+
+                if isinstance(prompt_request, PromptRequest):
+                    renderer = OpenAIRenderer(prompt_request)
+                    mm_parts = self._build_mm_parts_from_prompt_request(prompt_request)
+                    if mm_parts:
+                        supports_vision = self._supports_vision_for_mm_parts(mm_parts)
+                        return renderer.render_with_multimodal(
+                            mm_parts,
+                            supports_vision=supports_vision,
+                        )
+                    return renderer.render()
+            except Exception as exc:
+                log_debug(
+                    f"[cortex_bridge] PromptRequest rendering fallback to dict path: {exc}"
+                )
+
         instructions: str = (
             prompt.get("instructions_verbose") or prompt.get("instructions") or ""
         )
-        user_dict = {
-            k: v
-            for k, v in prompt.items()
-            if k not in ("instructions", "instructions_verbose")
-        }
-        user_content = json.dumps(user_dict, ensure_ascii=False)
+        # Strip keys elevated to system; sanitize the rest (handles non-serializable
+        # objects like the PromptRequest dataclass via __dict__ conversion).
+        from core.json_utils import sanitize_for_json
+
+        _skip = {"instructions", "instructions_verbose", "__prompt_request"}
+        user_dict = {k: v for k, v in prompt.items() if k not in _skip}
+
+        # Extract multimodal attachments before serialising to text so that
+        # base64 blobs don't waste context tokens on the text side.
+        redacted, mm_parts = _extract_attachments_and_redact(user_dict)
+        redacted = sanitize_for_json(redacted)
+        user_content = json.dumps(redacted, ensure_ascii=False)
+
+        # Build user message — multipart if we have attachments
+        if mm_parts:
+            content_parts: list[dict[str, Any]] = [
+                {"type": "text", "text": user_content}
+            ]
+            for p in mm_parts:
+                content_parts.append(self._format_mm_part(p))
+            log_debug(
+                f"[cortex_bridge] _build_messages: extracted {len(mm_parts)} "
+                f"multimodal part(s)"
+            )
+            user_msg_content: Any = content_parts
+        else:
+            user_msg_content = user_content
 
         if instructions:
             return [
                 {"role": "system", "content": str(instructions)},
-                {"role": "user", "content": user_content},
+                {"role": "user", "content": user_msg_content},
             ]
-        return [{"role": "user", "content": json.dumps(prompt, ensure_ascii=False)}]
+        return [{"role": "user", "content": user_msg_content}]
 
     async def handle_incoming_message(
         self, bot: Any, message: Any, prompt: Any

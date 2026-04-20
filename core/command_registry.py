@@ -1,5 +1,6 @@
 """Backend registry for slash commands usable by any interface."""
 
+import asyncio
 from typing import Awaitable, Callable, Dict, Any
 from core.logging_utils import log_debug
 import core.plugin_instance as plugin_instance
@@ -34,10 +35,10 @@ async def execute_command(name: str, *args: Any, **kwargs: Any) -> str:
 
 async def handle_command_message(
     command_text: str,
-    user_id: int = None,
-    interface_id: str = None,
+    user_id: int | None = None,
+    interface_id: str | None = None,
     interface_context=None,
-) -> str:
+) -> str | None:
     """
     Generic command handler for all interfaces.
 
@@ -170,7 +171,7 @@ async def diary_command(days: str = "7") -> str:
             days_arg = int(num_days)
         except Exception:
             days_arg = 2
-        entries = get_recent_entries(days=days_arg, max_chars=None)
+        entries = await asyncio.to_thread(lambda: get_recent_entries(days=days_arg))
 
         if not entries:
             return f"📔 No diary entries found in the last {num_days} days."
@@ -189,8 +190,6 @@ async def diary_command(days: str = "7") -> str:
 
 def get_help_text() -> str:
     """Get help text for use in generic commands."""
-    import asyncio
-
     try:
         # Run the async help command
         loop = asyncio.get_event_loop()
@@ -621,21 +620,17 @@ async def last_chats_command(*args) -> str:
 
 async def context_command(*args) -> str:
     """Handle context enable/disable."""
-    from core.context import toggle_context_state, get_context_state
+    from core.context import get_context_state, set_context_state
 
     if args and args[0].lower() in ["on", "enable", "true", "1"]:
-        from core.context import enable_context
-
-        enable_context()
+        set_context_state(True)
         return "✅ Context mode enabled."
     elif args and args[0].lower() in ["off", "disable", "false", "0"]:
-        from core.context import disable_context
-
-        disable_context()
+        set_context_state(False)
         return "❌ Context mode disabled."
     else:
         # Toggle
-        toggle_context_state()
+        set_context_state(not get_context_state())
         state = "enabled" if get_context_state() else "disabled"
         return f"🔄 Context mode {state}."
 

@@ -61,6 +61,7 @@ import mimetypes
 
 BRAND_NAME = "Synthetic Heart"
 INTERFACE_NAME = "synth_webui"
+EXTERNAL_ENDPOINT_PROBE_TIMEOUT_SECONDS = 300.0
 
 # exposed configuration variable to toggle experimental multi-session mode
 register_exposed_var(
@@ -289,14 +290,22 @@ class SynthWebUIInterface:
         # initialise skin hint based on whatever active_vrm we found
         self._current_skin = self._derive_skin_from_active_vrm()
 
-        # Attachments storage: prefer explicit env var, then XDG_DATA_HOME, then /config
+        # Attachments storage: prefer explicit env var, then XDG_DATA_HOME,
+        # then a platform default. On Windows, /config becomes a drive-root
+        # path, so prefer a temp-backed local directory instead.
         attachments_root = os.getenv("SYNTH_ATTACHMENTS_ROOT")
         if attachments_root:
             self.attachments_dir = Path(attachments_root).expanduser()
         else:
             xdg_data_home = os.getenv("XDG_DATA_HOME")
             self.attachments_dir = (
-                Path(xdg_data_home).expanduser() if xdg_data_home else Path("/config")
+                Path(xdg_data_home).expanduser()
+                if xdg_data_home
+                else (
+                    Path(tempfile.gettempdir()) / "synth_webui"
+                    if os.name == "nt"
+                    else Path("/config")
+                )
             ) / "attachments"
         try:
             self.attachments_dir.mkdir(parents=True, exist_ok=True)
@@ -1211,6 +1220,8 @@ class SynthWebUIInterface:
                     config_registry.get_value(
                         "ACTIVE_IRIS_ENGINE",
                         "disabled",
+                        label="Active Iris Engine",
+                        description="Name of the active Iris vision engine. Set to 'disabled' to turn off the Iris subsystem.",
                         value_type=str,
                         group="plugins",
                         component="iris_plugin",
@@ -2074,10 +2085,13 @@ class SynthWebUIInterface:
                     continue
                 is_voice_input = bool(payload.get("is_voice_input", False))
                 normalized_attachments = [
-                    self._normalize_webui_attachment(att)
-                    for att in attachments
+                    self._normalize_webui_attachment(att) for att in attachments
                 ]
-                metadata = {"attachments": normalized_attachments} if normalized_attachments else None
+                metadata = (
+                    {"attachments": normalized_attachments}
+                    if normalized_attachments
+                    else None
+                )
                 await self._append_history(session_id, "user", text, metadata=metadata)
                 # Process message in background to avoid blocking WebSocket
                 asyncio.create_task(
@@ -2946,11 +2960,117 @@ class SynthWebUIInterface:
         animation_file: str,
         descriptor: Optional[Dict[str, Any]],
     ) -> None:
-        """No-op stub kept for external plugin compatibility.
+        """Broadcast a lightweight animation-state summary to connected clients."""
+        if not self.connections:
+            return
 
-        Lightweight state summaries are superseded by the ``vrm_face`` channel
-        for emotion data and ``vrm_animation`` for animation state.
-        """
+        current: Dict[str, Any] = {}
+        if self.animation_handler:
+            try:
+                current = self.animation_handler.get_current_animation_state() or {}
+            except Exception:
+                current = {}
+
+        animation_state = dict(current.get("animation_state") or {})
+        if not animation_state:
+            animation_state = {
+                "action": getattr(state, "value", state),
+                "phase": "loop",
+                "animation": current.get("animation") or animation_file,
+                "descriptor": descriptor,
+                "timing": None,
+                "expressions": descriptor.get("expressions")
+                if isinstance(descriptor, dict)
+                else None,
+                "blink": descriptor.get("blink")
+                if isinstance(descriptor, dict)
+                else None,
+                "eye_movement": descriptor.get("eye_movement")
+                if isinstance(descriptor, dict)
+                else None,
+                "emotions": None,
+                "lipsync": (
+                    descriptor.get("lipsync")
+                    if isinstance(descriptor, dict) and "lipsync" in descriptor
+                    else False
+                ),
+            }
+
+        emotions = None
+        try:
+            emotion_mgr = None
+            emotion_manager_cls = None
+            try:
+                from plugins.emotion_manager import EmotionManager
+
+                emotion_manager_cls = EmotionManager
+            except Exception:
+                emotion_manager_cls = None
+
+            try:
+                from core.core_initializer import PLUGIN_REGISTRY
+
+                if isinstance(PLUGIN_REGISTRY, dict):
+                    candidate = PLUGIN_REGISTRY.get("emotion_manager")
+                    if candidate is not None and hasattr(
+                        candidate, "get_emotion_state"
+                    ):
+                        if emotion_manager_cls is None or isinstance(
+                            candidate, emotion_manager_cls
+                        ):
+                            emotion_mgr = candidate
+            except Exception:
+                emotion_mgr = None
+
+            if emotion_mgr is None and emotion_manager_cls is not None:
+                try:
+                    emotion_mgr = emotion_manager_cls()
+                except Exception:
+                    emotion_mgr = None
+
+            emotions_raw = None
+            if emotion_mgr is not None and hasattr(emotion_mgr, "get_emotion_state"):
+                emotions_raw_maybe = emotion_mgr.get_emotion_state()
+                emotions_raw = (
+                    await emotions_raw_maybe
+                    if asyncio.iscoroutine(emotions_raw_maybe)
+                    else emotions_raw_maybe
+                )
+
+            if isinstance(emotions_raw, dict) and emotions_raw:
+                emotions_filtered = {
+                    key: value
+                    for key, value in emotions_raw.items()
+                    if isinstance(value, (int, float)) and value >= 0.1
+                }
+                if emotions_filtered:
+                    dominant, _ = max(
+                        emotions_filtered.items(), key=lambda item: item[1]
+                    )
+                    emotions = {
+                        "dominant": dominant,
+                        "values": emotions_filtered,
+                    }
+        except Exception:
+            emotions = None
+
+        animation_state["emotions"] = emotions
+
+        message = {
+            "type": "animation_state",
+            "state": current.get("state") or getattr(state, "value", state),
+            "animation": current.get("animation") or animation_file,
+            "descriptor": current.get("descriptor") or descriptor,
+            "animation_state": animation_state,
+        }
+
+        for session_id, websocket in list(self.connections.items()):
+            try:
+                await websocket.send_json(message)
+            except Exception as exc:
+                log_warning(
+                    f"{LOG_PREFIX} Failed to broadcast animation state to {session_id}: {exc}"
+                )
 
     async def get_animation_state(self):
         """HTTP endpoint that returns a lightweight animation state summary.
@@ -2998,7 +3118,7 @@ class SynthWebUIInterface:
 
         parsed = urlparse(url)
         if parsed.path.startswith("/uploads/"):
-            file_name = Path(unquote(parsed.path[len("/uploads/"):])).name
+            file_name = Path(unquote(parsed.path[len("/uploads/") :])).name
             if file_name:
                 local_path = self.attachments_dir / file_name
                 normalized = dict(attachment)
@@ -3010,11 +3130,10 @@ class SynthWebUIInterface:
                         normalized["data"] = base64.b64encode(content).decode("utf-8")
                         normalized["mime_type"] = normalized.get(
                             "mime_type",
-                            mimetypes.guess_type(str(local_path))[0] or "application/octet-stream",
+                            mimetypes.guess_type(str(local_path))[0]
+                            or "application/octet-stream",
                         )
-                        normalized["size"] = normalized.get(
-                            "size", len(content)
-                        )
+                        normalized["size"] = normalized.get("size", len(content))
                     except Exception as exc:
                         log_warning(
                             f"{LOG_PREFIX} Failed to inline chat attachment data: {exc}"
@@ -3035,8 +3154,7 @@ class SynthWebUIInterface:
         from core import message_queue
 
         normalized_attachments = [
-            self._normalize_webui_attachment(att)
-            for att in (attachments or [])
+            self._normalize_webui_attachment(att) for att in (attachments or [])
         ]
 
         log_info(
@@ -3504,7 +3622,11 @@ class SynthWebUIInterface:
         if isinstance(payload_or_chat_id, dict):
             payload = payload_or_chat_id
             # Accept both "text" (standard) and "value" (legacy synthetic-action mapping)
-            text = payload.get("text") or payload.get("value") or text
+            payload_text = (
+                payload.get("text") or payload.get("value") or payload.get("content")
+            )
+            if payload_text is not None:
+                text = payload_text
             chat_id = (
                 payload.get("interface_path")
                 or payload.get("target")
@@ -3519,6 +3641,14 @@ class SynthWebUIInterface:
                 text = kwargs.get("text")
             if metadata is None and isinstance(kwargs.get("metadata"), dict):
                 metadata = kwargs.get("metadata")
+
+        # Guard against accidental object leakage (e.g. original_message passed as
+        # positional arg by callers). Only strings are valid outbound message text.
+        if text is not None and not isinstance(text, str):
+            log_warning(
+                f"{LOG_PREFIX} send_message got non-string text type={type(text).__name__}; dropping"
+            )
+            return
 
         if not text or not chat_id:
             log_warning(f"{LOG_PREFIX} send_message missing text or chat_id")
@@ -3591,6 +3721,9 @@ class SynthWebUIInterface:
             writing_action_id = existing_writing[-1]
             writing_pushed = True
 
+        # Normalize metadata before websocket/history/DB use to avoid serialization errors.
+        safe_metadata = self._clean_for_json(metadata) if metadata is not None else None
+
         # If websocket is present attempt to send; otherwise persist for later replay
         if websocket:
             try:
@@ -3600,19 +3733,19 @@ class SynthWebUIInterface:
                     "text": text,
                 }
                 # Forward metadata fields that the client can use (e.g. tts_url).
-                if metadata and metadata.get("tts_url"):
-                    payload["tts_url"] = metadata["tts_url"]
+                if safe_metadata and safe_metadata.get("tts_url"):
+                    payload["tts_url"] = safe_metadata["tts_url"]
                     # Also include in `data` for clients that expect it there.
-                    payload["data"] = {"tts_url": metadata["tts_url"]}
+                    payload["data"] = {"tts_url": safe_metadata["tts_url"]}
 
-                await websocket.send_json(payload)
+                await websocket.send_json(self._clean_for_json(payload))
             except Exception as e:
                 log_warning(
                     f"{LOG_PREFIX} Failed to send websocket message to {session_id}: {e}"
                 )
 
         # Append to in-memory history so reconnect will replay it
-        await self._append_history(session_id, "synth", text, metadata=metadata)
+        await self._append_history(session_id, "synth", text, metadata=safe_metadata)
 
         # Save SyntH's response via core chat_context_manager
         if not skip_history:
@@ -3620,7 +3753,9 @@ class SynthWebUIInterface:
                 from core.chat_context_manager import save_response_message
 
                 msg_interface_path = f"{INTERFACE_NAME}/{chat_id}"
-                await save_response_message(msg_interface_path, text, metadata=metadata)
+                await save_response_message(
+                    msg_interface_path, text, metadata=safe_metadata
+                )
             except Exception as e:
                 log_debug(
                     f"{LOG_PREFIX} Failed to save response via context_manager: {e}"
@@ -3974,7 +4109,9 @@ class SynthWebUIInterface:
             if not session_id:
                 session_id = _extract_session_id(payload.get("interface_path"))
             if not session_id and original_message is not None:
-                session_id = _extract_session_id(getattr(original_message, "interface_path", None))
+                session_id = _extract_session_id(
+                    getattr(original_message, "interface_path", None)
+                )
 
             # Ensure the payload has the correct interface_path for sending
             if session_id:
@@ -5088,6 +5225,7 @@ class SynthWebUIInterface:
         Never raises — errors are captured and returned as a failed probe dict.
         """
         import asyncio
+        import os
 
         try:
             from core.external_endpoints.probe import probe_endpoint
@@ -5096,7 +5234,15 @@ class SynthWebUIInterface:
             if ep is None:
                 return {"status": "failed", "error": "Endpoint not found"}
 
-            result = await asyncio.wait_for(probe_endpoint(ep, api_key), timeout=40.0)
+            timeout_seconds = float(
+                os.getenv(
+                    "EXTERNAL_ENDPOINT_PROBE_TIMEOUT_SECONDS",
+                    str(EXTERNAL_ENDPOINT_PROBE_TIMEOUT_SECONDS),
+                )
+            )
+            result = await asyncio.wait_for(
+                probe_endpoint(ep, api_key), timeout=timeout_seconds
+            )
             await reg.set_probe_result(
                 ep_id,
                 status=result.status,
@@ -5112,7 +5258,10 @@ class SynthWebUIInterface:
             }
         except asyncio.TimeoutError:
             log_warning(f"{LOG_PREFIX} auto-probe timed out for ep_id={ep_id}")
-            return {"status": "failed", "error": "Probe timed out (40 s)"}
+            return {
+                "status": "failed",
+                "error": f"Probe timed out ({os.getenv('EXTERNAL_ENDPOINT_PROBE_TIMEOUT_SECONDS', str(EXTERNAL_ENDPOINT_PROBE_TIMEOUT_SECONDS))} s)",
+            }
         except Exception as exc:
             log_warning(f"{LOG_PREFIX} auto-probe failed for ep_id={ep_id}: {exc}")
             return {"status": "failed", "error": str(exc)}
@@ -5257,7 +5406,6 @@ class SynthWebUIInterface:
         """POST /api/external-endpoints/{ep_id}/probe — probe capabilities."""
         try:
             from core.external_endpoints.crypto import decrypt_api_key
-            from core.external_endpoints.probe import probe_endpoint
             from core.external_endpoints.registry import get_external_endpoint_registry
 
             reg = get_external_endpoint_registry()
@@ -5266,19 +5414,13 @@ class SynthWebUIInterface:
                 raise HTTPException(status_code=404, detail="Endpoint not found")
 
             api_key = decrypt_api_key(ep.api_key_enc or "")
-            result = await probe_endpoint(ep, api_key)
-            await reg.set_probe_result(
-                ep_id,
-                status=result.status,
-                capabilities=result.capabilities,
-                models=result.models,
-            )
+            probe_data = await self._run_auto_probe(ep_id, api_key, reg)
             return JSONResponse(
                 {
-                    "status": result.status,
-                    "capabilities": result.capabilities,
-                    "models": result.models,
-                    "error": result.error_message,
+                    "status": probe_data.get("status", "failed"),
+                    "capabilities": probe_data.get("capabilities", {}),
+                    "models": probe_data.get("models", []),
+                    "error": probe_data.get("error", ""),
                 }
             )
         except HTTPException:
@@ -5310,7 +5452,10 @@ class SynthWebUIInterface:
 
             api_key = decrypt_api_key(ep.api_key_enc or "")
             adapter = get_adapter_for_endpoint(ep, api_key)
-            ok, echo = await adapter.ping_test(model=model, timeout=30.0)
+            ok, echo = await adapter.ping_test(
+                model=model,
+                timeout=EXTERNAL_ENDPOINT_PROBE_TIMEOUT_SECONDS,
+            )
             return JSONResponse(
                 {
                     "ok": ok,
@@ -6398,16 +6543,28 @@ class SynthWebUIInterface:
                         rows = rows[:per_page]
 
                     for row in rows:
-                        timestamp_str = self._dt_to_utc_iso(row[3])
                         import json as _json
 
-                        raw_meta = row[4]
+                        if isinstance(row, dict):
+                            raw_interface_path = row.get("interface_path")
+                            raw_sender_name = row.get("sender_name")
+                            raw_message_text = row.get("message_text")
+                            raw_timestamp = row.get("timestamp")
+                            raw_meta = row.get("metadata")
+                        else:
+                            raw_interface_path = row[0]
+                            raw_sender_name = row[1]
+                            raw_message_text = row[2]
+                            raw_timestamp = row[3]
+                            raw_meta = row[4] if len(row) > 4 else None
+
+                        timestamp_str = self._dt_to_utc_iso(raw_timestamp)
                         parsed_meta = _json.loads(raw_meta) if raw_meta else None
                         messages.append(
                             {
-                                "interface_path": row[0],
-                                "sender_name": row[1],
-                                "message_text": row[2],
+                                "interface_path": raw_interface_path,
+                                "sender_name": raw_sender_name,
+                                "message_text": raw_message_text,
                                 "timestamp": timestamp_str,
                                 "metadata": parsed_meta,
                             }
@@ -6441,6 +6598,28 @@ class SynthWebUIInterface:
             )
 
         except Exception as exc:
+            error_text = str(exc)
+            lowered_error = error_text.lower()
+            if (
+                "asyncpg is not installed" in lowered_error
+                or "aiomysql is not installed" in lowered_error
+                or "db unavailable" in lowered_error
+            ):
+                log_warning(
+                    f"{LOG_PREFIX} Chat history DB unavailable; returning empty history payload: {exc}"
+                )
+                return JSONResponse(
+                    {
+                        "success": True,
+                        "messages": [],
+                        "interface_paths": [],
+                        "page": page,
+                        "per_page": per_page,
+                        "total_count": 0,
+                        "total_pages": 0,
+                    }
+                )
+
             log_error(f"{LOG_PREFIX} Failed to fetch chat history: {exc}")
             return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
 
@@ -8062,7 +8241,14 @@ class SynthWebUIInterface:
 
             active_auris: str | None = None
             try:
-                active_auris = config_registry.get_value("ACTIVE_AURIS_ENGINE", None)
+                active_auris = config_registry.get_value(
+                    "ACTIVE_AURIS_ENGINE",
+                    None,
+                    label="Active Auris Engine",
+                    description="Name of the active Auris speech-to-text engine. Set to 'disabled' to turn off the Auris subsystem.",
+                    component="auris_plugin",
+                    group="plugins",
+                )
             except Exception:
                 pass
             # add disabled option first
@@ -8157,7 +8343,14 @@ class SynthWebUIInterface:
 
             active_iris: str | None = None
             try:
-                active_iris = config_registry.get_value("ACTIVE_IRIS_ENGINE", None)
+                active_iris = config_registry.get_value(
+                    "ACTIVE_IRIS_ENGINE",
+                    None,
+                    label="Active Iris Engine",
+                    description="Name of the active Iris vision engine. Set to 'disabled' to turn off the Iris subsystem.",
+                    component="iris_plugin",
+                    group="plugins",
+                )
             except Exception:
                 pass
             iris_data.append(

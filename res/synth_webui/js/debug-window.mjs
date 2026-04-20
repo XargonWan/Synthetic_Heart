@@ -260,15 +260,35 @@ export function createDebugWindow() {
             console.warn('[debug-window] running without WinBox; legacy DOM window support removed.');
         }
 
-        const minimizeBtn = win.querySelector('#synth-debug-minimize');
-        if (minimizeBtn) {
-            minimizeBtn.addEventListener('click', () => {
+        const minimizeDebugWindow = () => {
+            try {
                 if (winbox && window.SynthWindowManager && typeof window.SynthWindowManager.minimize === 'function') {
-                    try { window.SynthWindowManager.minimize('debug'); } catch (e) { /* ignore */ }
+                    window.SynthWindowManager.minimize('debug');
                     return;
                 }
-            });
-        }
+            } catch (e) { /* ignore */ }
+
+            try {
+                if (!win) return;
+                win.style.display = 'none';
+                const dock = getDock();
+                if (!dock) return;
+                let restoreBtn = dock.querySelector('[data-debug-restore="1"]');
+                if (!restoreBtn) {
+                    restoreBtn = document.createElement('button');
+                    restoreBtn.type = 'button';
+                    restoreBtn.dataset.debugRestore = '1';
+                    restoreBtn.className = 'pill secondary';
+                    restoreBtn.textContent = 'Debug';
+                    restoreBtn.title = 'Restore Debug';
+                    restoreBtn.addEventListener('click', () => {
+                        try { win.style.display = 'flex'; } catch (e) { /* ignore */ }
+                        try { restoreBtn.remove(); } catch (e) { /* ignore */ }
+                    });
+                    dock.appendChild(restoreBtn);
+                }
+            } catch (e) { /* ignore */ }
+        };
 
         async function resyncFromBackend(force = false) {
             try {
@@ -340,13 +360,13 @@ export function createDebugWindow() {
                     btn.addEventListener('click', (ev) => { try { ev.stopPropagation(); } catch (e) {} try { if (typeof clickFn === 'function') clickFn(); } catch (e) {} });
                     toolsEl.appendChild(btn);
                 };
-                // No header tools for Debug (buttons removed)
-                // Rendered header area intentionally kept empty to avoid duplicate controls.
+                addBtn('▁', 'Minimize', minimizeDebugWindow, 'synth-debug-minimize-tool');
             } catch (e) { /* ignore */ }
         };
 
         const renderHeaderToolsIntoDOM = () => {
             try {
+                if (winbox) return;
                 const headerTools = (win && win.querySelector) ? win.querySelector('#synth-debug-header-tools') : null;
                 if (!headerTools) return;
                 headerTools.innerHTML = '';
@@ -359,7 +379,7 @@ export function createDebugWindow() {
                     btn.addEventListener('click', (ev) => { try { ev.stopPropagation(); } catch (e) {} try { if (typeof clickFn === 'function') clickFn(); } catch (e) {} });
                     headerTools.appendChild(btn);
                 };
-                // No header tools for Debug (buttons removed)
+                addBtn('▁', 'Minimize', minimizeDebugWindow, 'synth-debug-minimize-tool');
             } catch (e) { /* ignore */ }
         };
 

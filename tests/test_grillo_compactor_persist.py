@@ -96,7 +96,7 @@ async def test_persist_compaction_moves_to_archive_and_inserts_memory(monkeypatc
     )
     monkeypatch.setattr(
         "core.config.get_active_cortex_engine",
-        lambda: asyncio.sleep(0, result="selenium_chatgpt"),
+        lambda *args, **kwargs: asyncio.sleep(0, result="selenium_chatgpt"),
     )
 
     # Capture insert_memory calls

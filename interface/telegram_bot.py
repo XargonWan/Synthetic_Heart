@@ -4,6 +4,7 @@ import os
 import re
 import asyncio
 import time
+from inspect import isawaitable
 from typing import Optional
 from telegram import Update, Bot
 
@@ -32,7 +33,11 @@ from telegram.ext import (
     filters,
 )
 from dotenv import load_dotenv  # type: ignore
-from plugins.blocklist import block_user, unblock_user, get_blocked_users
+from plugins.blocklist import (
+    block_user as block_user_id,
+    unblock_user as unblock_user_id,
+    get_blocked_users,
+)
 from plugins.message_map import init_message_map_table, cleanup_old_mappings
 from core import response_proxy
 from core import message_queue
@@ -55,14 +60,66 @@ from core.config import (
 )
 from core.command_registry import execute_command, handle_command_message
 
-from plugins.chat_link import ChatLinkStore
-
-chat_link_store = ChatLinkStore()
+from plugins.chat_link import ChatLinkMultipleMatches, ChatLinkStore
 import core.plugin_instance as plugin_instance
 from core.core_initializer import register_interface
 from core.interfaces_registry import get_interface_registry
 from core.config_manager import config_registry
 from core.variables_engine import register_exposed_var
+
+chat_link_store = ChatLinkStore()
+
+
+async def _await_if_needed(result):
+    if isawaitable(result):
+        return await result
+    return result
+
+
+def _normalize_telegram_message(message):
+    if message is None:
+        return None
+
+    try:
+        if getattr(message, "chat_id", None) is None:
+            chat = getattr(message, "chat", None)
+            chat_id = getattr(chat, "id", None)
+            if chat_id is not None:
+                setattr(message, "chat_id", chat_id)
+    except Exception:
+        pass
+
+    for attr in (
+        "voice",
+        "video",
+        "video_note",
+        "photo",
+        "document",
+        "audio",
+        "sticker",
+        "caption",
+        "reply_to_message",
+        "message_thread_id",
+        "thread_id",
+        "text",
+    ):
+        if not hasattr(message, attr):
+            try:
+                setattr(message, attr, None)
+            except Exception:
+                pass
+
+    reply_to_message = getattr(message, "reply_to_message", None)
+    if reply_to_message is not None:
+        _normalize_telegram_message(reply_to_message)
+
+    return message
+
+
+async def _ensure_plugin_loaded_ready(update: Update) -> bool:
+    result = await _await_if_needed(ensure_plugin_loaded(update))
+    return bool(result)
+
 
 # Get interface registry for trainer verification
 _interface_registry = get_interface_registry()
@@ -259,7 +316,7 @@ async def _resolve_original_from_reply(reply_message):
             log_debug(f"[telegram_bot] plugin lookup for {mid} -> {repr(tracked)}")
         except Exception as e:
             tracked = None
-            log_exception(f"Failed to query plugin mapping: {e}")
+            log_error(f"Failed to query plugin mapping: {e}")
         if tracked:
             # support both tuple and dict return types
             log_debug(
@@ -336,7 +393,7 @@ async def _resolve_original_from_reply(reply_message):
             )
             return int(m.group(1)), int(m.group(2))
         except Exception as e:
-            log_exception(f"Error parsing textual fallback: {e}")
+            log_error(f"Error parsing textual fallback: {e}")
 
     log_debug(f"[telegram_bot] no mapping found for trainer_msg_id={trainer_mid}")
     return None, None
@@ -350,7 +407,7 @@ async def block_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     try:
         to_block = int(context.args[0])
-        block_user(to_block)
+        block_user_id(to_block)
         log_debug(f"User {to_block} blocked.")
         await update.message.reply_text(f"\U0001f6ab User {to_block} blocked.")
     except (IndexError, ValueError):
@@ -375,7 +432,7 @@ async def unblock_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     try:
         to_unblock = int(context.args[0])
-        unblock_user(to_unblock)
+        unblock_user_id(to_unblock)
         log_debug(f"User {to_unblock} unblocked.")
         await update.message.reply_text(f"\u2705 User {to_unblock} unblocked.")
     except (IndexError, ValueError):
@@ -421,7 +478,7 @@ async def logchat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_response_command(
     update: Update, context: ContextTypes.DEFAULT_TYPE, content_type: str
 ):
-    if not await ensure_plugin_loaded(update):
+    if not await _ensure_plugin_loaded_ready(update):
         return
 
     if not is_trainer(update.effective_user.id):
@@ -464,31 +521,6 @@ async def cancel_response(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def test_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log_debug("/test received")
     await update.message.reply_text("✅ Test OK")
-
-
-async def last_chats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_trainer(update.effective_user.id):
-        return
-
-    entries = await recent_chats.get_last_active_chats_verbose(10, context.bot)
-    if not entries:
-        await update.message.reply_text("⚠️ No recent chat found.")
-        return
-
-    lines = [f"[{name}](tg://user?id={cid}) — `{cid}`" for cid, name in entries]
-    await update.message.reply_text(
-        "\U0001f553 Last active chats:\n" + "\n".join(lines), parse_mode="Markdown"
-    )
-
-    entries = await recent_chats.get_last_active_chats_verbose(10, context.bot)
-    if not entries:
-        await update.message.reply_text("⚠️ No recent chat found.")
-        return
-
-    lines = [f"[{name}](tg://user?id={cid}) — `{cid}`" for cid, name in entries]
-    await update.message.reply_text(
-        "\U0001f553 Last active chats:\n" + "\n".join(lines), parse_mode="Markdown"
-    )
 
 
 async def _inject_memory_interaction(
@@ -601,7 +633,7 @@ async def handle_media_live(update: Update, context: ContextTypes.DEFAULT_TYPE):
     Handle incoming voice/video messages using the LLM's Live API capability.
     Processes the media and returns TEXT response.
     """
-    message = update.message
+    message = _normalize_telegram_message(update.message)
     log_info(f"[telegram_bot] Handling live media message from {message.from_user.id}")
 
     # First thing: decide whether this media message is *actually* meant for
@@ -639,7 +671,7 @@ async def handle_media_live(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if emoji:
             interface = INTERFACE_REGISTRY.get("telegram_bot")
             if interface:
-                await react_when_mentioned(interface, message, emoji)
+                await _await_if_needed(react_when_mentioned(interface, message, emoji))
     except Exception as e:
         log_debug(f"[telegram_bot] config reaction skipped/failed: {e}")
 
@@ -839,20 +871,26 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"[telegram_bot] Update type: {type(update)}, Message: {update.message if update else 'None'}"
     )
 
-    if update.message:
+    message = _normalize_telegram_message(update.message if update else None)
+    if update is not None and message is not None:
+        try:
+            update.message = message
+        except Exception:
+            pass
+
+    if message:
         log_debug(
-            f"[telegram_bot] Message attributes - Voice: {bool(update.message.voice)}, Video: {bool(update.message.video)}, VideoNote: {bool(update.message.video_note)}"
+            f"[telegram_bot] Message attributes - Voice: {bool(message.voice)}, Video: {bool(message.video)}, VideoNote: {bool(message.video_note)}"
         )
 
     log_info(f"[telegram_bot] Received message update: {update}")
 
-    plugin_loaded = await ensure_plugin_loaded(update)
+    plugin_loaded = await _ensure_plugin_loaded_ready(update)
     log_debug(f"[telegram_bot] Plugin loaded check result: {plugin_loaded}")
     if not plugin_loaded:
         log_error("[telegram_bot] Plugin loading failed, aborting message processing")
         return
 
-    message = update.message
     if not message or not message.from_user:
         log_debug("Message ignored (empty or no sender)")
         return
@@ -923,7 +961,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = message.from_user
     user_id = user.id
     username = user.full_name
-    usertag = f"@{user.username}" if user.username else "(no tag)"
     text = getattr(message, "text", "") or getattr(message, "caption", "") or ""
     # Diagnostic: log raw repr and check for mojibake (double-decoding) patterns
     try:

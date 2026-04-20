@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npx gitnexus *)",
+      "mcp__affine__list_workspaces",
+      "mcp__affine__search_docs"
+    ]
+  },
+  "enabledMcpjsonServers": [
+    "gemini-api-docs-mcp",
+    "gitnexus",
+    "synth-logs",
+    "synth-db",
+    "synth-cortex",
+    "affine"
+  ]
+}

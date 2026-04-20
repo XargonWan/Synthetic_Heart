@@ -21,7 +21,7 @@ without configuration changes.
 from __future__ import annotations
 
 import asyncio
-import os
+import importlib
 import re
 import threading
 import time
@@ -704,13 +704,24 @@ class VoxPlugin(AIPluginBase):
             if iface_name == "synth_webui" and hasattr(target_iface, "send_tts_audio"):
                 session_id = levels[0] if levels else None
                 if session_id:
-                    await target_iface.send_tts_audio(
-                        session_id=session_id,
-                        audio_path=str(audio_path),
-                        text=caption,
-                        lipsync_data=lipsync_data,
-                        audio_duration_s=audio_duration_s,
-                    )
+                    send_kwargs = {
+                        "session_id": session_id,
+                        "audio_path": str(audio_path),
+                        "text": caption,
+                        "lipsync_data": lipsync_data,
+                    }
+                    if audio_duration_s is not None:
+                        send_kwargs["audio_duration_s"] = audio_duration_s
+                    try:
+                        await target_iface.send_tts_audio(**send_kwargs)
+                    except TypeError as exc:
+                        if (
+                            "audio_duration_s" not in send_kwargs
+                            or "audio_duration_s" not in str(exc)
+                        ):
+                            raise
+                        send_kwargs.pop("audio_duration_s", None)
+                        await target_iface.send_tts_audio(**send_kwargs)
 
             elif iface_name == "discord_bot" and hasattr(target_iface, "send_message"):
                 await target_iface.send_message(
@@ -793,15 +804,19 @@ class VoxPlugin(AIPluginBase):
         ]
 
         try:
-            tts_endpoints = os.getenv("TTS_ENDPOINTS", "")
-            if not tts_endpoints:
-                tts_endpoints = config_registry.get_value(
-                    "TTS_ENDPOINTS",
-                    "",
-                    value_type=str,
-                    group="plugins",
-                    component="tts_lipsync",
-                )
+            tts_endpoints = config_registry.get_value(
+                "TTS_ENDPOINTS",
+                "",
+                value_type=str,
+                group="plugins",
+                component="tts_lipsync",
+            )
+            definition = getattr(config_registry, "_definitions", {}).get(
+                "TTS_ENDPOINTS"
+            )
+            if definition is not None:
+                config_registry._load_definition_sync(definition)
+                tts_endpoints = definition.value
             if tts_endpoints and str(tts_endpoints).strip():
                 builtins.insert(0, "plugins.vox_engines.http")
         except Exception:
@@ -809,7 +824,10 @@ class VoxPlugin(AIPluginBase):
 
         for mod in builtins:
             try:
-                __import__(mod)
+                module = importlib.import_module(mod)
+                engine_name = mod.rsplit(".", 1)[-1]
+                if engine_name not in VOX_REGISTRY.get_available_engines():
+                    importlib.reload(module)
             except Exception as exc:
                 log_warning(
                     f"[vox_plugin] Could not import engine module '{mod}': {exc}"

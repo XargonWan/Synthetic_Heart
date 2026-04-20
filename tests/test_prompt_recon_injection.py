@@ -123,10 +123,31 @@ async def test_recon_keyword_normalization(monkeypatch):
 
     PLUGIN_REGISTRY["kw_plugin_test"] = KWPlugin()
 
+    class FakeEngine:
+        async def generate_response(self, messages):
+            return "🕰️ Waiting for manual input."
+
+    class FakeRegistry:
+        def get_engine(self, name):
+            return FakeEngine()
+
+        def load_engine(self, name):
+            return FakeEngine()
+
+    async def fake_get_active_cortex_engine(scope=None):
+        return "fake"
+
+    monkeypatch.setattr(
+        "core.config.get_active_cortex_engine", fake_get_active_cortex_engine
+    )
+    monkeypatch.setattr(
+        "core.cortex_registry.get_cortex_registry", lambda: FakeRegistry()
+    )
+
     import core.recon as recon_mod
 
     # Call gather_recon_contributions with compound keywords
-    contribs = await recon_mod.gather_recon_contributions(
+    await recon_mod.gather_recon_contributions(
         message=None,
         context_memory=None,
         text="test",

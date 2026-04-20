@@ -29,8 +29,10 @@ from core.ai_plugin_base import AIPluginBase
 from core.config_manager import config_registry
 from core.cortex_api_logger import log_cortex_request, log_cortex_response
 from core.logging_utils import log_debug, log_error, log_info, log_warning
+from core.prompt_request import PromptRequest
 
 ENGINE_LABEL = "OpenRouter — multi-provider LLM gateway (OpenAI-compatible)"
+_LEGACY_DICT_PROMPT_WARNED = False
 
 # ---------------------------------------------------------------------------
 # WebUI variable registration (always visible so keys can be set before use)
@@ -220,6 +222,7 @@ class OpenRouterModel:
     supports_vision: bool = False
     supports_audio: bool = False
     supports_tool_use: bool = False
+    supports_json_mode: bool = False
     pricing_prompt: float = 0.0
     pricing_completion: float = 0.0
 
@@ -256,6 +259,7 @@ class OpenRouterModel:
         supports_tools = (
             "tools" in supported_params or "tool_choice" in supported_params
         )
+        supports_json = "response_format" in supported_params
 
         return cls(
             id=model_id,
@@ -266,6 +270,7 @@ class OpenRouterModel:
             supports_vision=supports_vision,
             supports_audio=supports_audio,
             supports_tool_use=supports_tools,
+            supports_json_mode=supports_json,
             pricing_prompt=p_prompt,
             pricing_completion=p_completion,
         )
@@ -355,7 +360,17 @@ async def _catalog_refresh_loop(base_url: str, interval_minutes: int) -> None:
 # ---------------------------------------------------------------------------
 
 # Supported image MIME types for OpenAI vision format
-_VISION_MIME_TYPES = {"image/jpeg", "image/png", "image/gif", "image/webp"}
+_VISION_MIME_TYPES = {
+    "image/jpeg",
+    "image/png",
+    "image/gif",
+    "image/webp",
+    "image/bmp",
+    "image/tiff",
+    "image/avif",
+    "image/heic",
+    "image/heif",
+}
 
 # Supported audio MIME types — sent as input_audio content parts (OpenAI format)
 _AUDIO_MIME_TYPES: dict[str, str] = {
@@ -367,6 +382,16 @@ _AUDIO_MIME_TYPES: dict[str, str] = {
     "audio/mp4": "mp4",
     "audio/webm": "webm",
     "audio/flac": "flac",
+}
+
+# Document MIME types — forwarded as data-URI image_url parts.
+# Supported by Gemini (via OpenRouter), Claude, and some GPT-4 variants.
+_DOCUMENT_MIME_TYPES = {
+    "application/pdf",
+    "text/plain",
+    "text/csv",
+    "text/html",
+    "text/markdown",
 }
 
 
@@ -391,6 +416,7 @@ class OpenRouterPlugin(AIPluginBase):
     """OpenRouter LLM Engine using the OpenAI-compatible REST API."""
 
     display_name = "OpenRouter"
+    supports_prompt_request = True
 
     def __init__(self, notify_fn: Any = None) -> None:
         from core.notifier import set_notifier
@@ -632,9 +658,54 @@ class OpenRouterPlugin(AIPluginBase):
                 except (json.JSONDecodeError, ValueError):
                     pass
 
+            # === Phase 4: PromptRequest native-format path ===
+            _pr: PromptRequest | None = None
+            if isinstance(prompt, PromptRequest):
+                _pr = prompt
+            elif isinstance(prompt, dict):
+                candidate = prompt.get("__prompt_request")
+                if isinstance(candidate, PromptRequest):
+                    _pr = candidate
+            if _pr is not None:
+                from core.prompt_renderers import OpenAIRenderer
+
+                _scope = (
+                    prompt.get("scope") or prompt.get("action_scope")
+                    if isinstance(prompt, dict)
+                    else None
+                )
+                _model = self._resolve_model(scope=_scope)
+                _model_info = _catalog.get(_model)
+                _pr.supports_tool_calling = (
+                    _model_info.supports_tool_use if _model_info else False
+                )
+                _mm_parts = self._extract_multimodal_parts(prompt)
+                renderer = OpenAIRenderer(_pr)
+                _model_vis = _model_info.supports_vision if _model_info else False
+                _messages = (
+                    renderer.render_with_multimodal(_mm_parts, _model_vis)
+                    if _mm_parts
+                    else renderer.render()
+                )
+                _tools = renderer.tool_schemas()
+                _max_tok = _model_info.max_completion_tokens if _model_info else 4096
+                return await self._openai_chat_completion_from_messages(
+                    _messages, _tools, _max_tok, model=_model
+                )
+
+            if isinstance(prompt, dict):
+                global _LEGACY_DICT_PROMPT_WARNED
+                if not _LEGACY_DICT_PROMPT_WARNED:
+                    log_debug(
+                        "[openrouter] dict prompt fallback path used (missing __prompt_request)"
+                    )
+                    _LEGACY_DICT_PROMPT_WARNED = True
+
             # Normalize prompt to text
             if isinstance(prompt, dict):
-                prompt_text = json.dumps(prompt, indent=2, ensure_ascii=False)
+                prompt_text = json.dumps(
+                    prompt, ensure_ascii=False, separators=(",", ":")
+                )
             elif isinstance(prompt, str):
                 prompt_text = prompt
             else:
@@ -645,7 +716,9 @@ class OpenRouterPlugin(AIPluginBase):
 
             if isinstance(prompt, dict):
                 redacted = self._copy_and_redact_data(prompt)
-                prompt_text = json.dumps(redacted, indent=2, ensure_ascii=False)
+                prompt_text = json.dumps(
+                    redacted, ensure_ascii=False, separators=(",", ":")
+                )
 
             log_debug(
                 f"[openrouter] Sending prompt ({len(prompt_text)} chars) to {self._current_model}"
@@ -662,13 +735,36 @@ class OpenRouterPlugin(AIPluginBase):
             model_info = _catalog.get(model)
             max_tokens = model_info.max_completion_tokens if model_info else 4096
 
-            response_text = await self._openai_chat_completion(
-                prompt_text=prompt_text,
-                system_instruction=system_instruction,
-                max_tokens=max_tokens,
-                model=model,
-                multimodal_parts=multimodal_parts if multimodal_parts else None,
-            )
+            if isinstance(prompt, dict):
+                legacy_messages: list[dict[str, Any]] = [
+                    {"role": "system", "content": system_instruction}
+                ]
+                if multimodal_parts:
+                    has_vision = model_info.supports_vision if model_info else False
+                    content_parts: list[dict[str, Any]] = []
+                    if has_vision:
+                        for part in multimodal_parts:
+                            content_parts.append(part)
+                    else:
+                        log_warning(
+                            f"[openrouter] Vision unsupported on model '{model}'; skipping {len(multimodal_parts)} image part(s)"
+                        )
+                    content_parts.append({"type": "text", "text": prompt_text})
+                    legacy_messages.append({"role": "user", "content": content_parts})
+                else:
+                    legacy_messages.append({"role": "user", "content": prompt_text})
+
+                response_text = await self._openai_chat_completion_from_messages(
+                    legacy_messages, [], max_tokens, model=model
+                )
+            else:
+                response_text = await self._openai_chat_completion(
+                    prompt_text=prompt_text,
+                    system_instruction=system_instruction,
+                    max_tokens=max_tokens,
+                    model=model,
+                    multimodal_parts=multimodal_parts if multimodal_parts else None,
+                )
 
             # ── Audio fallback: transcribe & retry if provider rejects audio ─
             if (
@@ -890,6 +986,11 @@ class OpenRouterPlugin(AIPluginBase):
             ],
         }
 
+        # Enforce structured JSON output when the model supports it
+        model_info = _catalog.get(resolved_model)
+        if model_info and model_info.supports_json_mode:
+            payload["response_format"] = {"type": "json_object"}
+
         # ── Log the outgoing request ──────────────────────────────────
         log_cortex_request(
             "openrouter",
@@ -1031,6 +1132,32 @@ class OpenRouterPlugin(AIPluginBase):
             )
 
         content = choices[0].get("message", {}).get("content", "")
+        finish_reason = choices[0].get("finish_reason", "")
+
+        if finish_reason == "content_filter":
+            log_warning(
+                f"[openrouter] Response blocked by content filter "
+                f"(model={resolved_model}, finish_reason={finish_reason})"
+            )
+            if not content:
+                return json.dumps(
+                    {
+                        "actions": [
+                            {
+                                "type": "system_message",
+                                "payload": {
+                                    "text": "Response blocked by provider safety filter"
+                                },
+                            }
+                        ]
+                    }
+                )
+        elif finish_reason == "length":
+            log_warning(
+                f"[openrouter] Response truncated due to max_tokens limit "
+                f"(model={resolved_model})"
+            )
+
         if not content:
             log_error(f"[openrouter] Response contained no content: {data}")
             return json.dumps(
@@ -1067,6 +1194,172 @@ class OpenRouterPlugin(AIPluginBase):
         )
 
         return content.strip()
+
+    async def _openai_chat_completion_from_messages(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        max_tokens: int,
+        model: str | None = None,
+    ) -> str:
+        """Send pre-built messages to OpenRouter (Phase-4 PromptRequest path).
+
+        Handles both plain ``content`` responses and ``tool_calls`` responses,
+        converting the latter to SyntH's ``{"actions": [...]}`` format.
+        """
+        from core.prompt_renderers import OpenAIRenderer
+
+        base_url = str(OPENROUTER_BASE_URL).strip() or "https://openrouter.ai/api/v1"
+        api_key = str(OPENROUTER_API_KEY).strip()
+        url = f"{base_url.rstrip('/')}/chat/completions"
+        resolved_model = model or self._current_model
+
+        payload: dict[str, Any] = {
+            "model": resolved_model,
+            "messages": messages,
+            "max_tokens": max_tokens,
+            # Disable safety filters for providers that support it (Gemini).
+            # Grok has no adjustable safety — it's already minimally filtered.
+            "safety_settings": [
+                {
+                    "category": "HARM_CATEGORY_HARASSMENT",
+                    "threshold": "BLOCK_NONE",
+                },
+                {
+                    "category": "HARM_CATEGORY_HATE_SPEECH",
+                    "threshold": "BLOCK_NONE",
+                },
+                {
+                    "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+                    "threshold": "BLOCK_NONE",
+                },
+                {
+                    "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
+                    "threshold": "BLOCK_NONE",
+                },
+            ],
+        }
+        if tools:
+            payload["tools"] = tools
+            payload["tool_choice"] = "auto"
+
+        # Enforce structured JSON output when the model supports it
+        model_info = _catalog.get(resolved_model)
+        if model_info and model_info.supports_json_mode:
+            payload["response_format"] = {"type": "json_object"}
+
+        headers: dict[str, str] = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+            "HTTP-Referer": "https://github.com/synthetic-heart/synth",
+        }
+
+        log_cortex_request(
+            "openrouter",
+            model=resolved_model,
+            url=url,
+            headers=headers,
+            payload=payload,
+        )
+        _req_start = time.monotonic()
+
+        def _do_req() -> requests.Response:
+            return requests.post(url, headers=headers, json=payload, timeout=120)
+
+        max_attempts = 3
+
+        def _error_json(msg: str) -> str:
+            return json.dumps(
+                {"actions": [{"type": "system_message", "payload": {"text": msg}}]}
+            )
+
+        response: requests.Response | None = None
+        for attempt in range(max_attempts):
+            try:
+                loop = asyncio.get_event_loop()
+                resp: requests.Response = await loop.run_in_executor(None, _do_req)
+                response = resp
+            except Exception as exc:
+                if attempt < max_attempts - 1:
+                    await asyncio.sleep(min(8, 1 * (2**attempt)))
+                    continue
+                log_error(f"[openrouter] HTTP request failed: {exc}")
+                return _error_json(f"OpenRouter HTTP request failed: {exc}")
+
+            if int(resp.status_code) >= 400:  # type: ignore[arg-type]
+                if (
+                    int(resp.status_code) in {429, 500, 503, 504}  # type: ignore[arg-type]
+                    and attempt < max_attempts - 1
+                ):
+                    await asyncio.sleep(min(8, 1 * (2**attempt)))
+                    continue
+                log_error(f"[openrouter] HTTP error {resp.status_code}: {resp.text}")
+                return _error_json(f"OpenRouter HTTP error {resp.status_code}")
+            break
+
+        if response is None:
+            return _error_json("OpenRouter HTTP request failed: no response")
+
+        try:
+            data = response.json()
+        except Exception as exc:
+            log_error(f"[openrouter] Response JSON parse failed: {exc}")
+            return _error_json("OpenRouter response was not valid JSON")
+
+        if "error" in data:
+            err = data["error"]
+            if isinstance(err, dict):
+                err = err.get("message", str(err))
+            log_error(f"[openrouter] API error: {err}")
+            return _error_json(f"OpenRouter endpoint error: {err}")
+
+        choices = data.get("choices") or []
+        if not choices:
+            log_error(
+                f"[openrouter] Response missing choices (PromptRequest path): {data}"
+            )
+            return _error_json("OpenRouter response missing choices")
+
+        choice_msg = choices[0].get("message", {})
+        finish_reason = choices[0].get("finish_reason", "")
+
+        if finish_reason == "content_filter":
+            log_warning(
+                f"[openrouter] Response blocked by content filter "
+                f"(PromptRequest path, model={resolved_model}, "
+                f"finish_reason={finish_reason})"
+            )
+        elif finish_reason == "length":
+            log_warning(
+                f"[openrouter] Response truncated due to max_tokens limit "
+                f"(PromptRequest path, model={resolved_model})"
+            )
+
+        tool_calls = choice_msg.get("tool_calls")
+        if tool_calls:
+            result_text = OpenAIRenderer.parse_tool_call_response(data)
+        else:
+            result_text = choice_msg.get("content") or ""
+            if not result_text:
+                diag = (
+                    "blocked by provider safety filter"
+                    if finish_reason == "content_filter"
+                    else "contained no content"
+                )
+                log_error(f"[openrouter] Response {diag} (PromptRequest path): {data}")
+                return _error_json(f"OpenRouter response {diag}")
+
+        usage = data.get("usage")
+        _elapsed = (time.monotonic() - _req_start) * 1000
+        log_cortex_response(
+            "openrouter",
+            model=data.get("model", resolved_model),
+            status=int(getattr(response, "status_code", 0) or 0),
+            body=result_text.strip(),
+            usage=usage,
+            elapsed_ms=_elapsed,
+        )
+        return result_text.strip()
 
     # ------------------------------------------------------------------
     # System instruction
@@ -1328,8 +1621,9 @@ class OpenRouterPlugin(AIPluginBase):
 
             is_image = mime_type in _VISION_MIME_TYPES
             is_audio = mime_type in _AUDIO_MIME_TYPES
+            is_document = mime_type in _DOCUMENT_MIME_TYPES
 
-            if not is_image and not is_audio:
+            if not is_image and not is_audio and not is_document:
                 if mime_type and not mime_type.startswith("application/octet"):
                     log_debug(
                         f"[openrouter] Skipping unsupported attachment: {mime_type}"
@@ -1365,6 +1659,19 @@ class OpenRouterPlugin(AIPluginBase):
                 log_debug(
                     f"[openrouter] Added image part: {mime_type} "
                     f"len={len(b64_data)} hash={_img_hash}"
+                )
+            elif is_document:
+                # Documents (PDF, text, etc.) use the same image_url data-URI
+                # format.  Providers that don't support them will ignore the
+                # part harmlessly; Gemini-via-OpenRouter handles them natively.
+                parts.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:{mime_type};base64,{b64_data}"},
+                    }
+                )
+                log_debug(
+                    f"[openrouter] Added document part: {mime_type} len={len(b64_data)}"
                 )
             else:
                 # Audio — OpenAI input_audio format

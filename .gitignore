@@ -49,6 +49,7 @@ dist/
 build/
 site/
 logs/
+skins/2B/
 skins/2B/persona.json
 skins/Rekku
 skins/temp
@@ -59,7 +60,8 @@ SyntH_main
 TODO*.md
 .github/prompts
 old
-.vscode
+.vscode/*
+!.vscode/mcp.json
 node_modules/
 tmp*
 test_output*.txt
@@ -67,3 +69,8 @@ db_check.txt
 git_*.txt
 .ruff_cache
 _[Bb]uild
+.gitnexus
+
+# Local installer outputs and downloaded packaging dependencies
+installer/Output/
+installer/vendor/*.msi

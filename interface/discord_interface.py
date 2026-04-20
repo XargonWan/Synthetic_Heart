@@ -1086,6 +1086,9 @@ class DiscordInterface:
         self,
         channel_id: str | int,
         attachments: list[Any] | None = None,
+        initial_text: str | None = None,
+        initial_sender: str | None = None,
+        initial_timestamp: str | None = None,
     ) -> dict[str, str]:
         """Start a Gemini Live API voice session in a Discord voice channel.
 
@@ -1098,6 +1101,9 @@ class DiscordInterface:
             attachments: Optional list of Discord attachment objects from the
                 triggering message.  Text files are injected as context
                 updates; images/PDFs use multimodal injection.
+            initial_text: Optional text message that triggered the live start.
+            initial_sender: Optional display name for ``initial_text``.
+            initial_timestamp: Optional ISO timestamp for ``initial_text``.
         """
         if not self.client:
             return {"status": "failed", "message": "Discord client not initialized"}
@@ -1130,35 +1136,59 @@ class DiscordInterface:
             _configured_live_engine: str = str(
                 _cfg_r.get_value("LIVE_CORTEX", "") or ""
             ).strip()
-            _all_engine_names = _creg.get_available_engines()
+            _base_cortex_engine: str = str(
+                _cfg_r.get_value("BASE_CORTEX", "") or ""
+            ).strip()
             # When the configured value is explicitly "disabled" treat as no
             # engine at all; we then leave _live_capable_engine = None below.
             if _configured_live_engine.lower() == "disabled":
                 _configured_live_engine = ""
-            # Prefer the configured LIVE_CORTEX; fall back to any already-loaded engine.
-            _candidates = (
-                [_configured_live_engine]
-                if _configured_live_engine
-                and _configured_live_engine in _all_engine_names
-                else []
-            ) + [e for e in _all_engine_names if e != _configured_live_engine]
+
+            _candidate_names: list[str] = []
+
+            def _append_candidate(name: str | None) -> None:
+                if not name:
+                    return
+                normalized = str(name).strip()
+                if (
+                    not normalized
+                    or normalized in {"Default", "None"}
+                    or normalized.lower() == "disabled"
+                ):
+                    return
+                if normalized not in _candidate_names:
+                    _candidate_names.append(normalized)
+
+            # Prefer explicit live override, then dedicated live engines, then
+            # the base cortex and any other registered engines. Finally try the
+            # canonical Gemini engine names via dynamic import fallback.
+            _append_candidate(_configured_live_engine)
+            for _engine_name in _creg.get_engines_by_cortex("live"):
+                _append_candidate(_engine_name)
+            _append_candidate(_base_cortex_engine)
+            for _engine_name in _creg.get_available_engines():
+                _append_candidate(_engine_name)
+            for _engine_name in ("gemini_api", "gemini_live"):
+                _append_candidate(_engine_name)
 
             _live_capable_engine = None
-            for _en in _candidates:
+            for _en in _candidate_names:
                 _e = _creg.get_engine(_en)
-                if _e is None and _en == _configured_live_engine:
-                    # Load the configured LIVE_CORTEX engine on demand so we
-                    # don't have to instantiate all registered engines just to
-                    # find one with get_live_session_manager.
+                if _e is None:
                     try:
                         _e = _creg.load_engine(_en)
                         log_info(
-                            f"[live_voice] Loaded LIVE_CORTEX engine '{_en}' on demand"
+                            f"[live_voice] Loaded engine '{_en}' on demand while resolving Live API support"
                         )
                     except Exception as _le:
-                        log_warning(
-                            f"[live_voice] Could not load LIVE_CORTEX engine '{_en}': {_le}"
-                        )
+                        if _en in {_configured_live_engine, _base_cortex_engine}:
+                            log_warning(
+                                f"[live_voice] Could not load preferred engine '{_en}': {_le}"
+                            )
+                        else:
+                            log_debug(
+                                f"[live_voice] Skipping engine '{_en}' while resolving Live API support: {_le}"
+                            )
                         continue
                 if _e and hasattr(_e, "get_live_session_manager"):
                     _live_capable_engine = _e
@@ -1393,6 +1423,8 @@ class DiscordInterface:
             manager.set_tool_executor(LiveToolExecutor(manager, bot=self.client))
             manager.set_turn_complete_callback(on_turn_complete)
             manager.set_reconnect_failed_callback(on_reconnect_failed)
+            if hasattr(manager, "set_playback_active_callback"):
+                manager.set_playback_active_callback(guild_id, audio_buffer.is_speaking)
 
             # Start the Live API session
             started = await manager.start_session(
@@ -1401,6 +1433,9 @@ class DiscordInterface:
                 system_instruction=system_instruction,
                 tools=tools,
                 attachment_context=_attachment_context,
+                initial_user_message=initial_text,
+                initial_user_name=initial_sender,
+                initial_message_timestamp=initial_timestamp,
             )
             if not started:
                 return {
@@ -2604,6 +2639,43 @@ class DiscordInterface:
         elif action_type == "join_voice_discord":
             payload = action.get("payload", {})
             channel_id = payload.get("channel_id")
+            registry = get_interface_registry()
+
+            def _sender_is_trainer_for_join() -> bool:
+                sender_id = ""
+                if original_message is not None:
+                    from_user = getattr(original_message, "from_user", None)
+                    sender_id = str(getattr(from_user, "id", "") or "")
+                if not sender_id:
+                    sender_id = str(context.get("sender_id", "") or "")
+                if sender_id and registry.is_trainer("discord_bot", sender_id):
+                    return True
+
+                if original_message is not None:
+                    user_obj = getattr(original_message, "from_user", None)
+                    if user_obj:
+                        names: list[str] = []
+                        if getattr(user_obj, "name", None):
+                            names.append(str(user_obj.name))
+                        if getattr(user_obj, "display_name", None):
+                            names.append(str(user_obj.display_name))
+                        if getattr(user_obj, "full_name", None):
+                            names.append(str(user_obj.full_name))
+                        if getattr(user_obj, "username", None):
+                            names.append(str(user_obj.username))
+                        disc = getattr(user_obj, "discriminator", None)
+                        if disc and names:
+                            names.append(f"{names[0]}#{disc}")
+                        for name in names:
+                            if registry.is_trainer("discord_bot", name):
+                                return True
+
+                name_ctx = context.get("sender_name")
+                if name_ctx and registry.is_trainer("discord_bot", str(name_ctx)):
+                    return True
+                return False
+
+            sender_is_trainer_for_join = _sender_is_trainer_for_join()
             # note: start_live_voice flag removed – live sessions must be started
             # explicitly via a dedicated action (`start_live_voice_discord`).
 
@@ -2662,36 +2734,7 @@ class DiscordInterface:
 
                     # determine whether the sender qualifies as trainer by
                     # numeric id or username(s) via the registry helper
-                    registry = get_interface_registry()
-
-                    def sender_is_trainer() -> bool:
-                        if not _sender_id:
-                            return False
-                        if registry.is_trainer("discord_bot", _sender_id):
-                            return True
-                        # also try known name fields if a discord user object is
-                        # available (original_message may carry it)
-                        if original_message is not None:
-                            user_obj = getattr(original_message, "from_user", None)
-                            if user_obj:
-                                names: list[str] = []
-                                if getattr(user_obj, "name", None):
-                                    names.append(str(user_obj.name))
-                                if getattr(user_obj, "display_name", None):
-                                    names.append(str(user_obj.display_name))
-                                disc = getattr(user_obj, "discriminator", None)
-                                if disc and names:
-                                    names.append(f"{names[0]}#{disc}")
-                                for n in names:
-                                    if registry.is_trainer("discord_bot", n):
-                                        return True
-                        # context sender_name may also be useful
-                        name_ctx = context.get("sender_name")
-                        if name_ctx and registry.is_trainer("discord_bot", name_ctx):
-                            return True
-                        return False
-
-                    if not sender_is_trainer():
+                    if not sender_is_trainer_for_join:
                         log_warning(
                             "[discord_interface] join_voice_discord: denied — "
                             f"LIVE_TRAINER_ONLY_VOICE active and sender {_sender_id!r} "
@@ -2781,6 +2824,28 @@ class DiscordInterface:
             # Use voice_clients (always current) instead of get_channel() (cache-only).
             if self.client:
                 try:
+                    initial_text = getattr(original_message, "text", None) or getattr(
+                        original_message, "content", None
+                    )
+                    initial_sender = getattr(
+                        getattr(original_message, "from_user", None),
+                        "full_name",
+                        None,
+                    ) or getattr(
+                        getattr(original_message, "from_user", None),
+                        "username",
+                        None,
+                    )
+                    initial_timestamp = (
+                        getattr(
+                            getattr(original_message, "date", None),
+                            "isoformat",
+                            lambda: None,
+                        )()
+                        if getattr(original_message, "date", None)
+                        else None
+                    )
+
                     # Find the voice channel the bot just joined via voice_clients.
                     vc_channel = None
                     for _vc in getattr(self.client, "voice_clients", []):
@@ -2813,7 +2878,6 @@ class DiscordInterface:
                     )
 
                     if vc_channel is not None:
-                        registry = get_interface_registry()
                         trainer_present = any(
                             not getattr(m, "bot", False)
                             and registry.is_trainer("discord_bot", str(m.id))
@@ -2829,11 +2893,34 @@ class DiscordInterface:
                                 attachments=getattr(
                                     original_message, "attachments", None
                                 ),
+                                initial_text=initial_text,
+                                initial_sender=initial_sender,
+                                initial_timestamp=initial_timestamp,
                             )
                             if live_result and live_result.get("status") == "failed":
                                 log_warning(
                                     "[discord_interface] join_voice_discord: live session "
                                     f"auto-start failed: {live_result.get('message')}"
+                                )
+                        elif sender_is_trainer_for_join and channel_id:
+                            log_info(
+                                "[discord_interface] join_voice_discord: trainer requested join "
+                                "but channel member scan did not confirm trainer presence yet — "
+                                "starting live session directly on the resolved voice channel"
+                            )
+                            live_result = await self._start_live_voice(
+                                getattr(vc_channel, "id", channel_id),
+                                attachments=getattr(
+                                    original_message, "attachments", None
+                                ),
+                                initial_text=initial_text,
+                                initial_sender=initial_sender,
+                                initial_timestamp=initial_timestamp,
+                            )
+                            if live_result and live_result.get("status") == "failed":
+                                log_warning(
+                                    "[discord_interface] join_voice_discord: direct live start "
+                                    f"failed after trainer fallback: {live_result.get('message')}"
                                 )
                         else:
                             log_info(
@@ -2843,10 +2930,30 @@ class DiscordInterface:
                                 f"trainer check uses 'discord_bot' interface)"
                             )
                     else:
-                        log_warning(
-                            "[discord_interface] join_voice_discord: could not resolve voice "
-                            f"channel for live auto-start (channel_id={channel_id})"
-                        )
+                        if sender_is_trainer_for_join and channel_id:
+                            log_info(
+                                "[discord_interface] join_voice_discord: could not inspect voice channel members, "
+                                "but the trainer explicitly requested the join — starting live session directly"
+                            )
+                            live_result = await self._start_live_voice(
+                                channel_id,
+                                attachments=getattr(
+                                    original_message, "attachments", None
+                                ),
+                                initial_text=initial_text,
+                                initial_sender=initial_sender,
+                                initial_timestamp=initial_timestamp,
+                            )
+                            if live_result and live_result.get("status") == "failed":
+                                log_warning(
+                                    "[discord_interface] join_voice_discord: direct live start "
+                                    f"failed without channel inspection: {live_result.get('message')}"
+                                )
+                        else:
+                            log_warning(
+                                "[discord_interface] join_voice_discord: could not resolve voice "
+                                f"channel for live auto-start (channel_id={channel_id})"
+                            )
                 except Exception as _lve:
                     log_warning(
                         f"[discord_interface] join_voice_discord: live auto-start check failed: {_lve}"

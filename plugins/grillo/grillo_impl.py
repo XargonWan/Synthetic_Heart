@@ -348,6 +348,19 @@ class GrilloPlugin(AIPluginBase):
             '{"actions": [{"type": "create_personal_diary_entry", "payload": {"content":"relationship insight"}}]}'
         )
 
+    def _get_allowed_action_types_for_beat(self, beat_type: str) -> list[str] | None:
+        if beat_type == "diary_consolidation":
+            return ["update_diary_entry"]
+        if beat_type in {
+            "tag_elaboration",
+            "memory_consolidation",
+            "self_reflection",
+            "curiosity",
+            "relationship",
+        }:
+            return ["create_personal_diary_entry"]
+        return None
+
     async def _enqueue_with_low_priority(self, prompt: str, beat_type: str):
         try:
             from core import message_queue
@@ -389,6 +402,10 @@ class GrilloPlugin(AIPluginBase):
                     "grillo_beat": True,
                     "beat_type": beat_type,
                     "activity_log_id": activity_log_id,
+                    "allowed_action_types": self._get_allowed_action_types_for_beat(
+                        beat_type
+                    ),
+                    "skip_history": True,
                 },
                 "priority": False,
             }
