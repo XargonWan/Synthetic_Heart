@@ -132,20 +132,8 @@ def get_max_diary_chars(
             active_cortex = "manual"  # Safe fallback
 
         if not active_cortex or active_cortex == "manual":
-            log_debug(
-                "[ai_diary] Using manual fallback limits from Selenium engine if available"
-            )
-            # Try to get limits from active Selenium LLM engine first
-            try:
-                from cortex.selenium_engine.selenium_llm_base import (
-                    get_active_selenium_limits,
-                )
-
-                selenium_limits = get_active_selenium_limits()
-                max_selenium_chars = selenium_limits.get("max_prompt_chars", 128001)
-                return max_selenium_chars
-            except Exception:
-                return 128001  # Safe fallback
+            log_debug("[ai_diary] Using manual fallback limits")
+            return 128001  # Safe fallback
 
         registry = get_cortex_registry()
         engine = registry.get_engine(active_cortex)
@@ -153,20 +141,14 @@ def get_max_diary_chars(
         if not engine:
             engine = registry.load_engine(active_cortex)
 
-        # Try to get limits from active Selenium LLM engine first
+        # Get limits from the active engine
         max_prompt_chars = 128001  # Safe fallback default
-        try:
-            from cortex.selenium_engine.selenium_llm_base import (
-                get_active_selenium_limits,
-            )
-
-            selenium_limits = get_active_selenium_limits()
-            max_prompt_chars = selenium_limits.get("max_prompt_chars", 128001)
-        except Exception:
-            # If not a Selenium engine, try to get from the engine itself
-            if engine and hasattr(engine, "get_interface_limits"):
+        if engine and hasattr(engine, "get_interface_limits"):
+            try:
                 limits = engine.get_interface_limits()
                 max_prompt_chars = limits.get("max_prompt_chars", 128001)
+            except Exception:
+                pass
 
         # Check if this is a memory-focused operation (e.g., Grillo memory consolidation beat)
         maximize_diary = False
@@ -1607,7 +1589,7 @@ class DiaryPlugin:
                 FROM ai_diary
                 WHERE timestamp >= DATE_SUB(CURDATE(), INTERVAL 7 DAY)
                 GROUP BY DATE(timestamp)
-                HAVING row_count > 1 OR combined LIKE '%---%'
+                HAVING row_count > 1 OR combined LIKE '%%---%%'
                 ORDER BY MIN(timestamp) ASC
                 LIMIT 1
                 """

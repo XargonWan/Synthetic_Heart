@@ -460,6 +460,18 @@ async def handle_incoming_message(
 
             log_error(f"[message_chain] Traceback: {traceback.format_exc()}")
 
+        # Remove internal emotion tags from the LLM text once they have been
+        # processed so downstream actions and interfaces only see clean text.
+        try:
+            from plugins.emotion_manager import strip_emotion_tags
+
+            cleaned_text = strip_emotion_tags(text)
+            if cleaned_text != text:
+                log_debug("[message_chain] Stripped emotion tags from LLM-origin text")
+                text = cleaned_text
+        except Exception:
+            pass
+
     log_info("[message_chain] 📋 Starting action extraction loop...")
     # Retry/tried set to avoid loops
     tried_texts = set()

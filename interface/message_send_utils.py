@@ -181,6 +181,7 @@ async def _send_with_retry(
         "is_llm_response",
         "context",
         "error_retry_policy",
+        "skip_history",
     }
     valid_kwargs = {
         k: v for k, v in kwargs.items() if k not in excluded and v is not None

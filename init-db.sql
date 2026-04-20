@@ -132,6 +132,23 @@ CREATE TABLE IF NOT EXISTS external_endpoints (
     INDEX idx_protocol (protocol)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+-- Default external endpoint: Selenium LLM Engine
+INSERT IGNORE INTO external_endpoints
+    (name, display_label, protocol, base_url, enabled, capabilities, subsystem_map, default_model, probe_status, extra_config)
+VALUES
+    (
+        'selenium-llm-engine',
+        'Selenium LLM Engine',
+        'openai',
+        'http://synth-selenium-llm-engine:8000',
+        1,
+        '{"llm": true, "tts": false, "stt": false}',
+        '{"cortex": true, "vox": false, "auris": false, "live": false}',
+        'gemini',
+        'never',
+        '{"timeout": 300}'
+    );
+
 -- Core config table (authoritative for config_registry)
 CREATE TABLE IF NOT EXISTS config (
     `config_key` VARCHAR(255) PRIMARY KEY,
@@ -140,11 +157,7 @@ CREATE TABLE IF NOT EXISTS config (
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
-INSERT IGNORE INTO config (`config_key`, `value`) VALUES ('BASE_CORTEX', 'selenium_chatgpt');
-INSERT IGNORE INTO config (`config_key`, `value`) VALUES ('GRILLO_CORTEX', 'Default');
-INSERT IGNORE INTO config (`config_key`, `value`) VALUES ('TRAINER_CORTEX', 'Default');
-
-INSERT IGNORE INTO config (`config_key`, `value`) VALUES ('BASE_CORTEX', 'selenium_chatgpt');
+INSERT IGNORE INTO config (`config_key`, `value`) VALUES ('BASE_CORTEX', 'selenium-llm-engine');
 INSERT IGNORE INTO config (`config_key`, `value`) VALUES ('GRILLO_CORTEX', 'Default');
 INSERT IGNORE INTO config (`config_key`, `value`) VALUES ('TRAINER_CORTEX', 'Default');
 

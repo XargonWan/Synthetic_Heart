@@ -1,5 +1,8 @@
-"""Tests that setting a model on an ext_* Cortex engine persists to the DB."""
+"""Tests that setting a model on an external Cortex engine persists to the DB."""
 
+import asyncio
+
+import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from fastapi.testclient import TestClient
@@ -31,7 +34,7 @@ def _make_endpoint(
 
 
 def test_set_model_persists_to_db(monkeypatch):
-    """POST /api/components/cortex/model for an ext_* engine must call
+    """POST /api/components/cortex/model for an external endpoint engine must call
     ExternalEndpointRegistry.set_default_model so the selection survives restart."""
 
     endpoint = _make_endpoint()
@@ -61,7 +64,7 @@ def test_set_model_persists_to_db(monkeypatch):
     ):
         resp = client.post(
             "/api/components/cortex/model",
-            json={"engine": "ext_my_ep", "model": "model-b"},
+            json={"engine": "my_ep", "model": "model-b"},
         )
 
     assert resp.status_code == 200
@@ -71,6 +74,40 @@ def test_set_model_persists_to_db(monkeypatch):
 
     # The DB persist must have been called exactly once with the right args
     set_default_model_mock.assert_awaited_once_with(1, "model-b")
+
+
+def test_generate_response_retries_on_connection_error(monkeypatch):
+    """ExternalCortexEngine.generate_response should retry connection failures."""
+
+    endpoint = _make_endpoint()
+    endpoint.extra_config = {"retry_attempts": 2, "retry_backoff": 0.0}
+    adapter_mock = MagicMock()
+    adapter_mock.chat_completion = AsyncMock(
+        side_effect=[ConnectionError("Connection error"), MagicMock(content="retry-ok")]
+    )
+    bridge = ExternalCortexEngine(endpoint, adapter_mock)
+
+    with patch("core.external_endpoints.bridges.cortex_bridge.asyncio.sleep", return_value=None):
+        result = asyncio.run(bridge.generate_response([{"role": "user", "content": "hi"}]))
+
+    assert result == "retry-ok"
+    assert adapter_mock.chat_completion.call_count == 2
+
+
+def test_handle_incoming_message_propagates_after_retry_exhaustion(monkeypatch):
+    """If retries are exhausted, ExternalCortexEngine.handle_incoming_message should raise."""
+
+    endpoint = _make_endpoint()
+    endpoint.extra_config = {"retry_attempts": 2, "retry_backoff": 0.0}
+    adapter_mock = MagicMock()
+    adapter_mock.chat_completion = AsyncMock(
+        side_effect=ConnectionError("Connection error")
+    )
+    bridge = ExternalCortexEngine(endpoint, adapter_mock)
+
+    with patch("core.external_endpoints.bridges.cortex_bridge.asyncio.sleep", return_value=None):
+        with pytest.raises(ConnectionError, match="Connection error"):
+            asyncio.run(bridge.handle_incoming_message(None, None, {"foo": "bar"}))
 
 
 def test_set_model_persist_failure_does_not_break_response(monkeypatch):
@@ -101,7 +138,7 @@ def test_set_model_persist_failure_does_not_break_response(monkeypatch):
     ):
         resp = client.post(
             "/api/components/cortex/model",
-            json={"engine": "ext_my_ep", "model": "model-a"},
+            json={"engine": "my_ep", "model": "model-a"},
         )
 
     assert resp.status_code == 200

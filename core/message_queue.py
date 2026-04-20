@@ -29,8 +29,10 @@ LOW_PRIORITY = (
     2  # For autonomous beats (G.R.I.L.L.O.) - processed only when queue is idle
 )
 
-_queue: asyncio.PriorityQueue = asyncio.PriorityQueue()
-_lock = asyncio.Lock()
+_queue: asyncio.PriorityQueue | None = None
+_queue_loop: asyncio.AbstractEventLoop | None = None
+_lock: asyncio.Lock | None = None
+_lock_loop: asyncio.AbstractEventLoop | None = None
 _consumer_task: asyncio.Task | None = None
 _counter = 0  # Monotonic counter to prevent dict comparison when priorities are equal
 
@@ -39,6 +41,64 @@ _counter = 0  # Monotonic counter to prevent dict comparison when priorities are
 # This prevents duplicate responses when a grillo outreach beat and a user
 # message target the same interface_path concurrently.
 _bg_tasks: dict[str, asyncio.Task] = {}
+
+
+def _get_queue() -> asyncio.PriorityQueue:
+    global _queue, _queue_loop
+    try:
+        current_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        if _queue is None:
+            raise RuntimeError(
+                "[QUEUE] Cannot create message queue without a running event loop"
+            )
+        return _queue
+
+    if _queue is None:
+        _queue = asyncio.PriorityQueue()
+        _queue_loop = current_loop
+        return _queue
+
+    if _queue_loop is not current_loop:
+        old_items = list(_queue._queue)
+        log_warning(
+            "[QUEUE] Existing queue is bound to a different event loop; "
+            "recreating queue on the current loop"
+        )
+        _queue = asyncio.PriorityQueue()
+        _queue_loop = current_loop
+        if old_items:
+            _queue._queue.extend(old_items)
+            heapq.heapify(_queue._queue)
+
+    return _queue
+
+
+def _get_lock() -> asyncio.Lock:
+    global _lock, _lock_loop
+    try:
+        current_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        if _lock is None:
+            raise RuntimeError(
+                "[QUEUE] Cannot create lock without a running event loop"
+            )
+        return _lock
+
+    if _lock is None:
+        _lock = asyncio.Lock()
+        _lock_loop = current_loop
+        return _lock
+
+    if _lock_loop is not current_loop:
+        log_warning(
+            "[QUEUE] Existing lock is bound to a different event loop; "
+            "recreating lock on the current loop"
+        )
+        _lock = asyncio.Lock()
+        _lock_loop = current_loop
+
+    return _lock
 
 
 class MessageQueue:
@@ -59,7 +119,7 @@ async def _delayed_put(item: dict, delay: float) -> None:
     await asyncio.sleep(delay)
     priority = HIGH_PRIORITY if item.get("priority") else NORMAL_PRIORITY
     _counter += 1
-    await _queue.put((priority, _counter, item))
+    await _get_queue().put((priority, _counter, item))
 
 
 async def enqueue(
@@ -71,6 +131,7 @@ async def enqueue(
     interface_id: str = None,
     skip_mention_check: bool = False,
     original_message=None,
+    response_future: asyncio.Future | None = None,
 ) -> None:
     """Enqueue a message for serialized processing with rate limiting.
 
@@ -83,6 +144,7 @@ async def enqueue(
         interface_id: The interface identifier (e.g., 'webui', 'interface_name')
         skip_mention_check: If True, skip is_message_for_bot check (for 1:1 interfaces like ollama, webui)
         original_message: The original message object from the interface (for reactions)
+        response_future: Optional Future that will be completed with the processing result or exception.
     """
     # Use centralized context manager if context_memory not provided
     if context_memory is None:
@@ -192,6 +254,8 @@ async def enqueue(
                 log_debug("[QUEUE] DEBUG: Reason: multiple_humans")
             else:
                 log_debug(f"[QUEUE] DEBUG: Reason: {reason or 'not directed to bot'}")
+            if response_future is not None and not response_future.done():
+                response_future.set_result(None)
             return
 
         log_debug("[QUEUE] DEBUG: Message is directed to bot - continuing processing")
@@ -238,6 +302,8 @@ async def enqueue(
 
     if not is_trainer and await is_user_blocked(user_id):
         log_debug(f"[QUEUE] DEBUG: User {user_id} is blocked - ignoring message")
+        if response_future is not None and not response_future.done():
+            response_future.set_result(None)
         return
 
     log_debug(
@@ -247,6 +313,8 @@ async def enqueue(
     plugin = plugin_instance.get_plugin()
     if not plugin:
         log_error("[QUEUE] No active plugin")
+        if response_future is not None and not response_future.done():
+            response_future.set_result(None)
         return
 
     try:
@@ -427,18 +495,20 @@ async def enqueue(
         "chat_id": chat_id,
         "thread_id": thread_id,
         "interface": interface,
+        "interface_path": getattr(message, "interface_path", None),
         "chat_name": chat_name,
         "message_thread_name": message_thread_name,
         "timestamp": time.time(),
         "context": context_memory,
         "priority": priority,
         "history_scope": history_scope,
+        "response_future": response_future,
     }
 
     global _counter
     priority_val = HIGH_PRIORITY if priority else NORMAL_PRIORITY
     _counter += 1
-    await _queue.put((priority_val, _counter, item))
+    await _get_queue().put((priority_val, _counter, item))
     log_debug(f"[QUEUE] Message successfully put in queue with priority {priority_val}")
 
     if priority:
@@ -451,6 +521,40 @@ async def enqueue(
             f"[QUEUE] Regular message enqueued from {interface} chat {chat_id}"
             f" thread {thread_id} by user {user_id}"
         )
+
+
+async def enqueue_and_wait(
+    bot,
+    message,
+    context_memory=None,
+    history_scope: str | None = None,
+    priority: bool = False,
+    interface_id: str = None,
+    skip_mention_check: bool = False,
+    original_message=None,
+    timeout: float | None = None,
+):
+    """Enqueue a message and wait for its processing result.
+
+    This is useful for HTTP-like interfaces that need an immediate response
+    from the core pipeline instead of purely asynchronous queue delivery.
+    """
+    loop = asyncio.get_running_loop()
+    response_future = loop.create_future()
+    await enqueue(
+        bot=bot,
+        message=message,
+        context_memory=context_memory,
+        history_scope=history_scope,
+        priority=priority,
+        interface_id=interface_id,
+        skip_mention_check=skip_mention_check,
+        original_message=original_message,
+        response_future=response_future,
+    )
+    if timeout is not None:
+        return await asyncio.wait_for(response_future, timeout=timeout)
+    return await response_future
 
 
 async def enqueue_low_priority(
@@ -529,7 +633,7 @@ async def enqueue_low_priority(
     global _counter
     _counter += 1
     # Use explicit LOW_PRIORITY value
-    await _queue.put((LOW_PRIORITY, _counter, item))
+    await _get_queue().put((LOW_PRIORITY, _counter, item))
     log_debug(
         f"[QUEUE] Low-priority message enqueued from {item['interface']} chat {chat_id} thread {thread_id}"
     )
@@ -550,7 +654,7 @@ async def compact_similar_messages(first: dict, limit: int = 5) -> list:
         if mid:
             seen_ids.add(mid)
 
-    queue_items = list(_queue._queue)
+    queue_items = list(_get_queue()._queue)
     dirty = False
     for item_tuple in queue_items:
         if len(batch) >= limit:
@@ -570,7 +674,7 @@ async def compact_similar_messages(first: dict, limit: int = 5) -> list:
                 mid = getattr(msg, "message_id", None)
                 if mid and mid in seen_ids:
                     try:
-                        _queue._queue.remove(item_tuple)
+                        _get_queue()._queue.remove(item_tuple)
                         dirty = True
                     except ValueError:
                         pass
@@ -579,14 +683,14 @@ async def compact_similar_messages(first: dict, limit: int = 5) -> list:
                 if mid:
                     seen_ids.add(mid)
             try:
-                _queue._queue.remove(item_tuple)
+                _get_queue()._queue.remove(item_tuple)
                 dirty = True
                 batch.append(item)
             except ValueError:
                 pass
 
     if dirty:
-        heapq.heapify(_queue._queue)
+        heapq.heapify(_get_queue()._queue)
 
     batch.sort(key=lambda x: x["timestamp"])
 
@@ -601,12 +705,12 @@ async def _consumer_loop() -> None:
     log_info("[QUEUE] Consumer loop started")
     while True:
         try:
-            priority, counter, item = await _queue.get()
+            priority, counter, item = await _get_queue().get()
             log_debug(
                 f"[QUEUE] Dequeued message from chat {item.get('chat_id')} (priority={priority}, counter={counter})"
             )
 
-            async with _lock:
+            async with _get_lock():
                 batch = await compact_similar_messages(item)
                 final = batch[0]
                 if len(batch) > 1 and final.get("message"):
@@ -773,11 +877,15 @@ async def _consumer_loop() -> None:
                     # Create interface_path and add to context
                     from core.interface_path_utils import build_interface_path
 
-                    interface_path = build_interface_path(
-                        interface_id,
-                        str(chat_id),
-                        str(thread_id) if thread_id else None,
+                    interface_path = final.get("interface_path") or getattr(
+                        final.get("message"), "interface_path", None
                     )
+                    if not interface_path:
+                        interface_path = build_interface_path(
+                            interface_id,
+                            str(chat_id),
+                            str(thread_id) if thread_id else None,
+                        )
 
                     # Add interface_path to context dict so prompt_engine can access it
                     context = final.get("context", {})
@@ -1060,6 +1168,7 @@ async def _consumer_loop() -> None:
                                 final.get("interface"),
                             )
                         )
+                        response_future = final.get("response_future")
                         log_debug(
                             f"[QUEUE] Dispatched handle_incoming_message task for interface_path={interface_path}, interface={final.get('interface')} cancellable={task_is_cancellable}"
                         )
@@ -1071,6 +1180,13 @@ async def _consumer_loop() -> None:
                             log_debug(
                                 f"[QUEUE] Low-priority task scheduled as background for interface_path={interface_path}; not awaiting"
                             )
+
+                            if response_future is not None and not response_future.done():
+                                response_future.set_exception(
+                                    RuntimeError(
+                                        "enqueue_and_wait cannot wait for low-priority background tasks"
+                                    )
+                                )
 
                             # Track this background task so it can be cancelled if a
                             # user message arrives for the same interface_path.
@@ -1195,7 +1311,7 @@ async def _consumer_loop() -> None:
                                             pass
 
                                         still_pending = False
-                                        for prio, _, queued_item in list(_queue._queue):
+                                        for prio, _, queued_item in list(_get_queue()._queue):
                                             item_chat = (
                                                 queued_item.get("chat_id")
                                                 if isinstance(queued_item, dict)
@@ -1243,6 +1359,21 @@ async def _consumer_loop() -> None:
                                         f"[QUEUE] Failed to attach background completion callback: {cb_e}"
                                     )
                         finally:
+                            if response_future is not None and not response_future.done():
+                                if processing_task.done():
+                                    try:
+                                        response_future.set_result(
+                                            processing_task.result()
+                                        )
+                                    except Exception as exc:
+                                        response_future.set_exception(exc)
+                                elif timed_out:
+                                    response_future.set_exception(
+                                        asyncio.TimeoutError(
+                                            f"Message processing timed out after {timeout_seconds}s"
+                                        )
+                                    )
+
                             # If we completed within the timeout (success or error), notify generation end now.
                             if not timed_out:
                                 try:
@@ -1262,7 +1393,7 @@ async def _consumer_loop() -> None:
                             else:
                                 # Check for any remaining queued messages for the same chat
                                 still_pending = False
-                                for prio, _, queued_item in list(_queue._queue):
+                                for prio, _, queued_item in list(_get_queue()._queue):
                                     item_chat = (
                                         queued_item.get("chat_id")
                                         if isinstance(queued_item, dict)
@@ -1317,7 +1448,7 @@ async def _consumer_loop() -> None:
                     log_warning(f"[QUEUE] Failed to send fallback message: {send_err}")
             finally:
                 for _ in batch:
-                    _queue.task_done()
+                    _get_queue().task_done()
         except asyncio.CancelledError:
             log_info("[QUEUE] Consumer loop cancelled")
             break
@@ -1353,16 +1484,16 @@ async def enqueue_event(bot, prompt_data, event_id: int = None) -> None:
     }
 
     # Check to avoid duplicates in the queue
-    for prio, cnt, queued_item in list(_queue._queue):
+    for prio, cnt, queued_item in list(_get_queue()._queue):
         if queued_item.get("event_prompt") == prompt_data:
             log_warning("[QUEUE] Duplicate event detected, not added to the queue")
             return
 
     global _counter
     _counter += 1
-    await _queue.put((HIGH_PRIORITY, _counter, item))
+    await _get_queue().put((HIGH_PRIORITY, _counter, item))
     log_debug(f"[QUEUE] Event added to the queue with priority: {prompt_data}")
-    log_debug(f"[QUEUE] Current queue state: {list(_queue._queue)}")
+    log_debug(f"[QUEUE] Current queue state: {list(_get_queue()._queue)}")
 
 
 async def run() -> None:
@@ -1372,6 +1503,10 @@ async def run() -> None:
     if _consumer_task and not _consumer_task.done():
         log_debug("[QUEUE] Consumer already running")
         return
+
+    # Ensure the queue primitives are initialized on the active event loop.
+    _get_queue()
+    _get_lock()
 
     _consumer_task = asyncio.create_task(_consumer_loop())
     log_info("[QUEUE] Consumer task started")

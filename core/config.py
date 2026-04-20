@@ -98,7 +98,7 @@ TRAINER_NAME = config_registry.get_var(
 
 BASE_CORTEX = config_registry.get_var(
     "BASE_CORTEX",
-    "selenium_chatgpt",
+    "manual",
     label="Base Cortex",
     description="Default cortex engine used system-wide unless overridden by scope.",
     group="core",
@@ -344,13 +344,61 @@ async def get_active_cortex_engine(scope: str | None = None) -> str:
 
         reg = get_cortex_registry()
         if chosen not in reg.get_available_engines():
-            raise ValueError(f"Cortex engine '{chosen}' is not registered")
+            # Stale engine name in DB (e.g. removed engine from a previous branch).
+            # Fall back to the registry default rather than leaving the system broken.
+            try:
+                fallback = reg.get_default_engine()
+            except ValueError:
+                raise ValueError(f"Cortex engine '{chosen}' is not registered")
+            log_warning(
+                f"[config] ⚠️ Cortex engine '{chosen}' is no longer registered. "
+                f"Falling back to '{fallback}'. "
+                f"Update {'BASE_CORTEX' if scope is None else scope.upper() + '_CORTEX'} to silence this warning."
+            )
+            # Persist the corrected value to the right config key.
+            # When the stale name came from a scope override (TRAINER_CORTEX,
+            # GRILLO_CORTEX, LIVE_CORTEX), reset that scope key to 'Default' so
+            # it falls through to BASE_CORTEX — do NOT touch BASE_CORTEX.
+            # When the stale name is BASE_CORTEX itself (scope is None), update
+            # BASE_CORTEX to the fallback.
+            try:
+                if scope is None:
+                    await config_registry.set_value("BASE_CORTEX", fallback)
+                elif scope == "trainer":
+                    await config_registry.set_value("TRAINER_CORTEX", "Default")
+                elif scope == "grillo":
+                    await config_registry.set_value("GRILLO_CORTEX", "Default")
+                elif scope == "live":
+                    await config_registry.set_value("LIVE_CORTEX", "Default")
+            except Exception:
+                pass
+            chosen = fallback
 
         log_debug(f"[config] 🧠 Active Cortex ({scope or 'base'}): {chosen}")
         return chosen
     except Exception as e:
         log_error(f"[config] ❌ Error resolving active cortex: {repr(e)}")
         raise
+
+
+def derive_cortex_scope(context: dict | None) -> str | None:
+    """Return the scope string implied by *context*, or ``None`` for the base engine.
+
+    Reads the same context flags used throughout the message chain so that
+    Recon, the main LLM call, and Debrief all route to the same engine for a
+    given request.  This is the single authoritative place that maps context
+    keys to scope strings.
+
+    Scope values mirror those accepted by :func:`get_active_cortex_engine`:
+    ``"trainer"``, ``"grillo"``, or ``None`` (base engine).
+    """
+    if not isinstance(context, dict):
+        return None
+    if context.get("is_trainer"):
+        return "trainer"
+    if context.get("grillo_beat"):
+        return "grillo"
+    return None
 
 
 async def set_base_cortex(name: str) -> None:
@@ -438,6 +486,19 @@ async def switch_active_cortex_engine(name: str, use_hot_swap: bool = True):
             loaded = getattr(plugin_instance, "plugin", None)
             if loaded is None:
                 return None
+            # Reverse-lookup in the registry so that direct-instance engines
+            # (e.g. ExternalCortexEngine registered as "ext_xyz") are matched
+            # by their registry key, not by their Python module name.
+            try:
+                from core.cortex_registry import get_cortex_registry
+
+                reg = get_cortex_registry()
+                for engine_name in reg.get_available_engines():
+                    if reg.get_engine(engine_name) is loaded:
+                        return engine_name
+            except Exception:
+                pass
+            # Fallback: module-based name for non-direct engines
             return loaded.__class__.__module__.split(".")[-1]
         except Exception:
             return None

@@ -607,6 +607,16 @@ class MemorySearchPlugin:
         # The caller will inject the results into the main prompt context.
         is_preflight = bool((context or {}).get("preflight"))
 
+        # If this memory_search is being executed while processing an existing
+        # action result delivery, do not spawn another follow-up prompt.
+        # This avoids preparing a new prompt when we are still evaluating the
+        # response to the current LLM prompt (multi-part evaluation flows).
+        system_message = (context or {}).get("system_message") or {}
+        is_action_result_delivery = bool(
+            system_message.get("is_action_result_delivery")
+            or (context or {}).get("is_action_result_delivery")
+        )
+
         # the new async live search path
         interface_path = getattr(original_message, "interface_path", "")
         if isinstance(interface_path, str) and interface_path.startswith(
@@ -690,8 +700,9 @@ class MemorySearchPlugin:
             log_info(f"[memory_search] Retrieved {len(results)} results")
 
             delivered = False
-            # Send results back to LLM via auto_response so the model can continue (skip in preflight)
-            if not is_preflight:
+            # Send results back to LLM via auto_response so the model can continue
+            # (skip in preflight or when already processing an action-result delivery).
+            if not is_preflight and not is_action_result_delivery:
                 original_context = {
                     "interface_name": context.get("interface"),
                     "interface_path": getattr(original_message, "interface_path", None),
@@ -727,6 +738,10 @@ class MemorySearchPlugin:
                     )
                 except Exception as e:
                     log_warning(f"[memory_search] Failed to request LLM delivery: {e}")
+            elif is_action_result_delivery:
+                log_debug(
+                    "[memory_search] Skipping LLM delivery because memory_search is part of an action-result delivery evaluation"
+                )
 
             return {
                 "processed": True,

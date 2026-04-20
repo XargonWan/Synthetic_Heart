@@ -8,6 +8,7 @@ to a built-in engine from the perspective of the SyntH core.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import TYPE_CHECKING, Any
 
@@ -37,6 +38,47 @@ class ExternalCortexEngine(AIPluginBase):
     # Core LLM interface
     # ------------------------------------------------------------------
 
+    def _extra_api_kwargs(self) -> dict[str, Any]:
+        """Build extra API kwargs derived from ``endpoint.extra_config``.
+
+        Supported keys (set inside the endpoint's *Extra Config* JSON field):
+
+        * ``disable_thinking`` (bool) — pass ``enable_thinking=False`` to the
+          API.  Supported by Qwen3 / LM Studio: prevents the model from spending
+          the entire context window on chain-of-thought tokens before generating
+          a response.  Drastically reduces latency on models that default to
+          extended thinking mode.
+        """
+        extra = self._endpoint.extra_config or {}
+        kwargs: dict[str, Any] = {}
+        if extra.get("disable_thinking"):
+            kwargs["enable_thinking"] = False
+        return kwargs
+
+    def _get_retry_settings(self) -> tuple[int, float]:
+        extra = self._endpoint.extra_config or {}
+        max_retries = int(extra.get("retry_attempts", 3))
+        backoff = float(extra.get("retry_backoff", 0.5))
+        return max_retries, backoff
+
+    @staticmethod
+    def _is_retryable_exception(exc: Exception) -> bool:
+        if isinstance(exc, (ConnectionError, TimeoutError, OSError)):
+            return True
+        msg = str(exc).lower()
+        return any(
+            token in msg
+            for token in (
+                "connection",
+                "timeout",
+                "refused",
+                "reset",
+                "temporarily unavailable",
+                "dns",
+                "unreachable",
+            )
+        )
+
     async def generate_response(self, messages: list[dict[str, Any]] | Any) -> str:
         """Forward ``messages`` to the external endpoint and return the response text.
 
@@ -53,14 +95,32 @@ class ExternalCortexEngine(AIPluginBase):
             msg_list = [{"role": "user", "content": str(messages)}]
 
         model = self._endpoint.default_model or None
-        try:
-            chat_resp = await self._adapter.chat_completion(msg_list, model=model)
-            return chat_resp.content
-        except Exception as exc:
-            log_warning(
-                f"[cortex_bridge:{self._endpoint.name}] generate_response failed: {exc}"
-            )
-            raise
+        max_retries, backoff = self._get_retry_settings()
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                chat_resp = await self._adapter.chat_completion(
+                    msg_list, model=model, **self._extra_api_kwargs()
+                )
+                return chat_resp.content
+            except Exception as exc:
+                should_retry = (
+                    attempt < max_retries
+                    and self._is_retryable_exception(exc)
+                )
+                if should_retry:
+                    delay = backoff * (2 ** (attempt - 1))
+                    log_warning(
+                        f"[cortex_bridge:{self._endpoint.name}] generate_response failed "
+                        f"(attempt {attempt}/{max_retries}): {exc}; retrying in {delay:.1f}s"
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                log_warning(
+                    f"[cortex_bridge:{self._endpoint.name}] generate_response failed: {exc}"
+                )
+                raise
 
     def _build_messages(self, prompt: Any) -> list[dict[str, Any]]:
         """Convert a SyntH prompt into an OpenAI-style messages list.
@@ -97,45 +157,15 @@ class ExternalCortexEngine(AIPluginBase):
 
         The message_chain (plugin_instance) drives the full pipeline; this method
         only handles the LLM call — same contract as openrouter/gemini engine.
-
-        Correction prompts are skipped immediately: selenium/browser engines cannot
-        reliably produce corrected JSON and would trigger a multi-second bombardment
-        loop (CORRECTOR_RETRIES attempts × ~20 s each).
+        Correction prompts are forwarded to the engine like any other prompt;
+        the corrector loop is managed entirely by the message chain.
         """
-        # Detect correction prompts — return None so the corrector stops retrying.
-        _prompt_dict: dict[str, Any] | None = None
-        if isinstance(prompt, dict):
-            _prompt_dict = prompt
-        elif isinstance(prompt, str):
-            try:
-                _parsed = json.loads(prompt)
-                if isinstance(_parsed, dict):
-                    _prompt_dict = _parsed
-            except (json.JSONDecodeError, ValueError):
-                pass
+        messages = self._build_messages(prompt)
+        return await self.generate_response(messages)
 
-        if _prompt_dict is not None:
-            sm = _prompt_dict.get("system_message", {})
-            if isinstance(sm, dict) and sm.get("type") in {
-                "error",
-                "correction",
-                "invalid_json",
-                "validation_error",
-            }:
-                log_warning(
-                    f"[cortex_bridge:{self._endpoint.name}] Skipping correction prompt — "
-                    "external/browser engines do not support the JSON correction loop"
-                )
-                return None
-
-        try:
-            messages = self._build_messages(prompt)
-            return await self.generate_response(messages)
-        except Exception as exc:
-            log_warning(
-                f"[cortex_bridge:{self._endpoint.name}] handle_incoming_message failed: {exc}"
-            )
-            return None
+    # NOTE: generate_response already uses _extra_api_kwargs(), so all call
+    # paths (Recon via generate_response, main LLM via handle_incoming_message)
+    # benefit from extra_config settings such as ``disable_thinking``.
 
     # ------------------------------------------------------------------
     # Model / capability info

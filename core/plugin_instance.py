@@ -129,6 +129,28 @@ async def load_plugin(
     # 🔁 If already loaded but different, replace it or update notify_fn
     if plugin is not None:
         current_plugin_name = plugin.__class__.__module__.split(".")[-1]
+        # For engines registered as direct instances (e.g. ExternalCortexEngine),
+        # the module name ("cortex_bridge") differs from the registry key
+        # ("ext_xyz").  If the registry already holds this exact instance under
+        # the requested name, there is nothing to reload.
+        try:
+            _reg = get_cortex_registry()
+            if _reg.get_engine(name) is plugin:
+                # Same instance already in registry under the requested name.
+                if notify_fn and hasattr(plugin, "set_notify_fn"):
+                    try:
+                        plugin.set_notify_fn(notify_fn)
+                        log_debug("[plugin] ✅ notify_fn updated dynamically")
+                    except Exception as e:
+                        log_error(f"[plugin] ❌ Unable to update notify_fn: {e}", e)
+                else:
+                    log_debug(
+                        f"[plugin] ⚠️ Plugin already loaded: {plugin.__class__.__name__}"
+                    )
+                return
+        except Exception:
+            pass
+
         if current_plugin_name != name:
             log_debug(
                 f"[plugin] 🔄 Changing plugin from {current_plugin_name} to {name}"
@@ -378,10 +400,11 @@ async def handle_incoming_message(
 
         if message is None and isinstance(context_memory_or_prompt, dict):
             prompt = context_memory_or_prompt
+            payload = prompt.get("input", {}).get("payload", {})
             message = SimpleNamespace(
                 chat_id="TARDIS / system / events",
                 message_id=int(datetime.utcnow().timestamp() * 1000) % 1_000_000,
-                text=prompt.get("input", {}).get("payload", {}).get("description", ""),
+                text=payload.get("text") or payload.get("description") or "",
                 date=datetime.utcnow(),
                 from_user=SimpleNamespace(id=0, full_name="system", username="system"),
                 reply_to_message=None,
@@ -676,16 +699,19 @@ async def handle_incoming_message(
         )
 
     # ── Scope-based engine resolution ───────────────────────────────
-    # Determine whether this request should be routed to a different
-    # cortex engine than the globally-loaded one (e.g. TRAINER_CORTEX).
+    # Always resolve the active engine via the registry so that the main LLM
+    # call, Recon, and Debrief all use the same engine for a given request.
+    # derive_cortex_scope() is the single authoritative mapping from context
+    # flags (is_trainer, grillo_beat) to scope strings.
     effective_plugin = plugin
     try:
-        _scope: str | None = None
-        if isinstance(context_memory_or_prompt, dict):
-            if context_memory_or_prompt.get("is_trainer"):
-                _scope = "trainer"
-            elif context_memory_or_prompt.get("grillo_beat"):
-                _scope = "grillo"
+        from core.config import derive_cortex_scope, get_active_cortex_engine
+
+        _scope = derive_cortex_scope(
+            context_memory_or_prompt
+            if isinstance(context_memory_or_prompt, dict)
+            else None
+        )
 
         log_debug(
             f"[plugin_instance] Scope routing: _scope={_scope}, "
@@ -693,24 +719,17 @@ async def handle_incoming_message(
             f"global_plugin={plugin.__class__.__name__ if plugin else None}"
         )
 
-        if _scope is not None:
-            from core.config import get_active_cortex_engine
-
-            scope_engine_name = await get_active_cortex_engine(scope=_scope)
-            global_engine_name = (
-                plugin.__class__.__module__.split(".")[-1] if plugin is not None else ""
+        active_engine_name = await get_active_cortex_engine(scope=_scope)
+        reg = get_cortex_registry()
+        resolved = reg.get_engine(active_engine_name)
+        if resolved is None:
+            resolved = reg.load_engine(active_engine_name)
+        if resolved is not None and resolved is not plugin:
+            effective_plugin = resolved
+            log_info(
+                f"[plugin_instance] Engine resolved from registry: '{active_engine_name}' "
+                f"(scope={_scope!r})"
             )
-            if scope_engine_name and scope_engine_name != global_engine_name:
-                reg = get_cortex_registry()
-                scope_engine = reg.get_engine(scope_engine_name)
-                if scope_engine is None:
-                    scope_engine = reg.load_engine(scope_engine_name)
-                if scope_engine is not None:
-                    effective_plugin = scope_engine
-                    log_info(
-                        f"[plugin_instance] Scope override: using '{scope_engine_name}' "
-                        f"for scope='{_scope}' instead of global '{global_engine_name}'"
-                    )
     except Exception as scope_exc:
         log_warning(
             f"[plugin_instance] Scope routing failed, falling back to global plugin: {scope_exc}"

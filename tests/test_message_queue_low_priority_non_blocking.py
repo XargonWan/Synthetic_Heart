@@ -84,3 +84,57 @@ async def test_low_priority_does_not_block(monkeypatch):
         pass
 
     assert True  # If we reached here without deadlock, test passes
+
+
+@pytest.mark.asyncio
+async def test_queue_rebinds_to_current_event_loop():
+    original_queue = message_queue._queue
+    original_lock = message_queue._lock
+    original_queue_loop = getattr(message_queue, "_queue_loop", None)
+    original_lock_loop = getattr(message_queue, "_lock_loop", None)
+
+    try:
+        async def create_queue_on_other_loop():
+            message_queue._get_queue()
+            message_queue._get_lock()
+
+        other_loop = asyncio.new_event_loop()
+        try:
+            other_loop.run_until_complete(create_queue_on_other_loop())
+        finally:
+            other_loop.close()
+
+        old_queue = message_queue._queue
+        old_lock = message_queue._lock
+        assert old_queue is not None
+        assert old_lock is not None
+
+        new_queue = message_queue._get_queue()
+        new_lock = message_queue._get_lock()
+
+        assert new_queue is not old_queue
+        assert new_lock is not old_lock
+
+        await new_queue.put(
+            (
+                message_queue.NORMAL_PRIORITY,
+                1,
+                {
+                    "bot": None,
+                    "message": None,
+                    "chat_id": 0,
+                    "thread_id": None,
+                    "interface": "test",
+                    "timestamp": 0,
+                    "context": {},
+                    "priority": False,
+                },
+            )
+        )
+        queued_item = await new_queue.get()
+        assert queued_item[2]["interface"] == "test"
+    finally:
+        message_queue._queue = original_queue
+        message_queue._lock = original_lock
+        message_queue._queue_loop = original_queue_loop
+        message_queue._lock_loop = original_lock_loop

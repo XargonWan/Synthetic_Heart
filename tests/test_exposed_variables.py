@@ -42,23 +42,6 @@ async def test_should_retry_respects_updated_limit():
     assert not action_parser._should_retry(msg)
 
 
-def test_chromium_headless_reflects_config_change():
-    # Instantiate a SeleniumLLMBase-derived object minimally to test listener
-    from cortex.selenium_engine.selenium_llm_base import SeleniumLLMBase
-    from core.config_manager import config_registry
-
-    inst = SeleniumLLMBase(notify_fn=None, config={})
-
-    # Default should be False (0)
-    assert inst.CHROMIUM_HEADLESS in (False, 0)
-
-    # Update config and verify instance flag updates
-    import asyncio
-
-    asyncio.run(config_registry.set_value("CHROMIUM_HEADLESS", 1))
-    assert inst.CHROMIUM_HEADLESS is True
-
-
 def test_default_response_timeout():
     # The configuration registry default should match the new value we set in the code.
     from core.message_chain import RESPONSE_TIMEOUT

@@ -1059,6 +1059,7 @@ async def universal_send(interface_send_func, *args, text: str = None, **kwargs)
         "context",
         "error_retry_policy",
         "interface_path",
+        "skip_history",
     }
     for param in excluded_params:
         kwargs.pop(param, None)
@@ -1770,6 +1771,27 @@ async def run_corrector_middleware(
                                             payload["interface_path"] = (
                                                 f"ollama_serve/{id_for_iface or '<chat_id>'}"
                                             )
+                                            rewritten = True
+
+                                        if act.get("type") == "message_ollama_serve":
+                                            conversation_id = payload.get("conversation_id")
+                                            if conversation_id is None:
+                                                conversation_id = (
+                                                    context.get("conversation_id")
+                                                    if context
+                                                    else None
+                                                )
+                                            payload.setdefault(
+                                                "target",
+                                                chat_id
+                                                or conversation_id
+                                                or id_for_iface
+                                                or "<chat_id>",
+                                            )
+                                            payload.setdefault(
+                                                "conversation_id",
+                                                conversation_id,
+                                            )
                                             act["payload"] = payload
                                             rewritten = True
                             if rewritten:
@@ -1899,6 +1921,18 @@ async def llm_to_interface(interface_send_func, *args, text: str = None, **kwarg
         if norm and norm != text:
             log_debug("[llm_to_interface] Normalized LLM text (mojibake/unescape)")
             text = norm
+    except Exception:
+        pass
+
+    # Strip internal emotion tags from every incoming LLM message so the text
+    # remains clean for downstream processors and interface outputs.
+    try:
+        from plugins.emotion_manager import strip_emotion_tags
+
+        cleaned = strip_emotion_tags(text)
+        if cleaned != text:
+            log_debug("[llm_to_interface] Stripped emotion tags from LLM text")
+            text = cleaned
     except Exception:
         pass
 

@@ -3,7 +3,7 @@ set -e
 
 # Ensure synth config directory exists and is writable
 mkdir -p /config/.config/
-sudo chmod a+rwx -R /config
+chmod a+rwx -R /config
 
 echo "[S6 synth] Waiting for /tmp/.X11-unix/X1 (up to ${SYNTH_X11_WAIT_SECONDS:-30}s)..."
 # Configurable wait with a safe default; if the socket doesn't appear we'll

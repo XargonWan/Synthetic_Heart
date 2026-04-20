@@ -30,7 +30,6 @@ import asyncio
 import logging
 from typing import Any, AsyncIterator
 
-from core.live_registry import register_live_engine
 from core.logging_utils import log_error, log_info, log_warning
 from plugins.live_base import LiveEngineBase, LiveEvent
 
@@ -239,14 +238,3 @@ _CLOSED = object()
 # ---------------------------------------------------------------------------
 
 ENGINE_CLASS = GeminiLiveEngine
-
-register_live_engine(
-    name="gemini_live",
-    module_path=__name__,
-    capabilities={
-        "input": True,
-        "output": True,
-        "vad": True,
-        "local": False,
-    },
-)
