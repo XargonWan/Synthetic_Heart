@@ -551,7 +551,7 @@ async def test_handle_custom_action_vision_describe(tmp_path) -> None:  # type: 
 
 
 @pytest.mark.asyncio
-async def test_execute_action_vision_describe_uses_current_attachment() -> None:  # type: ignore[no-untyped-def]
+async def test_execute_action_vision_describe_uses_current_attachment() -> None:
     from plugins.iris_base import IrisEngineBase, IrisResult
 
     class MockEngine(IrisEngineBase):

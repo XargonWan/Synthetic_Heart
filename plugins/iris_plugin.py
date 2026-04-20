@@ -524,6 +524,197 @@ class IrisPlugin(AIPluginBase):
         return None, False, None
 
     # ------------------------------------------------------------------
+    # Vision helpers
+    # ------------------------------------------------------------------
+
+    async def _run_vision_describe(
+        self,
+        payload: dict[str, Any],
+        *,
+        bot: Any | None = None,
+        original_message: Any | None = None,
+    ) -> dict[str, Any]:
+        image_path = str(payload.get("image_path", "") or "").strip()
+        mime_type: str | None = payload.get("mime_type")
+        prompt: str | None = payload.get("prompt")
+        engine_name: str | None = payload.get("engine")
+        model: str | None = payload.get("model")
+
+        (
+            resolved_path,
+            should_cleanup,
+            effective_mime,
+        ) = await self._resolve_media_target(
+            image_path,
+            mime_type,
+            bot=bot,
+            original_message=original_message,
+        )
+        if not resolved_path:
+            return {
+                "status": "error",
+                "message": "No image available for vision analysis.",
+            }
+
+        try:
+            result = await self.describe_media(
+                resolved_path,
+                effective_mime,
+                prompt,
+                engine_name,
+                model,
+            )
+            if result:
+                response: dict[str, Any] = {
+                    "status": "success",
+                    "description": result.description,
+                }
+                if result.language is not None:
+                    response["language"] = result.language
+                if result.confidence is not None:
+                    response["confidence"] = result.confidence
+                return response
+            return {
+                "status": "error",
+                "message": "Vision analysis returned no result.",
+            }
+        finally:
+            if should_cleanup and resolved_path:
+                try:
+                    os.remove(resolved_path)
+                except OSError:
+                    pass
+
+    async def _resolve_media_target(
+        self,
+        image_path: str,
+        mime_type: str | None,
+        *,
+        bot: Any | None = None,
+        original_message: Any | None = None,
+    ) -> tuple[str | None, bool, str | None]:
+        if image_path and os.path.exists(image_path):
+            return image_path, False, mime_type
+
+        inline_path, inline_mime = self._materialize_inline_media(image_path, mime_type)
+        if inline_path:
+            return inline_path, True, inline_mime
+
+        if original_message is not None:
+            (
+                message_path,
+                should_cleanup,
+                message_mime,
+            ) = await self._materialize_message_media(
+                bot,
+                original_message,
+            )
+            if message_path:
+                return message_path, should_cleanup, message_mime or mime_type
+
+        return None, False, mime_type
+
+    @staticmethod
+    def _infer_interface_name(original_message: Any) -> str:
+        interface_name = getattr(original_message, "interface_name", None) or getattr(
+            original_message, "interface", None
+        )
+        if interface_name:
+            return str(interface_name)
+        interface_path = str(getattr(original_message, "interface_path", "") or "")
+        if "/" in interface_path:
+            return interface_path.split("/", 1)[0]
+        return interface_path
+
+    @staticmethod
+    def _mime_suffix(mime_type: str | None) -> str:
+        if not mime_type or "/" not in mime_type:
+            return ""
+        return f".{mime_type.split('/', 1)[1].split(';', 1)[0]}"
+
+    @classmethod
+    def _write_temp_media(
+        cls,
+        media_bytes: bytes,
+        mime_type: str | None,
+    ) -> str | None:
+        if not media_bytes:
+            return None
+        suffix = cls._mime_suffix(mime_type)
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            tmp.write(media_bytes)
+            return tmp.name
+
+    @classmethod
+    def _materialize_inline_media(
+        cls,
+        image_path: str,
+        mime_type: str | None,
+    ) -> tuple[str | None, str | None]:
+        if not image_path:
+            return None, mime_type
+
+        raw_value = image_path.strip()
+        effective_mime = mime_type
+        if raw_value.startswith("data:"):
+            header, _, raw_value = raw_value.partition(",")
+            if ";base64" not in header or not raw_value:
+                return None, mime_type
+            if effective_mime is None:
+                effective_mime = header[5:].split(";", 1)[0] or mime_type
+
+        compact_value = "".join(raw_value.split())
+        media_hint = bool(mime_type and mime_type.startswith(("image/", "video/")))
+        if not media_hint and len(compact_value) < 64:
+            return None, effective_mime
+
+        try:
+            media_bytes = base64.b64decode(compact_value, validate=True)
+        except Exception:
+            return None, effective_mime
+
+        return cls._write_temp_media(media_bytes, effective_mime), effective_mime
+
+    async def _materialize_message_media(
+        self,
+        bot: Any | None,
+        original_message: Any,
+    ) -> tuple[str | None, bool, str | None]:
+        try:
+            from core.plugin_instance import _extract_multimodal_attachments
+
+            interface_name = self._infer_interface_name(original_message)
+            attachments = await _extract_multimodal_attachments(
+                bot,
+                original_message,
+                interface_name,
+            )
+        except Exception as exc:
+            log_warning(f"[iris_plugin] Failed to extract message attachments: {exc}")
+            return None, False, None
+
+        for attachment in attachments:
+            if not isinstance(attachment, dict):
+                continue
+            attachment_mime = str(attachment.get("mime_type") or "")
+            if not attachment_mime.startswith(("image/", "video/")):
+                continue
+
+            file_path = str(attachment.get("path") or attachment.get("file_path") or "")
+            if file_path and os.path.exists(file_path):
+                return file_path, False, attachment_mime
+
+            inline_data = str(attachment.get("data") or attachment.get("base64") or "")
+            inline_path, effective_mime = self._materialize_inline_media(
+                inline_data,
+                attachment_mime,
+            )
+            if inline_path:
+                return inline_path, True, effective_mime or attachment_mime
+
+        return None, False, None
+
+    # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
 
