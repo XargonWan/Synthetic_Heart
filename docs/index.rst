@@ -1,13 +1,16 @@
 Synthetic Heart Documentation
 ===================================
 
-.. raw:: html
+.. image:: res/synth_banner.png
+   :alt: Synthetic Heart banner
+   :align: center
+   :width: 100%
 
-   <div align="center">
-      <div style="background: #222; border-radius: 12px; padding: 12px; width: 700px; height: 300px; display: flex; align-items: center; justify-content: center; margin: 0 auto;">
-         <img src="res/SyntH_logo.png" alt="Synthetic Heart Logo" style="max-width: 100%; max-height: 100%; object-fit: contain;" />
-      </div>
-   </div>
+
+.. container:: hero-box
+
+   The Documentation for **Synthetic Heart** is below; use the quickstart to get
+   running and the User / Developer sections to explore features and internals.
 
 
 Welcome to the **Synthetic Heart** documentation. These pages are built
@@ -19,43 +22,35 @@ getting started.
 
 .. toctree::
    :maxdepth: 2
-   :caption: Contents:
+   :caption: User guide:
 
-   installation
-   usage
    quickstart
-   commands
+   usage
    features
-   architecture
-   event_id_flow
-   auto_response
-   chat_links
-   chat_context
-   chat_history
-   emotion_engine
-   persona_manager
-   persona_configuration
-   llm_engines
+   cortex
+   interfaces
    plugins
-   action_schema_format
-   validation_system
-   message_handling
-   monitoring_and_scheduling
-   ai_diary_personal_memory
+   external_endpoints
+   auris_vox
    vrm_animations
    animation_system
-   webui_debug
-   interfaces
-   compose_env_vars
-   interface_path
-   matrix_interface
-   config_management
+   webui_controls
+   gemini/synth-live-voice-integration
+   faq
+
+.. toctree::
+   :maxdepth: 2
+   :caption: Developer guide:
+
+   COMPONENT_DEVELOPMENT_GUIDE
    dev_components
-   component_development_guide
+   api_endpoints
    component_pattern
    two_phase_init_implementation
+   config_management
+   prompt_engine_json_prompt
+   memory_search_and_management
    contributing
-   faq
 
 Building the Documentation
 --------------------------

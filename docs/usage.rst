@@ -8,7 +8,7 @@ Usage Overview
 
 
 synth operates as a modular AI persona with multiple LLM backends. You can
-switch engines on the fly using the ``/llm`` command in your preferred chat
+switch engines on the fly using the ``/cortex`` command in your preferred chat
 platform. Supported modes include ``manual``, ``openai_chatgpt`` and
 ``selenium_chatgpt``.
 
@@ -38,7 +38,7 @@ synth automatically discovers and loads components at startup:
     - ``weather``: Weather information
     - ``message_plugin``: Cross-platform messaging
 
-**Available LLM Engines**
+**Available Cortex Engines**
     - ``openai_chatgpt``: OpenAI API integration
     - ``google_cli``: Google Gemini via CLI
     - ``selenium_chatgpt``: Browser-based ChatGPT
@@ -48,8 +48,13 @@ Runtime Commands
 ----------------
 
 **Engine Management**
-    - ``/llm``: List available LLM engines
-    - ``/llm <engine_name>``: Switch to a specific engine
+    - ``/cortex``: List available cortex engines (``/llm`` deprecated alias); output now includes per-scope overrides (live, grillo, trainer)
+    - ``/cortex <engine_name>``: Switch to a specific engine (``/llm <engine_name>`` deprecated)
+    - ``/cortex_live <engine_name>``: Set the live/base cortex engine (alias of ``/cortex``)
+    - ``/cortex_grillo <engine_name>``: Override the engine used by grillo beats
+      (use without arguments to see current override)
+    - ``/cortex_trainer <engine_name>``: Override the engine used for trainer
+      messages
     - ``/model``: List available models for the active engine
     - ``/model <model_name>``: Switch the active model (e.g. ``gemini_api``)
 
@@ -78,7 +83,10 @@ Components are configured through environment variables in the ``.env`` file:
     - ``DISCORD_BOT_TOKEN``: Discord bot token
     - ``REDDIT_*``: Reddit API credentials
 
-**LLM API Keys**
+**File Storage**
+    - ``SYNTH_EXPOSED_STORAGE_ROOT``: Files uploaded for `file`-type exposed variables are stored here. Defaults to ``/config/storage``.
+
+**Cortex API Keys**
     - ``OPENAI_API_KEY``: OpenAI API access
     - ``GEMINI_API_KEY``: Google Gemini access
 
@@ -105,6 +113,10 @@ The WebUI interface provides a browser-based visual representation of synth usin
 
 **Avatar Management**
     - Upload custom VRM models via the WebUI
+    - The last-uploaded VRM automatically becomes the active model until you select a skin
+      or upload another model.
+    - Only a single user VRM is cached at any time; uploading a new file clears the previous
+      model from the temporary storage (skins/temp).
     - Activate/deactivate models on the fly
     - Automatic animation retargeting for compatible models
 

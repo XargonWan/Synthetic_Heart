@@ -4,7 +4,7 @@ Development Components System
 Overview
 --------
 
-The Development Components System allows developers to safely test experimental interfaces, plugins, and LLM engines in separate ``_dev`` directories without affecting production components. This feature is designed with safety in mind: the dev components flag **resets to disabled on every restart**, ensuring that untested code never persists in production environments.
+The Development Components System allows developers to safely test experimental interfaces, plugins, and Cortex engines in separate ``_dev`` directories without affecting production components. This feature is designed with safety in mind: the dev components flag **resets to disabled on every restart**, ensuring that untested code never persists in production environments.
 
 Key Features
 ------------
@@ -14,7 +14,7 @@ Key Features
   
   * ``interface_dev/`` - Development interfaces
   * ``plugins_dev/`` - Development plugins
-  * ``llm_engines_dev/`` - Development LLM engines
+  * ``cortex/*/dev`` - Development Cortex engine subfolders (e.g. ``cortex/llm_provider/dev``)
 
 * **Visual Identification**: Dev components are marked with yellow "⚠️ in development" badges in the WebUI
 * **Safety First**: Flag automatically resets to ``False`` on every container restart
@@ -34,7 +34,7 @@ Core Components
 2. **Discovery Mechanism**
    
    * ``_discover_interfaces()`` - Scans ``interface/`` and optionally ``interface_dev/``
-   * ``_load_plugins()`` - Scans ``plugins/``, ``llm_engines/``, and optionally their ``_dev`` variants
+   * ``_load_plugins()`` - Scans ``plugins/``, ``cortex/``, and optionally their ``_dev`` variants
 
 3. **WebUI Integration** (``core/webui.py``)
    
@@ -52,14 +52,21 @@ Directory Structure
     ├── interface_dev/      # Development interfaces (optional)
     ├── plugins/            # Production plugins
     ├── plugins_dev/        # Development plugins (optional)
-    ├── llm_engines/        # Production LLM engines
-    └── llm_engines_dev/    # Development LLM engines (optional)
+    ├── cortex/             # Production Cortex engines
+    └── cortex/*/dev/       # Development Cortex engine subfolders (optional)
 
 Usage
 -----
 
 Enabling Dev Components
 ^^^^^^^^^^^^^^^^^^^^^^^
+
+.. note::
+
+   A comprehensive catalog of all HTTP and WebSocket endpoints exposed by
+   Synthetic Heart is available in :doc:`api_endpoints`.  Developers building
+   external integrations should consult that reference when writing clients.
+
 
 1. **Via WebUI**:
    
@@ -98,7 +105,7 @@ Creating Dev Components
 
        mkdir interface_dev  # For interfaces
        mkdir plugins_dev    # For plugins
-       mkdir llm_engines_dev  # For LLM engines
+       mkdir -p cortex/llm_provider/dev  # Example: create a dev folder for a Cortex provider (adjust per provider) 
 
 2. Add your experimental component following the same structure as production components
 
@@ -147,7 +154,7 @@ When dev components are enabled and loaded, they appear in the Components tab wi
 .. code-block:: text
 
     🔧 Development Components
-    ☑ Enable development components (interface_dev, plugins_dev, llm_engines_dev)
+    ☑ Enable development components (interface_dev, plugins_dev, cortex dev folders)
     
     ⚠️ Warning: This setting is not persistent and will reset to OFF when 
     the container restarts. A restart is required after toggling.
@@ -270,8 +277,14 @@ Component Import Errors
 **Solutions**:
 
 1. Ensure the module is in the correct ``_dev`` directory
-2. Check for missing dependencies in ``requirements.txt``
-3. Verify the import paths are correct (use ``interface_dev.module_name`` not ``interface.module_name``)
+2. Check for missing dependencies in ``pyproject.toml`` (use `uv sync` to install).
+   * Note: some development engines such as ``chatterbox`` are not pulled
+     from PyPI and live under ``plugins/_dev``; ``kitten`` is now vendored
+     directly and requires no external repository.  If a build fails it means
+     a third-party dependency (e.g. ``pkuseg`` for chatterbox) could not be
+     compiled.  Adding the necessary system packages to the Dockerfile or
+     fixing the upstream repo is the correct remedy; do not attempt to
+     manually ``pip``-install inside the container.3. Verify the import paths are correct (use ``interface_dev.module_name`` not ``interface.module_name``)
 4. Check Python syntax in the dev module
 
 See Also
@@ -280,5 +293,5 @@ See Also
 * :doc:`components` - General component system documentation
 * :doc:`interfaces` - Interface development guide
 * :doc:`plugins` - Plugin development guide
-* :doc:`llm_engines` - LLM engine development guide
+* :doc:`cortex` - Cortex development guide
 * :doc:`config_management` - Configuration management with ConfigVar

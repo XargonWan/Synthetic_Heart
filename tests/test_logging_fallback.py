@@ -1,5 +1,4 @@
 import importlib
-import os
 import sys
 import logging
 
@@ -18,6 +17,7 @@ def test_logging_fallback_to_stdout(tmp_path, monkeypatch, capsys):
         importlib.reload(sys.modules["core.logging_utils"])
     else:
         import core.logging_utils as _lu
+
         importlib.reload(_lu)
 
     from core import logging_utils

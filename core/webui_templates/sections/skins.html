@@ -1,0 +1,54 @@
+<section class="tab-panel" id="tab-skins" data-tab="skins" role="tabpanel">
+    <div class="settings-grid">
+        <article class="card">
+            <h2>Skins</h2>
+            <p>Manage installed skins. Each skin should include at least one <code>.vrm</code> file. If a skin lacks animations, Rei will be used as fallback.</p>
+
+            <div style="margin-top:0.6rem; margin-bottom:0.6rem; display:flex; gap:0.6rem; flex-wrap:wrap; align-items:center;">
+                <button class="pill" id="btn-new-skin">New Skin</button>
+                <label class="pill secondary" style="cursor:pointer;">
+                    Upload Skin (.zip)
+                    <input type="file" id="skin-zip-upload" accept=".zip" style="display:none;" />
+                </label>
+                <label for="skin-vrm-upload" class="pill secondary" style="cursor:pointer;">
+                    Load single VRM
+                    <input type="file" id="skin-vrm-upload" accept=".vrm" style="display:none;" />
+                </label>
+            </div>
+
+            <!-- New Skin Form (hidden by default) -->
+            <div id="skin-editor-form" class="skin-editor-form" style="display:none;">
+                <h3>Create New Skin</h3>
+                <div class="skin-form-grid">
+                    <div class="skin-form-field">
+                        <label>Name <span style="color:var(--error)">*</span></label>
+                        <input type="text" id="skin-form-name" placeholder="My Skin" maxlength="64" />
+                    </div>
+                    <div class="skin-form-field">
+                        <label>Author</label>
+                        <input type="text" id="skin-form-author" placeholder="Your name" maxlength="64" />
+                    </div>
+                    <div class="skin-form-field">
+                        <label>Version</label>
+                        <input type="text" id="skin-form-version" placeholder="1.0" maxlength="16" value="1.0" />
+                    </div>
+                </div>
+                <div class="skin-form-field" style="margin-top:0.5rem;">
+                    <label>Physical Appearance</label>
+                    <textarea id="skin-form-appearance" rows="3" placeholder="Describe the avatar's physical appearance..."></textarea>
+                </div>
+                <div style="margin-top:0.75rem; display:flex; gap:0.5rem;">
+                    <button class="pill" id="btn-skin-create">Create</button>
+                    <button class="btn-ghost" id="btn-skin-cancel">Cancel</button>
+                </div>
+            </div>
+
+            <div id="skins-grid" class="skins-grid">
+                <div class="meta">Loading skins...</div>
+            </div>
+            <div style="margin-top:1rem">
+                <button class="btn-ghost" id="clear-uploaded">Clear uploaded VRM (restore Rei)</button>
+            </div>
+        </article>
+    </div>
+</section>

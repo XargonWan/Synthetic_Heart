@@ -41,5 +41,5 @@ A new table `archived_memories` stores the archival summaries and the list of so
 Testing
 -------
 
-Unit tests are in `tests/test_grillo_compactor.py` and mock DB and LLM engines to
+Unit tests are in `tests/test_grillo_compactor.py` and mock DB and Cortex engines to
 verify tag selection, cycle behavior and successful persistence.

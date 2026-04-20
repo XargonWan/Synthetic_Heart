@@ -7,10 +7,7 @@
                         <option value="newest">Newest First</option>
                         <option value="oldest">Oldest First</option>
                     </select>
-                    <label class="control-label">
-                        <input type="checkbox" id="diary-show-archived" />
-                        Show Archived
-                    </label>
+
                 </div>
             </header>
             <div id="diary-content" class="diary-container">
@@ -39,7 +36,9 @@
                 width: 40px;
                 height: 40px;
                 border: 3px solid var(--border);
-                border-top: 3px solid var(--accent);
+                /* gradient accent border */
+                border-top: 3px solid transparent;
+                border-image: linear-gradient(90deg, var(--accent), var(--accent-dark)) 1;
                 border-radius: 50%;
                 animation: spin 1s linear infinite;
                 margin-bottom: 1rem;
@@ -95,7 +94,8 @@
             .diary-entry-action {
                 padding: 0.25rem 0.5rem;
                 border-radius: 4px;
-                border: 1px solid var(--border);
+                border: 1px solid transparent;
+                border-image: linear-gradient(90deg, var(--accent), var(--accent-dark)) 1;
                 background: transparent;
                 color: var(--text-soft);
                 font-size: 0.75rem;
@@ -105,6 +105,7 @@
             .diary-entry-action:hover {
                 background: var(--surface-alt);
                 color: var(--text);
+                border-image: linear-gradient(90deg, var(--accent), var(--accent-dark)) 1;
             }
             .diary-entry-content {
                 line-height: 1.6;

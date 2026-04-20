@@ -13,13 +13,13 @@ Modular Architecture
 --------------------
 
 **Component Auto-Discovery**
-    synth automatically scans ``interface/``, ``plugins/``, and ``llm_engines/`` directories to load compatible components. No manual registration or configuration files required.
+    synth automatically scans ``interface/``, ``plugins/``, and ``cortex/`` directories to load compatible components. No manual registration or configuration files required.
 
 **Zero Hardcoding**
     Components are completely decoupled from the core. Adding new functionality requires only placing a compatible Python module in the appropriate directory.
 
 **Runtime Flexibility**
-    Switch LLM engines, enable/disable plugins, and manage interfaces dynamically without restarting the system.
+    Switch Cortex engines, enable/disable plugins, and manage interfaces dynamically without restarting the system.
 
 Adaptive Intelligence
 ---------------------
@@ -33,7 +33,7 @@ synth supports multiple language model backends with seamless switching. **Note:
 * ``manual`` – Human trainer input for debugging and development.
 
 **Runtime Engine Switching**
-    Use ``/llm <engine_name>`` to switch engines instantly during operation.
+    Use ``/cortex <engine_name>`` to switch engines instantly during operation (``/llm <engine_name>`` is a deprecated alias).
 
 Multi-Platform Integration
 ---------------------------
@@ -134,7 +134,7 @@ Extensibility
     Add functionality by implementing ``AIPluginBase`` and placing modules in appropriate directories:
 
     - **Plugins**: Extend capabilities with new actions
-    - **LLM Engines**: Add support for new AI models
+    - **Cortex engines**: Add support for new runtime engines (kinds: ``llm``, ``live``, ``agent``).
     - **Interfaces**: Integrate new communication platforms
 
 **No Core Modifications**
@@ -220,7 +220,7 @@ The diary plugin can be enabled/disabled dynamically:
 
 **Configuration:**
 
-Each LLM engine has its own configuration for diary integration:
+Each Cortex engine has its own configuration for diary integration:
 
 * **OpenAI**: Up to 2000 characters for diary content
 * **Selenium ChatGPT**: Up to 1500 characters

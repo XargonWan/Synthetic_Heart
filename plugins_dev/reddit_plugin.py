@@ -37,7 +37,9 @@ class RedditPlugin:
         return {
             "message_reddit": {
                 "required_fields": ["text", "target", "title"],
-                "optional_fields": ["thread_id"],  # Solo per Reddit, Telegram usa thread_id
+                "optional_fields": [
+                    "thread_id"
+                ],  # Solo per Reddit, Telegram usa thread_id
                 "description": "Post a submission or comment to Reddit",
             }
         }
@@ -48,11 +50,34 @@ class RedditPlugin:
         return {
             "description": "Send a post or comment on Reddit",
             "payload": {
-                "text": {"type": "string", "example": "Post content here", "description": "The content of the post or comment"},
-                "target": {"type": "string", "example": "r/example_subreddit", "description": "The subreddit to post to"},
-                "title": {"type": "string", "example": "Optional post title", "description": "Title for new posts", "optional": True},
-                "thread_id": {"type": "string", "example": "abc123", "description": "Optional comment thread ID for replies (Reddit only)", "optional": True},
-                "interface": {"type": "string", "example": self.get_interface_id(), "description": "Interface identifier", "auto_filled": True},
+                "text": {
+                    "type": "string",
+                    "example": "Post content here",
+                    "description": "The content of the post or comment",
+                },
+                "target": {
+                    "type": "string",
+                    "example": "r/example_subreddit",
+                    "description": "The subreddit to post to",
+                },
+                "title": {
+                    "type": "string",
+                    "example": "Optional post title",
+                    "description": "Title for new posts",
+                    "optional": True,
+                },
+                "thread_id": {
+                    "type": "string",
+                    "example": "abc123",
+                    "description": "Optional comment thread ID for replies (Reddit only)",
+                    "optional": True,
+                },
+                "interface": {
+                    "type": "string",
+                    "example": self.get_interface_id(),
+                    "description": "Interface identifier",
+                    "auto_filled": True,
+                },
             },
         }
 
@@ -68,7 +93,8 @@ class RedditPlugin:
             return
         if action.get("interface") != "reddit":
             log_debug(
-                "[reddit_plugin] Skipping action for interface %s" % action.get("interface")
+                "[reddit_plugin] Skipping action for interface %s"
+                % action.get("interface")
             )
             return
 
@@ -99,13 +125,17 @@ class RedditPlugin:
                 log_info(f"[reddit_plugin] Reply posted: https://reddit.com{url}")
             else:
                 subreddit_name = target.lstrip("r/")
-                submission = self.reddit.subreddit(subreddit_name).submit(title=title, selftext=text)
+                submission = self.reddit.subreddit(subreddit_name).submit(
+                    title=title, selftext=text
+                )
                 if flair_id:
                     try:
                         submission.flair.select(flair_id)
                     except Exception as e:
                         log_warning(f"[reddit_plugin] Failed to set flair: {e}")
-                log_info(f"[reddit_plugin] Submission created: https://reddit.com{submission.permalink}")
+                log_info(
+                    f"[reddit_plugin] Submission created: https://reddit.com{submission.permalink}"
+                )
         except Exception as e:
             log_error(f"[reddit_plugin] Failed to execute action: {e}", e)
 

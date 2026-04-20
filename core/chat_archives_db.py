@@ -5,6 +5,7 @@ This avoids overwriting the existing (messy) `chat_archives.py` while we
 migrate to a DB-only approach. Use this module in `webui.py` and other code
 that needs DB-backed archives.
 """
+
 from __future__ import annotations
 
 import json
@@ -37,7 +38,12 @@ async def init_chat_archives_table() -> None:
         log_warning(f"[chat_archives_db] Failed to init table: {e}")
 
 
-async def create_archive(session_id: str, messages: List[Dict[str, Any]], name: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+async def create_archive(
+    session_id: str,
+    messages: List[Dict[str, Any]],
+    name: Optional[str] = None,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     archive_id = uuid4().hex
     created_at = datetime.utcnow().isoformat()
     try:
@@ -46,9 +52,17 @@ async def create_archive(session_id: str, messages: List[Dict[str, Any]], name: 
             async with conn.cursor() as cur:
                 await cur.execute(
                     "INSERT INTO chat_archives (id, session_id, name, messages, metadata, created_at) VALUES (%s, %s, %s, %s, %s, UTC_TIMESTAMP())",
-                    (archive_id, session_id, name or 'Chat', json.dumps(messages), json.dumps(metadata) if metadata else None),
+                    (
+                        archive_id,
+                        session_id,
+                        name or "Chat",
+                        json.dumps(messages),
+                        json.dumps(metadata) if metadata else None,
+                    ),
                 )
-                log_info(f"[chat_archives_db] Created archive {archive_id} for session {session_id}")
+                log_info(
+                    f"[chat_archives_db] Created archive {archive_id} for session {session_id}"
+                )
                 return {"id": archive_id, "created_at": created_at}
     except Exception as e:
         log_warning(f"[chat_archives_db] Failed to create archive: {e}")
@@ -57,7 +71,9 @@ async def create_archive(session_id: str, messages: List[Dict[str, Any]], name: 
 
 async def list_archives(session_id: Optional[str] = None) -> List[Dict[str, Any]]:
     try:
-        log_debug(f"[chat_archives_db] list_archives called with session_id={session_id}")
+        log_debug(
+            f"[chat_archives_db] list_archives called with session_id={session_id}"
+        )
         await init_chat_archives_table()
         async with get_conn_ctx() as conn:
             async with conn.cursor() as cur:
@@ -74,13 +90,17 @@ async def list_archives(session_id: Optional[str] = None) -> List[Dict[str, Any]
                 rows = await cur.fetchall()
                 out: List[Dict[str, Any]] = []
                 for r in rows:
-                    out.append({
-                        "id": r[0],
-                        "session_id": r[1],
-                        "name": r[2] or 'Chat',
-                        "created_at": r[3].isoformat() if hasattr(r[3], 'isoformat') else str(r[3]),
-                        "message_count": int(r[4]) if r[4] else 0,
-                    })
+                    out.append(
+                        {
+                            "id": r[0],
+                            "session_id": r[1],
+                            "name": r[2] or "Chat",
+                            "created_at": r[3].isoformat()
+                            if hasattr(r[3], "isoformat")
+                            else str(r[3]),
+                            "message_count": int(r[4]) if r[4] else 0,
+                        }
+                    )
                 return out
     except Exception as e:
         log_warning(f"[chat_archives_db] Failed to list archives: {e}")
@@ -92,10 +112,15 @@ async def load_archive(archive_id: str) -> Dict[str, Any]:
         await init_chat_archives_table()
         async with get_conn_ctx() as conn:
             async with conn.cursor() as cur:
-                await cur.execute("SELECT id, session_id, name, messages, metadata, created_at FROM chat_archives WHERE id = %s", (archive_id,))
+                await cur.execute(
+                    "SELECT id, session_id, name, messages, metadata, created_at FROM chat_archives WHERE id = %s",
+                    (archive_id,),
+                )
                 row = await cur.fetchone()
                 if not row:
-                    log_debug(f"[chat_archives_db] load_archive: archive {archive_id} not found in DB")
+                    log_debug(
+                        f"[chat_archives_db] load_archive: archive {archive_id} not found in DB"
+                    )
                     raise FileNotFoundError(archive_id)
                 return {
                     "id": row[0],
@@ -103,7 +128,9 @@ async def load_archive(archive_id: str) -> Dict[str, Any]:
                     "name": row[2],
                     "messages": json.loads(row[3]) if row[3] else [],
                     "metadata": json.loads(row[4]) if row[4] else None,
-                    "created_at": row[5].isoformat() if hasattr(row[5], 'isoformat') else str(row[5])
+                    "created_at": row[5].isoformat()
+                    if hasattr(row[5], "isoformat")
+                    else str(row[5]),
                 }
     except FileNotFoundError:
         raise
@@ -117,7 +144,9 @@ async def delete_archive(archive_id: str) -> None:
         await init_chat_archives_table()
         async with get_conn_ctx() as conn:
             async with conn.cursor() as cur:
-                await cur.execute("DELETE FROM chat_archives WHERE id = %s", (archive_id,))
+                await cur.execute(
+                    "DELETE FROM chat_archives WHERE id = %s", (archive_id,)
+                )
                 log_info(f"[chat_archives_db] Deleted archive {archive_id}")
     except Exception as e:
         log_warning(f"[chat_archives_db] Failed to delete archive {archive_id}: {e}")
@@ -129,8 +158,14 @@ async def rename_archive(archive_id: str, new_name: str) -> Dict[str, Any]:
         await init_chat_archives_table()
         async with get_conn_ctx() as conn:
             async with conn.cursor() as cur:
-                await cur.execute("UPDATE chat_archives SET name=%s WHERE id=%s", (new_name, archive_id))
-                await cur.execute("SELECT id, session_id, name, messages, metadata, created_at FROM chat_archives WHERE id = %s", (archive_id,))
+                await cur.execute(
+                    "UPDATE chat_archives SET name=%s WHERE id=%s",
+                    (new_name, archive_id),
+                )
+                await cur.execute(
+                    "SELECT id, session_id, name, messages, metadata, created_at FROM chat_archives WHERE id = %s",
+                    (archive_id,),
+                )
                 row = await cur.fetchone()
                 if not row:
                     raise FileNotFoundError(archive_id)
@@ -140,7 +175,9 @@ async def rename_archive(archive_id: str, new_name: str) -> Dict[str, Any]:
                     "name": row[2],
                     "messages": json.loads(row[3]) if row[3] else [],
                     "metadata": json.loads(row[4]) if row[4] else None,
-                    "created_at": row[5].isoformat() if hasattr(row[5], 'isoformat') else str(row[5])
+                    "created_at": row[5].isoformat()
+                    if hasattr(row[5], "isoformat")
+                    else str(row[5]),
                 }
     except FileNotFoundError:
         raise

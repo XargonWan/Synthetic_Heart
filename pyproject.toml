@@ -1,0 +1,135 @@
+[project]
+name = "synthetic-heart"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "aiohttp<3.10",
+    "aiomysql>=0.3.2",
+    "aiosqlite>=0.17.0",
+    "asyncpraw>=7.8.1",
+    "beautifulsoup4>=4.14.3",
+    "cryptography>=46.0.4",
+    "discord-py>=2.6.4",
+    "fastapi>=0.128.0",
+    "google-genai>=1.61.0",
+    "jinja2>=3.1.6",
+    "lxml>=6.0.2",
+    "matrix-nio<0.25",
+    "openai>=2.16.0",
+    "praw>=7.8.1",
+    "pycryptodome>=3.23.0",
+    "pydantic>=2.12.5",
+    "pymysql>=1.1.2",
+    "python-dotenv>=1.2.1",
+    "python-multipart>=0.0.22",
+    "python-telegram-bot>=22.6",
+    "pyyaml>=6.0.3",
+    "requests>=2.32.5",
+    "selenium>=4.40.0",
+    "selenium-stealth>=1.0.6",
+    "telethon>=1.42.0",
+    "tenacity>=9.1.2",
+    "tqdm>=4.67.2",
+    "tzdata>=2025.3",
+    "undetected-chromedriver>=3.5.5",
+    "uvicorn>=0.40.0",
+    "watchfiles>=1.1.1",
+    "websockets>=15.0.1",
+    "webdriver-manager>=4.0.1",
+    "setuptools>=70.0.0",
+    "discord-ext-voice-recv>=0.5.2a179",
+    # Auris/Vox default audio engines (packages that exist on PyPI and build cleanly)
+    "vosk>=0.3.45",                    # local STT; model downloaded at runtime
+    # audio dependencies are intentionally pared back for a CPU-only container.
+    # VOSK remains the only default engine; other packages are available via extras
+    # (see [project.optional-dependencies] below). Keeping these in the base
+    "pydub>=0.25.1",
+    "huggingface-hub>=1.5.0",
+    "gtts>=2.5.4",
+    "lingua-language-detector>=2.0.2",
+    "kittentts",
+    "torch",
+    "torchaudio",
+]
+
+[project.optional-dependencies]
+# Install one or more extras to enable the corresponding audio engine.
+# Example: uv pip install '.[silero]' or uv pip install '.[vosk,qwen3tts]'
+
+# ── Auris STT engines ─────────────────────────────────────────────────────────
+vosk      = ["vosk>=0.3.45"]          # local CPU STT (Auris vosk engine)
+                                       # ~50 MB model downloaded on first use
+whisper   = ["faster-whisper>=0.8.1"]   # optional language-detection helper
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+    "ruff>=0.1.0",
+    "ty>=0.0.14", 
+    "unittest-xml-reporting>=3.2.0",
+    "sphinx>=7.0.0",
+    "sphinx-rtd-theme>=2.0.0",
+    "pytest-asyncio>=0.23.0",
+]
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+
+[tool.ruff.lint]
+fixable = ["ALL"]
+
+
+[tool.ty.environment]
+# "python-version" must be inside [environment], not at the top
+python-version = "3.10"
+
+[tool.ty.src]
+# We explicitly list all folders containing Python code
+include = [
+    "core",
+    "plugins",
+    "interface",
+    "llm_engines",
+    "tests",
+    "scripts",
+    "automation_tools",
+    "main.py"
+]
+
+[build-system]
+requires = ["setuptools>=70.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = [
+    "core*",
+    "plugins*",
+    "interface*",
+    "cortex*",
+    "llm_engines*",
+    "vendor*",
+    "plugins_dev*",
+    "interface_dev*",
+    "automation_tools*",
+    "tests*",
+]
+exclude = [
+    "res*",
+    "skins*",
+    "webtop*",
+    "website*",
+]
+
+[tool.uv.sources]
+kittentts = { url = "https://github.com/KittenML/KittenTTS/releases/download/0.8.1/kittentts-0.8.1-py3-none-any.whl" }
+torch = { index = "pytorch-cpu" }
+torchaudio = { index = "pytorch-cpu" }
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true

@@ -95,12 +95,15 @@ LLM Error Message Routing
 
 When the LLM fails to generate valid JSON actions, the system sends a fallback error message. This message is now automatically routed to the same interface and conversation where the original message was received.
 
+Fallback messages are intended to notify users only when the *entire* LLM iteration has failed or when an internal error prevents any useful response. If the model produces some valid actions that successfully execute, no generic failure message will be emitted even if the remaining response could not be corrected. This prevents spurious "LLM failure" notices during partial success.
+
 **Error Scenarios:**
 
-- **JSON Parsing Errors**: Invalid JSON structure in LLM response
-- **Action Validation Failures**: Actions don't match expected schema
-- **Timeout Errors**: LLM response takes too long
-- **Corrector Failures**: Unable to fix invalid responses
+- **Complete JSON Failure**: No valid actions could be extracted or corrected
+- **No Actions Executed**: All returned actions were invalid and correction exhausted
+- **Timeout/Technical Errors**: The engine timed out or an exception occurred before any result
+
+(Partial failures – e.g. a subset of actions rejected by validation – trigger the corrector but do not generate a fallback message unless every action fails.)
 
 **Routing Implementation:**
 

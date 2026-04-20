@@ -13,7 +13,29 @@ def test_parser_records_error_on_unescaped_quotes():
     # The important behavior is that the parser detected errors and recorded a
     # clear hint so the corrector middleware can use it to ask the LLM to
     # regenerate valid JSON.
-    assert obj is not None, "Decoder should return at least partial JSON (other actions)"
-    assert meta.get('had_errors', False) is True, "Parser should mark had_errors=True"
-    assert transport_layer.LAST_JSON_ERROR_INFO is not None and isinstance(transport_layer.LAST_JSON_ERROR_INFO, str)
-    assert 'Expecting' in transport_layer.LAST_JSON_ERROR_INFO or 'Invalid' in transport_layer.LAST_JSON_ERROR_INFO
+    assert obj is not None, (
+        "Decoder should return at least partial JSON (other actions)"
+    )
+    assert meta.get("had_errors", False) is True, "Parser should mark had_errors=True"
+    assert transport_layer.LAST_JSON_ERROR_INFO is not None and isinstance(
+        transport_layer.LAST_JSON_ERROR_INFO, str
+    )
+    assert (
+        "Expecting" in transport_layer.LAST_JSON_ERROR_INFO
+        or "Invalid" in transport_layer.LAST_JSON_ERROR_INFO
+    )
+
+
+def test_attempted_action_description_for_unknown_action():
+    # If the LLM tries to use an action name that doesn't exist, we still
+    # want the corrector to receive a helpful hint containing the available
+    # action list rather than nothing at all.
+    bogus = '{"actions":[{"type":"message","payload":{"text":"hi"}}]}'
+    info = transport_layer._get_attempted_action_full_description(bogus)
+    assert info is not None, "Fallback info should be returned even for invalid type"
+    assert info.get("action_type") == "message"
+    desc = info.get("full_description", {}).get("description", "")
+    assert "not a supported" in desc
+    # Should not contain an explicit enumeration of action types
+    assert "Supported action types" not in desc
+    assert "Available actions" in desc or "plugins" in desc

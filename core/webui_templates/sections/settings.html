@@ -1,0 +1,160 @@
+<section class="tab-panel" id="tab-settings" data-tab="settings" role="tabpanel">
+  <div class="settings-grid">
+    <article class="card">
+      <h2>Window Management</h2>
+      <p>Reset movable window positions and sizes to safe defaults for desktop and mobile.</p>
+      <div style="margin-top:0.6rem;">
+        <button id="reset-window-positions" class="btn-ghost">Reset window positions</button>
+      </div>
+    </article>
+    <article class="card">
+      <h2>Notifications</h2>
+      <p>Enable desktop notifications and audio cues whenever new messages arrive.</p>
+      <label class="toggle">
+        <input type="checkbox" id="notify-toggle" />
+        <span>Enable desktop notifications</span>
+      </label>
+      <div id="notify-status" class="meta">Disabled</div>
+      <div id="connection" class="status-chip" data-tone="info">Ready.</div>
+    </article>
+    <article class="card" id="config-accent-card" style="display:none;">
+      <h2>Appearance</h2>
+      <p>Adjust the primary accent color used across the WebUI.</p>
+      <div class="config-input" id="config-accent-input-container"></div>
+    </article>
+    <article class="card" id="config-general-card">
+      <h2>Configuration</h2>
+      <div class="config-search-row">
+        <input id="config-search" type="search" placeholder="Search settings (name, label, description, group)" />
+        <button id="config-search-clear" class="btn-ghost" type="button">Clear</button>
+      </div>
+      <div class="meta" id="config-search-status"></div>
+      <div class="config-list" id="config-general-list">
+        <div class="meta">Loading…</div>
+      </div>
+      <div class="config-disclaimer" id="config-env-disclaimer">
+        <span class="override-icon">⚠️</span> Variables with this icon are overridden by environment values. Remove the override to enable editing.
+      </div>
+    </article>
+    <article class="card warning-card" id="config-advanced-card">
+      <h2>Advanced Settings</h2>
+      <p class="warning-text" id="config-advanced-warning">Changing ports may render the service unavailable. Update Docker compose exposure before applying modifications.</p>
+      <div class="config-list" id="config-advanced-list">
+        <div class="meta">Loading…</div>
+      </div>
+    </article>
+  </div>
+</section>
+
+<style>
+  /* Match develop: circular accent preset swatches in the Settings Appearance card. */
+  #config-accent-input-container {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+  }
+
+  #config-accent-input-container .accent-presets {
+    display: flex;
+    gap: 0.75rem;
+    align-items: center;
+  }
+
+  #config-accent-input-container .accent-presets button {
+    width: 34px;
+    height: 34px;
+    border-radius: 50%;
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    padding: 0;
+    cursor: pointer;
+  }
+
+  #config-accent-input-container .accent-presets button.is-active {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+    box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.55) inset;
+  }
+
+  #config-accent-input-container .accent-color-input {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  #config-accent-input-container .accent-color-dot {
+    width: 42px;
+    height: 42px;
+    border-radius: 50%;
+    border: 1px solid var(--border);
+    background: transparent;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.1rem;
+    line-height: 1;
+    color: var(--text-soft);
+    cursor: pointer;
+    box-shadow: 0 6px 16px rgba(0, 0, 0, 0.35);
+  }
+
+  #config-accent-input-container .accent-color-dot:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+
+  #config-accent-input-container .accent-actions {
+    display: flex;
+    gap: 0.5rem;
+    margin-left: 6px;
+  }
+
+  #config-accent-input-container .accent-actions button {
+    padding: 0.45rem 0.65rem;
+    border-radius: 8px;
+    border: 1px solid transparent;
+    cursor: pointer;
+  }
+
+  #config-accent-input-container .accent-actions .apply {
+    background: var(--accent);
+    color: var(--accent-contrast);
+  }
+
+  #config-accent-input-container .accent-actions .cancel {
+    background: transparent;
+    color: var(--text);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+  }
+
+  #config-accent-input-container .accent-preview {
+    width: 68px;
+    height: 40px;
+    border-radius: 8px;
+    border: 1px solid transparent;
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
+    background: linear-gradient(90deg, var(--accent), var(--accent-dark));
+  }
+
+  .config-search-row {
+    display: flex;
+    gap: 0.6rem;
+    align-items: center;
+    margin: 0.6rem 0 0.2rem;
+  }
+
+  .config-search-row input[type="search"] {
+    flex: 1 1 auto;
+    min-width: 200px;
+    padding: 0.55rem 0.75rem;
+    border-radius: 10px;
+    border: 1px solid var(--border);
+    background: var(--background);
+    color: var(--text);
+  }
+
+  .config-search-row input[type="search"]::placeholder {
+    color: var(--text-soft);
+  }
+</style>

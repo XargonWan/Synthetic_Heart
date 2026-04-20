@@ -1,18 +1,17 @@
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch, AsyncMock
+from unittest.mock import patch
 
 from core import message_chain
 
 
 class TestMessageChain(unittest.TestCase):
-
-    @patch('core.transport_layer.run_corrector_middleware')
+    @patch("core.transport_layer.run_corrector_middleware")
     async def test_system_json_error_skips_corrector(self, mock_corrector):
         """System messages of type 'error' should be blocked without correction."""
         mock_corrector.return_value = "{}"
 
-        msg = SimpleNamespace(chat_id=123, text="", from_llm=False)
+        msg = SimpleNamespace(chat_id=123, text="", from_cortex=False)
         result = await message_chain.handle_incoming_message(
             bot=None,
             message=msg,
@@ -23,12 +22,12 @@ class TestMessageChain(unittest.TestCase):
         self.assertEqual(result, message_chain.BLOCKED)
         mock_corrector.assert_not_called()
 
-    @patch('core.transport_layer.run_corrector_middleware')
+    @patch("core.transport_layer.run_corrector_middleware")
     async def test_system_json_forwarded_without_corrector(self, mock_corrector):
-        """Event/output system messages should be forwarded without invoking the corrector."""
+        """System messages from non-LLM source are always blocked without correction."""
         mock_corrector.return_value = "{}"
 
-        msg = SimpleNamespace(chat_id=123, text="", from_llm=False)
+        msg = SimpleNamespace(chat_id=123, text="", from_cortex=False)
 
         for sm_type in ["event", "output"]:
             with self.subTest(sm_type=sm_type):
@@ -39,15 +38,15 @@ class TestMessageChain(unittest.TestCase):
                     source="interface",
                 )
 
-                self.assertEqual(result, message_chain.FORWARD_AS_TEXT)
+                self.assertEqual(result, message_chain.BLOCKED)
                 mock_corrector.assert_not_called()
 
-    @patch('core.transport_layer.run_corrector_middleware')
+    @patch("core.transport_layer.run_corrector_middleware")
     async def test_non_llm_invalid_json_skips_corrector(self, mock_corrector):
-        """Invalid JSON from non-LLM sources should bypass the corrector."""
+        """Invalid JSON from non-LLM sources is blocked without invoking the corrector."""
         mock_corrector.return_value = "{}"
 
-        msg = SimpleNamespace(chat_id=123, text="", from_llm=False)
+        msg = SimpleNamespace(chat_id=123, text="", from_cortex=False)
         result = await message_chain.handle_incoming_message(
             bot=None,
             message=msg,
@@ -55,9 +54,9 @@ class TestMessageChain(unittest.TestCase):
             source="interface",
         )
 
-        self.assertEqual(result, message_chain.FORWARD_AS_TEXT)
+        self.assertEqual(result, message_chain.BLOCKED)
         mock_corrector.assert_not_called()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

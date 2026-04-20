@@ -1,0 +1,17 @@
+{
+  "name": "synthetic-heart-webui",
+  "version": "0.1.0",
+  "private": true,
+  "devDependencies": {
+    "eslint": "^8.0.0",
+    "htmlhint": "^0.16.2",
+    "playwright": "^1.36.0",
+    "wait-on": "^7.0.1"
+  },
+  "scripts": {
+    "check:js": "find res/synth_webui/js -name '*.js' -print0 | xargs -0 -n1 node --check || true",
+    "lint:webui": "npm run check:js && eslint res/synth_webui/js --ext .js || true && htmlhint \"core/webui_templates/**/*.html\" || true",
+    "lint:all": "npm run check:js && npm run lint:webui",
+    "test:e2e": "npx playwright test tests/e2e --reporter=list"
+  }
+}

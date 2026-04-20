@@ -1,35 +1,31 @@
 #!/bin/bash
 set -e
 
-VENV_DIR="venv"
-if [ ! -d "$VENV_DIR" ]; then
-    python3 -m venv "$VENV_DIR"
-fi
-# Ensure we activate or at least use the venv located at ./venv. Prefer sourcing
-# the activation script for convenience, but fall back to calling the venv's
-# python/pip binaries directly so tests always run inside the project venv.
-if [ -f "$VENV_DIR/bin/activate" ]; then
-  # shellcheck disable=SC1090
-  source "$VENV_DIR/bin/activate"
-else
-  echo "Warning: venv activation script not found, will use $VENV_DIR/bin/python directly"
-fi
-
-# Install runtime and development dependencies
-"$VENV_DIR/bin/pip" install -r requirements.txt >/dev/null
-
-# Install test dependencies explicitly into the venv so pytest is available
-"$VENV_DIR/bin/pip" install pytest pytest-asyncio unittest-xml-reporting >/dev/null
-
 # Ensure a local log directory is used
 export LOG_DIR=${LOG_DIR:-./logs}
 mkdir -p "$LOG_DIR"
 
+if ! command -v uv >/dev/null 2>&1; then
+  echo "uv command not found. Installing uv with pip..."
+  python -m pip install --upgrade pip
+  python -m pip install uv
+fi
+
+echo "Syncing dependencies with uv..."
+# Installs project dependencies from uv.lock/pyproject.toml
+uv sync --frozen
+
+echo "Installing test dependencies..."
+# Installs pytest/asyncio into the environment explicitly
+# (Since these might not be in your main pyproject.toml yet)
+uv pip install pytest pytest-asyncio unittest-xml-reporting
+
 # Run the tests but capture the exit code so the script itself always exits 0
 set +e
-# Run the test runner using the venv's python executable to guarantee the
-# tests execute within ./venv regardless of the caller's active environment.
-"$VENV_DIR/bin/python" run_tests.py
+
+echo "Running tests..."
+# 'uv run' executes the script inside the environment we just prepped
+uv run run_tests.py
 TEST_EXIT=$?
 set -e
 

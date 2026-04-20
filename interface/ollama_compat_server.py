@@ -27,7 +27,7 @@ def _now_iso() -> str:
 
 class OllamaCompatServer:
     """Expose the synth message chain through a REST API compatible with Ollama."""
-    
+
     display_name = "Ollama Compat Server"
 
     interface_id = "ollama_serve"
@@ -38,7 +38,22 @@ class OllamaCompatServer:
         self._server_task: Optional[asyncio.Task[None]] = None
         self._startup_pending = False
         self.default_model_name = os.getenv("OLLAMA_DEFAULT_MODEL", "SyntH")
-        self.default_model_display = os.getenv("OLLAMA_DEFAULT_MODEL_DISPLAY", "Syntethic Heart")
+        self.default_model_display = os.getenv(
+            "OLLAMA_DEFAULT_MODEL_DISPLAY", "Syntethic Heart"
+        )
+
+        # Prefer the configured Base Cortex as the default model exposed to
+        # Ollama/OpenAI clients so `/api/tags` and `/v1/models` reflect
+        # available Cortex engines and the configured active engine.
+        try:
+            from core.config_manager import config_registry
+
+            base_cortex = config_registry.get_value("BASE_CORTEX", "")
+            if base_cortex:
+                self.default_model_name = base_cortex
+        except Exception:
+            # Keep env/default fallback if config_registry isn't available
+            pass
 
         # Context memory mirrors the structure used by other interfaces so that
         # build_json_prompt() can reuse the chat history.
@@ -51,6 +66,8 @@ class OllamaCompatServer:
         self._response_buffers: Dict[str, list[str]] = {}
         self._completion_events: Dict[str, asyncio.Event] = {}
         self._request_start: Dict[str, float] = {}
+        # Stable request identifiers for streaming compatibility (OpenAI-style)
+        self._request_ids: Dict[str, str] = {}
 
         # Map external conversation identifiers to internal chat ids used by
         # the core. When no identifier is provided we still create a temporary
@@ -65,13 +82,41 @@ class OllamaCompatServer:
         self.app.post("/api/chat")(self._chat_endpoint)
         self.app.post("/api/generate")(self._generate_endpoint)
 
+        # Compatibility aliases (many clients — e.g. AIRI — use a /v1/ base path)
+        self.app.get("/v1/")(self._index)
+        self.app.get("/v1/api/tags")(self._list_models)
+        self.app.post("/v1/api/chat")(self._chat_endpoint)
+        self.app.post("/v1/api/generate")(self._generate_endpoint)
+
+        # Common OpenAI-style aliases expected by some clients
+        self.app.post("/v1/chat/completions")(self._chat_endpoint)
+        self.app.post("/v1/completions")(self._generate_endpoint)
+        # OpenAI-compatible model list (returns `data: [...]`) — many clients use `resp.data.map(...)`
+        self.app.get("/v1/models")(self._list_models_v1)
+        # Single-model lookup (returns model descriptor)
+        self.app.get("/v1/models/{model_name}")(self._get_model)
+
         register_interface(self.interface_id, self)
         log_info("[ollama_serve] Interface registered")
 
         self.stream_timeout = float(os.getenv("OLLAMA_STREAM_TIMEOUT", "60.0"))
         self.completion_timeout = float(os.getenv("OLLAMA_COMPLETION_TIMEOUT", "0.0"))
 
-        self._schedule_server_startup()
+        # Check if server should be enabled (default: true for backward compatibility)
+        self.server_enabled = os.getenv("OLLAMA_SERVER_ENABLED", "true").lower() in (
+            "true",
+            "1",
+            "yes",
+            "on",
+        )
+
+        if self.server_enabled:
+            self._schedule_server_startup()
+        else:
+            log_info(
+                "[ollama_serve] Server disabled via OLLAMA_SERVER_ENABLED=false. "
+                "Interface actions still available but HTTP server will not start."
+            )
 
     # ------------------------------------------------------------------
     # Interface metadata
@@ -127,7 +172,54 @@ class OllamaCompatServer:
         return JSONResponse({"status": "ok", "interface": self.interface_id})
 
     async def _list_models(self) -> JSONResponse:
-        payload = {"models": self._build_model_catalog()}
+        models = self._build_model_catalog()
+        # Try to surface the _runtime_ active cortex as the first/default model
+        try:
+            from core.config import get_active_cortex_engine
+
+            active = await get_active_cortex_engine()
+            if active and not any(m.get("name") == active for m in models):
+                models.insert(
+                    0,
+                    self._format_model_descriptor(
+                        active, display=self.default_model_display
+                    ),
+                )
+        except Exception:
+            # Non-fatal if we cannot determine runtime active engine
+            pass
+        payload = {"models": models}
+        return JSONResponse(payload)
+
+    async def _get_model(self, model_name: str) -> JSONResponse:
+        """Return a single model descriptor or 404 if not found.
+
+        Accept both `id` and `name` as lookup keys (compatibility).
+        """
+        for desc in self._build_model_catalog():
+            if str(desc.get("name")) == str(model_name) or str(desc.get("id")) == str(
+                model_name
+            ):
+                return JSONResponse(desc)
+        raise HTTPException(status_code=404, detail="Model not found")
+
+    async def _list_models_v1(self, request: Request) -> JSONResponse:
+        """OpenAI-style `/v1/models` response (returns `data: [...]`)."""
+        data = self._build_model_catalog()
+        try:
+            from core.config import get_active_cortex_engine
+
+            active = await get_active_cortex_engine()
+            if active and not any(m.get("name") == active for m in data):
+                data.insert(
+                    0,
+                    self._format_model_descriptor(
+                        active, display=self.default_model_display
+                    ),
+                )
+        except Exception:
+            pass
+        payload = {"object": "list", "data": data}
         return JSONResponse(payload)
 
     async def _chat_endpoint(self, request: Request):
@@ -138,7 +230,9 @@ class OllamaCompatServer:
         data = await request.json()
         prompt = data.get("prompt")
         if not isinstance(prompt, str) or not prompt.strip():
-            raise HTTPException(status_code=400, detail="'prompt' must be a non-empty string")
+            raise HTTPException(
+                status_code=400, detail="'prompt' must be a non-empty string"
+            )
 
         payload = dict(data)
         payload["messages"] = [{"role": "user", "content": prompt}]
@@ -148,11 +242,15 @@ class OllamaCompatServer:
     async def _handle_chat_payload(self, data: dict[str, Any]):
         messages = data.get("messages") or []
         if not messages:
-            raise HTTPException(status_code=400, detail="'messages' must be a non-empty list")
+            raise HTTPException(
+                status_code=400, detail="'messages' must be a non-empty list"
+            )
 
         last_message = messages[-1]
         if not isinstance(last_message, dict) or last_message.get("role") != "user":
-            raise HTTPException(status_code=400, detail="Last message must be a user message")
+            raise HTTPException(
+                status_code=400, detail="Last message must be a user message"
+            )
 
         history_messages = messages[:-1]
 
@@ -167,8 +265,33 @@ class OllamaCompatServer:
         completion_event = asyncio.Event()
         self._completion_events[chat_id] = completion_event
         self._request_start[chat_id] = time.monotonic()
+        # Create a stable per-request completion id so streamed chunks can
+        # include a consistent `id`/`object` pair (OpenAI-compatible).
+        self._request_ids[chat_id] = f"chatcmpl-{uuid.uuid4().hex[:12]}"
 
-        log_debug(
+        # Emit an initial "processing" chunk for streaming clients that expect
+        # an early typing indicator (AIRI and other Ollama-like frontends).
+        # Include the stable `id` and an empty OpenAI-style `choices[].delta` so
+        # clients that parse streaming deltas immediately show typing.
+        if stream:
+            try:
+                await self._publish_chunk(
+                    chat_id,
+                    {
+                        "id": self._request_ids.get(chat_id),
+                        "type": "processing",
+                        "processing": True,
+                        "message": {"role": "assistant", "content": ""},
+                        "done": False,
+                        "conversation_id": conversation_id,
+                        "choices": [{"delta": {}, "index": 0}],
+                    },
+                )
+            except Exception:
+                # Don't fail the request if the helper chunk cannot be queued
+                log_warning("[ollama_serve] Failed to emit initial processing chunk")
+
+        log_info(
             f"[ollama_serve] Received chat request chat_id={chat_id} conv_id={conversation_id} "
             f"model={model} stream={stream}"
         )
@@ -200,7 +323,9 @@ class OllamaCompatServer:
             return JSONResponse(final_chunk, status_code=500)
 
         aggregated_response = "".join(
-            chunk.get("response", "") for chunk in result_chunks if not chunk.get("done")
+            chunk.get("response", "")
+            for chunk in result_chunks
+            if not chunk.get("done")
         )
         if not aggregated_response:
             aggregated_response = final_chunk.get("final_response", "")
@@ -215,11 +340,42 @@ class OllamaCompatServer:
             "done_reason": final_chunk.get("done_reason", "stop"),
             "context": final_chunk.get("context", []),
         }
+        # OpenAI/Ollama-compatible metadata to satisfy clients that expect
+        # `resp.choices.map(...)` or `/v1/chat/completions` style payloads.
+        payload_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
+        payload_created = int(datetime.now(tz=timezone.utc).timestamp())
+        # Prefer the per-request stable id (streaming) when available
+        payload.setdefault("id", self._request_ids.get(chat_id, payload_id))
+        payload.setdefault("object", "chat.completion")
+        payload.setdefault("created", payload_created)
+        payload.setdefault(
+            "choices",
+            [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": aggregated_response},
+                    "finish_reason": payload.get("done_reason", "stop"),
+                }
+            ],
+        )
+        # OpenAI-style compatibility: include `text` on completion choices for
+        # clients that call `/v1/completions`.
+        try:
+            payload["choices"][0].setdefault("text", aggregated_response)
+        except Exception:
+            pass
+
+        payload.setdefault(
+            "usage", {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        )
+
         if "total_duration" in final_chunk:
             payload["total_duration"] = final_chunk["total_duration"]
         payload["load_duration"] = final_chunk.get("load_duration", 0)
         payload["prompt_eval_duration"] = final_chunk.get("prompt_eval_duration", 0)
-        payload["eval_duration"] = final_chunk.get("eval_duration", final_chunk.get("total_duration", 0))
+        payload["eval_duration"] = final_chunk.get(
+            "eval_duration", final_chunk.get("total_duration", 0)
+        )
         payload["prompt_eval_count"] = final_chunk.get("prompt_eval_count", 0)
         payload["eval_count"] = final_chunk.get("eval_count", 0)
         return JSONResponse(payload)
@@ -240,32 +396,52 @@ class OllamaCompatServer:
         try:
             # Build interface_path for Ollama
             from core.interface_path_utils import build_interface_path
-            interface_path = build_interface_path('ollama_serve', chat_id)
+
+            interface_path = build_interface_path("ollama_serve", chat_id)
             log_debug(f"[ollama_serve] Generated interface_path: {interface_path}")
+
+            # Mark session as processing so clients that poll session_meta (or
+            # expect server-side session flags) see an immediate "typing"
+            # indicator for Ollama-originated requests.
+            try:
+                from core.session_meta import set_session_meta
+
+                await set_session_meta(interface_path, {"processing": True})
+            except Exception:
+                log_debug(
+                    "[ollama_serve] Unable to set session_meta.processing for interface_path"
+                )
 
             # Track context using centralized manager
             from core.chat_context_manager import add_message_to_context
+
             try:
                 await add_message_to_context(
                     interface_path=interface_path,
                     message_text=last_message.get("content", ""),
                     sender_name="user",
                     sender_id=f"ollama-user-{chat_id}",
-                    timestamp=None
+                    timestamp=None,
                 )
             except Exception as e:
                 log_warning(f"[ollama_serve] Failed to add message to context: {e}")
 
             self._populate_history(chat_id, history_messages)
             message_obj = self._build_message(chat_id, last_message)
-            
+
             # Add interface_path to message object
             message_obj.interface_path = interface_path
 
             # Update context memory with the latest user message so the prompt
             # reflects the current conversation state.
-            history = self.context_memory.setdefault(chat_id, deque(maxlen=self.max_history))
-            history.append(self._history_entry_from_message("user", last_message["content"], chat_id))
+            history = self.context_memory.setdefault(
+                chat_id, deque(maxlen=self.max_history)
+            )
+            history.append(
+                self._history_entry_from_message(
+                    "user", last_message["content"], chat_id
+                )
+            )
 
             try:
                 response = await plugin_instance.handle_incoming_message(
@@ -280,6 +456,7 @@ class OllamaCompatServer:
                 return
 
             if isinstance(response, str):
+                # Stream the (possibly partial) text as OpenAI-style deltas.
                 await self._stream_text(
                     chat_id=chat_id,
                     model=model,
@@ -320,6 +497,24 @@ class OllamaCompatServer:
                             f"(waited ~{waited:.1f}s, timeout={timeout}s)"
                         )
         finally:
+            # Clear any session-level processing flag we set earlier. Use a
+            # guarded call in case interface_path was not successfully set.
+            try:
+                if "interface_path" in locals():
+                    from core.session_meta import set_session_meta
+
+                    await set_session_meta(interface_path, {"processing": False})
+            except Exception:
+                log_debug(
+                    "[ollama_serve] Failed to clear session_meta.processing for interface_path"
+                )
+
+            # Clean up stored request id
+            try:
+                self._request_ids.pop(chat_id, None)
+            except Exception:
+                pass
+
             self._pending_streams.pop(chat_id, None)
             self._response_buffers.pop(chat_id, None)
             self._completion_events.pop(chat_id, None)
@@ -444,8 +639,20 @@ class OllamaCompatServer:
         if message.get("content"):
             chunk.setdefault("response", message["content"])
 
+        # OpenAI-compatible metadata: stable id/object/created on chunks
+        chunk.setdefault(
+            "id", self._request_ids.get(chat_id, f"chatcmpl-{uuid.uuid4().hex[:12]}")
+        )
+        chunk.setdefault(
+            "object",
+            "chat.completion.chunk" if not chunk.get("done") else "chat.completion",
+        )
+        chunk.setdefault("created", int(datetime.now(tz=timezone.utc).timestamp()))
+
         if chunk.get("done"):
-            chunk.setdefault("done_reason", "stop" if not chunk.get("error") else "error")
+            chunk.setdefault(
+                "done_reason", "stop" if not chunk.get("error") else "error"
+            )
             chunk.setdefault("context", [])
             duration_ns = self._compute_duration_ns(chat_id)
             if duration_ns is not None:
@@ -464,6 +671,50 @@ class OllamaCompatServer:
             chunk.setdefault("prompt_eval_count", 0)
             chunk.setdefault("final_response", response_text or "")
             chunk["message"] = {"role": "assistant", "content": response_text or ""}
+
+            # OpenAI-compatible final choices + usage
+            chunk.setdefault(
+                "choices",
+                [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": final_text},
+                        "finish_reason": chunk.get("done_reason", "stop"),
+                        "text": final_text,
+                    }
+                ],
+            )
+            chunk.setdefault(
+                "usage", {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+            )
+        else:
+            # Streaming (partial) chunk: include OpenAI-style delta
+            response_text = chunk.get("response", "") or message.get("content", "")
+            delta_obj: dict[str, str] = {}
+            if response_text:
+                # Provide both `content` (chat) and `text` (completion) to
+                # satisfy a wider range of clients.
+                delta_obj["content"] = response_text
+                delta_obj["text"] = response_text
+            chunk.setdefault(
+                "choices",
+                [
+                    {
+                        "delta": delta_obj,
+                        "index": 0,
+                        "finish_reason": None,
+                    }
+                ],
+            )
+
+        # Normalize error shape to OpenAI-style object when present
+        if chunk.get("error") and not isinstance(chunk.get("error"), dict):
+            chunk["error"] = {
+                "message": str(chunk.get("error")),
+                "type": "server_error",
+                "param": None,
+                "code": None,
+            }
 
         log_debug(f"[ollama_serve] Publishing chunk for chat_id={chat_id}: {chunk}")
         await queue.put(chunk)
@@ -522,8 +773,12 @@ class OllamaCompatServer:
         )
 
         if aggregated:
-            history = self.context_memory.setdefault(chat_id, deque(maxlen=self.max_history))
-            history.append(self._history_entry_from_message("assistant", aggregated, chat_id))
+            history = self.context_memory.setdefault(
+                chat_id, deque(maxlen=self.max_history)
+            )
+            history.append(
+                self._history_entry_from_message("assistant", aggregated, chat_id)
+            )
 
         if completion_event and not completion_event.is_set():
             completion_event.set()
@@ -561,38 +816,106 @@ class OllamaCompatServer:
         return int(elapsed * 1_000_000_000)
 
     def _build_model_catalog(self) -> list[dict[str, Any]]:
+        """Return a model catalog derived from available Cortex engines.
+
+        - Expose all registered cortex engines as `models` so external clients
+          (AIRI, Ollama front-ends) can choose engines directly.
+        - Ensure the configured `BASE_CORTEX` is used as the default model.
+        """
         descriptors: list[dict[str, Any]] = []
+
+        # Prefer listing available Cortex engines (synchronous helper)
         try:
-            models = plugin_instance.get_supported_models() or []
-        except Exception as exc:  # pragma: no cover - defensive guard
-            log_warning(f"[ollama_serve] Failed to get supported models: {exc}")
-            models = []
+            from core.config import list_available_cortex_engines
+
+            engines = list(list_available_cortex_engines(None) or [])
+        except Exception:
+            # Fallback to plugin-provided models for backward compatibility
+            try:
+                engines = plugin_instance.get_supported_models() or []
+            except Exception as exc:  # pragma: no cover - defensive guard
+                log_warning(f"[ollama_serve] Failed to list cortex engines: {exc}")
+                engines = []
+
+        # Try to enrich display name from CortexRegistry when available
+        display_map: dict[str, str] = {}
+        try:
+            from core.cortex_registry import get_cortex_registry
+
+            reg = get_cortex_registry()
+            for name in engines:
+                label = reg._engine_meta.get(name, {}).get("label")
+                if label:
+                    display_map[name] = label
+        except Exception:
+            # Not critical — keep going
+            pass
 
         seen = set()
-        for name in models:
-            if not isinstance(name, str):
+        for name in engines:
+            if not isinstance(name, str) or not name:
                 continue
-            descriptor = self._format_model_descriptor(name)
+            descriptor = self._format_model_descriptor(
+                name, display=display_map.get(name)
+            )
             descriptors.append(descriptor)
-            seen.add(descriptor["name"])
+            seen.add(descriptor.get("name") or name)
 
-        if self.default_model_name not in seen:
-            descriptors.append(self._format_model_descriptor(self.default_model_name, display=self.default_model_display))
+        # Ensure configured BASE_CORTEX is present and used as default if missing
+        try:
+            from core.config_manager import config_registry
+
+            base_cortex = (
+                config_registry.get_value("BASE_CORTEX", "") or self.default_model_name
+            )
+        except Exception:
+            base_cortex = self.default_model_name
+
+        if base_cortex and base_cortex not in seen:
+            descriptors.insert(
+                0,
+                self._format_model_descriptor(
+                    base_cortex, display=self.default_model_display
+                ),
+            )
 
         return descriptors
 
-    def _format_model_descriptor(self, name: str, *, display: Optional[str] = None) -> dict[str, Any]:
+    def _format_model_descriptor(
+        self, name: str, *, display: Optional[str] = None
+    ) -> dict[str, Any]:
         created = _now_iso()
         display_name = display or name
+        # Provide OpenAI/Ollama-style descriptor fields plus a lightweight
+        # provider metadata blob so external clients (AIRI, Ollama front-ends)
+        # can discover provider information reliably.
         return {
+            "id": name,
+            "object": "model",
             "name": name,
             "model": name,
+            "owned_by": "synthetic-heart",
+            "provider": {
+                "name": "synthetic-heart",
+                "type": "local",
+                "display_name": display_name,
+            },
+            "provider_metadata": {
+                "format": "SyntH",
+                "family": "synthetic-heart"
+                if name == self.default_model_name
+                else "generic",
+                "parameter_size": "dynamic",
+                "quantization_level": "adaptive",
+            },
             "modified_at": created,
             "size": 0,
             "digest": "",
             "details": {
                 "format": "SyntH",
-                "family": "synthetic-heart" if name == self.default_model_name else "generic",
+                "family": "synthetic-heart"
+                if name == self.default_model_name
+                else "generic",
                 "parameter_size": "dynamic",
                 "quantization_level": "adaptive",
                 "display_name": display_name,
@@ -606,7 +929,9 @@ class OllamaCompatServer:
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
-            log_debug("[ollama_serve] Event loop not running yet; deferring HTTP server startup")
+            log_debug(
+                "[ollama_serve] Event loop not running yet; deferring HTTP server startup"
+            )
             self._startup_pending = True
             return
 
@@ -622,7 +947,7 @@ class OllamaCompatServer:
         import uvicorn
 
         host = os.getenv("OLLAMA_HOST", "0.0.0.0")
-        port = int(os.getenv("OLLAMA_PORT", "11434"))
+        port = int(os.getenv("OLLAMA_PORT", "11435"))
         config = uvicorn.Config(self.app, host=host, port=port, log_level="info")
         server = uvicorn.Server(config)
 
@@ -631,6 +956,17 @@ class OllamaCompatServer:
             await server.serve()
         except asyncio.CancelledError:  # pragma: no cover - cancellation path
             log_info("[ollama_serve] HTTP server task cancelled")
+            raise
+        except OSError as exc:  # pragma: no cover - port conflict
+            if "address already in use" in str(exc).lower() or exc.errno == 48:
+                log_error(
+                    f"[ollama_serve] ❌ Port {port} already in use! "
+                    f"Either disable this server with OLLAMA_SERVER_ENABLED=false "
+                    f"or change the port with OLLAMA_PORT=<other_port>. "
+                    f"If you want to CONNECT to llama.cpp/ollama, use the 'openapi' cortex engine instead."
+                )
+            else:
+                log_error(f"[ollama_serve] HTTP server failed to start: {exc}")
             raise
         except Exception as exc:  # pragma: no cover - defensive logging
             log_error(f"[ollama_serve] HTTP server crashed: {exc}")
@@ -679,7 +1015,9 @@ class OllamaCompatServer:
         model = model or self.default_model_name
         chat_id = str(chat_id)
         if text is None and not finalize_flag:
-            log_warning("[ollama_serve] send_message missing text and final flag not set")
+            log_warning(
+                "[ollama_serve] send_message missing text and final flag not set"
+            )
             return
 
         if text:
@@ -689,15 +1027,18 @@ class OllamaCompatServer:
                 conversation_id=conversation_id,
                 text=text,
             )
-            
+
             # Save SyntH's response via core chat_context_manager
             try:
                 from core.chat_context_manager import save_response_message
                 from core.interface_path_utils import build_interface_path
-                msg_interface_path = build_interface_path('ollama_serve', str(chat_id))
+
+                msg_interface_path = build_interface_path("ollama_serve", str(chat_id))
                 await save_response_message(msg_interface_path, text)
             except Exception as e:
-                log_debug(f"[ollama_serve] Failed to save response via context_manager: {e}")
+                log_debug(
+                    f"[ollama_serve] Failed to save response via context_manager: {e}"
+                )
 
         if finalize_flag:
             await self._finalize_stream(
@@ -728,6 +1069,84 @@ async def start_server() -> None:
     """Compatibility wrapper for external starters."""
     await ollama_serve_interface.serve()
 
+
+def initialize_interface():
+    """Called by the core initializer to ensure the HTTP server is started.
+
+    The core calls `initialize_interface()` for all interface modules after
+    configuration has been loaded. If the module was imported before the
+    main event loop existed we may have a pending startup; this function
+    makes sure the uvicorn task is scheduled when the loop is available.
+    """
+    global ollama_serve_interface
+
+    if ollama_serve_interface is None:
+        log_info(
+            "[ollama_serve] Creating interface instance via initialize_interface()"
+        )
+        ollama_serve_interface = OllamaCompatServer()
+
+    # Re-register (idempotent) so core_initializer sees the interface
+    try:
+        register_interface("ollama_serve", ollama_serve_interface)
+    except Exception:
+        # register_interface may already have been called at import time
+        pass
+
+    try:
+        ollama_serve_interface._schedule_server_startup()
+    except Exception as e:
+        log_warning(f"[ollama_serve] Failed to schedule HTTP server startup: {e}")
+
+    return ollama_serve_interface
+
+
+def shutdown_interface():
+    """Shutdown and cleanup the Ollama-compatible HTTP server."""
+    global ollama_serve_interface
+
+    if ollama_serve_interface is None:
+        log_debug("[ollama_serve] No interface instance to shutdown")
+        return
+
+    log_info("[ollama_serve] Shutting down Ollama-compatible HTTP server...")
+    try:
+        task = getattr(ollama_serve_interface, "_server_task", None)
+        if task is not None and not task.done():
+            try:
+                task.cancel()
+            except Exception:
+                pass
+    except Exception as e:
+        log_warning(f"[ollama_serve] Error while cancelling server task: {e}")
+
+    # Unregister from global registry if present
+    try:
+        from core.core_initializer import INTERFACE_REGISTRY
+
+        INTERFACE_REGISTRY.pop("ollama_serve", None)
+    except Exception:
+        pass
+
+    ollama_serve_interface = None
+    log_info("[ollama_serve] Shutdown complete")
+
+
+def reload_interface():
+    """Reload the interface (used for config reload handlers)."""
+    log_info("[ollama_serve] Reloading interface")
+    shutdown_interface()
+    return initialize_interface()
+
+
+# Export lifecycle helpers so core_initializer can call them
+__all__ = [
+    "initialize_interface",
+    "shutdown_interface",
+    "reload_interface",
+    "start_server",
+    "OllamaCompatServer",
+]
 
 if __name__ == "__main__":
     asyncio.run(start_server())

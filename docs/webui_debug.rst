@@ -35,23 +35,11 @@ The debug window is designed to help validate VRM animation and facial state.
 
   - Lets you create a temporary loop from an animation file using **frame indices**.
   - Frame semantics are **descriptor-style**: ``start`` and ``end`` are **inclusive** indices.
+  - When you press **Start**, the UI forces ``end`` to the animation **max frame** (it always recomputes it).
+  - The override is **local to the current browser session** and does not change global state.
+  - **Clear** removes the local override and immediately resyncs with the global animation state.
   - The UI auto-fills ``start=0`` and ``end=maxFrameIndex`` when it can infer clip duration/descriptor.
 
-- **Feelings / Emotions**
-
-  - Shows the most recent emotion values seen by the client.
-  - You can apply overrides (0..1) for specific emotion keys.
-  - Emotion keys are injected as a synthetic expression so they can be mapped via
-   - Shows the most recent emotion values seen by the client.
-   - You can apply overrides (0..1) for specific emotion keys.
-   - Emotion keys are injected as a synthetic expression and mapped to face targets by the per-persona
-     ``persona.emotions`` mapping (a dictionary keyed by emotion name).
-
-    - If a persona provides no mapping, the debug UI will not apply facial overrides for that key.
-    - When a persona defines an ``emotions`` mapping, the **Feelings** panel will show only those
-      emotion keys (it will not invent or add extra metrics like ``valence``, ``arousal``, or ``stress``).
-      If no persona list is defined, the panel falls back to showing metrics reported by the animation
-      handler (e.g., from LLM tags or diary-derived feelings).
 
 Custom Emotion Face Presets
 ---------------------------

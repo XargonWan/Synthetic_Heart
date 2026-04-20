@@ -33,6 +33,14 @@ Behavior
 
 When the plugin executes it searches both `memories` and `ai_diary` tables (using JSON_CONTAINS for tag searches and LIKE tokens for free searches), orders results by timestamp descending, and returns a list of snippets. Results are also delivered back to the LLM via the core auto-response mechanism so the model can immediately incorporate them in its reply.
 
+On **live voice sessions** (Discord paths starting with ``discord_live_``) the search is
+performed asynchronously: the plugin immediately returns ``{"processed": True,
+"results": [], "async": True}`` and schedules a background query.  When the
+results are ready a plaintext summary is sent back into the live session via
+``LiveSessionManager.send_text`` so that the conversation continues without
+deleterious audio pauses.  This non‑blocking behaviour ensures memory lookups
+don't interrupt the speech stream.
+
 Examples and usage notes
 ------------------------
 
@@ -42,4 +50,4 @@ Docs: Where to update
 ---------------------
 
 - This file: `docs/memory_search.rst`
-- Consider adding examples to `AGENTS.md` and the prompt guidance docs if you want more detailed usage examples for specific LLM engines.
+- Consider adding examples to `AGENTS.md` and the prompt guidance docs if you want more detailed usage examples for specific Cortex engines.

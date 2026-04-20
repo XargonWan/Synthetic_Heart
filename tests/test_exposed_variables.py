@@ -19,7 +19,7 @@ async def test_corrector_retries_dynamic_update():
 
     # Try importing plugin that references the value; skip if deps missing
     try:
-        event_plugin = importlib.import_module('plugins.event_plugin')
+        event_plugin = importlib.import_module("plugins.event_plugin")
     except Exception:
         pytest.skip("plugins.event_plugin not importable in test environment")
     assert int(event_plugin.CORRECTOR_RETRIES) == 5
@@ -44,7 +44,7 @@ async def test_should_retry_respects_updated_limit():
 
 def test_chromium_headless_reflects_config_change():
     # Instantiate a SeleniumLLMBase-derived object minimally to test listener
-    from core.selenium_llm_base import SeleniumLLMBase
+    from cortex.selenium_engine.selenium_llm_base import SeleniumLLMBase
     from core.config_manager import config_registry
 
     inst = SeleniumLLMBase(notify_fn=None, config={})
@@ -59,11 +59,19 @@ def test_chromium_headless_reflects_config_change():
     assert inst.CHROMIUM_HEADLESS is True
 
 
+def test_default_response_timeout():
+    # The configuration registry default should match the new value we set in the code.
+    from core.message_chain import RESPONSE_TIMEOUT
+
+    assert int(RESPONSE_TIMEOUT) == 300
+
+
 def test_system_reply_timeout_from_config():
     from core.transport_layer import _get_system_reply_timeout
     from core.config_manager import config_registry
 
     # Set to a custom value and verify getter returns it
     import asyncio
-    asyncio.run(config_registry.set_value('AWAIT_RESPONSE_TIMEOUT', 123))
+
+    asyncio.run(config_registry.set_value("AWAIT_RESPONSE_TIMEOUT", 123))
     assert _get_system_reply_timeout() == 123

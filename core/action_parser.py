@@ -3,39 +3,32 @@
 
 import asyncio
 import inspect
-import os
-import json
 import time
-from collections import deque
-from types import SimpleNamespace
-from datetime import datetime
-from typing import Any, Dict, List, Tuple, Optional
+from typing import Any, Dict, List, Tuple
 
 from core.logging_utils import log_debug, log_info, log_warning, log_error
-from core.prompt_engine import build_full_json_instructions
 from core.validation_registry import get_validation_registry
 from core.config_manager import config_registry
-
-# Import RESTRICT_ACTIONS from image_processor (already registered there)
 from core.image_processor import RESTRICT_ACTIONS
+import json
+from core.transport_layer import run_corrector_middleware
+from core.core_initializer import INTERFACE_REGISTRY
 
 # Global dictionary to track retry attempts per chat/message thread for the corrector
 # Use a ConfigVar so consumers always see the latest value (set via WebUI/API)
-CORRECTOR_RETRIES = config_registry.get_var(
-    "CORRECTOR_RETRIES",
-    2
-)
+CORRECTOR_RETRIES = config_registry.get_var("CORRECTOR_RETRIES", 2)
 
 _retry_tracker = {}
 
 
 def _extract_json_local(text: str):
     """Local helper to extract JSON from text using transport_layer's extract_json_from_text.
-    
+
     Returns:
         Parsed JSON object or None if not found
     """
     from core.transport_layer import extract_json_from_text
+
     return extract_json_from_text(text, return_metadata=False)
 
 
@@ -60,6 +53,7 @@ def _maybe_unescape_text_in_payload(payload: dict) -> None:
     # Recover common mojibake (UTF-8 bytes decoded as latin-1/cp1252)
     try:
         from core.text_utils import try_recover_mojibake
+
         recovered = try_recover_mojibake(text)
         if recovered and recovered != text:
             payload["text"] = recovered
@@ -69,7 +63,13 @@ def _maybe_unescape_text_in_payload(payload: dict) -> None:
         pass
 
     # Quick heuristic — only attempt to decode when we see backslash escapes
-    if "\\n" not in text and "\\u" not in text and "\\t" not in text and "\\r" not in text and "\\x" not in text:
+    if (
+        "\\n" not in text
+        and "\\u" not in text
+        and "\\t" not in text
+        and "\\r" not in text
+        and "\\x" not in text
+    ):
         return
 
     try:
@@ -85,7 +85,9 @@ def _maybe_unescape_text_in_payload(payload: dict) -> None:
         return
 
 
-async def _maybe_record_grillo_outbound_message(action_type: str, payload: dict, context: Dict[str, Any]) -> None:
+async def _maybe_record_grillo_outbound_message(
+    action_type: str, payload: dict, context: Dict[str, Any]
+) -> None:
     """Best-effort: if a message_* action was produced by a Grillo beat, store its outbound text.
 
     Grillo beats carry an `activity_log_id` in the context dict (see GrilloPlugin._enqueue_with_low_priority).
@@ -93,14 +95,20 @@ async def _maybe_record_grillo_outbound_message(action_type: str, payload: dict,
     `grillo_activity_log.response_text` so History > Grillo shows what was actually said.
     """
     try:
-        if not action_type or not isinstance(action_type, str) or not action_type.startswith("message"):
+        if (
+            not action_type
+            or not isinstance(action_type, str)
+            or not action_type.startswith("message")
+        ):
             return
         if not isinstance(payload, dict):
             return
         if not isinstance(context, dict):
             return
 
-        activity_log_id = context.get("activity_log_id") or context.get("grillo_activity_log_id")
+        activity_log_id = context.get("activity_log_id") or context.get(
+            "grillo_activity_log_id"
+        )
         if not activity_log_id:
             return
 
@@ -108,11 +116,25 @@ async def _maybe_record_grillo_outbound_message(action_type: str, payload: dict,
         if not text or not isinstance(text, str):
             return
 
-        from plugins.grillo_plugin import GrilloPlugin
+        from core.core_initializer import PLUGIN_REGISTRY
 
-        if GrilloPlugin is None:
+        # Use PLUGIN_REGISTRY to avoid importing plugin internals in core
+        grillo_plugin = None
+        if isinstance(PLUGIN_REGISTRY, dict):
+            grillo_plugin = PLUGIN_REGISTRY.get("grillo_plugin") or PLUGIN_REGISTRY.get(
+                "grillo_impl"
+            )
+        else:
+            try:
+                grillo_plugin = getattr(PLUGIN_REGISTRY, "get", lambda k: None)(
+                    "grillo_plugin"
+                )
+            except Exception:
+                grillo_plugin = None
+
+        if grillo_plugin is None:
             return
-        setter = getattr(GrilloPlugin, "set_activity_response_text", None)
+        setter = getattr(grillo_plugin, "set_activity_response_text", None)
         if not callable(setter):
             return
 
@@ -120,6 +142,41 @@ async def _maybe_record_grillo_outbound_message(action_type: str, payload: dict,
     except Exception as e:
         # Never fail message sending because of Grillo tracking
         log_debug(f"[action_parser] Failed to record Grillo outbound message: {e}")
+
+
+async def _grillo_recent_same_message(
+    interface_path: str, text: str, window: float
+) -> bool:
+    """Return True if the synth sent *text* to *interface_path* within *window* seconds.
+
+    This is a light database lookup used by Grillo beats to avoid repeating the
+    very same question over and over when the conversation has not progressed.
+    """
+    if not interface_path or not text:
+        return False
+    try:
+        from core.db import execute_query
+        from datetime import datetime, timedelta
+
+        threshold = datetime.utcnow() - timedelta(seconds=window)
+        rows = await execute_query(
+            """
+            SELECT COUNT(*)
+            FROM chat_history_cache
+            WHERE interface_path = %s
+              AND COALESCE(sender_id,'') IN (%s,%s)
+              AND text = %s
+              AND timestamp > %s
+            """,
+            (interface_path, "self", "synth", text, threshold),
+        )
+        if rows and len(rows) > 0:
+            r = rows[0]
+            count = int(r[0] if isinstance(r, (list, tuple)) else r.get("cnt", 0))
+            return count > 0
+    except Exception as e:
+        log_debug(f"[action_parser] grillo dedupe lookup failed: {e}")
+    return False
 
 
 ERROR_RETRY_POLICY = {
@@ -165,7 +222,9 @@ def _should_retry(message, max_retries: int | None = None) -> bool:
 
     # Clean up old retry entries (older than 5 minutes)
     cutoff_time = current_time - 300  # 5 minutes
-    keys_to_remove = [k for k, (count, timestamp) in _retry_tracker.items() if timestamp < cutoff_time]
+    keys_to_remove = [
+        k for k, (count, timestamp) in _retry_tracker.items() if timestamp < cutoff_time
+    ]
     for key in keys_to_remove:
         del _retry_tracker[key]
 
@@ -243,7 +302,9 @@ def get_supported_action_types() -> set[str]:
         validation_registry = get_validation_registry()
         supported_types.update(validation_registry.get_supported_action_types())
     except Exception as e:
-        log_warning(f"[action_parser] Error getting action types from validation registry: {e}")
+        log_warning(
+            f"[action_parser] Error getting action types from validation registry: {e}"
+        )
 
     # Legacy discovery from plugins
     try:
@@ -272,69 +333,109 @@ def get_supported_action_types() -> set[str]:
 
 def _normalize_payload(action_type: str, payload: dict) -> None:
     """Normalize payload by converting string numbers to int for numeric fields.
-    
-    This makes the system more flexible by accepting both "2" and 2 for numeric IDs.
+
+    This makes the system more flexible by accepting both ``"2"`` and ``2`` for
+    numeric IDs.  We also strip surrounding whitespace so ``" 42 "`` works, and
+    we recursively normalize nested dictionaries.
+
     Modifies the payload dict in-place.
-    
+
     Fields that should be integers:
     - chat_id: Chat identifier
     - user_id: User identifier
-    - Any field ending with _id
+    - message_id
+    - animation_state
+    - Any field ending with ``_id``
     """
     # Fields that should always be integers
     int_fields = {"chat_id", "user_id", "message_id", "animation_state"}
-    
+
     # Also handle fields ending with _id
     for key in payload.keys():
         if key.endswith("_id") and key not in int_fields:
             int_fields.add(key)
-    
+
+    def _coerce(value):
+        """Try to convert a value to an int if it looks like one."""
+        if isinstance(value, str):
+            s = value.strip()
+            if s.lstrip("-").isdigit():
+                try:
+                    return int(s)
+                except (ValueError, TypeError):
+                    pass
+        return value
+
     # Normalize top-level fields
     for field in int_fields:
         if field in payload:
-            value = payload[field]
-            if isinstance(value, str) and value.isdigit():
-                try:
-                    payload[field] = int(value)
-                    log_debug(f"[action_parser] Normalized {action_type}.payload.{field}: '{value}' -> {int(value)}")
-                except (ValueError, TypeError):
-                    pass
-    
+            orig = payload[field]
+            coerced = _coerce(orig)
+            if coerced is not orig:
+                payload[field] = coerced
+                log_debug(
+                    f"[action_parser] Normalized {action_type}.payload.{field}: '{orig}' -> {coerced}"
+                )
+
     # Normalize nested dict fields (like target: {chat_id: ...})
-    for key, value in payload.items():
+    for key, value in list(payload.items()):
         if isinstance(value, dict):
             for nested_field in int_fields:
                 if nested_field in value:
-                    nested_value = value[nested_field]
-                    if isinstance(nested_value, str) and nested_value.isdigit():
-                        try:
-                            value[nested_field] = int(nested_value)
-                            log_debug(f"[action_parser] Normalized {action_type}.payload.{key}.{nested_field}: '{nested_value}' -> {int(nested_value)}")
-                        except (ValueError, TypeError):
-                            pass
+                    orig = value[nested_field]
+                    coerced = _coerce(orig)
+                    if coerced is not orig:
+                        value[nested_field] = coerced
+                        log_debug(
+                            f"[action_parser] Normalized {action_type}.payload.{key}.{nested_field}: '{orig}' -> {coerced}"
+                        )
+
+
+def _attempt_auto_fix(actions: list) -> bool:
+    """Apply simple corrections to payloads, returning True if anything changed.
+
+    At the moment the only fix is to re-run ``_normalize_payload`` (which
+    converts numeric-string IDs into ints and strips whitespace); this lets us
+    recover from trivial type mismatches without pinging the LLM again.  If we
+    discover additional common errors we can extend this helper.
+    """
+    modified = False
+    for a in actions:
+        payload = a.get("payload")
+        if isinstance(payload, dict):
+            before = json.dumps(payload, sort_keys=True)
+            _normalize_payload(a.get("type", ""), payload)
+            after = json.dumps(payload, sort_keys=True)
+            if before != after:
+                modified = True
+    return modified
 
 
 def _validate_payload(action_type: str, payload: dict, errors: List[str]) -> None:
     """Validate payload using centralized validation registry and legacy plugin/interface validation.
-    
-    This function implements the new Dynamic Component Validation System that removes 
-    hardcoded validation rules from the corrector. Components register their validation 
+
+    This function implements the new Dynamic Component Validation System that removes
+    hardcoded validation rules from the corrector. Components register their validation
     rules dynamically, and this function applies them automatically.
-    
+
     See docs/validation_system.rst for complete documentation.
     """
     """Validate payload using centralized validation registry and legacy plugin/interface validation."""
-    
+
     # First, use the centralized validation registry (new system)
     try:
         validation_registry = get_validation_registry()
-        registry_errors = validation_registry.validate_action_payload(action_type, payload)
+        registry_errors = validation_registry.validate_action_payload(
+            action_type, payload
+        )
         if registry_errors:
             errors.extend(registry_errors)
-            log_debug(f"[action_parser] Validation registry added {len(registry_errors)} errors for {action_type}")
+            log_debug(
+                f"[action_parser] Validation registry added {len(registry_errors)} errors for {action_type}"
+            )
     except Exception as e:
         log_warning(f"[action_parser] Error using validation registry: {e}")
-    
+
     # Legacy validation - keep for backward compatibility until all components migrate
     try:
         for plugin in _load_action_plugins():
@@ -347,10 +448,15 @@ def _validate_payload(action_type: str, payload: dict, errors: List[str]) -> Non
                     actions = plugin.get_supported_actions()
                     if isinstance(actions, dict) and action_type in actions:
                         supports_action = True
-                    elif isinstance(actions, (list, set, tuple)) and action_type in actions:
+                    elif (
+                        isinstance(actions, (list, set, tuple))
+                        and action_type in actions
+                    ):
                         supports_action = True
             except Exception as e:
-                log_debug(f"[action_parser] Error checking plugin support for {action_type}: {e}")
+                log_debug(
+                    f"[action_parser] Error checking plugin support for {action_type}: {e}"
+                )
                 continue
 
             if supports_action:
@@ -390,6 +496,7 @@ def _validate_payload(action_type: str, payload: dict, errors: List[str]) -> Non
         if iface_name:
             try:
                 from core.core_initializer import INTERFACE_REGISTRY
+
                 iface = INTERFACE_REGISTRY.get(iface_name)
                 if iface and hasattr(iface, "validate_payload"):
                     iface_errors = iface.validate_payload(action_type, payload)
@@ -406,7 +513,9 @@ def _validate_payload(action_type: str, payload: dict, errors: List[str]) -> Non
         log_error(f"[action_parser] Error during payload validation: {e}")
 
 
-def validate_action(action: dict, context: dict = None, original_message=None) -> Tuple[bool, List[str]]:
+def validate_action(
+    action: dict, context: dict | None = None, original_message=None
+) -> Tuple[bool, List[str]]:
     """Validate an action dictionary.
 
     Parameters
@@ -447,11 +556,11 @@ def validate_action(action: dict, context: dict = None, original_message=None) -
         )
 
     payload = action.get("payload")
-    
+
     # Some actions (like bio plugins) support both payload and direct field format
     # for backward compatibility
     actions_with_flexible_payload = ["bio_update", "bio_full_request"]
-    
+
     if payload is None and action_type not in actions_with_flexible_payload:
         errors.append("Missing 'payload'")
     elif payload is not None and not isinstance(payload, dict):
@@ -460,44 +569,68 @@ def validate_action(action: dict, context: dict = None, original_message=None) -
     # If action type is not supported, allow validation registry to attempt
     # resolving legacy/alias names (e.g., 'message_send'). This keeps the
     # resolution logic centralized and configurable.
-    if action_type not in supported_types:
+    if action_type and action_type not in supported_types:
         try:
             validation_registry = get_validation_registry()
-            resolved = validation_registry.resolve_action_alias(action_type, payload or {})
+            resolved = validation_registry.resolve_action_alias(
+                action_type, payload or {}
+            )
             if resolved:
-                log_debug(f"[action_parser] Resolved alias '{action_type}' -> '{resolved}' via ValidationRegistry")
+                log_debug(
+                    f"[action_parser] Resolved alias '{action_type}' -> '{resolved}' via ValidationRegistry"
+                )
                 action_type = resolved
                 action["type"] = resolved
                 # fall through to normal validation below
         except Exception as e:
-            log_warning(f"[action_parser] Alias resolution failed for '{action_type}': {e}")
+            log_warning(
+                f"[action_parser] Alias resolution failed for '{action_type}': {e}"
+            )
 
     # Dynamic validation - delegate to plugins or interfaces that support this action type
-    if (isinstance(payload, dict) or action_type in actions_with_flexible_payload) and action_type in supported_types:
+    if (
+        action_type
+        and (isinstance(payload, dict) or action_type in actions_with_flexible_payload)
+        and action_type in supported_types
+    ):
         # Normalize payload before validation (convert string numbers to int)
-        _normalize_payload(action_type, payload or {})
+        if payload:
+            _normalize_payload(action_type, payload)
         _validate_payload(action_type, payload or {}, errors)
 
         if _is_restricted_action(action_type):
-            mode = RESTRICT_ACTIONS.lower()
+            mode = str(RESTRICT_ACTIONS).lower()
             if mode in ("on", "deny_all"):
                 errors.append(f"Action '{action_type}' is restricted")
             elif mode == "trainer_only":
                 # Check if user is trainer using abstract context
                 try:
                     from core.abstract_context import AbstractContext, AbstractUser
-                    interface_name = context.get("interface_name", "unknown")
-                    user_id = getattr(getattr(original_message, "from_user", None), "id", None)
-                    
+
+                    interface_name = "unknown"
+                    if context:
+                        interface_name = context.get("interface_name", "unknown")
+                    user_id = getattr(
+                        getattr(original_message, "from_user", None), "id", None
+                    )
+
                     if user_id is not None:
-                        abstract_user = AbstractUser(id=user_id, interface_name=interface_name)
-                        abstract_context = AbstractContext(interface_name, user=abstract_user)
-                        
+                        abstract_user = AbstractUser(
+                            id=user_id, interface_name=interface_name
+                        )
+                        abstract_context = AbstractContext(
+                            interface_name, user=abstract_user
+                        )
+
                         if not abstract_context.is_trainer():
-                            errors.append(f"Action '{action_type}' is restricted to trainer")
+                            errors.append(
+                                f"Action '{action_type}' is restricted to trainer"
+                            )
                 except Exception as e:
                     log_warning(f"Could not verify trainer status: {e}")
-                    errors.append(f"Action '{action_type}' requires trainer verification")
+                    errors.append(
+                        f"Action '{action_type}' requires trainer verification"
+                    )
 
     return len(errors) == 0, errors
 
@@ -510,7 +643,9 @@ def _load_action_plugins() -> List[Any]:
     """Return plugin instances registered with the core initializer."""
     global _ACTION_PLUGINS
     if _ACTION_PLUGINS is not None:
-        log_debug(f"[action_parser] 🔄 Returning cached plugins ({len(_ACTION_PLUGINS)})")
+        log_debug(
+            f"[action_parser] 🔄 Returning cached plugins ({len(_ACTION_PLUGINS)})"
+        )
         return _ACTION_PLUGINS
 
     try:
@@ -520,8 +655,11 @@ def _load_action_plugins() -> List[Any]:
         PLUGIN_REGISTRY = {}
 
     _ACTION_PLUGINS = list(PLUGIN_REGISTRY.values())
-    log_info(f"[action_parser] 🔍 Loaded {len(_ACTION_PLUGINS)} plugin(s) from registry")
+    log_info(
+        f"[action_parser] 🔍 Loaded {len(_ACTION_PLUGINS)} plugin(s) from registry"
+    )
     return _ACTION_PLUGINS
+
 
 def _plugins_for(action_type: str) -> List[Any]:
     plugins = []
@@ -532,8 +670,6 @@ def _plugins_for(action_type: str) -> List[Any]:
 
     for plugin in loaded_plugins:
         try:
-            supported = None
-
             if hasattr(plugin, "get_supported_action_types"):
                 action_types = plugin.get_supported_action_types()
                 log_debug(
@@ -544,10 +680,15 @@ def _plugins_for(action_type: str) -> List[Any]:
                     log_debug(
                         f"[action_parser] ✅ Plugin {plugin.__class__.__name__} supports {action_type} (via action_types)"
                     )
-                    # Optimization: Stop searching for message actions after first match
-                    if action_type.startswith("message_"):
-                        log_debug(f"[action_parser] ⚡ Optimization: Stopping search for message action {action_type} after first match")
-                        break
+                    # Optimization: Stop searching for user-facing message actions after first match
+                    try:
+                        if _is_interface_message_action(action_type):
+                            log_debug(
+                                f"[action_parser] ⚡ Optimization: Stopping search for user-facing action {action_type} after first match"
+                            )
+                            break
+                    except Exception:
+                        pass
                     continue
 
             if hasattr(plugin, "get_supported_actions"):
@@ -560,10 +701,15 @@ def _plugins_for(action_type: str) -> List[Any]:
                     log_debug(
                         f"[action_parser] ✅ Plugin {plugin.__class__.__name__} supports {action_type} (via actions_dict)"
                     )
-                    # Optimization: Stop searching for message actions after first match
-                    if action_type.startswith("message_"):
-                        log_debug(f"[action_parser] ⚡ Optimization: Stopping search for message action {action_type} after first match")
-                        break
+                    # Optimization: Stop searching for user-facing message actions after first match
+                    try:
+                        if _is_interface_message_action(action_type):
+                            log_debug(
+                                f"[action_parser] ⚡ Optimization: Stopping search for user-facing action {action_type} after first match"
+                            )
+                            break
+                    except Exception:
+                        pass
                     continue
 
         except Exception as e:
@@ -574,7 +720,9 @@ def _plugins_for(action_type: str) -> List[Any]:
         for plugin in loaded_plugins:
             if plugin.__class__.__name__ in {"TTSMasterPlugin", "TTSPlugin"}:
                 plugins.append(plugin)
-                log_info("[action_parser] ✅ Explicitly added TTS master plugin for tts_speak")
+                log_info(
+                    "[action_parser] ✅ Explicitly added TTS master plugin for tts_speak"
+                )
                 break
 
     # Special handling for trigger_weather_report: explicitly check for WeatherPlugin if not found
@@ -582,7 +730,9 @@ def _plugins_for(action_type: str) -> List[Any]:
         for plugin in loaded_plugins:
             if plugin.__class__.__name__ == "WeatherPlugin":
                 plugins.append(plugin)
-                log_info("[action_parser] ✅ Explicitly added WeatherPlugin for trigger_weather_report")
+                log_info(
+                    "[action_parser] ✅ Explicitly added WeatherPlugin for trigger_weather_report"
+                )
                 break
 
     try:
@@ -593,7 +743,6 @@ def _plugins_for(action_type: str) -> List[Any]:
 
     for name, iface in INTERFACE_REGISTRY.items():
         try:
-            supported = None
             if hasattr(iface, "get_supported_action_types"):
                 action_types = iface.get_supported_action_types()
                 log_debug(
@@ -604,10 +753,15 @@ def _plugins_for(action_type: str) -> List[Any]:
                     log_debug(
                         f"[action_parser] ✅ Interface {name} supports {action_type} (via action_types)"
                     )
-                    # Optimization: Stop searching for message actions after first match
-                    if action_type.startswith("message_"):
-                        log_debug(f"[action_parser] ⚡ Optimization: Stopping search for message action {action_type} after first match")
-                        break
+                    # Optimization: Stop searching for user-facing message actions after first match
+                    try:
+                        if _is_interface_message_action(action_type):
+                            log_debug(
+                                f"[action_parser] ⚡ Optimization: Stopping search for user-facing action {action_type} after first match"
+                            )
+                            break
+                    except Exception:
+                        pass
                     continue
 
             if hasattr(iface, "get_supported_actions"):
@@ -620,10 +774,15 @@ def _plugins_for(action_type: str) -> List[Any]:
                     log_debug(
                         f"[action_parser] ✅ Interface {name} supports {action_type} (via actions_dict)"
                     )
-                    # Optimization: Stop searching for message actions after first match
-                    if action_type.startswith("message_"):
-                        log_debug(f"[action_parser] ⚡ Optimization: Stopping search for message action {action_type} after first match")
-                        break
+                    # Optimization: Stop searching for user-facing message actions after first match
+                    try:
+                        if _is_interface_message_action(action_type):
+                            log_debug(
+                                f"[action_parser] ⚡ Optimization: Stopping search for user-facing action {action_type} after first match"
+                            )
+                            break
+                    except Exception:
+                        pass
                     continue
 
             log_debug(
@@ -638,26 +797,77 @@ def _plugins_for(action_type: str) -> List[Any]:
     return plugins
 
 
-def set_available_plugins(interfaces, llm_engine, plugins):
+def set_available_plugins(interfaces, cortex_engine, plugins):
     """Set available plugins and their details for the action parser."""
-    global ACTIVE_INTERFACES, ACTIVE_LLM_ENGINE, AVAILABLE_PLUGINS
+    global ACTIVE_INTERFACES, ACTIVE_CORTEX_ENGINE, AVAILABLE_PLUGINS
 
     # Set active interfaces
     ACTIVE_INTERFACES = set(interfaces)
     log_info("[action_parser] Active interfaces set.")
 
-    # Set active LLM engine
-    ACTIVE_LLM_ENGINE = llm_engine
-    log_info(f"[action_parser] Active LLM engine: {ACTIVE_LLM_ENGINE}")
+    # Set active Cortex engine
+    ACTIVE_CORTEX_ENGINE = cortex_engine
+    log_info(f"[action_parser] Active Cortex engine: {ACTIVE_CORTEX_ENGINE}")
 
     # Set available plugins
     AVAILABLE_PLUGINS = plugins
     log_info("[action_parser] Available plugins set.")
 
 
+def _is_interface_message_action(action_type: str) -> bool:
+    """Return True if the given action_type is a registered interface action that
+    represents a user-facing message (i.e., capable of sending textual messages).
+
+    This function inspects the registered interfaces, preferring the interface's
+    explicit metadata rather than hard-coded name checks.
+    """
+    try:
+        # Map action to interface name
+        iface_name = _load_interface_actions().get(action_type)
+        if not iface_name:
+            return False
+
+        from core.core_initializer import INTERFACE_REGISTRY
+
+        iface = INTERFACE_REGISTRY.get(iface_name)
+        if not iface:
+            return False
+
+        # If the interface exposes a send_message method, it's likely a user-facing
+        # messaging interface; verify that the action belongs to the interface's
+        # supported actions to avoid false positives.
+        if hasattr(iface, "send_message"):
+            # Check that the action_type is indeed listed by the interface
+            if hasattr(iface, "get_supported_actions"):
+                supported = iface.get_supported_actions() or {}
+                if action_type in supported:
+                    return True
+            if hasattr(iface, "get_supported_action_types"):
+                action_types = iface.get_supported_action_types() or []
+                if action_type in action_types:
+                    return True
+
+        # Fallback: examine the action metadata for a 'text' required/optional field
+        if hasattr(iface, "get_supported_actions"):
+            supported = iface.get_supported_actions() or {}
+            meta = supported.get(action_type, {})
+            if isinstance(meta, dict):
+                req = meta.get("required_fields") or meta.get("required_params") or []
+                opt = meta.get("optional_fields") or meta.get("optional_params") or []
+                if isinstance(req, (list, set)) and "text" in req:
+                    return True
+                if isinstance(opt, (list, set)) and "text" in opt:
+                    return True
+
+    except Exception:
+        return False
+
+    return False
+
+
 # Variables to store the state
 ACTIVE_INTERFACES = set()
-ACTIVE_LLM_ENGINE = None
+ACTIVE_CORTEX_ENGINE = None
 AVAILABLE_PLUGINS = []
 
 
@@ -665,13 +875,20 @@ async def _handle_plugin_action(
     action: Dict[str, Any], context: Dict[str, Any], bot, original_message
 ):
     action_type = action.get("type")
+    if not action_type:
+        log_warning("[action_parser] Action is missing a 'type'")
+        return {"error": "Action is missing a 'type'"}
     iface_target = action.get("interface")
-    
-    log_info(f"[action_parser] 🎯 Handling action: type={action_type}, interface={iface_target}")
-    
+
+    log_info(
+        f"[action_parser] 🎯 Handling action: type={action_type}, interface={iface_target}"
+    )
+
     plugins = _plugins_for(action_type)
-    log_info(f"[action_parser] 🔍 Found {len(plugins)} plugins for action type '{action_type}'")
-    
+    log_info(
+        f"[action_parser] 🔍 Found {len(plugins)} plugins for action type '{action_type}'"
+    )
+
     if not plugins:
         log_info(
             f"[action_parser] 📭 No plugin found for action type '{action_type}', attempting interface dispatch"
@@ -679,29 +896,41 @@ async def _handle_plugin_action(
 
         # Determine target interface from action or registry mapping
         iface_name = iface_target or _load_interface_actions().get(action_type)
-        
+
         # If interface not found, try to refresh the interface actions cache
-        if not iface_name and action_type.startswith("message_"):
-            global _INTERFACE_ACTIONS
-            _INTERFACE_ACTIONS = None  # Force refresh
-            iface_name = _load_interface_actions().get(action_type)
+        if not iface_name:
+            try:
+                if _is_interface_message_action(action_type):
+                    global _INTERFACE_ACTIONS
+                    _INTERFACE_ACTIONS = None  # Force refresh
+                    iface_name = _load_interface_actions().get(action_type)
+            except Exception:
+                pass
 
         try:
             from core.core_initializer import INTERFACE_REGISTRY
 
             interface = INTERFACE_REGISTRY.get(iface_name) if iface_name else None
-            if interface and action_type.startswith("message") and hasattr(interface, "send_message"):
+            if (
+                interface
+                and action_type.startswith("message")
+                and hasattr(interface, "send_message")
+            ):
                 payload = action.get("payload", {})
                 # Normalize text payloads to recover double-escaped sequences
                 try:
                     _maybe_unescape_text_in_payload(payload)
                 except Exception:
-                    log_debug("[action_parser] Text unescape normalization failed (non-fatal)")
+                    log_debug(
+                        "[action_parser] Text unescape normalization failed (non-fatal)"
+                    )
                 log_info(
                     f"[action_parser] ✉️ Dispatching message action to interface '{iface_name}'"
                 )
                 try:
-                    result = interface.send_message(payload, original_message=original_message)
+                    result = interface.send_message(
+                        payload, original_message=original_message
+                    )
                     if inspect.iscoroutine(result):
                         await result
                     return None
@@ -714,15 +943,21 @@ async def _handle_plugin_action(
             log_warning(f"[action_parser] Interface dispatch failed: {e}")
 
         if action_type == "trigger_weather_report":
-            log_warning("[action_parser] ⚠️ Suppressing failed 'trigger_weather_report' to prevent recursion loop.")
+            log_warning(
+                "[action_parser] ⚠️ Suppressing failed 'trigger_weather_report' to prevent recursion loop."
+            )
             return None
 
-        log_error(f"[action_parser] ❌ No plugin or interface supports action type '{action_type}'")
+        log_error(
+            f"[action_parser] ❌ No plugin or interface supports action type '{action_type}'"
+        )
         return
-    
+
     for plugin in plugins:
         plugin_iface = getattr(
-            plugin.__class__, "get_interface_id", lambda: plugin.__class__.__name__.lower()
+            plugin.__class__,
+            "get_interface_id",
+            lambda: plugin.__class__.__name__.lower(),
         )()
 
         log_info(
@@ -746,11 +981,70 @@ async def _handle_plugin_action(
                 try:
                     _maybe_unescape_text_in_payload(payload)
                 except Exception:
-                    log_debug("[action_parser] Text unescape normalization failed for plugin send_message (non-fatal)")
+                    log_debug(
+                        "[action_parser] Text unescape normalization failed for plugin send_message (non-fatal)"
+                    )
+                # === facial expression tag handling ===
+                try:
+                    from core.facial_expression_parser import parse_facial_expressions
+                    from plugins.facial_expression_plugin import FacialExpressionPlugin
+                    from core.animation_handler import get_karada_state_server
+
+                    original_text = payload.get("text", "") or ""
+                    clean_text, events = parse_facial_expressions(original_text)
+                    if clean_text != original_text:
+                        payload["text"] = clean_text
+                    if events and get_karada_state_server().has_connected_clients():
+                        # find our plugin instance (if loaded)
+                        expr_plugin = None
+                        from core.core_initializer import PLUGIN_REGISTRY
+
+                        if isinstance(PLUGIN_REGISTRY, dict):
+                            for p in PLUGIN_REGISTRY.values():
+                                if isinstance(p, FacialExpressionPlugin):
+                                    expr_plugin = p
+                                    break
+                        if expr_plugin:
+                            total_chars = len(clean_text)
+                            # read settings via persona manager as plugin does
+                            from core.persona_manager import get_persona_manager
+
+                            persona_json = None
+                            pm = get_persona_manager()
+                            if pm and getattr(pm, "_current_persona", None):
+                                try:
+                                    persona_json = pm._load_persona_json(
+                                        pm._current_persona.name
+                                    )
+                                except Exception:
+                                    persona_json = None
+                            chars_per_sec = (
+                                persona_json.get("facial_expression_chars_per_sec", 12)
+                                if persona_json
+                                else 12
+                            )
+                            expr_section = (
+                                persona_json.get("facial_expressions", {})
+                                if persona_json
+                                else {}
+                            )
+                            asyncio.create_task(
+                                expr_plugin._play_expression_timeline(
+                                    events,
+                                    total_chars,
+                                    getattr(original_message, "session_id", ""),
+                                    chars_per_sec,
+                                    expr_section=expr_section,
+                                )
+                            )
+                except Exception:
+                    pass
 
                 # If this outbound message originates from a Grillo beat, store it in grillo_activity_log
                 try:
-                    await _maybe_record_grillo_outbound_message(action_type, payload, context)
+                    await _maybe_record_grillo_outbound_message(
+                        action_type, payload, context
+                    )
                 except Exception:
                     pass
                 log_info(
@@ -778,11 +1072,15 @@ async def _handle_plugin_action(
                 try:
                     _maybe_unescape_text_in_payload(payload)
                 except Exception:
-                    log_debug("[action_parser] Text unescape normalization failed for plugin execute_action (non-fatal)")
+                    log_debug(
+                        "[action_parser] Text unescape normalization failed for plugin execute_action (non-fatal)"
+                    )
 
                 # If this outbound message originates from a Grillo beat, store it in grillo_activity_log
                 try:
-                    await _maybe_record_grillo_outbound_message(action_type, payload, context)
+                    await _maybe_record_grillo_outbound_message(
+                        action_type, payload, context
+                    )
                 except Exception:
                     pass
                 new_action = {**action, "payload": payload}
@@ -791,9 +1089,20 @@ async def _handle_plugin_action(
                 )
                 log_debug(f"[action_parser] 📦 Action payload: {payload}")
 
-                result = plugin.execute_action(new_action, context, bot, original_message)
+                result = plugin.execute_action(
+                    new_action, context, bot, original_message
+                )
                 if inspect.iscoroutine(result):
                     result = await result
+                # If a plugin explicitly skips this action, fall through to the next handler.
+                # "skipped" means "I'm not handling this — try the next plugin".
+                if isinstance(result, dict) and result.get("status") == "skipped":
+                    log_info(
+                        f"[action_parser] ⏭️ Plugin {plugin.__class__.__name__} skipped "
+                        f"action '{action_type}' (reason: {result.get('reason', 'unknown')}); "
+                        "trying next plugin"
+                    )
+                    continue
                 log_info(
                     f"[action_parser] ✅ Successfully executed action via {plugin_iface}"
                 )
@@ -803,31 +1112,42 @@ async def _handle_plugin_action(
                     f"[action_parser] ❌ Error executing {action_type} with {plugin.__class__.__name__}: {repr(e)}"
                 )
                 import traceback
-                log_error(f"[action_parser] 📄 Full traceback: {traceback.format_exc()}")
+
+                log_error(
+                    f"[action_parser] 📄 Full traceback: {traceback.format_exc()}"
+                )
         else:
             log_warning(
                 f"[action_parser] ⚠️ Plugin {plugin.__class__.__name__} has no execute_action() method"
             )
 
     # No matching plugin found - collect error for auto-correction
-    available_interfaces = list(ACTIVE_INTERFACES) if ACTIVE_INTERFACES else ["No interfaces registered"]
+    available_interfaces = (
+        list(ACTIVE_INTERFACES) if ACTIVE_INTERFACES else ["No interfaces registered"]
+    )
     error_msg = f"Interface '{iface_target}' not found for action '{action_type}'. Available interfaces: {', '.join(available_interfaces)}"
-    
-    log_error(f"[action_parser] 💥 No plugin matched interface '{iface_target}' for action '{action_type}'")
-    return {"error": error_msg, "action": action, "available_interfaces": available_interfaces}
+
+    log_error(
+        f"[action_parser] 💥 No plugin matched interface '{iface_target}' for action '{action_type}'"
+    )
+    return {
+        "error": error_msg,
+        "action": action,
+        "available_interfaces": available_interfaces,
+    }
 
 
 async def run_action(action: Any, context: Dict[str, Any], bot, original_message):
     """Validate and execute a single action or list of actions."""
     log_info(f"[action_parser] 🎬 run_action called with action: {action}")
-    
+
     if isinstance(action, list):
         log_info(f"[action_parser] 📋 Processing action list with {len(action)} items")
         return await run_actions(action, context, bot, original_message)
 
     action_type = action.get("type")
     log_info(f"[action_parser] 🔍 Action type detected: {action_type}")
-    
+
     valid, errors = validate_action(action, context, original_message)
     if not valid:
         error_msg = f"Invalid action: {errors}"
@@ -836,85 +1156,82 @@ async def run_action(action: Any, context: Dict[str, Any], bot, original_message
 
     action_interface = action.get("interface")
 
-    # Preflight safety: prevent preflight-run actions from performing side-effects.
-    # When preflight=True in context we only allow read-only/search actions (e.g., memory_search).
-    try:
-        if isinstance(context, dict) and bool(context.get('preflight')):
-            PRELIGHT_BLOCKED_ACTIONS = {"create_personal_diary_entry", "create_diary_entry"}
-            if action_type in PRELIGHT_BLOCKED_ACTIONS:
-                log_info(f"[action_parser] ⚠️ Skipping action '{action_type}' during preflight to avoid side-effects")
-                return {"skipped_due_to_preflight": True, "action": action}
-    except Exception:
-        # Fail-safe: if anything goes wrong, proceed with normal execution
-        pass
-
-    log_info(f"[action_parser] 🚀 Executing action: type={action_type}, interface={action_interface}")
+    log_info(
+        f"[action_parser] 🚀 Executing action: type={action_type}, interface={action_interface}"
+    )
 
     # Use plugin system for all action types (including messages)
     result = await _handle_plugin_action(action, context, bot, original_message)
     return result
 
 
-async def _request_selective_correction(failed_actions, successful_actions, bot, context, original_message):
+async def _request_selective_correction(
+    failed_actions, successful_actions, bot, context, original_message
+):
     """Request LLM to fix only the failed actions, while preserving successful ones."""
-    from core.transport_layer import run_corrector_middleware
-    from core.action_parser import _load_action_plugins
-    from core.core_initializer import INTERFACE_REGISTRY
-    
+
     # Build clear correction prompt
     successful_count = len(successful_actions)
     failed_count = len(failed_actions)
-    
+
     # Extract successful action types for context
     successful_types = [action.get("type", "unknown") for action in successful_actions]
-    
+
     # Load plugin and interface schemas for detailed descriptions
     action_schemas = {}
-    
+
     # Get schemas from plugins
     try:
         for plugin in _load_action_plugins():
-            if hasattr(plugin, 'get_supported_actions'):
+            if hasattr(plugin, "get_supported_actions"):
                 actions = plugin.get_supported_actions()
                 for action_type, action_info in actions.items():
                     action_schemas[action_type] = action_info
-            if hasattr(plugin, 'get_prompt_instructions'):
+            if hasattr(plugin, "get_prompt_instructions"):
                 # Store verbose descriptions
                 for action_type in (plugin.get_supported_actions() or {}).keys():
-                    if hasattr(plugin, 'get_prompt_instructions'):
+                    if hasattr(plugin, "get_prompt_instructions"):
                         instructions = plugin.get_prompt_instructions(action_type)
                         if instructions and action_type in action_schemas:
-                            action_schemas[action_type]['_verbose_instructions'] = instructions
+                            action_schemas[action_type]["_verbose_instructions"] = (
+                                instructions
+                            )
     except Exception as e:
         log_warning(f"[action_parser] Error loading plugin schemas: {e}")
-    
+
     # Get schemas from interfaces
     try:
         for iface_name, interface in INTERFACE_REGISTRY.items():
-            if hasattr(interface, 'get_supported_actions'):
+            if hasattr(interface, "get_supported_actions"):
                 actions = interface.get_supported_actions()
                 for action_type, action_info in actions.items():
                     action_schemas[action_type] = action_info
             # Also pull verbose prompt instructions from interfaces when available
-            if hasattr(interface, 'get_prompt_instructions'):
+            if hasattr(interface, "get_prompt_instructions"):
                 for action_type in (interface.get_supported_actions() or {}).keys():
                     try:
                         instr = interface.get_prompt_instructions(action_type)
                         if instr and action_type in action_schemas:
-                            action_schemas[action_type]['_verbose_instructions'] = instr
+                            action_schemas[action_type]["_verbose_instructions"] = instr
                     except Exception:
                         pass
     except Exception as e:
         log_warning(f"[action_parser] Error loading interface schemas: {e}")
-    
+
     # Build detailed error descriptions with schemas
     error_details = []
+    # we'll also note globally whether any unknown action types occurred
+    unknown_actions: list[str] = []
     for failed in failed_actions:
         action = failed["action"]
         errors = failed["errors"]
         action_type = action.get("type", "unknown")
         schema = action_schemas.get(action_type, {})
-        
+
+        # mark unknown actions for later hinting
+        if action_type not in action_schemas:
+            unknown_actions.append(action_type)
+
         detail = {
             "action_type": action_type,
             "errors": errors,
@@ -923,65 +1240,74 @@ async def _request_selective_correction(failed_actions, successful_actions, bot,
             "required_fields": schema.get("required_fields", []),
             "optional_fields": schema.get("optional_fields", []),
         }
-        
+
         # Add verbose instructions if available (from plugin or interface)
-        if '_verbose_instructions' in schema:
-            detail['verbose_instructions'] = schema['_verbose_instructions']
-        
+        if "_verbose_instructions" in schema:
+            detail["verbose_instructions"] = schema["_verbose_instructions"]
+
         error_details.append(detail)
-    
+
     # Create a specialized correction prompt that only asks for failed actions
-    correction_context = {
-        "previous_response_status": "partial_success",
-        "successful_actions": successful_count,
-        "successful_types": successful_types,
-        "failed_actions": failed_count,
-        "correction_needed": True,
-        "instruction": f"""
+    instruction = f"""
 Your previous response was partially successful:
-✅ {successful_count} actions executed successfully: {', '.join(successful_types) if successful_types else 'none'}
+✅ {successful_count} actions executed successfully: {", ".join(successful_types) if successful_types else "none"}
 ❌ {failed_count} actions failed and need correction
 
 Please provide ONLY the corrected versions of the failed actions. Do not repeat the {successful_count} successful actions.
 
 FAILED ACTIONS REQUIRING CORRECTION:
 """
-    }
-    
+
     for i, detail in enumerate(error_details, 1):
-        correction_context["instruction"] += f"\n{i}. ACTION: '{detail['action_type']}'\n"
-        correction_context["instruction"] += f"   DESCRIPTION: {detail['description']}\n"
-        
+        instruction += f"\n{i}. ACTION: '{detail['action_type']}'\n"
+        instruction += f"   DESCRIPTION: {detail['description']}\n"
+
         # Add schema information
-        if detail['required_fields']:
-            correction_context["instruction"] += f"   REQUIRED FIELDS: {', '.join(detail['required_fields'])}\n"
-        if detail['optional_fields']:
-            correction_context["instruction"] += f"   OPTIONAL FIELDS: {', '.join(detail['optional_fields'])}\n"
-        
+        if detail["required_fields"]:
+            instruction += (
+                f"   REQUIRED FIELDS: {', '.join(detail['required_fields'])}\n"
+            )
+        if detail["optional_fields"]:
+            instruction += (
+                f"   OPTIONAL FIELDS: {', '.join(detail['optional_fields'])}\n"
+            )
+
+        # If this action was unknown, include a generic advisory instead of
+        # spitting out the entire current list (which may change depending on
+        # loaded plugins).  The corrector will already know which actions are
+        # valid; this note is just to highlight the mismatch.
+        if (
+            detail["description"] == "Unknown action"
+            or detail["action_type"] in unknown_actions
+        ):
+            instruction += (
+                f"   NOTE: '{detail['action_type']}' is not a valid action type.\n"
+            )
+
         # Add verbose instructions if available (include description, payload schema, examples, and important notes)
-        if 'verbose_instructions' in detail:
-            vi = detail['verbose_instructions']
-            if vi.get('description'):
-                correction_context["instruction"] += f"   FULL DESCRIPTION: {vi.get('description')}\n"
-            if vi.get('payload'):
-                correction_context["instruction"] += f"   PAYLOAD FIELDS:\n"
-                for k, v in vi.get('payload', {}).items():
-                    desc = v.get('description', '') if isinstance(v, dict) else str(v)
-                    ex = v.get('example', '') if isinstance(v, dict) else ''
-                    correction_context["instruction"] += f"      - {k}: {desc} (example: {ex})\n"
-            if vi.get('examples'):
-                correction_context["instruction"] += f"   EXAMPLES: {vi.get('examples')}\n"
-            if vi.get('important_notes'):
-                correction_context["instruction"] += f"   IMPORTANT NOTES:\n"
-                for note in vi.get('important_notes'):
-                    correction_context["instruction"] += f"      - {note}\n"
-        
+        if "verbose_instructions" in detail:
+            vi = detail["verbose_instructions"]
+            if vi.get("description"):
+                instruction += f"   FULL DESCRIPTION: {vi.get('description')}\n"
+            if vi.get("payload"):
+                instruction += "   PAYLOAD FIELDS:\n"
+                for k, v in vi.get("payload", {}).items():
+                    desc = v.get("description", "") if isinstance(v, dict) else str(v)
+                    ex = v.get("example", "") if isinstance(v, dict) else ""
+                    instruction += f"      - {k}: {desc} (example: {ex})\n"
+            if vi.get("examples"):
+                instruction += f"   EXAMPLES: {vi.get('examples')}\n"
+            if vi.get("important_notes"):
+                instruction += "   IMPORTANT NOTES:\n"
+                for note in vi.get("important_notes"):
+                    instruction += f"      - {note}\n"
+
         # Add specific errors
-        correction_context["instruction"] += f"   ERRORS FOUND:\n"
-        for error in detail['errors']:
-            correction_context["instruction"] += f"      ❌ {error}\n"
-    
-    correction_context["instruction"] += f"""
+        instruction += "   ERRORS FOUND:\n"
+        for error in detail["errors"]:
+            instruction += f"      ❌ {error}\n"
+
+    instruction += f"""
 Respond with JSON containing only the corrected actions (not the successful ones):
 {{
   "actions": [
@@ -989,28 +1315,55 @@ Respond with JSON containing only the corrected actions (not the successful ones
   ]
 }}
 
-IMPORTANT: Do not include the {successful_count} actions that were already executed successfully ({', '.join(successful_types) if successful_types else 'none'}).
+IMPORTANT: Do not include the {successful_count} actions that were already executed successfully ({", ".join(successful_types) if successful_types else "none"}).
 """
-    
-    log_info(f"[action_parser] Requesting selective correction for {failed_count} failed actions (preserving {successful_count} successful ones)")
+
+    correction_context = {
+        "previous_response_status": "partial_success",
+        "successful_actions": successful_count,
+        "successful_types": successful_types,
+        "failed_actions": failed_count,
+        "correction_needed": True,
+        "instruction": instruction,
+    }
+
+    log_info(
+        f"[action_parser] Requesting selective correction for {failed_count} failed actions (preserving {successful_count} successful ones)"
+    )
     log_debug(f"[action_parser] Correction context: {correction_context}")
-    
+
     try:
         # Create a synthetic message with correction context
         import types
+
         correction_message = types.SimpleNamespace()
-        correction_message.chat_id = getattr(original_message, 'chat_id', None)
-        correction_message.from_llm = True
+        correction_message.chat_id = getattr(original_message, "chat_id", None)
+        correction_message.from_cortex = True
         correction_message.original_text = correction_context["instruction"]
         correction_message.text = correction_context["instruction"]
-        
-        # Use existing corrector middleware but with selective context
+
+        # Ensure the original message carries correction_context for the transport-layer corrector
+        try:
+            if hasattr(original_message, "__dict__"):
+                original_message.correction_context = correction_context
+        except Exception:
+            pass
+
+        # Use existing corrector middleware but include original_message in context so
+        # run_corrector_middleware can detect selective correction context correctly
+        corrected_context = {
+            **(context or {}),
+            "selective_correction": True,
+            "correction_context": correction_context,
+            "message": original_message,
+        }
+
         await run_corrector_middleware(
-            text=correction_context["instruction"],
+            text=str(correction_context["instruction"]),
             bot=bot,
-            context={**context, "selective_correction": True, "correction_context": correction_context},
-            chat_id=getattr(original_message, 'chat_id', None),
-            thread_id=getattr(original_message, 'thread_id', None)
+            context=corrected_context,
+            chat_id=getattr(original_message, "chat_id", None),
+            thread_id=getattr(original_message, "thread_id", None),
         )
     except Exception as e:
         log_error(f"[action_parser] Failed to request selective correction: {e}")
@@ -1021,7 +1374,7 @@ async def run_actions(actions: Any, context: Dict[str, Any], bot, original_messa
 
     If ``actions`` is a single dict, it will be wrapped in a list.
     Valid actions are executed, invalid actions are collected for selective correction.
-    
+
     Returns:
         dict: {"processed": [successful_actions], "errors": [error_messages], "failed_actions": [failed_actions]}
     """
@@ -1061,55 +1414,109 @@ async def run_actions(actions: Any, context: Dict[str, Any], bot, original_messa
                 error_msg = f"Invalid action {idx}: {errors}"
                 log_warning(f"[action_parser] Skipping {error_msg}")
                 collected_errors.append(error_msg)
-                failed_actions.append({"index": idx, "action": action, "errors": errors})
+                failed_actions.append(
+                    {"index": idx, "action": action, "errors": errors}
+                )
                 continue
 
-            # --- Safety & autonomy checks for LLM-originated actions ---
-            is_from_llm = (hasattr(original_message, 'from_llm') and getattr(original_message, 'from_llm')) or context.get('from_llm', False)
-            if is_from_llm:
+            # --- Safety & autonomy checks for AI/cortex-originated actions ---
+            is_from_cortex = (
+                hasattr(original_message, "from_cortex")
+                and getattr(original_message, "from_cortex")
+            ) or context.get("from_cortex", False)
+
+            # Grillo-specific dedupe: if this run originated from a Grillo beat and
+            # the message text has already been sent to the same interface_path
+            # within the self-window, discard the action early.  This guard works
+            # even if the snippet collector failed to filter the chat.
+            if is_from_cortex and context.get("grillo_beat"):
                 try:
-                    # Read relevant runtime config
-                    synth_mode = str(config_registry.get_value('SYNTH_AUTONOMY_MODE', 'suggest') or 'suggest').lower()
-                    llm_unsafe_override = bool(config_registry.get_value('LLM_AUTO_EXECUTE_UNSAFE_ACTIONS', False))
-                    allowed_autonomy = config_registry.get_value('AUTONOMY_ALLOWED_ACTIONS', []) or []
+                    action_type = action.get("type") or ""
+                    if action_type.startswith("message"):
+                        payload = action.get("payload") or {}
+                        text = payload.get("text")
+                        interface_path = payload.get("interface_path") or context.get(
+                            "interface_path"
+                        )
+                        # use same window as snippet skip for consistency
+                        window = float(
+                            config_registry.get_value(
+                                "GRILLO_OBSERVER_SELF_WINDOW",
+                                43200,
+                                group="grillo",
+                                component="grillo_chat_observer",
+                            )
+                        )
+                        if text and interface_path:
+                            if await _grillo_recent_same_message(
+                                interface_path, text, window
+                            ):
+                                log_info(
+                                    "[action_parser] Suppressing duplicate Grillo outbound message (within self-window)"
+                                )
+                                continue
+                except Exception as e:
+                    log_debug(f"[action_parser] Grillo dedupe check failed: {e}")
 
-                    safe_flag = action.get('safe', True)
+                # Block agent actions (propose_action, agent_execute, etc.)
+                # from grillo beats — outreach should deliver directly to the
+                # target interface, never route through the agent approval flow.
+                if action_type in (
+                    "propose_action",
+                    "agent_execute",
+                    "approve_action",
+                    "start_task",
+                ):
+                    log_warning(
+                        f"[action_parser] Dropping '{action_type}' from grillo beat — agent actions not allowed in grillo context"
+                    )
+                    continue
 
-                    # If action flagged unsafe and no global override, block
-                    if safe_flag is False and not llm_unsafe_override:
-                        error_msg = f"Action '{action.get('type')}' blocked: flagged as unsafe (requires human approval)"
-                        log_warning(f"[action_parser] {error_msg}")
-                        collected_errors.append(error_msg)
-                        failed_actions.append({"index": idx, "action": action, "errors": [error_msg]})
-                        continue
+            if is_from_cortex:
+                try:
+                    # Centralized safety decision
+                    from core.action_safety import is_action_allowed_for_execution
 
-                    # If synth is in 'suggest' mode, do not auto-execute LLM-proposed actions
-                    if synth_mode == 'suggest':
-                        error_msg = f"Action '{action.get('type')}' originated from LLM while synth in 'suggest' mode; proposal-only"
+                    allowed, reason, meta = is_action_allowed_for_execution(
+                        action, context or {}, original_message
+                    )
+                    if not allowed:
+                        # Safety/policy blocks are unfixable — the LLM cannot
+                        # change the system configuration, so asking the
+                        # corrector to "fix" these only produces workarounds
+                        # like propose_action that bypass the intended policy.
+                        error_msg = f"Action '{action.get('type')}' blocked by safety policy: {reason}"
                         log_info(f"[action_parser] {error_msg}")
                         collected_errors.append(error_msg)
-                        failed_actions.append({"index": idx, "action": action, "errors": [error_msg]})
+                        failed_actions.append(
+                            {
+                                "index": idx,
+                                "action": action,
+                                "errors": [error_msg],
+                                "safety_meta": meta,
+                                "unfixable": True,
+                            }
+                        )
                         continue
 
-                    # If synth is in 'whitelisted' mode, only execute actions present in AUTONOMY_ALLOWED_ACTIONS
-                    if synth_mode == 'whitelisted':
-                        if allowed_autonomy and action.get('type') not in allowed_autonomy:
-                            error_msg = f"Action '{action.get('type')}' is not whitelisted for autonomous execution"
-                            log_warning(f"[action_parser] {error_msg}")
-                            collected_errors.append(error_msg)
-                            failed_actions.append({"index": idx, "action": action, "errors": [error_msg]})
-                            continue
+                    # Special-case: heuristic-recovered actions must not be auto-executed even if allowed
+                    if action.get("metadata", {}).get("heuristic_recovery"):
+                        error_msg = f"Action '{action.get('type')}' flagged as heuristic recovery and requires human validation; quarantined"
+                        log_warning(f"[action_parser] {error_msg}")
+                        collected_errors.append(error_msg)
+                        failed_actions.append(
+                            {"index": idx, "action": action, "errors": [error_msg]}
+                        )
+                        continue
 
-                    # If synth is in 'autonomous' mode, allow unrestricted execution (no whitelist checks)
-                    if synth_mode == 'autonomous':
-                        # unrestricted - nothing to check here (still respect 'safe' and global overrides)
-                        pass
                 except Exception as e:
                     log_warning(f"[action_parser] Safety/autonomy checks failed: {e}")
                     # On error, be conservative and treat as proposal-only
                     error_msg = f"Action '{action.get('type')}' treated as proposal due to safety check failure"
                     collected_errors.append(error_msg)
-                    failed_actions.append({"index": idx, "action": action, "errors": [error_msg]})
+                    failed_actions.append(
+                        {"index": idx, "action": action, "errors": [error_msg]}
+                    )
                     continue
             # --- End safety & autonomy checks ---
 
@@ -1119,7 +1526,9 @@ async def run_actions(actions: Any, context: Dict[str, Any], bot, original_messa
             # Check if run_action returned error info
             if isinstance(result, dict) and "error" in result:
                 collected_errors.append(result["error"])
-                failed_actions.append({"index": idx, "action": action, "errors": [result["error"]]})
+                failed_actions.append(
+                    {"index": idx, "action": action, "errors": [result["error"]]}
+                )
             else:
                 processed_actions.append(action)
 
@@ -1137,7 +1546,9 @@ async def run_actions(actions: Any, context: Dict[str, Any], bot, original_messa
             error_msg = f"Error executing action {idx}: {repr(e)}"
             log_error(f"[action_parser] {error_msg}")
             collected_errors.append(error_msg)
-            failed_actions.append({"index": idx, "action": action, "errors": [error_msg]})
+            failed_actions.append(
+                {"index": idx, "action": action, "errors": [error_msg]}
+            )
 
     # After all actions processed, mark scheduled event as delivered if applicable
     event_id = context.get("event_id") or getattr(original_message, "event_id", None)
@@ -1148,9 +1559,13 @@ async def run_actions(actions: Any, context: Dict[str, Any], bot, original_messa
             if await db.mark_event_delivered(event_id):
                 log_info(f"[action_parser] Event {event_id} marked delivered")
             else:
-                log_warning(f"[action_parser] Failed to mark event {event_id} delivered")
+                log_warning(
+                    f"[action_parser] Failed to mark event {event_id} delivered"
+                )
         except Exception as e:
-            log_warning(f"[action_parser] Error marking event {event_id} delivered: {e}")
+            log_warning(
+                f"[action_parser] Error marking event {event_id} delivered: {e}"
+            )
         try:
             from core import event_dispatcher
 
@@ -1188,22 +1603,51 @@ async def run_actions(actions: Any, context: Dict[str, Any], bot, original_messa
 
     if collected_errors and failed_actions:
         # New selective corrector: only ask LLM to fix failed actions, not successful ones
-        # Check both message object AND context for from_llm flag
-        is_from_llm = (hasattr(original_message, 'from_llm') and original_message.from_llm) or context.get('from_llm', False)
-        
-        if is_from_llm:
+        # Check both message object AND context for from_cortex flag
+        is_from_cortex = (
+            hasattr(original_message, "from_cortex") and original_message.from_cortex
+        ) or context.get("from_cortex", False)
+
+        if is_from_cortex:
             try:
                 await _request_selective_correction(
                     failed_actions=failed_actions,
                     successful_actions=processed_actions,
                     bot=bot,
                     context=context,
-                    original_message=original_message
+                    original_message=original_message,
                 )
             except Exception as e:
-                log_warning(f"[action_parser] Failed to invoke selective correction: {e}")
+                log_warning(
+                    f"[action_parser] Failed to invoke selective correction: {e}"
+                )
         else:
-            log_debug("[action_parser] Errors found but message is not from LLM; skipping correction to prevent loops")
+            log_debug(
+                "[action_parser] Errors found but message is not from LLM; skipping correction to prevent loops"
+            )
+
+    # Debrief hooks (postflight) before diary creation
+    if not (context or {}).get("from_debrief"):
+        try:
+            from core.debrief import run_debrief
+
+            if isinstance(context, dict):
+                context["debrief_ran"] = True
+
+            await run_debrief(
+                processed_actions=processed_actions,
+                failed_actions=failed_actions,
+                results={
+                    "processed": processed_actions,
+                    "failed": failed_actions,
+                    "errors": collected_errors,
+                    "llm_response_text": (context or {}).get("llm_response_text"),
+                },
+                context=context,
+                original_message=original_message,
+            )
+        except Exception as e:
+            log_debug(f"[action_parser] Debrief failed: {e}")
 
     # Create diary entry for this interaction
     await _create_diary_entry_for_actions(processed_actions, context, original_message)
@@ -1220,19 +1664,26 @@ async def _create_diary_entry_for_actions(processed_actions, context, original_m
     """Create a diary entry summarizing the actions performed during this interaction."""
     if not processed_actions:
         return
-    
+
     try:
         from plugins.ai_diary import create_personal_diary_entry, is_plugin_enabled
-        
+
         if not is_plugin_enabled():
             log_debug("[action_parser] Diary plugin disabled, skipping diary entry")
             return
-        
+
         # Extract relevant information
         interface_name = context.get("interface", "unknown")
         chat_id = getattr(original_message, "chat_id", None)
-        interface_path = getattr(original_message, "interface_path", None)
-        
+
+        # Prefer LLM-provided diary metadata when present.
+        # This avoids generic/hardcoded reflections unrelated to the real context.
+        llm_diary_payload = {}
+        for action in processed_actions:
+            if action.get("type") == "create_personal_diary_entry":
+                llm_diary_payload = action.get("payload") or {}
+                break
+
         # Get user message from context or original_message
         user_message = ""
         if hasattr(original_message, "text"):
@@ -1243,34 +1694,38 @@ async def _create_diary_entry_for_actions(processed_actions, context, original_m
             payload = context["input"]["payload"]
             if "text" in payload:
                 user_message = payload["text"]
-        
+
         # Extract people involved from context participants for logging
         involved_people = set()
         if context and "participants" in context:
             for participant in context["participants"]:
                 if "usertag" in participant:
                     # Remove @ from usertag
-                    username = participant["usertag"].lstrip('@')
+                    username = participant["usertag"].lstrip("@")
                     involved_people.add(username)
                 # Also add nicknames if available
                 if "nicknames" in participant and participant["nicknames"]:
                     for nickname in participant["nicknames"]:
                         if nickname and nickname.lower() not in ["synth", "bot"]:
                             involved_people.add(nickname)
-        
+
         # Convert to list for logging purposes only (not passed to diary)
-        involved_list = [person for person in involved_people if person.lower() not in ["synth", "bot"]]
-        
+        involved_list = [
+            person
+            for person in involved_people
+            if person.lower() not in ["synth", "bot"]
+        ]
+
         # Generate comprehensive response content from all actions
         synth_response_parts = []
         action_types = [action.get("type", "unknown") for action in processed_actions]
-        
+
         # Extract actual text from message actions
         for action in processed_actions:
             action_type = action.get("type", "")
             payload = action.get("payload", {})
-            
-            if action_type.startswith("message_"):
+
+            if action_type and _is_interface_message_action(action_type):
                 text = payload.get("text", "")
                 if text:
                     synth_response_parts.append(text)
@@ -1284,30 +1739,46 @@ async def _create_diary_entry_for_actions(processed_actions, context, original_m
             elif action_type == "event":
                 description = payload.get("description", "created an event")
                 synth_response_parts.append(f"Scheduled event: {description}")
-        
+
         # If no specific content found, create a summary
         if not synth_response_parts:
             action_counts = {}
             for action_type in action_types:
                 action_counts[action_type] = action_counts.get(action_type, 0) + 1
-            
+
             if len(action_counts) == 1:
                 action_type = list(action_counts.keys())[0]
                 count = action_counts[action_type]
                 if count == 1:
                     synth_response_parts.append(f"Performed {action_type} action")
                 else:
-                    synth_response_parts.append(f"Performed {count} {action_type} actions")
+                    synth_response_parts.append(
+                        f"Performed {count} {action_type} actions"
+                    )
             else:
-                action_summary = ", ".join([f"{count} {action_type}" for action_type, count in action_counts.items()])
-                synth_response_parts.append(f"Performed multiple actions: {action_summary}")
-        
+                action_summary = ", ".join(
+                    [
+                        f"{count} {action_type}"
+                        for action_type, count in action_counts.items()
+                    ]
+                )
+                synth_response_parts.append(
+                    f"Performed multiple actions: {action_summary}"
+                )
+
         synth_response = " | ".join(synth_response_parts)
-        
-        # Generate context tags based on action types and content
-        context_tags = _generate_context_tags(action_types, synth_response, user_message, interface_name)
-        
-        # Use create_personal_diary_entry for automatic thought and emotion generation
+
+        # Use payload tags if provided by LLM, otherwise keep automatic tag generation.
+        payload_context_tags = llm_diary_payload.get("context_tags")
+        if payload_context_tags:
+            context_tags = payload_context_tags
+        else:
+            context_tags = _generate_context_tags(
+                action_types, synth_response, user_message, interface_name
+            )
+
+        # Use create_personal_diary_entry with heuristics disabled.
+        # We only persist diary metadata explicitly provided by the LLM payload.
         create_personal_diary_entry(
             synth_response=synth_response,
             user_message=user_message if user_message else None,
@@ -1315,21 +1786,29 @@ async def _create_diary_entry_for_actions(processed_actions, context, original_m
             involved_users=involved_list,
             interface=interface_name,
             chat_id=str(chat_id) if chat_id else None,
-            grillo_activity_log_id=context.get("activity_log_id") if isinstance(context, dict) else None
+            grillo_activity_log_id=context.get("activity_log_id")
+            if isinstance(context, dict)
+            else None,
+            interaction_summary=llm_diary_payload.get("interaction_summary"),
+            personal_thought=llm_diary_payload.get("personal_thought"),
+            emotions=llm_diary_payload.get("emotions"),
         )
-        
+
         log_debug(f"[action_parser] Created personal diary entry: {synth_response}")
-        
+
     except Exception as e:
         log_warning(f"[action_parser] Failed to create diary entry: {e}")
         import traceback
+
         log_debug(f"[action_parser] Diary error traceback: {traceback.format_exc()}")
 
 
-def _generate_context_tags(action_types: List[str], synth_response: str, user_message: str, interface_name: str) -> List[str]:
+def _generate_context_tags(
+    action_types: List[str], synth_response: str, user_message: str, interface_name: str
+) -> List[str]:
     """Generate specific context tags based on action types and conversation content."""
     context_tags = []
-    
+
     # Action-based tags (more specific than before)
     if "bio_update" in action_types or "bio_full_request" in action_types:
         context_tags.append("personal_info")
@@ -1337,65 +1816,111 @@ def _generate_context_tags(action_types: List[str], synth_response: str, user_me
         context_tags.append("technical")
     if "event" in action_types:
         context_tags.append("scheduling")
-    if "speech_selenium_elevenlabs" in action_types or "audio_telegram_bot" in action_types:
+    if (
+        "speech_selenium_elevenlabs" in action_types
+        or "audio_telegram_bot" in action_types
+    ):
         context_tags.append("audio")
-    
+
     # Content-based analysis for specific topics
     combined_text = (synth_response + " " + (user_message or "")).lower()
-    
+
     # Food and dining
-    if any(word in combined_text for word in ["food", "eat", "cooking", "recipe", "restaurant", "meal"]):
+    if any(
+        word in combined_text
+        for word in ["food", "eat", "cooking", "recipe", "restaurant", "meal"]
+    ):
         context_tags.append("food")
         # Specific food types
         if any(word in combined_text for word in ["sushi", "japanese"]):
             context_tags.append("sushi")
         if any(word in combined_text for word in ["pizza", "italian"]):
-            context_tags.append("pizza") 
+            context_tags.append("pizza")
         if any(word in combined_text for word in ["restaurant", "dining"]):
             context_tags.append("restaurant")
-    
+
     # Cars and vehicles
-    if any(word in combined_text for word in ["car", "auto", "vehicle", "driving", "motor", "bmw", "audi", "honda"]):
+    if any(
+        word in combined_text
+        for word in [
+            "car",
+            "auto",
+            "vehicle",
+            "driving",
+            "motor",
+            "bmw",
+            "audi",
+            "honda",
+        ]
+    ):
         context_tags.append("cars")
-        if any(word in combined_text for word in ["color", "blue", "red", "black", "white"]):
+        if any(
+            word in combined_text for word in ["color", "blue", "red", "black", "white"]
+        ):
             context_tags.append("colors")
-    
+
     # Technology and computers
-    if any(word in combined_text for word in ["computer", "software", "programming", "code", "tech"]):
+    if any(
+        word in combined_text
+        for word in ["computer", "software", "programming", "code", "tech"]
+    ):
         context_tags.append("technology")
-    
+
     # Entertainment
-    if any(word in combined_text for word in ["movie", "music", "game", "book", "entertainment"]):
+    if any(
+        word in combined_text
+        for word in ["movie", "music", "game", "book", "entertainment"]
+    ):
         context_tags.append("entertainment")
-    
+
     # Location and travel
-    if any(word in combined_text for word in ["travel", "vacation", "city", "country", "location"]):
+    if any(
+        word in combined_text
+        for word in ["travel", "vacation", "city", "country", "location"]
+    ):
         context_tags.append("travel")
-    
+
     # Work and career
-    if any(word in combined_text for word in ["work", "job", "career", "office", "business"]):
+    if any(
+        word in combined_text
+        for word in ["work", "job", "career", "office", "business"]
+    ):
         context_tags.append("work")
-    
+
     # Health and wellness
-    if any(word in combined_text for word in ["health", "exercise", "fitness", "medical"]):
+    if any(
+        word in combined_text for word in ["health", "exercise", "fitness", "medical"]
+    ):
         context_tags.append("health")
-    
+
     # Family and relationships
-    if any(word in combined_text for word in ["family", "friend", "relationship", "love", "marriage"]):
+    if any(
+        word in combined_text
+        for word in ["family", "friend", "relationship", "love", "marriage"]
+    ):
         context_tags.append("relationships")
-    
+
     # Only add help tag for explicit help requests
-    if any(word in combined_text for word in ["help me", "can you help", "need help", "assistance"]):
+    if any(
+        word in combined_text
+        for word in ["help me", "can you help", "need help", "assistance"]
+    ):
         context_tags.append("help")
-    
+
     # Only add learning tag for explicit learning conversations
-    if any(word in combined_text for word in ["learn", "teach", "explain", "understand", "study"]):
+    if any(
+        word in combined_text
+        for word in ["learn", "teach", "explain", "understand", "study"]
+    ):
         context_tags.append("learning")
-    
+
     # Only add problem tag for explicit problem-solving
-    if any(word in combined_text for word in ["problem", "issue", "error", "fix", "solve", "bug"]):
+    if any(
+        word in combined_text
+        for word in ["problem", "issue", "error", "fix", "solve", "bug"]
+    ):
         context_tags.append("problem")
-    
+
     # Remove duplicate tags and return
     return list(set(context_tags))
 
@@ -1423,6 +1948,7 @@ async def parse_action(action: dict, bot, message):
 
     # First allow the active LLM plugin to handle custom actions
     import core.plugin_instance as plugin_instance
+
     llm_plugin = getattr(plugin_instance, "plugin", None)
     if llm_plugin:
         try:
@@ -1450,12 +1976,16 @@ async def parse_action(action: dict, bot, message):
                     if inspect.iscoroutine(result):
                         await result
                     action_handled = True
-                    log_debug(f"[action_parser] Action {action_type} handled by {plugin.__class__.__name__}")
+                    log_debug(
+                        f"[action_parser] Action {action_type} handled by {plugin.__class__.__name__}"
+                    )
                     break  # Stop after first successful handler
                 elif hasattr(plugin, "handle_custom_action"):
                     await plugin.handle_custom_action(action_type, payload)
                     action_handled = True
-                    log_debug(f"[action_parser] Action {action_type} handled by {plugin.__class__.__name__} (custom)")
+                    log_debug(
+                        f"[action_parser] Action {action_type} handled by {plugin.__class__.__name__} (custom)"
+                    )
                     break  # Stop after first successful handler
                 else:
                     log_warning(
@@ -1465,11 +1995,13 @@ async def parse_action(action: dict, bot, message):
                 log_error(
                     f"[action_parser] Error delegating {action_type} to plugin {plugin.__class__.__name__}: {repr(e)}"
                 )
-        
+
         if action_handled:
             log_debug(f"[action_parser] Action {action_type} successfully handled")
         else:
-            log_warning(f"[action_parser] No plugin successfully handled action {action_type}")
+            log_warning(
+                f"[action_parser] No plugin successfully handled action {action_type}"
+            )
         return
 
     log_warning(
@@ -1484,12 +2016,14 @@ async def initialize_core(notify_fn=None):
     return await core_initializer.initialize_all(notify_fn=notify_fn)
 
 
-def get_action_plugin_instructions() -> dict[str, dict]:
+def get_action_plugin_instructions() -> dict[str, Any]:
     """Gather prompt instructions from all action plugins."""
-    instructions: dict[str, str] = {}
+    instructions: dict[str, Any] = {}
     try:
         for plugin in _load_action_plugins():
-            if hasattr(plugin, "get_supported_actions") and hasattr(plugin, "get_prompt_instructions"):
+            if hasattr(plugin, "get_supported_actions") and hasattr(
+                plugin, "get_prompt_instructions"
+            ):
                 supported = plugin.get_supported_actions()
                 for action in supported:
                     try:
@@ -1501,78 +2035,115 @@ def get_action_plugin_instructions() -> dict[str, dict]:
                             f"[action_parser] Plugin {plugin.__class__.__name__} missing prompt instructions for '{action}'"
                         )
     except Exception as e:
-        log_error(f"[action_parser] Error collecting plugin prompt instructions: {repr(e)}")
+        log_error(
+            f"[action_parser] Error collecting plugin prompt instructions: {repr(e)}"
+        )
 
     return instructions
 
 
-async def gather_static_injections(message=None, context_memory=None) -> dict:
-    """Collect static injections from plugins supporting the ``static_inject`` action.
+async def gather_static_injections(message=None, context_memory=None):
+    """Gathers static contextual data from all plugins that support 'static_inject'.
 
-    Parameters
-    ----------
-    message : optional
-        The original message associated with the prompt. Passed to plugins that
-        accept it for participant resolution.
-    context_memory : optional
-        Memory structure containing recent chat messages. Also passed to
-        plugins if they accept it.
+    This is used to build the context for every prompt with information like
+    date, time, weather, persona, etc.
     """
+    injections = {}
+    loaded_plugins = _load_action_plugins()
+    log_info(
+        f"[action_parser] gather_static_injections: Querying {len(loaded_plugins)} plugins"
+    )
 
-    injections: dict = {}
-    log_debug(f"[action_parser] 🔍 gather_static_injections() CALLED")
-    try:
-        plugins_list = _load_action_plugins()
-        log_debug(f"[action_parser] Found {len(list(plugins_list))} plugins to check for static_inject")
-        plugins_list = _load_action_plugins()  # Reload since we consumed it in len()
-        
-        for plugin in plugins_list:
-            try:
-                supported = False
-                if hasattr(plugin, "get_supported_action_types"):
-                    types = plugin.get_supported_action_types()
-                    if types and "static_inject" in types:
-                        supported = True
-                elif hasattr(plugin, "get_supported_actions"):
-                    acts = plugin.get_supported_actions()
-                    if isinstance(acts, dict):
-                        supported = "static_inject" in acts
-                    elif isinstance(acts, (list, set, tuple)):
-                        supported = "static_inject" in acts
-                
-                has_method = hasattr(plugin, "get_static_injection")
-                log_debug(f"[action_parser] Plugin {plugin.__class__.__name__}: supported={supported}, has_method={has_method}")
-                
-                if not supported or not has_method:
-                    continue
+    tasks = []
+    plugin_names = []
 
-                log_debug(f"[action_parser] 🎯 Calling get_static_injection() on {plugin.__class__.__name__}")
-                
-                # Pass message and context_memory if the plugin expects them
+    for plugin in loaded_plugins:
+        try:
+            supported = False
+            if hasattr(plugin, "get_supported_action_types"):
+                supported = "static_inject" in (
+                    plugin.get_supported_action_types() or []
+                )
+            if not supported and hasattr(plugin, "get_supported_actions"):
+                actions = plugin.get_supported_actions()
+                supported = isinstance(actions, dict) and "static_inject" in actions
+
+            has_method = hasattr(plugin, "get_static_injection")
+
+            if not supported or not has_method:
+                continue
+
+            # Wrapper to handle both sync/async and different signatures
+            async def _run_injection(p=plugin):
+                name = p.__class__.__name__
+                start = time.time()
                 try:
-                    result = plugin.get_static_injection(message, context_memory)
-                except TypeError:
-                    try:
-                        result = plugin.get_static_injection()
-                    except Exception as inner_e:
-                        log_error(f"[action_parser] Error calling get_static_injection() on {plugin.__class__.__name__}: {inner_e}")
-                        continue
+                    # Enforce a strict timeout per-plugin to prevent hangs
+                    async def _inner():
+                        # Try with arguments first
+                        try:
+                            res = p.get_static_injection(message, context_memory)
+                        except TypeError:
+                            # Fallback to no arguments
+                            res = p.get_static_injection()
 
-                if inspect.iscoroutine(result):
-                    result = await result
-                    
-                log_debug(f"[action_parser] ✅ Got result from {plugin.__class__.__name__}: {list(result.keys()) if isinstance(result, dict) else type(result)}")
-                
-                if isinstance(result, dict):
-                    injections.update(result)
-            except Exception as e:
+                        if inspect.iscoroutine(res):
+                            res = await res
+                        return res
+
+                    try:
+                        res = await asyncio.wait_for(_inner(), timeout=5.0)
+                    except asyncio.TimeoutError:
+                        log_error(
+                            f"[action_parser] ⏰ get_static_injection() on {name} timed out after 5s"
+                        )
+                        return {}
+
+                    duration = time.time() - start
+                    if duration > 0.1:
+                        log_info(
+                            f"[action_parser] ⚠️ get_static_injection() on {name} took {duration:.3f}s"
+                        )
+                    else:
+                        log_debug(
+                            f"[action_parser] ✅ get_static_injection() on {name} took {duration:.3f}s"
+                        )
+
+                    return res if isinstance(res, dict) else {}
+                except Exception as e:
+                    log_error(
+                        f"[action_parser] Error in get_static_injection() on {name}: {e}"
+                    )
+                    return {}
+
+            tasks.append(_run_injection())
+            plugin_names.append(plugin.__class__.__name__)
+
+        except Exception as e:
+            log_error(f"[action_parser] Error preparing injection for {plugin}: {e}")
+
+    if not tasks:
+        # Return empty dict if no injections
+        return {}
+
+    log_debug(
+        f"[action_parser] Running {len(tasks)} injections in parallel: {plugin_names}"
+    )
+    try:
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for res in results:
+            if isinstance(res, dict):
+                injections.update(res)
+            elif isinstance(res, Exception):
                 log_error(
-                    f"[action_parser] Error gathering static injection from {plugin.__class__.__name__}: {e}"
+                    f"[action_parser] asyncio.gather task raised exception: {res}"
                 )
     except Exception as e:
-        log_error(f"[action_parser] Error collecting static injections: {e}")
-    
-    log_info(f"[action_parser] 📊 gather_static_injections() returning {len(injections)} keys: {list(injections.keys())}")
+        log_error(f"[action_parser] Error in asyncio.gather results: {e}")
+
+    log_info(
+        f"[action_parser] 📊 gather_static_injections() returning {len(injections)} keys: {list(injections.keys())}"
+    )
     return injections
 
 
@@ -1590,6 +2161,7 @@ def _is_restricted_action(action_type: str) -> bool:
         pass
     try:  # Check interface actions as well
         from core.core_initializer import INTERFACE_REGISTRY
+
         for iface in INTERFACE_REGISTRY.values():
             if hasattr(iface, "get_supported_actions"):
                 actions = iface.get_supported_actions()
@@ -1614,9 +2186,17 @@ __all__ = [
 ]
 
 
-async def corrector_orchestrator(text: str, context: dict, bot, message, max_retries: int | None = None, completed_actions: list = None, force_correction: bool = False):
+async def corrector_orchestrator(
+    text: str,
+    context: dict,
+    bot,
+    message,
+    max_retries: int | None = None,
+    completed_actions: list | None = None,
+    force_correction: bool = False,
+):
     """Process model text: parse JSON actions or run the corrector loop.
-    
+
     Args:
         text: The text to parse/correct
         context: Context information
@@ -1633,18 +2213,28 @@ async def corrector_orchestrator(text: str, context: dict, bot, message, max_ret
         False -> blocked (corrector exhausted or not allowed)
         None  -> not JSON-like; caller may forward as plain text
     """
-    # Only handle messages that explicitly originate from the LLM.
-    # Transport layer / llm engines must set `message.from_llm = True` when passing
-    # LLM outputs into this orchestrator. Any message without this flag is ignored
-    # here so system- or interface-originated payloads are not processed.
-    if message is not None and not getattr(message, "from_llm", False):
-        log_debug("[corrector_orchestrator] Ignoring message: not marked as LLM-origin (message.from_llm is False or missing)")
+    # Only handle messages that explicitly originate from the AI/cortex layer.
+    # We signal this with a single flag `from_cortex` on the message or in the
+    # context; legacy `from_cortex`/`from_ai` names are no longer used.
+    origin_flag = False
+    try:
+        origin_flag = bool(
+            getattr(message, "from_cortex", False)
+            or (context or {}).get("from_cortex", False)
+        )
+    except Exception:
+        origin_flag = False
+
+    if message is not None and not origin_flag:
+        log_debug(
+            "[corrector_orchestrator] Ignoring message: not marked as cortex-origin"
+        )
         return None
 
     # Determine max retries
     if max_retries is None:
-            max_retries = int(CORRECTOR_RETRIES)
-    
+        max_retries = int(CORRECTOR_RETRIES)
+
     # Initialize completed_actions if not provided
     if completed_actions is None:
         completed_actions = []
@@ -1668,55 +2258,121 @@ async def corrector_orchestrator(text: str, context: dict, bot, message, max_ret
         elif isinstance(parsed, dict) and "type" in parsed:
             actions = [parsed]
         else:
-            log_warning(f"[corrector_orchestrator] Unrecognized JSON structure: {parsed}")
+            log_warning(
+                f"[corrector_orchestrator] Unrecognized JSON structure: {parsed}"
+            )
             return None
-        
+
         # Filter out already completed actions to avoid duplicates (e.g., double diary entries)
         if completed_actions:
             original_count = len(actions)
-            actions = [a for a in actions if a.get('type') not in completed_actions]
+            actions = [a for a in actions if a.get("type") not in completed_actions]
             if len(actions) < original_count:
-                log_info(f"[corrector_orchestrator] Filtered out {original_count - len(actions)} already-completed actions: {completed_actions}")
-        
+                log_info(
+                    f"[corrector_orchestrator] Filtered out {original_count - len(actions)} already-completed actions: {completed_actions}"
+                )
+
         # If no actions left after filtering, we're done
         if not actions:
-            log_info("[corrector_orchestrator] All actions were already completed - nothing to regenerate")
+            log_info(
+                "[corrector_orchestrator] All actions were already completed - nothing to regenerate"
+            )
             return True
+
+        # If the parsed LLM JSON contains extra top-level keys (other than
+        # 'actions'), treat each unregistered key as an invalid action. This
+        # keeps validation strictly aligned to the registry of actions and
+        # avoids hard-coded key checks. Components may register allowed
+        # response metadata keys via the validation registry.
+        try:
+            if isinstance(parsed, dict):
+                from core.validation_registry import get_validation_registry
+
+                allowed_metadata = (
+                    get_validation_registry().get_response_metadata_keys()
+                )
+                extra_keys = [
+                    k
+                    for k in parsed.keys()
+                    if k != "actions" and k not in allowed_metadata
+                ]
+
+                if extra_keys:
+                    synthetic_actions = []
+                    for key in extra_keys:
+                        value = parsed.get(key)
+                        payload = value if isinstance(value, dict) else {"value": value}
+                        synthetic_actions.append({"type": key, "payload": payload})
+
+                    actions.extend(synthetic_actions)
+                    log_info(
+                        f"[corrector_orchestrator] Added {len(synthetic_actions)} synthetic actions for unregistered top-level keys: {', '.join(extra_keys)}"
+                    )
+        except Exception as _e:
+            log_debug(
+                f"[corrector_orchestrator] Error while processing top-level keys: {_e}"
+            )
 
         try:
             result = await run_actions(actions, context, bot, message)
-            # Check if any actions were processed successfully
+            # If at least one action was processed successfully, consider it a success
+            # even when other actions produced errors (partial success).  We must check
+            # `processed` BEFORE `errors` to preserve this invariant.
             if isinstance(result, dict) and result.get("processed"):
-                log_info('[corrector_orchestrator] Actions executed successfully - interrupting correction loop')
+                log_info(
+                    "[corrector_orchestrator] Actions executed successfully - interrupting correction loop"
+                )
                 return True
-            elif isinstance(result, dict) and result.get("errors"):
-                log_warning(f'[corrector_orchestrator] Actions failed with errors: {result.get("errors")}')
+            # No actions processed.  If there are errors, attempt trivial auto-fix
+            # (e.g. numeric-string → int coercion) before giving up entirely.
+            if isinstance(result, dict) and result.get("errors"):
+                if _attempt_auto_fix(actions):
+                    log_info(
+                        "[corrector_orchestrator] Attempting automatic fix for minor errors"
+                    )
+                    result2 = await run_actions(actions, context, bot, message)
+                    if isinstance(result2, dict) and result2.get("processed"):
+                        log_info(
+                            "[corrector_orchestrator] Automatic fix succeeded; continuing without LLM correction"
+                        )
+                        return True
+                log_warning(
+                    f"[corrector_orchestrator] Actions failed with errors: {result.get('errors')}"
+                )
                 return False
-            else:
-                log_info('[corrector_orchestrator] Actions executed successfully - interrupting correction loop')
-                return True
+            # No processed and no explicit errors – treat as success (empty but valid)
+            log_info(
+                "[corrector_orchestrator] Actions executed successfully - interrupting correction loop"
+            )
+            return True
         except Exception as e:
             log_warning(f"[corrector_orchestrator] Failed to run actions: {e}")
             return False
 
     # Not parsed initially. If not JSON-like, check if we should force correction
-    if '{' not in (text or '') and '[' not in (text or ''):
+    if "{" not in (text or "") and "[" not in (text or ""):
         if not force_correction:
             # Not JSON-like and not forced -> indicate to caller to forward as plain text
             return None
         else:
             # force_correction=True: LLM returned plain text violating JSON-only rule
             # Fall through to run corrector loop
-            log_info("[corrector_orchestrator] Plain text detected with force_correction=True - running corrector loop to request JSON format")
+            log_info(
+                "[corrector_orchestrator] Plain text detected with force_correction=True - running corrector loop to request JSON format"
+            )
 
     # JSON-like but not valid (or forced correction for plain text) -> run corrector loop here
     # Build context for corrector, including completed actions
     if completed_actions:
-        log_info(f"[corrector_orchestrator] Starting correction loop - actions already completed: {completed_actions}")
+        log_info(
+            f"[corrector_orchestrator] Starting correction loop - actions already completed: {completed_actions}"
+        )
         context = dict(context) if context else {}
-        context['completed_actions'] = completed_actions
-        context['instruction'] = f"The previous response had corrupted JSON. These actions were already successfully executed: {', '.join(completed_actions)}. Please regenerate ONLY the missing/corrupted actions. Do NOT regenerate: {', '.join(completed_actions)}"
-    
+        context["completed_actions"] = completed_actions
+        context["instruction"] = (
+            f"The previous response had corrupted JSON. These actions were already successfully executed: {', '.join(completed_actions)}. Please regenerate ONLY the missing/corrupted actions. Do NOT regenerate: {', '.join(completed_actions)}"
+        )
+
     tried_texts = set()
     attempt = 0
     while attempt < max_retries:
@@ -1724,65 +2380,93 @@ async def corrector_orchestrator(text: str, context: dict, bot, message, max_ret
         if not _should_retry(message, max_retries=max_retries):
             retry_key = _get_retry_key(message)
             retry_count, _ = _retry_tracker.get(retry_key, (0, 0))
-            log_warning(f"[corrector_orchestrator] Max retries ({retry_count}) reached for {retry_key}; blocking")
+            log_warning(
+                f"[corrector_orchestrator] Max retries ({retry_count}) reached for {retry_key}; blocking"
+            )
             return False
 
         # increment retry counter
-        attempt_count = _increment_retry(message)
+        _increment_retry(message)
         attempt += 1
 
         # Call the corrector (transport-layer middleware)
         try:
             import core.transport_layer as transport
+
             # Add message to context for error handling
             context = dict(context) if context else {}
-            context['message'] = message
-            # Pass interface_path from original message to maintain conversation continuity
-            interface_path = getattr(message, 'interface_path', None)
-            corrected = await transport.run_corrector_middleware(text, bot=bot, context=context, chat_id=getattr(message, 'chat_id', None), interface_path=interface_path)
+            context["message"] = message
+            # Pass thread_id from original message to maintain conversation continuity
+            corrected = await transport.run_corrector_middleware(
+                text,
+                bot=bot,
+                context=context,
+                chat_id=getattr(message, "chat_id", None),
+                thread_id=getattr(message, "thread_id", None),
+            )
         except Exception as e:
             log_warning(f"[corrector_orchestrator] Corrector invocation failed: {e}")
             return False
 
         if corrected is None:
-            log_debug(f"[corrector_orchestrator] Corrector returned None on attempt {attempt}")
+            log_debug(
+                f"[corrector_orchestrator] Corrector returned None on attempt {attempt}"
+            )
             # corrected failed; loop will check retry and possibly continue
             text = text  # keep original or last value
             continue
 
         # If corrected same as previous tried value, avoid infinite loop
         if corrected in tried_texts:
-            log_warning("[corrector_orchestrator] Corrector returned previously seen output; attempting to execute already-parsed actions if available")
+            log_warning(
+                "[corrector_orchestrator] Corrector returned previously seen output; attempting to execute already-parsed actions if available"
+            )
             # Try to execute already-parsed actions from the original text instead of blocking completely
             if parsed is not None:
-                log_info("[corrector_orchestrator] Attempting to execute actions from originally-parsed JSON before blocking")
+                log_info(
+                    "[corrector_orchestrator] Attempting to execute actions from originally-parsed JSON before blocking"
+                )
                 # Build actions list
                 if isinstance(parsed, dict) and "actions" in parsed:
-                    actions = parsed["actions"] if isinstance(parsed["actions"], list) else None
+                    actions = (
+                        parsed["actions"]
+                        if isinstance(parsed["actions"], list)
+                        else None
+                    )
                 elif isinstance(parsed, list):
                     actions = parsed
                 elif isinstance(parsed, dict) and "type" in parsed:
                     actions = [parsed]
                 else:
                     actions = None
-                
+
                 if actions:
                     # Filter out already-completed actions
                     if completed_actions:
                         original_count = len(actions)
-                        actions = [a for a in actions if a.get('type') not in completed_actions]
-                        log_info(f"[corrector_orchestrator] Filtered {original_count - len(actions)} already-completed actions")
-                    
+                        actions = [
+                            a for a in actions if a.get("type") not in completed_actions
+                        ]
+                        log_info(
+                            f"[corrector_orchestrator] Filtered {original_count - len(actions)} already-completed actions"
+                        )
+
                     if actions:
                         try:
                             result = await run_actions(actions, context, bot, message)
                             if isinstance(result, dict) and result.get("processed"):
-                                log_info('[corrector_orchestrator] Successfully executed originally-parsed actions despite loop')
+                                log_info(
+                                    "[corrector_orchestrator] Successfully executed originally-parsed actions despite loop"
+                                )
                                 return True
                         except Exception as e:
-                            log_warning(f"[corrector_orchestrator] Failed to execute originally-parsed actions: {e}")
-            
-            log_warning("[corrector_orchestrator] No valid actions to execute; blocking due to loop")
+                            log_warning(
+                                f"[corrector_orchestrator] Failed to execute originally-parsed actions: {e}"
+                            )
+
+            log_warning(
+                "[corrector_orchestrator] No valid actions to execute; blocking due to loop"
+            )
             return False
         tried_texts.add(corrected)
 
@@ -1796,37 +2480,53 @@ async def corrector_orchestrator(text: str, context: dict, bot, message, max_ret
         if parsed2 is not None:
             # run actions
             if isinstance(parsed2, dict) and "actions" in parsed2:
-                actions = parsed2["actions"] if isinstance(parsed2["actions"], list) else None
+                actions = (
+                    parsed2["actions"] if isinstance(parsed2["actions"], list) else None
+                )
                 if actions is None:
-                    log_warning("[corrector_orchestrator] corrected actions field must be a list")
+                    log_warning(
+                        "[corrector_orchestrator] corrected actions field must be a list"
+                    )
                     return False
             elif isinstance(parsed2, list):
                 actions = parsed2
             elif isinstance(parsed2, dict) and "type" in parsed2:
                 actions = [parsed2]
             else:
-                log_warning(f"[corrector_orchestrator] Unrecognized corrected JSON structure: {parsed2}")
+                log_warning(
+                    f"[corrector_orchestrator] Unrecognized corrected JSON structure: {parsed2}"
+                )
                 return False
 
             try:
                 result = await run_actions(actions, context, bot, message)
                 # Check if any actions were processed successfully
                 if isinstance(result, dict) and result.get("processed"):
-                    log_info('[corrector_orchestrator] Corrected actions executed successfully - interrupting correction loop')
+                    log_info(
+                        "[corrector_orchestrator] Corrected actions executed successfully - interrupting correction loop"
+                    )
                     return True
                 elif isinstance(result, dict) and result.get("errors"):
-                    log_warning(f'[corrector_orchestrator] Corrected actions failed with errors: {result.get("errors")}')
+                    log_warning(
+                        f"[corrector_orchestrator] Corrected actions failed with errors: {result.get('errors')}"
+                    )
                     return False
                 else:
-                    log_info('[corrector_orchestrator] Corrected actions executed successfully - interrupting correction loop')
+                    log_info(
+                        "[corrector_orchestrator] Corrected actions executed successfully - interrupting correction loop"
+                    )
                     return True
             except Exception as e:
-                log_warning(f"[corrector_orchestrator] Failed to run actions after correction: {e}")
+                log_warning(
+                    f"[corrector_orchestrator] Failed to run actions after correction: {e}"
+                )
                 return False
 
         # Not parsed; set text to corrected and retry
         text = corrected
 
     # Exhausted retries
-    log_warning(f"[corrector_orchestrator] Exhausted {max_retries} correction attempts; blocking message for chat {getattr(message, 'chat_id', None)}")
+    log_warning(
+        f"[corrector_orchestrator] Exhausted {max_retries} correction attempts; blocking message for chat {getattr(message, 'chat_id', None)}"
+    )
     return False

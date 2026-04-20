@@ -1,7 +1,4 @@
-LLM Engines
-===========
 
-The Synthetic Heart supports multiple language model backends through a modular engine system. Engines are automatically discovered and can be switched at runtime using the ``/llm`` command. This design ensures that LLM implementations are completely decoupled from the core system.
 
 Engine Architecture
 -------------------
@@ -13,6 +10,26 @@ All LLM engines follow a consistent architecture:
 - **Capability Reporting**: Engines declare their supported models and features
 - **Dynamic Switching**: Active engine can be changed without restarting the system
 - **Unified Limits**: Engines report their constraints (token limits, modalities, etc.)
+
+Agent Hooks (optional)
+~~~~~~~~~~~~~~~~~~~~~~~
+
+Engines may optionally implement a small set of agent hooks to provide richer,
+engine-specific integrations for the Agent plugin. These hooks are optional and
+engines that do not implement them will degrade gracefully — the Agent will
+fall back to calling ``plugin_instance.handle_incoming_message()`` and the
+plugin-level handlers.
+
+Recommended methods (all optional):
+
+- ``supports_agent() -> bool`` — return True if the engine provides agentic features
+- ``attach_agent(agent_plugin)`` / ``detach_agent(agent_plugin)`` — lifecycle hooks
+- ``agent_prepare_prompt(context) -> dict`` — provide additional structured context
+- ``agent_execute(action_dict, context) -> dict`` — optional engine-level action executor
+
+Note: These hooks are intended to be lightweight extensions, not required
+capabilities. The Agent integration remains fully functional with engines that
+do nothing more than implement the standard ``AIPluginBase`` interface.
 
 Selenium Plugin Architecture
 -----------------------------
@@ -111,6 +128,10 @@ Selenium-based LLM plugins can function in guest mode (without user authenticati
 
 Available Engines
 -----------------
+
+**API Engines:**
+
+* ``gemini_api`` – Direct REST API integration with Google Gemini. Supports multimodal input (images, audio, video, documents), correction/retry loops, and agentic hooks. See :doc:`gemini_api_engine` for full documentation.
 
 **Stable Engines:**
 
@@ -213,7 +234,7 @@ The ``selenium_gemini`` engine controls a Google Gemini browser session using th
 
 1. Access ``http://<host>:5006`` to sign in to your Google account
 2. Complete any authentication challenges
-3. Switch to this engine with ``/llm selenium_gemini``
+3. Switch to this engine with ``/cortex selenium_gemini`` (deprecated alias: ``/llm selenium_gemini``)
 
 Selenium Grok Engine
 --------------------
@@ -237,7 +258,7 @@ The ``selenium_grok`` engine controls an xAI Grok browser session using the stan
 
 1. Access ``http://<host>:5006`` to log in to X/Grok
 2. Complete login and any authentication challenges
-3. Switch to this engine with ``/llm selenium_grok``
+3. Switch to this engine with ``/cortex selenium_grok`` (deprecated alias: ``/llm selenium_grok``)
 
 Engine Registration and Discovery
 ---------------------------------
@@ -249,6 +270,18 @@ LLM engines are automatically discovered through the core initializer:
 3. **Registry Registration**: Engines register with the LLM registry
 4. **Capability Indexing**: Engine capabilities are indexed for runtime selection
 5. **Dynamic Loading**: Engines can be loaded/unloaded without system restart
+
+Labeling engines for the WebUI
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Engines may provide a short, human-readable label used by the WebUI to help operators
+choose the right engine for a task. Provide a label by either:
+
+- exporting ``ENGINE_LABEL = "short description"`` in the engine module, or
+- defining ``engine_label = "short description"`` on ``PLUGIN_CLASS``
+- or passing ``label="short description"`` to ``CortexRegistry.register_engine_module``
+
+These labels are surfaced in the Components page under "Cortex Engines" and are intended
+to be brief and informative (one sentence).
 
 Developing LLM Engines
 ----------------------
@@ -265,7 +298,13 @@ Creating a new LLM engine requires extending ``AIPluginBase`` and implementing t
            self.notify_fn = notify_fn
 
        async def handle_incoming_message(self, bot, message, prompt):
-           """Process a message and generate response."""
+           """Process a message and generate response.
+
+           **IMPORTANT:** this method **must** return a plain string.  The core
+           transport and corrector layers assume a text response and will crash
+           if they receive an integer, dict, or other non-str value.  Engines
+           that send structured data should serialize it to JSON first.
+           """
            # Generate response using your LLM
            reply = await self.generate_response(prompt)
            
@@ -378,22 +417,33 @@ Suggested hooks for engines:
 Engines must not raise exceptions if the Agent plugin is absent; calls should be
 protected and degrade safely.
 
-Engine Integration
-------------------
+Engine Integration (Cortex)
+----------------------------
 
-Once created, register your engine with the LLM registry:
+Engines are now organized under the new **Cortex** abstraction. A cortex has a *kind* (e.g., ``llm``, ``live``, ``agent``) and one or more registered engines. Engines should register themselves with the Cortex registry.
 
 .. code-block:: python
 
-   from core.llm_registry import get_llm_registry
-   get_llm_registry().register_engine_module("my_engine", "llm_engines.my_engine")
+   from core.cortex_registry import get_cortex_registry
+   cortex = get_cortex_registry()
+   # Register an LLM engine (cortex='llm') or a live engine (cortex='live')
+   cortex.register_engine_module("my_engine", "cortex.llm_engine.my_engine", cortex='llm')
 
-Switch to your engine at runtime:
+Switch to a cortex engine at runtime using the Components tab in the WebUI
+or via the CLI/commands (the UI now asks for the *cortex kind* first, then an engine):
 
 .. code-block:: text
 
-   /llm my_engine
+   # Select cortex kind (e.g., llm)
+   /components set_active_cortex llm
 
+   # Select specific engine for the cortex
+   /components set_active_cortex_engine my_engine
+
+Notes
+-----
+- Use the Cortex registry helpers to discover engines and their capabilities: ``get_cortex_registry().get_available_engines(cortex)``.
+- Engines may optionally declare capability flags (vision, audio, actions, bidi, low_latency) when registered; these are used to choose the best engine for a given task.
 Engine Capabilities
 -------------------
 
@@ -622,7 +672,7 @@ user can authenticate via the service's web interface.
 
 Endpoint:
 
-``POST /api/components/llm/login``
+``POST /api/components/cortex/login``
 
 Request JSON:
 

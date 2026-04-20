@@ -14,6 +14,17 @@ if [ -f "$ENV_FILE" ]; then
     set +a
 fi
 
+# VENV_DIR may be set by the image; default to /opt/venv but fall back to /app/venv
+# for backwards compatibility if present (e.g., older images)
+VENV_DIR="${VENV_DIR:-/opt/venv}"
+if [ ! -x "$VENV_DIR/bin/python" ]; then
+    # If VENV_DIR isn't present (e.g., user bind-mounted /app and removed symlink)
+    # fall back to /app/venv to preserve older behavior.
+    if [ -x "/app/venv/bin/python" ]; then
+        VENV_DIR="/app/venv"
+    fi
+fi
+
 # Ensure logs directory exists and is writable by the runtime user
 # This handles the common case where the host bind-mount (./logs:/app/logs)
 # is owned by root or another UID and would otherwise prevent the app from
@@ -53,15 +64,15 @@ case "$MODE" in
         if [ "${1:-}" = "--as-service" ]; then
             shift
             log "Running main.py in service mode"
-            exec /app/venv/bin/python /app/main.py --service "$@"
+            exec "$VENV_DIR/bin/python" /app/main.py --service "$@"
         else
             log "Running main.py interactively"
-            exec /app/venv/bin/python /app/main.py "$@"
+            exec "$VENV_DIR/bin/python" /app/main.py "$@"
         fi
         ;;
     notify)
         log "Sending test notification"
-        /app/venv/bin/python - <<'PY'
+        "$VENV_DIR/bin/python" - <<'PY'
 import asyncio
 from telegram import Bot
 from core.config import BOT_TOKEN, TELEGRAM_TRAINER_ID

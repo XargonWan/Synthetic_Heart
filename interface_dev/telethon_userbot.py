@@ -1,40 +1,37 @@
-from telethon import TelegramClient, events, Button
-from telethon.tl.types import PeerUser, PeerChat, PeerChannel
+from telethon import TelegramClient, events
+
 try:
     from dotenv import load_dotenv  # type: ignore
 except Exception:  # pragma: no cover - fallback if python-dotenv not installed
+
     def load_dotenv(*args, **kwargs):
         return False
+
+
 import os
 import re
 import asyncio
-from collections import deque
-import time
 import core.plugin_instance as plugin_instance
 from core.logging_utils import log_debug, log_info, log_warning, log_error
-from core.message_sender import detect_media_type, extract_response_target
-from core.config import set_active_llm, list_available_llms, get_active_llm
-from telethon import TelegramClient, events, Button
-from telethon.tl.types import PeerUser, PeerChat, PeerChannel
+from core.config import (
+    switch_active_cortex_engine,
+    list_available_cortex_engines,
+    get_active_cortex_engine,
+)
+
 try:
     from dotenv import load_dotenv  # type: ignore
 except Exception:  # pragma: no cover - fallback if python-dotenv not installed
+
     def load_dotenv(*args, **kwargs):
         return False
-import os
-import re
-import asyncio
-from collections import deque
-import core.plugin_instance as plugin_instance
-from core.logging_utils import log_debug, log_info, log_warning, log_error
-from core.message_sender import detect_media_type, extract_response_target
-from core.config import set_active_llm, list_available_llms, get_active_llm
+
+
 from core.interfaces_registry import get_interface_registry
+
 # from core import blocklist, response_proxy, say_proxy, recent_chats  # Moved to plugins
 from plugins.blocklist import block_user, unblock_user, get_blocked_users
 from core import recent_chats  # For command functions only, not for tracking
-from core import response_proxy, say_proxy
-from core.context import context_command
 from core.auto_response import request_llm_delivery
 from core.core_initializer import register_interface, core_initializer
 
@@ -48,30 +45,37 @@ from core.config_manager import config_registry
 TELEGRAM_TRAINER_ID_STR = []
 TELEGRAM_TRAINER_ID = None
 
+
 def _update_trainer_ids(raw_value: str | None):
     global TELEGRAM_TRAINER_ID_STR, TELEGRAM_TRAINER_ID
     s = str(raw_value) if raw_value is not None else ""
-    TELEGRAM_TRAINER_ID_STR = s.split(',') if s else []
+    TELEGRAM_TRAINER_ID_STR = s.split(",") if s else []
     TELEGRAM_TRAINER_ID = None
     for trainer_config in TELEGRAM_TRAINER_ID_STR:
-        if trainer_config.startswith('telegram_userbot:'):
+        if trainer_config.startswith("telegram_userbot:"):
             try:
-                TELEGRAM_TRAINER_ID = int(trainer_config.split(':')[1])
+                TELEGRAM_TRAINER_ID = int(trainer_config.split(":")[1])
                 break
             except (ValueError, IndexError):
-                log_warning(f"[telethon_userbot] Invalid trainer ID format in TRAINER_IDS: {trainer_config}")
+                log_warning(
+                    f"[telethon_userbot] Invalid trainer ID format in TRAINER_IDS: {trainer_config}"
+                )
+
 
 # Initialize from current config and watch for updates
-_update_trainer_ids(config_registry.get_value('TRAINER_IDS', ''))
-config_registry.add_listener('TRAINER_IDS', _update_trainer_ids)
+_update_trainer_ids(config_registry.get_value("TRAINER_IDS", ""))
+config_registry.add_listener("TRAINER_IDS", _update_trainer_ids)
+
 
 def is_trainer(user_id: int) -> bool:
     """Check if user is the trainer for this Telegram interface."""
-    return _interface_registry.is_trainer('telegram_userbot', user_id)
+    return _interface_registry.is_trainer("telegram_userbot", user_id)
+
 
 def get_trainer_id() -> int:
     """Get the trainer ID for this Telegram interface."""
-    return _interface_registry.get_trainer_id('telegram_userbot') or TELEGRAM_TRAINER_ID
+    return _interface_registry.get_trainer_id("telegram_userbot") or TELEGRAM_TRAINER_ID
+
 
 load_dotenv()
 
@@ -80,7 +84,6 @@ API_ID = os.getenv("API_ID")
 API_HASH = os.getenv("API_HASH")
 SESSION = os.getenv("SESSION", "synth_userbot")
 
-say_sessions = {}
 context_memory = {}
 last_selected_chat = {}
 message_id = None
@@ -89,45 +92,56 @@ client = None
 if API_ID and API_HASH and TELEGRAM_TRAINER_ID:
     client = TelegramClient(SESSION, int(API_ID), API_HASH)
     register_interface("telegram_userbot", client)
-    
+
     # Register in the new registry system (avoid duplicate registration)
-    _interface_registry.register_interface('telegram_userbot', client)
-    _interface_registry.set_trainer_id('telegram_userbot', TELEGRAM_TRAINER_ID)
-    log_info(f"[telethon_userbot] Registered telegram_userbot interface with trainer ID {TELEGRAM_TRAINER_ID}")
-    
+    _interface_registry.register_interface("telegram_userbot", client)
+    _interface_registry.set_trainer_id("telegram_userbot", TELEGRAM_TRAINER_ID)
+    log_info(
+        f"[telethon_userbot] Registered telegram_userbot interface with trainer ID {TELEGRAM_TRAINER_ID}"
+    )
+
     log_info("[telethon_userbot] Registered TelethonUserbot")
 elif not API_ID or not API_HASH:
     log_warning("[telethon_userbot] API_ID or API_HASH missing; userbot disabled")
 else:
-    log_warning("[telethon_userbot] TELEGRAM_TRAINER_ID not configured; userbot disabled")
+    log_warning(
+        "[telethon_userbot] TELEGRAM_TRAINER_ID not configured; userbot disabled"
+    )
+
 
 def optional_on(*args, **kwargs):
     def decorator(func):
         if client:
             client.on(*args, **kwargs)(func)
         return func
+
     return decorator
 
+
 def escape_markdown(text):
-    return re.sub(r'([_*\[\]()~`>#+=|{}.!-])', r'\\\1', text)
+    return re.sub(r"([_*\[\]()~`>#+=|{}.!-])", r"\\\1", text)
+
 
 async def ensure_plugin_loaded(event):
     if plugin_instance.plugin is None:
         try:
-            current = await get_active_llm()
+            current = await get_active_cortex_engine()
             if current:
                 await plugin_instance.load_plugin(current)
         except Exception as e:
-            log_warning(f"[telethon_userbot] Failed to autoload LLM: {e}")
+            log_warning(f"[telethon_userbot] Failed to autoload Cortex: {e}")
         if plugin_instance.plugin is None:
             try:
                 await plugin_instance.load_plugin("manual")
                 log_warning("[telethon_userbot] Falling back to ManualAIPlugin")
             except Exception:
-                log_error("No LLM plugin loaded.")
-                await event.reply("⚠️ No active LLM plugin. Use .llm to select one.")
+                log_error("No Cortex plugin loaded.")
+                await event.reply(
+                    "⚠️ No active Cortex plugin. Use .cortex to select one."
+                )
                 return False
     return True
+
 
 def resolve_forwarded_target(message):
     if getattr(message, "fwd_from", None):
@@ -137,6 +151,7 @@ def resolve_forwarded_target(message):
     if tracked:
         return tracked["chat_id"], tracked["message_id"]
     return None, None
+
 
 @optional_on(events.NewMessage(pattern=r"\.block (\d+)"))
 async def block_user_command(event):
@@ -149,6 +164,7 @@ async def block_user_command(event):
     except Exception:
         await event.reply("❌ Use: .block <user_id>")
 
+
 @optional_on(events.NewMessage(pattern=r"\.block_list"))
 async def block_list(event):
     if not is_trainer(event.sender_id):
@@ -158,6 +174,7 @@ async def block_list(event):
         await event.reply("✅ No blocked users.")
     else:
         await event.reply("🚫 Blocked users:\n" + "\n".join(map(str, blocked)))
+
 
 @optional_on(events.NewMessage(pattern=r"\.unblock (\d+)"))
 async def unblock_user(event):
@@ -170,6 +187,7 @@ async def unblock_user(event):
     except Exception:
         await event.reply("❌ Use: .unblock <user_id>")
 
+
 @optional_on(events.NewMessage(pattern=r"\.last_chats"))
 async def last_chats_command(event):
     if not is_trainer(event.sender_id):
@@ -178,26 +196,25 @@ async def last_chats_command(event):
     if not entries:
         await event.reply("⚠️ No recent chat found.")
         return
-    lines = [f"[{escape_markdown(name)}](tg://user?id={cid}) — `{cid}`" for cid, name in entries]
-    await event.reply(
-        "🕓 Recent active chats:\n" + "\n".join(lines),
-        parse_mode="md"
-    )
+    lines = [
+        f"[{escape_markdown(name)}](tg://user?id={cid}) — `{cid}`"
+        for cid, name in entries
+    ]
+    await event.reply("🕓 Recent active chats:\n" + "\n".join(lines), parse_mode="md")
+
 
 @optional_on(events.NewMessage(pattern=r"\.help"))
 async def help_command(event):
     if not is_trainer(event.sender_id):
         return
     from core.context import get_context_state
+
     context_status = "active ✅" if get_context_state() else "inactive ❌"
-    llm_mode = "LLM managed centrally in initialize_core_components"
+    cortex_mode = "Cortex managed centrally in initialize_core_components"
     help_text = (
         f"🧞‍♀️ *synth – Available Commands*\n\n"
         "*🧠 Context Mode*\n"
         f"`.context` – Toggle history in forwarded messages, currently *{context_status}*\n\n"
-        "*✏️ .say Command*\n"
-        "`.say` – Select a chat from recent ones\n"
-        "`.say <id> <message>` – Send a message directly to a chat\n\n"
         "*🧩 Manual Mode*\n"
         "Reply to a forwarded message with text or content (stickers, photos, audio, files, etc.)\n"
         "`.cancel` – Cancel a pending send\n\n"
@@ -205,66 +222,46 @@ async def help_command(event):
         "`.block <user_id>` – Block a user\n"
         "`.unblock <user_id>` – Unblock a user\n"
         "`.block_list` – List blocked users\n\n"
-        "*⚙️ LLM Mode*\n"
-        f"`.llm` – Show and select current engine (active: `{llm_mode}`)\n"
+        "*⚙️ Cortex Engine*\n"
+        f"`.cortex` – Show and select current engine (active: `{cortex_mode}`)\n"
         "\n*📋 Miscellaneous*\n"
         "`.last_chats` – Recent active chats\n"
     )
     await event.reply(help_text, parse_mode="md")
 
-@optional_on(events.NewMessage(pattern=r"\.llm(?: (.+))?"))
-async def llm_command(event):
+
+@optional_on(events.NewMessage(pattern=r"\.cortex(?: (.+))?"))
+async def cortex_command(event):
     if not is_trainer(event.sender_id):
         return
     args = event.pattern_match.group(1)
-    current = await get_active_llm()
-    available = list_available_llms()
+    current = await get_active_cortex_engine()
+    available = list_available_cortex_engines()
     if not args:
-        msg = f"*Active LLM:* `{current}`\n\n*Available:*"
+        msg = f"*Active Cortex:* `{current}`\n\n*Available:*"
         msg += "\n" + "\n".join(f"• `{name}`" for name in available)
-        msg += "\n\nTo change: `.llm <name>`"
+        msg += "\n\nTo change: `.cortex <name>`"
         await event.reply(msg, parse_mode="md")
         return
     choice = args.strip()
     if choice not in available:
-        await event.reply(f"❌ LLM `{choice}` not found.")
+        await event.reply(f"❌ Cortex `{choice}` not found.")
         return
     try:
-        await set_active_llm(choice)
-        
+        await switch_active_cortex_engine(choice)
+
         # We don't load plugins here - that's the core's job
         # The system will restart with the new LLM on next restart
-        
-        await event.reply(f"✅ LLM mode updated to `{choice}`. Restart to apply changes.")
-    except Exception as e:
-        await event.reply(f"❌ Error changing LLM: {e}")
 
-@optional_on(events.NewMessage(pattern=r"\.say(?: (\d+) (.+))?"))
-async def say_command(event):
-    if not is_trainer(event.sender_id):
-        return
-    args = event.pattern_match.groups()
-    # Case 1: .say <chat_id> <message>
-    if args[0] and args[1]:
-        try:
-            chat_id = int(args[0])
-            text = args[1]
-            await client.send_message(chat_id, text)
-            await event.reply("✅ Message sent.")
-        except Exception as e:
-            log_error(f"Direct .say error: {repr(e)}", e)
-            await event.reply("❌ Error during sending.")
-        return
-    # Case 2: .say (no arguments)
-    entries = await recent_chats.get_last_active_chats_verbose(10, client)
-    if not entries:
-        await event.reply("⚠️ No recent chat found.")
-        return
-    numbered = "\n".join(f"{i+1}. {name} — `{cid}`" for i, (cid, name) in enumerate(entries))
-    numbered += "\n\n✏️ Reply with the number to choose the chat."
-    say_proxy.clear(event.sender_id)
-    say_sessions[event.sender_id] = entries
-    await event.reply(numbered)
+        await event.reply(
+            f"✅ Cortex engine updated to `{choice}`. Restart to apply changes."
+        )
+    except Exception as e:
+        await event.reply(f"❌ Error changing Cortex engine: {e}")
+
+
+# .say command removed — interactive forward-to-chat functionality deprecated.
+
 
 @optional_on(events.NewMessage())
 async def handle_message(event):
@@ -275,33 +272,14 @@ async def handle_message(event):
         return
     user_id = message.sender_id
     text = message.message or ""
-    # Interactive /say step
-    if is_trainer(user_id) and user_id in say_sessions:
-        stripped = text.strip()
-        if stripped.isdigit():
-            index = int(stripped) - 1
-            choices = say_sessions[user_id]
-            if 0 <= index < len(choices):
-                selected_chat_id = choices[index][0]
-                say_proxy.set_target(user_id, selected_chat_id)
-                del say_sessions[user_id]
-                await event.reply(
-                    "✅ Chat selected.\n\nNow send me the *message*, a *photo*, a *file*, *audio* or any other content to forward.",
-                    parse_mode="md"
-                )
-                return
-        await event.reply("❌ Invalid selection. Send a correct number.")
-        return
-    
+
     # Trainer reply to forwarded message
     if is_trainer(user_id) and message.is_reply:
         reply_msg_id = message.reply_to_msg_id
         original = plugin_instance.get_target(reply_msg_id)
         if original:
             await client.send_message(
-                original["chat_id"],
-                text,
-                reply_message_id=original["message_id"]
+                original["chat_id"], text, reply_message_id=original["message_id"]
             )
             await event.reply("✅ Reply sent.")
         else:
@@ -313,13 +291,14 @@ async def handle_message(event):
             message=message,
             interface=client,
             context=context_memory,
-            reason="telethon_userbot_autonomous"
+            reason="telethon_userbot_autonomous",
         )
     except Exception as e:
         log_error(
             f"auto-response delivery failed for telethon userbot: {e}",
             e,
         )
+
 
 async def main():
     if not client:
@@ -330,25 +309,26 @@ async def main():
         async def send():
             try:
                 await client.send_message(
-                    chat_id,
-                    message,
-                    reply_message_id=reply_to_message_id
+                    chat_id, message, reply_message_id=reply_to_message_id
                 )
                 log_debug(f"[notify] Telegram message sent to {chat_id}")
             except Exception as e:
                 log_error(f"[notify] Failed to send Telegram message: {repr(e)}", e)
+
         import asyncio
+
         asyncio.create_task(send())
-    
+
     # Initialize core system with notify function
     await core_initializer.initialize_all(notify_fn=telegram_notify)
-    
+
     log_info("🧞‍♀️ synth Userbot (Telethon) is online.")
-    
+
     # Register this interface with the core
     core_initializer.register_interface("telegram_userbot")
-    
+
     client.run_until_disconnected()
+
 
 if __name__ == "__main__":
     asyncio.run(main())

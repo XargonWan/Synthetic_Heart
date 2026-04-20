@@ -3,10 +3,9 @@ from core.db import ensure_core_tables
 import aiomysql
 import time
 import re
-from core.logging_utils import log_debug, log_info, log_warning, log_error
+from core.logging_utils import log_debug, log_info, log_warning
 import json
 from pathlib import Path
-from core.interfaces_registry import get_interface_registry
 from core.abstract_context import AbstractContext
 from typing import Union, Optional, Callable
 
@@ -16,13 +15,17 @@ chat_path_map = {}
 
 _CHAT_MAP_PATH = Path(__file__).with_name("chat_paths.json")
 
+
 def _save_chat_paths():
     try:
         with _CHAT_MAP_PATH.open("w", encoding="utf-8") as f:
             json.dump(chat_path_map, f)
-        log_debug(f"[recent_chats] Saved chat path map with {len(chat_path_map)} entries")
+        log_debug(
+            f"[recent_chats] Saved chat path map with {len(chat_path_map)} entries"
+        )
     except Exception as e:  # pragma: no cover - best effort
         log_warning(f"[recent_chats] Failed to save chat path map: {e}")
+
 
 if _CHAT_MAP_PATH.exists():
     try:
@@ -33,6 +36,7 @@ if _CHAT_MAP_PATH.exists():
         )
     except Exception as e:  # pragma: no cover - best effort
         log_warning(f"[recent_chats] Failed to load chat path map: {e}")
+
 
 async def track_chat(chat_id: Union[int, str], interface_name: str, metadata=None):
     """
@@ -68,6 +72,7 @@ async def track_chat(chat_id: Union[int, str], interface_name: str, metadata=Non
     if metadata:
         _metadata[chat_id] = metadata
 
+
 async def reset_chat(chat_id: Union[int, str], interface_name: str):
     # Attempt to remove from persistent storage; if DB unavailable just remove in-memory
     try:
@@ -76,7 +81,9 @@ async def reset_chat(chat_id: Union[int, str], interface_name: str):
             try:
                 async with conn.cursor() as cur:
                     chat_id_str = str(chat_id)
-                    await cur.execute("DELETE FROM recent_chats WHERE chat_id = %s", (chat_id_str,))
+                    await cur.execute(
+                        "DELETE FROM recent_chats WHERE chat_id = %s", (chat_id_str,)
+                    )
                     await conn.commit()
             except Exception as e:
                 log_warning(f"[recent_chats] Failed to reset chat in DB: {e}")
@@ -87,12 +94,15 @@ async def reset_chat(chat_id: Union[int, str], interface_name: str):
     if chat_path_map.pop(chat_id, None) is not None:
         _save_chat_paths()
 
+
 def set_chat_path(chat_id: Union[int, str], chat_path: str) -> None:
     chat_path_map[chat_id] = chat_path
     _save_chat_paths()
 
+
 def get_chat_path(chat_id: Union[int, str]) -> str | None:
     return chat_path_map.get(chat_id)
+
 
 def clear_chat_path(chat_id: Union[int, str]) -> None:
     """Remove chat path mapping for the given chat_id."""
@@ -102,6 +112,7 @@ def clear_chat_path(chat_id: Union[int, str]) -> None:
         log_info(f"[recent_chats] Cleared chat path for chat_id: {chat_id}")
     else:
         log_debug(f"[recent_chats] No chat path found for chat_id: {chat_id}")
+
 
 async def get_last_active_chats(n=10):
     try:
@@ -118,7 +129,9 @@ async def get_last_active_chats(n=10):
                 rows = await cur.fetchall()
                 return [row["chat_id"] for row in rows]
     except Exception as e:
-        log_warning(f"[recent_chats] DB unavailable, falling back to in-memory chats: {e}")
+        log_warning(
+            f"[recent_chats] DB unavailable, falling back to in-memory chats: {e}"
+        )
         # Best-effort fallback: return recently cached metadata keys
         try:
             keys = list(_metadata.keys())[:n]
@@ -126,13 +139,21 @@ async def get_last_active_chats(n=10):
         except Exception:
             return []
 
-def format_chat_entry_generic(chat_id: Union[int, str], chat_name: Optional[str] = None):
+
+def format_chat_entry_generic(
+    chat_id: Union[int, str], chat_name: Optional[str] = None
+):
     """Generic format for chat entries."""
     name = chat_name or str(chat_id)
     safe_name = escape_markdown(name)
     return f"{safe_name} — `{chat_id}`"
 
-async def last_chats_command(abstract_context: AbstractContext, reply_fn: Optional[Callable] = None, get_chat_info_fn: Optional[Callable] = None):
+
+async def last_chats_command(
+    abstract_context: AbstractContext,
+    reply_fn: Optional[Callable] = None,
+    get_chat_info_fn: Optional[Callable] = None,
+):
     """Last chats command that works with any interface."""
     if not abstract_context.is_trainer():
         return
@@ -144,15 +165,16 @@ async def last_chats_command(abstract_context: AbstractContext, reply_fn: Option
         if get_chat_info_fn:
             try:
                 chat_info = await get_chat_info_fn(chat_id)
-                chat_name = chat_info.get('name') if chat_info else None
+                chat_name = chat_info.get("name") if chat_info else None
             except Exception as e:
                 log_debug(f"Error retrieving chat {chat_id}: {e}")
-        
+
         lines.append("- " + format_chat_entry_generic(chat_id, chat_name))
 
     response = "\n".join(lines)
     if reply_fn:
         await reply_fn(response)
+
 
 async def get_last_active_chats_verbose(n=10, bot=None):
     chat_ids = await get_last_active_chats(n)
@@ -170,9 +192,10 @@ async def get_last_active_chats_verbose(n=10, bot=None):
         results.append((chat_id, name))
     return results
 
+
 def escape_markdown(text: str) -> str:
     """
     Escape Markdown v1 characters to avoid errors or malformed output.
     """
-    escape_chars = r'\_*[]()~`>#+-=|{}.!'
-    return re.sub(f'([{re.escape(escape_chars)}])', r'\\\1', text)
+    escape_chars = r"\_*[]()~`>#+-=|{}.!"
+    return re.sub(f"([{re.escape(escape_chars)}])", r"\\\1", text)

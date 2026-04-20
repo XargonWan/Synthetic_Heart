@@ -24,8 +24,10 @@
             --surface-alt: rgba(18, 18, 28, 0.75);
             --border: rgba(255, 255, 255, 0.08);
             --border-strong: rgba(255, 255, 255, 0.18);
-            --accent: #ff6bd6;
-            --accent-soft: rgba(255, 107, 214, 0.16);
+            --accent: #6bfefe;
+            --accent-soft: rgba(107, 254, 254, 0.16);
+            --accent-dark: #3aa8a8;
+            --accent-contrast: #07070c;
             --text: #f5f5ff;
             --text-soft: #b9badc;
             --success: #18c98c;
@@ -46,8 +48,8 @@
             display: flex;
             flex-direction: column;
             background:
-                radial-gradient(circle at 20% 0%, rgba(114, 137, 218, 0.18), transparent 55%),
-                radial-gradient(circle at 80% 100%, rgba(255, 107, 214, 0.22), transparent 55%),
+                radial-gradient(circle at 20% 0%, rgba(var(--accent-r,114), var(--accent-g,137), var(--accent-b,218), 0.10), transparent 55%),
+                radial-gradient(circle at 80% 100%, rgba(var(--accent-r,114), var(--accent-g,137), var(--accent-b,218), 0.06), transparent 55%),
                 var(--bg);
             color: var(--text);
         }
@@ -60,9 +62,11 @@
             align-items: center;
             justify-content: space-between;
             padding: 1.2rem min(4vw, 2.4rem);
-            background: linear-gradient(135deg, rgba(12, 12, 20, 0.78), rgba(34, 30, 46, 0.78));
-            /* remove hard bottom border so full-screen 3D content is not visually clipped */
-            border-bottom: none;
+            /* subtle accent overlay + dark gradient */
+            background: linear-gradient(135deg, rgba(var(--accent-r,114), var(--accent-g,137), var(--accent-b,218), 0.04), rgba(12, 12, 20, 0.78));
+            /* make bottom border use accent gradient */
+            border-bottom: 1px solid transparent;
+            border-image: linear-gradient(90deg, var(--accent), var(--accent-dark)) 1;
             /* expose a CSS variable for the header height so content can size itself */
             --topbar-height: 80px;
             backdrop-filter: blur(18px);
@@ -111,42 +115,33 @@
         .nav-btn .icon {
             font-size: 1.05rem;
         }
+        .nav-btn:hover, .nav-btn:focus {
+            border-image: linear-gradient(90deg, var(--accent), var(--accent-dark)) 1;
+            border-color: transparent;
+            box-shadow: 0 12px 30px -20px var(--accent-soft);
+        }
         .nav-btn.active {
             background: var(--accent);
-            color: #07070c;
-            box-shadow: 0 18px 35px -24px rgba(255, 107, 214, 0.95);
+            color: var(--accent-contrast);
+            box-shadow: 0 18px 35px -24px rgba(var(--accent-r,255), var(--accent-g,107), var(--accent-b,214), 0.95);
         }
         .nav-btn.active .icon {
             transform: scale(1.08);
-        }
-        .connection-status {
-            display: flex;
-            align-items: center;
-            gap: 0.6rem;
-            font-size: 0.85rem;
-            color: var(--text-soft);
-            letter-spacing: 0.06em;
-        }
-        .connection-status .indicator {
-            width: 0.7rem;
-            height: 0.7rem;
-            border-radius: 50%;
-            background: #8585a2;
-            transition: background 0.2s ease, box-shadow 0.2s ease;
-        }
-        .connection-status .indicator.online {
-            background: var(--success);
-            box-shadow: 0 0 12px rgba(24, 201, 140, 0.7);
         }
         main {
             height: 100%;
             display: block;
             width: 100%;
+            position: relative;
         }
         .tab-panel {
             display: none;
             height: 100%;
         }
+        /* When iframe-based desktop is enabled hide internal tab panels and
+           make the iframe fill the available area so the header stays outside */
+        .desktop-iframe-enabled .tab-panel { display: none !important; }
+        .desktop-iframe-enabled #desktop-iframe { display: block !important; position: absolute; inset: 0; z-index: 1; height: calc(100vh - var(--topbar-height, 80px)); width:100%; border:0; }
         .tab-panel.active {
             display: flex;
             flex-direction: column;
@@ -168,155 +163,25 @@
             position: relative;
             min-height: 0;
         }
-        #chat {
-            position: absolute;
-            bottom: 1rem;
-            left: 1rem;
-            width: 400px;
-            height: 60vh;
-            max-height: 500px;
-            display: flex;
-            flex-direction: column;
-            background: rgba(12, 12, 20, 0.92);
-            backdrop-filter: blur(12px);
-            -webkit-backdrop-filter: blur(12px);
-            border: none;
-            border-radius: 22px;
-            box-shadow: 0 24px 45px -38px rgba(0, 0, 0, 0.9);
-            transition: transform 0.3s ease, opacity 0.3s ease;
-            padding-top: 4rem;
-            overflow: hidden;
-            z-index: 50;
+        #desktop-root {
+            position: fixed;
+            top: var(--topbar-height, 80px);
+            left: 0;
+            right: 0;
+            bottom: 0;
+            z-index: 5;
+            pointer-events: none;
         }
-        #chat.hidden {
-            display: none;
-        }
-        /* Minimized chat styling (fallback for templates using base.css) */
-        #chat.minimized {
-            height: 3.8rem !important;
-            min-height: auto;
-            max-height: none;
-            overflow: hidden;
-            width: 320px;
+        #desktop-root .winbox {
             pointer-events: auto;
         }
-        #messages {
-            flex: 1;
-            overflow-y: auto;
-            padding: 1.2rem 1.4rem;
-            display: flex;
-            flex-direction: column;
-            gap: 0.9rem;
-        }
-        .bubble {
-            max-width: 72ch;
-            padding: 1rem 1.2rem;
-            border-radius: 18px;
-            line-height: 1.45;
-            animation: fadeSlide 0.35s ease;
-            white-space: pre-wrap;
-            box-shadow: 0 18px 45px -38px rgba(0, 0, 0, 0.85);
-        }
-        .bubble.user {
-            align-self: flex-end;
-            background: rgba(255, 255, 255, 0.08);
-        }
-        .bubble.synth {
-            align-self: flex-start;
-            background: linear-gradient(135deg, #ff6bd6, #7289da);
-            color: #fff;
-        }
-        .typing-indicator {
-            display: flex;
-            gap: 0.3rem;
-            align-items: center;
-            justify-content: center;
-            padding: 1rem 1.5rem !important;
-        }
-        .typing-indicator .dot {
-            width: 8px;
-            height: 8px;
-            border-radius: 50%;
-            background: rgba(255, 255, 255, 0.85);
-            animation: typingDot 1.4s ease-in-out infinite;
-        }
-        .typing-indicator .dot:nth-child(1) {
-            animation-delay: 0s;
-        }
-        .typing-indicator .dot:nth-child(2) {
-            animation-delay: 0.2s;
-        }
-        .typing-indicator .dot:nth-child(3) {
-            animation-delay: 0.4s;
-        }
-        @keyframes typingDot {
-            0%, 60%, 100% {
-                transform: translateY(0);
-                opacity: 0.7;
-            }
-            30% {
-                transform: translateY(-10px);
-                opacity: 1;
-            }
-        }
-        @keyframes fadeSlide {
-            from {
-                transform: translateY(10px);
-                opacity: 0;
-            }
-            to {
-                transform: translateY(0);
-                opacity: 1;
-            }
-        }
-        #composer {
-            display: flex;
-            flex-direction: row;
-            gap: 0.8rem;
-            padding: 1.1rem 1.4rem 1.4rem;
-            align-items: flex-end;
-        }
-        #input {
-            flex: 1;
-            resize: none;
-            border-radius: 14px;
-            padding: 0.9rem 1.1rem;
-            border: 1px solid var(--border);
-            background: rgba(12, 12, 20, 0.58);
-            color: inherit;
-            font-size: 1rem;
-            line-height: 1.4;
-            min-height: 2.8rem;
-            max-height: 7rem;
-        }
-        #input:focus {
-            outline: 2px solid var(--accent);
-            outline-offset: 3px;
-        }
-        #send {
-            padding: 0;
-            border-radius: 50%;
-            border: none;
-            background: var(--accent);
-            color: #04040a;
-            font-weight: 600;
-            cursor: pointer;
-            transition: transform 0.15s ease, box-shadow 0.15s ease;
-            height: 2.8rem;
-            width: 2.8rem;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-        }
-        #send:disabled {
-            opacity: 0.5;
-            cursor: not-allowed;
-            transform: none;
-            box-shadow: none;
-        }
+        /* Chat CSS removed — rely on WinBox/default styling and component-level styles */
+        /* Minimal placeholder so templates remain valid */
+        #chat { position: absolute; }
+        #chat.synth-window-managed { /* WinBox handles chrome */ }
         #send:hover:enabled {
             transform: translateY(-1px);
-            box-shadow: 0 18px 30px -18px rgba(255, 107, 214, 0.85);
+            box-shadow: 0 18px 30px -18px rgba(var(--accent-r,255), var(--accent-g,107), var(--accent-b,214), 0.85);
         }
         .home-vrm {
             position: relative;
@@ -333,7 +198,8 @@
             width: 56px;
             height: 56px;
             border-radius: 50%;
-            border: 2px solid var(--border);
+            border: 2px solid transparent;
+            border-image: linear-gradient(90deg, var(--accent), var(--accent-dark)) 1;
             background: rgba(12, 12, 20, 0.95);
             backdrop-filter: blur(10px);
             -webkit-backdrop-filter: blur(10px);
@@ -348,9 +214,9 @@
         }
         .chat-toggle-btn:hover {
             transform: scale(1.1);
-            background: rgba(255, 107, 214, 0.15);
+            background: rgba(var(--accent-r,255), var(--accent-g,107), var(--accent-b,214), 0.15);
             border-color: var(--accent);
-            box-shadow: 0 12px 32px rgba(255, 107, 214, 0.4);
+            box-shadow: 0 12px 32px rgba(var(--accent-r,255), var(--accent-g,107), var(--accent-b,214), 0.4);
         }
         .chat-toggle-btn:active {
             transform: scale(0.95);
@@ -409,10 +275,12 @@
             border-radius: 14px;
             padding: 0.6rem 1.1rem;
             cursor: pointer;
-            transition: background 0.2s ease;
+            transition: background 0.2s ease, border 0.2s ease;
         }
         .log-controls button:hover {
             background: var(--accent-soft);
+            border: 1px solid transparent;
+            border-image: linear-gradient(90deg, var(--accent), var(--accent-dark)) 1;
         }
         .log-controls label {
             display: inline-flex;
@@ -529,7 +397,7 @@
             border-radius: 999px;
             padding: 0.15rem 0.55rem;
             background: var(--accent);
-            color: #040404;
+            color: var(--accent-contrast);
         }
         .component-flag-secondary {
             background: rgba(114, 137, 218, 0.25);
@@ -674,13 +542,14 @@
            e.g. <input /><label class="toggle-switch"><span class="toggle-slider"></span></label> */
         input[type="checkbox"]:checked + .toggle-switch .toggle-slider,
         input[type="checkbox"]:checked + label .toggle-slider {
-            background: linear-gradient(135deg, #ff6bd6, #7289da);
-            border-color: #ff6bd6;
+            background: linear-gradient(135deg, var(--accent), var(--accent-dark, rgba(114,137,218,0.25)));
+            border-color: var(--accent);
         }
         input[type="checkbox"]:checked + .toggle-slider:before,
         input[type="checkbox"]:checked + .toggle-switch .toggle-slider:before,
         input[type="checkbox"]:checked + label .toggle-slider:before {
             transform: translateX(24px);
+            background-color: var(--accent-contrast);
         }
         input[type="checkbox"]:disabled + .toggle-slider,
         input[type="checkbox"]:disabled + .toggle-switch .toggle-slider,
@@ -831,24 +700,55 @@
         }
         .diary-entry.archived {
             opacity: 0.7;
-            background: rgba(255, 107, 214, 0.05);
+            background: rgba(var(--accent-r,255), var(--accent-g,107), var(--accent-b,214), 0.05);
         }
         .settings-grid {
             display: flex;
-            flex-wrap: wrap;
+            /* Force vertical stacking of settings cards by default */
+            flex-direction: column;
             gap: clamp(1rem, 2vw, 1.6rem);
             align-items: stretch;
         }
         .settings-grid > .card {
-            flex: 1 1 auto;
-            min-width: 280px;
+            /* Ensure cards take full width in vertical layout */
+            width: 100%;
+            min-width: 0;
         }
+        /* Backwards-compatible hook (no-op since .settings-grid is columnar by default) */
         #tab-settings .settings-grid {
-            flex-direction: column;
+            /* intentionally left empty */
         }
         #tab-settings .settings-grid > .card {
             max-width: none;
             width: 100%;
+        }
+
+        /* Make About / Settings / Components panels use the browser scroll (page scroll)
+           instead of internal scroll containers */
+        .tab-panel[data-tab="settings"],
+        .tab-panel[data-tab="components"],
+        .tab-panel[data-tab="about"] {
+            /* Do not override display for non-active panels; allow browser scroll when active (see .active override) */
+            height: auto;
+            min-height: 0;
+            overflow: visible;
+        }
+        /* When these panels are active, allow them to behave as normal document flow so the browser
+           handles scrolling (overrides the default .tab-panel.active flex/full-height behavior). */
+        .tab-panel[data-tab="settings"].active,
+        .tab-panel[data-tab="components"].active,
+        .tab-panel[data-tab="about"].active {
+            display: block;
+            height: auto;
+            min-height: 0;
+            overflow: visible;
+        }
+        .tab-panel[data-tab="settings"] .home-stage,
+        .tab-panel[data-tab="components"] .home-stage,
+        .tab-panel[data-tab="about"] .home-stage {
+            height: auto;
+            min-height: 0;
+            overflow: visible;
         }
         .card {
             background: var(--surface);
@@ -882,7 +782,7 @@
             justify-content: center;
             padding: 0.55rem 1.1rem;
             border-radius: 999px;
-            border: 1px solid rgba(255, 107, 214, 0.4);
+            border: 1px solid rgba(var(--accent-r,255), var(--accent-g,107), var(--accent-b,214), 0.4);
             background: var(--accent-soft);
             color: inherit;
             cursor: pointer;
@@ -890,7 +790,7 @@
             transition: background 0.2s ease, transform 0.15s ease;
         }
         .pill:hover {
-            background: rgba(255, 107, 214, 0.24);
+            background: rgba(var(--accent-r,255), var(--accent-g,107), var(--accent-b,214), 0.24);
             transform: translateY(-1px);
         }
         .pill.secondary {
@@ -923,8 +823,8 @@
             font-size: 0.9rem;
         }
         .vrm-list li.active {
-            border-color: rgba(255, 107, 214, 0.65);
-            background: rgba(255, 107, 214, 0.16);
+            border-color: rgba(var(--accent-r,114), var(--accent-g,137), var(--accent-b,218), 0.65);
+            background: rgba(var(--accent-r,114), var(--accent-g,137), var(--accent-b,218), 0.16);
         }
         .vrm-list li .name {
             flex: 1;
@@ -996,8 +896,8 @@
             transition: border 0.2s ease, background 0.2s ease;
         }
         .links a:hover {
-            border-color: rgba(255, 107, 214, 0.6);
-            background: rgba(255, 107, 214, 0.16);
+            border-color: rgba(var(--accent-r,114), var(--accent-g,137), var(--accent-b,218), 0.6);
+            background: rgba(var(--accent-r,114), var(--accent-g,137), var(--accent-b,218), 0.16);
         }
         dl {
             margin: 0;
@@ -1025,9 +925,6 @@
                 justify-content: center;
                 text-align: center;
             }
-            .connection-status {
-                order: 3;
-            }
             .home-stage {
                 min-height: calc(100vh - 140px);
                 padding: clamp(1.2rem, 4vw, 1.8rem);
@@ -1038,7 +935,7 @@
             #chat {
                 flex: 0 0 auto;
                 width: 100%;
-                padding-top: 3.5rem;
+                padding-top: 1rem;
             }
             .home-vrm {
                 min-height: clamp(320px, 50vh, 560px);
@@ -1197,15 +1094,26 @@
             }
             .hamburger {
                 display: block;
-                background: none;
+                background: transparent;
                 border: none;
                 color: var(--text);
                 font-size: 1.5rem;
                 cursor: pointer;
                 padding: 0.5rem;
+                margin-left: auto; /* align to right */
+                z-index: 20001; /* ensure above nav overlay */
             }
             .hamburger:hover {
                 color: var(--accent);
+            }
+
+            /* When nav is expanded (mobile menu open), hide the hamburger toggle (mutually exclusive) */
+            header.top-bar.nav-open .hamburger {
+                display: none;
+            }
+
+            header.top-bar.topbar--compact .hamburger {
+                margin-left: auto;
             }
             #chat {
                 bottom: 0;
@@ -1260,7 +1168,7 @@
 </head>
 <body>
     <header class="top-bar">
-        <div class="brand">
+        <div class="brand" role="button" tabindex="0" title="Go to Home">
             <img src="%%LOGO_URL%%" alt="SyntH logo" />
             <div class="brand-text">
                 <h1>%%BRAND_NAME%%</h1>
@@ -1287,12 +1195,12 @@
                 <span class="icon" aria-hidden="true">ℹ️</span><span>About</span>
             </button>
         </nav>
-        <div class="connection-status">
-            <span class="indicator offline" aria-hidden="true"></span>
-            <span id="status-label">Connecting…</span>
-        </div>
     </header>
-    <main id="main-content"><!-- dynamic --></main>
+    <div id="desktop-root" aria-hidden="true"></div>
+    <main id="main-content">
+        <iframe id="desktop-iframe" title="Desktop content" sandbox="allow-scripts allow-same-origin" style="display:none;width:100%;height:100%;border:0;min-height:0;"></iframe>
+        <!-- dynamic -->
+    </main>
     <!-- Debug overlay. Rendered only when WEB_DEBUG=1. Default is 0 (disabled). -->
     <div id="synth-debug" data-debug-enabled="%%WEB_DEBUG%%" aria-hidden="false" style="position:fixed;right:12px;bottom:12px;z-index:9999;padding:0.5rem 0.75rem;background:rgba(0,0,0,0.6);color:#fff;border-radius:8px;font-size:12px;max-width:320px;box-shadow:0 8px 20px rgba(0,0,0,0.6)">
         <div style="font-weight:600;margin-bottom:0.25rem;">SyntH Debug</div>
@@ -1384,7 +1292,7 @@
             const navLoaded = await loadNavigation();
 
             // Load all template sections (excluding navbar which is loaded separately)
-            const sections = ['home', 'logs', 'diary', 'config', 'components', 'about'];
+            const sections = ['home', 'logs', 'diary', 'agent', 'config', 'components', 'about'];
             const templatePromises = sections.map(section => loadTemplateSection(section));
             const templates = await Promise.all(templatePromises);
 
@@ -1412,8 +1320,8 @@
                         updateDebug(`panel[${idx}]=${p.dataset.tab||p.id||'?'} class=${Array.from(p.classList).join('|')} display=${display} vis=${vis} size=${w}x${h}`);
                         // lightly highlight panels so the user can see their bounds
                         try {
-                            p.style.outline = '2px dashed rgba(255,107,214,0.35)';
-                            p.style.background = p.style.background || 'rgba(255,107,214,0.02)';
+                            p.style.outline = `2px dashed rgba(${getComputedStyle(document.documentElement).getPropertyValue('--accent-r') || 255}, ${getComputedStyle(document.documentElement).getPropertyValue('--accent-g') || 107}, ${getComputedStyle(document.documentElement).getPropertyValue('--accent-b') || 214}, 0.35)`;
+                            p.style.background = p.style.background || `rgba(${getComputedStyle(document.documentElement).getPropertyValue('--accent-r') || 255}, ${getComputedStyle(document.documentElement).getPropertyValue('--accent-g') || 107}, ${getComputedStyle(document.documentElement).getPropertyValue('--accent-b') || 214}, 0.02)`;
                         } catch (e) {}
                     });
                 }
@@ -1446,6 +1354,22 @@
                         const targetPanel = document.querySelector(`[data-tab="${tabName}"]`);
                         if (targetPanel) {
                             targetPanel.classList.add('active');
+                        }
+
+                        // Toggle page scroll for About / Settings / Components
+                        // These sections are designed to use the browser page scroll instead of
+                        // internal scroll containers. Because the root `html, body` start with
+                        // `overflow: hidden`, we switch it to `auto` when one of these tabs
+                        // is active, and restore `hidden` for other tabs to keep the app
+                        // layout stable.
+                        if (['settings', 'components', 'about'].includes(tabName)) {
+                            document.documentElement.style.overflow = 'auto';
+                            document.body.style.overflow = 'auto';
+                            // Ensure the activated panel is visible at the top of the page
+                            try { targetPanel.scrollIntoView({ behavior: 'auto', block: 'start' }); } catch (e) {}
+                        } else {
+                            document.documentElement.style.overflow = 'hidden';
+                            document.body.style.overflow = 'hidden';
                         }
                     });
                 });
@@ -1500,35 +1424,82 @@
 
             // Initialize chat WebSocket
             try {
-                const statusLabel = document.getElementById('status-label');
-                const statusIndicator = document.querySelector('.connection-status .indicator');
-                if (statusLabel && statusIndicator) {
-                    statusLabel.textContent = 'Connecting…';
-                    statusIndicator.className = 'indicator';
-                }
 
                 // Connect to chat WebSocket
                 const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
                 const ws = new WebSocket(`${protocol}://${window.location.host}/ws`);
                 ws.onopen = () => {
+                    console.log('[synth_webui ws] onopen');
                     updateDebug('Chat WebSocket connected');
-                    if (statusLabel) statusLabel.textContent = 'Connected';
-                    if (statusIndicator) statusIndicator.classList.add('online');
+                    // Announce capabilities so server can do a targeted full-state push
+                    try {
+                        ws.send(JSON.stringify({
+                            type: 'hello',
+                            client_type: 'web',
+                            capabilities: ['url_fetch'],
+                            has_assets: []
+                        }));
+                    } catch (e) { /* ignore */ }
                 };
                 ws.onmessage = (event) => {
-                    // Handle incoming messages
-                    const data = JSON.parse(event.data);
-                    // Simplified message handling
-                    updateDebug('Received WebSocket message: ' + data.type);
+                    try { console.log('[synth_webui ws] onmessage', event && event.data ? event.data.toString().slice(0,200) : event); } catch (e) {}
+                    try {
+                        const data = JSON.parse(event.data);
+                        updateDebug('Received WebSocket message: ' + data.type);
+
+                        if (data.type === 'vrm_animation') {
+                            try {
+                                if (window.VRMAnimations && typeof window.VRMAnimations.play === 'function') {
+                                    window.VRMAnimations.play(data.state, {
+                                        animation: data.file,
+                                        playOnce: data.loop === false,
+                                        playSection: data.play_section,
+                                        descriptor: data.descriptor
+                                    });
+                                }
+                            } catch (e) { /* ignore */ }
+                        } else if (data.type === 'vrm_preload') {
+                            try {
+                                if (window.VRMAnimations && typeof window.VRMAnimations.preload === 'function') {
+                                    window.VRMAnimations.preload(data.state, data.file, data.descriptor);
+                                }
+                            } catch (e) { /* ignore */ }
+                        } else if (data.type === 'vrm_face') {
+                            try {
+                                if (window.VRMAnimations && typeof window.VRMAnimations.setFaceValues === 'function') {
+                                    window.VRMAnimations.setFaceValues(data.values);
+                                }
+                            } catch (e) { /* ignore */ }
+                        } else if (data.type === 'vrm_model') {
+                            try {
+                                if (typeof window.refreshVRM === 'function') {
+                                    window.refreshVRM(data.url, data.name);
+                                }
+                            } catch (e) { /* ignore */ }
+                        }
+                    } catch (e) { /* ignore non-JSON */ }
                 };
-                ws.onclose = () => {
+                ws.onclose = (ev) => {
+                    console.log('[synth_webui ws] onclose', ev && ev.code ? ev.code : ev);
                     updateDebug('Chat WebSocket disconnected');
-                    if (statusLabel) statusLabel.textContent = 'Disconnected';
-                    if (statusIndicator) statusIndicator.classList.remove('online');
+                    // notify the user and clear any typing indicator so the UI
+                    // doesn't appear stuck after a dropped connection
+                    try { if (typeof removeTypingIndicator === 'function') removeTypingIndicator(); } catch (e) {}
+                    try {
+                        if (window.SynthChat && typeof window.SynthChat.maybeNotify === 'function') {
+                            window.SynthChat.maybeNotify('⚠️ Connection lost. Please reload the page.');
+                        }
+                    } catch (e) {}
                 };
                 ws.onerror = (error) => {
-                    console.error('WebSocket error:', error);
+                    console.error('[synth_webui ws] WebSocket error:', error);
                     updateDebug('Chat WebSocket error');
+                    try { if (typeof removeTypingIndicator === 'function') removeTypingIndicator(); } catch (e) {}
+                    try {
+                        if (window.SynthChat && typeof window.SynthChat.maybeNotify === 'function') {
+                            window.SynthChat.maybeNotify('⚠️ Chat WebSocket error.');
+                        }
+                    } catch (e) {}
                 };
 
                 // Store WebSocket globally for later use

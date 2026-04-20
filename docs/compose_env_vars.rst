@@ -32,6 +32,18 @@ DISPLAY_WIDTH, DISPLAY_HEIGHT
 - **Default**: 1280x720
 - **Recommendation**: Leave defaults for local dev; set to higher values if you need a larger remote desktop.
 
+SYNTH_X11_WAIT_SECONDS
+~~~~~~~~~~~~~~~~~~~~~~
+- **Purpose**: Number of seconds the container will wait for the X11 socket (`/tmp/.X11-unix/X1`) before continuing startup.
+- **Default**: 30
+- **Recommendation**: Leave at default for most setups. Lower to `0` for headless-only deployments or increase if your host X server takes longer to appear.
+
+SYNTH_CREATE_X11_PLACEHOLDER
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+- **Purpose**: When set to `1` (default) the container will create a placeholder file at `/tmp/.X11-unix/X1` after the timeout so startup can continue even if the host X socket isn't mounted. Set to `0` to make the container proceed without creating the placeholder (fail-fast behavior).
+- **Default**: `1`
+- **Recommendation**: Keep `1` to avoid the container blocking in environments where a host X socket isn't present; set to `0` if you require the container to fail early when X is missing.
+
 SYNTH_WEBUI_HTTP_PORT, SYNTH_WEBUI_HTTPS_PORT
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 - **Purpose**: Ports used by the Synthetic Heart Web UI (HTTP/HTTPS).
@@ -54,12 +66,20 @@ SECURE_CONNECTION / SYNTH_WEBUI_TLS
 
 - **SYNTH_WEBUI_TLS**: If not set, the application falls back to enabling TLS by default (value `1`) to provide a secure developer experience. You only need to set this to `0` when you explicitly want to disable HTTPS.
 - **SYNTH_WEBUI_CERT_DIR**: If no certificate/key are provided, the Web UI will look for certificates in `/config/ssl` and, if missing, will attempt to generate a self-signed certificate there at startup.
+- **SYNTH_ATTACHMENTS_ROOT**: Optional root directory for Web UI attachments. If set, uploaded files are stored there. If unset, the application will use `$XDG_DATA_HOME/attachments` when `XDG_DATA_HOME` is defined, otherwise `/config/uploads`.
+- **Image seed**: The container image ships a default self-signed certificate and key in `/config/ssl` (copied from `/app/res/default_ssl`) so HTTPS works out-of-the-box unless a volume overwrites that path.
 
 DB_HOST
 ~~~~~~~
 - **Purpose**: Hostname of the MariaDB service used by the application.
 - **Default**: `synth-db` (compose fallback)
 - **Recommendation**: For multi-container setups keep `synth-db` or set this to an external host if you run the DB elsewhere.
+
+DB_AUTO_HEAL
+~~~~~~~~~~~~
+- **Purpose**: When enabled, the DB layer will attempt an automatic, idempotent "schema heal" if a query fails with a missing table/column error (e.g. error 1146 / 1054). The heal runs core/plugin table-ensurers and retries the failed statement once.
+- **Default**: `1` (enabled)
+- **Recommendation**: Leave enabled for development and restore/upgrade resilience; set to `0` to disable automatic repairs in locked-down production environments where implicit schema changes are undesired.
 
 CLI_SERVER_PORT
 ~~~~~~~~~~~~~~~

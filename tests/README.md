@@ -8,7 +8,7 @@ This directory contains the test suite for the Synthetic Heart. The tests are de
 Basic functionality tests that verify core imports and initialization work correctly.
 
 ### Component Loading Tests (`test_component_loading.py`)
-Tests that verify the auto-discovery and registration system for plugins, interfaces, and LLM engines.
+Tests that verify the auto-discovery and registration system for plugins, interfaces, and Cortex engines.
 
 ### Message Chain Tests (`test_message_chain.py`, `test_message_chain_integration.py`)
 Tests for the core message processing pipeline, including JSON extraction, action execution, and error handling.
@@ -33,8 +33,8 @@ Tests for platform-specific interfaces with proper mocking.
 
 ### Local Development
 ```bash
-# Install dependencies
-pip install -r requirements.txt
+# Install dependencies (poetry/uv manages versions)
+uv sync
 
 # Run all tests
 python run_tests.py
@@ -56,7 +56,7 @@ The tests are automatically run in GitHub Actions with JUnit XML output:
 ## Test Requirements
 
 - Python 3.8+
-- All dependencies from `requirements.txt`
+- Dependencies are declared in `pyproject.toml` (use `uv sync` to install)
 - Mock environment variables (automatically set in tests)
 
 ## Writing New Tests

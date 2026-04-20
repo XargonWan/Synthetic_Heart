@@ -8,25 +8,53 @@
     }
     ,
     "blendshape_map": {
-        "eyes_closed": "eyes_closed",
-        "mouth.O": "mouth_O",
+        "eyes_closed": "blink",
+        "mouth_smile": "happy",
+        "eyes_smile": "happy",
+        "mouth_frown": "sad",
+        "eyes_sad": "sad",
+        "brow_down": "angry",
+        "eyes_wide": "surprised",
+        "mouth_open": "aa",
+        "mouth.O": "oh",
+        "mouth_O": "oh",
+        "cheek_blush": "relaxed",
+        "eyes_squint": "relaxed",
+        "tongue_out": "ou",
         "visemes": {
-            "A": { "mouth_A": 1.0 },
-            "O": { "mouth_O": 1.0 }
+            "A": { "aa": 1.0 },
+            "I": { "ih": 1.0 },
+            "U": { "ou": 1.0 },
+            "E": { "ee": 1.0 },
+            "O": { "oh": 1.0 }
         }
     },
     "emotions": {
-        "happy": { "mouth_smile": 0.6, "eyes_smile": 0.5 },
-        "sad": { "mouth_frown": 0.7, "eyes_closed": 0.4 },
-        "surprised": { "eyes_wide": 0.8, "mouth_open": 0.2 },
-        "relaxed": { "eyes_smile": 0.3, "mouth_smile": 0.2 },
-        "angry": { "mouth_frown": 0.9, "brow_down": 0.8 },
-        "fear": { "eyes_wide": 0.7, "mouth_frown": 0.3 },
-        "disgust": { "mouth_frown": 0.4, "eyes_closed": 0.2 },
+        "happy": { "mouth_smile": 0.25, "eyes_smile": 0.2 },
+        "sad": { "mouth_frown": 0.25, "eyes_sad": 0.15 },
+        "surprised": { "eyes_wide": 0.3 },
+        "relaxed": { "eyes_smile": 0.15, "mouth_smile": 0.1 },
+        "angry": { "mouth_frown": 0.3, "brow_down": 0.35 },
+        "fear": { "eyes_wide": 0.3, "brow_down": 0.15 },
+        "disgust": { "mouth_frown": 0.2, "eyes_squint": 0.15 },
         "neutral": {}
     },
+    "facial_expressions": {
+        "smile":         {"description": "gentle smile",    "targets": {"mouth_smile": 0.5, "eyes_smile": 0.3}},
+        "grin":          {"description": "wide grin",       "targets": {"mouth_smile": 0.9, "eyes_smile": 0.6}},
+        "sad":           {"description": "sadness",         "targets": {"mouth_frown": 0.7, "eyes_sad": 0.5}},
+        "blush":         {"description": "embarrassed",     "targets": {"cheek_blush": 0.8}},
+        "surprised":     {"description": "surprised",       "targets": {"eyes_wide": 0.8, "mouth_open": 0.3}},
+        "angry":         {"description": "angry",           "targets": {"brow_down": 0.8, "mouth_frown": 0.5}},
+        "neutral":       {"description": "return to base emotional state", "targets": {}},
+        "expressionless":{"description": "expressionless -_-",  "targets": {"eyes_squint": 0.6}},
+        "joy_eyes":      {"description": "smiling eyes ^^","targets": {"eyes_smile": 0.9}},
+        "tongue_out":    {"description": "tongue out :P", "targets": {"tongue_out": 0.8, "mouth_smile": 0.3}}
+    },
+    "facial_expression_cooldown_s": 3,
+    "facial_expression_chars_per_sec": 12,
     "emotion_speed": {
-        "default": 1.0,
+        "default": 6.0,
         "per_emotion": { "happy": 1.2, "sad": 0.8 }
     },
     "animation_overrides": {

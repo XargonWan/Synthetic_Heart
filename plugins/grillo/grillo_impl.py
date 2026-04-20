@@ -10,12 +10,11 @@ maintains beat scheduling and optional usage of the `history_evaluator` plugin.
 
 import asyncio
 import random
-from datetime import datetime
 from types import SimpleNamespace
-from typing import Optional, Any
+from typing import Optional, Any, List, Dict
 
 from core.ai_plugin_base import AIPluginBase
-from core.logging_utils import log_debug, log_info, log_warning, log_error
+from core.logging_utils import log_debug, log_info, log_error
 from core.config_manager import config_registry
 
 
@@ -23,10 +22,11 @@ class GrilloPlugin(AIPluginBase):
     display_name = "G.R.I.L.L.O. (light)"
 
     BEAT_TYPES = {
-        "tag_elaboration": 0.3,
+        "tag_elaboration": 0.25,
         "memory_consolidation": 0.15,
-        "self_reflection": 0.25,
-        "curiosity": 0.2,
+        "diary_consolidation": 0.15,
+        "self_reflection": 0.2,
+        "curiosity": 0.15,
         "relationship": 0.1,
     }
 
@@ -38,7 +38,15 @@ class GrilloPlugin(AIPluginBase):
 
     def __init__(self):
         super().__init__()
-        self.beat_interval = int(config_registry.get_value("GRILLO_BEAT_INTERVAL", 1800, value_type=int, group="grillo", component="grillo"))
+        self.beat_interval = int(
+            config_registry.get_value(
+                "GRILLO_BEAT_INTERVAL",
+                1800,
+                value_type=int,
+                group="grillo",
+                component="grillo",
+            )
+        )
         self.history_evaluator = None
         # Map beat_type -> plugin instance (optional)
         self.beat_plugins: dict[str, object] = {}
@@ -52,6 +60,7 @@ class GrilloPlugin(AIPluginBase):
         # Try to locate history_evaluator if available
         try:
             from core.core_initializer import PLUGIN_REGISTRY
+
             self.history_evaluator = PLUGIN_REGISTRY.get("history_evaluator")
             if self.history_evaluator:
                 log_info("[grillo] history_evaluator plugin located")
@@ -61,11 +70,15 @@ class GrilloPlugin(AIPluginBase):
                     beat_type = getattr(plugin, "BEAT_TYPE", None)
                     if beat_type:
                         self.beat_plugins[beat_type] = plugin
-                        log_info(f"[grillo] Loaded beat plugin: {name} for beat_type={beat_type}")
+                        log_info(
+                            f"[grillo] Loaded beat plugin: {name} for beat_type={beat_type}"
+                        )
                 except Exception:
                     continue
         except Exception:
-            log_debug("[grillo] PLUGIN_REGISTRY unavailable or history_evaluator missing")
+            log_debug(
+                "[grillo] PLUGIN_REGISTRY unavailable or history_evaluator missing"
+            )
 
         if GrilloPlugin._scheduler_task and not GrilloPlugin._scheduler_task.done():
             log_debug("[grillo] scheduler already running")
@@ -123,7 +136,9 @@ class GrilloPlugin(AIPluginBase):
                 else:
                     return builder()
             except Exception as e:
-                log_debug(f"[grillo] Beat plugin for {beat_type} failed to build prompt: {e}")
+                log_debug(
+                    f"[grillo] Beat plugin for {beat_type} failed to build prompt: {e}"
+                )
 
         # Fallback to built-in simple prompts
         if beat_type == "tag_elaboration":
@@ -158,7 +173,7 @@ class GrilloPlugin(AIPluginBase):
         try:
             if not chat_path:
                 return False
-            parts = chat_path.split('/')
+            parts = chat_path.split("/")
             interface_name = parts[0] if len(parts) > 0 else None
             chat_id = parts[1] if len(parts) > 1 else None
 
@@ -169,6 +184,7 @@ class GrilloPlugin(AIPluginBase):
             # Exempt trainer private chats
             try:
                 from core.interfaces_registry import get_interface_registry
+
                 registry = get_interface_registry()
                 if interface_name and chat_id and chat_id.isdigit():
                     try:
@@ -182,11 +198,15 @@ class GrilloPlugin(AIPluginBase):
             # If last message author is synth, mark as inactive
             try:
                 from core.chat_history_cache import get_last_message
+
                 last = await get_last_message(chat_path)
                 if last:
-                    sender_id = last.get('sender_id')
-                    sender_name = (last.get('sender_name') or "").lower()
-                    if str(sender_id) == 'self' or any(k in sender_name for k in ("synth", "bot", "auto_response", "autoreply")):
+                    sender_id = last.get("sender_id")
+                    sender_name = (last.get("sender_name") or "").lower()
+                    if str(sender_id) == "self" or any(
+                        k in sender_name
+                        for k in ("synth", "bot", "auto_response", "autoreply")
+                    ):
                         return False
             except Exception:
                 # If we cannot determine, play safe and treat as public
@@ -196,17 +216,40 @@ class GrilloPlugin(AIPluginBase):
         except Exception:
             return True
 
+    async def suggest_actions_from_reply(
+        self, llm_reply: str, original_user_message: str, context: dict, message: Any
+    ) -> Optional[List[Dict[str, Any]]]:
+        """Ask the Grillo checker to suggest actions based on an LLM reply.
+
+        This wrapper avoids importing plugin internals from core; core should
+        call this method on the Grillo plugin instance when available.
+        """
+        try:
+            from .grillo_action_checker import GrilloActionChecker
+
+            checker = GrilloActionChecker()
+            return await checker.inspect_reply_and_suggest_actions(
+                llm_reply, original_user_message, context, message
+            )
+        except Exception as e:
+            log_debug(f"[grillo] suggest_actions_from_reply failed: {e}")
+            return None
+
     async def _create_memory_consolidation_prompt(self) -> str:
         # Try to include a short history snippet from evaluator
         history_snippet = None
         if self.history_evaluator:
             try:
                 import core.recent_chats as recent_chats
+
                 # Try a few recent chats and pick the first public/active one
                 last = await recent_chats.get_last_active_chats_verbose(5)
                 if last:
                     for chat_id, _ in last:
-                        chat_path = recent_chats.get_chat_path(chat_id) or f"telegram_bot/{chat_id}"
+                        chat_path = (
+                            recent_chats.get_chat_path(chat_id)
+                            or f"telegram_bot/{chat_id}"
+                        )
                         if not chat_path:
                             continue
                         # Skip chats where last message is synth unless exempt
@@ -218,7 +261,11 @@ class GrilloPlugin(AIPluginBase):
                             pass
                         # Use first eligible chat
                         try:
-                            history_snippet = await self.history_evaluator.evaluate_history(chat_path, entries=5)
+                            history_snippet = (
+                                await self.history_evaluator.evaluate_history(
+                                    chat_path, entries=5
+                                )
+                            )
                             if history_snippet:
                                 break
                         except Exception:
@@ -232,8 +279,8 @@ class GrilloPlugin(AIPluginBase):
             "Synthesize your recent memories and identify recurring patterns.\n"
             "Write a concise (1-2 sentence) summary that is specific and informative — not just 'we talked about X'. "
             "The summary should include: the topic, who raised or asked about it (if known), and the assistant's concrete answer or insight. "
-            "Example: \"We talked about Power Rangers — Jay asked what Super Sentai is, and I explained Super Sentai is the original Japanese series with different stories than Power Rangers.\"\n\n"
-            "Also provide 2-4 short tags (as a JSON array) describing the memory (e.g., [\"power_rangers\", \"sentai\"]).\n"
+            'Example: "We talked about Power Rangers — Jay asked what Super Sentai is, and I explained Super Sentai is the original Japanese series with different stories than Power Rangers."\n\n'
+            'Also provide 2-4 short tags (as a JSON array) describing the memory (e.g., ["power_rangers", "sentai"]).\n'
             "Return ONLY valid JSON that creates a diary entry using the `create_personal_diary_entry` action. The JSON must look like: \n"
             '{"actions": [{"type": "create_personal_diary_entry", "payload": {"content": "<your concise summary>", "context_tags": ["tag1","tag2"]}}]}\n'
             "Do NOT include any extra text outside the JSON."
@@ -252,11 +299,15 @@ class GrilloPlugin(AIPluginBase):
         if self.history_evaluator:
             try:
                 import core.recent_chats as recent_chats
+
                 # Try multiple recent chats and pick the first public/active one
                 last = await recent_chats.get_last_active_chats_verbose(5)
                 if last:
                     for chat_id, _ in last:
-                        chat_path = recent_chats.get_chat_path(chat_id) or f"telegram_bot/{chat_id}"
+                        chat_path = (
+                            recent_chats.get_chat_path(chat_id)
+                            or f"telegram_bot/{chat_id}"
+                        )
                         if not chat_path:
                             continue
                         try:
@@ -266,7 +317,11 @@ class GrilloPlugin(AIPluginBase):
                         except Exception:
                             pass
                         try:
-                            history_snippet = await self.history_evaluator.evaluate_history(chat_path, entries=3)
+                            history_snippet = (
+                                await self.history_evaluator.evaluate_history(
+                                    chat_path, entries=3
+                                )
+                            )
                             if history_snippet:
                                 break
                         except Exception:
@@ -275,7 +330,11 @@ class GrilloPlugin(AIPluginBase):
                 pass
         intro = "[G.R.I.L.L.O. Curiosity Exploration]\n\n"
         if history_snippet:
-            intro += "Below is a short history-derived prompt to help you be curious:\n\n" + history_snippet + "\n\n"
+            intro += (
+                "Below is a short history-derived prompt to help you be curious:\n\n"
+                + history_snippet
+                + "\n\n"
+            )
         intro += (
             "Based on your recent experiences: what questions have emerged? End with JSON action.\n"
             '{"actions": [{"type": "create_personal_diary_entry", "payload": {"content": "your curious thoughts"}}]}'
@@ -295,7 +354,9 @@ class GrilloPlugin(AIPluginBase):
 
             activity_log_id: Optional[int] = None
             try:
-                activity_log_id = await self.create_activity_log(beat_type=beat_type, prompt_text=prompt)
+                activity_log_id = await self.create_activity_log(
+                    beat_type=beat_type, prompt_text=prompt
+                )
             except Exception as e:
                 log_debug(f"[grillo] Failed to create activity log entry: {e}")
 
@@ -304,8 +365,14 @@ class GrilloPlugin(AIPluginBase):
             message.chat_id = -1
             message.message_id = 0
             message.text = prompt
-            message.from_user = SimpleNamespace(id=-1, username="grillo", full_name="G.R.I.L.L.O.", first_name="G.R.I.L.L.O.")
+            message.from_user = SimpleNamespace(
+                id=-1,
+                username="grillo",
+                full_name="G.R.I.L.L.O.",
+                first_name="G.R.I.L.L.O.",
+            )
             from datetime import datetime
+
             message.chat = SimpleNamespace(id=-1, type="internal")
             # Ensure the synthetic message has a date so prompt building doesn't fail
             message.date = datetime.utcnow()
@@ -326,7 +393,13 @@ class GrilloPlugin(AIPluginBase):
                 "priority": False,
             }
             # Use the official enqueue API to avoid direct queue access
-            await message_queue.enqueue_low_priority(None, message, context_memory=item.get('context'), interface_id='grillo', original_message=None)
+            await message_queue.enqueue_low_priority(
+                None,
+                message,
+                context_memory=item.get("context"),
+                interface_id="grillo",
+                original_message=None,
+            )
             # Reset pending flag after small delay to avoid flooding
             asyncio.create_task(self._reset_beat_pending_after_delay())
         except Exception as e:
@@ -334,7 +407,13 @@ class GrilloPlugin(AIPluginBase):
             GrilloPlugin._beat_pending = False
 
     @classmethod
-    async def create_activity_log(cls, *, beat_type: str, prompt_text: str, metadata: Optional[dict[str, Any]] = None) -> Optional[int]:
+    async def create_activity_log(
+        cls,
+        *,
+        beat_type: str,
+        prompt_text: str,
+        metadata: Optional[dict[str, Any]] = None,
+    ) -> Optional[int]:
         """Create a grillo_activity_log row and return its id.
 
         This enables the WebUI History > Grillo view and lets other plugins link
@@ -451,7 +530,9 @@ class GrilloPlugin(AIPluginBase):
             log_error(f"[grillo] set_activity_response_text failed: {e}")
 
     @classmethod
-    async def record_suppressed_event(cls, activity_log_id: Optional[int] = None, reason: str = "") -> None:
+    async def record_suppressed_event(
+        cls, activity_log_id: Optional[int] = None, reason: str = ""
+    ) -> None:
         """Record a suppressed outbound message and attempt to annotate the originating activity log.
 
         This increments an in-memory counter and (best-effort) appends a note to the
@@ -462,9 +543,13 @@ class GrilloPlugin(AIPluginBase):
             if activity_log_id:
                 try:
                     # Annotate the activity row with a suppression note
-                    await cls.set_activity_response_text(activity_log_id, f"[suppressed: {reason}]", append=True)
+                    await cls.set_activity_response_text(
+                        activity_log_id, f"[suppressed: {reason}]", append=True
+                    )
                 except Exception as e:
-                    log_debug(f"[grillo] record_suppressed_event failed to update activity log: {e}")
+                    log_debug(
+                        f"[grillo] record_suppressed_event failed to update activity log: {e}"
+                    )
 
             # Best-effort: increment persistent counter in DB if available
             try:
@@ -483,7 +568,11 @@ class GrilloPlugin(AIPluginBase):
                                 END
                             WHERE id=%s
                             """,
-                            (f"[suppressed: {reason}]", f"[suppressed: {reason}]", int(activity_log_id)),
+                            (
+                                f"[suppressed: {reason}]",
+                                f"[suppressed: {reason}]",
+                                int(activity_log_id),
+                            ),
                         )
                         try:
                             await conn.commit()
@@ -504,6 +593,7 @@ class GrilloPlugin(AIPluginBase):
         """Best-effort: create the `grillo_action_execs` table if it doesn't exist."""
         try:
             from core.db import get_conn_ctx
+
             async with get_conn_ctx() as conn:
                 async with conn.cursor() as cur:
                     await cur.execute(
@@ -581,26 +671,34 @@ class GrilloPlugin(AIPluginBase):
                 msg = str(e) or ""
                 log_debug(f"[grillo] create_action_exec attempt {attempt} failed: {e}")
                 # MySQL error code 1146 indicates missing table
-                if attempt == 0 and ("1146" in msg or "doesn't exist" in msg or "no such table" in msg.lower()):
+                if attempt == 0 and (
+                    "1146" in msg
+                    or "doesn't exist" in msg
+                    or "no such table" in msg.lower()
+                ):
                     ok = await cls._ensure_action_execs_table()
                     if ok:
                         continue
                 # As a fallback, write to disk so we don't lose proposals
                 try:
                     exec_obj = {
-                        'activity_log_id': int(activity_log_id),
-                        'action_index': int(action_index),
-                        'action_type': action_type[:150] if action_type else '',
-                        'payload': payload,
-                        'status': status,
-                        'error_text': error_text,
-                        'result': result,
-                        'created_at': None,
+                        "activity_log_id": int(activity_log_id),
+                        "action_index": int(action_index),
+                        "action_type": action_type[:150] if action_type else "",
+                        "payload": payload,
+                        "status": status,
+                        "error_text": error_text,
+                        "result": result,
+                        "created_at": None,
                     }
                     await cls._fallback_write_action_exec(exec_obj)
-                    log_info(f"[grillo] Persisted action exec to fallback file for activity_id={activity_log_id} idx={action_index}")
+                    log_info(
+                        f"[grillo] Persisted action exec to fallback file for activity_id={activity_log_id} idx={action_index}"
+                    )
                 except Exception as e2:
                     log_debug(f"[grillo] fallback write failed: {e2}")
+
+    @classmethod
     async def fetch_action_execs(cls, activity_ids: list[int]) -> dict:
         """Return mapping activity_log_id -> list of action exec dicts.
 
@@ -608,6 +706,7 @@ class GrilloPlugin(AIPluginBase):
         """
         try:
             from core.db import get_conn_ctx
+
             if not activity_ids:
                 return {}
         except Exception as e:
@@ -631,6 +730,7 @@ class GrilloPlugin(AIPluginBase):
                         rows = await cur.fetchall()
                         mapping = {}
                         import json
+
                         for r in rows:
                             aid = r[1]
                             payload = None
@@ -643,22 +743,30 @@ class GrilloPlugin(AIPluginBase):
                                 result = json.loads(r[7]) if r[7] else None
                             except Exception:
                                 result = None
-                            mapping.setdefault(aid, []).append({
-                                "id": r[0],
-                                "activity_log_id": aid,
-                                "action_index": r[2],
-                                "action_type": r[3],
-                                "payload": payload,
-                                "status": r[5],
-                                "error_text": r[6],
-                                "result": result,
-                                "created_at": r[8].isoformat() if hasattr(r[8], "isoformat") else r[8],
-                            })
+                            mapping.setdefault(aid, []).append(
+                                {
+                                    "id": r[0],
+                                    "activity_log_id": aid,
+                                    "action_index": r[2],
+                                    "action_type": r[3],
+                                    "payload": payload,
+                                    "status": r[5],
+                                    "error_text": r[6],
+                                    "result": result,
+                                    "created_at": r[8].isoformat()
+                                    if hasattr(r[8], "isoformat")
+                                    else r[8],
+                                }
+                            )
                         return mapping
             except Exception as e:
                 msg = str(e) or ""
                 log_debug(f"[grillo] fetch_action_execs attempt {attempt} failed: {e}")
-                if attempt == 0 and ("1146" in msg or "doesn't exist" in msg or "no such table" in msg.lower()):
+                if attempt == 0 and (
+                    "1146" in msg
+                    or "doesn't exist" in msg
+                    or "no such table" in msg.lower()
+                ):
                     ok = await cls._ensure_action_execs_table()
                     if ok:
                         continue
@@ -680,33 +788,41 @@ class GrilloPlugin(AIPluginBase):
         return mapping
 
     @classmethod
+    @classmethod
     async def _fallback_write_action_exec(cls, exec_obj: dict) -> None:
         """Append action exec to a local fallback JSONL file in logs/ if DB unavailable."""
         try:
             import json
             import os
-            path = os.path.join(os.getcwd(), 'logs', 'grillo_action_execs_fallback.jsonl')
+
+            path = os.path.join(
+                os.getcwd(), "logs", "grillo_action_execs_fallback.jsonl"
+            )
             os.makedirs(os.path.dirname(path), exist_ok=True)
-            with open(path, 'a', encoding='utf-8') as f:
-                f.write(json.dumps(exec_obj, ensure_ascii=False) + '\n')
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(exec_obj, ensure_ascii=False) + "\n")
         except Exception as e:
             log_debug(f"[grillo] _fallback_write_action_exec failed: {e}")
 
+    @classmethod
     @classmethod
     async def _fallback_read_action_execs(cls, activity_ids: list[int]) -> dict:
         """Read fallback JSONL file and return mapping activity_log_id -> list of execs."""
         try:
             import json
             import os
-            path = os.path.join(os.getcwd(), 'logs', 'grillo_action_execs_fallback.jsonl')
+
+            path = os.path.join(
+                os.getcwd(), "logs", "grillo_action_execs_fallback.jsonl"
+            )
             if not os.path.exists(path):
                 return {}
             mapping = {}
-            with open(path, 'r', encoding='utf-8') as f:
+            with open(path, "r", encoding="utf-8") as f:
                 for line in f:
                     try:
                         obj = json.loads(line)
-                        aid = obj.get('activity_log_id')
+                        aid = obj.get("activity_log_id")
                         if aid in activity_ids:
                             mapping.setdefault(aid, []).append(obj)
                     except Exception:
@@ -723,15 +839,18 @@ class GrilloPlugin(AIPluginBase):
             import json
             import os
             import time
-            path = os.path.join(os.getcwd(), 'logs', 'grillo_activity_fallback.jsonl')
+
+            path = os.path.join(os.getcwd(), "logs", "grillo_activity_fallback.jsonl")
             os.makedirs(os.path.dirname(path), exist_ok=True)
             # Ensure activity has an id
-            if 'id' not in activity_obj or not activity_obj.get('id'):
-                activity_obj['id'] = f"fallback-{int(time.time()*1000)}"
-            with open(path, 'a', encoding='utf-8') as f:
-                f.write(json.dumps(activity_obj, ensure_ascii=False) + '\n')
-            log_info(f"[grillo] Wrote activity to fallback file id={activity_obj['id']}")
-            return activity_obj['id']
+            if "id" not in activity_obj or not activity_obj.get("id"):
+                activity_obj["id"] = f"fallback-{int(time.time() * 1000)}"
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(activity_obj, ensure_ascii=False) + "\n")
+            log_info(
+                f"[grillo] Wrote activity to fallback file id={activity_obj['id']}"
+            )
+            return activity_obj["id"]
         except Exception as e:
             log_debug(f"[grillo] _fallback_write_activity failed: {e}")
             return ""
@@ -742,11 +861,12 @@ class GrilloPlugin(AIPluginBase):
         try:
             import json
             import os
-            path = os.path.join(os.getcwd(), 'logs', 'grillo_activity_fallback.jsonl')
+
+            path = os.path.join(os.getcwd(), "logs", "grillo_activity_fallback.jsonl")
             if not os.path.exists(path):
                 return []
             out = []
-            with open(path, 'r', encoding='utf-8') as f:
+            with open(path, "r", encoding="utf-8") as f:
                 for line in f:
                     try:
                         obj = json.loads(line)

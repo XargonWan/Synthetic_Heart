@@ -14,8 +14,10 @@ from typing import Any
 try:  # pragma: no cover - import guard
     import aiomysql  # type: ignore
 except Exception:  # pragma: no cover - executed when aiomysql missing
+
     async def _missing_connect(*args, **kwargs):
         raise RuntimeError("aiomysql is not installed")
+
     # Provide a minimal stub exposing the async connect/create_pool API so
     # calling sites receive a clear RuntimeError instead of an AttributeError
     # when aiomysql is not installed.
@@ -43,38 +45,39 @@ def _read_db_config():
     # DB connection settings must be environment-driven.
     # If a previous run persisted an incorrect DB_HOST (e.g. "localhost") into
     # config_registry/DB, preferring that value can lock the system out of DB.
-    env_host = os.getenv('DB_HOST')
-    env_port = os.getenv('DB_PORT')
-    env_user = os.getenv('DB_USER')
-    env_pass = os.getenv('DB_PASS')
-    env_name = os.getenv('DB_NAME')
+    env_host = os.getenv("DB_HOST")
+    env_port = os.getenv("DB_PORT")
+    env_user = os.getenv("DB_USER")
+    env_pass = os.getenv("DB_PASS")
+    env_name = os.getenv("DB_NAME")
 
     # Start from env (or hard defaults if env is missing)
-    host = env_host or 'localhost'
+    host = env_host or "localhost"
     try:
         port = int(env_port) if env_port is not None else 3306
     except Exception:
         port = 3306
-    user = env_user or 'synth'
-    passwd = env_pass or 'synth'
-    dbname = env_name or 'synth'
+    user = env_user or "synth"
+    passwd = env_pass or "synth"
+    dbname = env_name or "synth"
 
     # Allow config_registry to fill only the missing pieces (never override env)
     try:
         if env_host is None:
-            host = config_registry.get_value('DB_HOST', host)
+            host = config_registry.get_value("DB_HOST", host)
         if env_port is None:
-            port = int(config_registry.get_value('DB_PORT', port))
+            port = int(config_registry.get_value("DB_PORT", port))
         if env_user is None:
-            user = config_registry.get_value('DB_USER', user)
+            user = config_registry.get_value("DB_USER", user)
         if env_pass is None:
-            passwd = config_registry.get_value('DB_PASS', passwd)
+            passwd = config_registry.get_value("DB_PASS", passwd)
         if env_name is None:
-            dbname = config_registry.get_value('DB_NAME', dbname)
+            dbname = config_registry.get_value("DB_NAME", dbname)
     except Exception:
         pass
 
     return host, port, user, passwd, dbname
+
 
 # Test di connessione con retry e logging dettagliato
 async def wait_for_db(max_attempts=10, delay=3):
@@ -82,7 +85,9 @@ async def wait_for_db(max_attempts=10, delay=3):
     for attempt in range(1, max_attempts + 1):
         try:
             host, port, user, passwd, dbname = _read_db_config()
-            log_debug(f"[db] Attempt {attempt}: connecting to {user}@{host}:{port}/{dbname}")
+            log_debug(
+                f"[db] Attempt {attempt}: connecting to {user}@{host}:{port}/{dbname}"
+            )
             conn = await aiomysql.connect(
                 host=host,
                 port=port,
@@ -100,10 +105,12 @@ async def wait_for_db(max_attempts=10, delay=3):
     log_error(f"[db] Could not connect to the database after {max_attempts} attempts.")
     return False
 
+
 _db_logging_initialized = False
 
 # Track if we've already warned about unsupported `max_execution_time` so we don't spam logs
 _max_execution_time_unsupported_reported = False
+
 
 def initialize_db_logging():
     """Log database configuration for debugging purposes."""
@@ -112,7 +119,9 @@ def initialize_db_logging():
         return
     try:
         host, port, user, passwd, dbname = _read_db_config()
-        log_info(f"[db] Configuration: HOST={host}, PORT={port}, USER={user}, DB_NAME={dbname}")
+        log_info(
+            f"[db] Configuration: HOST={host}, PORT={port}, USER={user}, DB_NAME={dbname}"
+        )
         try:
             log_debug(f"[db] Password length: {len(passwd)} characters")
         except Exception:
@@ -120,6 +129,7 @@ def initialize_db_logging():
     except Exception:
         log_info("[db] Configuration: <unable to read DB config at import-time>")
     _db_logging_initialized = True
+
 
 _db_initialized = False
 _db_init_lock = asyncio.Lock()
@@ -136,6 +146,7 @@ _pool_lock = asyncio.Lock()
 _active_conn_count = 0
 _conn_acquired_times: dict[int, float] = {}
 _conn_acquired_stacks: dict[int, str] = {}
+
 
 async def get_pool():
     """Get or create the database connection pool."""
@@ -158,20 +169,52 @@ async def get_pool():
                 log_info("[db] Creating connection pool for loop id=%s" % loop_id)
                 # Allow pool size to be configured via config_registry or environment
                 try:
-                    DB_POOL_MINSIZE = int(os.getenv('DB_POOL_MINSIZE', config_registry.get_value('DB_POOL_MINSIZE', 1, label='DB Pool Min Size', group='database', component='core', advanced=True)))
+                    DB_POOL_MINSIZE = int(
+                        os.getenv(
+                            "DB_POOL_MINSIZE",
+                            config_registry.get_value(
+                                "DB_POOL_MINSIZE",
+                                1,
+                                label="DB Pool Min Size",
+                                group="database",
+                                component="core",
+                                advanced=True,
+                            ),
+                        )
+                    )
                 except Exception:
                     DB_POOL_MINSIZE = 1
                 try:
-                    DB_POOL_MAXSIZE = int(os.getenv('DB_POOL_MAXSIZE', config_registry.get_value('DB_POOL_MAXSIZE', 150, label='DB Pool Max Size', group='database', component='core', advanced=True)))
+                    DB_POOL_MAXSIZE = int(
+                        os.getenv(
+                            "DB_POOL_MAXSIZE",
+                            config_registry.get_value(
+                                "DB_POOL_MAXSIZE",
+                                60,
+                                label="DB Pool Max Size",
+                                group="database",
+                                component="core",
+                                advanced=True,
+                            ),
+                        )
+                    )
                 except Exception:
-                    DB_POOL_MAXSIZE = 150
+                    DB_POOL_MAXSIZE = 60
 
                 try:
                     host, port, user, passwd, dbname = _read_db_config()
                 except Exception:
-                    host, port, user, passwd, dbname = (os.getenv('DB_HOST', 'localhost'), int(os.getenv('DB_PORT', '3306')), os.getenv('DB_USER', 'synth'), os.getenv('DB_PASS', 'synth'), os.getenv('DB_NAME', 'synth'))
+                    host, port, user, passwd, dbname = (
+                        os.getenv("DB_HOST", "localhost"),
+                        int(os.getenv("DB_PORT", "3306")),
+                        os.getenv("DB_USER", "synth"),
+                        os.getenv("DB_PASS", "synth"),
+                        os.getenv("DB_NAME", "synth"),
+                    )
 
-                log_info(f"[db] Creating pool with minsize={DB_POOL_MINSIZE} maxsize={DB_POOL_MAXSIZE}")
+                log_info(
+                    f"[db] Creating pool with minsize={DB_POOL_MINSIZE} maxsize={DB_POOL_MAXSIZE}"
+                )
                 new_pool = await aiomysql.create_pool(
                     host=host,
                     port=port,
@@ -198,10 +241,10 @@ def get_pool_debug_info(max_stacks: int = 3) -> dict:
     """
     try:
         info = {
-            'active_connections': _active_conn_count,
-            'acquired_count': len(_conn_acquired_times),
-            'oldest_held_seconds': None,
-            'oldest_stack': None,
+            "active_connections": _active_conn_count,
+            "acquired_count": len(_conn_acquired_times),
+            "oldest_held_seconds": None,
+            "oldest_stack": None,
         }
         if _conn_acquired_times:
             now = time.time()
@@ -212,18 +255,19 @@ def get_pool_debug_info(max_stacks: int = 3) -> dict:
                 if age > oldest_age:
                     oldest_age = age
                     oldest_id = cid
-            info['oldest_held_seconds'] = int(oldest_age)
+            info["oldest_held_seconds"] = int(oldest_age)
             if oldest_id and _conn_acquired_stacks.get(oldest_id):
-                info['oldest_stack'] = _conn_acquired_stacks.get(oldest_id)
+                info["oldest_stack"] = _conn_acquired_stacks.get(oldest_id)
 
         # Provide a small sample of stacks (up to max_stacks)
         stacks = []
         for cid, stack in list(_conn_acquired_stacks.items())[:max_stacks]:
-            stacks.append({'id': cid, 'stack': stack})
-        info['stacks'] = stacks
+            stacks.append({"id": cid, "stack": stack})
+        info["stacks"] = stacks
         return info
     except Exception:
-        return {'active_connections': _active_conn_count}
+        return {"active_connections": _active_conn_count}
+
 
 async def get_conn() -> aiomysql.Connection:
     """Return an async MariaDB connection from the connection pool."""
@@ -241,7 +285,7 @@ async def get_conn() -> aiomysql.Connection:
             _last_db_log_time = now
     except Exception:
         pass
-    
+
     log_debug("[db] About to call get_pool()")
     pool = await get_pool()
     log_debug("[db] get_pool() completed, about to call pool.acquire()")
@@ -252,13 +296,19 @@ async def get_conn() -> aiomysql.Connection:
         log_error("[db] get_conn cancelled while waiting for pool.acquire()")
         raise
     except asyncio.TimeoutError:
-        log_error("[db] TIMEOUT acquiring connection from pool after 30 seconds - pool may be exhausted")
-        raise TimeoutError("Database connection pool exhausted - timeout acquiring connection")
+        log_error(
+            "[db] TIMEOUT acquiring connection from pool after 30 seconds - pool may be exhausted"
+        )
+        raise TimeoutError(
+            "Database connection pool exhausted - timeout acquiring connection"
+        )
 
     # Set query timeout to prevent long-running queries from holding connections indefinitely
     try:
         async with conn.cursor() as cur:
-            await cur.execute("SET SESSION max_execution_time=30000")  # 30 second timeout per query
+            await cur.execute(
+                "SET SESSION max_execution_time=30000"
+            )  # 30 second timeout per query
     except Exception as e:
         # Some MySQL/MariaDB servers (or older versions) don't support
         # the `max_execution_time` session variable (error 1193 / "Unknown system variable").
@@ -270,11 +320,16 @@ async def get_conn() -> aiomysql.Connection:
                     # report the unsupported-variable condition only the first time
                     global _max_execution_time_unsupported_reported
                     if not _max_execution_time_unsupported_reported:
-                        log_warning("[db] DB server does not support session max_execution_time; query timeouts will not be enforced (first occurrence): %s" % msg)
+                        log_warning(
+                            "[db] DB server does not support session max_execution_time; query timeouts will not be enforced (first occurrence): %s"
+                            % msg
+                        )
                         _max_execution_time_unsupported_reported = True
                 except Exception:
                     # Fallback to debug logging if something goes wrong updating the flag
-                    log_debug(f"[db] Could not set query timeout (ignoring unsupported var): {e}")
+                    log_debug(
+                        f"[db] Could not set query timeout (ignoring unsupported var): {e}"
+                    )
             else:
                 # Other errors are unexpected — log as error so maintainers notice
                 log_error(f"[db] Could not set query timeout: {e}")
@@ -290,19 +345,22 @@ async def get_conn() -> aiomysql.Connection:
             # where connections are being held without release.
             try:
                 import traceback
+
                 stack = traceback.format_stack(limit=8)
-                _conn_acquired_stacks[id(conn)] = ''.join(stack)
+                _conn_acquired_stacks[id(conn)] = "".join(stack)
             except Exception:
                 pass
         except Exception:
             pass
         # Warn when we're close to pool capacity
         try:
-            maxsize = getattr(pool, 'maxsize', None)
+            maxsize = getattr(pool, "maxsize", None)
             # Only warn if we're at or very close to pool limit
             # For small pools (size 1-2), require actual connection pressure
             # For larger pools, warn when within 2 of limit
-            warning_threshold = max(maxsize - 2, maxsize) if maxsize and maxsize > 2 else maxsize
+            warning_threshold = (
+                max(maxsize - 2, maxsize) if maxsize and maxsize > 2 else maxsize
+            )
             if maxsize and _active_conn_count >= warning_threshold:
                 # Compute the oldest-held connection age and include a stack
                 oldest_age = 0
@@ -351,7 +409,7 @@ async def get_conn() -> aiomysql.Connection:
 
         def close(self):
             """Synchronous close that releases connection back to pool immediately.
-            
+
             We use pool.release() directly instead of scheduling an async task
             because the connection needs to be returned to the pool immediately
             to avoid connection leaks.
@@ -359,12 +417,12 @@ async def get_conn() -> aiomysql.Connection:
             global _active_conn_count
             try:
                 # Release directly to pool - this is synchronous and safe
-                if self._pool and hasattr(self._pool, 'release'):
+                if self._pool and hasattr(self._pool, "release"):
                     try:
                         self._pool.release(self._conn)
                     except Exception:
                         pass
-                
+
                 log_debug("[db] Connection released to pool")
             finally:
                 try:
@@ -395,7 +453,7 @@ async def get_conn() -> aiomysql.Connection:
             it's awaitable.
             """
             try:
-                real_cursor_call = getattr(self._conn, 'cursor')
+                real_cursor_call = getattr(self._conn, "cursor")
             except Exception:
                 real_cursor_call = None
 
@@ -406,6 +464,7 @@ async def get_conn() -> aiomysql.Connection:
                 @asynccontextmanager
                 async def _null_ctx():
                     yield None
+
                 return _null_ctx()
 
             real_cursor_obj = real_cursor_call(*args, **kwargs)
@@ -416,21 +475,94 @@ async def get_conn() -> aiomysql.Connection:
                 def __init__(self, real):
                     self._real = real
                     self._cursor = None
+                    self._entered_cm = None
+
+                def _wrap_cursor_obj(self, inner_cur):
+                    """Return a proxy cursor that intercepts execute/executemany and
+                    attempts an idempotent auto-heal (ensure_core_tables/ensure_plugin_tables)
+                    on schema-related errors (1146 / 1054) before retrying once.
+                    """
+                    import inspect as _inspect
+                    import os as _os
+                    from core.logging_utils import (
+                        log_info as _log_info,
+                        log_warning as _log_warning,
+                    )
+
+                    AUTO_HEAL = _os.getenv("DB_AUTO_HEAL", "1") not in (
+                        "0",
+                        "false",
+                        "False",
+                    )
+
+                    async def _exec_wrapper(method, *a, **kw):
+                        try:
+                            res = method(*a, **kw)
+                            if _inspect.isawaitable(res):
+                                return await res
+                            return res
+                        except Exception as exc:
+                            msg = str(exc) or ""
+                            is_schema_error = (
+                                "1146" in msg
+                                or "doesn't exist" in msg
+                                or "1054" in msg
+                                or "Unknown column" in msg
+                            )
+                            if AUTO_HEAL and is_schema_error:
+                                _log_warning(
+                                    f"[db] Schema error detected during DB execute: {msg}. Attempting auto-heal."
+                                )
+                                try:
+                                    await ensure_core_tables()
+                                    await ensure_plugin_tables()
+                                    _log_info(
+                                        "[db] Auto-heal applied; retrying query once"
+                                    )
+                                except Exception as heal_err:
+                                    _log_warning(f"[db] Auto-heal failed: {heal_err}")
+                                    raise
+                                # retry once
+                                res2 = method(*a, **kw)
+                                if _inspect.isawaitable(res2):
+                                    return await res2
+                                return res2
+                            raise
+
+                    class _ProxyCursor:
+                        def __init__(self, inner):
+                            self._inner = inner
+
+                        def __getattr__(self, name):
+                            # Intercept execute/executemany only; forward everything else
+                            if name in ("execute", "executemany"):
+                                orig = getattr(self._inner, name)
+
+                                async def _wrapped(*args, **kwargs):
+                                    return await _exec_wrapper(orig, *args, **kwargs)
+
+                                return _wrapped
+                            return getattr(self._inner, name)
+
+                        async def close(self):
+                            close_fn = getattr(self._inner, "close", None)
+                            if close_fn:
+                                res = close_fn()
+                                if _inspect.isawaitable(res):
+                                    await res
+
+                    return _ProxyCursor(inner_cur)
 
                 def __await__(self):
                     async def _get():
-                        # Case 1: the underlying call is awaitable and returns a cursor
+                        # Awaitable underlying call (e.g. await conn.cursor())
                         if inspect.isawaitable(self._real):
                             cur = await self._real
-                            self._cursor = cur
-                            return cur
+                            self._cursor = self._wrap_cursor_obj(cur)
+                            return self._cursor
 
-                        # Case 2: the underlying object is an async context manager
-                        # (e.g., contextlib._AsyncGeneratorContextManager). In this
-                        # case we enter it and return a small proxy that forwards
-                        # attribute access to the real cursor but also ensures we
-                        # call __aexit__ when the proxy's async close() is invoked.
-                        if hasattr(self._real, '__aenter__'):
+                        # Underlying object is an async context manager
+                        if hasattr(self._real, "__aenter__"):
                             cm = self._real
                             enter_res = cm.__aenter__()
                             if inspect.isawaitable(enter_res):
@@ -438,85 +570,47 @@ async def get_conn() -> aiomysql.Connection:
                             else:
                                 cur = enter_res
 
-                            self._cursor = cur
+                            self._cursor = self._wrap_cursor_obj(cur)
                             self._entered_cm = cm
+                            return self._cursor
 
-                            class _ProxyCursor:
-                                def __init__(self, inner_cur, cm_obj):
-                                    self._inner = inner_cur
-                                    self._cm = cm_obj
-
-                                def __getattr__(self, name):
-                                    return getattr(self._inner, name)
-
-                                async def close(self):
-                                    # Close inner cursor if possible
-                                    try:
-                                        close_fn = getattr(self._inner, 'close', None)
-                                        if close_fn:
-                                            res = close_fn()
-                                            if inspect.isawaitable(res):
-                                                await res
-                                    except Exception:
-                                        pass
-
-                                    # Exit the context manager to release resources
-                                    try:
-                                        exit_fn = getattr(self._cm, '__aexit__', None)
-                                        if exit_fn:
-                                            res = exit_fn(None, None, None)
-                                            if inspect.isawaitable(res):
-                                                await res
-                                    except Exception:
-                                        pass
-
-                                # Provide sync-compatible close for callers that do not await
-                                def close_sync(self):
-                                    try:
-                                        close = getattr(self._inner, 'close', None)
-                                        if close:
-                                            close()
-                                    except Exception:
-                                        pass
-                                    try:
-                                        exit_fn = getattr(self._cm, '__aexit__', None)
-                                        if exit_fn:
-                                            # Best-effort: call without awaiting
-                                            exit_fn(None, None, None)
-                                    except Exception:
-                                        pass
-
-                            return _ProxyCursor(cur, cm)
-
-                        # Case 3: plain object (cursor already returned)
+                        # Plain cursor object
                         cur = self._real
-                        self._cursor = cur
-                        return cur
+                        self._cursor = self._wrap_cursor_obj(cur)
+                        return self._cursor
 
                     return _get().__await__()
 
                 async def __aenter__(self):
-                    # Ensure we have the resolved cursor instance
-                    if self._cursor is None:
-                        self._cursor = await self
-
-                    # If the underlying cursor is itself an async context manager,
-                    # prefer to delegate to its __aenter__ for any setup logic.
                     try:
-                        enter_fn = getattr(self._cursor, '__aenter__', None)
-                        if enter_fn:
-                            res = enter_fn()
-                            if inspect.isawaitable(res):
-                                return await res
-                            return res
+                        # If underlying call returned a coroutine that needs awaiting,
+                        # handle that first and wrap the resulting cursor.
+                        if self._cursor is None and inspect.isawaitable(self._real):
+                            cur = await self._real
+                            self._cursor = self._wrap_cursor_obj(cur)
+
+                        # If the underlying cursor is itself an async context manager,
+                        # prefer to delegate to its __aenter__ for any setup logic.
+                        try:
+                            enter_fn = getattr(self._cursor, "__aenter__", None)
+                            if enter_fn:
+                                res = enter_fn()
+                                if inspect.isawaitable(res):
+                                    await res
+                                return self._cursor
+                        except Exception:
+                            pass
+
+                        return self._cursor
                     except Exception:
-                        pass
-                    return self._cursor
+                        # Reset partially-initialized state on error
+                        self._cursor = None
+                        raise
 
                 async def __aexit__(self, exc_type, exc, tb):
                     # If the underlying cursor provides __aexit__, use it.
                     try:
-                        exit_fn = getattr(self._cursor, '__aexit__', None)
+                        exit_fn = getattr(self._cursor, "__aexit__", None)
                         if exit_fn:
                             res = exit_fn(exc_type, exc, tb)
                             if inspect.isawaitable(res):
@@ -527,7 +621,7 @@ async def get_conn() -> aiomysql.Connection:
 
                     # Otherwise, attempt to close the cursor (await if necessary)
                     try:
-                        close_fn = getattr(self._cursor, 'close', None)
+                        close_fn = getattr(self._cursor, "close", None)
                         if close_fn:
                             res = close_fn()
                             if inspect.isawaitable(res):
@@ -574,6 +668,7 @@ def get_conn_ctx():
     """
     return _ConnContext()
 
+
 async def release_conn(conn):
     """Release a connection back to the pool."""
     global _active_conn_count
@@ -587,7 +682,7 @@ async def release_conn(conn):
             # Some aiomysql internals may expose pool.release; attempt it as fallback
             try:
                 pool = await get_pool()
-                if hasattr(pool, 'release'):
+                if hasattr(pool, "release"):
                     pool.release(conn)
             except Exception:
                 pass
@@ -607,6 +702,7 @@ async def release_conn(conn):
         except Exception:
             pass
 
+
 async def test_connection() -> bool:
     """Check if the database is reachable."""
     try:
@@ -619,40 +715,40 @@ async def test_connection() -> bool:
         print(f"[test_connection] Error: {e}")
         return False
 
+
 async def init_db() -> None:
     """Asynchronously initialize essential MariaDB tables (core only)."""
     async with get_conn_ctx() as conn:
         try:
+            # Ensure we have a cursor to run schema creation for core tables
             async with conn.cursor() as cur:
-                # settings table for configuration values - core functionality
                 await cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS settings (
-                    `setting_key` VARCHAR(255) PRIMARY KEY,
-                    `value` TEXT NOT NULL,
-                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+                    """
+                    CREATE TABLE IF NOT EXISTS config (
+                        `config_key` VARCHAR(255) PRIMARY KEY,
+                        `value` TEXT NOT NULL,
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+                    )
+                    """
                 )
-                """
-            )
 
-            await cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS config (
-                    `config_key` VARCHAR(255) PRIMARY KEY,
-                    `value` TEXT NOT NULL,
-                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+                # Insert default config entries if they don't exist (use `config` table)
+                await cur.execute(
+                    """
+                    INSERT IGNORE INTO config (`config_key`, `value`) VALUES ('BASE_CORTEX', 'selenium_chatgpt')
+                    """
                 )
-                """
-            )
-
-            # Insert default settings if they don't exist
-            await cur.execute(
-                """
-                INSERT IGNORE INTO settings (`setting_key`, `value`) VALUES ('active_llm', 'selenium_chatgpt')
-                """
-            )
+                await cur.execute(
+                    """
+                    INSERT IGNORE INTO config (`config_key`, `value`) VALUES ('GRILLO_CORTEX', 'Default')
+                    """
+                )
+                await cur.execute(
+                    """
+                    INSERT IGNORE INTO config (`config_key`, `value`) VALUES ('TRAINER_CORTEX', 'Default')
+                    """
+                )
         except Exception as e:
             print(f"[init_db] Error: {e}")
 
@@ -668,10 +764,229 @@ async def ensure_core_tables() -> None:
             # Initialize chat history cache table
             try:
                 from core.chat_history_cache import init_chat_history_table
+
                 await init_chat_history_table()
             except Exception as e:
                 log_warning(f"[db] Failed to initialize chat history cache table: {e}")
             _db_initialized = True
+
+
+async def ensure_plugin_tables() -> None:
+    """Ensure plugin-managed tables exist (idempotent).
+
+    This is a startup *preflight* that creates tables normally created
+    lazily by plugins or present in init-db.sql so fresh installs won't
+    hit 1146 "Table doesn't exist" errors.
+    """
+    try:
+        # Some plugin tables reference `ai_diary` — ensure diary table first if available
+        try:
+            from plugins.ai_diary import init_diary_table
+
+            await init_diary_table()
+        except Exception:
+            # No-op if plugin not present or init failed; create a safe fallback so
+            # other plugin tables (e.g. grillo) that JOIN `ai_diary` won't keep
+            # failing with 1146. This mirrors the schema declared in
+            # `plugins/ai_diary.init_diary_table()` and is intentionally
+            # idempotent (`IF NOT EXISTS`). Any real migration should be
+            # performed by the plugin, but the fallback avoids a hard failure
+            # during auto-heal.
+            log_debug("[db] init_diary_table not available or failed (continuing)")
+            try:
+                # Create a *minimal placeholder* so other plugin table creation and
+                # JOINs do not fail with 1146. This intentionally avoids duplicating
+                # the plugin-managed schema (columns, JSON types, migrations).
+                # The `plugins.ai_diary` implementation is still authoritative and
+                # must perform any schema migrations (adding columns / changing
+                # types) — the placeholder prevents hard failures only.
+                async with get_conn_ctx() as _conn:
+                    async with _conn.cursor() as _cur:
+                        await _cur.execute("""
+                            CREATE TABLE IF NOT EXISTS ai_diary (
+                                id INT AUTO_INCREMENT PRIMARY KEY,
+                                content LONGTEXT,
+                                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                                INDEX idx_timestamp (timestamp)
+                            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+                        """)
+
+                        await _cur.execute("""
+                            CREATE TABLE IF NOT EXISTS ai_diary_archive (
+                                id INT AUTO_INCREMENT PRIMARY KEY,
+                                content LONGTEXT,
+                                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                                INDEX idx_timestamp (timestamp)
+                            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+                        """)
+                    try:
+                        await _conn.commit()
+                    except Exception:
+                        pass
+                log_info(
+                    "[db] Minimal placeholder `ai_diary` / `ai_diary_archive` created (plugin must migrate full schema)"
+                )
+            except Exception as _fallback_err:
+                log_warning(
+                    f"[db] Failed to create minimal placeholder ai_diary tables: {_fallback_err}"
+                )
+
+        async with get_conn_ctx() as conn:
+            async with conn.cursor() as cur:
+                # bio (plugin)
+                await cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS bio (
+                        id VARCHAR(255) PRIMARY KEY,
+                        known_as TEXT DEFAULT '[]',
+                        likes TEXT DEFAULT '[]',
+                        not_likes TEXT DEFAULT '[]',
+                        information TEXT DEFAULT '',
+                        past_events TEXT DEFAULT '[]',
+                        feelings TEXT DEFAULT '[]',
+                        contacts TEXT DEFAULT '{}',
+                        social_accounts TEXT DEFAULT '[]',
+                        privacy TEXT DEFAULT 'default',
+                        created_at VARCHAR(50),
+                        last_accessed VARCHAR(50)
+                    )
+                    """
+                )
+
+                # recent_chats (plugin)
+                await cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS recent_chats (
+                        chat_id VARCHAR(255) PRIMARY KEY,
+                        last_active DOUBLE NOT NULL,
+                        metadata TEXT,
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        INDEX idx_last_active (last_active)
+                    )
+                    """
+                )
+
+                # grillo tables (init-db.sql + plugin may expect them)
+                await cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS grillo_activity_log (
+                        id INT AUTO_INCREMENT PRIMARY KEY,
+                        beat_type VARCHAR(50) NOT NULL,
+                        prompt_text TEXT NOT NULL,
+                        response_text LONGTEXT,
+                        diary_entry_id INT,
+                        executed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        metadata JSON,
+                        suppressed_count INT DEFAULT 0,
+                        INDEX idx_executed_at (executed_at),
+                        INDEX idx_beat_type (beat_type),
+                        INDEX idx_diary_entry (diary_entry_id)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+                    """
+                )
+
+                await cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS grillo_action_execs (
+                        id INT AUTO_INCREMENT PRIMARY KEY,
+                        activity_log_id INT NOT NULL,
+                        action_index INT NOT NULL,
+                        action_type VARCHAR(150) NOT NULL,
+                        payload JSON,
+                        status ENUM('pending','processed','failed') NOT NULL DEFAULT 'pending',
+                        error_text TEXT,
+                        result JSON,
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                        INDEX idx_activity_log_id (activity_log_id)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+                    """
+                )
+
+                # agent tables (init-db.sql)
+                await cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS agent_activity_log (
+                        id INT AUTO_INCREMENT PRIMARY KEY,
+                        command TEXT NOT NULL,
+                        proposer VARCHAR(100),
+                        status ENUM('proposed','approved','rejected','executed') NOT NULL DEFAULT 'proposed',
+                        trainer_id VARCHAR(100),
+                        request_ts DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        response_ts DATETIME,
+                        result LONGTEXT,
+                        metadata JSON
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+                    """
+                )
+
+                await cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS agent_action_execs (
+                        id INT AUTO_INCREMENT PRIMARY KEY,
+                        activity_log_id INT NOT NULL,
+                        command TEXT NOT NULL,
+                        status ENUM('pending','executed','failed') NOT NULL DEFAULT 'pending',
+                        error_text TEXT,
+                        result JSON,
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                        INDEX idx_activity_log_id (activity_log_id)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+                    """
+                )
+
+                await cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS agent_tasks (
+                        id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                        engine VARCHAR(64),
+                        status ENUM('pending','running','waiting_for_approval','paused','completed','failed','cancelled') NOT NULL DEFAULT 'pending',
+                        input JSON,
+                        iterations_meta JSON,
+                        output JSON,
+                        trainer_id VARCHAR(64),
+                        metadata JSON,
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+                    """
+                )
+
+                # external_endpoints (core/external_endpoints)
+                await cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS external_endpoints (
+                        id INT AUTO_INCREMENT PRIMARY KEY,
+                        name VARCHAR(100) NOT NULL UNIQUE,
+                        display_label VARCHAR(255) NOT NULL DEFAULT '',
+                        protocol VARCHAR(50) NOT NULL,
+                        base_url TEXT NOT NULL,
+                        api_key_enc TEXT,
+                        enabled TINYINT(1) NOT NULL DEFAULT 1,
+                        capabilities JSON,
+                        subsystem_map JSON,
+                        available_models JSON,
+                        default_model VARCHAR(255),
+                        probe_status VARCHAR(50) NOT NULL DEFAULT 'never',
+                        last_probe_at DATETIME,
+                        extra_config JSON,
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                        INDEX idx_enabled (enabled),
+                        INDEX idx_protocol (protocol)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+                    """
+                )
+
+                try:
+                    await conn.commit()
+                except Exception:
+                    pass
+        log_debug("[db] ensure_plugin_tables completed")
+    except Exception as e:
+        log_warning(f"[db] ensure_plugin_tables failed: {e}")
+
 
 # 🧠 Insert a new memory into the database
 async def insert_memory(
@@ -686,7 +1001,7 @@ async def insert_memory(
     timestamp: str | None = None,
 ) -> None:
     if not timestamp:
-        timestamp = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
     await ensure_core_tables()
 
@@ -698,10 +1013,21 @@ async def insert_memory(
                     INSERT INTO memories (timestamp, content, author, source, tags, scope, emotion, intensity, emotion_state)
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
-                    (timestamp, content, author, source, tags, scope, emotion, intensity, emotion_state),
+                    (
+                        timestamp,
+                        content,
+                        author,
+                        source,
+                        tags,
+                        scope,
+                        emotion,
+                        intensity,
+                        emotion_state,
+                    ),
                 )
         except Exception as e:
             print(f"[insert_memory] Error: {e}")
+
 
 # 💥 Insert a new emotional event
 async def insert_emotion_event(
@@ -739,6 +1065,7 @@ async def insert_emotion_event(
         except Exception as e:
             print(f"[insert_emotion_event] Error: {e}")
 
+
 # 🔍 Retrieve active emotions
 async def get_active_emotions() -> list[dict]:
     try:
@@ -755,6 +1082,7 @@ async def get_active_emotions() -> list[dict]:
         print(f"[get_active_emotions] Error: {e}")
         rows = []
     return [dict(row) for row in rows]
+
 
 # ➕ Modify the intensity of an emotion
 async def update_emotion_intensity(eid: str, delta: int) -> None:
@@ -773,6 +1101,7 @@ async def update_emotion_intensity(eid: str, delta: int) -> None:
         except Exception as e:
             print(f"[update_emotion_intensity] Error: {e}")
 
+
 # 💀 Mark an emotion as resolved
 async def mark_emotion_resolved(eid: str) -> None:
     await ensure_core_tables()
@@ -790,6 +1119,7 @@ async def mark_emotion_resolved(eid: str) -> None:
         except Exception as e:
             print(f"[mark_emotion_resolved] Error: {e}")
 
+
 # 💎 Crystallize an active emotion
 async def crystallize_emotion(eid: str) -> None:
     await ensure_core_tables()
@@ -806,6 +1136,7 @@ async def crystallize_emotion(eid: str) -> None:
                 )
         except Exception as e:
             print(f"[crystallize_emotion] Error: {e}")
+
 
 # 🔁 Retrieve recent responses generated by the bot
 async def get_recent_responses(since_timestamp: str) -> list[dict]:
@@ -826,7 +1157,9 @@ async def get_recent_responses(since_timestamp: str) -> list[dict]:
         rows = []
     return [dict(row) for row in rows]
 
+
 # === Event management helpers ===
+
 
 async def insert_scheduled_event(
     date: str,
@@ -839,7 +1172,7 @@ async def insert_scheduled_event(
     conversation_llm_response: str = None,
 ) -> None:
     """Insert a new scheduled event using local time and store next_run in UTC.
-    
+
     Args:
         date: Event date (YYYY-MM-DD)
         time: Event time (HH:MM)
@@ -860,6 +1193,7 @@ async def insert_scheduled_event(
             async with conn.cursor() as cur:
                 try:
                     from core.time_zone_utils import parse_local_to_utc
+
                     next_run_utc = parse_local_to_utc(date, time)
                 except Exception as e:
                     log_warning(
@@ -879,7 +1213,7 @@ async def insert_scheduled_event(
                     (
                         date,
                         time,
-                        next_run_utc.strftime('%Y-%m-%d %H:%M:%S'),
+                        next_run_utc.strftime("%Y-%m-%d %H:%M:%S"),
                         recurrence_type or "none",
                         description,
                         created_by,
@@ -893,12 +1227,14 @@ async def insert_scheduled_event(
         log_error(f"[insert_scheduled_event] Error: {e}")
 
 
-async def get_due_events(now: datetime | None = None, advance_minutes: int = 3) -> list[dict]:
+async def get_due_events(
+    now: datetime | None = None, advance_minutes: int = 3
+) -> list[dict]:
     """Return scheduled events that are ready for dispatch.
-    
+
     All timestamps are stored in UTC in the database.
     Comparison is always done in UTC for consistency.
-    
+
     Args:
         now: Current time (UTC). Defaults to current UTC time.
         advance_minutes: Number of minutes to check ahead for events (default: 3).
@@ -907,23 +1243,29 @@ async def get_due_events(now: datetime | None = None, advance_minutes: int = 3) 
 
     if now is None:
         now = datetime.now(timezone.utc)
-    
+
     # Add advance window to account for LLM processing time
     check_time = now + timedelta(minutes=advance_minutes)
 
-    log_debug(f"[get_due_events] Checking events at UTC {now.isoformat()} (with {advance_minutes}min advance: {check_time.isoformat()})")
+    log_debug(
+        f"[get_due_events] Checking events at UTC {now.isoformat()} (with {advance_minutes}min advance: {check_time.isoformat()})"
+    )
 
     # Query: find events that are due (not delivered and next_run is within advance window)
     # All timestamps stored in DB are already in UTC (converted during insert)
-    check_str = check_time.strftime('%Y-%m-%d %H:%M:%S')
+    check_str = check_time.strftime("%Y-%m-%d %H:%M:%S")
     query = "SELECT * FROM scheduled_events WHERE delivered = 0 AND next_run <= %s ORDER BY id"
-    log_debug(f"[get_due_events] Executing query with UTC time (+ {advance_minutes}min): {check_str}")
+    log_debug(
+        f"[get_due_events] Executing query with UTC time (+ {advance_minutes}min): {check_str}"
+    )
 
     rows = []
     try:
         async with get_conn_ctx() as conn:
             async with conn.cursor(aiomysql.DictCursor) as cur:
-                await safe_db_execute(cur, query, (check_str,), ensure_fn=ensure_core_tables)
+                await safe_db_execute(
+                    cur, query, (check_str,), ensure_fn=ensure_core_tables
+                )
                 rows = await cur.fetchall()
                 log_debug(f"[get_due_events] Retrieved {len(rows)} rows")
                 for row in rows:
@@ -931,7 +1273,7 @@ async def get_due_events(now: datetime | None = None, advance_minutes: int = 3) 
     except Exception as e:
         log_error(f"[get_due_events] Error executing query: {repr(e)}")
         rows = []
-    
+
     log_debug("[get_due_events] Connection released")
 
     due = []
@@ -939,19 +1281,23 @@ async def get_due_events(now: datetime | None = None, advance_minutes: int = 3) 
 
     for r in rows:
         log_debug(f"[get_due_events] Raw event data: {dict(r)}")
-        scheduled_val = r.get('next_run')
+        scheduled_val = r.get("next_run")
         try:
             if isinstance(scheduled_val, datetime):
                 event_dt = scheduled_val
             else:
-                event_dt = datetime.fromisoformat(str(scheduled_val).replace('Z', '+00:00'))
+                event_dt = datetime.fromisoformat(
+                    str(scheduled_val).replace("Z", "+00:00")
+                )
             # If no timezone info, assume it's UTC (as stored in the database)
             if event_dt.tzinfo is None:
                 event_dt = event_dt.replace(tzinfo=timezone.utc)
             else:
                 event_dt = event_dt.astimezone(timezone.utc)
         except Exception as e:
-            log_warning(f"[get_due_events] Invalid datetime in next_run: {scheduled_val} - {e}")
+            log_warning(
+                f"[get_due_events] Invalid datetime in next_run: {scheduled_val} - {e}"
+            )
             continue
 
         # Calculate lateness: an event is late only if now (without advance) is past its scheduled time
@@ -961,6 +1307,7 @@ async def get_due_events(now: datetime | None = None, advance_minutes: int = 3) 
 
         ev = dict(r)
         from core.time_zone_utils import format_dual_time
+
         ev.update(
             {
                 "is_late": is_late,
@@ -980,18 +1327,25 @@ async def mark_event_delivered(event_id: int) -> bool:
     Returns ``True`` when the update succeeds and ``False`` otherwise.
     """
     await ensure_core_tables()
-    
+
     try:
         async with get_conn_ctx() as conn:
             # Fetch event info
             async with conn.cursor(aiomysql.DictCursor) as cur:
-                await safe_db_execute(cur, "SELECT recurrence_type, next_run FROM scheduled_events WHERE id = %s", (event_id,), ensure_fn=ensure_core_tables)
+                await safe_db_execute(
+                    cur,
+                    "SELECT recurrence_type, next_run FROM scheduled_events WHERE id = %s",
+                    (event_id,),
+                    ensure_fn=ensure_core_tables,
+                )
                 row = await cur.fetchone()
-            
+
             if not row:
-                log_warning(f"[db] Event {event_id} not found to be marked as delivered")
+                log_warning(
+                    f"[db] Event {event_id} not found to be marked as delivered"
+                )
                 return False
-            
+
             repeat_type = (row.get("recurrence_type") or "none").lower()
             next_run_val = row.get("next_run")
 
@@ -999,19 +1353,23 @@ async def mark_event_delivered(event_id: int) -> bool:
             async with conn.cursor(aiomysql.DictCursor) as cur:
                 try:
                     if next_run_val:
-                        next_run_dt = datetime.fromisoformat(str(next_run_val).replace('Z', '+00:00'))
+                        next_run_dt = datetime.fromisoformat(
+                            str(next_run_val).replace("Z", "+00:00")
+                        )
                     else:
                         next_run_dt = None
                     if next_run_dt and next_run_dt.tzinfo is None:
                         from core.time_zone_utils import get_local_timezone
-                        next_run_dt = (
-                            next_run_dt.replace(tzinfo=get_local_timezone())
-                            .astimezone(timezone.utc)
-                        )
+
+                        next_run_dt = next_run_dt.replace(
+                            tzinfo=get_local_timezone()
+                        ).astimezone(timezone.utc)
                     elif next_run_dt:
                         next_run_dt = next_run_dt.astimezone(timezone.utc)
                 except Exception as e:
-                    log_warning(f"[db] Invalid next_run for event {event_id}: {next_run_val} - {e}")
+                    log_warning(
+                        f"[db] Invalid next_run for event {event_id}: {next_run_val} - {e}"
+                    )
                     next_run_dt = None
 
                 if repeat_type == "none":
@@ -1026,12 +1384,16 @@ async def mark_event_delivered(event_id: int) -> bool:
 
                 elif repeat_type == "always":
                     # Always recurring events stay active indefinitely
-                    log_debug(f"[db] Event {event_id} remains active (always recurrence)")
+                    log_debug(
+                        f"[db] Event {event_id} remains active (always recurrence)"
+                    )
                     return True
 
                 else:
                     if not next_run_dt:
-                        log_warning(f"[db] Missing next_run for repeating event {event_id}")
+                        log_warning(
+                            f"[db] Missing next_run for repeating event {event_id}"
+                        )
                         return False
 
                     if repeat_type == "daily":
@@ -1044,10 +1406,14 @@ async def mark_event_delivered(event_id: int) -> bool:
                         day = min(next_run_dt.day, calendar.monthrange(year, month)[1])
                         new_dt = next_run_dt.replace(year=year, month=month, day=day)
                     else:
-                        log_warning(f"[db] Unknown recurrence type '{repeat_type}' for event {event_id}")
+                        log_warning(
+                            f"[db] Unknown recurrence type '{repeat_type}' for event {event_id}"
+                        )
                         return False
 
-                    new_iso = new_dt.astimezone(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+                    new_iso = new_dt.astimezone(timezone.utc).strftime(
+                        "%Y-%m-%d %H:%M:%S"
+                    )
                     await safe_db_execute(
                         cur,
                         "UPDATE scheduled_events SET next_run = %s WHERE id = %s",
@@ -1060,6 +1426,7 @@ async def mark_event_delivered(event_id: int) -> bool:
         log_error(f"[mark_event_delivered] Error: {e}")
         return False
 
+
 def is_valid_datetime_format(date_str: str, time_str: str | None) -> bool:
     """Verifica se la data e l'ora sono in un formato valido."""
     dt_str = f"{date_str} {time_str or '00:00'}"
@@ -1068,7 +1435,9 @@ def is_valid_datetime_format(date_str: str, time_str: str | None) -> bool:
         log_debug(f"[is_valid_datetime_format] Valid datetime format: {dt_str}")
         return True
     except ValueError as e:
-        log_warning(f"[is_valid_datetime_format] Invalid datetime format: {dt_str} - {e}")
+        log_warning(
+            f"[is_valid_datetime_format] Invalid datetime format: {dt_str} - {e}"
+        )
         return False
 
 
@@ -1095,72 +1464,73 @@ async def safe_db_execute(
     except aiomysql.Error as e:
         err_code = e.args[0] if e.args else None
         if err_code == 1146 and ensure_fn:
-            log_debug(
-                f"[safe_db_execute] Table missing for query. Calling ensure_fn()"
-            )
+            log_debug("[safe_db_execute] Table missing for query. Calling ensure_fn()")
             try:
                 await ensure_fn()
             except Exception as ensure_exc:  # pragma: no cover - best effort
-                log_error(
-                    f"[safe_db_execute] ensure_fn failed: {repr(ensure_exc)}"
-                )
+                log_error(f"[safe_db_execute] ensure_fn failed: {repr(ensure_exc)}")
                 raise
             try:
                 log_debug("[safe_db_execute] Retrying query after ensure_fn")
                 return await cursor.execute(query, params)
             except Exception as retry_exc:
-                log_error(
-                    f"[safe_db_execute] Retry failed: {repr(retry_exc)}"
-                )
+                log_error(f"[safe_db_execute] Retry failed: {repr(retry_exc)}")
                 raise
         log_error(f"[safe_db_execute] Query failed: {repr(e)}")
         raise
 
+
 async def start_pool_cleanup_task():
     """Start a background task that monitors and cleans up the database connection pool.
-    
+
     When pool usage reaches 85%, force-kill oldest non-critical connections to prevent
     pool exhaustion. This is an emergency measure to maintain system stability under load.
     """
     global _active_conn_count
-    
+
     async def cleanup_monitor():
         global _active_conn_count
-        
+
         while True:
             try:
                 await asyncio.sleep(10)  # Check every 10 seconds
-                
+
                 try:
                     pool = await get_pool()
                 except Exception:
                     continue
-                
-                maxsize = getattr(pool, 'maxsize', 50)
-                usage_percent = (_active_conn_count / maxsize * 100) if maxsize > 0 else 0
-                
+
+                maxsize = getattr(pool, "maxsize", 50)
+                usage_percent = (
+                    (_active_conn_count / maxsize * 100) if maxsize > 0 else 0
+                )
+
                 # Threshold: 85% of pool exhausted
                 if usage_percent >= 85:
-                    log_warning(f"[db] Pool usage CRITICAL: {_active_conn_count}/{maxsize} ({usage_percent:.1f}%)")
-                    
+                    log_warning(
+                        f"[db] Pool usage CRITICAL: {_active_conn_count}/{maxsize} ({usage_percent:.1f}%)"
+                    )
+
                     # Identify oldest connections to kill
                     now = time.time()
                     candidates = []
-                    
+
                     for cid, ts in list(_conn_acquired_times.items()):
                         age = now - ts
                         # Only consider connections held for more than 30 seconds
                         if age > 30:
                             candidates.append((cid, age))
-                    
+
                     # Sort by age (oldest first)
                     candidates.sort(key=lambda x: x[1], reverse=True)
-                    
+
                     # Kill up to 5 oldest connections
                     killed = 0
                     for cid, age in candidates[:5]:
                         try:
-                            log_warning(f"[db] Emergency pool cleanup: killing connection {cid} (held {int(age)}s)")
+                            log_warning(
+                                f"[db] Emergency pool cleanup: killing connection {cid} (held {int(age)}s)"
+                            )
                             # Mark it as killed by removing from tracking
                             _conn_acquired_times.pop(cid, None)
                             _conn_acquired_stacks.pop(cid, None)
@@ -1168,17 +1538,19 @@ async def start_pool_cleanup_task():
                             killed += 1
                         except Exception as e:
                             log_debug(f"[db] Failed to cleanup connection {cid}: {e}")
-                    
+
                     if killed > 0:
-                        log_info(f"[db] Emergency cleanup killed {killed} connections, new pool usage: {_active_conn_count}/{maxsize}")
-                
+                        log_info(
+                            f"[db] Emergency cleanup killed {killed} connections, new pool usage: {_active_conn_count}/{maxsize}"
+                        )
+
             except asyncio.CancelledError:
                 log_debug("[db] Pool cleanup task cancelled")
                 break
             except Exception as e:
                 log_error(f"[db] Pool cleanup task error: {e}")
                 await asyncio.sleep(10)
-    
+
     # Start the background task
     try:
         task = asyncio.create_task(cleanup_monitor())

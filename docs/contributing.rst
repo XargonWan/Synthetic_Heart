@@ -6,7 +6,7 @@ Contributing
    :alt: Contributing Guide
 
 
-We welcome pull requests for bug fixes and new features. Ensure your code passes ``python -m py_compile`` and ``python -m mypy . --strict`` (current strict scope is defined in ``mypy.ini`` for incremental coverage), and use the following commit message format:
+We welcome pull requests for bug fixes and new features. Ensure your code passes the validation sequence (``uv run ruff format .``, ``uv run ruff check --fix .``, ``uv run ty check <files>``, ``uv run pytest``), and use the following commit message format:
 
 - ``fix(element): description`` – bug fixes
 - ``feat(element): description`` – new features

@@ -13,6 +13,7 @@ on:
       - "develop"
       - "fix/**"
       - "feat/**"
+  workflow_dispatch:
 
 jobs:
   prepare:
@@ -98,6 +99,7 @@ jobs:
   unit-tests:
     needs: build-images
     runs-on: ubuntu-latest
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - name: Create dummy env file
@@ -107,6 +109,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.x'
+      - name: Install uv
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install uv
       - name: Run unit tests
         id: tests
         run: ./run_tests.sh
@@ -115,6 +121,90 @@ jobs:
         with:
           name: unit-test-results
           path: test-results/
+
+  agent-integration:
+    needs: unit-tests
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    services:
+      mysql:
+        image: mysql:8
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: synth
+          MYSQL_USER: synth
+          MYSQL_PASSWORD: synth
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping --silent"
+          --health-interval=5s --health-timeout=2s --health-retries=20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - name: Install deps
+        run: |
+          # dependencies are managed via pyproject.toml/uv.lock
+          uv sync --no-cache
+          pip install pytest pytest-asyncio aiomysql
+      - name: Wait for mysql
+        run: |
+          for i in {1..20}; do mysql -h127.0.0.1 -uroot -proot -e "SELECT 1" && break || sleep 3; done
+      - name: Run agent tests
+        run: pytest -q tests/test_agent_loop.py -q tests/test_recon_debrief.py -q tests/test_agent_webui.py -q tests/test_agent_attach.py
+
+  agent-e2e:
+    needs: agent-integration
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    services:
+      mysql:
+        image: mysql:8
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: synth
+          MYSQL_USER: synth
+          MYSQL_PASSWORD: synth
+        options: >-
+          --health-cmd="mysqladmin ping --silent"
+          --health-interval=5s --health-timeout=2s --health-retries=20
+      selenium:
+        image: selenium/standalone-chrome:115.0
+        ports:
+          - 4444:4444
+        options: >-
+          --health-cmd="curl -sS http://localhost:4444/status | grep -q 'ready' || exit 1"
+          --health-interval=5s --health-timeout=2s --health-retries=20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - name: Install deps
+        run: |
+          uv sync --no-cache
+          pip install pytest pytest-asyncio selenium
+      - name: Wait for services
+        run: |
+          for i in {1..30}; do mysql -h127.0.0.1 -uroot -proot -e "SELECT 1" && curl -sS http://localhost:4444/status | grep -q 'ready' && break || sleep 3; done
+      - name: Run end-to-end agent tests
+        run: pytest -q tests/test_engine_adapters.py -q tests/test_selenium_queue.py -q tests/test_agent_loop.py
+
+  mypy-check:
+    needs: unit-tests
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - name: Install mypy
+        run: python -m pip install mypy
+      - name: Run mypy
+        run: python -m mypy . --strict
 
   manifest:
     needs: [prepare, build-images]

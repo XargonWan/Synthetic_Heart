@@ -18,11 +18,11 @@ def scan_forbidden(root_path: str = None) -> list:
             continue
         for dirpath, _, filenames in os.walk(str(root)):
             for filename in filenames:
-                if not filename.endswith('.py'):
+                if not filename.endswith(".py"):
                     continue
                 file_path = os.path.join(dirpath, filename)
                 try:
-                    with open(file_path, 'r', encoding='utf-8') as fh:
+                    with open(file_path, "r", encoding="utf-8") as fh:
                         content = fh.read()
                 except Exception:
                     continue
@@ -36,5 +36,5 @@ def test_no_direct_queue_writes():
     # Run scanner for the repo
     matches = scan_forbidden(os.path.dirname(__file__))
     if matches:
-        files = '\n'.join([f"{m[0]} matches {m[1]}" for m in matches])
+        files = "\n".join([f"{m[0]} matches {m[1]}" for m in matches])
         raise AssertionError(f"Found direct queue writes in plugin files:\n{files}")

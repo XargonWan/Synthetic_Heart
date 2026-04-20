@@ -491,7 +491,7 @@ The WebUI will fetch ``/skins/<skin>/persona.json`` and apply the mapping when r
 Testing & manual QA
 ^^^^^^^^^^^^^^^^^^^^
 
- - A small manual test harness is available at ``core/webui_templates/animation_face_test.html`` to exercise face expressions and verify that ``blendShapeProxy.setValue`` is invoked.
+ - A small manual test harness is available at ``docs/_static/animation_face_test.html`` to exercise face expressions and verify that ``blendShapeProxy.setValue`` is invoked.
  - The WebUI template now emits global events ``synth_animation_state_updated`` and ``synth_animation_lipsync_changed`` that can be used by other consumers.
 - Graceful stopping
 - Various animation combinations

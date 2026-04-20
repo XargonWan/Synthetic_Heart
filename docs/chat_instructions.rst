@@ -20,7 +20,7 @@ Behavior
 Notes for implementers
 ----------------------
 
-- LLM engines (Selenium, OpenAI, Gemini, etc.) should check for
+- Cortex engines (Selenium, OpenAI, Gemini, etc.) should check for
   `instructions_verbose` in the prompt and prepend it as a system message
   before sending the request to the backend.
 - `instructions_verbose` is protected in `reduce_prompt_for_llm_limit`, so it

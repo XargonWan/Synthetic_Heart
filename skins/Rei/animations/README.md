@@ -232,7 +232,7 @@ class AnimationState(Enum):
 
 ### 4. Update Frontend Mapping
 
-Edit `core/webui_templates/synth_webui_index.html` and update `animationMappings`:
+Edit `res/synth_webui/js/vrm-viewer.mjs` and update `animationMappings`:
 
 ```javascript
 const animationMappings = {

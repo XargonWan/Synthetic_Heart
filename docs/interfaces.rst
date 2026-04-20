@@ -1,7 +1,7 @@
 Interfaces
 ==========
 
-Interfaces provide the communication layer between synth and external platforms. Like plugins and LLM engines, interfaces are completely modular and automatically discovered at runtime. This ensures that platform integrations are decoupled from the core system and can be developed independently.
+Interfaces provide the communication layer between synth and external platforms. Like plugins and Cortex engines, interfaces are completely modular and automatically discovered at runtime. This ensures that platform integrations are decoupled from the core system and can be developed independently.
 
 Interface Architecture
 ----------------------
@@ -72,11 +72,12 @@ The Telegram bot interface offers comprehensive Telegram integration:
 - Inline keyboard and callback support
 - Group and private chat handling
 - Trainer ID security validation
-- Wake/Sleep attention mode (commands ``/wake`` ``/sleep`` ``/status``)
+- Wake/Sleep attention mode (commands ``/wake`` ``/awake`` ``/sleep`` ``/status``)
     - **Default**: awake (listens to all messages in the chat)
     - ``/sleep``: switches to mention/reply-only handling for that chat
-    - ``/wake``: restores awake behavior
+    - ``/wake`` / ``/awake``: restores awake behavior
     - ``/status``: shows the current mode
+    - ``CHAT_SLEEP_COMMANDS`` / ``CHAT_WAKE_COMMANDS``: configurable comma-separated phrases that can act as chat-level sleep/wake triggers (set via WebUI).
 
 Reddit Interface
 ----------------
@@ -133,6 +134,7 @@ Mate-Engine:
 - ``GET /api/animations/uploads`` – List temporary animation uploads
 - ``DELETE /api/animations/uploads/{upload_id}`` – Remove a temporary upload
 - ``POST /api/animations/promote`` – Promote a temporary upload into a skin
+- ``GET /api/about`` – About summary payload (uptime, sessions, system info)
 - ``GET /api/prompt_override`` – Interface prompt injection/override hints
 - ``POST /api/integrations/messages`` – Generic integration message endpoint. Body: ``{source, type, payload, metadata}``. ``type=chat`` is forwarded to the message chain; other types are stored for retrieval.
 - ``GET /api/integrations/outbox?source=<source>`` – Retrieve queued messages for a given integration source (clears the queue on read). Use ``source=mate`` for Mate Engine clients.
@@ -162,14 +164,14 @@ The **Ollama compatibility server** exposes Synthetic Heart through the same HTT
 
 - Implements ``/api/generate`` and ``/api/chat`` with streaming NDJSON output.
 - Mirrors the Ollama ``/api/tags`` endpoint so discovery requests return a synthetic model catalogue.
-- Translates incoming prompts into the synth message chain, letting the currently loaded LLM engine drive the reply.
+- Translates incoming prompts into the synth message chain, letting the currently loaded Cortex engine drive the reply.
 
 **Configuration**
 
 .. code-block:: bash
 
    OLLAMA_HOST=0.0.0.0          # Bind address for the compatibility server
-   OLLAMA_PORT=11434            # Default Ollama port; update if you already run a native instance
+   OLLAMA_PORT=11435            # Default Ollama port; update if you already run a native instance
    OLLAMA_DEFAULT_MODEL=SyntH   # Name reported to clients when no model is specified
    OLLAMA_DEFAULT_MODEL_DISPLAY="Synthetic Heart"  # Friendly label in /api/tags
    OLLAMA_MAX_HISTORY=20        # Conversation turns preserved between requests
@@ -183,7 +185,7 @@ The **Ollama compatibility server** exposes Synthetic Heart through the same HTT
 
    .. code-block:: bash
 
-      export OLLAMA_HOST=http://<synth-host>:11434
+      export OLLAMA_HOST=http://<synth-host>:11435
       ollama list    # returns the synthetic catalogue exposed by SyntH
       ollama chat SyntH  # your client now exchanges messages with synth
 

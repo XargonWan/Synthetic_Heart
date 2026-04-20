@@ -73,6 +73,14 @@ Database Schema
    -------------------------
 
    The Web UI uses a single persistent session per deploy (single user semantics). The session id is stored in ``backups/webui_session_id.txt`` on the server and is used as the ``interface_path`` namespace for chat history (``synth_webui/<session_id>``). This allows the Web UI to restore conversation history when the container restarts.
+
+   .. note::
+
+      An advanced configuration variable ``MULTI_SESSION`` can be enabled to
+      give each WebSocket connection its own session identifier.  In this
+      experimental mode no session id file is written and history is not
+      preserved across restarts.  It is intended for testing only and may
+      exhibit unexpected behaviour.
 - ``message_text``: Full message content
 - ``timestamp``: Message timestamp with microsecond precision
 
@@ -109,6 +117,12 @@ API Reference
 
 ``load_chat_history(interface_path)``
    Load recent messages for a conversation
+
+``load_chat_history_for_guild(guild_id, since=None, limit=100)``
+   Load recent text messages across all interface paths belonging to a Discord
+   guild (paths matching ``discord_<guild>_%``).  This is used by the live voice
+   synchronization subsystem to mirror text channel activity into ongoing
+   voice sessions.
 
 **Usage Examples:**
 

@@ -1,7 +1,6 @@
 import json
-import pytest
 
-from core.selenium_llm_base import SeleniumLLMBase
+from cortex.selenium_engine.selenium_llm_base import SeleniumLLMBase
 
 
 class DummySelenium(SeleniumLLMBase):
@@ -9,6 +8,7 @@ class DummySelenium(SeleniumLLMBase):
 
     We'll override _execute_complete_workflow in test to simulate responses.
     """
+
     def __init__(self):
         # Call base __init__ to set config vars and flags
         super().__init__(notify_fn=None, config={})
@@ -34,9 +34,9 @@ def test_should_double_prompt_trigger_json_context():
     payload = {
         "context": {
             "chat_history": ["m" * 20 for _ in range(5)],
-            "memories": ["mm" * 30 for _ in range(4)]
+            "memories": ["mm" * 30 for _ in range(4)],
         },
-        "instructions": "do something big"
+        "instructions": "do something big",
     }
     prompt = "system\n---\n" + json.dumps(payload)
 
@@ -63,15 +63,15 @@ def test_split_prompt_json_context():
     p1, p2 = inst._split_prompt_text_into_parts(prompt)
 
     # PART1 should contain only the extracted keys directly (no 'context' wrapper)
-    p1_json = json.loads(p1.split('\n\n', 1)[1])
+    p1_json = json.loads(p1.split("\n\n", 1)[1])
     assert "memories" in p1_json
     assert "chat_history" in p1_json
 
     # PART2 should have context emptied
     parsed_p2 = json.loads(p2)
-    ctx = parsed_p2.get('context', {})
-    assert ctx.get('chat_history', []) == []
-    assert ctx.get('memories', []) == []
+    ctx = parsed_p2.get("context", {})
+    assert ctx.get("chat_history", []) == []
+    assert ctx.get("memories", []) == []
 
 
 def test_split_prompt_avoids_user_message_in_part1():
@@ -85,7 +85,7 @@ def test_split_prompt_avoids_user_message_in_part1():
         "chat_history": ["hello", "how are you"],
         "ai_diary": ["diary entry 1"],
         "user_message": "Rekku, facciamo un test 19",
-        "instructions": "do the task"
+        "instructions": "do the task",
     }
 
     prompt = "system\n---\n" + json.dumps(base)
@@ -94,7 +94,7 @@ def test_split_prompt_avoids_user_message_in_part1():
     # PART1 must contain only the chat_history and ai_diary
     assert "Rekku, facciamo un test 19" not in p1
     assert "user_message" not in p1
-    p1_json = json.loads(p1.split('\n\n', 1)[1])
+    p1_json = json.loads(p1.split("\n\n", 1)[1])
     assert "chat_history" in p1_json
     assert "ai_diary" in p1_json
 
@@ -110,10 +110,7 @@ def test_split_prompt_deep_nested_context():
     # create nested context where chat_history/memories are buried
     # Use the canonical structure expected by the prompt engine (context key)
     nested = {
-        "context": {
-            "chat_history": ["msg1", "msg2"],
-            "memories": ["memA", "memB"]
-        },
+        "context": {"chat_history": ["msg1", "msg2"], "memories": ["memA", "memB"]},
         "instructions": "do heavy work",
     }
 
@@ -121,15 +118,15 @@ def test_split_prompt_deep_nested_context():
     p1, p2 = inst._split_prompt_text_into_parts(prompt)
 
     # PART1 must contain both chat_history and memories pulled from nested keys
-    assert 'chat_history' in p1
-    assert 'memories' in p1
+    assert "chat_history" in p1
+    assert "memories" in p1
 
     # PART2 should preserve instructions and empty those keys
     parsed_p2 = json.loads(p2)
-    assert parsed_p2.get('instructions') == 'do heavy work'
+    assert parsed_p2.get("instructions") == "do heavy work"
     # Ensure those fields are either emptied or not present in part2
-    assert parsed_p2.get('chat_history') in ([], None) or 'context' in parsed_p2
-    assert parsed_p2.get('memories') in ([], None) or 'context' in parsed_p2
+    assert parsed_p2.get("chat_history") in ([], None) or "context" in parsed_p2
+    assert parsed_p2.get("memories") in ([], None) or "context" in parsed_p2
 
 
 def test_part1_contains_full_chat_and_diary_and_part2_minified():
@@ -146,9 +143,9 @@ def test_part1_contains_full_chat_and_diary_and_part2_minified():
         "context": {
             "chat_history": big_chat,
             "ai_diary": big_diary,
-            "other": "x" * 200
+            "other": "x" * 200,
         },
-        "instructions": "Please do a deep analysis and propose actions for system design with full context." 
+        "instructions": "Please do a deep analysis and propose actions for system design with full context.",
     }
 
     prompt = "system\n---\n" + json.dumps(parsed)
@@ -156,9 +153,9 @@ def test_part1_contains_full_chat_and_diary_and_part2_minified():
     p1, p2 = inst._split_prompt_text_into_parts(prompt)
 
     # PART1 must include complete chat_history and ai_diary contents
-    p1_json = json.loads(p1.split('\n\n',1)[1])
-    assert p1_json['chat_history'] == big_chat
-    assert p1_json['ai_diary'] == big_diary
+    p1_json = json.loads(p1.split("\n\n", 1)[1])
+    assert p1_json["chat_history"] == big_chat
+    assert p1_json["ai_diary"] == big_diary
 
     # PART2 should be minified by reduce_json_text_for_transmission -> smaller size than original
     original_p2_size = len(json.dumps(parsed))
@@ -179,9 +176,9 @@ def test_prompt_with_missing_outer_braces_is_parsed_and_split():
     p1, p2 = inst._split_prompt_text_into_parts(prompt)
 
     # Ensure PART1 contains both chat_history and ai_diary
-    p1_json = json.loads(p1.split('\n\n',1)[1])
-    assert 'chat_history' in p1_json
-    assert 'ai_diary' in p1_json
+    p1_json = json.loads(p1.split("\n\n", 1)[1])
+    assert "chat_history" in p1_json
+    assert "ai_diary" in p1_json
 
 
 def test_should_consider_pre_reduction_size():
@@ -190,7 +187,9 @@ def test_should_consider_pre_reduction_size():
     inst.default_model = "default"
 
     # Use a JSON-like prompt that contains context keys but is small after reduction
-    small_prompt = 'system\n---\n{"context": {"chat_history": [], "ai_diary": [], "memories": []}}'
+    small_prompt = (
+        'system\n---\n{"context": {"chat_history": [], "ai_diary": [], "memories": []}}'
+    )
     # When pre-reduction size is large, we must trigger split even if final prompt is small
     assert inst._should_double_prompt(small_prompt, pre_reduction_size=50000) is True
 
@@ -218,7 +217,9 @@ def test_execute_double_prompt_workflow_retries_and_flag_reset(monkeypatch):
             calls["part2"] += 1
             return '{"actions": []}'
 
-    monkeypatch.setattr(inst, "_execute_complete_workflow", fake_execute_complete_workflow)
+    monkeypatch.setattr(
+        inst, "_execute_complete_workflow", fake_execute_complete_workflow
+    )
 
     resp = inst._execute_double_prompt_workflow(prompt)
 

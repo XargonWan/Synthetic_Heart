@@ -59,3 +59,10 @@ TODO*.md
 .github/prompts
 old
 .vscode
+node_modules/
+tmp*
+test_output*.txt
+db_check.txt
+git_*.txt
+.ruff_cache
+_[Bb]uild

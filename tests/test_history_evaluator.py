@@ -1,10 +1,10 @@
-import asyncio
 import pytest
 
 
 def test_history_evaluator_importable():
     import plugins.grillo.history_evaluator as he
-    assert hasattr(he, 'HistoryEvaluatorPlugin')
+
+    assert hasattr(he, "HistoryEvaluatorPlugin")
 
 
 @pytest.mark.asyncio

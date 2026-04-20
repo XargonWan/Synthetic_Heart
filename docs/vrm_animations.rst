@@ -224,7 +224,7 @@ Animation Assets
 Code Integration
 ----------------
 
-- ``core/webui_templates/synth_webui_index.html`` - Main WebUI with animation logic
+- ``res/synth_webui/js/vrm-viewer.mjs`` - Main WebUI animation logic (frontend handler)
 - Lines 2950-2960: Import statements for FBX and animation loaders
 - Lines 3000-3020: Animation system initialization
 - Lines 3170-3250: Animation state management functions

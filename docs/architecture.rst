@@ -13,7 +13,7 @@ Core Principles
 ---------------
 
 **Modularity and Extensibility**
-    Components (LLM engines, plugins, and interfaces) are not hardcoded in the core. Instead, they are dynamically discovered and loaded at runtime through auto-registration mechanisms. This ensures that new functionality can be added by simply placing compatible modules in the appropriate directories.
+    Components (Cortex engines, plugins, and interfaces) are not hardcoded in the core. Instead, they are dynamically discovered and loaded at runtime through auto-registration mechanisms. This ensures that new functionality can be added by simply placing compatible modules in the appropriate directories.
 
 **Message-Driven Architecture**
     All interactions flow through a centralized message chain that handles JSON action parsing, validation, and execution. Components communicate through well-defined interfaces rather than direct coupling.
@@ -29,8 +29,8 @@ System Components
     
     - **Message Chain** (``message_chain.py``): Central orchestrator for incoming messages, JSON extraction, and action execution flow.
     - **Action Parser** (``action_parser.py``): Executes validated actions from parsed JSON, routing them to appropriate component handlers.
-    - **Core Initializer** (``core_initializer.py``): Auto-discovers and loads all components from ``plugins/``, ``llm_engines/``, and ``interface/`` directories.
-    - **Registries**: Centralized management for LLM engines, interfaces, plugins, and validation rules.
+    - **Core Initializer** (``core_initializer.py``): Auto-discovers and loads all components from ``plugins/``, ``cortex/``, and ``interface/`` directories.
+    - **Registries**: Centralized management for Cortex engines, interfaces, plugins, and validation rules.
     - **Transport Layer**: Handles communication between components and interfaces.
     - **Interface Path System**: Unified hierarchical addressing system using ``interface_path`` format (e.g., "telegram_bot/chat_id/thread_id") for consistent conversation identification across all platforms. See :doc:`interface_path` for detailed documentation.
 
@@ -42,20 +42,20 @@ System Components
     - Handles platform-specific message formatting and rate limiting
     - Provides trainer ID validation for security
 
-``llm_engines``
-    Language model backend implementations (OpenAI, Google Gemini, manual input, etc.). Each engine:
+``cortex/``
+    Runtime engine implementations (OpenAI, Google Gemini, manual input, etc.). Each engine:
     
     - Extends ``AIPluginBase`` for consistent interface
     - Handles prompt construction and response generation
     - Manages model-specific limits and capabilities
     - Supports both text and multimodal interactions
 
-    LLM engines expose configuration variables (API keys, endpoints, model selectors)
+    Cortex engines expose configuration variables (API keys, endpoints, model selectors)
     through the shared settings registry. These variables can be edited in the Web UI
     even when the engine is not active. When a required variable is missing, the engine
     may load in a **degraded** state and is surfaced as failed in the Components view so
     operators can see it needs attention. Variables marked with
-    ``needs_component_reload`` automatically trigger a reload of the owning LLM engine
+    ``needs_component_reload`` automatically trigger a reload of the owning Cortex engine
     after an update, allowing API keys to be applied without restarting the whole system.
 
 ``plugins``
@@ -91,7 +91,7 @@ The following diagram shows the complete message processing pipeline:
        MessageChain [label="Message Chain"];
        JSONExtract [label="JSON Extraction"];
        ActionParser [label="Action Parser"];
-       Component [label="Component\n(Plugin/LLM Engine)"];
+       Component [label="Component\n(Plugin/Cortex)"]; 
        Response [label="Response"];
        
        User -> Interface;
@@ -159,7 +159,7 @@ The message queue was experiencing ``TypeError: '<' not supported between instan
 
 1. **Message Reception**: Interface receives message from user and forwards to message chain
 2. **JSON Detection**: Message chain attempts to extract JSON actions from the text
-3. **Validation & Correction**: If JSON is invalid, corrector middleware queries the active LLM engine to fix it
+3. **Validation & Correction**: If JSON is invalid, corrector middleware queries the active Cortex engine to fix it
 4. **Action Execution**: Validated actions are parsed and routed to appropriate components
 5. **Response Generation**: Components execute actions and generate responses
 6. **Output Delivery**: Responses are sent back through the originating interface
@@ -169,7 +169,7 @@ Component Auto-Discovery
 
 Components are automatically discovered through a recursive import system:
 
-- The core initializer scans ``plugins/``, ``llm_engines/``, and ``interface/`` directories
+- The core initializer scans ``plugins/``, ``cortex/``, and ``interface/`` directories
 - Each Python file is imported and checked for a ``PLUGIN_CLASS`` attribute
 - Compatible classes are instantiated and registered with appropriate registries
 - Components self-report their capabilities through standardized methods
@@ -210,6 +210,13 @@ to improve continuity across interfaces and sessions.
           "discord_bot/123456/0": "lane_Trainer_Main",
           "123456": "lane_Trainer_Main"
         }
+
+    By default the WebUI uses a single persistent session id that is stored in
+    ``backups/webui_session_id.txt``.  This ensures history and window state
+    survive container restarts.  An **advanced, experimental** option
+    ``MULTI_SESSION`` can be toggled to ``true``; when enabled each browser
+    connection gets its own independent session.  This mode is unstable and
+    should only be used for testing.
 
     The resolver checks for exact path matches first and then tries a user-id
     match using the second path segment (``interface/chat_id/...``).

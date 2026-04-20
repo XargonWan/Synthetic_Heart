@@ -1,0 +1,28 @@
+name: Deploy website to GitHub Pages
+
+on:
+  push:
+    branches: [ develop ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Deploy `website/` to GitHub Pages (gh-pages)
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          # Use a repo-scoped Personal Access Token if your repository disallows GITHUB_TOKEN pushes.
+          # Create a secret named `GH_PAGES_DEPLOY_TOKEN` with `repo` scope and it will be used automatically.
+          github_token: ${{ secrets.GH_PAGES_DEPLOY_TOKEN || secrets.GITHUB_TOKEN }}
+          publish_dir: ./website

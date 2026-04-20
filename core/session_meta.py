@@ -3,13 +3,13 @@ DB-backed session metadata storage for WebUI chat rect and camera state.
 
 Provides init, get, set functions for session-level metadata keyed by interface_path.
 """
+
 from __future__ import annotations
 
 import json
-from datetime import datetime
 from typing import Any, Dict, Optional
 
-from core.logging_utils import log_debug, log_info, log_warning
+from core.logging_utils import log_debug, log_warning
 from core.db import get_conn_ctx
 
 
@@ -54,7 +54,9 @@ async def set_session_meta(interface_path: str, meta: Dict[str, Any]) -> None:
         log_warning(f"[session_meta] Failed to set meta for {interface_path}: {e}")
 
 
-def _merge_meta(existing: Optional[Dict[str, Any]], incoming: Dict[str, Any]) -> Dict[str, Any]:
+def _merge_meta(
+    existing: Optional[Dict[str, Any]], incoming: Dict[str, Any]
+) -> Dict[str, Any]:
     """Merge incoming meta into existing meta.
 
     Special handling: if incoming contains a 'device' key ('mobile'|'desktop'),
@@ -68,16 +70,16 @@ def _merge_meta(existing: Optional[Dict[str, Any]], incoming: Dict[str, Any]) ->
     out = dict(existing)
 
     device = None
-    if isinstance(incoming, dict) and 'device' in incoming:
-        device = incoming.get('device')
+    if isinstance(incoming, dict) and "device" in incoming:
+        device = incoming.get("device")
 
     if device:
         # Ensure viewports namespace exists
-        viewports = out.setdefault('viewports', {})
+        viewports = out.setdefault("viewports", {})
         viewport_meta = dict(viewports.get(device) or {})
         # Merge incoming excluding 'device'
         for k, v in incoming.items():
-            if k == 'device':
+            if k == "device":
                 continue
             if isinstance(v, dict) and isinstance(viewport_meta.get(k), dict):
                 # shallow merge for nested dicts
@@ -87,7 +89,7 @@ def _merge_meta(existing: Optional[Dict[str, Any]], incoming: Dict[str, Any]) ->
             else:
                 viewport_meta[k] = v
         viewports[device] = viewport_meta
-        out['viewports'] = viewports
+        out["viewports"] = viewports
         return out
 
     # No device provided: perform shallow merge of keys at top-level
@@ -107,7 +109,10 @@ async def get_session_meta(interface_path: str) -> Optional[Dict[str, Any]]:
         await init_session_meta_table()
         async with get_conn_ctx() as conn:
             async with conn.cursor() as cur:
-                await cur.execute("SELECT meta FROM chat_session_meta WHERE interface_path = %s", (interface_path,))
+                await cur.execute(
+                    "SELECT meta FROM chat_session_meta WHERE interface_path = %s",
+                    (interface_path,),
+                )
                 row = await cur.fetchone()
                 if row and row[0]:
                     try:

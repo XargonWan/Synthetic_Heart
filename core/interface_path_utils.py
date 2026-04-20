@@ -15,16 +15,16 @@ from typing import Optional, List, Tuple, Dict, Any
 from core.logging_utils import log_debug
 
 
-def build_interface_path(interface_name: str, *levels: str) -> str:
+def build_interface_path(interface_name: str, *levels: Any) -> str:
     """Build an interface path from components.
-    
+
     Args:
         interface_name: The interface name (e.g., 'telegram_bot', 'discord_bot')
         *levels: Variable number of hierarchical levels
-        
+
     Returns:
         Complete interface path as a string
-        
+
     Examples:
         >>> build_interface_path('telegram_bot', '123456', '2')
         'telegram_bot/123456/2'
@@ -33,10 +33,10 @@ def build_interface_path(interface_name: str, *levels: str) -> str:
     """
     # Filter out None values and convert all to strings
     valid_levels = [str(level) for level in levels if level is not None]
-    
+
     if not valid_levels:
         return interface_name
-    
+
     path = f"{interface_name}/{'/'.join(valid_levels)}"
     log_debug(f"[interface_path] Built path: {path}")
     return path
@@ -46,44 +46,44 @@ def build_interface_path_from_legacy(
     interface_name: str,
     chat_id: Optional[Any] = None,
     thread_id: Optional[Any] = None,
-    **extra_levels
+    **extra_levels,
 ) -> str:
     """Build interface path from legacy chat_id/thread_id format.
-    
+
     Args:
         interface_name: The interface name
         chat_id: Legacy chat ID
         thread_id: Legacy thread ID (optional)
         **extra_levels: Additional hierarchical levels
-        
+
     Returns:
         Interface path string
     """
     levels = []
-    
+
     if chat_id is not None:
         levels.append(str(chat_id))
-    
+
     if thread_id is not None:
         levels.append(str(thread_id))
-    
+
     # Add any extra levels
     for key in sorted(extra_levels.keys()):
         if extra_levels[key] is not None:
             levels.append(str(extra_levels[key]))
-    
+
     return build_interface_path(interface_name, *levels)
 
 
 def parse_interface_path(interface_path: str) -> Tuple[str, List[str]]:
     """Parse an interface path into components.
-    
+
     Args:
         interface_path: The interface path string
-        
+
     Returns:
         Tuple of (interface_name, [levels])
-        
+
     Examples:
         >>> parse_interface_path('telegram_bot/123456/2')
         ('telegram_bot', ['123456', '2'])
@@ -91,50 +91,50 @@ def parse_interface_path(interface_path: str) -> Tuple[str, List[str]]:
         ('discord_bot', ['Xargon'])
     """
     if not interface_path:
-        return ('', [])
-    
-    parts = interface_path.split('/')
-    interface_name = parts[0] if parts else ''
+        return ("", [])
+
+    parts = interface_path.split("/")
+    interface_name = parts[0] if parts else ""
     levels = parts[1:] if len(parts) > 1 else []
-    
+
     log_debug(f"[interface_path] Parsed: interface={interface_name}, levels={levels}")
     return interface_name, levels
 
 
 def extract_legacy_ids(interface_path: str) -> Dict[str, Optional[str]]:
     """Extract legacy chat_id and thread_id from interface path.
-    
+
     This is for backward compatibility. Typically:
     - level 1 = chat_id (channel/user/server)
     - level 2 = thread_id (thread/topic)
-    
+
     Args:
         interface_path: The interface path
-        
+
     Returns:
         Dict with 'interface', 'chat_id', 'thread_id'
     """
     interface_name, levels = parse_interface_path(interface_path)
-    
+
     result = {
-        'interface': interface_name,
-        'chat_id': levels[0] if len(levels) >= 1 else None,
-        'thread_id': levels[1] if len(levels) >= 2 else None,
+        "interface": interface_name,
+        "chat_id": levels[0] if len(levels) >= 1 else None,
+        "thread_id": levels[1] if len(levels) >= 2 else None,
     }
-    
+
     log_debug(f"[interface_path] Extracted legacy IDs: {result}")
     return result
 
 
 def get_interface_from_path(interface_path: str) -> str:
     """Extract just the interface name from a path.
-    
+
     Args:
         interface_path: The interface path string
-        
+
     Returns:
         The interface name (level 0)
-        
+
     Examples:
         >>> get_interface_from_path('telegram_bot/123456/2')
         'telegram_bot'
@@ -145,14 +145,14 @@ def get_interface_from_path(interface_path: str) -> str:
 
 def get_level_from_path(interface_path: str, level: int) -> Optional[str]:
     """Extract a specific level from an interface path.
-    
+
     Args:
         interface_path: The interface path string
         level: The level to extract (0-based, where 0 is interface name)
-        
+
     Returns:
         The level value, or None if level doesn't exist
-        
+
     Examples:
         >>> get_level_from_path('telegram_bot/123456/2', 0)
         'telegram_bot'
@@ -163,7 +163,7 @@ def get_level_from_path(interface_path: str, level: int) -> Optional[str]:
         >>> get_level_from_path('telegram_bot/123456/2', 3)
         None
     """
-    parts = interface_path.split('/')
+    parts = interface_path.split("/")
     if 0 <= level < len(parts):
         return parts[level]
     return None
@@ -171,24 +171,24 @@ def get_level_from_path(interface_path: str, level: int) -> Optional[str]:
 
 def is_valid_interface_path(interface_path: str) -> bool:
     """Validate an interface path.
-    
+
     Args:
         interface_path: The interface path string
-        
+
     Returns:
         True if valid, False otherwise
     """
     if not interface_path or not isinstance(interface_path, str):
         return False
-    
-    parts = interface_path.split('/')
+
+    parts = interface_path.split("/")
     # Must have at least interface name
     if not parts or not parts[0]:
         return False
-    
+
     # All parts must be non-empty
     for part in parts:
         if not part or not part.strip():
             return False
-    
+
     return True

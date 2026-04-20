@@ -9,6 +9,7 @@ from core.ai_plugin_base import AIPluginBase
 display_name = "G.R.I.L.L.O. Curiosity"
 BEAT_TYPE = "curiosity"
 
+
 class GrilloCuriosityPlugin(AIPluginBase):
     display_name = display_name
     BEAT_TYPE = BEAT_TYPE
@@ -26,5 +27,6 @@ class GrilloCuriosityPlugin(AIPluginBase):
             '{"actions": [{"type": "create_personal_diary_entry", "payload": {"content": "your curious thoughts"}}]}'
         )
         return intro
+
 
 PLUGIN_CLASS = GrilloCuriosityPlugin

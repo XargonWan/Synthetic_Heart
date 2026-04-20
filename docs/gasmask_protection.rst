@@ -302,9 +302,9 @@ A: The instructions are part of the LLM's core prompt context. A sufficiently cr
 
 A: No. Guidelines exist to help SYNTH be better at assisting people safely. They expand capability by focusing it on genuine help rather than harmful outputs.
 
-**Q: What if the LLM engine doesn't respect the instructions?**
+**Q: What if a Cortex engine doesn't respect the instructions?**
 
-A: This depends on the LLM model. Gasmask provides strong instructions, but ultimately the LLM engine controls behavior. Test with your specific LLM to verify effectiveness.
+A: This depends on the selected model and engine kind. Gasmask provides strong instructions, but ultimately the model/configuration of the Cortex engine controls behavior. Test with your specific Cortex engine to verify effectiveness.
 
 Future Enhancements
 ====================

@@ -1,15 +1,15 @@
 import asyncio
 from types import SimpleNamespace
 
-import llm_engines_dev.openai_chatgpt as openai_mod
+import cortex.llm_provider.dev.openai_chatgpt as openai_mod
 
 
 def test_openai_includes_instructions_verbose(monkeypatch):
     captured = {}
 
     def fake_create(model, messages):
-        captured['model'] = model
-        captured['messages'] = messages
+        captured["model"] = model
+        captured["messages"] = messages
 
         class DummyResp:
             def __init__(self):
@@ -34,8 +34,8 @@ def test_openai_includes_instructions_verbose(monkeypatch):
     response = asyncio.run(plugin.generate_response(prompt))
 
     # Ensure our fake_create was called and messages include the verbose instruction
-    assert 'messages' in captured
-    assert captured['messages'][0]['role'] == 'system'
-    assert 'VERBOSE CHAT INSTRUCTION' in captured['messages'][0]['content']
+    assert "messages" in captured
+    assert captured["messages"][0]["role"] == "system"
+    assert "VERBOSE CHAT INSTRUCTION" in captured["messages"][0]["content"]
     # Also ensure the plugin returned the stubbed response content
     assert response == "ok"
