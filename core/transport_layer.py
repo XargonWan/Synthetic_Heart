@@ -1774,7 +1774,9 @@ async def run_corrector_middleware(
                                             rewritten = True
 
                                         if act.get("type") == "message_ollama_serve":
-                                            conversation_id = payload.get("conversation_id")
+                                            conversation_id = payload.get(
+                                                "conversation_id"
+                                            )
                                             if conversation_id is None:
                                                 conversation_id = (
                                                     context.get("conversation_id")

@@ -18,10 +18,13 @@ import re
 import threading
 import uuid
 import platform
+import tempfile
+import base64
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Deque, Dict, Optional, List, Any
+from urllib.parse import quote, unquote, urlparse
 
 from fastapi import (
     FastAPI,
@@ -286,6 +289,53 @@ class SynthWebUIInterface:
         # initialise skin hint based on whatever active_vrm we found
         self._current_skin = self._derive_skin_from_active_vrm()
 
+        # Attachments storage: prefer explicit env var, then XDG_DATA_HOME, then /config
+        attachments_root = os.getenv("SYNTH_ATTACHMENTS_ROOT")
+        if attachments_root:
+            self.attachments_dir = Path(attachments_root).expanduser()
+            log_info(
+                f"{LOG_PREFIX} Using attachments directory from SYNTH_ATTACHMENTS_ROOT: {self.attachments_dir}",
+                log_file=WEBUI_LOG,
+            )
+        else:
+            xdg_data_home = os.getenv("XDG_DATA_HOME")
+            if xdg_data_home:
+                self.attachments_dir = Path(xdg_data_home).expanduser() / "attachments"
+                log_info(
+                    f"{LOG_PREFIX} Using attachments directory from XDG_DATA_HOME: {self.attachments_dir}",
+                    log_file=WEBUI_LOG,
+                )
+            else:
+                self.attachments_dir = Path("/config") / "uploads"
+                log_info(
+                    f"{LOG_PREFIX} Using default attachments directory: {self.attachments_dir}",
+                    log_file=WEBUI_LOG,
+                )
+        try:
+            self.attachments_dir.mkdir(parents=True, exist_ok=True)
+        except Exception as exc:
+            log_warning(
+                f"{LOG_PREFIX} Could not create attachments directory {self.attachments_dir}: {exc}",
+                log_file=WEBUI_LOG,
+            )
+            fallback_dir = Path(tempfile.gettempdir()) / "synth_webui" / "attachments"
+            try:
+                fallback_dir.mkdir(parents=True, exist_ok=True)
+                self.attachments_dir = fallback_dir
+                log_info(
+                    f"{LOG_PREFIX} Falling back to attachments directory {self.attachments_dir}",
+                    log_file=WEBUI_LOG,
+                )
+                log_warning(
+                    f"{LOG_PREFIX} Uploaded files will not persist in temporary attachments directory {self.attachments_dir}",
+                    log_file=WEBUI_LOG,
+                )
+            except Exception as exc2:
+                log_warning(
+                    f"{LOG_PREFIX} Could not create fallback attachments directory {fallback_dir}: {exc2}",
+                    log_file=WEBUI_LOG,
+                )
+
         if static_dir.exists():
             self.app.mount(
                 "/static", StaticFiles(directory=str(static_dir)), name="static"
@@ -354,6 +404,7 @@ class SynthWebUIInterface:
                         path.startswith("/js/")
                         or path.startswith("/static/")
                         or path.startswith("/skins")
+                        or path.startswith("/uploads")
                     ):
                         # No store ensures proxies and browsers always revalidate.
                         response.headers["Cache-Control"] = "no-cache"
@@ -383,6 +434,20 @@ class SynthWebUIInterface:
                 log_warning(f"{LOG_PREFIX} Failed to mount /skins: {exc}")
         else:
             log_warning(f"{LOG_PREFIX} Skins directory not found: {skins_dir}")
+        if self.attachments_dir.exists():
+            try:
+                self.app.mount(
+                    "/uploads",
+                    StaticFiles(directory=str(self.attachments_dir)),
+                    name="synth-webui-uploads",
+                )
+                log_info(f"{LOG_PREFIX} Mounted /uploads to {self.attachments_dir}")
+            except Exception as exc:
+                log_warning(f"{LOG_PREFIX} Failed to mount /uploads: {exc}")
+        else:
+            log_warning(
+                f"{LOG_PREFIX} Attachments directory does not exist, /uploads endpoint NOT mounted"
+            )
         if self.vrm_dir.exists():
             try:
                 self.app.mount(
@@ -534,6 +599,7 @@ class SynthWebUIInterface:
         self.app.websocket("/logs")(self.logs_ws_endpoint)
         # Auris audio endpoints
         self.app.post("/api/audio/upload")(self.audio_upload_endpoint)
+        self.app.post("/api/chat/attachments")(self.chat_attachment_upload_endpoint)
         # helper endpoint for Vosk language selection (legacy compat, delegates to MODEL_MANAGER)
         self.app.post("/api/auris/vosk/download")(self.vosk_model_download)
         # Model management endpoints (SSOT: MODEL_MANAGER)
@@ -1154,6 +1220,23 @@ class SynthWebUIInterface:
                 _vox_cache = 40
             replacements["%%VOX_ENABLED%%"] = "true" if _vox_enabled else "false"
             replacements["%%VOX_AUDIO_CACHE_SIZE%%"] = str(_vox_cache)
+
+            # Iris enabled flag exposed to the WebUI client. Attachments require
+            # the Iris subsystem to be available in the current session.
+            try:
+                active_iris = str(
+                    config_registry.get_value(
+                        "ACTIVE_IRIS_ENGINE",
+                        "disabled",
+                        value_type=str,
+                        group="plugins",
+                        component="iris_plugin",
+                    )
+                )
+                _iris_enabled = bool(active_iris and active_iris != "disabled")
+            except Exception:
+                _iris_enabled = False
+            replacements["%%IRIS_ENABLED%%"] = "true" if _iris_enabled else "false"
 
             # Accent color config + presets (exposed to client as runtime config)
             try:
@@ -2003,14 +2086,26 @@ class SynthWebUIInterface:
                     continue
 
                 text = (payload.get("text") or "").strip()
-                if not text:
+                attachments = payload.get("attachments") or []
+                if not text and not attachments:
                     continue
                 is_voice_input = bool(payload.get("is_voice_input", False))
-                await self._append_history(session_id, "user", text)
+                normalized_attachments = [
+                    self._normalize_webui_attachment(att) for att in attachments
+                ]
+                metadata = (
+                    {"attachments": normalized_attachments}
+                    if normalized_attachments
+                    else None
+                )
+                await self._append_history(session_id, "user", text, metadata=metadata)
                 # Process message in background to avoid blocking WebSocket
                 asyncio.create_task(
                     self._handle_user_message(
-                        session_id, text, is_voice_input=is_voice_input
+                        session_id,
+                        text,
+                        attachments=normalized_attachments,
+                        is_voice_input=is_voice_input,
                     )
                 )
         except WebSocketDisconnect:
@@ -2229,6 +2324,43 @@ class SynthWebUIInterface:
         except Exception as exc:
             log_error(f"{LOG_PREFIX} audio_upload_endpoint error: {exc}")
             return JSONResponse({"error": str(exc)}, status_code=500)
+
+    # ------------------------------------------------------------------
+    # WebUI chat attachment upload endpoint
+    # ------------------------------------------------------------------
+
+    async def chat_attachment_upload_endpoint(
+        self,
+        file: UploadFile = File(...),
+    ):
+        """POST /api/chat/attachments — store a user attachment for WebUI chat."""
+        if not file or not file.filename:
+            raise HTTPException(status_code=400, detail="No file uploaded")
+
+        filename = Path(file.filename).name
+        safe_name = f"{uuid.uuid4().hex}_{filename}"
+        destination = self.attachments_dir / safe_name
+        try:
+            with destination.open("wb") as fh:
+                while True:
+                    chunk = await file.read(1 << 20)
+                    if not chunk:
+                        break
+                    fh.write(chunk)
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to store chat attachment: {exc}")
+            raise HTTPException(status_code=500, detail="Failed to store uploaded file")
+
+        file_url = f"/uploads/{quote(safe_name)}"
+        return JSONResponse(
+            {
+                "status": "ok",
+                "url": file_url,
+                "filename": filename,
+                "mime_type": file.content_type or "application/octet-stream",
+                "size": destination.stat().st_size,
+            }
+        )
 
     # ------------------------------------------------------------------
     # Vox metadata/sample endpoints
@@ -2875,16 +3007,76 @@ class SynthWebUIInterface:
                 status_code=500, detail=f"Failed to retrieve animation state: {exc}"
             ) from exc
 
+    def _normalize_webui_attachment(self, attachment: dict[str, Any]) -> dict[str, Any]:
+        """Normalize WebUI attachment metadata for local engine ingestion."""
+        if not isinstance(attachment, dict):
+            return attachment
+
+        url = attachment.get("url")
+        if not isinstance(url, str):
+            return attachment
+
+        parsed = urlparse(url)
+        if parsed.path.startswith("/uploads/"):
+            file_name = Path(unquote(parsed.path[len("/uploads/") :])).name
+            if file_name:
+                local_path = self.attachments_dir / file_name
+                normalized = dict(attachment)
+                normalized["path"] = str(local_path)
+                normalized["file_path"] = str(local_path)
+                if local_path.exists() and local_path.is_file():
+                    try:
+                        content = local_path.read_bytes()
+                        normalized["data"] = base64.b64encode(content).decode("utf-8")
+                        normalized["mime_type"] = normalized.get(
+                            "mime_type",
+                            mimetypes.guess_type(str(local_path))[0]
+                            or "application/octet-stream",
+                        )
+                        normalized["size"] = normalized.get("size", len(content))
+                    except Exception as exc:
+                        log_warning(
+                            f"{LOG_PREFIX} Failed to inline chat attachment data: {exc}"
+                        )
+                log_debug(
+                    f"{LOG_PREFIX} Normalized webui attachment: filename={file_name}, "
+                    f"mime_type={normalized.get('mime_type')}, "
+                    f"size={normalized.get('size')}, "
+                    f"path={normalized.get('path')}, "
+                    f"inlined_data={'data' in normalized}"
+                )
+                return normalized
+
+        return attachment
+
     async def _handle_user_message(
-        self, session_id: str, text: str, is_voice_input: bool = False
+        self,
+        session_id: str,
+        text: str,
+        attachments: list[dict[str, Any]] | None = None,
+        is_voice_input: bool = False,
     ) -> None:
         from types import SimpleNamespace
         from core.config import TRAINER_NAME
         from core import message_queue
 
+        normalized_attachments = [
+            self._normalize_webui_attachment(att) for att in (attachments or [])
+        ]
+
         log_info(
             f"{LOG_PREFIX} [_handle_user_message] START: session_id={session_id}, text_len={len(text)}, text={text[:100]}"
         )
+        log_debug(
+            f"{LOG_PREFIX} [_handle_user_message] normalized_attachments={len(normalized_attachments)}"
+        )
+        for att in normalized_attachments:
+            log_debug(
+                f"{LOG_PREFIX} [_handle_user_message] attachment metadata: "
+                f"filename={att.get('filename')}, mime_type={att.get('mime_type')}, "
+                f"size={att.get('size')}, path={att.get('path')}, "
+                f"has_data={'data' in att}"
+            )
 
         # Get trainer name for the user
         trainer_name = (
@@ -2898,6 +3090,7 @@ class SynthWebUIInterface:
             interface_path=f"{INTERFACE_NAME}/{session_id}",  # Add interface_path for proper routing
             message_id=int(datetime.utcnow().timestamp() * 1000) % 1_000_000,
             text=text,
+            attachments=normalized_attachments or [],
             is_voice_input=is_voice_input,
             date=datetime.utcnow(),
             from_user=SimpleNamespace(
@@ -3104,6 +3297,9 @@ class SynthWebUIInterface:
                     replay_payload["data"] = {"tts_url": tts_url}
                 else:
                     replay_payload["data"] = meta
+                attachments = meta.get("attachments")
+                if attachments:
+                    replay_payload["attachments"] = attachments
             await websocket.send_json(replay_payload)
         log_info(
             f"{LOG_PREFIX} _replay_history: sent {len(history)} messages to session {session_id}"
@@ -3438,11 +3634,18 @@ class SynthWebUIInterface:
                     "sender": "synth",
                     "text": text,
                 }
+                # Forward attachments if present so the WebUI can render them.
+                if metadata and isinstance(metadata.get("attachments"), list):
+                    payload["attachments"] = metadata["attachments"]
+                    # Keep attachments accessible under `data` for compatibility.
+                    payload.setdefault("data", {})["attachments"] = metadata[
+                        "attachments"
+                    ]
+
                 # Forward metadata fields that the client can use (e.g. tts_url).
                 if metadata and metadata.get("tts_url"):
                     payload["tts_url"] = metadata["tts_url"]
-                    # Also include in `data` for clients that expect it there.
-                    payload["data"] = {"tts_url": metadata["tts_url"]}
+                    payload.setdefault("data", {})["tts_url"] = metadata["tts_url"]
 
                 await websocket.send_json(payload)
             except Exception as e:
@@ -3813,7 +4016,9 @@ class SynthWebUIInterface:
             if not session_id:
                 session_id = _extract_session_id(payload.get("interface_path"))
             if not session_id and original_message is not None:
-                session_id = _extract_session_id(getattr(original_message, "interface_path", None))
+                session_id = _extract_session_id(
+                    getattr(original_message, "interface_path", None)
+                )
 
             # Ensure the payload has the correct interface_path for sending
             if session_id:
@@ -7990,6 +8195,58 @@ class SynthWebUIInterface:
         except Exception as exc:
             log_warning(f"{LOG_PREFIX} unable to build Live engine list: {exc}")
 
+        iris_data: list[dict] = []
+        try:
+            from core.iris_registry import IRIS_REGISTRY
+
+            active_iris: str | None = None
+            try:
+                active_iris = config_registry.get_value("ACTIVE_IRIS_ENGINE", None)
+            except Exception:
+                pass
+            iris_data.append(
+                {
+                    "name": "disabled",
+                    "display_name": "Disabled",
+                    "label": "No vision engine (disabled)",
+                    "capabilities": {},
+                    "description": "Vision disabled",
+                    "status": "success",
+                    "details": "Active" if active_iris == "disabled" else "",
+                    "error": None,
+                    "active": active_iris == "disabled",
+                }
+            )
+            for _name in IRIS_REGISTRY.get_available_engines():
+                _meta = IRIS_REGISTRY.get_engine_meta(_name)
+                _caps = _meta.get("capabilities") or {}
+                _available_models: list[str] = []
+                _default_model: str | None = None
+                _instance = IRIS_REGISTRY.get_instance(_name)
+                if _instance is not None and hasattr(_instance, "_endpoint"):
+                    _ep = _instance._endpoint
+                    _available_models = list(
+                        getattr(_ep, "available_models", None) or []
+                    )
+                    _default_model = getattr(_ep, "default_model", None)
+                iris_data.append(
+                    {
+                        "name": _name,
+                        "display_name": _name.replace("_", " ").title(),
+                        "label": _meta.get("label", ""),
+                        "capabilities": _caps,
+                        "description": f"Vision engine — capabilities: {_caps_desc(_caps)}",
+                        "status": "success",
+                        "details": "Active" if _name == active_iris else "",
+                        "error": None,
+                        "active": _name == active_iris,
+                        "available_models": _available_models,
+                        "default_model": _default_model,
+                    }
+                )
+        except Exception as exc:
+            log_warning(f"{LOG_PREFIX} unable to build Iris engine list: {exc}")
+
         # Build scope overrides for the UI (Grillo, Trainer, Live cortex selectors)
         # Single source of truth: derive options from the same data already built above.
         cortex_scopes: list[dict] = []
@@ -8047,6 +8304,10 @@ class SynthWebUIInterface:
             },
             "vox": vox_data,
             "auris": auris_data,
+            "iris": iris_data,
+            "iris_current_model": (
+                config_registry.get_value("IRIS_DEFAULT_MODEL", "") or ""
+            ),
             "live": live_data,
             "interfaces": interfaces_data,
             "plugins": plugins_data,

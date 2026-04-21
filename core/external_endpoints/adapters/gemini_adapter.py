@@ -232,3 +232,45 @@ class GeminiAdapter(BaseProtocolAdapter):
         except Exception as exc:
             log_warning(f"[gemini_adapter] transcribe_audio failed: {exc}")
             return None
+
+    # ------------------------------------------------------------------
+    # Vision (Iris) – Gemini inline_data format
+    # ------------------------------------------------------------------
+
+    async def describe_image(
+        self,
+        image_bytes: bytes,
+        mime_type: str | None = None,
+        prompt: str | None = None,
+        **kwargs: Any,
+    ) -> str | None:
+        """Describe *image_bytes* using Gemini multimodal inline_data.
+
+        Returns ``None`` if the request fails.
+        """
+        import asyncio
+
+        client = self._get_client()
+        effective_mime = mime_type or "image/jpeg"
+        effective_prompt = prompt or "Describe this image in detail."
+        request_model = kwargs.get("model", self.DEFAULT_MODEL)
+
+        try:
+            from google.genai import types
+
+            def _sync_describe() -> str:
+                response = client.models.generate_content(
+                    model=request_model,
+                    contents=[
+                        types.Part.from_bytes(
+                            data=image_bytes, mime_type=effective_mime
+                        ),
+                        effective_prompt,
+                    ],
+                )
+                return response.text or ""
+
+            return await asyncio.get_event_loop().run_in_executor(None, _sync_describe)
+        except Exception as exc:
+            log_warning(f"[gemini_adapter] describe_image failed: {exc}")
+            return None

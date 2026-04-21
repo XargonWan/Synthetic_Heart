@@ -27,7 +27,7 @@ async def test_enqueue_clears_voice_and_tts_flags(monkeypatch):
     monkeypatch.setattr(message_queue, "is_user_blocked", AsyncMock(return_value=False))
 
     # ensure a plugin is available so enqueue() doesn't bail out early
-    from core import plugin_instance, rate_limit
+    from core import plugin_instance
 
     class DummyPlugin:
         def get_rate_limit(self):
@@ -100,7 +100,9 @@ async def test_enqueue_and_wait_returns_plugin_response(monkeypatch):
             return 1000, 1, 1.0
 
     monkeypatch.setattr(plugin_instance, "get_plugin", lambda: DummyPlugin())
-    monkeypatch.setattr(message_queue.rate_limit, "is_allowed", lambda *args, **kwargs: True)
+    monkeypatch.setattr(
+        message_queue.rate_limit, "is_allowed", lambda *args, **kwargs: True
+    )
 
     async def fake_handle(bot, message, context_memory_or_prompt, interface=None, **kw):
         return "llm-ok"
@@ -142,7 +144,9 @@ async def test_enqueue_preserves_explicit_interface_path(monkeypatch):
             return 1000, 1, 1.0
 
     monkeypatch.setattr(plugin_instance, "get_plugin", lambda: DummyPlugin())
-    monkeypatch.setattr(message_queue.rate_limit, "is_allowed", lambda *args, **kwargs: True)
+    monkeypatch.setattr(
+        message_queue.rate_limit, "is_allowed", lambda *args, **kwargs: True
+    )
 
     recorded = []
 

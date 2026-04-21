@@ -52,7 +52,7 @@ async def test_components_summary_includes_disabled_options(monkeypatch):
     resp = await webui.components_summary()
     assert resp.status_code == 200
     payload = json.loads(resp.body)
-    for key in ("auris", "vox", "live"):
+    for key in ("auris", "vox", "live", "iris"):
         assert key in payload, f"{key} missing from summary"
         names = [e.get("name") for e in payload[key]]
         assert names, f"{key} list empty"

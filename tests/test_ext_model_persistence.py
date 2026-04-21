@@ -87,8 +87,12 @@ def test_generate_response_retries_on_connection_error(monkeypatch):
     )
     bridge = ExternalCortexEngine(endpoint, adapter_mock)
 
-    with patch("core.external_endpoints.bridges.cortex_bridge.asyncio.sleep", return_value=None):
-        result = asyncio.run(bridge.generate_response([{"role": "user", "content": "hi"}]))
+    with patch(
+        "core.external_endpoints.bridges.cortex_bridge.asyncio.sleep", return_value=None
+    ):
+        result = asyncio.run(
+            bridge.generate_response([{"role": "user", "content": "hi"}])
+        )
 
     assert result == "retry-ok"
     assert adapter_mock.chat_completion.call_count == 2
@@ -105,7 +109,9 @@ def test_handle_incoming_message_propagates_after_retry_exhaustion(monkeypatch):
     )
     bridge = ExternalCortexEngine(endpoint, adapter_mock)
 
-    with patch("core.external_endpoints.bridges.cortex_bridge.asyncio.sleep", return_value=None):
+    with patch(
+        "core.external_endpoints.bridges.cortex_bridge.asyncio.sleep", return_value=None
+    ):
         with pytest.raises(ConnectionError, match="Connection error"):
             asyncio.run(bridge.handle_incoming_message(None, None, {"foo": "bar"}))
 

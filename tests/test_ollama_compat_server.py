@@ -88,3 +88,29 @@ async def test_nonstream_completion_includes_text(monkeypatch):
     )
     assert parsed.get("message", {}).get("content") == "hello from synth"
     assert "id" in parsed and parsed["id"].startswith("chatcmpl-")
+
+
+@pytest.mark.asyncio
+async def test_nonstream_completion_with_actions_executed(monkeypatch):
+    server = OllamaCompatServer()
+
+    async def fake_handle_incoming_message(
+        interface, message_obj, context_memory, iface_id
+    ):
+        return None
+
+    monkeypatch.setattr(
+        "core.plugin_instance.handle_incoming_message",
+        fake_handle_incoming_message,
+    )
+
+    payload = {"messages": [{"role": "user", "content": "ciao"}], "stream": False}
+    resp = await server._handle_chat_payload(payload)
+    assert resp.status_code == 200
+    parsed = json.loads(resp.body.decode())
+
+    assert parsed.get("message", {}).get("content") == ""
+    assert parsed.get("final_response", "") == ""
+    assert parsed.get("response", "") == ""
+    assert parsed.get("choices") and parsed["choices"][0].get("text") == ""
+    assert parsed.get("id", "").startswith("chatcmpl-")

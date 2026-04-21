@@ -129,7 +129,7 @@
         // Subsystems — read-only badges
         const subsysEl = card.querySelector('.ext-ep-subsystems');
         const effectiveMap = ep.effective_subsystem_map || {};
-        for (const key of ['cortex', 'vox', 'auris', 'live']) {
+        for (const key of ['cortex', 'vox', 'auris', 'vision', 'live']) {
             if (!(key in effectiveMap)) continue;
             const val = effectiveMap[key];
             const badge = document.createElement('span');
@@ -162,6 +162,10 @@
         if (ep.default_model && models && models.includes && models.includes(ep.default_model)) {
             modelSelect.value = ep.default_model;
         }
+
+        modelSelect.addEventListener('change', () => {
+            handleSetModel(ep.id, modelSelect.value, card);
+        });
 
         // Probe time
         if (ep.last_probe_at) {
@@ -255,6 +259,35 @@
                 echoEl.textContent = `✗ ${e.message}`;
                 echoEl.style.color = 'var(--danger,#c0392b)';
             }
+        }
+    }
+
+    async function handleSetModel(id, model, card) {
+        const echoEl = card ? card.querySelector('.ext-ep-model-test-echo') : null;
+        if (echoEl) {
+            echoEl.textContent = 'Saving…';
+            echoEl.style.color = 'var(--muted)';
+        }
+        try {
+            await apiFetch(`/api/external-endpoints/${id}/model`, {
+                method: 'PUT',
+                body: JSON.stringify({ model: model || null }),
+            });
+            const endpoint = _endpoints.find((e) => e.id === id);
+            if (endpoint) {
+                endpoint.default_model = model || null;
+            }
+            if (echoEl) {
+                echoEl.textContent = model ? `✓ Saved "${model}"` : '✓ Saved';
+                echoEl.style.color = 'var(--success,#27ae60)';
+            }
+            window.SynthWebUI?.loadEnginesSummary?.();
+        } catch (e) {
+            if (echoEl) {
+                echoEl.textContent = `✗ ${e.message}`;
+                echoEl.style.color = 'var(--danger,#c0392b)';
+            }
+            await loadEndpoints();
         }
     }
 
@@ -368,7 +401,7 @@
 
         // Capabilities checkboxes
         const caps = preset.default_capabilities || {};
-        for (const k of ['cortex', 'vox', 'auris', 'live']) {
+        for (const k of ['cortex', 'vox', 'auris', 'vision', 'live']) {
             const cb = document.getElementById(`ext-ep-form-cap-${k}`);
             if (cb) cb.checked = !!caps[k];
         }
@@ -427,7 +460,7 @@
 
         // Capabilities from effective_subsystem_map
         const smap = ep.effective_subsystem_map || {};
-        for (const k of ['cortex', 'vox', 'auris', 'live']) {
+        for (const k of ['cortex', 'vox', 'auris', 'vision', 'live']) {
             const cb = document.getElementById(`ext-ep-form-cap-${k}`);
             if (cb) cb.checked = !!smap[k];
         }
@@ -505,7 +538,7 @@
 
         // Collect capability checkboxes into subsystem_map
         const subsystem_map = {};
-        for (const k of ['cortex', 'vox', 'auris', 'live']) {
+        for (const k of ['cortex', 'vox', 'auris', 'vision', 'live']) {
             const cb = document.getElementById(`ext-ep-form-cap-${k}`);
             if (cb) subsystem_map[k] = cb.checked;
         }

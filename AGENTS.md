@@ -90,6 +90,38 @@ The **Agent plugin** (`plugins/agent_plugin.py`) gives Synth a controlled hand f
 
 ---
 
+## 5a. Media Subsystems
+
+SyntH has four named media subsystems, each with its own registry, base class, plugin, and WebUI selector.
+
+| Name | Purpose | Registry | Plugin | Config key | Action |
+|------|---------|---------|--------|-----------|--------|
+| **Cortex** | Text generation / LLM | `core/cortex_registry.py` | — (AI engines) | `BASE_CORTEX` | — |
+| **Vox** | Text-to-Speech | `core/vox_registry.py` | `plugins/vox_plugin.py` | `ACTIVE_VOX_ENGINE` | `tts_speak` |
+| **Auris** | Speech-to-Text (file-based) | `core/auris_registry.py` | `plugins/auris_plugin.py` | `ACTIVE_AURIS_ENGINE` | `stt_transcribe` |
+| **Iris** | Image / Video Understanding | `core/iris_registry.py` | `plugins/iris_plugin.py` | `ACTIVE_IRIS_ENGINE` | `vision_describe` |
+
+### Iris — Vision
+
+Iris handles file-based image and video analysis.
+
+- **Base class**: `plugins/iris_base.py` — `IrisEngineBase(ABC)`, `IrisResult` dataclass.
+- **Plugin**: `plugins/iris_plugin.py` — public API: `await iris_plugin.describe_media(file_path, mime_type, prompt, engine_name, model)`.
+- **Bridge**: `core/external_endpoints/bridges/iris_bridge.py` — wraps any external endpoint adapter.
+- **Adapter method**: `BaseProtocolAdapter.describe_image(image_bytes, mime_type, prompt, model)` — implemented in `openai_compat`, `gemini_adapter`, `anthropic_adapter`.
+- **Media dispatcher**: `core/media_dispatcher.py` — Iris is called for `image/*` and `video/*` MIME types (step 2 in the escalation chain, between Auris and Live).
+- **Default engine**: `selenium-llm-engine` (pre-set in `init-db.sql`). No local model is bundled.
+- **WebUI**: Engine selector appears in the Engines tab (`core/webui_templates/sections/engines.html`), populated from `/api/components` → `iris` key.
+
+Engine authors subclass `IrisEngineBase` and set `ENGINE_CLASS = MyEngine` at module level. Register at import time:
+
+```python
+from core.iris_registry import register_iris_engine
+register_iris_engine("my_engine", __name__, capabilities={"vision": True}, label="My vision engine")
+```
+
+---
+
 ## 6. Interfaces
 
 - Manage I/O with external systems.

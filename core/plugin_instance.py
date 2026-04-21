@@ -8,9 +8,16 @@ from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from datetime import datetime
 import json
+import base64
 import os
+import tempfile
+from pathlib import Path
 from core.logging_utils import log_debug, log_info, log_warning, log_error
-from core.json_utils import dumps as json_dumps, sanitize_for_json
+from core.json_utils import (
+    dumps as json_dumps,
+    redact_multimodal_for_logging,
+    sanitize_for_json,
+)
 from core.image_processor import get_image_processor, process_image_message
 from core.abstract_context import AbstractContext, AbstractUser, AbstractMessage
 from core.mention_utils import is_message_for_bot
@@ -18,6 +25,8 @@ from core.config_manager import config_registry
 from core.multimodal_attachment import (
     extract_multimodal_from_telegram,
     extract_multimodal_from_discord,
+    get_mime_type,
+    is_supported_type,
 )
 
 # Plugin managed centrally in initialize_core_components
@@ -549,6 +558,57 @@ async def handle_incoming_message(
             log_info(
                 f"[plugin_instance] Message contains {len(attachments)} attachments from user {user_id}"
             )
+            # Do NOT pass the user's text as the Iris prompt — Iris must
+            # receive a neutral plain-text instruction so the vision engine
+            # returns a description rather than formatted/structured output.
+            # The user's actual question is answered by the main LLM after the
+            # Iris description is injected into the context.
+            _IRIS_PLAIN_TEXT_PROMPT = (
+                "IMPORTANT: Respond in plain conversational text only. "
+                "Do NOT use JSON, XML or any structured format. "
+                "Simply describe what you see in the image."
+            )
+            iris_result = await _describe_attachment_images_with_iris(
+                attachments, prompt=_IRIS_PLAIN_TEXT_PROMPT
+            )
+            if iris_result is not None:
+                try:
+                    original_text = getattr(message, "text", "") or ""
+                    # Build a structured block with all available metadata.
+                    parts: list[str] = [iris_result.description]
+                    if iris_result.language:
+                        parts.append(f"language: {iris_result.language}")
+                    if iris_result.confidence is not None:
+                        parts.append(f"confidence: {iris_result.confidence:.2f}")
+                    description_block = "[Iris vision: " + " | ".join(parts) + "]"
+                    if original_text:
+                        setattr(
+                            message, "text", f"{original_text}\n\n{description_block}"
+                        )
+                    else:
+                        setattr(message, "text", description_block)
+                    log_info(
+                        "[plugin_instance] Appended Iris vision analysis to prompt text"
+                    )
+                except Exception as exc:
+                    log_warning(
+                        f"[plugin_instance] Could not append Iris description to message text: {exc}"
+                    )
+
+            # Strip image/video base64 data from attachments so the Cortex
+            # engine does not receive raw vision bytes.  Iris already provided
+            # a textual description (or a placeholder).  Audio and document
+            # attachments are kept intact for engines that support them natively.
+            attachments = [
+                att
+                for att in attachments
+                if not (
+                    att.get("mime_type")
+                    or att.get("content_type")
+                    or att.get("type")
+                    or ""
+                ).startswith(("image/", "video/"))
+            ]
 
         if isinstance(context_memory_or_prompt, str):
             try:
@@ -690,7 +750,10 @@ async def handle_incoming_message(
         )
         # debug log of the full prompt content for reconstruction
         try:
-            log_debug(f"[flow] prompt content: {json_dumps(prompt)}")
+            log_debug(
+                "[flow] prompt content: "
+                + json_dumps(redact_multimodal_for_logging(prompt))
+            )
         except Exception:
             pass
     except Exception:
@@ -747,7 +810,11 @@ async def handle_incoming_message(
             log_error(f"[plugin_instance] Failed to log LLM traffic: {e}")
         # debug log response for full transaction replay
         try:
-            log_debug(f"[flow] LLM raw response: {result}")
+            redacted_result = redact_multimodal_for_logging(result)
+            if isinstance(redacted_result, (dict, list)):
+                log_debug("[flow] LLM raw response: " + json_dumps(redacted_result))
+            else:
+                log_debug(f"[flow] LLM raw response: {redacted_result}")
         except Exception:
             pass
 
@@ -992,12 +1059,17 @@ def _log_llm_traffic(prompt, response, interface_name):
             log_prompt.pop("actions", None)
         except Exception:
             pass
+    try:
+        log_prompt = redact_multimodal_for_logging(log_prompt)
+        log_response = redact_multimodal_for_logging(response)
+    except Exception:
+        log_response = response
 
     entry = {
         "timestamp": datetime.utcnow().isoformat(),
         "interface": interface_name,
         "input_context": log_prompt,
-        "response": response,
+        "response": log_response,
     }
 
     try:
@@ -1139,23 +1211,238 @@ async def _extract_image_data_from_message(message, interface_name: str):
     elif hasattr(message, "attachments"):
         # Handle generic attachments
         for attachment in message.attachments:
-            if (
-                hasattr(attachment, "content_type")
-                and attachment.content_type
-                and attachment.content_type.startswith("image/")
-            ):
+            mime_type = ""
+            filename = ""
+            size = 0
+            url = None
+            if isinstance(attachment, dict):
+                mime_type = str(
+                    attachment.get("content_type")
+                    or attachment.get("mime_type")
+                    or attachment.get("type")
+                    or ""
+                )
+                filename = attachment.get("filename") or attachment.get("name") or ""
+                size = attachment.get("size", 0)
+                url = attachment.get("url") or attachment.get("path")
+            elif hasattr(attachment, "content_type") and attachment.content_type:
+                mime_type = attachment.content_type
+                filename = getattr(attachment, "filename", "") or getattr(
+                    attachment, "name", ""
+                )
+                size = getattr(attachment, "size", 0)
+                url = getattr(attachment, "url", None) or getattr(
+                    attachment, "path", None
+                )
+            else:
+                continue
+
+            if not mime_type and isinstance(attachment, dict):
+                mime_type = get_mime_type(attachment.get("path"), filename)
+
+            if mime_type.startswith("image/"):
                 image_data = {
                     "type": "attachment",
-                    "url": attachment.url,
-                    "filename": attachment.filename,
-                    "content_type": attachment.content_type,
-                    "size": getattr(attachment, "size", 0),
-                    "caption": getattr(message, "content", ""),
+                    "url": url,
+                    "filename": filename,
+                    "content_type": mime_type,
+                    "size": size,
+                    "caption": getattr(message, "caption", "")
+                    or getattr(message, "text", "")
+                    or "",
                 }
                 has_trigger = True
                 break
 
     return image_data, has_trigger
+
+
+def _build_unviewable_media_placeholder(
+    mime_type: str | None,
+    reason: str = "unavailable",
+) -> str:
+    """Build a text placeholder informing the Cortex that media was received but not analysed.
+
+    Args:
+        mime_type: MIME type of the attachment (e.g. ``"image/png"``).
+        reason:    Why the vision analysis could not run.
+                   Typical values: ``"disabled"``, ``"unavailable"``, ``"error"``.
+    """
+    media_label = mime_type or "media file"
+    return (
+        f"The user sent a {media_label} attachment. "
+        f"The Iris vision subsystem is currently {reason}, so the image content "
+        "cannot be analysed. Acknowledge the attachment and let the user know "
+        "that vision capabilities are not available right now."
+    )
+
+
+async def _describe_attachment_images_with_iris(
+    attachments: list[dict],
+    prompt: str | None = None,
+) -> "IrisResult | None":  # noqa: F821
+    """Use the configured Iris engine to describe the first image/video attachment.
+
+    Returns the full :class:`IrisResult` (including *language* and *confidence*
+    metadata) rather than a bare description string.  When the engine is
+    disabled or the analysis fails, a synthetic ``IrisResult`` is returned
+    whose *description* contains an informative placeholder for the Cortex.
+    """
+    from plugins.iris_base import IrisResult
+
+    if not attachments:
+        return None
+
+    first_media_mime_type = None
+    for attachment in attachments:
+        mime_type = str(
+            attachment.get("mime_type")
+            or attachment.get("content_type")
+            or attachment.get("type")
+            or ""
+        )
+        if mime_type.startswith(("image/", "video/")):
+            first_media_mime_type = mime_type
+            break
+
+    if first_media_mime_type is None:
+        return None
+
+    try:
+        from core.core_initializer import PLUGIN_REGISTRY
+
+        iris = PLUGIN_REGISTRY.get("iris_plugin")
+        if iris is None:
+            log_info(
+                "[plugin_instance] Iris skip: iris_plugin not found in PLUGIN_REGISTRY"
+            )
+            return IrisResult(
+                description=_build_unviewable_media_placeholder(
+                    first_media_mime_type, reason="unavailable"
+                )
+            )
+        # Refresh config before reading _active_engine_name so we get the
+        # DB-loaded value rather than the hard-coded startup default ("disabled").
+        try:
+            iris.refresh_config()
+        except Exception:
+            pass
+        active_engine = getattr(iris, "_active_engine_name", "disabled")
+        if active_engine == "disabled":
+            log_info("[plugin_instance] Iris skip: active engine is 'disabled'")
+            return IrisResult(
+                description=_build_unviewable_media_placeholder(
+                    first_media_mime_type, reason="disabled"
+                )
+            )
+        log_info(
+            f"[plugin_instance] Iris active engine: '{active_engine}', processing {len(attachments)} attachment(s)"
+        )
+    except Exception as exc:
+        log_debug(f"[plugin_instance] Iris plugin lookup failed: {exc}")
+        return IrisResult(
+            description=_build_unviewable_media_placeholder(
+                first_media_mime_type, reason="unavailable"
+            )
+        )
+
+    for attachment in attachments:
+        mime_type = str(
+            attachment.get("mime_type")
+            or attachment.get("content_type")
+            or attachment.get("type")
+            or ""
+        )
+        if not mime_type.startswith(("image/", "video/")):
+            log_debug(
+                f"[plugin_instance] Iris skip attachment: mime_type={mime_type!r} not image/video"
+            )
+            continue
+
+        data_b64 = attachment.get("data")
+        if not data_b64 or not isinstance(data_b64, str):
+            # Try to read from path if data is missing
+            file_path = attachment.get("path") or attachment.get("file_path")
+            if file_path:
+                try:
+                    p = Path(file_path)
+                    if p.exists() and p.is_file():
+                        data_b64 = base64.b64encode(p.read_bytes()).decode("utf-8")
+                        log_info(
+                            f"[plugin_instance] Iris: read file from path for attachment ({mime_type})"
+                        )
+                    else:
+                        log_warning(
+                            f"[plugin_instance] Iris skip: no data and file not found at {file_path!r}"
+                        )
+                        continue
+                except Exception as exc:
+                    log_warning(
+                        f"[plugin_instance] Iris skip: failed to read {file_path!r}: {exc}"
+                    )
+                    continue
+            else:
+                log_warning(
+                    f"[plugin_instance] Iris skip: attachment has no data and no path (mime={mime_type!r})"
+                )
+                continue
+
+        try:
+            image_bytes = base64.b64decode(data_b64)
+        except Exception as exc:
+            log_warning(
+                f"[plugin_instance] Failed to decode attachment data for Iris: {exc}"
+            )
+            continue
+
+        if not image_bytes:
+            continue
+
+        suffix = ""
+        if "/" in mime_type:
+            suffix = f".{mime_type.split('/', 1)[1].split(';')[0]}"
+
+        tmp_path = None
+        try:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                tmp.write(image_bytes)
+                tmp_path = tmp.name
+
+            log_info(
+                f"[plugin_instance] Iris: calling describe_media for {mime_type} ({len(image_bytes)} bytes)"
+            )
+            try:
+                result = await asyncio.wait_for(
+                    iris.describe_media(tmp_path, mime_type, prompt),
+                    timeout=120.0,
+                )
+            except asyncio.TimeoutError:
+                log_warning(
+                    f"[plugin_instance] Iris: describe_media timed out after 120s for {mime_type}"
+                )
+                result = None
+            if result and result.description:
+                log_info(
+                    f"[plugin_instance] Iris: got description ({len(result.description)} chars)"
+                )
+                return result
+            log_info(
+                f"[plugin_instance] Iris: describe_media returned empty result={result!r}"
+            )
+        except Exception as exc:
+            log_warning(f"[plugin_instance] Iris description failed: {exc}")
+        finally:
+            if tmp_path:
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
+
+    return IrisResult(
+        description=_build_unviewable_media_placeholder(
+            first_media_mime_type, reason="error"
+        )
+    )
 
 
 async def _extract_multimodal_attachments(
@@ -1186,7 +1473,43 @@ async def _extract_multimodal_attachments(
             log_debug(
                 f"[plugin_instance] No multimodal extractor for interface: {interface_name}"
             )
-            return []
+
+            attachments = []
+            if hasattr(message, "attachments"):
+                for attachment in getattr(message, "attachments") or []:
+                    if not isinstance(attachment, dict):
+                        continue
+
+                    mime_type = str(
+                        attachment.get("content_type")
+                        or attachment.get("mime_type")
+                        or ""
+                    )
+                    filename = (
+                        attachment.get("filename") or attachment.get("name") or ""
+                    )
+                    if not mime_type:
+                        mime_type = get_mime_type(attachment.get("path"), filename)
+                    if not mime_type or not is_supported_type(mime_type):
+                        continue
+
+                    normalized = dict(attachment)
+                    normalized["mime_type"] = mime_type
+
+                    if "data" not in normalized and normalized.get("path"):
+                        try:
+                            path = Path(str(normalized["path"]))
+                            if path.exists() and path.is_file():
+                                normalized["data"] = base64.b64encode(
+                                    path.read_bytes()
+                                ).decode("utf-8")
+                        except Exception as exc:
+                            log_warning(
+                                f"[plugin_instance] Failed to inline attachment data: {exc}"
+                            )
+
+                    attachments.append(normalized)
+            return attachments
     except Exception as e:
         log_warning(f"[plugin_instance] Failed to extract multimodal attachments: {e}")
         return []

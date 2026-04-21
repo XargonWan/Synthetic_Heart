@@ -684,6 +684,24 @@ async def handle_media_live(update: Update, context: ContextTypes.DEFAULT_TYPE):
         log_warning(f"[telegram_bot] live_media: no file_id available for {message}")
         return
 
+    # ------------------------------------------------------------------
+    # Pre-enqueue with a media_future so the queue consumer holds a
+    # NORMAL_PRIORITY slot immediately.  This prevents any LOW_PRIORITY
+    # Grillo beat from being extracted and started concurrently while we
+    # spend the next several seconds downloading the file and running
+    # Auris/Iris/dispatch_media outside the queue.  The consumer will
+    # block on this future until we resolve it with the final MessageWrapper.
+    # ------------------------------------------------------------------
+    _media_future: asyncio.Future = asyncio.get_event_loop().create_future()
+    await message_queue.enqueue(
+        context.bot,
+        message,
+        media_future=_media_future,
+        interface_id="telegram_bot",
+        original_message=message,
+        skip_mention_check=True,
+    )
+
     # Download file and process
     input_path = None
     try:
@@ -703,7 +721,7 @@ async def handle_media_live(update: Update, context: ContextTypes.DEFAULT_TYPE):
         log_debug(f"[telegram_bot] Media file downloaded to {input_path}")
 
         # ------------------------------------------------------------------
-        # PRIMARY PATH: Auris STT → enqueue as text message
+        # PRIMARY PATH: Auris STT → resolve future with transcribed text
         # ------------------------------------------------------------------
         auris_handled = False
         try:
@@ -738,13 +756,8 @@ async def handle_media_live(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     is_voice_input=True,
                     request_tts=True,
                 )
-                await message_queue.enqueue(
-                    context.bot,
-                    wrapped,
-                    interface_id="telegram_bot",
-                    original_message=message,
-                    skip_mention_check=True,
-                )
+                if not _media_future.done():
+                    _media_future.set_result(wrapped)
                 auris_handled = True
             else:
                 # Auris returned empty string; log a warning but *do not* abort.
@@ -780,21 +793,16 @@ async def handle_media_live(update: Update, context: ContextTypes.DEFAULT_TYPE):
             fallback = None
 
         if fallback:
-            # we received a transcription from dispatch_media; enqueue it like a
-            # normal Auris result and stop.
+            # we received a transcription from dispatch_media; resolve the future
+            # with the wrapped message and return.
             wrapped = MessageWrapper(
                 message,
                 text=fallback,
                 is_voice_input=True,
                 request_tts=True,
             )
-            await message_queue.enqueue(
-                context.bot,
-                wrapped,
-                interface_id="telegram_bot",
-                original_message=message,
-                skip_mention_check=True,
-            )
+            if not _media_future.done():
+                _media_future.set_result(wrapped)
             return
 
         # FALLBACK PATH: no transcription available, hand off the media as a
@@ -810,17 +818,17 @@ async def handle_media_live(update: Update, context: ContextTypes.DEFAULT_TYPE):
             is_voice_input=True,
             request_tts=True,
         )
-        await message_queue.enqueue(
-            context.bot,
-            wrapped,
-            interface_id="telegram_bot",
-            original_message=message,
-            skip_mention_check=True,
-        )
+        if not _media_future.done():
+            _media_future.set_result(wrapped)
 
     except Exception as e:
         log_error(f"[telegram_bot] Error handling live media: {e}")
-        await message.reply_text(f"⚠️ Error processing media: {str(e)}")
+        if not _media_future.done():
+            _media_future.set_exception(e)
+        try:
+            await message.reply_text(f"⚠️ Error processing media: {str(e)}")
+        except Exception:
+            pass
     finally:
         # Cleanup temp file
         if input_path and os.path.exists(input_path):

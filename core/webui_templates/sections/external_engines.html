@@ -4,7 +4,7 @@
             <h2>External Engines</h2>
             <div class="meta" style="margin-bottom:16px;">
                 Connect external AI services: Ollama, OpenAI, Gemini, Anthropic, or any OpenAI-compatible API, even self hosted.
-                Endpoints are auto-probed for capabilities and can be mapped to Cortex (chat/text, reasoning), Vox (voice, TTS), Auris (audio, STT), or Live (real-time, multimodal) subsystems.
+                Endpoints are auto-probed for capabilities and can be mapped to Cortex (chat/text, reasoning), Vox (voice, TTS), Auris (audio, STT), Iris (image/video vision), or Live (real-time, multimodal) subsystems.
             </div>
 
             <!-- Toolbar -->
@@ -99,6 +99,9 @@
                             </label>
                             <label style="display:flex; align-items:center; gap:6px; font-size:0.9rem; cursor:pointer;">
                                 <input type="checkbox" id="ext-ep-form-cap-auris"> Auris <span style="color:var(--muted); font-size:0.8rem;">(STT)</span>
+                            </label>
+                            <label style="display:flex; align-items:center; gap:6px; font-size:0.9rem; cursor:pointer;">
+                                <input type="checkbox" id="ext-ep-form-cap-vision"> Iris <span style="color:var(--muted); font-size:0.8rem;">(image/video vision)</span>
                             </label>
                             <label style="display:flex; align-items:center; gap:6px; font-size:0.9rem; cursor:pointer;">
                                 <input type="checkbox" id="ext-ep-form-cap-live"> Live <span style="color:var(--muted); font-size:0.8rem;">(real-time streaming)</span>

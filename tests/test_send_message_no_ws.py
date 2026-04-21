@@ -45,7 +45,9 @@ async def test_execute_action_uses_original_message_interface_path_when_context_
     original_message = type("M", (), {"interface_path": "synth_webui/webui_default"})()
 
     with patch.object(webui, "send_message", AsyncMock()) as mock_send:
-        await webui.execute_action(action, context={}, bot=None, original_message=original_message)
+        await webui.execute_action(
+            action, context={}, bot=None, original_message=original_message
+        )
 
     assert mock_send.called
     sent_payload = mock_send.call_args.args[0]

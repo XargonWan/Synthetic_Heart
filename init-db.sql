@@ -160,6 +160,11 @@ CREATE TABLE IF NOT EXISTS config (
 INSERT IGNORE INTO config (`config_key`, `value`) VALUES ('BASE_CORTEX', 'selenium-llm-engine');
 INSERT IGNORE INTO config (`config_key`, `value`) VALUES ('GRILLO_CORTEX', 'Default');
 INSERT IGNORE INTO config (`config_key`, `value`) VALUES ('TRAINER_CORTEX', 'Default');
+INSERT IGNORE INTO config (`config_key`, `value`) VALUES ('ACTIVE_IRIS_ENGINE', 'selenium-llm-engine');
+-- Enable vision support for selenium-llm-engine which supports image uploads
+INSERT IGNORE INTO config (`config_key`, `value`) VALUES ('OPENAPI_SUPPORTS_VISION', 'true');
+-- Allow enough time for selenium-llm-engine queue processing
+INSERT IGNORE INTO config (`config_key`, `value`) VALUES ('RESPONSE_TIMEOUT', '600');
 
 -- Grant privileges to synth user from any host
 GRANT ALL PRIVILEGES ON synth.* TO 'synth'@'%' IDENTIFIED BY 'synth';

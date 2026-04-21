@@ -6,6 +6,33 @@ from core.external_endpoints.bridges.vox_bridge import ExternalVoxEngine
 from core.external_endpoints.adapters.custom_tts_adapter import LegacyHttpTTSAdapter
 
 
+def test_external_endpoint_effective_subsystem_map_includes_vision() -> None:
+    endpoint = ExternalEndpoint(
+        id=1,
+        name="vision_ep",
+        display_label="Vision Endpoint",
+        protocol=EndpointProtocol.OPENAI,
+        base_url="http://localhost:9999",
+        api_key_enc=None,
+        enabled=True,
+        capabilities={"vision": True},
+        subsystem_map={"auris": True},
+        available_models=[],
+        default_model=None,
+        probe_status="success",
+        last_probe_at=None,
+        extra_config={},
+    )
+
+    merged = endpoint.effective_subsystem_map()
+
+    assert merged["vision"] is True
+    assert merged["auris"] is True
+    assert merged["cortex"] is False
+    assert merged["vox"] is False
+    assert merged["live"] is False
+
+
 class FakeResponse:
     def __init__(self, status: int, data: bytes) -> None:
         self.status = status
