@@ -621,6 +621,45 @@
             text-transform: uppercase;
             letter-spacing: 0.08em;
         }
+        /* VRM loading / summoning screen */
+        #vrm-loading-overlay {
+            position: absolute;
+            inset: 0;
+            z-index: 10;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            background: var(--bg);
+            pointer-events: none;
+            transition: opacity 0.5s ease;
+        }
+        #vrm-loading-overlay.fade-out {
+            opacity: 0;
+        }
+        .vrm-loading-spinner {
+            width: 52px;
+            height: 52px;
+            border-radius: 50%;
+            border: 3px solid rgba(255, 255, 255, 0.08);
+            border-top-color: var(--accent);
+            animation: vrm-spin 0.9s linear infinite;
+            margin-bottom: 1.5rem;
+        }
+        @keyframes vrm-spin {
+            to { transform: rotate(360deg); }
+        }
+        .vrm-loading-label {
+            color: var(--text-soft);
+            font-size: 0.82rem;
+            text-transform: uppercase;
+            letter-spacing: 0.16em;
+            margin: 0;
+        }
+        .vrm-loading-label span {
+            color: var(--accent);
+            font-weight: 700;
+        }
         .settings-grid {
             display: flex;
             /* Vertical stacking by default */

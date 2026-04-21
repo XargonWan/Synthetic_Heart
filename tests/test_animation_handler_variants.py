@@ -48,15 +48,23 @@ def test_variants_discovery(tmp_path: Path):
 def test_exact_file_match_and_aliases(tmp_path: Path):
     base = tmp_path / "custom_root"
     base.mkdir()
-    # exact file match eat.fbx in root
-    (base / "eat.fbx").write_text("FBX_PLACEHOLDER")
-    write_json(base / "eat.fbx.json", {"loop": {"start_frame": 0, "end_frame": 30}})
+    eat_dir = base / "eat"
+    eat_dir.mkdir()
+    # Root-level files must be ignored by strict state-folder discovery.
+    (base / "root_only.fbx").write_text("FBX_PLACEHOLDER")
+    write_json(
+        base / "root_only.fbx.json", {"loop": {"start_frame": 0, "end_frame": 30}}
+    )
+    # The actual runtime-discoverable variant lives in the state folder.
+    (eat_dir / "eat.fbx").write_text("FBX_PLACEHOLDER")
+    write_json(eat_dir / "eat.fbx.json", {"loop": {"start_frame": 0, "end_frame": 30}})
 
     handler = get_karada_state_server()
     handler.set_animation_search_paths([base])
 
     variants = handler.get_animation_variants("eat")
     assert "eat.fbx" in variants["loop"]
+    assert "root_only.fbx" not in variants["loop"]
 
     # register alias: chow -> eat
     handler.register_state_aliases({"chow": ["eat"]})

@@ -1,22 +1,23 @@
 import json
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
-from core.animation_handler import get_karada_state_server
-from core.animation_handler import AnimationState
+from core.animation_handler import AnimationState, KaradaStateServer
+from core.karada_ws_transport import WebSocketTransport
 
 
 class FakeWebSocket:
     def __init__(self):
-        self.sent = []
+        self.sent: list[dict[str, Any]] = []
 
-    async def send_json(self, payload):
+    async def send_json(self, payload: dict[str, Any]) -> None:
         self.sent.append(payload)
 
 
 class FakeWebUI:
-    def __init__(self, sid):
+    def __init__(self, sid: str) -> None:
         self.connections = {sid: FakeWebSocket()}
 
 
@@ -36,14 +37,15 @@ async def test_play_and_stop_with_outro(tmp_path: Path):
         )
     )
 
-    handler = get_karada_state_server()
+    handler = KaradaStateServer()
     handler.set_animation_search_paths([base])
     # Force selection of our test animation regardless of active persona/skin content
     handler.register_state_animations("think", {"loop": ["think_long.fbx"]})
 
     session = "sess1"
     fake = FakeWebUI(session)
-    handler.set_webui(fake)
+    handler.set_webui(cast(Any, fake))
+    handler.add_transport(WebSocketTransport(cast(Any, fake.connections)))
 
     # Play animation with context
     await handler.play_animation(
