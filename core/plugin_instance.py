@@ -1,6 +1,6 @@
 # core/plugin_instance.py
 
-from core.prompt_engine import build_json_prompt
+from core.prompt_engine import build_prompt_request
 from core.cortex_registry import get_cortex_registry
 import asyncio
 import contextvars
@@ -31,6 +31,18 @@ from core.multimodal_attachment import (
 
 # Plugin managed centrally in initialize_core_components
 plugin = None
+
+
+def _restore_plugin_instance(instance: object) -> None:
+    """Directly restore the module-level plugin reference from a saved instance."""
+    global plugin  # noqa: PLW0603
+    plugin = instance
+    from core.logging_utils import log_info as _log_info
+
+    _log_info(
+        f"[plugin_instance] Restored cortex instance directly: {instance.__class__.__name__}"
+    )
+
 
 # Global lease to serialize LLM chains (Recon + prompt + actions) across tasks
 _llm_chain_lock = asyncio.Lock()
@@ -379,9 +391,25 @@ async def handle_incoming_message(
         except Exception:
             pass
 
-        original_plugin_name = (
-            plugin.__class__.__module__.split(".")[-1] if plugin is not None else None
-        )
+        # Save both the instance and its registry name so we can restore cleanly.
+        # The module-path tail (e.g. "cortex_bridge") is NOT a registry key and
+        # cannot be passed back to load_plugin — keep the instance as a fallback.
+        original_plugin_instance = plugin  # may be None
+        original_plugin_name: str | None = None
+        if plugin is not None:
+            try:
+                reg = get_cortex_registry()
+                # Prefer the registered name (reverse-lookup by identity)
+                for _k, _v in reg._engines.items():
+                    if _v is plugin:
+                        original_plugin_name = _k
+                        break
+            except Exception:
+                pass
+            # Last resort: derive from module path (may be wrong for bridge engines)
+            if not original_plugin_name:
+                original_plugin_name = plugin.__class__.__module__.split(".")[-1]
+
         desired_plugin_name = original_plugin_name
         should_restore_plugin = False
 
@@ -649,7 +677,7 @@ async def handle_incoming_message(
                         )
 
                 log_debug(f"[plugin_instance] Exception path - max_chars={max_chars}")
-                prompt = await build_json_prompt(
+                prompt = await build_prompt_request(
                     message,
                     {},
                     interface_name,
@@ -699,9 +727,9 @@ async def handle_incoming_message(
                 )
 
             log_debug(
-                f"[plugin_instance] Passing max_chars={max_chars} to build_json_prompt()"
+                f"[plugin_instance] Passing max_chars={max_chars} to build_prompt_request()"
             )
-            prompt = await build_json_prompt(
+            prompt = await build_prompt_request(
                 message,
                 context_memory_or_prompt,
                 interface_name,
@@ -710,11 +738,18 @@ async def handle_incoming_message(
                 max_chars=max_chars,
             )
 
-    # Multimodal attachments already extracted and passed to build_json_prompt above
+    # Multimodal attachments already extracted and passed to build_prompt_request above
     if attachments:
         log_info(
             f"[plugin_instance] Processing {len(attachments)} multimodal attachment(s)"
         )
+
+    # Pull typed PromptRequest out of the transport dict before sanitization.
+    # Only PromptRequest-aware engines receive this object directly; legacy
+    # engines keep the sanitized transport dict until they opt in.
+    prompt_request_obj: object | None = None
+    if isinstance(prompt, dict):
+        prompt_request_obj = prompt.pop("__prompt_request", None)
 
     prompt = sanitize_for_json(prompt)
     log_debug("🌐 JSON PROMPT built for the plugin:")
@@ -731,7 +766,7 @@ async def handle_incoming_message(
         pre_size = None
         try:
             if isinstance(prompt, dict):
-                # Prefer explicit pre_reduction_size if provided by build_json_prompt
+                # Prefer explicit pre_reduction_size if provided by build_prompt_request
                 pre_size = prompt.get("__pre_reduction_size", None)
                 # If not present, compute a fallback (note: this is post-reduction size)
                 if pre_size is None:
@@ -803,7 +838,14 @@ async def handle_incoming_message(
             log_error("[plugin_instance] No LLM plugin loaded, cannot process message")
             raise ValueError("No LLM plugin loaded")
 
-        result = await effective_plugin.handle_incoming_message(bot, message, prompt)
+        prompt_for_engine = prompt
+        if prompt_request_obj is not None and bool(
+            getattr(effective_plugin, "supports_prompt_request", False)
+        ):
+            prompt_for_engine = prompt_request_obj
+        result = await effective_plugin.handle_incoming_message(
+            bot, message, prompt_for_engine
+        )
         try:
             _log_llm_traffic(prompt, result, interface)
         except Exception as e:
@@ -988,8 +1030,13 @@ async def handle_incoming_message(
                 )
             except Exception as e:
                 log_warning(
-                    f"[plugin_instance] Failed to restore cortex {original_plugin_name}: {e}"
+                    f"[plugin_instance] Failed to restore cortex via name '{original_plugin_name}': {e}"
+                    " — restoring saved instance directly"
                 )
+                # Restore the saved instance directly; the registry name was wrong
+                # (e.g. bridge engines register under a key different from their module).
+                if original_plugin_instance is not None:
+                    _restore_plugin_instance(original_plugin_instance)
 
 
 def get_supported_models():

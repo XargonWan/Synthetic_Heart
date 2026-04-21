@@ -131,6 +131,41 @@
                             try { if (window.SynthWebUI && typeof window.SynthWebUI.loadSection === 'function') await window.SynthWebUI.loadSection('home'); } catch (e) { /* ignore */ }
                             // createChatWindow returns a Promise resolving to the WinBox instance (or null)
                             const winbox = await mod.createChatWindow().catch(() => null);
+                            if (winbox) {
+                                try {
+                                    attachHeaderTools('chat', winbox, [{
+                                        label: '↺',
+                                        title: 'Reset position',
+                                        onClick: () => {
+                                            try {
+                                                const resetBtn = document.getElementById('reset-window-positions');
+                                                if (resetBtn) {
+                                                    resetBtn.click();
+                                                    return;
+                                                }
+                                            } catch (e) { /* ignore */ }
+
+                                            try {
+                                                if (window.SynthWindowManager && typeof window.SynthWindowManager.ensureChatWindow === 'function') {
+                                                    try { window.SynthWindowManager.ensureChatWindow(); } catch (e) {}
+                                                    try {
+                                                        if (
+                                                            window.SynthWindowManager.has
+                                                            && typeof window.SynthWindowManager.has === 'function'
+                                                            && window.SynthWindowManager.has('chat')
+                                                            && typeof window.SynthWindowManager.restore === 'function'
+                                                        ) {
+                                                            window.SynthWindowManager.restore('chat');
+                                                        }
+                                                    } catch (e) {}
+                                                }
+                                            } catch (e) { /* ignore */ }
+
+                                            try { if (typeof window.resetWindowPositions === 'function') window.resetWindowPositions(); } catch (e) { /* ignore */ }
+                                        }
+                                    }]);
+                                } catch (e) { /* ignore */ }
+                            }
                         }
                     } catch (e) { /* ignore */ }
                 }).catch((e) => { try { console.debug('[synth_webui] chat-window import failed', e); } catch (e) {} });
@@ -172,8 +207,8 @@ try {
         document.documentElement.style.setProperty('--accent-r', String(r));
         document.documentElement.style.setProperty('--accent-g', String(g));
         document.documentElement.style.setProperty('--accent-b', String(b));
-        try { document.documentElement.style.setProperty('--accent-contrast', pickAccentContrastFromHex(accent)); } catch(e) { document.documentElement.style.setProperty('--accent-contrast', '#07070c'); }
-        try { document.documentElement.style.setProperty('--accent-dark', pickAccentDarkFromHex(accent)); } catch(e) { document.documentElement.style.setProperty('--accent-dark', '#5b5b6b'); }
+        try { document.documentElement.style.setProperty('--accent-contrast', pickAccentContrastFromHex(accent)); } catch (e) { document.documentElement.style.setProperty('--accent-contrast', '#07070c'); }
+        try { document.documentElement.style.setProperty('--accent-dark', pickAccentDarkFromHex(accent)); } catch (e) { document.documentElement.style.setProperty('--accent-dark', '#5b5b6b'); }
       }
     } catch (e) { /* ignore */ }
   }
@@ -192,7 +227,7 @@ function pickAccentContrastFromHex(hex) {
     const crWhite = _contrastRatio(la, lWhite);
     const crBlack = _contrastRatio(la, lBlack);
     return (crWhite >= crBlack) ? '#ffffff' : '#07070c';
-  } catch(e) { return '#07070c'; }
+    } catch (e) { return '#07070c'; }
 }
 
 // Darken a color (hex) using HSL lightness reduction to generate gradient end
@@ -1307,7 +1342,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                                 b.addEventListener('click', (ev) => {
                                     ev.preventDefault();
                                     previewValue = c;
-                                    try { document.documentElement.style.setProperty('--accent', c); const [r,g,b2] = _hexToRgb(c); document.documentElement.style.setProperty('--accent-soft', `rgba(${r}, ${g}, ${b2}, 0.16)`); document.documentElement.style.setProperty('--accent-r', String(r)); document.documentElement.style.setProperty('--accent-g', String(g)); document.documentElement.style.setProperty('--accent-b', String(b2)); document.documentElement.style.setProperty('--accent-contrast', pickAccentContrastFromHex(c)); document.documentElement.style.setProperty('--accent-dark', pickAccentDarkFromHex(c)); } catch(e){}
+                                    try { document.documentElement.style.setProperty('--accent', c); const [r,g,b2] = _hexToRgb(c); document.documentElement.style.setProperty('--accent-soft', `rgba(${r}, ${g}, ${b2}, 0.16)`); document.documentElement.style.setProperty('--accent-r', String(r)); document.documentElement.style.setProperty('--accent-g', String(g)); document.documentElement.style.setProperty('--accent-b', String(b2)); document.documentElement.style.setProperty('--accent-contrast', pickAccentContrastFromHex(c)); document.documentElement.style.setProperty('--accent-dark', pickAccentDarkFromHex(c)); } catch (e) {}
                                 });
                                 presetsEl.appendChild(b);
                             });
@@ -1330,7 +1365,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                                     document.documentElement.style.setProperty('--accent-b', String(b2));
                                     document.documentElement.style.setProperty('--accent-contrast', pickAccentContrastFromHex(c));
                                     document.documentElement.style.setProperty('--accent-dark', pickAccentDarkFromHex(c));
-                                } catch(e){}
+                                } catch (e) {}
                             });
 
                             // Apply / Cancel controls for preview UX
@@ -1364,7 +1399,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                                     document.documentElement.style.setProperty('--accent-b', String(b2));
                                     document.documentElement.style.setProperty('--accent-contrast', pickAccentContrastFromHex(current));
                                     document.documentElement.style.setProperty('--accent-dark', pickAccentDarkFromHex(current));
-                                } catch(e){}
+                                } catch (e) {}
                             });
 
                             const reset = document.createElement('button');
@@ -1384,7 +1419,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                                     document.documentElement.style.setProperty('--accent-b', String(b2));
                                     document.documentElement.style.setProperty('--accent-contrast', pickAccentContrastFromHex(def));
                                     document.documentElement.style.setProperty('--accent-dark', pickAccentDarkFromHex(def));
-                                } catch(e){}
+                                } catch (e) {}
                             });
 
                             swatchWrap.appendChild(presetsEl);
@@ -2001,7 +2036,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                             b.setAttribute('data-color', c);
                             b.addEventListener('click', () => {
                                 previewVal = c;
-                                try { document.documentElement.style.setProperty('--accent', c); const [r,g,b2] = _hexToRgb(c); document.documentElement.style.setProperty('--accent-soft', `rgba(${r}, ${g}, ${b2}, 0.16)`); document.documentElement.style.setProperty('--accent-r', String(r)); document.documentElement.style.setProperty('--accent-g', String(g)); document.documentElement.style.setProperty('--accent-b', String(b2)); document.documentElement.style.setProperty('--accent-contrast', pickAccentContrastFromHex(c)); document.documentElement.style.setProperty('--accent-dark', pickAccentDarkFromHex(c)); } catch(e){}
+                                try { document.documentElement.style.setProperty('--accent', c); const [r,g,b2] = _hexToRgb(c); document.documentElement.style.setProperty('--accent-soft', `rgba(${r}, ${g}, ${b2}, 0.16)`); document.documentElement.style.setProperty('--accent-r', String(r)); document.documentElement.style.setProperty('--accent-g', String(g)); document.documentElement.style.setProperty('--accent-b', String(b2)); document.documentElement.style.setProperty('--accent-contrast', pickAccentContrastFromHex(c)); document.documentElement.style.setProperty('--accent-dark', pickAccentDarkFromHex(c)); } catch (e) {}
                                 updateColorDot(c);
                                 setActivePreset(c);
                             });
@@ -2015,7 +2050,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                         colorInput.disabled = !isEditable;
                         colorInput.addEventListener('input', (ev) => {
                             previewVal = ev.target.value;
-                            try { const c = previewVal; document.documentElement.style.setProperty('--accent', c); const [r,g,b2] = _hexToRgb(c); document.documentElement.style.setProperty('--accent-soft', `rgba(${r}, ${g}, ${b2}, 0.16)`); document.documentElement.style.setProperty('--accent-r', String(r)); document.documentElement.style.setProperty('--accent-g', String(g)); document.documentElement.style.setProperty('--accent-b', String(b2)); document.documentElement.style.setProperty('--accent-contrast', pickAccentContrastFromHex(c)); document.documentElement.style.setProperty('--accent-dark', pickAccentDarkFromHex(c)); } catch(e){}
+                            try { const c = previewVal; document.documentElement.style.setProperty('--accent', c); const [r,g,b2] = _hexToRgb(c); document.documentElement.style.setProperty('--accent-soft', `rgba(${r}, ${g}, ${b2}, 0.16)`); document.documentElement.style.setProperty('--accent-r', String(r)); document.documentElement.style.setProperty('--accent-g', String(g)); document.documentElement.style.setProperty('--accent-b', String(b2)); document.documentElement.style.setProperty('--accent-contrast', pickAccentContrastFromHex(c)); document.documentElement.style.setProperty('--accent-dark', pickAccentDarkFromHex(c)); } catch (e) {}
                             updateColorDot(previewVal);
                         });
 
@@ -2070,7 +2105,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                         cancelBtn.addEventListener('click', () => {
                             previewVal = null;
                             colorInput.value = current;
-                            try { const c = current; document.documentElement.style.setProperty('--accent', c); const [r,g,b2] = _hexToRgb(c); document.documentElement.style.setProperty('--accent-soft', `rgba(${r}, ${g}, ${b2}, 0.16)`); document.documentElement.style.setProperty('--accent-r', String(r)); document.documentElement.style.setProperty('--accent-g', String(g)); document.documentElement.style.setProperty('--accent-b', String(b2)); document.documentElement.style.setProperty('--accent-contrast', pickAccentContrastFromHex(c)); document.documentElement.style.setProperty('--accent-dark', pickAccentDarkFromHex(c)); } catch(e){}
+                            try { const c = current; document.documentElement.style.setProperty('--accent', c); const [r,g,b2] = _hexToRgb(c); document.documentElement.style.setProperty('--accent-soft', `rgba(${r}, ${g}, ${b2}, 0.16)`); document.documentElement.style.setProperty('--accent-r', String(r)); document.documentElement.style.setProperty('--accent-g', String(g)); document.documentElement.style.setProperty('--accent-b', String(b2)); document.documentElement.style.setProperty('--accent-contrast', pickAccentContrastFromHex(c)); document.documentElement.style.setProperty('--accent-dark', pickAccentDarkFromHex(c)); } catch (e) {}
                             updateColorDot(current);
                             setActivePreset(current);
                         });
@@ -3266,7 +3301,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                                     const item = Array.isArray(cfg.items)? cfg.items.find(i=>i.key==='VOSK_LANGUAGE') : null;
                                     if(item && item.value) voskLangSelect.value = item.value;
                                 }
-                            }catch(e){/* ignore */}
+                            } catch (e) { /* ignore */ }
                         } else {
                             voskLangSelect.style.display = 'none';
                         }

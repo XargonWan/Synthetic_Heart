@@ -6,12 +6,13 @@ This module provides functionality to add reactions to messages when the bot
 is mentioned or triggered, if configured via REACT_WHEN_MENTIONED env variable.
 """
 
+import os
 from typing import Optional
 from core.logging_utils import log_debug, log_info, log_warning
-from core.config_manager import config_registry
+from core.config_manager import ConfigVar, config_registry
 
 # Register REACT_WHEN_MENTIONED configuration
-REACT_WHEN_MENTIONED = config_registry.get_var(
+_REACT_WHEN_MENTIONED_CONFIG = config_registry.get_var(
     "REACT_WHEN_MENTIONED",
     "👀",
     label="React When Mentioned",
@@ -19,6 +20,18 @@ REACT_WHEN_MENTIONED = config_registry.get_var(
     group="core",
     component="core",
 )
+REACT_WHEN_MENTIONED = _REACT_WHEN_MENTIONED_CONFIG
+
+
+def _get_reaction_config_value():
+    env_value = os.getenv("REACT_WHEN_MENTIONED")
+    if env_value is not None:
+        return env_value
+
+    raw = REACT_WHEN_MENTIONED
+    if isinstance(raw, ConfigVar):
+        return _REACT_WHEN_MENTIONED_CONFIG.value
+    return raw
 
 
 def get_reaction_emoji() -> Optional[str]:
@@ -28,7 +41,7 @@ def get_reaction_emoji() -> Optional[str]:
     Returns:
         Optional[str]: The emoji to use as reaction, or None if not configured
     """
-    raw = REACT_WHEN_MENTIONED
+    raw = _get_reaction_config_value()
     log_debug(f"[reaction] REACT_WHEN_MENTIONED raw: '{raw}' (type: {type(raw)})")
     emoji = str(raw).strip() if raw else ""
     log_debug(f"[reaction] Processed emoji: '{emoji}'")

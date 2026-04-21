@@ -4,7 +4,6 @@
 import unittest
 import sys
 import os
-import json
 from unittest.mock import patch, MagicMock
 
 # Add project root to path
@@ -34,27 +33,12 @@ class TestPromptGeneration(unittest.TestCase):
             },
         }
 
-    @patch("core.prompt_engine.build_full_json_instructions")
-    async def test_prompt_includes_available_actions(self, mock_build_instructions):
+    @patch("core.prompt_engine.load_json_instructions")
+    async def test_prompt_includes_available_actions(self, mock_load_instructions):
         """Test that prompts include all available actions."""
         from core.prompt_engine import build_prompt
 
-        # Mock the instructions builder
-        mock_build_instructions.return_value = json.dumps(
-            {
-                "available_actions": self.mock_actions,
-                "response_format": {
-                    "type": "json",
-                    "schema": {
-                        "type": "object",
-                        "properties": {
-                            "type": {"type": "string"},
-                            "payload": {"type": "object"},
-                        },
-                    },
-                },
-            }
-        )
+        mock_load_instructions.return_value = "RESPOND ONLY WITH VALID JSON"
 
         # Build prompt using correct API
         prompt = await build_prompt(
@@ -68,22 +52,18 @@ class TestPromptGeneration(unittest.TestCase):
         self.assertIsInstance(prompt, list)
 
     def test_json_instructions_structure(self):
-        """Test that JSON instructions have the correct structure."""
-        from core.prompt_engine import build_full_json_instructions
+        """Test that prompt instructions and minified actions have valid structure."""
+        from core.prompt_engine import load_json_instructions, minify_actions_block
 
         # Mock core_initializer to provide actions
         with patch("core.core_initializer.core_initializer") as mock_core_init:
             mock_core_init.actions_block = {"available_actions": self.mock_actions}
 
-            instructions = build_full_json_instructions()
+            instructions = load_json_instructions()
+            actions = minify_actions_block(self.mock_actions)
 
-            # Should return a dict
-            self.assertIsInstance(instructions, dict)
-            self.assertIn("instructions", instructions)
-            self.assertIn("actions", instructions)
-
-            # Check actions structure
-            actions = instructions["actions"]
+            # Instructions are now a compact string; actions are a dict
+            self.assertIsInstance(instructions, str)
             self.assertIsInstance(actions, dict)
             self.assertIn("message_telegram_bot", actions)
             self.assertIn("terminal_bash", actions)

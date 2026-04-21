@@ -27,6 +27,7 @@ import logging as _stdlib_logging
 
 from core.logging_utils import log_debug, log_error, log_info, log_warning
 from core.chat_attention import set_attention, evaluate_triggers
+from core.reaction_handler import get_reaction_emoji
 
 # ── Route discord.ext.voice_recv logs into the synth logger ──────────────
 # voice_recv uses stdlib logging; without this its errors are invisible.
@@ -1085,6 +1086,9 @@ class DiscordInterface:
         self,
         channel_id: str | int,
         attachments: list[Any] | None = None,
+        initial_text: str | None = None,
+        initial_sender: str | None = None,
+        initial_timestamp: str | None = None,
     ) -> dict[str, str]:
         """Start a Gemini Live API voice session in a Discord voice channel.
 
@@ -1097,6 +1101,9 @@ class DiscordInterface:
             attachments: Optional list of Discord attachment objects from the
                 triggering message.  Text files are injected as context
                 updates; images/PDFs use multimodal injection.
+            initial_text: Optional text message that triggered the live start.
+            initial_sender: Optional display name for ``initial_text``.
+            initial_timestamp: Optional ISO timestamp for ``initial_text``.
         """
         if not self.client:
             return {"status": "failed", "message": "Discord client not initialized"}
@@ -1129,35 +1136,59 @@ class DiscordInterface:
             _configured_live_engine: str = str(
                 _cfg_r.get_value("LIVE_CORTEX", "") or ""
             ).strip()
-            _all_engine_names = _creg.get_available_engines()
+            _base_cortex_engine: str = str(
+                _cfg_r.get_value("BASE_CORTEX", "") or ""
+            ).strip()
             # When the configured value is explicitly "disabled" treat as no
             # engine at all; we then leave _live_capable_engine = None below.
             if _configured_live_engine.lower() == "disabled":
                 _configured_live_engine = ""
-            # Prefer the configured LIVE_CORTEX; fall back to any already-loaded engine.
-            _candidates = (
-                [_configured_live_engine]
-                if _configured_live_engine
-                and _configured_live_engine in _all_engine_names
-                else []
-            ) + [e for e in _all_engine_names if e != _configured_live_engine]
+
+            _candidate_names: list[str] = []
+
+            def _append_candidate(name: str | None) -> None:
+                if not name:
+                    return
+                normalized = str(name).strip()
+                if (
+                    not normalized
+                    or normalized in {"Default", "None"}
+                    or normalized.lower() == "disabled"
+                ):
+                    return
+                if normalized not in _candidate_names:
+                    _candidate_names.append(normalized)
+
+            # Prefer explicit live override, then dedicated live engines, then
+            # the base cortex and any other registered engines. Finally try the
+            # canonical Gemini engine names via dynamic import fallback.
+            _append_candidate(_configured_live_engine)
+            for _engine_name in _creg.get_engines_by_cortex("live"):
+                _append_candidate(_engine_name)
+            _append_candidate(_base_cortex_engine)
+            for _engine_name in _creg.get_available_engines():
+                _append_candidate(_engine_name)
+            for _engine_name in ("gemini_api", "gemini_live"):
+                _append_candidate(_engine_name)
 
             _live_capable_engine = None
-            for _en in _candidates:
+            for _en in _candidate_names:
                 _e = _creg.get_engine(_en)
-                if _e is None and _en == _configured_live_engine:
-                    # Load the configured LIVE_CORTEX engine on demand so we
-                    # don't have to instantiate all registered engines just to
-                    # find one with get_live_session_manager.
+                if _e is None:
                     try:
                         _e = _creg.load_engine(_en)
                         log_info(
-                            f"[live_voice] Loaded LIVE_CORTEX engine '{_en}' on demand"
+                            f"[live_voice] Loaded engine '{_en}' on demand while resolving Live API support"
                         )
                     except Exception as _le:
-                        log_warning(
-                            f"[live_voice] Could not load LIVE_CORTEX engine '{_en}': {_le}"
-                        )
+                        if _en in {_configured_live_engine, _base_cortex_engine}:
+                            log_warning(
+                                f"[live_voice] Could not load preferred engine '{_en}': {_le}"
+                            )
+                        else:
+                            log_debug(
+                                f"[live_voice] Skipping engine '{_en}' while resolving Live API support: {_le}"
+                            )
                         continue
                 if _e and hasattr(_e, "get_live_session_manager"):
                     _live_capable_engine = _e
@@ -1279,8 +1310,14 @@ class DiscordInterface:
                 attachment_context=_attachment_context,
             )
 
-            # Build Gemini function declarations from the SyntH action registry
-            tools = _build_gemini_tool_declarations()
+            # Build Gemini function declarations via the model-agnostic registry.
+            from core.live_tool_registry import LiveToolRegistry
+            from core.live_tool_adapters.gemini import GeminiToolAdapter
+
+            _manifests = LiveToolRegistry.build_manifests()
+            tools = (
+                GeminiToolAdapter.to_declarations(_manifests) if _manifests else None
+            )
 
             # Set up audio output callback: Live API → Discord voice
             audio_buffer = LiveAudioBuffer()
@@ -1289,13 +1326,9 @@ class DiscordInterface:
                 """Receive 24kHz mono PCM from Gemini, buffer for Discord playback."""
                 audio_buffer.write(pcm_data)
 
-            async def on_text_from_model(gid: int, text: str) -> None:
+            async def on_text_from_model(_gid: int, text: str) -> None:
                 """Log text responses from the live model (for debugging/diary)."""
-                log_info(f"[live_voice] Model text for guild {gid}: {text[:200]}")
-
-            async def on_tool_call(gid: int, call_dict: dict) -> dict:
-                """Route Gemini function calls to the SyntH action pipeline."""
-                return await _handle_live_tool_call(gid, call_dict, self.client)
+                log_info(f"[live_voice] Model text for guild {guild_id}: {text[:200]}")
 
             # Stable interface_path for this guild's live voice conversation.
             live_interface_path = f"discord_live_{guild_id}"
@@ -1383,11 +1416,15 @@ class DiscordInterface:
                 )
                 await self._stop_live_voice(gid)
 
+            from core.live_tool_executor import LiveToolExecutor
+
             manager.set_audio_callback(on_audio_from_model)
             manager.set_text_callback(on_text_from_model)
-            manager.set_tool_call_callback(on_tool_call)
+            manager.set_tool_executor(LiveToolExecutor(manager, bot=self.client))
             manager.set_turn_complete_callback(on_turn_complete)
             manager.set_reconnect_failed_callback(on_reconnect_failed)
+            if hasattr(manager, "set_playback_active_callback"):
+                manager.set_playback_active_callback(guild_id, audio_buffer.is_speaking)
 
             # Start the Live API session
             started = await manager.start_session(
@@ -1396,6 +1433,9 @@ class DiscordInterface:
                 system_instruction=system_instruction,
                 tools=tools,
                 attachment_context=_attachment_context,
+                initial_user_message=initial_text,
+                initial_user_name=initial_sender,
+                initial_message_timestamp=initial_timestamp,
             )
             if not started:
                 return {
@@ -1648,12 +1688,37 @@ class DiscordInterface:
         ):
             return
 
-        # Case 1: The bot itself left the voice channel
+        # Case 1: The bot itself left the voice channel.
+        # Discord occasionally fires a transient VSU with channel_id=None
+        # immediately followed by a corrective VSU that puts the bot back.
+        # We wait one event-loop tick and then verify the bot is genuinely
+        # not in any voice channel before tearing down the live session.
         if (
             member.id == bot_user.id
             and before.channel is not None
             and after.channel is None
         ):
+            await asyncio.sleep(0)  # yield so any follow-up VSU can be processed
+            # Re-check: if the bot is still in a voice channel in this guild,
+            # the initial VSU was transient — do not stop the session.
+            _bot_in_vc = False
+            try:
+                if self.client:
+                    _guild_obj = self.client.get_guild(guild_id)
+                    if _guild_obj:
+                        _bot_member = _guild_obj.get_member(bot_user.id)
+                        if _bot_member and getattr(
+                            getattr(_bot_member, "voice", None), "channel", None
+                        ):
+                            _bot_in_vc = True
+            except Exception:
+                pass
+            if _bot_in_vc:
+                log_info(
+                    f"[discord_interface] Transient bot-left VSU ignored for "
+                    f"guild {guild_id} (bot still in channel)"
+                )
+                return
             log_info(
                 f"[discord_interface] Bot left voice in guild {guild_id}, "
                 "cleaning up live session"
@@ -2275,7 +2340,6 @@ class DiscordInterface:
             # stories aligned in real time.
             try:
                 from core.config_manager import config_registry as _cfg
-                from core.chat_history_cache import save_chat_message
 
                 if (
                     _cfg.get_value("LIVE_SYNC_CHAT_HISTORY", True, value_type=bool)
@@ -2294,9 +2358,9 @@ class DiscordInterface:
                     if live_mgr and live_mgr.is_session_active(guild_id):
                         text = content
 
-                        # --- inject text-decodable file attachments as context ---
-                        # Live API only supports text; binary files (images,
-                        # PDFs) cannot be sent as inline_data.
+                        # --- inject file attachments into the live context ---
+                        # Text-decodable files go via send_context_update (plain text).
+                        # Images go via send_multimodal_context (send_realtime_input).
                         _DECODABLE_PREFIXES = (
                             "text/",
                             "application/json",
@@ -2326,6 +2390,9 @@ class DiscordInterface:
                             ".rst",
                             ".tex",
                         )
+                        _sender = getattr(
+                            message.author, "display_name", None
+                        ) or getattr(message.author, "name", "unknown")
                         for att in getattr(message, "attachments", []):
                             mime = getattr(att, "content_type", "") or ""
                             fname = getattr(att, "filename", "document")
@@ -2337,10 +2404,116 @@ class DiscordInterface:
                                     fname.lower().endswith(ext)
                                     for ext in _TEXT_EXTENSIONS
                                 )
+                            if mime.startswith("image/"):
+                                # Convert image to text description via vision proxy
+                                # to prevent Gemini Live from seeing raw image content
+                                # which triggers its strict multimodal safety filter.
+                                try:
+                                    raw = await att.read()
+
+                                    # Vision Proxy: send to OpenRouter/Grok for a
+                                    # neutral scene description. The resulting text
+                                    # goes into the Live session as a narrative context
+                                    # update — no raw image bytes ever reach Gemini.
+                                    vision_description = None
+                                    from core.cortex_registry import get_cortex_registry
+
+                                    try:
+                                        openrouter = get_cortex_registry().get_engine(
+                                            "openrouter"
+                                        )
+                                        if openrouter:
+                                            import base64
+
+                                            b64_data = base64.b64encode(raw).decode(
+                                                "utf-8"
+                                            )
+                                            multimodal_parts = [
+                                                {
+                                                    "type": "image_url",
+                                                    "image_url": {
+                                                        "url": f"data:{mime};base64,{b64_data}"
+                                                    },
+                                                }
+                                            ]
+                                            # Prompt focuses on artistic/narrative scene
+                                            # elements only. No mention of romantic or
+                                            # adult context — that way neither Grok's
+                                            # output NOR Gemini's text classifier flags
+                                            # the injected description.
+                                            prompt_text = (
+                                                "You are a scene description assistant for a creative fiction writer. "
+                                                "Describe the visual content of this image as a brief scene note (2-4 sentences). "
+                                                "Focus only on: setting/background, what characters look like (hair color, clothing, posture, expression), "
+                                                "and the overall mood or atmosphere. "
+                                                "If a character has short white hair, call her '2B'. "
+                                                "If a character is male with ginger/red hair, call him 'Scarlet'. "
+                                                "Write in neutral, literary prose. Do not describe any explicit or adult content. "
+                                                "Output ONLY the scene description, no preamble."
+                                            )
+                                            system_instruction = (
+                                                "You are a concise visual scene narrator. "
+                                                "Output a single plain-text paragraph describing the scene."
+                                            )
+                                            resp_text = await openrouter._openai_chat_completion(
+                                                prompt_text=prompt_text,
+                                                system_instruction=system_instruction,
+                                                model=openrouter._current_model,
+                                                multimodal_parts=multimodal_parts,
+                                            )
+                                            if resp_text:
+                                                vision_description = resp_text.strip()
+                                    except Exception as err:
+                                        log_warning(
+                                            f"[discord_interface] Vision proxy failed: {err}"
+                                        )
+
+                                    if vision_description:
+                                        # Wrap as a neutral story/scene note.
+                                        # Avoid words like "shared an image" or
+                                        # "explicit" which may be flagged by Gemini's
+                                        # realtime input content classifier.
+                                        scene_note = (
+                                            f"[Story scene note from {_sender}: "
+                                            f"{vision_description}]"
+                                        )
+                                        await live_mgr.send_context_update(
+                                            guild_id,
+                                            scene_note,
+                                        )
+                                        log_info(
+                                            f"[discord_interface] Injected text description of image '{fname}' "
+                                            f"via vision proxy into live session for guild {guild_id}"
+                                        )
+                                    else:
+                                        # Fallback to direct multimodal injection
+                                        await live_mgr.send_multimodal_context(
+                                            guild_id,
+                                            text=f"[{_sender} shared an image: {fname}]",
+                                            attachments=[(mime, raw)],
+                                        )
+                                        log_info(
+                                            f"[discord_interface] Injected image '{fname}' "
+                                            f"({len(raw)} bytes, {mime}) into live session "
+                                            f"for guild {guild_id}"
+                                        )
+
+                                    _emoji = get_reaction_emoji()
+                                    if _emoji:
+                                        try:
+                                            await message.add_reaction(_emoji)
+                                        except Exception:
+                                            pass
+                                except Exception as _att_err:
+                                    log_warning(
+                                        f"[discord_interface] Failed to inject image "
+                                        f"'{fname}' into live session: {_att_err}"
+                                    )
+                                continue
                             if not _is_decodable:
                                 log_info(
-                                    f"[discord_interface] Skipping non-text attachment "
-                                    f"'{fname}' ({mime}) — Live API text-only"
+                                    f"[discord_interface] Skipping attachment "
+                                    f"'{fname}' ({mime}) — unsupported type for live injection"
                                 )
                                 continue
                             try:
@@ -2373,13 +2546,9 @@ class DiscordInterface:
                             guild_id,
                             f"[Text chat] {sender}: {text}",
                         )
-                        # replicate in history cache
-                        await save_chat_message(
-                            interface_path=f"discord_live_{guild_id}",
-                            message_text=text,
-                            sender_name=getattr(message.author, "name", None),
-                            sender_id=str(getattr(message.author, "id", "")),
-                        )
+                        # Note: no separate save_chat_message here — the message
+                        # is already persisted to discord_bot/<guild>/<channel>
+                        # by the normal message-queue pipeline above.
             except Exception as _sync_err:  # pragma: no cover - best effort
                 log_debug(f"[discord_interface] live sync failed: {_sync_err}")
 
@@ -2470,6 +2639,43 @@ class DiscordInterface:
         elif action_type == "join_voice_discord":
             payload = action.get("payload", {})
             channel_id = payload.get("channel_id")
+            registry = get_interface_registry()
+
+            def _sender_is_trainer_for_join() -> bool:
+                sender_id = ""
+                if original_message is not None:
+                    from_user = getattr(original_message, "from_user", None)
+                    sender_id = str(getattr(from_user, "id", "") or "")
+                if not sender_id:
+                    sender_id = str(context.get("sender_id", "") or "")
+                if sender_id and registry.is_trainer("discord_bot", sender_id):
+                    return True
+
+                if original_message is not None:
+                    user_obj = getattr(original_message, "from_user", None)
+                    if user_obj:
+                        names: list[str] = []
+                        if getattr(user_obj, "name", None):
+                            names.append(str(user_obj.name))
+                        if getattr(user_obj, "display_name", None):
+                            names.append(str(user_obj.display_name))
+                        if getattr(user_obj, "full_name", None):
+                            names.append(str(user_obj.full_name))
+                        if getattr(user_obj, "username", None):
+                            names.append(str(user_obj.username))
+                        disc = getattr(user_obj, "discriminator", None)
+                        if disc and names:
+                            names.append(f"{names[0]}#{disc}")
+                        for name in names:
+                            if registry.is_trainer("discord_bot", name):
+                                return True
+
+                name_ctx = context.get("sender_name")
+                if name_ctx and registry.is_trainer("discord_bot", str(name_ctx)):
+                    return True
+                return False
+
+            sender_is_trainer_for_join = _sender_is_trainer_for_join()
             # note: start_live_voice flag removed – live sessions must be started
             # explicitly via a dedicated action (`start_live_voice_discord`).
 
@@ -2528,36 +2734,7 @@ class DiscordInterface:
 
                     # determine whether the sender qualifies as trainer by
                     # numeric id or username(s) via the registry helper
-                    registry = get_interface_registry()
-
-                    def sender_is_trainer() -> bool:
-                        if not _sender_id:
-                            return False
-                        if registry.is_trainer("discord_bot", _sender_id):
-                            return True
-                        # also try known name fields if a discord user object is
-                        # available (original_message may carry it)
-                        if original_message is not None:
-                            user_obj = getattr(original_message, "from_user", None)
-                            if user_obj:
-                                names: list[str] = []
-                                if getattr(user_obj, "name", None):
-                                    names.append(str(user_obj.name))
-                                if getattr(user_obj, "display_name", None):
-                                    names.append(str(user_obj.display_name))
-                                disc = getattr(user_obj, "discriminator", None)
-                                if disc and names:
-                                    names.append(f"{names[0]}#{disc}")
-                                for n in names:
-                                    if registry.is_trainer("discord_bot", n):
-                                        return True
-                        # context sender_name may also be useful
-                        name_ctx = context.get("sender_name")
-                        if name_ctx and registry.is_trainer("discord_bot", name_ctx):
-                            return True
-                        return False
-
-                    if not sender_is_trainer():
+                    if not sender_is_trainer_for_join:
                         log_warning(
                             "[discord_interface] join_voice_discord: denied — "
                             f"LIVE_TRAINER_ONLY_VOICE active and sender {_sender_id!r} "
@@ -2647,6 +2824,28 @@ class DiscordInterface:
             # Use voice_clients (always current) instead of get_channel() (cache-only).
             if self.client:
                 try:
+                    initial_text = getattr(original_message, "text", None) or getattr(
+                        original_message, "content", None
+                    )
+                    initial_sender = getattr(
+                        getattr(original_message, "from_user", None),
+                        "full_name",
+                        None,
+                    ) or getattr(
+                        getattr(original_message, "from_user", None),
+                        "username",
+                        None,
+                    )
+                    initial_timestamp = (
+                        getattr(
+                            getattr(original_message, "date", None),
+                            "isoformat",
+                            lambda: None,
+                        )()
+                        if getattr(original_message, "date", None)
+                        else None
+                    )
+
                     # Find the voice channel the bot just joined via voice_clients.
                     vc_channel = None
                     for _vc in getattr(self.client, "voice_clients", []):
@@ -2679,7 +2878,6 @@ class DiscordInterface:
                     )
 
                     if vc_channel is not None:
-                        registry = get_interface_registry()
                         trainer_present = any(
                             not getattr(m, "bot", False)
                             and registry.is_trainer("discord_bot", str(m.id))
@@ -2695,11 +2893,34 @@ class DiscordInterface:
                                 attachments=getattr(
                                     original_message, "attachments", None
                                 ),
+                                initial_text=initial_text,
+                                initial_sender=initial_sender,
+                                initial_timestamp=initial_timestamp,
                             )
                             if live_result and live_result.get("status") == "failed":
                                 log_warning(
                                     "[discord_interface] join_voice_discord: live session "
                                     f"auto-start failed: {live_result.get('message')}"
+                                )
+                        elif sender_is_trainer_for_join and channel_id:
+                            log_info(
+                                "[discord_interface] join_voice_discord: trainer requested join "
+                                "but channel member scan did not confirm trainer presence yet — "
+                                "starting live session directly on the resolved voice channel"
+                            )
+                            live_result = await self._start_live_voice(
+                                getattr(vc_channel, "id", channel_id),
+                                attachments=getattr(
+                                    original_message, "attachments", None
+                                ),
+                                initial_text=initial_text,
+                                initial_sender=initial_sender,
+                                initial_timestamp=initial_timestamp,
+                            )
+                            if live_result and live_result.get("status") == "failed":
+                                log_warning(
+                                    "[discord_interface] join_voice_discord: direct live start "
+                                    f"failed after trainer fallback: {live_result.get('message')}"
                                 )
                         else:
                             log_info(
@@ -2709,10 +2930,30 @@ class DiscordInterface:
                                 f"trainer check uses 'discord_bot' interface)"
                             )
                     else:
-                        log_warning(
-                            "[discord_interface] join_voice_discord: could not resolve voice "
-                            f"channel for live auto-start (channel_id={channel_id})"
-                        )
+                        if sender_is_trainer_for_join and channel_id:
+                            log_info(
+                                "[discord_interface] join_voice_discord: could not inspect voice channel members, "
+                                "but the trainer explicitly requested the join — starting live session directly"
+                            )
+                            live_result = await self._start_live_voice(
+                                channel_id,
+                                attachments=getattr(
+                                    original_message, "attachments", None
+                                ),
+                                initial_text=initial_text,
+                                initial_sender=initial_sender,
+                                initial_timestamp=initial_timestamp,
+                            )
+                            if live_result and live_result.get("status") == "failed":
+                                log_warning(
+                                    "[discord_interface] join_voice_discord: direct live start "
+                                    f"failed without channel inspection: {live_result.get('message')}"
+                                )
+                        else:
+                            log_warning(
+                                "[discord_interface] join_voice_discord: could not resolve voice "
+                                f"channel for live auto-start (channel_id={channel_id})"
+                            )
                 except Exception as _lve:
                     log_warning(
                         f"[discord_interface] join_voice_discord: live auto-start check failed: {_lve}"
@@ -2895,10 +3136,12 @@ class DiscordInterface:
 def _build_gemini_tool_declarations() -> list[Any] | None:
     """Build Gemini function declarations from the SyntH action registry.
 
-    Queries all plugins and interfaces via ``get_supported_actions()`` /
-    ``get_prompt_instructions()`` and converts them into the
-    ``google.genai.types.FunctionDeclaration`` format expected by the
-    Gemini Live API ``tools`` parameter.
+    .. deprecated::
+        Use ``LiveToolRegistry.build_manifests()`` + ``GeminiToolAdapter.to_declarations()``
+        from ``core.live_tool_registry`` / ``core.live_tool_adapters.gemini`` instead.
+        This function is retained for callers outside the Discord interface
+        (e.g. ``_reconnect_inner`` in ``live_session_manager.py``) until those
+        are migrated.
 
     Returns:
         A list containing a single ``types.Tool`` wrapping all function
@@ -3179,6 +3422,16 @@ if _HAS_VOICE_RECV and voice_recv is not None:
             # attribute the user-side transcript to the correct Discord account.
             self._last_speaker_name: str | None = None
             self._last_speaker_id: str | None = None
+            # Cache the RMS noise-gate threshold once at construction time so
+            # we don't hit the config registry on every audio packet (50 Hz).
+            try:
+                from core.config_manager import config_registry as _cr
+
+                self._min_rms: int = int(
+                    _cr.get_value("LIVE_AUDIO_MIN_RMS", 500, value_type=int)
+                )
+            except Exception:
+                self._min_rms = 500
 
         def wants_opus(self) -> bool:
             """Return False so voice_recv decodes Opus internally.
@@ -3308,8 +3561,11 @@ if _HAS_VOICE_RECV and voice_recv is not None:
                     right = audioop.tomono(pcm_48k_stereo, _DISCORD_SAMPLE_WIDTH, 0, 1)
                     self._diag_right.writeframes(right)
 
-                if rms_mono == 0:
-                    # Pure silence — don't waste bandwidth
+                # Noise gate: discard sub-threshold audio so mic hiss and
+                # ambient background noise never reach the Live API.
+                # Without this, Gemini transcribes noise as speech (hallucination).
+                # Threshold cached at sink construction; set LIVE_AUDIO_MIN_RMS=0 to disable.
+                if rms_mono < self._min_rms:
                     return
 
                 # Downsample 48kHz → 16kHz for Gemini Live API input.

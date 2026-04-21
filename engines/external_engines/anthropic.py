@@ -29,6 +29,7 @@ from core.ai_plugin_base import AIPluginBase
 from core.config_manager import config_registry
 from core.cortex_api_logger import log_cortex_request, log_cortex_response
 from core.logging_utils import log_debug, log_error, log_info, log_warning
+from core.prompt_request import PromptRequest
 
 ENGINE_LABEL = "Anthropic Claude — Claude-family models via Messages API"
 
@@ -240,6 +241,7 @@ class AnthropicPlugin(AIPluginBase):
     """Anthropic Claude LLM Engine using the Messages REST API."""
 
     display_name = "Anthropic Claude"
+    supports_prompt_request = True
 
     def __init__(self, notify_fn: Any = None) -> None:
         from core.notifier import set_notifier
@@ -390,15 +392,59 @@ class AnthropicPlugin(AIPluginBase):
                 except (json.JSONDecodeError, ValueError):
                     pass
 
-            # Serialize prompt to text
+            # === Phase 5: PromptRequest native-format path (with prompt caching) ===
+            _pr: PromptRequest | None = None
+            if isinstance(prompt, PromptRequest):
+                _pr = prompt
+            elif isinstance(prompt, dict):
+                candidate = prompt.get("__prompt_request")
+                if isinstance(candidate, PromptRequest):
+                    _pr = candidate
+            if _pr is not None:
+                from core.prompt_renderers import AnthropicRenderer
+
+                enable_caching = bool(
+                    config_registry.get_value("ENABLE_PROMPT_CACHING", True)
+                )
+                renderer = AnthropicRenderer(_pr, enable_caching=enable_caching)
+                img_parts = _extract_image_parts(prompt)
+                rendered = (
+                    renderer.render_with_image_parts(img_parts)
+                    if img_parts
+                    else renderer.render()
+                )
+                return await self._call_api_with_messages(
+                    rendered_system=rendered.get("system", []),
+                    messages=rendered.get("messages", []),
+                    tools=rendered.get("tools") or [],
+                    api_key=api_key,
+                )
+
+            # Fallback path: still support non-PromptRequest callers without
+            # rebuilding a legacy JSON blob prompt pipeline.
             if isinstance(prompt, dict):
-                prompt_text = json.dumps(prompt, indent=2, ensure_ascii=False)
+                prompt_text = json.dumps(
+                    {k: v for k, v in prompt.items() if k != "__prompt_request"},
+                    ensure_ascii=False,
+                )
             elif isinstance(prompt, str):
                 prompt_text = prompt
             else:
                 prompt_text = str(prompt)
 
             image_parts = _extract_image_parts(prompt)
+
+            if isinstance(prompt, dict):
+                content: list[dict[str, Any]] = []
+                if image_parts:
+                    content.extend(image_parts)
+                content.append({"type": "text", "text": prompt_text})
+                return await self._call_api_with_messages(
+                    rendered_system=[],
+                    messages=[{"role": "user", "content": content}],
+                    tools=[],
+                    api_key=api_key,
+                )
 
             return await self._call_api(
                 prompt_text=prompt_text,
@@ -478,6 +524,86 @@ class AnthropicPlugin(AIPluginBase):
             elapsed_ms=elapsed * 1000,
         )
         return text
+
+    async def _call_api_with_messages(
+        self,
+        rendered_system: list[dict[str, Any]],
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        api_key: str,
+        max_tokens: int | None = None,
+    ) -> str:
+        """Phase-5 Anthropic call: pre-rendered system blocks + messages list.
+
+        Supports native prompt caching (cache_control blocks are embedded by
+        AnthropicRenderer) and converts ``tool_use`` blocks to SyntH's
+        ``{\"actions\": [...]}`` format via ``AnthropicRenderer``.
+        """
+        from core.prompt_renderers import AnthropicRenderer
+
+        base_url = (
+            str(ANTHROPIC_BASE_URL).rstrip("/")
+            if ANTHROPIC_BASE_URL
+            else "https://api.anthropic.com"
+        )
+        model = self._current_model
+        max_out = max_tokens or int(ANTHROPIC_MAX_TOKENS or 8192)
+
+        payload: dict[str, Any] = {
+            "model": model,
+            "max_tokens": max_out,
+            "system": rendered_system,
+            "messages": messages,
+        }
+        if tools:
+            payload["tools"] = tools
+
+        headers = _build_headers(api_key)
+        url = f"{base_url}/v1/messages"
+        log_cortex_request(
+            engine="anthropic",
+            model=model,
+            url=url,
+            payload=payload,
+        )
+
+        start = time.monotonic()
+        loop = asyncio.get_event_loop()
+        resp_data = await loop.run_in_executor(
+            None, lambda: self._post_sync(base_url, headers, payload)
+        )
+        elapsed = time.monotonic() - start
+
+        if isinstance(resp_data, str):
+            log_cortex_response(
+                engine="anthropic",
+                model=model,
+                error=resp_data,
+                elapsed_ms=elapsed * 1000,
+            )
+            return resp_data
+
+        # Phase 5: tool_use blocks → SyntH actions format
+        content_blocks = (
+            resp_data.get("content", []) if isinstance(resp_data, dict) else []
+        )
+        has_tool_use = any(
+            isinstance(b, dict) and b.get("type") == "tool_use" for b in content_blocks
+        )
+        if has_tool_use:
+            result_text = AnthropicRenderer.parse_tool_use_response(resp_data)
+        else:
+            result_text = self._extract_text(resp_data)
+
+        usage = resp_data.get("usage") if isinstance(resp_data, dict) else None
+        log_cortex_response(
+            engine="anthropic",
+            model=model,
+            body=resp_data,
+            usage=usage,
+            elapsed_ms=elapsed * 1000,
+        )
+        return result_text
 
     def _post_sync(
         self, base_url: str, headers: dict[str, str], payload: dict[str, Any]

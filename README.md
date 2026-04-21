@@ -50,12 +50,12 @@ Beta, but stable enough for daily use. Development branch gives access to the la
 
 ### Features
 
-- Switchable Cortex engines (Selenium-driven ChatGPT, Gemini or Grok sessions). **Note: Currently, only Selenium ChatGPT (Legacy) is fully functional. Other engines are experimental and may not work reliably.**
+- Switchable Cortex engines (API-driven Gemini, OpenAI, Claude, Grok, or local Ollama instances). Hot-swappable at runtime.
+- Typed prompt pipeline with native renderers for OpenAI-compatible, Anthropic, Gemini, external-endpoint, and Live engine paths.
 - Multiple chat interfaces including the builtin webui, Telegram, Discord and Matrix
 - **VRM Avatar System**: 3D animated avatars with idle, talking, and thinking states.
 - **SyntH Web UI**: A production-ready web interface featuring VRM avatar support and real-time animations.  
    The avatar's animations reflect the persona's global state—for example, if the character is replying on Telegram, connecting via the web UI will show the avatar busy typing on its smartphone. This ensures the visual representation always matches the character's current activity, regardless of the interface in use.
-- Action plugins such as a persistent terminal and scheduled events
 - Action plugins such as a persistent terminal and scheduled events
 - G.R.I.L.L.O. ("grillo"): an autonomous internal "beat" system that periodically triggers reflective prompts (memory consolidation, tag elaboration, self-reflection, curiosity, relationship checks) and can create diary entries, schedule actions, or enqueue other tasks. G.R.I.L.L.O. stands for "Generator for Reflective Inner Loop & Logical Observation" — and the word "grillo" in Italian literally means 'cricket' (see the Pinocchio reference: "grillo parlante", the talking cricket). See `plugins/grillo_plugin.py` for details; it's configurable and may be enabled or disabled.
 - Ollama-compatible HTTP bridge so existing Ollama clients can talk to Synthetic Heart
@@ -97,7 +97,7 @@ The project ships with an **Ollama-compatible interface** (`interface/ollama_com
 ### Option A: Docker (Recommended)
 
 1.  Clone this repository or simply download the `docker-compose.yml` and the `skins` folder (see the note below).
-2.  **[OPTIONAL]** Copy `.env.example` to `.env` to customize the deployment.
+2.  **[OPTIONAL]** Copy `.env.example` to `.env` to customize the deployment. The example file is trimmed to common deployment overrides; use `docs/compose_env_vars.rst` if you need the full advanced env reference.
 3.  Start the stack:
     ```bash
     docker compose up -d --build
@@ -109,7 +109,44 @@ The project ships with an **Ollama-compatible interface** (`interface/ollama_com
 
 4.  Connect to the WebUI via HTTPS (default port is **8000**): `https://localhost:8000`.
 
+#### Optional: Enable SOUL PostgreSQL + pgvector backend
+
+By default, SOUL uses in-memory persistence. To enable persistent SOUL storage:
+
+1. Set these environment variables in your `.env`:
+   - `SOUL_REPOSITORY_BACKEND=postgres`
+   - `SOUL_POSTGRES_DSN=postgresql://soul:soul@synth-soul-db:5432/soul_memory`
+   - Optional overrides: `SOUL_PG_DB`, `SOUL_PG_USER`, `SOUL_PG_PASSWORD`, `EXT_SOUL_DB_PORT`
+2. Start the SOUL DB service and apply schema:
+   - Linux/macOS: `bash scripts/bootstrap_soul_postgres.sh`
+   - Windows PowerShell: `./scripts/bootstrap_soul_postgres.ps1`
+3. Restart the stack:
+   - `docker compose up -d --build`
+
+#### Optional: Migrate Existing MariaDB memories into SOUL
+
+If your Synth already has months of history, you can import legacy data into SOUL `mem_cells`.
+
+1. Ensure SOUL Postgres is running and schema is applied:
+   - Linux/macOS: `bash scripts/bootstrap_soul_postgres.sh`
+   - Windows PowerShell: `./scripts/bootstrap_soul_postgres.ps1`
+2. Run a dry-run first:
+   - `uv run python scripts/migrate_legacy_to_soul.py --dry-run --days 180`
+3. Run the real migration:
+   - `uv run python scripts/migrate_legacy_to_soul.py --days 180`
+4. Verify results in Postgres:
+   - `SELECT COUNT(*) FROM mem_cells;`
+
+Migration notes:
+- Sources migrated: `chat_history_cache`, `memories`, `ai_diary`
+- IDs are deterministic (`legacy:<table>:<id>`), so reruns are safe (upsert behavior)
+- The script uses `SOUL_POSTGRES_DSN` for the destination and `DB_*` values for legacy MariaDB source
+
 ### Option B: Windows Native (with `uv`)
+
+> [!WARNING]
+> **DATABASE SETUP REQUIRED**
+> Database setup is **not automated** on Windows native environments. You must install MariaDB/MySQL separately, configure your local database (using the schema found in `init-db.sql`), and manually set the connection parameters in your `.env` file before running the application!
 
 For the fastest development experience on Windows, we recommend using **uv**. It handles Python installation, virtual environments, and dependencies automatically.
 
@@ -119,15 +156,19 @@ For the fastest development experience on Windows, we recommend using **uv**. It
     ```
 2.  **Clone the repository** and enter the folder:
     ```powershell
-    git clone [https://github.com/Scarlet-Raine/Synthetic_Heart.git](https://github.com/Scarlet-Raine/Synthetic_Heart.git)
+    git clone https://github.com/XargonWan/Synthetic_Heart.git
     cd Synthetic_Heart
     ```
-3.  **Sync Dependencies:**
+3.  **Configure `.env` and Database:**
+    - Install MariaDB or MySQL.
+    - Create a database and run the `init-db.sql` script to set up the necessary tables.
+    - Copy `.env.example` to `.env` and update the `DB_*` connection strings to match your local setup.
+4.  **Sync Dependencies:**
     ```powershell
     # This creates the environment and installs all packages instantly
     uv sync
     ```
-4.  **Run the App:**
+5.  **Run the App:**
     ```powershell
     uv run main.py
     ```
@@ -137,7 +178,6 @@ For the fastest development experience on Windows, we recommend using **uv**. It
 ### First Run Setup
 1.  **Access the WebUI:** Navigate to `https://localhost:8000` (Accept the self-signed certificate warning if prompted).
 2.  **Select Engine:** Go to **Components** and select your desired Cortex kind + engine.
-3.  **Login (Selenium Engines):** If using a Selenium engine (like ChatGPT or Gemini), click the **Login** button to authenticate via the virtual browser.
 
 > **Note on Skins:** The `skins` folder is optional if you do not intend to edit them. If you skip downloading it, ensure the volume mapping for `./skins` is commented out in your compose file, otherwise, an empty folder will override the built-in skins.
 
@@ -161,13 +201,33 @@ You can browse and manage Docker images for this project on [Docker Hub](https:/
 
 Pull requests are welcome! Everyone is encouraged to submit contributions—especially new components, plugins, and Cortex engines—to expand SyntH's capabilities. Please read the guidelines in the documentation before submitting.
 
+### AI-assisted development
+
+The repo ships with a full AI agent setup out of the box. If you use Claude Code, Cursor, Copilot, or similar tools, these are already wired up for you:
+
+**One-time setup after cloning:**
+```bash
+uv sync                   # installs all deps including the MCP server
+npx gitnexus analyze      # builds the code intelligence index (~1-2 min)
+```
+
+**What you get automatically:**
+
+- **`synth-logs` MCP server** (`mcp_servers/synth_logs.py`) — gives AI agents structured access to all log files across rotations. Instead of reading raw log files, agents can call `get_recent_errors()`, `search_logs()`, and `tail_log()` directly. Logs rotate fast in DEBUG mode (2000 lines), so this saves a lot of manual hunting.
+
+- **GitNexus code intelligence** — pre-configured in `.mcp.json` and `.vscode/mcp.json`. Gives agents a queryable map of the codebase: callers, callees, execution flows, and safe rename/refactor operations. Run `npx gitnexus analyze` to build or refresh the index after large changes.
+
+Both servers are pre-configured for **Claude Code** (`.mcp.json`) and **VS Code Copilot** (`.vscode/mcp.json`). No manual setup beyond the two commands above.
+
+**`AGENTS.md`** is the canonical reference for any AI agent working on this codebase — architecture overview, plugin contracts, DB schema, config keys, known issues, and debugging SOP. Read it before starting a non-trivial task.
+
 ## What's next (Planned features & fixes)
 Here are the main improvements and integrations we plan to work on — contributions are welcome:
 
 - [ ] Event system fixes
 - [ ] Global animation engine fixes — make animations always reflect the actual state of the SyntH and their current actions
-- [ ] Deepseek web Cortex engine support
-- [ ] SetpFun web Cortex engine support
+- [ ] Deepseek Cortex engine support
+- [ ] StepFun Cortex engine support
 - [ ] Desktop presence — allow SyntH to show up on a desktop environment (outside web interfaces)
 - [ ] First gaming plugin: Minecraft integration
 - [ ] Matrix interface

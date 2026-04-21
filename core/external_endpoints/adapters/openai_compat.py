@@ -11,10 +11,15 @@ retry logic, and streaming are all handled by the SDK.
 
 from __future__ import annotations
 
+import time as _time
 from typing import Any, AsyncIterator
 from urllib.parse import urlparse, urlunparse
 
 import httpx
+from core.cortex_api_logger import (
+    log_cortex_request,
+    log_cortex_response,
+)
 from core.logging_utils import log_debug, log_warning
 
 from core.external_endpoints.adapters.base import (
@@ -117,6 +122,7 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
     ) -> ChatResponse:
         client = self._get_client()
         request_model = model or "default"
+        engine_tag = f"openai_compat:{self._engine_label or 'default'}"
 
         # Pull out vendor-extension keys that need to travel via ``extra_body``
         # (the OpenAI SDK rejects unknown root-level kwargs, but accepts extra_body).
@@ -130,6 +136,14 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
         filtered = {
             k: v for k, v in kwargs.items() if k not in ("model", "messages", "stream")
         }
+
+        log_cortex_request(
+            engine_tag,
+            model=request_model,
+            url=self._sdk_base_url(),
+            payload={"messages": messages},
+        )
+        _req_start = _time.monotonic()
 
         try:
             response = await client.chat.completions.create(
@@ -147,13 +161,30 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
                     "completion_tokens": response.usage.completion_tokens or 0,
                     "total_tokens": response.usage.total_tokens or 0,
                 }
+            content = self._extract_message_content(choice.message)
+            _elapsed = (_time.monotonic() - _req_start) * 1000
+            log_cortex_response(
+                engine_tag,
+                model=response.model or request_model,
+                status=200,
+                body=content,
+                usage=usage or None,
+                elapsed_ms=_elapsed,
+            )
             return ChatResponse(
-                content=self._extract_message_content(choice.message),
+                content=content,
                 model=response.model or request_model,
                 finish_reason=choice.finish_reason or "stop",
                 usage=usage,
             )
-        except Exception:
+        except Exception as exc:
+            _elapsed = (_time.monotonic() - _req_start) * 1000
+            log_cortex_response(
+                engine_tag,
+                model=request_model,
+                error=str(exc),
+                elapsed_ms=_elapsed,
+            )
             raise
 
     async def stream_chat_completion(
@@ -164,6 +195,16 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
     ) -> AsyncIterator[str]:
         client = self._get_client()
         request_model = model or "default"
+        engine_tag = f"openai_compat:{self._engine_label or 'default'}"
+
+        log_cortex_request(
+            engine_tag,
+            model=request_model,
+            url=self._sdk_base_url(),
+            payload={"messages": messages, "stream": True},
+        )
+        _req_start = _time.monotonic()
+        _accumulated: list[str] = []
 
         try:
             stream = await client.chat.completions.create(
@@ -181,9 +222,25 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
                 if not delta:
                     continue
                 content = self._extract_message_content(delta)
-                if content:
-                    yield content
-        except Exception:
+                if not content:
+                    continue
+                _accumulated.append(content)
+                yield content
+            _elapsed = (_time.monotonic() - _req_start) * 1000
+            log_cortex_response(
+                engine_tag,
+                model=request_model,
+                body="".join(_accumulated),
+                elapsed_ms=_elapsed,
+            )
+        except Exception as exc:
+            _elapsed = (_time.monotonic() - _req_start) * 1000
+            log_cortex_response(
+                engine_tag,
+                model=request_model,
+                error=str(exc),
+                elapsed_ms=_elapsed,
+            )
             raise
 
     # ------------------------------------------------------------------
@@ -241,6 +298,30 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
             return True
         return False
 
+    async def _resolve_probe_model(
+        self,
+        *,
+        models: list[ModelInfo] | None = None,
+        prefer_vision: bool = False,
+    ) -> str | None:
+        model_infos = models
+        if model_infos is None:
+            try:
+                model_infos = await self.list_models()
+            except Exception:
+                return None
+
+        if prefer_vision:
+            for model in model_infos:
+                if model.id and self._supports_vision_capability(model):
+                    return model.id
+
+        for model in model_infos:
+            if model.id:
+                return model.id
+
+        return None
+
     def _resolve_http_url(self, path: str) -> str:
         parsed = urlparse(self._base_url)
         base_path = parsed.path.rstrip("/")
@@ -283,6 +364,8 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
     async def _list_models_via_http(self) -> list[ModelInfo]:
         import aiohttp
 
+        effective_timeout = float(self._timeout or 300.0)
+
         def _parse_list(data: Any) -> list[ModelInfo]:
             if data is None:
                 return []
@@ -304,7 +387,12 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
                     async with session.get(
                         url,
                         headers={"Authorization": f"Bearer {self._api_key}"},
-                        timeout=aiohttp.ClientTimeout(total=40),
+                        timeout=aiohttp.ClientTimeout(
+                            total=effective_timeout,
+                            connect=effective_timeout,
+                            sock_connect=effective_timeout,
+                            sock_read=effective_timeout,
+                        ),
                     ) as resp:
                         if resp.status != 200:
                             log_warning(
@@ -384,7 +472,8 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
         """
         import aiohttp
 
-        url = f"{self._base_url}/audio/transcriptions"
+        engine_tag = f"openai_compat:{self._engine_label or 'default'}"
+        stt_model = kwargs.get("model", "whisper-1")
         headers = {"Authorization": f"Bearer {self._api_key}"}
         ext = "wav"
         if mime_type:
@@ -397,7 +486,18 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
             filename=f"audio.{ext}",
             content_type=mime_type or "audio/wav",
         )
-        data.add_field("model", kwargs.get("model", "whisper-1"))
+        data.add_field("model", stt_model)
+
+        log_cortex_request(
+            engine_tag,
+            model=stt_model,
+            payload={
+                "task": "transcribe_audio",
+                "mime_type": mime_type or "audio/wav",
+                "audio_size": f"{len(audio_bytes)} bytes",
+            },
+        )
+        _req_start = _time.monotonic()
 
         for path in self._http_stt_paths():
             url = self._resolve_http_url(path)
@@ -411,12 +511,28 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
                     ) as resp:
                         if resp.status == 200:
                             result = await resp.json()
-                            return result.get("text", "")
+                            text = result.get("text", "")
+                            _elapsed = (_time.monotonic() - _req_start) * 1000
+                            log_cortex_response(
+                                engine_tag,
+                                model=stt_model,
+                                status=200,
+                                body=text,
+                                elapsed_ms=_elapsed,
+                            )
+                            return text
                         log_debug(
                             f"[openai_compat] STT {url} returned {resp.status} – not supported"
                         )
             except Exception as exc:
                 log_debug(f"[openai_compat] STT request failed ({url}): {exc}")
+        _elapsed = (_time.monotonic() - _req_start) * 1000
+        log_cortex_response(
+            engine_tag,
+            model=stt_model,
+            error="No STT endpoint responded successfully",
+            elapsed_ms=_elapsed,
+        )
         return None
 
     # ------------------------------------------------------------------
@@ -443,10 +559,19 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
 
         import aiohttp
 
+        engine_tag = f"openai_compat:{self._engine_label or 'default'}"
         effective_mime = mime_type or "image/jpeg"
         b64 = base64.b64encode(image_bytes).decode("ascii")
         data_url = f"data:{effective_mime};base64,{b64}"
         effective_prompt = prompt or "Describe this image in detail."
+        vision_model = kwargs.get("model", "default")
+        vision_timeout = float(kwargs.pop("vision_timeout", self._timeout or 600.0))
+
+        # Disable chain-of-thought thinking for vision calls unless explicitly
+        # requested. Some OpenAI-compatible providers spend the whole budget on
+        # reasoning tokens for image tasks, which hurts latency and reliability.
+        if "enable_thinking" not in kwargs:
+            kwargs["enable_thinking"] = False
 
         messages: list[dict[str, Any]] = [
             {
@@ -461,18 +586,8 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
             }
         ]
 
-        vision_timeout = float(kwargs.pop("vision_timeout", 600))
-        # Disable chain-of-thought thinking for ALL vision calls regardless of
-        # model name — the model name in kwargs may be the endpoint alias (e.g.
-        # "perplexity"), not the actual model ID (e.g. "qwen/qwen3.5-9b").
-        # Thinking consumes the entire context window on image-description tasks
-        # and causes timeouts; the LLM answer comes from the main cortex anyway.
-        # Models that don't support this extension silently ignore the field.
-        if "enable_thinking" not in kwargs:
-            kwargs["enable_thinking"] = False
-
         payload: dict[str, Any] = {
-            "model": kwargs.get("model", "default"),
+            "model": vision_model,
             "messages": messages,
             "max_tokens": kwargs.get("max_tokens", 1024),
             "stream": False,
@@ -485,11 +600,24 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
             "Content-Type": "application/json",
         }
         # Vision calls use only /chat/completions endpoints — generic /chat
-        # fallbacks (e.g. /v1/chat) are non-standard and return empty content
-        # on servers like LM Studio.
+        # fallbacks (e.g. /v1/chat) are non-standard and can return empty content.
         vision_urls = [u for u in self._http_chat_urls() if u.endswith("completions")]
         if not vision_urls:
             vision_urls = self._http_chat_urls()
+
+        log_cortex_request(
+            engine_tag,
+            model=vision_model,
+            url=vision_urls[0] if vision_urls else "",
+            payload={
+                "task": "describe_image",
+                "mime_type": effective_mime,
+                "image_size": f"{len(image_bytes)} bytes",
+                "prompt": effective_prompt,
+            },
+        )
+        _req_start = _time.monotonic()
+        last_error = "No vision endpoint responded successfully"
 
         try:
             async with aiohttp.ClientSession() as session:
@@ -502,19 +630,46 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
                             timeout=aiohttp.ClientTimeout(total=vision_timeout),
                         ) as resp:
                             if resp.status != 200:
+                                body = await resp.text()
+                                last_error = f"HTTP {resp.status}: {body[:200]}"
                                 continue
+
                             result = await resp.json()
                             message = result.get("choices", [{}])[0].get("message", {})
-                            return self._extract_message_content(message) or None
-                    except Exception:
+                            description = self._extract_message_content(message) or None
+                            _elapsed = (_time.monotonic() - _req_start) * 1000
+                            log_cortex_response(
+                                engine_tag,
+                                model=vision_model,
+                                status=200,
+                                body=description,
+                                elapsed_ms=_elapsed,
+                            )
+                            return description
+                    except Exception as exc:
+                        last_error = str(exc)
                         continue
         except Exception as exc:
-            from core.logging_utils import log_warning
+            last_error = str(exc)
 
-            log_warning(f"[openai_compat] describe_image failed: {exc}")
+        _elapsed = (_time.monotonic() - _req_start) * 1000
+        log_cortex_response(
+            engine_tag,
+            model=vision_model,
+            error=last_error,
+            elapsed_ms=_elapsed,
+        )
+        if last_error and last_error != "No vision endpoint responded successfully":
+            _elapsed = (_time.monotonic() - _req_start) * 1000
+            log_warning(f"[openai_compat] describe_image failed: {last_error}")
         return None
 
-    async def _probe_vision_support(self, model: str | None = None) -> bool:
+    async def _probe_vision_support(
+        self,
+        *,
+        model: str | None = None,
+        models: list[ModelInfo] | None = None,
+    ) -> bool:
         import base64
 
         import aiohttp
@@ -530,7 +685,9 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
         data_url = f"data:image/png;base64,{base64.b64encode(tiny_png).decode('ascii')}"
         prompt = "Describe this image in detail."
         payload = {
-            "model": model or "default",
+            "model": model
+            or await self._resolve_probe_model(models=models, prefer_vision=True)
+            or "default",
             "messages": [
                 {
                     "role": "user",
@@ -590,7 +747,7 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
     async def ping_test(
         self,
         model: str | None = None,
-        timeout: float = 30.0,
+        timeout: float | None = None,
     ) -> tuple[bool, str]:
         """Send a minimal chat 'ping' to verify cortex connectivity.
 
@@ -599,8 +756,9 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
         success, ``(False, error_str)`` on failure.
 
         Two-phase timeout strategy:
-        - TCP connect must succeed within 10 s (hard failure).
-        - Body read uses ``timeout`` seconds (soft): if the server already
+                - TCP connect uses the effective probe timeout (explicit ``timeout``
+                    when provided, otherwise the adapter's configured timeout).
+                - Body read uses the same effective timeout (soft): if the server already
           returned HTTP 200 but the model is still generating (e.g. thinking/
           reasoning models like Qwen3.5), a body-read timeout is treated as a
           *reachability success* — ``(True, '')`` — rather than a failure.
@@ -609,9 +767,12 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
         """
         import aiohttp
 
-        chat_url = self._http_chat_url()
+        effective_timeout = float(
+            timeout if timeout is not None else (self._timeout or 30.0)
+        )
+        request_model = model or await self._resolve_probe_model() or "default"
         payload: dict[str, Any] = {
-            "model": model or "default",
+            "model": request_model,
             "messages": [{"role": "user", "content": "ping"}],
             "stream": False,
             "max_tokens": 16,
@@ -620,20 +781,23 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
             "Authorization": f"Bearer {self._api_key}",
             "Content-Type": "application/json",
         }
-        log_debug(
-            f"[openai_compat] ping_test → POST {chat_url} model={payload['model']}"
-        )
         last_err = ""
         try:
             async with aiohttp.ClientSession() as session:
                 for chat_url in self._http_chat_urls():
+                    log_debug(
+                        f"[openai_compat] ping_test → POST {chat_url} model={payload['model']}"
+                    )
                     try:
                         async with session.post(
                             chat_url,
                             json=payload,
                             headers=headers,
                             timeout=aiohttp.ClientTimeout(
-                                connect=10.0, sock_read=timeout
+                                total=effective_timeout,
+                                connect=effective_timeout,
+                                sock_connect=effective_timeout,
+                                sock_read=effective_timeout,
                             ),
                         ) as resp:
                             if resp.status >= 400:
@@ -686,21 +850,35 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
         import aiohttp
 
         # --- Vision: read declared model capability metadata first ---
+        models: list[ModelInfo] = []
         try:
             models = await self.list_models()
+        except Exception:
+            models = []
+
+        for m in models:
+            if self._supports_vision_capability(m):
+                capabilities["vision"] = True
+                break
+
+        if not capabilities["vision"]:
+            probed_model_ids: set[str] = set()
             for m in models:
-                if self._supports_vision_capability(m):
-                    capabilities["vision"] = True
-                    break
-            if not capabilities["vision"]:
-                for m in models:
+                if not m.id or m.id in probed_model_ids:
+                    continue
+                probed_model_ids.add(m.id)
+                try:
                     if await self._probe_vision_support(model=m.id):
                         capabilities["vision"] = True
                         break
-            if not capabilities["vision"]:
+                except Exception:
+                    continue
+
+        if not capabilities["vision"] and not models:
+            try:
                 capabilities["vision"] = await self._probe_vision_support()
-        except Exception:
-            pass
+            except Exception:
+                pass
 
         # --- Vox: probe /audio/speech with a tiny payload ---
         for path in self._http_tts_paths():

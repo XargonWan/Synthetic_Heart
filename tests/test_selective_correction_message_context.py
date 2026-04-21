@@ -65,6 +65,10 @@ async def test_request_selective_correction_includes_message_in_context(monkeypa
     assert "correction_context" in ctx
     # The correction_context should reference the failed action type
     cc = ctx["correction_context"]
+    assert cc["successful_actions"] == successful_actions
+    assert cc["failed_actions"] == failed_actions
+    assert cc["successful_count"] == 1
+    assert cc["failed_count"] == 1
     instr = cc.get("instruction", "")
     # Instruction should reference failed actions and include the invalid type
     assert (
@@ -74,3 +78,52 @@ async def test_request_selective_correction_includes_message_in_context(monkeypa
     )
     assert "message_send" in instr
     assert "Unsupported type" in instr or "not a valid action type" in instr
+
+
+@pytest.mark.asyncio
+async def test_request_selective_correction_skips_unfixable_failures(monkeypatch):
+    called = {"count": 0}
+
+    async def fake_run_corrector_middleware(
+        text, bot=None, context=None, chat_id=None, thread_id=None
+    ):
+        called["count"] += 1
+        return None
+
+    monkeypatch.setattr(
+        "core.transport_layer.run_corrector_middleware", fake_run_corrector_middleware
+    )
+    monkeypatch.setattr(
+        "core.action_parser.run_corrector_middleware", fake_run_corrector_middleware
+    )
+
+    failed_actions = [
+        {
+            "index": 0,
+            "action": {
+                "type": "update_emotion_state",
+                "payload": {"emotions": {"love": 5.0}},
+            },
+            "errors": [
+                "Action 'update_emotion_state' blocked by safety policy: blocked: not whitelisted"
+            ],
+            "unfixable": True,
+        }
+    ]
+
+    original_message = SimpleNamespace(from_cortex=True, chat_id=999, thread_id=None)
+
+    await _request_selective_correction(
+        failed_actions=failed_actions,
+        successful_actions=[
+            {
+                "type": "message_telegram_bot",
+                "payload": {"text": "visible reply"},
+            }
+        ],
+        bot=None,
+        context={"interface": "telegram"},
+        original_message=original_message,
+    )
+
+    assert called["count"] == 0

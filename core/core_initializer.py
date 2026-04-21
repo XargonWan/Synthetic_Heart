@@ -640,6 +640,10 @@ class CoreInitializer:
                     log_warning(
                         "[core_initializer] Exposed variables migration skipped: missing migrate_all_registered_configs"
                     )
+            except ModuleNotFoundError:
+                log_debug(
+                    "[core_initializer] core.exposed_migration not found — skipping"
+                )
             except Exception as _e:
                 log_warning(
                     f"[core_initializer] Exposed variables migration failed: {_e}"

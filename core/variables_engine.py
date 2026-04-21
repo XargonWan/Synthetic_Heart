@@ -34,7 +34,7 @@ from typing import Any, Callable, Dict, Optional, Iterable
 import re
 
 from core.config_manager import config_registry
-from core.logging_utils import log_info, log_warning, log_error
+from core.logging_utils import log_debug, log_info, log_warning, log_error
 from core.time_zone_utils import get_suggested_locations
 
 # Base profile template (shared with persona_manager.py)
@@ -169,9 +169,10 @@ class ExposedVariableRegistry:
         exists, `config_registry` will take precedence.
         """
         if definition.key in self._defs:
-            log_warning(
-                f"[exposed_vars] Overwriting existing definition for {definition.key}"
+            log_debug(
+                f"[exposed_vars] Re-registering existing definition for {definition.key} (ignored)"
             )
+            return
         self._defs[definition.key] = definition
 
         # Register in config_registry so UI and persistence work uniformly.

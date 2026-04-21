@@ -1,344 +1,350 @@
-Gemini 3.1 Pro is the next iteration of performance, behavior, and intelligence improvements in the 3 Pro family. It distills the core intelligence from Gemini 3 Deep Think into the standard Pro tier, delivering more than double the reasoning performance of 3 Pro on ARC-AGI-2, with 40-60% relative improvement on complex planning tasks. It is designed for tasks where a simple answer isn't enough — ambitious agentic workflows, autonomous coding, and complex multimodal reasoning.
+<!-- source: https://ai.google.dev/gemini-api/docs/models/gemini-3.1-flash-live-preview -->
 
-[Try Gemini 3.1 Pro](https://aistudio.google.com?model=gemini-3.1-pro-preview)
+Try the new high-speed, cost-effective [Veo 3.1 Lite](/gemini-api/docs/models/veo-3.1-lite-generate-preview) model for video generation at scale. 
 
-Get started with a few lines of code:
+  * [ Home ](https://ai.google.dev/)
+  * [ Gemini API ](https://ai.google.dev/gemini-api)
+  * [ Docs ](https://ai.google.dev/gemini-api/docs)
 
-### Python
 
-    from google import genai
 
-    client = genai.Client()
+Send feedback 
 
-    response = client.models.generate_content(
-        model="gemini-3.1-pro-preview",
-        contents="Analyze this multi-file codebase and identify all race conditions.",
-    )
+#  Gemini 3.1 Flash Live Preview
 
-    print(response.text)
+Gemini 3.1 Flash Live Preview is our low-latency, audio-to-audio model optimized for real-time dialogue and voice-first AI applications with acoustic nuance detection, numeric precision, and multimodal awareness.
 
-### JavaScript
+[Try in Google AI Studio](https://aistudio.google.com/live?model=gemini-3.1-flash-live-preview)
 
-    import { GoogleGenAI } from "@google/genai";
+## Documentation
 
-    const ai = new GoogleGenAI({});
+Visit the [Live API](/gemini-api/docs/live-api) guide for full coverage of features and capabilities.
 
-    async function run() {
-      const response = await ai.models.generateContent({
-        model: "gemini-3.1-pro-preview",
-        contents: "Analyze this multi-file codebase and identify all race conditions.",
-      });
+## gemini-3.1-flash-live-preview
 
-      console.log(response.text);
-    }
+Property | Description  
+---|---  
+id_cardModel code |  `gemini-3.1-flash-live-preview`  
+saveSupported data types |  **Inputs** Text, images, audio, video **Output** Text and audio  
+token_autoToken limits[[*]](/gemini-api/docs/tokens) |  **Input token limit** 131,072 **Output token limit** 65,536  
+handymanCapabilities |  **Audio generation** Supported **Batch API** Not supported **Caching** Not supported **Code execution** Not supported **File search** Not Supported **Function calling** Supported **Grounding with Google Maps** Not supported **Image generation** Not supported **Live API** Supported **Search grounding** Supported **Structured outputs** Not supported **Thinking** Supported **URL context** Not supported  
+123Versions |  Read the [model version patterns](/gemini-api/docs/models/gemini#model-versions) for more details.
 
-    run();
+  * Preview: `gemini-3.1-flash-live-preview`
 
-### REST
+  
+calendar_monthLatest update | March 2026  
+cognition_2Knowledge cutoff | January 2025  
+  
+## Migrating from Gemini 2.5 Flash Live
 
-    curl "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-pro-preview:generateContent" \
-      -H "x-goog-api-key: $GEMINI_API_KEY" \
-      -H 'Content-Type: application/json' \
-      -X POST \
-      -d '{
-        "contents": [{
-          "parts": [{"text": "Analyze this multi-file codebase and identify all race conditions."}]
-        }]
-      }'
+Gemini 3.1 Flash Live Preview is optimized for low-latency, real-time dialogue. When migrating from `gemini-2.5-flash-native-audio-preview-12-2025`, consider the following:
 
-## Model overview
+  * **Model string** : Update your model string from `gemini-2.5-flash-native-audio-preview-12-2025` to `gemini-3.1-flash-live-preview`.
+  * **Thinking configuration** : Gemini 3.1 uses `thinkingLevel` (with settings like `minimal`, `low`, `medium`, and `high`) instead of `thinkingBudget`. The default is `minimal` to optimize for lowest latency. See [Thinking levels and budgets](/gemini-api/docs/thinking#levels-budgets).
+  * **Server events** : A single [`BidiGenerateContentServerContent`](/api/live#bidigeneratecontentservercontent) event can now contain multiple content parts simultaneously (for example, audio chunks and transcript). Update your code to process all parts in each event to avoid missing content.
+  * **Client content** : `send_client_content` is only supported for seeding initial context history (requires setting [`initial_history_in_client_content`](/api/live#HistoryConfig) in [`history_config`](/api/live#BidiGenerateContentSetup)). Use [`send_realtime_input`](/api/live#bidigeneratecontentrealtimeinput) to send text updates during the conversation. See [Incremental content updates](/gemini-api/docs/live-guide#incremental-updates).
+  * **Turn coverage** : Defaults to [`TURN_INCLUDES_AUDIO_ACTIVITY_AND_ALL_VIDEO`](/api/live#turncoverage) instead of `TURN_INCLUDES_ONLY_ACTIVITY`. The model's turn now includes detected audio activity and all video frames. If your application currently sends a constant stream of video frames, you may want to update your application to only send video frames when there is audio activity to avoid incurring additional costs.
+  * **Async function calling** : Not yet supported. Function calling is synchronous only. The model will not start responding until you've sent the tool response. See [Async function calling](/gemini-api/docs/live-tools#async-function-calling).
+  * **Proactive audio and affective dialogue** : These features are not yet supported in Gemini 3.1 Flash Live. Remove any configuration for these features from your code. See [Proactive audio](/gemini-api/docs/live-guide#proactive-audio) and [Affective dialogue](/gemini-api/docs/live-guide#affective-dialog).
 
-Gemini 3.1 Pro Preview is currently the only 3.1 variant. No Flash, Ultra, or
-image generation variant has been announced.
 
-| Model ID | Context Window (In / Out) | Knowledge Cutoff | Pricing (Input / Output)\* |
-|---|---|---|---|
-| **gemini-3.1-pro-preview** | 1M / 64k | Jan 2025 | $2 / $12 (\<200k tokens) $4 / $18 (\>200k tokens) |
-| **gemini-3.1-pro-preview-customtools** | 1M / 64k | Jan 2025 | $2 / $12 (\<200k tokens) $4 / $18 (\>200k tokens) |
 
-*\* Pricing is per 1 million tokens. Output pricing includes thinking tokens.*
+For a detailed feature comparison, see the [Model comparison](/gemini-api/docs/live-guide#model-comparison) table in the capabilities guide.
 
-**Batch API pricing (50% discount):**
+Send feedback 
 
-| Model ID | Input | Output |
-|---|---|---|
-| gemini-3.1-pro-preview | $1 / $2 (\<200k / \>200k) | $6 / $9 (\<200k / \>200k) |
 
-**Context caching:** $0.20 per 1M tokens (\<200k), $0.40 (\>200k). Storage: $4.50 per 1M tokens per hour.
+---
 
-**Grounding with Google Search:** 5,000 prompts/month free, then $14 / 1,000 search queries.
+<!-- source: https://ai.google.dev/gemini-api/docs/models/gemini-3.1-pro-preview -->
 
-There is no free tier for Gemini 3.1 Pro Preview.
+Try the new high-speed, cost-effective [Veo 3.1 Lite](/gemini-api/docs/models/veo-3.1-lite-generate-preview) model for video generation at scale. 
 
-### The customtools endpoint
+  * [ Home ](https://ai.google.dev/)
+  * [ Gemini API ](https://ai.google.dev/gemini-api)
+  * [ Docs ](https://ai.google.dev/gemini-api/docs)
 
-`gemini-3.1-pro-preview-customtools` is a specialized endpoint optimized for
-prioritizing custom tools like `view_file` or `search_code`. Use it if you are
-building agentic workflows with a mix of bash and custom tools and the base
-model ignores your custom tools in favor of bash commands.
 
-Both endpoints share the same context window, pricing, and knowledge cutoff.
 
-## Benchmarks
+Send feedback 
 
-Gemini 3.1 Pro shows significant improvements over Gemini 3 Pro, especially in
-reasoning and agentic tasks:
+#  Gemini 3.1 Pro Preview
 
-| Benchmark | Task Type | Gemini 3.1 Pro | Notes |
-|---|---|---|---|
-| ARC-AGI-2 | Abstract reasoning | 77.1% | 2x reasoning over 3 Pro |
-| GPQA Diamond | Graduate-level science | 94.3% | |
-| SWE-Bench Verified | Software engineering | 80.6% | |
-| SWE-Bench Pro | Diverse coding | 54.2% | |
-| Terminal-Bench 2.0 | Agentic terminal coding | 68.5% | |
-| LiveCodeBench Pro | Competitive coding | 2887 Elo | |
-| Humanity's Last Exam (tools) | Academic reasoning | 51.4% | |
-| MMMLU | Multilingual Q&A | 92.6% | |
-| MRCR v2 (128k) | Long context | 84.9% | |
-| MRCR v2 (1M) | Long context | 26.3% | |
+Built to refine the performance and reliability of the Gemini 3 Pro series, Gemini 3.1 Pro Preview provides better thinking, improved token efficiency, and a more grounded, factually consistent experience. It's optimized for software engineering behavior and usability, as well as agentic workflows requiring precise tool usage and reliable multi-step execution across real-world domains.
 
-40-60% relative improvement over Gemini 2.5 Pro on complex planning tasks.
-Superior results on internal agentic suites measuring tool-use correctness over
-50+ sequential steps.
+[Try in Google AI Studio](https://aistudio.google.com/prompts/new_chat?model=gemini-3.1-pro-preview)
 
-## New API features in Gemini 3.1
+## Documentation
 
-### Thinking level: medium for Pro
+Visit the [Gemini 3 Developer Guide](/gemini-api/docs/gemini-3) page for full coverage of features and capabilities.
 
-Gemini 3.1 Pro now supports the `medium` thinking level, which was previously
-only available on Flash. This provides a better cost/speed/performance balance
-for tasks that don't need full `high` reasoning depth.
+## gemini-3.1-pro-preview
 
-**Gemini 3.1 Pro thinking levels:**
+Property | Description  
+---|---  
+id_cardModel code | `gemini-3.1-pro-preview`  
+saveSupported data types |  **Inputs** Text, Image, Video, Audio, and PDF **Output** Text  
+token_autoToken limits[[*]](/gemini-api/docs/tokens) |  **Input token limit** 1,048,576 **Output token limit** 65,536  
+handymanCapabilities |  **Audio generation** Not supported **Batch API** Supported **Caching** Supported **Code execution** Supported **File search** Supported (AI Studio only) **Flex inference** Supported **Function calling** Supported **Grounding with Google Maps** Supported **Image generation** Not supported **Live API** Not supported **Priority inference** Supported **Search grounding** Supported **Structured outputs** Supported **Thinking** Supported **URL context** Supported  
+123Versions |  Read the [model version patterns](/gemini-api/docs/models/gemini#model-versions) for more details.
 
-- `low`: Minimizes latency and cost. Best for simple instruction following, chat, or high-throughput applications.
-- `medium` (NEW for Pro): Balanced thinking for most tasks. Good trade-off between reasoning quality and response time.
-- `high` (Default, dynamic): Maximizes reasoning depth. Best for complex reasoning, coding, and agentic workflows.
+  * Preview: `gemini-3.1-pro-preview`
+  * Preview: `gemini-3.1-pro-preview-customtools` *
 
-### Python
+  
+calendar_monthLatest update | February 2026  
+cognition_2Knowledge cutoff | January 2025  
+  
+#### gemini-3.1-pro-preview-customtools
 
-    from google import genai
-    from google.genai import types
+* _For those building with a mix of bash and custom tools, Gemini 3.1 Pro Preview comes with a separate endpoint available via the API called`gemini-3.1-pro-preview-customtools`. This endpoint is better at prioritizing your custom tools (for example `view_file` or `search_code`)._
 
-    client = genai.Client()
+_Note that while`gemini-3.1-pro-preview-customtools` is optimized for agentic workflows that use custom tools and bash, you may see quality fluctuations in some use cases which don't benefit from such tools._
 
-    response = client.models.generate_content(
-        model="gemini-3.1-pro-preview",
-        contents="Summarize the key points of this document.",
-        config=types.GenerateContentConfig(
-            thinking_config=types.ThinkingConfig(thinking_level="medium")
-        ),
-    )
+Send feedback 
 
-    print(response.text)
 
-### JavaScript
+---
 
-    import { GoogleGenAI } from "@google/genai";
+<!-- source: https://ai.google.dev/gemini-api/docs/models/gemini-3.1-flash-lite-preview -->
 
-    const ai = new GoogleGenAI({});
+Try the new high-speed, cost-effective [Veo 3.1 Lite](/gemini-api/docs/models/veo-3.1-lite-generate-preview) model for video generation at scale. 
 
-    const response = await ai.models.generateContent({
-        model: "gemini-3.1-pro-preview",
-        contents: "Summarize the key points of this document.",
-        config: {
-          thinkingConfig: {
-            thinkingLevel: "medium",
-          }
-        },
-      });
+  * [ Home ](https://ai.google.dev/)
+  * [ Gemini API ](https://ai.google.dev/gemini-api)
+  * [ Docs ](https://ai.google.dev/gemini-api/docs)
 
-    console.log(response.text);
 
-### REST
 
-    curl "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-pro-preview:generateContent" \
-      -H "x-goog-api-key: $GEMINI_API_KEY" \
-      -H 'Content-Type: application/json' \
-      -X POST \
-      -d '{
-        "contents": [{
-          "parts": [{"text": "Summarize the key points of this document."}]
-        }],
-        "generationConfig": {
-          "thinkingConfig": {
-            "thinkingLevel": "medium"
-          }
-        }
-      }'
+Send feedback 
 
-| **Important:** You cannot use both `thinking_level` and the legacy `thinking_budget` parameter in the same request. Doing so will return a 400 error.
+#  Gemini 3.1 Flash-Lite Preview
 
-### Streaming function call arguments
+Our most cost-efficient multimodal model, offering the fastest performance for high-frequency, lightweight tasks. Gemini 3.1 Flash-Lite is best for high-volume agentic tasks, simple data extraction, and extremely low-latency applications where budget and speed are the primary constraints.
 
-Set `streamFunctionCallArguments: true` in `functionCallingConfig` to stream
-partial function call arguments as they are generated, rather than waiting for
-the complete argument payload. This reduces perceived latency for tool use in
-agentic workflows.
+[Try in Google AI Studio](https://aistudio.google.com/prompts/new_chat?model=gemini-3.1-flash-lite-preview)
 
-### Python
+## gemini-3.1-flash-lite-preview
 
-    from google import genai
-    from google.genai import types
+Property | Description  
+---|---  
+id_cardModel code | `gemini-3.1-flash-lite-preview`  
+saveSupported data types |  **Inputs** Text, Image, Video, Audio, and PDF **Output** Text  
+token_autoToken limits[[*]](/gemini-api/docs/tokens) |  **Input token limit** 1,048,576 **Output token limit** 65,536  
+handymanCapabilities |  **Audio generation** Not supported **Batch API** Supported **Caching** Supported **Code execution** Supported **Computer use** Not supported **File search** Supported **Flex inference** Supported **Function calling** Supported **Grounding with Google Maps** Supported **Image generation** Not supported **Live API** Not supported **Priority inference** Supported **Search grounding** Supported **Structured outputs** Supported **Thinking** Supported **URL context** Supported  
+123Versions |  Read the [model version patterns](/gemini-api/docs/models/gemini#model-versions) for more details.
 
-    client = genai.Client()
+  * `Preview: gemini-3.1-flash-lite-preview`
 
-    tool = types.Tool(function_declarations=[
-        types.FunctionDeclaration(
-            name="search_code",
-            description="Search the codebase for a pattern.",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "Search pattern"}
-                },
-                "required": ["query"],
+  
+calendar_monthLatest update | March 2026  
+cognition_2Knowledge cutoff | January 2025  
+  
+## Developer guide
+
+Gemini 3.1 Flash-Lite is best at handling straightforward tasks at significant scale. Here are some use cases best suited for Gemini 3.1 Flash-Lite:
+
+  * **Translation** : Fast, cheap, high-volume translation, such as processing chat messages, reviews, and support tickets at scale. You can use system instructions to constrain output to only the translated text with no extra commentary:
+        
+        text = "Hey, are you down to grab some pizza later? I'm starving!"
+        
+        response = client.models.generate_content(
+            model="gemini-3.1-flash-lite-preview",
+            config={
+                "system_instruction": "Only output the translated text"
+            },
+            contents=f"Translate the following text to German: {text}"
+        )
+        
+        print(response.text)
+        
+
+  * **Transcription** : Process recordings, voice notes, or any audio content where you need a text transcript without spinning up a separate speech-to-text pipeline. Supports multimodal inputs, so you can pass audio files directly for transcription:
+        
+        # URL = "https://storage.googleapis.com/generativeai-downloads/data/State_of_the_Union_Address_30_January_1961.mp3"
+        
+        # Upload the audio file to the GenAI File API
+        uploaded_file = client.files.upload(file='sample.mp3')
+        
+        prompt = 'Generate a transcript of the audio.'
+        
+        response = client.models.generate_content(
+          model="gemini-3.1-flash-lite-preview",
+          contents=[prompt, uploaded_file]
+        )
+        
+        print(response.text)
+        
+
+  * **Lightweight agentic tasks and data extraction** : Entity extraction, classification, and lightweight data processing pipelines supported with structured JSON output. For example, extracting structured data from an e-commerce customer review:
+        
+        from pydantic import BaseModel, Field
+        
+        prompt = "Analyze the user review and determine the aspect, sentiment score, summary quote, and return risk"
+        input_text = "The boots look amazing and the leather is high quality, but they run way too small. I'm sending them back."
+        
+        class ReviewAnalysis(BaseModel):
+            aspect: str = Field(description="The feature mentioned (e.g., Price, Comfort, Style, Shipping)")
+            summary_quote: str = Field(description="The specific phrase from the review about this aspect")
+            sentiment_score: int = Field(description="1 to 5 (1=worst, 5=best)")
+            is_return_risk: bool = Field(description="True if the user mentions returning the item")
+        
+        response = client.models.generate_content(
+            model="gemini-3.1-flash-lite-preview",
+            contents=[prompt, input_text],
+            config={
+                "response_mime_type": "application/json",
+                "response_json_schema": ReviewAnalysis.model_json_schema(),
             },
         )
-    ])
+        
+        print(response.text)
+        
 
-    response = client.models.generate_content(
-        model="gemini-3.1-pro-preview",
-        contents="Find all usages of the deprecated API.",
-        config=types.GenerateContentConfig(
-            tools=[tool],
-            function_calling_config=types.FunctionCallingConfig(
-                stream_function_call_arguments=True
+  * **Document processing and summarization** : Parse PDFs and return concise summaries, like for building a document processing pipeline or quickly triaging incoming files:
+        
+        import httpx
+        
+        # Download a sample PDF document
+        doc_url = "https://storage.googleapis.com/generativeai-downloads/data/med_gemini.pdf"
+        doc_data = httpx.get(doc_url).content
+        
+        prompt = "Summarize this document"
+        response = client.models.generate_content(
+            model="gemini-3.1-flash-lite-preview",
+            contents=[
+                types.Part.from_bytes(
+                    data=doc_data,
+                    mime_type='application/pdf',
+                ),
+                prompt
+            ]
+        )
+        
+        print(response.text)
+        
+
+  * **Model routing** : Use a low-latency and low-cost model as a classifier that routes queries to the appropriate model based on task complexity. This is a real pattern in production — the open-source [Gemini CLI](https://geminicli.com/docs/core/#model-fallback) uses Flash-Lite to classify task complexity and route to Flash or Pro accordingly.
+        
+        FLASH_MODEL = 'flash'
+        PRO_MODEL = 'pro'
+        
+        CLASSIFIER_SYSTEM_PROMPT = f"""
+        You are a specialized Task Routing AI. Your sole function is to analyze the user's request and classify its complexity. Choose between `{FLASH_MODEL}` (SIMPLE) or `{PRO_MODEL}` (COMPLEX).
+        1.  `{FLASH_MODEL}`: A fast, efficient model for simple, well-defined tasks.
+        2.  `{PRO_MODEL}`: A powerful, advanced model for complex, open-ended, or multi-step tasks.
+        
+        A task is COMPLEX if it meets ONE OR MORE of the following criteria:
+        1.  High Operational Complexity (Est. 4+ Steps/Tool Calls)
+        2.  Strategic Planning and Conceptual Design
+        3.  High Ambiguity or Large Scope
+        4.  Deep Debugging and Root Cause Analysis
+        
+        A task is SIMPLE if it is highly specific, bounded, and has Low Operational Complexity (Est. 1-3 tool calls).
+        """
+        
+        user_input = "I'm getting an error 'Cannot read property 'map' of undefined' when I click the save button. Can you fix it?"
+        
+        response_schema = {
+          "type": "object",
+          "properties": {
+            "reasoning": {
+              "type": "string",
+              "description": "A brief, step-by-step explanation for the model choice, referencing the rubric."
+            },
+            "model_choice": {
+              "type": "string",
+              "enum": [FLASH_MODEL, PRO_MODEL]
+            }
+          },
+          "required": ["reasoning", "model_choice"]
+        }
+        
+        response = client.models.generate_content(
+            model="gemini-3.1-flash-lite-preview",
+            contents=user_input,
+            config={
+                "system_instruction": CLASSIFIER_SYSTEM_PROMPT,
+                "response_mime_type": "application/json",
+                "response_json_schema": response_schema
+            },
+        )
+        
+        print(response.text)
+        
+
+  * **Thinking** : For better accuracy for tasks that benefit from step-by-step reasoning, configure thinking so the model spends additional compute on internal reasoning before producing the final output:
+        
+        response = client.models.generate_content(
+            model="gemini-3.1-flash-lite-preview",
+            contents="How does AI work?",
+            config=types.GenerateContentConfig(
+                thinking_config=types.ThinkingConfig(thinking_level="high")
             ),
-        ),
-    )
+        )
+        
+        print(response.text)
+        
 
-### Multimodal function responses
 
-Function responses can now include images and PDFs in addition to text. This
-allows tools to return rich multimodal data that the model can reason over. See
-the [Gemini 3 documentation](gemini-3.md#multimodal-function-responses) for
-full code examples across Python, JavaScript, and REST.
 
-### File upload limit increase
 
-The API file upload limit has been increased from 20MB to 100MB.
+Send feedback 
 
-### YouTube URL as media source
 
-You can now pass a YouTube URL directly as a media source in your prompts. The
-model will analyze the video content via the URL. This works with public,
-pre-recorded videos only — not private, unlisted, or live streams. Free-tier
-limit is 8 hours of YouTube video per day.
+---
 
-### Cloud Storage and pre-signed URL support
+<!-- source: https://ai.google.dev/gemini-api/docs/models/gemini-3.1-flash-image-preview -->
 
-Cloud Storage bucket paths and private database pre-signed URLs are now
-supported as direct data sources.
+Try the new high-speed, cost-effective [Veo 3.1 Lite](/gemini-api/docs/models/veo-3.1-lite-generate-preview) model for video generation at scale. 
 
-### Combined hosted tools + structured outputs
+  * [ Home ](https://ai.google.dev/)
+  * [ Gemini API ](https://ai.google.dev/gemini-api)
+  * [ Docs ](https://ai.google.dev/gemini-api/docs)
 
-You can now combine [Grounding with Google Search](https://ai.google.dev/gemini-api/docs/google-search)
-and [URL Context](https://ai.google.dev/gemini-api/docs/url-context) with
-[Structured Outputs](https://ai.google.dev/gemini-api/docs/structured-output)
-(JSON schema). This is especially powerful for building agents that need to
-fetch live information from the web and return it in a structured format.
 
-## Thought signatures
 
-Thought signatures remain **mandatory** for Gemini 3.1 Pro, identical to
-Gemini 3 Pro. Missing signatures in function calling will result in a 400
-error. The SDKs (Python, Node, Java) handle signatures automatically in
-standard chat history workflows.
+Send feedback 
 
-See [Thought Signatures](thought-signatures.md) for full details.
+#  Gemini 3.1 Flash Image Preview
 
-## Capabilities and limitations
+**Nano Banana 2** provides high-quality image generation and conversational editing at a mainstream price point and low latency. It serves as the high-efficiency counterpart to [Gemini 3 Pro Image](/gemini-api/docs/models/gemini-3-pro-image-preview), optimized for speed and high-volume developer use cases.
 
-**Supported:**
+**Key updates:**
 
-| Feature | Status |
-|---|---|
-| Text generation | Supported |
-| Image understanding | Supported |
-| Audio understanding | Supported |
-| Video understanding | Supported |
-| PDF processing (up to 1,000 pages) | Supported |
-| Function calling | Supported |
-| Code execution | Supported |
-| Google Search grounding | Supported |
-| URL Context | Supported |
-| File Search (AI Studio only) | Supported |
-| Structured outputs | Supported |
-| Context caching | Supported |
-| Batch API | Supported |
-| Computer Use | Supported |
+  * New output resolution options: 
+    * New support for 0.5K, 2K and 4K, default 1K
+  * New Image Search Grounding: 
+    * Integration of both text and image search results to inform generation with real-time web data
+    * Supported with Thinking on or off
+  * New 1:4, 4:1, 1:8 and 8:1 aspect ratios
+  * Improved aspect ratio adherence
+  * Improved image quality and consistency
+  * Improved i18n text rendering
 
-**NOT supported:**
 
-| Feature | Status |
-|---|---|
-| Live API | Not supported (use `gemini-2.5-flash-native-audio` models) |
-| Audio generation | Not supported |
-| Image generation | Not supported (use `gemini-3-pro-image-preview`) |
-| Google Maps grounding | Not supported |
 
-**Input modalities:** Text, Image, Audio, Video, PDF
+[Try in Google AI Studio](https://aistudio.google.com?model=gemini-3.1-flash-image-preview)
 
-**Output modalities:** Text only
+## Documentation
 
-## Breaking changes
+Visit the [Image generation](/gemini-api/docs/image-generation) page for full coverage of features and capabilities.
 
-- **Interactions API:** `total_reasoning_tokens` has been renamed to `total_thought_tokens`. Update any code that references this field.
-- **`thinking_level` vs `thinking_budget`:** Cannot be combined in the same request. Migrate to `thinking_level` for more predictable performance.
+## gemini-3.1-flash-image-preview
 
-## Safety evaluations
+Property | Description  
+---|---  
+id_cardModel code | `gemini-3.1-flash-image-preview`  
+saveSupported data types |  **Inputs** Text and Image / PDF **Output** Image and Text  
+token_autoToken limits[[*]](/gemini-api/docs/tokens) |  **Input token limit** 131,072 **Output token limit** 32,768  
+handymanCapabilities |  **Audio generation** Not supported **Batch API** Supported **Caching** Not supported **Code execution** Not supported **File search** Not supported **Function calling** Not supported **Grounding with Google Maps** Not supported **Image generation** Supported **Live API** Not supported **Search grounding** Supported **Structured outputs** Not supported **Thinking** Supported **URL context** Not supported  
+123Versions |  Read the [model version patterns](/gemini-api/docs/models/gemini#model-versions) for more details.
 
-Compared to Gemini 3 Pro, safety metrics show minimal changes:
+  * `Preview: gemini-3.1-flash-image-preview`
 
-| Category | Change vs 3 Pro |
-|---|---|
-| Text-to-text safety | +0.10% improvement |
-| Multilingual safety | +0.11% improvement |
-| Image-to-text safety | -0.33% (minor regression) |
-| Tone | +0.02% improvement |
-| Unjustified refusals | -0.08% (fewer false refusals) |
-
-All frontier safety critical capability levels (CBRN, Cyber, Harmful
-manipulation, ML R&D, Misalignment) remain below alert thresholds.
-
-## Deprecation notices (concurrent with 3.1 launch)
-
-**Shutting down June 1, 2026:**
-- `gemini-2.0-flash`
-- `gemini-2.0-flash-001`
-- `gemini-2.0-flash-lite`
-- `gemini-2.0-flash-lite-001`
-
-**Already shut down (February 17, 2026):**
-- `gemini-2.5-flash-preview-09-25`
-- `imagen-4.0-generate-preview-06-06`
-- `imagen-4.0-ultra-generate-preview-06-06`
-
-**Model alias updates (January 21, 2026):**
-- `gemini-pro-latest` now routes to `gemini-3-pro-preview`
-
-## Migrating from Gemini 3 Pro
-
-Gemini 3.1 Pro is a drop-in replacement for 3 Pro in most use cases:
-
-- **Model ID:** Change `gemini-3-pro-preview` to `gemini-3.1-pro-preview`.
-- **Thinking:** Try `medium` thinking level for tasks that don't need full reasoning depth — better cost/latency trade-off.
-- **Custom tools:** If the model ignores your custom tools in favor of bash, try `gemini-3.1-pro-preview-customtools`.
-- **Interactions API:** Update `total_reasoning_tokens` references to `total_thought_tokens`.
-- **Everything else:** Pricing, context window, thought signatures, media resolution, and tool support are identical to 3 Pro.
-
-## SDK requirements
-
-- Use the `google-genai` SDK (v1.51.0 or later). The old `google-generativeai` package is deprecated.
-- Latest SDK: v1.64.0 (released February 19, 2026).
-- Install: `pip install -U google-genai` (or `uv add google-genai`).
-
-## Official sources
-
-- [Gemini 3.1 Pro announcement](https://blog.google/innovation-and-ai/models-and-research/gemini-models/gemini-3-1-pro/)
-- [Model card](https://deepmind.google/models/model-cards/gemini-3-1-pro/)
-- [API changelog](https://ai.google.dev/gemini-api/docs/changelog)
-- [Pricing](https://ai.google.dev/gemini-api/docs/pricing)
-- [Models overview](https://ai.google.dev/gemini-api/docs/models)
-- [Gemini 3 series documentation](https://ai.google.dev/gemini-api/docs/gemini-3)
+  
+calendar_monthLatest update | February 2026  
+cognition_2Knowledge cutoff | January 2025  
+  
+Send feedback 

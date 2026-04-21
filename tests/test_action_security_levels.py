@@ -79,7 +79,7 @@ async def test_grillo_allows_medium_if_configured(monkeypatch):
             return ["dream_diary"]
 
     ap._ACTION_PLUGINS = [FakeDiary()]
-    ap.get_supported_action_types = lambda: set(["dream_diary"])
+    monkeypatch.setattr(ap, "get_supported_action_types", lambda: {"dream_diary"})
 
     res = await ap.run_actions(
         [{"type": "dream_diary", "payload": {}}],

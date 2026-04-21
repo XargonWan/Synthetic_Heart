@@ -35,8 +35,10 @@ from core.ai_plugin_base import AIPluginBase
 from core.config_manager import config_registry
 from core.cortex_api_logger import log_cortex_request, log_cortex_response
 from core.logging_utils import log_debug, log_error, log_info, log_warning
+from core.prompt_request import PromptRequest
 
 ENGINE_LABEL = "Generic OpenAPI — connect to any OpenAI-compatible endpoint"
+_LEGACY_DICT_PROMPT_WARNED = False
 
 # ---------------------------------------------------------------------------
 # WebUI variable registration (always visible so keys can be set before use)
@@ -345,7 +347,7 @@ OPENAPI_SUPPORTS_AUDIO = config_registry.get_var(
 
 OPENAPI_SUPPORTS_TOOLS = config_registry.get_var(
     "OPENAPI_SUPPORTS_TOOLS",
-    False,
+    True,  # Enabled by default for native PromptRequest rendering
     label="Enable Tool/Function Calling",
     description="Enable tool/function calling.",
     group="llm",
@@ -599,6 +601,7 @@ class OpenAPIPlugin(AIPluginBase):
     """Generic OpenAPI LLM Engine using OpenAI-compatible REST API."""
 
     display_name = "OpenAPI"
+    supports_prompt_request = True
 
     def __init__(self, notify_fn: Any = None) -> None:
         from core.notifier import set_notifier
@@ -892,9 +895,55 @@ class OpenAPIPlugin(AIPluginBase):
                 except (json.JSONDecodeError, ValueError):
                     pass
 
+            # === Phase 4: PromptRequest native-format path ===
+            # When build_json_prompt() has attached a PromptRequest, use OpenAIRenderer
+            # to produce a native messages list instead of a single JSON blob.
+            _pr: PromptRequest | None = None
+            if isinstance(prompt, PromptRequest):
+                _pr = prompt
+            elif isinstance(prompt, dict):
+                candidate = prompt.get("__prompt_request")
+                if isinstance(candidate, PromptRequest):
+                    _pr = candidate
+            if _pr is not None:
+                from core.prompt_renderers import OpenAIRenderer
+
+                _pr.supports_tool_calling = bool(OPENAPI_SUPPORTS_TOOLS)
+                _mm_parts: list[dict[str, Any]] = []
+                if bool(OPENAPI_SUPPORTS_VISION) or bool(OPENAPI_SUPPORTS_AUDIO):
+                    _mm_parts = self._extract_multimodal_parts(prompt)
+                renderer = OpenAIRenderer(_pr)
+                _messages = (
+                    renderer.render_with_multimodal(
+                        _mm_parts, bool(OPENAPI_SUPPORTS_VISION)
+                    )
+                    if _mm_parts
+                    else renderer.render()
+                )
+                _tools = renderer.tool_schemas()
+                _model = _catalog.get(self._current_model)
+                _max_tok = (
+                    _model.max_completion_tokens
+                    if _model
+                    else int(OPENAPI_DEFAULT_MAX_TOKENS)
+                )
+                return await self._openai_chat_completion_from_messages(
+                    _messages, _tools, _max_tok
+                )
+
+            if isinstance(prompt, dict):
+                global _LEGACY_DICT_PROMPT_WARNED
+                if not _LEGACY_DICT_PROMPT_WARNED:
+                    log_debug(
+                        "[openapi] dict prompt fallback path used (missing __prompt_request)"
+                    )
+                    _LEGACY_DICT_PROMPT_WARNED = True
+
             # Normalize prompt to text
             if isinstance(prompt, dict):
-                prompt_text = json.dumps(prompt, indent=2, ensure_ascii=False)
+                prompt_text = json.dumps(
+                    prompt, ensure_ascii=False, separators=(",", ":")
+                )
             elif isinstance(prompt, str):
                 prompt_text = prompt
             else:
@@ -907,7 +956,9 @@ class OpenAPIPlugin(AIPluginBase):
 
             if isinstance(prompt, dict) and multimodal_parts:
                 redacted = self._copy_and_redact_data(prompt)
-                prompt_text = json.dumps(redacted, indent=2, ensure_ascii=False)
+                prompt_text = json.dumps(
+                    redacted, ensure_ascii=False, separators=(",", ":")
+                )
 
             log_debug(
                 f"[openapi] Sending prompt ({len(prompt_text)} chars) to {self._current_model}"
@@ -921,6 +972,31 @@ class OpenAPIPlugin(AIPluginBase):
                 if model
                 else int(OPENAPI_DEFAULT_MAX_TOKENS)
             )
+
+            if isinstance(prompt, dict):
+                legacy_messages: list[dict[str, Any]] = [
+                    {"role": "system", "content": system_instruction}
+                ]
+                if multimodal_parts:
+                    has_vision = bool(OPENAPI_SUPPORTS_VISION)
+                    content_parts: list[dict[str, Any]] = []
+                    if has_vision:
+                        for part in multimodal_parts:
+                            content_parts.append(part)
+                    else:
+                        log_warning(
+                            f"[openapi] Vision disabled; skipping {len(multimodal_parts)} image part(s)"
+                        )
+                    content_parts.append({"type": "text", "text": prompt_text})
+                    legacy_messages.append({"role": "user", "content": content_parts})
+                else:
+                    legacy_messages.append({"role": "user", "content": prompt_text})
+
+                response_text = await self._openai_chat_completion_from_messages(
+                    legacy_messages, [], max_tokens
+                )
+                log_debug(f"[openapi] Received response ({len(response_text)} chars)")
+                return response_text
 
             response_text = await self._openai_chat_completion(
                 prompt_text=prompt_text,
@@ -1171,6 +1247,131 @@ class OpenAPIPlugin(AIPluginBase):
         )
 
         return content.strip()
+
+    async def _openai_chat_completion_from_messages(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        max_tokens: int,
+    ) -> str:
+        """Send a pre-built messages list to the OpenAI-compat endpoint.
+
+        Used by the Phase-4+ PromptRequest path. Handles both plain text
+        responses and ``tool_calls`` responses (converting the latter back into
+        SyntH's ``{"actions": [...]}`` JSON format via OpenAIRenderer).
+        """
+        from core.prompt_renderers import OpenAIRenderer
+
+        base_url = str(OPENAPI_BASE_URL).strip()
+        _base = base_url.rstrip("/")
+        url = (
+            f"{_base}/v1/chat/completions"
+            if not _base.endswith("/v1")
+            else f"{_base}/chat/completions"
+        )
+
+        payload: dict[str, Any] = {
+            "model": self._current_model,
+            "messages": messages,
+            "max_tokens": max_tokens,
+        }
+        if tools:
+            payload["tools"] = tools
+            payload["tool_choice"] = "auto"
+
+        headers = self._build_headers()
+
+        log_cortex_request(
+            "openapi",
+            model=self._current_model,
+            url=url,
+            headers=headers,
+            payload=payload,
+        )
+        _req_start = time.monotonic()
+
+        def _do_req() -> requests.Response:
+            timeout = int(OPENAPI_TIMEOUT) if OPENAPI_TIMEOUT else 120
+            return requests.post(url, headers=headers, json=payload, timeout=timeout)
+
+        max_attempts = int(OPENAPI_MAX_RETRIES) if OPENAPI_MAX_RETRIES else 3
+
+        def _error_json(msg: str) -> str:
+            return json.dumps(
+                {"actions": [{"type": "system_message", "payload": {"text": msg}}]}
+            )
+
+        response: requests.Response | None = None
+        for attempt in range(max_attempts):
+            try:
+                loop = asyncio.get_event_loop()
+                resp: requests.Response = await loop.run_in_executor(None, _do_req)
+                response = resp
+            except Exception as exc:
+                if attempt < max_attempts - 1:
+                    await asyncio.sleep(min(8, 1 * (2**attempt)))
+                    continue
+                log_error(f"[openapi] HTTP request failed: {exc}")
+                return _error_json(f"OpenAPI HTTP request failed: {exc}")
+
+            if int(resp.status_code) >= 400:  # type: ignore[arg-type]
+                if (
+                    int(resp.status_code) in {429, 500, 503, 504}  # type: ignore[arg-type]
+                    and attempt < max_attempts - 1
+                ):
+                    await asyncio.sleep(min(8, 1 * (2**attempt)))
+                    continue
+                log_error(f"[openapi] HTTP error {resp.status_code}: {resp.text}")
+                return _error_json(f"OpenAPI HTTP error {resp.status_code}")
+            break
+
+        if response is None:
+            return _error_json("OpenAPI HTTP request failed: no response")
+
+        try:
+            data = response.json()
+        except Exception as exc:
+            log_error(f"[openapi] Response JSON parse failed: {exc}")
+            return _error_json("OpenAPI response was not valid JSON")
+
+        if "error" in data:
+            err = data["error"]
+            if isinstance(err, dict):
+                err = err.get("message", str(err))
+            log_error(f"[openapi] API error: {err}")
+            return _error_json(f"OpenAPI endpoint error: {err}")
+
+        choices = data.get("choices") or []
+        if not choices:
+            log_error(
+                f"[openapi] Response missing choices (PromptRequest path): {data}"
+            )
+            return _error_json("OpenAPI response missing choices")
+
+        choice_msg = choices[0].get("message", {})
+        tool_calls = choice_msg.get("tool_calls")
+        if tool_calls:
+            # Convert tool_calls to SyntH actions format
+            result_text = OpenAIRenderer.parse_tool_call_response(data)
+        else:
+            result_text = choice_msg.get("content") or ""
+            if not result_text:
+                log_error(
+                    f"[openapi] Response contained no content (PromptRequest path): {data}"
+                )
+                return _error_json("OpenAPI response contained no content")
+
+        usage = data.get("usage")
+        _elapsed = (time.monotonic() - _req_start) * 1000
+        log_cortex_response(
+            "openapi",
+            model=data.get("model", self._current_model),
+            status=int(getattr(response, "status_code", 0) or 0),
+            body=result_text.strip(),
+            usage=usage,
+            elapsed_ms=_elapsed,
+        )
+        return result_text.strip()
 
     def _build_headers(self) -> dict[str, str]:
         """Build HTTP headers with optional auth and custom headers."""

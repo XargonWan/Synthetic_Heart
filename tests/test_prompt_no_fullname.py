@@ -1,30 +1,18 @@
 import asyncio
-import sys
-import types
 from types import SimpleNamespace
 
-# Create stubs for core.db and aiomysql to avoid DB/LLM dependencies
-sys.modules["aiomysql"] = types.SimpleNamespace()
-
-
-async def get_conn_ctx():
-    class DummyCtx:
-        async def __aenter__(self):
-            return None
-
-        async def __aexit__(self, exc, val, tb):
-            return False
-
-    return DummyCtx()
-
-
-sys.modules["core.db"] = types.SimpleNamespace(get_conn_ctx=get_conn_ctx)
-
-from core.prompt_engine import build_json_prompt
 from core.user_utils import get_user_display_name, get_user_usertag
 
 
-async def _run_test():
+class DummyConnCtx:
+    async def __aenter__(self):
+        return None
+
+    async def __aexit__(self, exc, val, tb):
+        return False
+
+
+async def _run_test(build_json_prompt):
     msg = SimpleNamespace(
         message_id=1,
         chat_id=-1,
@@ -43,5 +31,8 @@ async def _run_test():
     assert payload["source"]["usertag"] == get_user_usertag(msg.from_user)
 
 
-def test_build_prompt_no_fullname():
-    asyncio.run(_run_test())
+def test_build_prompt_no_fullname(monkeypatch):
+    import core.prompt_engine as prompt_engine
+
+    monkeypatch.setattr(prompt_engine, "get_conn_ctx", lambda: DummyConnCtx())
+    asyncio.run(_run_test(prompt_engine.build_json_prompt))

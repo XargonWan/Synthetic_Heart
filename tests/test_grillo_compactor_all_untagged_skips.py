@@ -8,10 +8,15 @@ async def test_all_untagged_batch_skipped(monkeypatch):
     p = GrilloCompactorPlugin()
 
     class DummyCursor:
+        def __init__(self):
+            self.offset = 0
+
         async def execute(self, sql, params=None):
-            pass
+            self.offset = params[2] if params and len(params) >= 3 else 0
 
         async def fetchall(self):
+            if self.offset > 0:
+                return []
             return [
                 {
                     "id": 901,
@@ -55,13 +60,10 @@ async def test_all_untagged_batch_skipped(monkeypatch):
 
     logged = []
     monkeypatch.setattr(
-        "plugins.grillo.grillo_compactor.log_debug",
+        "plugins.grillo.grillo_compactor.log_info",
         lambda msg, *a, **kw: logged.append(str(msg)),
     )
 
     res = await p._run_one_compaction_cycle(dry_run=True)
-    assert res is False
-    assert any(
-        "No tagged candidate memories in this batch; skipping compaction" in m
-        for m in logged
-    )
+    assert res == {"dry_run": True, "results": []}
+    assert any("Skipping entire batch of 2 untagged candidate(s)" in m for m in logged)

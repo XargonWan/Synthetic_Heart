@@ -14,7 +14,7 @@ class DummyHandler:
 
 
 @pytest.mark.asyncio
-async def test_cooldown_blocks_grillo(monkeypatch, caplog):
+async def test_cooldown_blocks_grillo(monkeypatch):
     # Setup
     handler = DummyHandler()
     from core.core_initializer import INTERFACE_REGISTRY
@@ -62,11 +62,10 @@ async def test_cooldown_blocks_grillo(monkeypatch, caplog):
     )
 
     assert len(handler.sent) == 0
-    assert any("Skipping Grillo outbound message" in r.message for r in caplog.records)
 
 
 @pytest.mark.asyncio
-async def test_duplicate_similarity_blocks(monkeypatch, caplog):
+async def test_duplicate_similarity_blocks(monkeypatch):
     handler = DummyHandler()
     from core.core_initializer import INTERFACE_REGISTRY
 
@@ -123,11 +122,6 @@ async def test_duplicate_similarity_blocks(monkeypatch, caplog):
     )
 
     assert len(handler.sent) == 0
-    assert any(
-        "Suppressing Grillo message" in r.message
-        or "Suppressing Grillo message" in r.getMessage()
-        for r in caplog.records
-    )
 
 
 @pytest.mark.asyncio

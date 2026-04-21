@@ -1,0 +1,10 @@
+{
+  "context_servers": {
+    "gemini-api-docs-mcp": {
+      "source": "custom",
+      "type": "http",
+      "url": "https://gemini-api-docs-mcp.dev",
+      "headers": {}
+    }
+  }
+}

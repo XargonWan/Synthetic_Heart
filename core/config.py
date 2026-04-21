@@ -282,13 +282,63 @@ LIVE_PROACTIVE_AUDIO = config_registry.get_var(
     component="cortex_live",
 )
 
+LIVE_THINKING_LEVEL = config_registry.get_var(
+    "LIVE_THINKING_LEVEL",
+    "minimal",
+    label="Live Thinking Level",
+    description=(
+        "Reasoning depth for the Live session. "
+        "'minimal' gives lowest latency; 'high' gives deepest reasoning. "
+        "Applies to Gemini 3.1 Flash Live; legacy 2.5 model uses LIVE_THINKING_BUDGET."
+    ),
+    group="core",
+    component="cortex_live",
+)
+
+_register_exposed_var(
+    "LIVE_THINKING_LEVEL",
+    label="Live Thinking Level",
+    default="minimal",
+    value_type=str,
+    ui_type="select",
+    options=["minimal", "low", "medium", "high"],
+    description=(
+        "Reasoning depth for the Live session. "
+        "'minimal' gives lowest latency; 'high' gives deepest reasoning."
+    ),
+    scope="live",
+    component="cortex_live",
+)
+
+# Legacy config kept for users on the 2.5 fallback model (affective/proactive sessions).
 LIVE_THINKING_BUDGET = config_registry.get_var(
     "LIVE_THINKING_BUDGET",
     0,
-    label="Thinking Budget",
-    description="Internal reasoning tokens before responding (0 = disabled).",
+    label="Live Thinking Budget (legacy 2.5)",
+    description=(
+        "Internal reasoning token budget for the legacy Gemini 2.5 Live model. "
+        "Only used when affective dialog or proactive audio is enabled. "
+        "0 = disabled."
+    ),
     group="core",
     component="cortex_live",
+    hidden=True,
+)
+
+LIVE_AUDIO_MIN_RMS = config_registry.get_var(
+    "LIVE_AUDIO_MIN_RMS",
+    500,
+    label="Live Audio Noise Gate (RMS)",
+    description=(
+        "Minimum RMS amplitude required before a Discord audio packet is forwarded "
+        "to the Live API. Packets below this threshold are silently discarded, "
+        "preventing mic hiss / background noise from triggering activity_start and "
+        "causing the model to transcribe garbage. Typical ambient noise sits around "
+        "100–300; speech is usually above 500. Set to 0 to disable the gate."
+    ),
+    group="core",
+    component="cortex_live",
+    value_type=int,
 )
 
 # --- LogChat configuration (use config_registry so exposed-variable APIs are consistent)
@@ -331,49 +381,67 @@ async def get_active_cortex_engine(scope: str | None = None) -> str:
     """
     try:
         base = config_registry.get_value("BASE_CORTEX", "")
+        override_key: str | None = None
         if scope == "grillo":
-            override = config_registry.get_value("GRILLO_CORTEX", "Default")
+            override_key = "GRILLO_CORTEX"
         elif scope == "trainer":
-            override = config_registry.get_value("TRAINER_CORTEX", "Default")
+            override_key = "TRAINER_CORTEX"
         elif scope == "live":
-            override = config_registry.get_value("LIVE_CORTEX", "Default")
+            override_key = "LIVE_CORTEX"
         else:
-            override = "Default"
+            override_key = None
 
-        chosen = base if override in (None, "", "Default", "None") else override
+        override = (
+            config_registry.get_value(override_key, "Default")
+            if override_key is not None
+            else "Default"
+        )
+
+        use_override = override_key is not None and override not in (
+            None,
+            "",
+            "Default",
+            "None",
+        )
+
+        chosen = override if use_override else base
         if not chosen:
             raise ValueError("BASE_CORTEX is not configured")
 
         from core.cortex_registry import get_cortex_registry
 
         reg = get_cortex_registry()
-        if chosen not in reg.get_available_engines():
+        available = set(reg.get_available_engines())
+        if chosen not in available:
             # Stale engine name in DB (e.g. removed engine from a previous branch).
             # Fall back to the registry default rather than leaving the system broken.
-            try:
-                fallback = reg.get_default_engine()
-            except ValueError:
-                raise ValueError(f"Cortex engine '{chosen}' is not registered")
+            updates: list[tuple[str, str]] = []
+            if use_override and override_key is not None and base in available:
+                fallback = base
+                updates.append((override_key, "Default"))
+            else:
+                try:
+                    fallback = reg.get_default_engine()
+                except ValueError:
+                    raise ValueError(f"Cortex engine '{chosen}' is not registered")
+                if use_override and override_key is not None:
+                    updates.append((override_key, "Default"))
+                if base != fallback:
+                    updates.append(("BASE_CORTEX", fallback))
+
+            stale_key = override_key if use_override and override_key else "BASE_CORTEX"
             log_warning(
                 f"[config] ⚠️ Cortex engine '{chosen}' is no longer registered. "
                 f"Falling back to '{fallback}'. "
-                f"Update {'BASE_CORTEX' if scope is None else scope.upper() + '_CORTEX'} to silence this warning."
+                f"Update {stale_key} to silence this warning."
             )
-            # Persist the corrected value to the right config key.
-            # When the stale name came from a scope override (TRAINER_CORTEX,
-            # GRILLO_CORTEX, LIVE_CORTEX), reset that scope key to 'Default' so
-            # it falls through to BASE_CORTEX — do NOT touch BASE_CORTEX.
-            # When the stale name is BASE_CORTEX itself (scope is None), update
-            # BASE_CORTEX to the fallback.
             try:
-                if scope is None:
-                    await config_registry.set_value("BASE_CORTEX", fallback)
-                elif scope == "trainer":
-                    await config_registry.set_value("TRAINER_CORTEX", "Default")
-                elif scope == "grillo":
-                    await config_registry.set_value("GRILLO_CORTEX", "Default")
-                elif scope == "live":
-                    await config_registry.set_value("LIVE_CORTEX", "Default")
+                seen_keys: set[str] = set()
+                for key, value in updates:
+                    if key in seen_keys:
+                        continue
+                    seen_keys.add(key)
+                    await config_registry.set_value(key, value)
             except Exception:
                 pass
             chosen = fallback

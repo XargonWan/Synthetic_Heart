@@ -24,7 +24,7 @@ class TestComponentLoading(unittest.TestCase):
         from core.core_initializer import core_initializer
 
         core_initializer.loaded_plugins = []
-        core_initializer.active_interfaces = {}
+        core_initializer.active_interfaces = []
 
         # Mock all external dependencies
         self.db_patcher = patch("core.db.get_conn", new_callable=AsyncMock)

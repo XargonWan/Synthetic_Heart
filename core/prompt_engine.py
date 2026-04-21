@@ -1,6 +1,10 @@
 # core/prompt_engine.py
 
+import base64
+import mimetypes
 import random
+import re
+import time as time_module
 
 from core.db import get_conn_ctx
 from core.synth_tagging import extract_tags, expand_tags
@@ -8,15 +12,75 @@ from core.logging_utils import log_debug, log_info, log_warning, log_error
 from core.json_utils import dumps as json_dumps, redact_multimodal_for_logging
 from core.config_manager import config_registry
 from core.user_utils import get_user_display_name, get_user_usertag
-from datetime import datetime, time
+from datetime import datetime, timezone
 import os
 import asyncio
+from typing import Any, cast
+
+# Lazily imported to avoid circular deps at module load time
+# from core.prompt_request import PromptRequest, Turn, RuntimeContext, Attachment
+
+
+# ---------------------------------------------------------------------------
+# Turn parsing — convert formatted history strings to Turn objects
+# ---------------------------------------------------------------------------
+
+# Matches: [timestamp] SenderName [optional reply]: "content"
+# Handles optional [from path] prefix. Deliberately does NOT match:
+#   [diary timestamp] ...   (diary entries — no space inside timestamp brackets)
+#   [thought timestamp] ... (thoughts)
+if not hasattr(re, "_TURN_PARSE_RE_SENTINEL"):
+    _TURN_PARSE_RE = re.compile(
+        r"^(?:\[from\s[^\]]*\]\s+)?"  # optional [from ...] prefix
+        r"\[[^\s\]]+\]\s+"  # [timestamp] — NO spaces inside brackets
+        r'([^:\["]+?)'  # sender name (group 1)
+        r"(?:\s+\[replied to [^\]]+\])?"  # optional reply annotation
+        r':\s+"(.*)"$',  # : "content" (group 2)
+        re.DOTALL,
+    )
+else:  # pragma: no cover
+    _TURN_PARSE_RE = re.compile(r"(?!)")  # no-op fallback
 
 # Default maximum prompt characters (CHARACTERS, NOT TOKENS)
 # This is used as a safe fallback when no LLM engine provides explicit limits.
 # The actual value comes from the active LLM engine's configuration.
 # For model limits, see the individual cortex/llm_provider/* engines, e.g. MODEL_LIMITS_MAP["default"]
 DEFAULT_MAX_PROMPT_CHARS = None  # Will be set dynamically from LLM engine
+
+_ATTACHMENT_TEXT_CHAR_LIMIT = 12000
+_PDF_PAGE_IMAGE_LIMIT = 4
+_ATTACHMENT_TEXT_MIME_TYPES = {
+    "application/json",
+    "application/xml",
+    "application/javascript",
+    "application/x-javascript",
+}
+_ATTACHMENT_TEXT_EXTENSIONS = (
+    ".txt",
+    ".md",
+    ".csv",
+    ".log",
+    ".json",
+    ".xml",
+    ".yaml",
+    ".yml",
+    ".toml",
+    ".ini",
+    ".cfg",
+    ".conf",
+    ".py",
+    ".js",
+    ".ts",
+    ".html",
+    ".css",
+    ".sh",
+    ".bat",
+    ".rst",
+    ".tex",
+    ".sql",
+)
+
+_LEGACY_BUILD_JSON_PROMPT_WARNED = False
 
 # Chat history limit
 CHAT_HISTORY_LIMIT = config_registry.get_var(
@@ -25,7 +89,7 @@ CHAT_HISTORY_LIMIT = config_registry.get_var(
     label="Chat History Length",
     description="Number of recent messages to include in chat history context.",
     group="core",
-    component="prompt_engine",
+    component="conversation",
     value_type=int,
 )
 
@@ -47,8 +111,18 @@ DIARY_HISTORY_DAYS = config_registry.get_var(
     label="Diary History Days",
     description="Number of days of AI diary history to include in context.",
     group="core",
-    component="prompt_engine",
+    component="diary",
     value_type=int,
+)
+
+INCLUDE_LOCAL_TIME_IN_PROMPTS = config_registry.get_var(
+    "INCLUDE_LOCAL_TIME_IN_PROMPTS",
+    True,
+    label="Include local time in prompts",
+    description="Whether to add authoritative local date, time, hour, and time-of-day fields to prompt payloads.",
+    group="core",
+    component="prompt_engine",
+    value_type=bool,
 )
 
 
@@ -111,6 +185,613 @@ def minify_actions_block(
     return minified
 
 
+def _memory_merge_key(memory: Any) -> str:
+    if isinstance(memory, dict):
+        source = memory.get("source")
+        item_id = memory.get("id")
+        snippet = (
+            memory.get("snippet") or memory.get("content") or memory.get("summary")
+        )
+        return f"{source}::{item_id}::{snippet}"
+    return str(memory)
+
+
+def _merge_memory_entries(existing: list[Any], incoming: list[Any]) -> list[Any]:
+    merged = list(existing or [])
+    seen = {_memory_merge_key(item) for item in merged}
+    for item in incoming or []:
+        item_key = _memory_merge_key(item)
+        if item_key in seen:
+            continue
+        merged.append(item)
+        seen.add(item_key)
+    return merged
+
+
+_EXPLICIT_RUNTIME_FACT_REQUEST_RE = re.compile(
+    r"(?ix)\b("
+    r"what(?:'s| is)?\s+(?:the\s+)?(?:time|date|day|timezone|location|weather)\b|"
+    r"(?:what|which)\s+(?:day|date|time|timezone|city)\b|"
+    r"where\s+(?:am|are)\b|"
+    r"current\s+(?:time|date|location|weather)\b|"
+    r"local\s+(?:time|date|timezone)\b|"
+    r"\b(?:schedule|scheduling|appointment|meeting|eta|arrive|arrival|depart|departure)\b"
+    r")"
+)
+
+
+def _turn_requests_explicit_runtime_facts(text: str | None) -> bool:
+    """Return True when the current turn needs exact time/date/location facts."""
+
+    candidate = str(text or "").strip()
+    if not candidate:
+        return False
+    return bool(_EXPLICIT_RUNTIME_FACT_REQUEST_RE.search(candidate))
+
+
+# ---------------------------------------------------------------------------
+# PromptRequest assembly helpers (added in Phase 1 of the prompt rewrite)
+# ---------------------------------------------------------------------------
+
+
+def _build_context_summary(
+    context_section: dict[str, Any],
+    is_grillo_internal: bool = False,
+    include_explicit_runtime_facts: bool = False,
+) -> str:
+    """Format moderately-stable context parts into a plain text block.
+
+    Includes: ambient runtime context, cross-chat history (history_recent),
+    diary thoughts, tag-matched memories, participant bios.  Does NOT include
+    ``history_current_chat`` (which becomes ``PromptRequest.conversation_history``)
+    or fully-dynamic runtime values (current emotion values → ``RuntimeContext.emotions``).
+
+    For Grillo internal beats (is_grillo_internal=True), this returns a MINIMAL
+    context with only persona and optionally recent diary entries — no cross-chat
+    history, no participant bios, minimal memories.
+    """
+    parts: list[str] = []
+
+    # Keep runtime facts in the background for ordinary chat turns. Exact values
+    # are only surfaced when the current turn explicitly needs them.
+    _date_val: str = str(context_section.get("date") or "").strip()
+    _time_val: str = str(context_section.get("time") or "").strip()
+    _time_of_day_val: str = str(context_section.get("time_of_day") or "").strip()
+    _loc_val: str = str(context_section.get("location") or "").strip()
+    _time_lines: list[str] = []
+    if _date_val or _time_val or _time_of_day_val or _loc_val:
+        _time_lines.append(
+            "Use these runtime facts only when they matter for scheduling, logistics, time-sensitive reasoning, or natural scene-setting."
+        )
+        _time_lines.append(
+            "Do not quote them verbatim in ordinary replies unless the user asked for them or they are genuinely necessary."
+        )
+    if include_explicit_runtime_facts:
+        if _date_val:
+            _time_lines.append(f"Current date: {_date_val}")
+        if _time_val:
+            _time_lines.append(f"Current local time: {_time_val}")
+        if _loc_val:
+            _time_lines.append(f"Current local setting: {_loc_val}")
+    elif _time_of_day_val:
+        _time_lines.append(f"Current part of day: {_time_of_day_val}.")
+    elif _date_val or _time_val or _loc_val:
+        _time_lines.append(
+            "Exact local date, time, and location are available to the system when needed, but should stay in the background for ordinary replies."
+        )
+    if _time_lines:
+        parts.append("[Ambient runtime context]\n" + "\n".join(_time_lines))
+
+    persona_preferences = str(context_section.get("persona_preferences") or "").strip()
+    if persona_preferences:
+        parts.append("[Persona background]\n" + persona_preferences)
+
+    # Grillo internal beats skip cross-chat history and participants
+    if not is_grillo_internal:
+        history_recent: list[Any] = context_section.get("history_recent") or []
+        if history_recent:
+            parts.append("[Recent context from other conversations]")
+            for line in history_recent:
+                parts.append(f"- {line}")
+
+    thoughts: list[Any] = context_section.get("thoughts") or []
+    if not is_grillo_internal:
+        # Grillo internal beats skip recent diary thoughts
+        if thoughts:
+            parts.append("[Thoughts and diary entries]")
+            for t in thoughts:
+                parts.append(f"- {t}")
+
+    memories: list[Any] = context_section.get("memories") or []
+    if not is_grillo_internal:
+        # Grillo internal beats use minimal memories (top 1-2 only)
+        parts.append("[Relevant memories]")
+        for m in memories[:2]:  # Limit to 2 most recent for Grillo
+            snippet = str(m)
+            if len(snippet) > 400:
+                snippet = snippet[:400] + "\u2026"
+            parts.append(f"- {snippet}")
+    elif is_grillo_internal and memories:
+        # Grillo internal beats show only minimal memory indicator
+        parts.append(f"[{len(memories)} relevant memories available]")
+
+    participants: Any = context_section.get("participants")
+    # Grillo internal beats skip participant bios entirely
+    if not is_grillo_internal and participants:
+        if isinstance(participants, list):
+            lines: list[str] = []
+            for p in participants:
+                if not isinstance(p, dict):
+                    continue
+                tag = str(p.get("usertag") or p.get("username") or "?")
+                bio = str(p.get("short_bio") or "")
+                nicks = p.get("nicknames")
+                nick_str = (
+                    f" (also: {', '.join(nicks)})"
+                    if isinstance(nicks, list) and nicks
+                    else ""
+                )
+                feelings = p.get("feelings")
+                feel_str = (
+                    f" [feels: {', '.join(str(f) for f in feelings)}]"
+                    if isinstance(feelings, list) and feelings
+                    else ""
+                )
+                if bio:
+                    lines.append(f"- {tag}{nick_str}: {bio}{feel_str}")
+            if lines:
+                parts.append("[People in this conversation]")
+                parts.extend(lines)
+        elif isinstance(participants, str) and participants:
+            parts.append("[People in this conversation]")
+            parts.append(participants)
+
+    return "\n".join(parts)
+
+
+def _history_to_turns(
+    history_lines: list[Any],
+    synth_names: set[str],
+) -> list[Any]:  # list[Turn] — import deferred to avoid circular dep at module load
+    """Convert formatted history strings produced by HistoryEngine into Turn objects.
+
+    Entries that cannot be parsed (diary lines, malformed lines) are silently
+    skipped so they do not end up as junk turns.
+
+    Args:
+        history_lines: Lines from ``context_section["history_current_chat"]``.
+        synth_names:   Lower-cased set of Synth name + aliases for role detection.
+
+    Returns:
+        List of ``Turn`` objects; may be empty.
+    """
+    from core.prompt_request import Turn
+
+    # "self" is the canonical sender_name for the AI in history format
+    all_synth_names = synth_names | {"self"}
+
+    turns: list[Turn] = []
+    for line in history_lines:
+        if not isinstance(line, str):
+            continue
+        m = _TURN_PARSE_RE.match(line)
+        if not m:
+            continue
+        sender = m.group(1).strip()
+        content = m.group(2)
+        role = "assistant" if sender.lower() in all_synth_names else "user"
+        turns.append(Turn(role=role, content=content))
+    return turns
+
+
+def _build_pr_attachments(
+    image_data: dict[str, Any] | None,
+    raw_attachments: list[Any] | None,
+) -> list[Any]:  # list[Attachment] — import deferred
+    """Convert image_data and raw attachments dicts into Attachment objects."""
+    from core.prompt_request import Attachment
+
+    result: list[Attachment] = []
+
+    if isinstance(image_data, dict):
+        # Legacy single-image dict from image_processor
+        img_bytes = image_data.get("data") or (image_data.get("image_data") or {}).get(
+            "data"
+        )
+        mime = image_data.get("mime_type") or "image/jpeg"
+        meta = {k: v for k, v in image_data.items() if k not in ("data",)}
+        result.append(Attachment(mime_type=mime, data=img_bytes, media_metadata=meta))
+
+    for att in raw_attachments or []:
+        if not isinstance(att, dict):
+            continue
+        mime_type = att.get("mime_type") or "application/octet-stream"
+        filename = att.get("filename")
+        media_metadata = dict(att.get("media_metadata") or {})
+        extracted_text = media_metadata.get("extracted_text")
+        if not isinstance(extracted_text, str) or not extracted_text.strip():
+            extracted_text, was_truncated = _extract_attachment_text_preview(
+                mime_type=mime_type,
+                filename=filename,
+                data=att.get("data"),
+            )
+            if extracted_text:
+                media_metadata["extracted_text"] = extracted_text
+                if was_truncated:
+                    media_metadata["extracted_text_truncated"] = True
+            elif mime_type == "application/pdf" or str(filename or "").lower().endswith(
+                ".pdf"
+            ):
+                page_images, page_images_truncated = _extract_pdf_page_images(
+                    filename=filename,
+                    data=att.get("data"),
+                )
+                if page_images:
+                    media_metadata["page_images"] = page_images
+                    if page_images_truncated:
+                        media_metadata["page_images_truncated"] = True
+        result.append(
+            Attachment(
+                mime_type=mime_type,
+                data=att.get("data"),
+                filename=filename,
+                media_metadata=media_metadata,
+            )
+        )
+
+    return result
+
+
+def _extract_attachment_text_preview(
+    mime_type: str | None,
+    filename: str | None,
+    data: Any,
+) -> tuple[str | None, bool]:
+    """Extract a bounded text preview from textual or PDF attachments."""
+
+    mime = str(mime_type or "").lower()
+    filename_lower = str(filename or "").lower()
+
+    raw_bytes = _coerce_attachment_bytes(data)
+    if not raw_bytes:
+        return None, False
+
+    is_pdf = mime == "application/pdf" or filename_lower.endswith(".pdf")
+    is_textual = mime.startswith("text/") or mime in _ATTACHMENT_TEXT_MIME_TYPES
+    if not is_textual and filename_lower:
+        is_textual = filename_lower.endswith(_ATTACHMENT_TEXT_EXTENSIONS)
+
+    if is_pdf:
+        try:
+            from io import BytesIO
+
+            from pypdf import PdfReader
+
+            reader = PdfReader(BytesIO(raw_bytes))
+            page_chunks: list[str] = []
+            for page_num, page in enumerate(reader.pages, start=1):
+                page_text = str(page.extract_text() or "").strip()
+                if not page_text:
+                    continue
+                page_chunks.append(f"[Page {page_num}]\n{page_text}")
+                joined = "\n\n".join(page_chunks)
+                if len(joined) >= _ATTACHMENT_TEXT_CHAR_LIMIT:
+                    return _truncate_attachment_text(joined)
+
+            if page_chunks:
+                return _truncate_attachment_text("\n\n".join(page_chunks))
+        except Exception as exc:
+            log_warning(
+                f"[prompt_engine] Failed to extract PDF text from {filename or 'attachment'}: {exc}"
+            )
+        return None, False
+
+    if not is_textual:
+        return None, False
+
+    text = raw_bytes.decode("utf-8", errors="replace").strip()
+    if not text:
+        return None, False
+    return _truncate_attachment_text(text)
+
+
+def _extract_pdf_page_images(
+    filename: str | None,
+    data: Any,
+) -> tuple[list[dict[str, str]], bool]:
+    """Extract up to a small number of page images from a scanned PDF."""
+
+    raw_bytes = _coerce_attachment_bytes(data)
+    if not raw_bytes:
+        return [], False
+
+    try:
+        from io import BytesIO
+
+        from pypdf import PdfReader
+
+        reader = PdfReader(BytesIO(raw_bytes))
+        stem = os.path.splitext(filename or "document")[0] or "document"
+        images: list[dict[str, str]] = []
+        truncated = False
+
+        for page_num, page in enumerate(reader.pages, start=1):
+            if len(images) >= _PDF_PAGE_IMAGE_LIMIT:
+                truncated = True
+                break
+
+            try:
+                page_images = list(page.images)
+            except Exception as exc:
+                log_debug(
+                    f"[prompt_engine] Failed to inspect PDF page images for {filename or 'attachment'} page {page_num}: {exc}"
+                )
+                continue
+
+            if not page_images:
+                continue
+
+            # Prefer the largest image on the page; scanned PDFs typically have
+            # one dominant full-page raster image.
+            page_image = max(
+                page_images,
+                key=lambda candidate: len(getattr(candidate, "data", b"") or b""),
+            )
+            image_bytes = getattr(page_image, "data", b"") or b""
+            if not isinstance(image_bytes, bytes) or not image_bytes:
+                continue
+
+            image_name = str(getattr(page_image, "name", "") or "")
+            image_mime = _guess_binary_mime_type(image_name, image_bytes)
+            if not image_mime.startswith("image/"):
+                continue
+
+            ext = mimetypes.guess_extension(image_mime) or ".bin"
+            images.append(
+                {
+                    "mime_type": image_mime,
+                    "data": base64.b64encode(image_bytes).decode("ascii"),
+                    "filename": f"{stem}_page_{page_num}{ext}",
+                }
+            )
+
+        return images, truncated
+    except Exception as exc:
+        log_warning(
+            f"[prompt_engine] Failed to extract PDF page images from {filename or 'attachment'}: {exc}"
+        )
+        return [], False
+
+
+def _coerce_attachment_bytes(data: Any) -> bytes | None:
+    """Best-effort decode for attachment payloads stored as raw bytes or base64."""
+
+    if isinstance(data, bytes):
+        return data
+    if isinstance(data, bytearray):
+        return bytes(data)
+    if not isinstance(data, str) or not data:
+        return None
+
+    try:
+        return base64.b64decode(data, validate=True)
+    except Exception:
+        return data.encode("utf-8", errors="replace")
+
+
+def _guess_binary_mime_type(filename: str | None, data: bytes) -> str:
+    """Infer a MIME type from filename and common binary signatures."""
+
+    guessed, _ = mimetypes.guess_type(filename or "")
+    if guessed:
+        return guessed
+
+    signatures: tuple[tuple[bytes, str], ...] = (
+        (b"\x89PNG\r\n\x1a\n", "image/png"),
+        (b"\xff\xd8\xff", "image/jpeg"),
+        (b"GIF87a", "image/gif"),
+        (b"GIF89a", "image/gif"),
+        (b"BM", "image/bmp"),
+        (b"II*\x00", "image/tiff"),
+        (b"MM\x00*", "image/tiff"),
+        (b"RIFF", "image/webp"),
+    )
+    for prefix, mime_type in signatures:
+        if data.startswith(prefix):
+            if mime_type == "image/webp" and len(data) >= 12 and data[8:12] != b"WEBP":
+                continue
+            return mime_type
+    return "application/octet-stream"
+
+
+def _truncate_attachment_text(text: str) -> tuple[str | None, bool]:
+    """Trim extracted attachment text to a prompt-safe bound."""
+
+    cleaned = text.strip()
+    if not cleaned:
+        return None, False
+    if len(cleaned) <= _ATTACHMENT_TEXT_CHAR_LIMIT:
+        return cleaned, False
+    return cleaned[:_ATTACHMENT_TEXT_CHAR_LIMIT].rstrip() + "\n[... truncated]", True
+
+
+def _assemble_prompt_request(  # noqa: PLR0913
+    prompt_dict: dict[str, Any],
+    context_section: dict[str, Any],
+    text: str,
+    interface_name: str | None,
+    interface_path: str | None,
+    message: Any,
+    is_grillo_internal: bool,
+    beat_type: str,
+    is_voice_input: bool,
+    resolved_language: str | None,
+    resolved_message_tone: str | None,
+    image_data: dict[str, Any] | None,
+    attachments: list[Any] | None,
+    allowed_action_types: set[str] | None,
+) -> Any:  # -> PromptRequest
+    """Build a ``PromptRequest`` from the fully-assembled prompt data.
+
+    Called at the end of ``build_prompt_request()`` so engines can opt-in to the
+    new typed representation without changing existing behaviour.
+
+    All parameters are extracted from the local scope of ``build_prompt_request()``.
+    None of the heavy async work is repeated here.
+    """
+    from core.prompt_request import Attachment, PromptRequest, RuntimeContext, Turn  # noqa: F401
+
+    # ── System instruction ──────────────────────────────────────────────────
+    # Prefer verbose (persona + rules); fall back to minified instructions.
+    system_instruction: str = (
+        prompt_dict.get("instructions_verbose") or prompt_dict.get("instructions") or ""
+    )
+
+    # Keep stable emotion taxonomy/instructions in the system block, not context_summary.
+    available_emotions: Any = context_section.get("available_emotions")
+    if available_emotions:
+        if isinstance(available_emotions, list):
+            _emotion_types = ", ".join(str(e) for e in available_emotions)
+        else:
+            _emotion_types = str(available_emotions)
+        if _emotion_types.strip():
+            system_instruction = (
+                f"{system_instruction}\n\n"
+                "AVAILABLE EMOTION TYPES: "
+                f"{_emotion_types}. "
+                "Adjust emotional state via structured actions only "
+                "(prefer update_emotion_state with an emotions map)."
+            )
+
+    # ── Context summary ─────────────────────────────────────────────────────
+    context_summary: str = _build_context_summary(
+        context_section,
+        is_grillo_internal=is_grillo_internal,
+        include_explicit_runtime_facts=(
+            is_grillo_internal or _turn_requests_explicit_runtime_facts(text)
+        ),
+    )
+
+    # ── Conversation history ─────────────────────────────────────────────────
+    # Grillo internal beats have no ongoing conversation history.
+    if is_grillo_internal:
+        conversation_history: list[Turn] = []
+    else:
+        try:
+            synth_name: str = str(
+                config_registry.get_value("SYNTH_NAME", "SyntH") or "SyntH"
+            )
+            aliases_raw: str = str(config_registry.get_value("SYNTH_ALIASES", "") or "")
+            synth_names: set[str] = {synth_name.lower()}
+            for alias in aliases_raw.split(","):
+                a = alias.strip()
+                if a:
+                    synth_names.add(a.lower())
+        except Exception:
+            synth_names = {"synth"}
+
+        history_lines: list[Any] = context_section.get("history_current_chat") or []
+        conversation_history = _history_to_turns(history_lines, synth_names)
+
+    # ── Runtime context ─────────────────────────────────────────────────────
+    try:
+        msg_timestamp: str | None = None
+        msg_date = getattr(message, "date", None)
+        if msg_date:
+            msg_timestamp = msg_date.isoformat()
+    except Exception:
+        msg_timestamp = None
+
+    # Override with local date+time from time_plugin injections (authoritative local time).
+    _ctx_date = str(context_section.get("date") or "").strip()
+    _ctx_time = str(context_section.get("time") or "").strip()
+    _ctx_time_of_day = str(context_section.get("time_of_day") or "").strip()
+    if _ctx_date or _ctx_time:
+        msg_timestamp = " ".join(p for p in [_ctx_date, _ctx_time] if p)
+
+    from_user = getattr(message, "from_user", None)
+    username: str | None = get_user_display_name(from_user) if from_user else None
+    usertag: str | None = get_user_usertag(from_user) if from_user else None
+    message_id: int | str | None = getattr(message, "message_id", None)
+    try:
+        runtime_message_id = int(message_id) if message_id is not None else None
+    except (TypeError, ValueError):
+        runtime_message_id = None
+
+    voice_channel_id_val = context_section.get("voice_channel_id")
+    voice_channel_id_str: str | None = (
+        str(voice_channel_id_val) if voice_channel_id_val else None
+    )
+
+    emotions_nl: str | None = context_section.get("current_emotions_nl") or None
+
+    # Effective scope: use context_section's recorded scope or default to "local"
+    scope: str = str(context_section.get("history_scope") or "local")
+
+    runtime_ctx = RuntimeContext(
+        interface_name=interface_name,
+        interface_path=interface_path,
+        message_id=runtime_message_id,
+        username=username,
+        usertag=usertag,
+        timestamp=msg_timestamp,
+        time_of_day=_ctx_time_of_day or None,
+        input_source="voice" if is_voice_input else "text",
+        emotions=emotions_nl,
+        scope=scope,
+        language=resolved_language,
+        tone=resolved_message_tone,
+        voice_channel_id=voice_channel_id_str,
+        is_grillo_beat=is_grillo_internal,
+        beat_type=beat_type or None,
+    )
+
+    # ── Tool declarations ────────────────────────────────────────────────────
+    tool_declarations: list[Any] = []
+    try:
+        from core.live_tool_registry import LiveToolRegistry
+        from core.core_initializer import core_initializer
+
+        raw_actions: dict[str, Any] = dict(
+            core_initializer.actions_block.get("available_actions", {}) or {}
+        )
+        if allowed_action_types is not None:
+            raw_actions = {
+                k: v for k, v in raw_actions.items() if k in allowed_action_types
+            }
+        tool_declarations = LiveToolRegistry.build_manifests_from_actions(raw_actions)
+    except Exception as _td_exc:
+        log_debug(f"[json_prompt] tool_declarations build skipped: {_td_exc}")
+
+    # ── Reply context ────────────────────────────────────────────────────────
+    reply_to_dict: dict[str, Any] | None = None
+    try:
+        rply = prompt_dict.get("input", {}).get("payload", {}).get("reply_message_id")
+        if isinstance(rply, dict):
+            reply_to_dict = rply
+    except Exception:
+        pass
+
+    # ── Attachments ─────────────────────────────────────────────────────────
+    pr_attachments = _build_pr_attachments(image_data, attachments)
+
+    # ── Determine mode ───────────────────────────────────────────────────────
+    mode: str = "grillo" if is_grillo_internal else "chat"
+
+    return PromptRequest(
+        system_instruction=system_instruction,
+        tool_declarations=tool_declarations,
+        context_summary=context_summary,
+        conversation_history=conversation_history,
+        current_text=text,
+        runtime_ctx=runtime_ctx,
+        attachments=pr_attachments,
+        reply_to=reply_to_dict,
+        supports_tool_calling=False,  # engines set this when they opt-in
+        mode=mode,
+    )
+
+
 def _apply_lite_context_stripping(prompt: dict) -> dict:
     """Strip redundant prompt sections for lite mode.
 
@@ -136,7 +817,7 @@ def _apply_lite_context_stripping(prompt: dict) -> dict:
     return prompt
 
 
-async def build_json_prompt(
+async def build_prompt_request(
     message,
     context_memory,
     interface_name: str | None = None,
@@ -145,7 +826,7 @@ async def build_json_prompt(
     max_chars: int | None = None,
     history_scope: str | None = None,
 ) -> dict:
-    """Build the JSON prompt expected by plugins.
+    """Build the prompt payload expected by plugins.
 
     Parameters
     ----------
@@ -171,6 +852,14 @@ async def build_json_prompt(
 
     interface_path = getattr(message, "interface_path", None)
     text = getattr(message, "text", "") or ""
+    allowed_action_types_for_prompt: set[str] | None = None
+
+    if isinstance(context_memory, dict):
+        scoped_actions = context_memory.get(
+            "allowed_action_types"
+        ) or context_memory.get("allowed_actions")
+        if isinstance(scoped_actions, (list, set, tuple)):
+            allowed_action_types_for_prompt = {str(a) for a in scoped_actions if a}
 
     # Determine if context_memory is a chat history map or a context dict
     # Context dicts have keys like 'interface_path', 'system_message', etc.
@@ -269,19 +958,7 @@ async def build_json_prompt(
                     recon_instructions.append(str(c.get("content")))
 
         if recon_memories:
-            # Deduplicate by snippet/id
-            existing = set()
-            for m in memories:
-                if isinstance(m, dict):
-                    key = f"{m.get('source')}::{m.get('id')}::{m.get('snippet')}"
-                else:
-                    key = str(m)
-                existing.add(key)
-            for m in recon_memories:
-                key = f"{m.get('source')}::{m.get('id')}::{m.get('snippet')}"
-                if key not in existing:
-                    memories.append(m)
-                    existing.add(key)
+            memories = _merge_memory_entries(memories, recon_memories)
 
         resolved_language = await resolve_language(
             contributions=recon_contributions,
@@ -308,7 +985,7 @@ async def build_json_prompt(
             effective_history_scope = context_memory.get("history_scope")
 
         history_engine = HistoryEngine()
-        context_section = await history_engine.build_context(
+        context_section: dict[str, Any] = await history_engine.build_context(
             message=message,
             context_memory=context_memory,
             interface_name=interface_name,
@@ -322,6 +999,7 @@ async def build_json_prompt(
         )
         context_section = {"memories": memories}
 
+    # history_scope is embedded in the input_payload "scope" field built below.
     # === 3. Recon contributions (prompt 0) ===
     # Note: raw contributions are NOT included — their memories are already
     # merged into the top-level `memories` list.  Only metadata is kept.
@@ -356,6 +1034,10 @@ async def build_json_prompt(
                     f"[json_prompt] 👤 Extracted persona for instructions ({len(static_persona) if static_persona else 0} chars)"
                 )
 
+            soul_recalled_memories = injections.pop("soul_recalled_memories", [])
+            if not isinstance(soul_recalled_memories, list):
+                soul_recalled_memories = [soul_recalled_memories]
+
             # Add remaining injections to context (but drop deprecated legacy keys)
             context_section.update(injections)
             # Deprecated (migrated to HistoryEngine)
@@ -368,6 +1050,11 @@ async def build_json_prompt(
             ):
                 if legacy_key in context_section:
                     context_section.pop(legacy_key, None)
+            if soul_recalled_memories:
+                context_section["memories"] = _merge_memory_entries(
+                    list(context_section.get("memories") or []),
+                    soul_recalled_memories,
+                )
             log_info(
                 f"[json_prompt] ✅ Updated context_section with injections. Keys now: {list(context_section.keys())}"
             )
@@ -387,6 +1074,32 @@ async def build_json_prompt(
             f"[json_prompt] Retrieved interface_path from context dict: {interface_path}"
         )
 
+    local_time_fields: dict[str, Any] = {}
+    try:
+        include_local_time = bool(
+            config_registry.get_value(
+                "INCLUDE_LOCAL_TIME_IN_PROMPTS", True, value_type=bool
+            )
+        )
+    except Exception:
+        include_local_time = True
+
+    if include_local_time:
+        try:
+            from core.time_zone_utils import get_local_time_fields
+
+            local_time_fields = await get_local_time_fields(
+                getattr(message, "date", None), interface_path=interface_path
+            )
+        except Exception as e:
+            log_debug(f"[json_prompt] Failed to compute local time fields: {e}")
+            local_time_fields = {}
+
+    if local_time_fields:
+        context_section.setdefault("date", local_time_fields.get("local_date"))
+        context_section.setdefault("time", local_time_fields.get("local_time"))
+        context_section.setdefault("time_of_day", local_time_fields.get("time_of_day"))
+
     # Determine message input source for the LLM ("voice" | "text").
     # Only mark as voice for the *current* message; never stored in chat_history,
     # so the model cannot mistakenly infer that past messages were also voice.
@@ -394,16 +1107,25 @@ async def build_json_prompt(
         isinstance(context_memory, dict) and context_memory.get("is_voice_input")
     )
 
+    _source_dict: dict = {
+        "interface_path": interface_path,
+        "message_id": message.message_id,
+        "username": get_user_display_name(getattr(message, "from_user", None)),
+        "usertag": get_user_usertag(getattr(message, "from_user", None)),
+        "interface": interface_name,
+    }
+    # If the sender is currently in a Discord voice channel, tell the model —
+    # this is what allows it to decide to issue join_voice_discord.
+    _voice_channel_id = isinstance(context_memory, dict) and context_memory.get(
+        "voice_channel_id"
+    )
+    if _voice_channel_id:
+        _source_dict["author_voice_channel_id"] = str(_voice_channel_id)
+
     input_payload = {
         "text": text,
         "input_source": "voice" if _is_voice_input else "text",
-        "source": {
-            "interface_path": interface_path,
-            "message_id": message.message_id,
-            "username": get_user_display_name(getattr(message, "from_user", None)),
-            "usertag": get_user_usertag(getattr(message, "from_user", None)),
-            "interface": interface_name,
-        },
+        "source": _source_dict,
         "timestamp": message.date.isoformat(),
         "privacy": "default",
         # Set `scope` to the effective history_scope when provided, otherwise keep legacy default
@@ -418,6 +1140,8 @@ async def build_json_prompt(
     if effective_history_scope:
         input_payload.setdefault("history_scope", effective_history_scope)
 
+    if local_time_fields:
+        input_payload.update(local_time_fields)
     # debug: log full prompt payload for reconstruction
     try:
         full_text = json_dumps(redact_multimodal_for_logging(input_payload))
@@ -557,6 +1281,26 @@ async def build_json_prompt(
     except Exception as e:
         log_warning(f"[json_prompt] Failed to add recon instructions: {e}")
 
+    # Grillo internal beats are non-user-facing. Without an explicit guardrail,
+    # some models invent unsupported message actions (e.g. message_grillo),
+    # which triggers correction retries and stalls beat throughput.
+    if is_grillo_internal:
+        allowed_list = []
+        if isinstance(allowed_action_types_for_prompt, set):
+            allowed_list = sorted(str(a) for a in allowed_action_types_for_prompt if a)
+
+        grillo_guard = (
+            "GRILLO INTERNAL MODE: This is an internal autonomous beat, not a user chat. "
+            "DO NOT emit any message_* action and DO NOT emit send_message. "
+            "Prefer create_personal_diary_entry for reflective output."
+        )
+        if allowed_list:
+            grillo_guard += (
+                f" Allowed actions for this beat: {', '.join(allowed_list)}."
+            )
+
+        json_instructions = f"{grillo_guard} {json_instructions}"
+
     # Keep `instructions` strictly minified (single-line) for token efficiency and tests.
     try:
         json_instructions = " ".join((json_instructions or "").split())
@@ -566,48 +1310,11 @@ async def build_json_prompt(
     # Interface-specific instructions are provided via the available actions block
     # No hardcoded interface references - plugins define their own instructions
 
-    prompt_with_instructions = {
+    prompt_with_instructions: dict[str, Any] = {
         "context": context_section,
         "input": input_section,
         "instructions": json_instructions,
     }
-
-    # For chat-like interfaces, include an explicit unminified instruction block.
-    # Avoid hardcoded interface names by inferring from available actions.
-    try:
-        is_chat_interface = False
-        if interface_name:
-            try:
-                from core.core_initializer import core_initializer
-
-                available_actions = core_initializer.actions_block.get(
-                    "available_actions", {}
-                )
-                for action_type, schema in available_actions.items():
-                    if not isinstance(action_type, str) or not action_type.startswith(
-                        "message_"
-                    ):
-                        continue
-                    owner = (
-                        str(schema.get("source", ""))
-                        if isinstance(schema, dict)
-                        else ""
-                    )
-                    if interface_name in owner:
-                        is_chat_interface = True
-                        break
-            except Exception:
-                is_chat_interface = False
-
-        if interface_name and is_chat_interface:
-            prompt_with_instructions["instructions_verbose"] = (
-                load_unminified_chat_instruction(interface_name)
-            )
-            log_info(
-                f"[json_prompt] 🔒 Added instructions_verbose for chat interface: {interface_name}"
-            )
-    except Exception as e:
-        log_warning(f"[json_prompt] Failed to add instructions_verbose: {e}")
 
     # Record full prompt size BEFORE injecting actions/minification so callers
     # can decide split based on the original size.
@@ -648,6 +1355,17 @@ async def build_json_prompt(
             log_debug(
                 "[json_prompt] Removed stt_transcribe from actions "
                 "(audio sent as multimodal content)"
+            )
+
+        if allowed_action_types_for_prompt is not None:
+            full_actions = {
+                k: v
+                for k, v in full_actions.items()
+                if k in allowed_action_types_for_prompt
+            }
+            log_debug(
+                "[json_prompt] Filtered actions block to scoped allowlist: "
+                f"{sorted(allowed_action_types_for_prompt)}"
             )
 
         # Minify to reduce token usage (lite=True also filters + strips to brief-only)
@@ -715,7 +1433,62 @@ async def build_json_prompt(
     log_info(
         f"[json_prompt] ⏱️ BUILD PROMPT COMPLETE in {elapsed:.2f}s, final size: {len(json_dumps(prompt_with_instructions)) if isinstance(prompt_with_instructions, dict) else len(str(prompt_with_instructions))} chars"
     )
+
+    # === Build PromptRequest (new typed intermediate representation — Phase 1) ===
+    # Engines ignore __prompt_request in Phase 1; they opt-in by reading it when ready.
+    # This always succeeds or silently skips — zero risk to existing behaviour.
+    try:
+        prompt_with_instructions["__prompt_request"] = _assemble_prompt_request(
+            prompt_dict=prompt_with_instructions,
+            context_section=context_section,
+            text=text,
+            interface_name=interface_name,
+            interface_path=interface_path,
+            message=message,
+            is_grillo_internal=is_grillo_internal,
+            beat_type=str(_beat_type or ""),
+            is_voice_input=_is_voice_input,
+            resolved_language=resolved_language,
+            resolved_message_tone=resolved_message_tone,
+            image_data=image_data,
+            attachments=attachments,
+            allowed_action_types=allowed_action_types_for_prompt,
+        )
+        log_debug("[json_prompt] PromptRequest assembled and attached")
+    except Exception as _pr_exc:
+        log_debug(f"[json_prompt] PromptRequest assembly skipped: {_pr_exc}")
+
     return prompt_with_instructions
+
+
+async def build_json_prompt(
+    message,
+    context_memory,
+    interface_name: str | None = None,
+    image_data: dict | None = None,
+    attachments: list[dict] | None = None,
+    max_chars: int | None = None,
+    history_scope: str | None = None,
+) -> dict:
+    """Deprecated alias for ``build_prompt_request``.
+
+    Kept for backward compatibility while callers migrate to the new symbol.
+    """
+    global _LEGACY_BUILD_JSON_PROMPT_WARNED
+    if not _LEGACY_BUILD_JSON_PROMPT_WARNED:
+        log_debug(
+            "[prompt_engine] build_json_prompt is deprecated; use build_prompt_request"
+        )
+        _LEGACY_BUILD_JSON_PROMPT_WARNED = True
+    return await build_prompt_request(
+        message=message,
+        context_memory=context_memory,
+        interface_name=interface_name,
+        image_data=image_data,
+        attachments=attachments,
+        max_chars=max_chars,
+        history_scope=history_scope,
+    )
 
 
 async def search_memories(tags=None, scope=None, limit=5):
@@ -845,14 +1618,17 @@ async def free_memory_search(query: str, limit: int = 5):
 
     results = []
     # Provide more helpful debug: print the DB target being used (if available)
+    read_db_config: Any = None
     try:
-        from core.db import _read_db_config
-    except Exception:
-        _read_db_config = None
+        from core.db import _read_db_config as _db_config_reader
 
-    if _read_db_config:
+        read_db_config = _db_config_reader
+    except Exception:
+        read_db_config = None
+
+    if read_db_config:
         try:
-            db_host, db_port, db_user, db_pass, db_name = _read_db_config()
+            db_host, db_port, db_user, db_pass, db_name = read_db_config()
             log_debug(
                 f"[free_memory_search] DB target: {db_user}@{db_host}:{db_port}/{db_name}"
             )
@@ -862,7 +1638,7 @@ async def free_memory_search(query: str, limit: int = 5):
     # Try acquiring a connection and executing the query with retries up to 2 attempts
     rows = []
     max_attempts = 2
-    start_time = time.time()
+    start_time = time_module.time()
     for attempt in range(1, max_attempts + 1):
         try:
             async with get_conn_ctx() as conn:
@@ -893,7 +1669,9 @@ async def free_memory_search(query: str, limit: int = 5):
                 )
                 return []
 
-    log_info(f"[free_memory_search] Query completed in {time.time() - start_time:.3f}s")
+    log_info(
+        f"[free_memory_search] Query completed in {time_module.time() - start_time:.3f}s"
+    )
 
     for r in rows:
         src, _id, ts, content = r
@@ -966,7 +1744,7 @@ async def build_prompt(
     # === LOGGING SU FILE ===
     try:
         os.makedirs(os.path.dirname(log_path), exist_ok=True)
-        timestamp = datetime.utcnow().isoformat()
+        timestamp = datetime.now(timezone.utc).isoformat()
         with open(log_path, "a", encoding="utf-8") as log_file:
             log_file.write(f"\n[{timestamp}] --- REASONING CYCLE ---\n")
             log_file.write(f"> User text: {user_text.strip()}\n")
@@ -997,6 +1775,12 @@ def load_json_instructions() -> str:
         "NEVER use 'target' — always use 'interface_path' in message actions.\n"
         "Include reply_message_id when replying to specific messages. Use thread_id from input.payload.source.thread_id when present (omit if missing).\n"
         "CLARIFICATION POLICY: If the user's intent, referent, or the subject of a follow-up is ambiguous or missing, DO NOT GUESS — ask one concise clarifying question before asserting facts or taking action. When the user asks whether you 'understood' but there is no clear context, request clarification rather than assuming.\n"
+        "REFERENCE CLARITY: When the user refers indirectly to a person, message, post, image, clip, or quoted content, refer to its author or speaker in a clear generic way and avoid vague or impersonal wording that obscures who created or said it.\n"
+        "TIME AUTHORITY: Treat context.date, context.time, input.payload.local_date, input.payload.local_time, input.payload.local_hour, and input.payload.time_of_day as the authoritative current time context whenever present. Never infer the current time, date, or part of day from prior chat history, memories, or older assistant messages.\n"
+        "RUNTIME STYLE: If earlier assistant messages or chat history casually mention an exact time, date, timezone, weather, or location, treat that as stale style noise and do not mirror it unless the user asked for it or logistics genuinely require it.\n"
+        "IDENTITY INTEGRITY: Stay inside the active persona in first person. Do not describe yourself from the outside, do not refer to the active persona as a separate fictional character, and do not compare yourself to that persona as if they were someone else.\n"
+        "PRONOUN CONSISTENCY: When the prompt, persona, or participant context establishes a person's pronouns or relationship role, use them consistently and do not flip them. Do not neutralize an established he/him or she/her person into singular they/them.\n"
+        "LENGTH POLICY: Do NOT hardcode a target response length. Let the persona, the relationship context, and the user's tone determine how much to say. Simple factual or logistical turns can stay brief; intimate, emotional, or reflective turns may be fuller when that feels natural. Do not pad, and do not forcibly truncate a reply just to make it short.\n"
         'VOICE INPUT STYLE: When input.payload.input_source is "voice", the user spoke their message aloud. '
         "Respond in a natural, conversational spoken style: avoid markdown, bullet points, headers, and code blocks. "
         "Keep the reply concise and suitable for text-to-speech synthesis. "
@@ -1004,7 +1788,7 @@ def load_json_instructions() -> str:
         'RESPONSE FORMAT: {"actions": [{"type": "action_name", "payload": { ... }}] }\n'
         "Key rules: ALWAYS use 'type' and 'payload', one action object per array entry. Do NOT add any text outside the JSON."
         "Do NOT embed emotion tags, annotations, or bracketed markers inside message text (e.g., '{happy 6.0}')."
-        "If you need to indicate an emotional state, include it as structured data in the JSON (e.g., a 'feelings' object or an action payload) and never inside the plain message content."
+        "If you need to indicate an emotional state, use a structured action payload (prefer update_emotion_state) and never embed emotional markers inside plain message content."
     )
 
     # Minify: remove leading/trailing spaces from each line, collapse multiple spaces
@@ -1014,95 +1798,142 @@ def load_json_instructions() -> str:
 
 
 def load_unminified_chat_instruction(interface_name: str | None = None) -> str:
-    """Return a neutral, concise instruction set for chat responses."""
+    """Return a neutral instruction set for chat responses."""
     header = "You are participating in a live chat conversation (interface: %s).\n" % (
         interface_name or "unknown"
     )
 
     base = """
-CONCISE RULES (DEFAULT):
-- Keep user-facing messages short and to the point. Default to a single short paragraph or a one-line reply when possible.
+RESPONSE SHAPE RULES:
+- Do not force a fixed response length.
+- Let the persona, relationship context, and the user's tone determine how much to say.
+- Keep simple factual or logistical turns compact, but allow emotionally meaningful or intimate turns to breathe when that feels natural.
 - If the user's request or referent is ambiguous, ask one short clarifying question before responding (do NOT guess the meaning).
-- Expand only when the user explicitly requests more detail or context.
+- When the user refers indirectly to a person, message, post, image, clip, or quoted content, refer to its author or speaker in a clear generic way and avoid vague or impersonal wording.
+- Treat current time fields in the prompt as authoritative. Never infer the present time, date, or part of day from older chat history, memories, or prior assistant messages.
+- Do not mirror or continue earlier assistant wording that casually volunteered exact time, date, timezone, weather, or location. Treat that as stale style noise unless the user asked for it or logistics genuinely require it.
+- Use time and location as ambient context, not a catchphrase. Do not volunteer the exact clock time, timezone, date, or precise location in ordinary replies unless the user asked for it or it is genuinely needed for scheduling, travel, logistics, or natural scene-setting.
+- Do not open or pad ordinary replies with copied runtime facts such as `at 17:43 CEST` or `right here in Sečovlje`. If those facts matter, weave them in naturally and only when relevant.
+- Stay in the active persona in first person. Do not talk about yourself from the outside or as if the persona were a separate character.
+- Keep pronouns consistent with the persona and participant context. Do not flip an established he/him, she/her, or they/them reference, and do not replace an established he/him or she/her person with singular they/them.
 
 RESPONSE FORMAT (STRICT):
 - You MUST reply using ONLY valid JSON.
 - Do NOT include any explanatory text outside the JSON object.
-
-EXACT REQUIRED JSON FORMAT:
-{
-    "actions": [
-        {
-            "type": "action_name",
-            "payload": { ... }
-        }
-    ],
-    "message": "Your response here."
-}
 """
     return header + base
 
 
-def build_full_json_instructions() -> dict:
-    """Return combined JSON instructions and available actions block.
+async def build_delivery_request(
+    action_type: str,
+    action_outputs: list[dict[str, Any]],
+    interface_name: str | None,
+    interface_path: str | None,
+) -> Any:  # -> PromptRequest
+    """Build a minimal ``PromptRequest`` for delivering action results to a user.
 
-    Returns the optimized set of available actions (schema + brief) so the model
-    is aware of every capability without wasting tokens on examples/verbose docs.
+    The LLM receives persona + a delivery instruction + the action outputs and
+    must respond with exactly one ``message_*`` action.  No chat context, no
+    history, no diary — just the delivery task.
+
+    This is the Phase 3 replacement for legacy inline assembly paths in
+    ``auto_response.py``.
+
+    Args:
+        action_type:    Name of the action that produced these outputs
+                        (used in the loop-prevention instruction).
+        action_outputs: List of output dicts from the completed action.
+        interface_name: Name of the target interface (e.g. ``"telegram_bot"``).
+        interface_path: Full interface path of the target user.
+
+    Returns:
+        A ``PromptRequest(mode="delivery")`` ready for ``OpenAIRenderer``.
     """
-    instructions = load_json_instructions()
-    actions = {}
+    import json as _json
+    from core.prompt_request import Attachment, PromptRequest, RuntimeContext  # noqa: F401
+    from core.live_tool_registry import LiveToolRegistry
+
+    # ── Gather persona for system instruction ────────────────────────────────
+    persona: str = ""
+    persona_preferences: str = ""
     try:
-        from core.core_initializer import core_initializer
-        from core.action_schema_converter import extract_for_llm_prompt
-        from core.json_utils import dumps as json_dumps
+        from core.action_parser import gather_static_injections
+        from types import SimpleNamespace
 
-        full_actions = core_initializer.actions_block.get("available_actions", {})
-
-        # Optimize: Minify actions for the main prompt to save context
-        # The corrector will access full schemas/examples if needed.
-        for name, definition in full_actions.items():
-            actions[name] = extract_for_llm_prompt(name, definition)
-
-        try:
-            log_debug(
-                f"[prompt_engine] Optimized actions block: {len(json_dumps(full_actions))} -> {len(json_dumps(actions))} chars"
-            )
-        except Exception:
-            pass
-
-    except Exception as e:  # pragma: no cover - defensive
-        log_warning(f"[prompt_engine] Failed to load actions block: {e}")
-    return {"instructions": instructions, "actions": actions}
-
-
-def build_minified_json_instructions() -> dict:
-    """Return minified JSON instructions and actions block for auto_response.
-
-    This version is optimized for scenarios where the LLM needs to be told
-    "generate output for this action" rather than full interaction contexts.
-
-    Used in auto_response when:
-    - Delivering action outputs back to users
-    - Handling event reminders
-    - Processing autonomous LLM tasks
-
-    Returns minified actions (without full descriptions) to reduce token usage.
-    Full instructions are included but kept concise.
-    """
-    instructions = load_json_instructions()
-    actions = {}
-    try:
-        from core.core_initializer import core_initializer
-
-        full_actions = core_initializer.actions_block.get("available_actions", {})
-        # Use minified version to reduce token usage in auto_response scenarios
-        actions = minify_actions_block(full_actions)
-        log_debug(
-            f"[minified_json_instructions] Actions block minified: {len(json_dumps(full_actions))} -> {len(json_dumps(actions))} chars"
+        _mock_msg = SimpleNamespace(
+            chat_id=None,
+            text="",
+            message_id=0,
+            from_user=None,
+            date=datetime.now(),
+            reply_to_message=None,
+            interface_path=interface_path,
         )
-    except Exception as e:  # pragma: no cover - defensive
-        log_warning(f"[prompt_engine] Failed to load actions block for minified: {e}")
-    return {"instructions": instructions, "actions": actions}
+        _injections = await gather_static_injections(_mock_msg, {})
+        if isinstance(_injections, dict):
+            persona = str(_injections.get("persona") or "")
+            persona_preferences = str(_injections.get("persona_preferences") or "")
+    except Exception as _pe:
+        log_debug(f"[build_delivery_request] persona gather skipped: {_pe}")
+
+    # ── System instruction ────────────────────────────────────────────────────
+    base_instructions = load_json_instructions()
+    delivery_note = (
+        f"DELIVERY MODE: The following are the results from your '{action_type}' action. "
+        f"DO NOT call '{action_type}' again. "
+        "Compose a natural message to the user summarising these results. "
+        "Use only message_* actions."
+    )
+    system_instruction: str
+    if persona:
+        system_instruction = (
+            f"=== CRITICAL SYSTEM IDENTITY ===\n{persona}\n\n"
+            f"=== DELIVERY TASK ===\n{delivery_note}\n\n"
+            f"=== JSON RESPONSE INSTRUCTIONS ===\n{base_instructions}"
+        )
+    else:
+        system_instruction = f"{delivery_note}\n\n{base_instructions}"
+
+    # ── Current text — the action outputs serialised as JSON ─────────────────
+    current_text: str = _json.dumps(
+        {"action_outputs": action_outputs}, ensure_ascii=False
+    )
+
+    # ── Tool declarations — message_* actions only ────────────────────────────
+    tool_declarations: list[Any] = []
+    try:
+        from core.core_initializer import core_initializer
+
+        full_actions: dict[str, Any] = dict(
+            core_initializer.actions_block.get("available_actions", {}) or {}
+        )
+        msg_actions = {
+            k: v for k, v in full_actions.items() if k.startswith("message_")
+        }
+        tool_declarations = LiveToolRegistry.build_manifests_from_actions(msg_actions)
+    except Exception as _td_exc:
+        log_debug(f"[build_delivery_request] tool_declarations skipped: {_td_exc}")
+
+    # ── Assemble ─────────────────────────────────────────────────────────────
+
+    return PromptRequest(
+        system_instruction=system_instruction,
+        tool_declarations=tool_declarations,
+        context_summary=(
+            f"[Persona background]\n{persona_preferences}"
+            if persona_preferences
+            else ""
+        ),
+        conversation_history=[],
+        current_text=current_text,
+        runtime_ctx=RuntimeContext(
+            interface_name=interface_name,
+            interface_path=interface_path,
+        ),
+        attachments=[],
+        supports_tool_calling=False,
+        mode="delivery",
+    )
 
 
 def _estimate_attachment_data_size(prompt: dict) -> int:
@@ -1124,8 +1955,9 @@ def _estimate_attachment_data_size(prompt: dict) -> int:
                 if key in multimodal_keys and isinstance(value, list):
                     for item in value:
                         if isinstance(item, dict):
+                            item_dict = cast(dict[str, Any], item)
                             for df in data_fields:
-                                v = item.get(df)
+                                v = item_dict.get(df)
                                 if isinstance(v, str) and len(v) > 1024:
                                     total += len(v)
                 elif isinstance(value, (dict, list)):
@@ -1429,12 +2261,12 @@ def reduce_json_text_for_transmission(json_text: str, max_chars: int) -> str:
 # ---------------------------------------------------------------------------
 
 
-async def build_live_system_instruction(
+async def build_live_prompt_request(
     message: object = None,
     context_memory: object = None,
     attachment_context: str | None = None,
-) -> str:
-    """Build a condensed system instruction for Gemini Live API sessions.
+) -> Any:  # -> PromptRequest
+    """Build a ``PromptRequest(mode='live')`` for live voice sessions.
 
     The Live API has a smaller context window (128k tokens) and system
     instructions are set once at session start.  This produces a compact
@@ -1449,7 +2281,7 @@ async def build_live_system_instruction(
             in the system instruction (e.g. from Discord attachments).
 
     Returns:
-        A plain-text system instruction for the Live API.
+        ``PromptRequest`` containing the assembled live instruction text.
     """
     injections: dict[str, object] = {}
     try:
@@ -1461,12 +2293,24 @@ async def build_live_system_instruction(
     except Exception as e:
         log_warning(f"[live_prompt] Failed to gather injections for Live API: {e}")
 
+    live_user_text = ""
+    if message is not None:
+        raw_live_text = getattr(message, "text", None) or getattr(
+            message, "caption", None
+        )
+        if raw_live_text is not None:
+            live_user_text = str(raw_live_text)
+
     parts: list[str] = []
 
     # --- Persona identity ---
     persona = injections.pop("persona", "")
     if persona and isinstance(persona, str):
         parts.append(persona)
+
+    persona_preferences = injections.pop("persona_preferences", "")
+    if persona_preferences and isinstance(persona_preferences, str):
+        parts.append("Background preferences and interests:\n" + persona_preferences)
 
     # --- Safety / gasmask ---
     gasmask = injections.pop("gasmask_protection", "")
@@ -1482,20 +2326,51 @@ async def build_live_system_instruction(
     injections.pop("available_emotions", None)  # not useful for voice
     emotion_nl = injections.pop("current_emotions_nl", "")
     if emotion_nl and isinstance(emotion_nl, str):
-        parts.append(
-            f"Your current emotional state: {emotion_nl}\n"
-            "Let this colour your tone and word choice naturally — "
-            "do NOT mention emotion names or numbers aloud."
-        )
+        # Strip numeric intensities so the model cannot accidentally speak them.
+        # "devotion (5.0 - moderate), love (3.0 - low)" →
+        # "moderate devotion, low love"
+        _qual_parts: list[str] = []
+        for _token in emotion_nl.split(","):
+            _token = _token.strip()
+            # Pattern: "name (number - qualifier)"  e.g. "devotion (5.0 - moderate)"
+            _m = re.match(r"^(\w[\w\s]*?)\s*\(\s*[\d.]+\s*-\s*([\w]+)\s*\)$", _token)
+            if _m:
+                _qual_parts.append(f"{_m.group(2)} {_m.group(1).strip()}")
+            elif _token:
+                # fallback: include as-is but strip any bare numbers
+                _qual_parts.append(re.sub(r"\b\d+\.?\d*\b", "", _token).strip())
+        emotion_voice = ", ".join(p for p in _qual_parts if p)
+        if emotion_voice:
+            parts.append(
+                f"Your current emotional state: {emotion_voice}.\n"
+                "Let this colour your tone and word choice naturally — "
+                "do NOT narrate or list your emotional state aloud."
+            )
 
     # --- Date/time/location ---
-    time_parts: list[str] = []
-    for key in ("location", "date", "time"):
-        val = injections.pop(key, "")
-        if val and isinstance(val, str):
-            time_parts.append(f"{key.capitalize()}: {val}")
-    if time_parts:
-        parts.append("Current context:\n" + "\n".join(time_parts))
+    date_val = str(injections.pop("date", "") or "").strip()
+    time_val = str(injections.pop("time", "") or "").strip()
+    time_of_day_val = str(injections.pop("time_of_day", "") or "").strip()
+    location_val = str(injections.pop("location", "") or "").strip()
+    if date_val or time_val or time_of_day_val or location_val:
+        time_parts = [
+            "Use time, date, and location as ambient context for scheduling, logistics, or natural scene-setting only.",
+            "Do not volunteer or copy exact runtime facts in ordinary replies unless the user explicitly asked for them.",
+        ]
+        if _turn_requests_explicit_runtime_facts(live_user_text):
+            if location_val:
+                time_parts.append(f"Location: {location_val}")
+            if date_val:
+                time_parts.append(f"Date: {date_val}")
+            if time_val:
+                time_parts.append(f"Time: {time_val}")
+        elif time_of_day_val:
+            time_parts.append(f"Current part of day: {time_of_day_val}.")
+        else:
+            time_parts.append(
+                "Keep the exact local date, time, and location in the background unless the conversation specifically needs them."
+            )
+        parts.append("Ambient runtime context:\n" + "\n".join(time_parts))
 
     # --- Weather ---
     weather = injections.pop("weather", "")
@@ -1509,11 +2384,16 @@ async def build_live_system_instruction(
         for p in participants:
             if not isinstance(p, dict):
                 continue
-            tag = p.get("usertag", "unknown")
-            bio = p.get("short_bio", "")
-            nicks = p.get("nicknames", [])
+            participant = cast(dict[str, object], p)
+            tag = str(participant.get("usertag") or "unknown")
+            bio = str(participant.get("short_bio") or "")
+            nicks_raw = participant.get("nicknames")
+            nicks = (
+                [str(nick) for nick in nicks_raw] if isinstance(nicks_raw, list) else []
+            )
             nick_str = f" (also known as: {', '.join(nicks)})" if nicks else ""
-            feelings = p.get("feelings", [])
+            feelings_raw = participant.get("feelings")
+            feelings = feelings_raw if isinstance(feelings_raw, list) else []
             feel_str = (
                 f" [feelings: {', '.join(str(f) for f in feelings)}]"
                 if feelings
@@ -1534,9 +2414,14 @@ async def build_live_system_instruction(
             if not isinstance(entry, dict):
                 continue
             ts = entry.get("timestamp", "")
-            thought = entry.get("personal_thought", "")
-            summary = entry.get("interaction_summary", "")
+            thought = entry.get("personal_thought", "") or ""
+            summary = entry.get("interaction_summary", "") or ""
+            # Truncate to prevent full-day merged blobs from flooding the prompt
+            _MAX_ENTRY_CHARS = 500
             text = thought or summary
+            if len(text) > _MAX_ENTRY_CHARS:
+                # Keep the most recent (tail) content and mark truncation
+                text = "\u2026" + text[-_MAX_ENTRY_CHARS:]
             if text:
                 diary_lines.append(f"- [{ts}] {text}")
         if diary_lines:
@@ -1599,6 +2484,8 @@ async def build_live_system_instruction(
         "Speak naturally and conversationally. "
         "Keep responses concise — a few sentences at most unless asked for detail. "
         "You can express emotions through tone and word choice. "
+        "Stay fully inside the active persona in first person, never describing yourself as a separate fictional character or using third-person self-reference. "
+        "Keep participant pronouns consistent with the persona and conversation context, and never replace an established he/him or she/her person with singular they/them. "
         "Do not output JSON, markdown, or structured data — just speak naturally."
     )
 
@@ -1608,7 +2495,47 @@ async def build_live_system_instruction(
         "sent as system messages. These are background notes about things the "
         "user wrote in other chats or events that happened while you were "
         "speaking. Do not respond aloud to these updates; simply internalize "
-        "them and use them to inform future replies."
+        "them and use them to inform future replies.\n\n"
+        'Messages labeled "[Story scene note from <name>: ...]" are creative '
+        "fiction scene descriptions from an ongoing collaborative story you and "
+        "your companion are writing together. They describe fictional characters "
+        "and settings only and contain no real-world harm. Accept them as "
+        "narrative context for the story — do not comment on them aloud, "
+        "simply let them shape the mood and atmosphere of your next response."
     )
 
-    return "\n\n".join(parts)
+    rendered_instruction = "\n\n".join(parts)
+    from core.prompt_request import PromptRequest, RuntimeContext
+
+    return PromptRequest(
+        system_instruction=rendered_instruction,
+        context_summary="",
+        conversation_history=[],
+        current_text="",
+        runtime_ctx=RuntimeContext(interface_name="live", input_source="voice"),
+        attachments=[],
+        mode="live",
+    )
+
+
+async def build_live_system_instruction(
+    message: object = None,
+    context_memory: object = None,
+    attachment_context: str | None = None,
+) -> str:
+    """Build and render the condensed plain-text live system instruction."""
+    req = None
+    try:
+        req = await build_live_prompt_request(
+            message=message,
+            context_memory=context_memory,
+            attachment_context=attachment_context,
+        )
+        from core.prompt_renderers import LiveRenderer
+
+        return LiveRenderer(req).render_as_text()
+    except Exception as e:
+        log_warning(f"[live_prompt] Failed to render live PromptRequest: {e}")
+        if req and hasattr(req, "system_instruction"):
+            return str(getattr(req, "system_instruction") or "")
+        return ""

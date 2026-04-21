@@ -31,6 +31,9 @@ class ChatResponse:
 class BaseProtocolAdapter(ABC):
     """Common interface every external endpoint adapter must implement."""
 
+    # Set by bridges to the endpoint name for log tags.
+    _engine_label: str = ""
+
     # ------------------------------------------------------------------
     # Chat / LLM
     # ------------------------------------------------------------------

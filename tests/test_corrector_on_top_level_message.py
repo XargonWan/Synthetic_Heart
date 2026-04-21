@@ -23,6 +23,9 @@ async def test_corrector_invoked_when_top_level_message_without_message_action(
     monkeypatch.setattr(
         "core.transport_layer.run_corrector_middleware", fake_run_corrector_middleware
     )
+    monkeypatch.setattr(
+        "core.action_parser.run_corrector_middleware", fake_run_corrector_middleware
+    )
 
     # Build a JSON-like LLM response: has actions that are internal only and a top-level message
     llm_text = """{

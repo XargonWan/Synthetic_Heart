@@ -23,6 +23,8 @@ services:
       - DB_PASS=${DB_PASS:-synth}
       - DB_NAME=${DB_NAME:-synth}
       - DB_ROOT_PASS=${DB_ROOT_PASS:-root}
+      - SOUL_REPOSITORY_BACKEND=${SOUL_REPOSITORY_BACKEND:-memory}
+      - SOUL_POSTGRES_DSN=${SOUL_POSTGRES_DSN:-}
       - ROOT_PASSWORD=${ROOT_PASSWORD:-"password"}
       - SYNTH_WEBUI_HTTPS_PORT=${SYNTH_WEBUI_HTTPS_PORT:-8000}
       - SYNTH_WEBUI_HTTP_PORT=${SYNTH_WEBUI_HTTP_PORT:-8080}
@@ -76,6 +78,32 @@ services:
     networks:
       - synth_network
 
+  # Optional SOUL memory store (PostgreSQL + pgvector)
+  # Enable it by setting:
+  # SOUL_REPOSITORY_BACKEND=postgres
+  # SOUL_POSTGRES_DSN=postgresql://soul:soul@synth-soul-db:5432/soul_memory
+  synth-soul-db:
+    container_name: synth-soul-db
+    hostname: synth-soul-db
+    image: pgvector/pgvector:pg16
+    ports:
+      - "${EXT_SOUL_DB_PORT:-5432}:5432"
+    environment:
+      POSTGRES_DB: ${SOUL_PG_DB:-soul_memory}
+      POSTGRES_USER: ${SOUL_PG_USER:-soul}
+      POSTGRES_PASSWORD: ${SOUL_PG_PASSWORD:-soul}
+    volumes:
+      - synth_soul_db_data:/var/lib/postgresql/data
+      - ./scripts/sql/soul_memory_postgres.sql:/docker-entrypoint-initdb.d/10-soul-memory.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${SOUL_PG_USER:-soul} -d ${SOUL_PG_DB:-soul_memory}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    networks:
+      - synth_network
+
   # Selenium‑LLM Engine, you can disable this if you want to use a different endpoint
   # such as an API provider or a local LLM running in another container
   synth-selenium-llm-engine:
@@ -97,6 +125,7 @@ services:
 
 volumes:
   synth_db_data:
+  synth_soul_db_data:
   synth_data:
   synth_logs:
   synth_skins:

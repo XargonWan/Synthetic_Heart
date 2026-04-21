@@ -258,6 +258,29 @@ def _dedup_key(text: str) -> str:
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
+def _is_ignored_prompt_history_entry(entry: HistoryEntry) -> bool:
+    if not isinstance(entry, dict):
+        return False
+
+    metadata = entry.get("metadata")
+    if isinstance(metadata, dict) and metadata.get("skip_history"):
+        return True
+
+    sender = str(entry.get("sender_name") or entry.get("username") or "").lower()
+    text = str(
+        entry.get("text") or entry.get("message_text") or entry.get("content") or ""
+    )
+    if sender != "self":
+        return False
+
+    return text.startswith(
+        (
+            "✅ Cortex engine dynamically updated to `",
+            "❌ Failed to switch Cortex to `",
+        )
+    )
+
+
 async def _call_with_supported_kwargs(obj: Any, method_name: str, **kwargs):
     fn = getattr(obj, method_name, None)
     if fn is None:
@@ -293,6 +316,14 @@ class HistoryEngine:
         memories: Optional[Sequence[HistoryEntry]] = None,
         history_scope: str | None = None,
     ) -> Dict[str, Any]:
+        # Internal beats (diary consolidation, grillo, etc.) set skip_history=True
+        # in context_memory to avoid loading irrelevant chat history into the prompt.
+        if isinstance(context_memory, dict) and context_memory.get("skip_history"):
+            log_debug(
+                "[history_engine] skip_history flag set — returning empty context"
+            )
+            return {"history_current_chat": [], "history_recent": [], "thoughts": []}
+
         lite_mode = _get_bool("PROMPT_LITE_MODE", False)
 
         verbosity = max(0, _get_int("CONTEXT_VERBOSITY", 10))
@@ -438,6 +469,8 @@ class HistoryEngine:
                         log_debug(f"[history_engine] live merge skipped: {_e}")
 
                 for m in msgs[-verbosity:] if verbosity > 0 else []:
+                    if _is_ignored_prompt_history_entry(m):
+                        continue
                     line = _entry_to_text_with_source(
                         m, current_interface_path=interface_path
                     )
@@ -452,6 +485,16 @@ class HistoryEngine:
         if unified_mode:
             try:
                 unified_candidates: List[dict] = []
+
+                for m in msgs if enable_current and interface_path else []:
+                    if not isinstance(m, dict):
+                        continue
+                    if not m.get("interface_path") and not m.get("source_path"):
+                        unified_candidates.append(
+                            {**m, "interface_path": interface_path}
+                        )
+                    else:
+                        unified_candidates.append(m)
 
                 try:
                     from core.chat_history_cache import load_global_chat_history
@@ -483,7 +526,22 @@ class HistoryEngine:
                             continue
 
                         if isinstance(q, (list, tuple)) or hasattr(q, "__iter__"):
-                            unified_candidates.extend(list(q))
+                            for m in list(q):
+                                if not isinstance(m, dict):
+                                    unified_candidates.append(m)
+                                    continue
+
+                                if (
+                                    isinstance(k, str)
+                                    and k
+                                    and not m.get("interface_path")
+                                    and not m.get("source_path")
+                                ):
+                                    unified_candidates.append(
+                                        {**m, "interface_path": k}
+                                    )
+                                else:
+                                    unified_candidates.append(m)
 
                 def _uni_sort_key(m: Any) -> float:
                     if not isinstance(m, dict):
@@ -509,6 +567,9 @@ class HistoryEngine:
                     # Filter out internal system messages (e.g. Grillo tags, Pattern Analysis)
                     # Queste tipicamente appaiono su '.../-1' come monologhi di sistema.
                     def _is_internal_noise(m: dict) -> bool:
+                        if _is_ignored_prompt_history_entry(m):
+                            return True
+
                         path = str(m.get("interface_path", "") or "")
                         if not path.endswith("/-1"):
                             return False
@@ -551,8 +612,6 @@ class HistoryEngine:
                 input_text = (text or "").strip()
 
                 # LOG: mostra quanti messaggi e da quali path
-                from core.logging_utils import log_debug
-
                 log_debug(
                     f"[history_engine] Unified candidates totali: {len(unified_candidates)}"
                 )
@@ -565,7 +624,7 @@ class HistoryEngine:
                     f"[history_engine] Messaggi per interface_path: {path_counter}"
                 )
 
-                for m in unified_candidates[-verbosity:] if verbosity > 0 else []:
+                for m in unified_candidates:
                     # Skip if this entry's text matches the current input
                     entry_text = (
                         (m.get("text") or m.get("message_text") or "").strip()
@@ -595,12 +654,19 @@ class HistoryEngine:
 
                     seen_history.add(k)
 
+                if verbosity > 0:
+                    local_lines = local_lines[-verbosity:]
+                    other_lines = other_lines[-verbosity:]
+
                 log_debug(
                     f"[history_engine] Messaggi globali passati al prompt: {len(local_lines) + len(other_lines)} (locali: {len(local_lines)}, altri: {len(other_lines)})"
                 )
 
-                # Preserve legacy `history_current_chat` as the merged unified view
-                history_current_chat = local_lines + other_lines
+                # Keep the active chat stream isolated from cross-chat context.
+                # Older unrelated messages belong in `history_recent`, not inside
+                # `history_current_chat`, otherwise the model can anchor on stale
+                # external context as if it were part of the active thread.
+                history_current_chat = local_lines
                 # Ensure `history_recent` (global) contains ONLY other chats
                 history_recent = other_lines
             except Exception as e:
@@ -649,6 +715,8 @@ class HistoryEngine:
                 if candidates:
                     candidates.sort(key=_sort_key)
                 for m in candidates[-verbosity:] if verbosity > 0 else []:
+                    if _is_ignored_prompt_history_entry(m):
+                        continue
                     line = _entry_to_text_with_source(
                         m, current_interface_path=interface_path
                     )
@@ -710,6 +778,8 @@ class HistoryEngine:
                 for raw in list(c.entries)[
                     : max_items or (verbosity if verbosity > 0 else None)
                 ]:
+                    if _is_ignored_prompt_history_entry(raw):
+                        continue
                     line = _entry_to_text_with_source(
                         raw, current_interface_path=interface_path
                     )
@@ -749,6 +819,12 @@ class HistoryEngine:
                 thought = entry.get("personal_thought")
                 if thought:
                     ts = _format_ts(entry.get("timestamp", ""))
+                    # Cap thought length — the merged daily blob can be 30k+ chars.
+                    # We keep the most recent 800 chars (tail) since entries are
+                    # appended chronologically and the latest thought is at the end.
+                    _MAX_THOUGHT = 800
+                    if len(thought) > _MAX_THOUGHT:
+                        thought = "\u2026" + thought[-_MAX_THOUGHT:]
                     thoughts.append(f"[thought {ts}] {thought}".strip())
                 if len(thoughts) >= thoughts_limit:
                     break

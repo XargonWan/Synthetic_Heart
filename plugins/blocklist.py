@@ -77,7 +77,14 @@ async def unblock_user(user_id: int):
 
 async def is_user_blocked(user_id: int) -> bool:
     """Check if a user is blocked."""
-    await init_blocklist_table()
+    try:
+        await init_blocklist_table()
+    except Exception as e:
+        log_warning(
+            f"[blocklist] Blocklist storage unavailable while checking user {user_id}; allowing request: {e}"
+        )
+        return False
+
     async with get_conn_ctx() as conn:
         try:
             async with conn.cursor() as cur:

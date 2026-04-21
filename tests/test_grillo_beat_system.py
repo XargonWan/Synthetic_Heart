@@ -42,6 +42,7 @@ async def test_grillo_beat_types_exist() -> None:
     expected_types = [
         "tag_elaboration",
         "memory_consolidation",
+        "diary_consolidation",
         "self_reflection",
         "curiosity",
         "relationship",

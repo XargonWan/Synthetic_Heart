@@ -65,8 +65,9 @@ async def test_low_priority_does_not_block(monkeypatch):
     }
 
     # Put onto the queue using internal API
-    await message_queue._queue.put((message_queue.LOW_PRIORITY, 1, item1))
-    await message_queue._queue.put((message_queue.NORMAL_PRIORITY, 2, item2))
+    queue = message_queue._get_queue()
+    await queue.put((message_queue.LOW_PRIORITY, 1, item1))
+    await queue.put((message_queue.NORMAL_PRIORITY, 2, item2))
 
     # Run consumer loop iteration twice with a short timeout to simulate
     consumer_task = asyncio.create_task(message_queue._consumer_loop())
@@ -94,46 +95,44 @@ async def test_queue_rebinds_to_current_event_loop():
     original_lock_loop = getattr(message_queue, "_lock_loop", None)
 
     try:
-
-        async def create_queue_on_other_loop():
-            message_queue._get_queue()
-            message_queue._get_lock()
-
         other_loop = asyncio.new_event_loop()
         try:
-            other_loop.run_until_complete(create_queue_on_other_loop())
+            message_queue._queue = asyncio.PriorityQueue()
+            message_queue._lock = asyncio.Lock()
+            message_queue._queue_loop = other_loop
+            message_queue._lock_loop = other_loop
+
+            old_queue = message_queue._queue
+            old_lock = message_queue._lock
+            assert old_queue is not None
+            assert old_lock is not None
+
+            new_queue = message_queue._get_queue()
+            new_lock = message_queue._get_lock()
+
+            assert new_queue is not old_queue
+            assert new_lock is not old_lock
+
+            await new_queue.put(
+                (
+                    message_queue.NORMAL_PRIORITY,
+                    1,
+                    {
+                        "bot": None,
+                        "message": None,
+                        "chat_id": 0,
+                        "thread_id": None,
+                        "interface": "test",
+                        "timestamp": 0,
+                        "context": {},
+                        "priority": False,
+                    },
+                )
+            )
+            queued_item = await new_queue.get()
+            assert queued_item[2]["interface"] == "test"
         finally:
             other_loop.close()
-
-        old_queue = message_queue._queue
-        old_lock = message_queue._lock
-        assert old_queue is not None
-        assert old_lock is not None
-
-        new_queue = message_queue._get_queue()
-        new_lock = message_queue._get_lock()
-
-        assert new_queue is not old_queue
-        assert new_lock is not old_lock
-
-        await new_queue.put(
-            (
-                message_queue.NORMAL_PRIORITY,
-                1,
-                {
-                    "bot": None,
-                    "message": None,
-                    "chat_id": 0,
-                    "thread_id": None,
-                    "interface": "test",
-                    "timestamp": 0,
-                    "context": {},
-                    "priority": False,
-                },
-            )
-        )
-        queued_item = await new_queue.get()
-        assert queued_item[2]["interface"] == "test"
     finally:
         message_queue._queue = original_queue
         message_queue._lock = original_lock

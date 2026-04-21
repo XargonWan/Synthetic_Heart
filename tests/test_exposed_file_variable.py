@@ -17,7 +17,14 @@ def test_upload_and_download_exposed_file(tmp_path):
 
     # Register a file-backed exposed variable
     key = "TEST_FILE_VAR"
-    register_exposed_var(key, label="Test File Var", default="", ui_type="file")
+    register_exposed_var(
+        key,
+        label="Test File Var",
+        default="",
+        ui_type="file",
+        description="Test-only file-backed exposed variable used for upload/download coverage.",
+        component="tests",
+    )
 
     files = {"file": ("original.txt", b"hello world", "text/plain")}
     res = client.post(f"/api/config/{key}/upload", files=files)
@@ -45,7 +52,13 @@ def test_upload_to_readonly_refused(tmp_path):
 
     key = "TEST_FILE_VAR_READONLY"
     register_exposed_var(
-        key, label="ReadOnly File", default="", ui_type="file", readonly=True
+        key,
+        label="ReadOnly File",
+        default="",
+        ui_type="file",
+        description="Test-only read-only file-backed exposed variable used for upload refusal coverage.",
+        component="tests",
+        readonly=True,
     )
 
     files = {"file": ("nope.txt", b"data", "text/plain")}

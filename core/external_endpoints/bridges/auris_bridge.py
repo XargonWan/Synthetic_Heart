@@ -23,6 +23,7 @@ class ExternalAurisEngine(AurisEngineBase):
     ) -> None:
         self._endpoint = endpoint
         self._adapter = adapter
+        self._adapter._engine_label = endpoint.name or "auris_bridge"
         self.display_name = f"{endpoint.display_label or endpoint.name} (STT)"
 
     def transcribe(

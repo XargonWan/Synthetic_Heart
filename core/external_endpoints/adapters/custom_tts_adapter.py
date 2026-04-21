@@ -7,10 +7,12 @@ similar to the legacy ``tts_lipsync``/``index-tts`` backend.
 
 from __future__ import annotations
 
+import time as _time
 from typing import Any
 
 import aiohttp
 
+from core.cortex_api_logger import log_cortex_request, log_cortex_response
 from core.external_endpoints.adapters.base import (
     BaseProtocolAdapter,
     ChatResponse,
@@ -56,6 +58,7 @@ class LegacyHttpTTSAdapter(BaseProtocolAdapter):
         voice: str | None = None,
         **kwargs: Any,
     ) -> bytes | None:
+        engine_tag = f"legacy_tts:{self._engine_label or 'default'}"
         payload: dict[str, Any] = {
             "text": text,
             "use_emo_text": False,
@@ -76,18 +79,54 @@ class LegacyHttpTTSAdapter(BaseProtocolAdapter):
         if self._extra_config.get("tts_endpoint_path"):
             url = f"{self._base_url.rstrip('/')}/{self._extra_config['tts_endpoint_path'].lstrip('/')}"
 
+        log_cortex_request(
+            engine_tag,
+            model="legacy-tts",
+            url=url,
+            payload={
+                "task": "generate_tts",
+                "text_length": len(text),
+                "voice": payload.get("voice_wav"),
+            },
+        )
+        _req_start = _time.monotonic()
+
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(
                     url, json=payload, timeout=aiohttp.ClientTimeout(total=60)
                 ) as resp:
                     if resp.status != 200:
+                        _elapsed = (_time.monotonic() - _req_start) * 1000
+                        log_cortex_response(
+                            engine_tag,
+                            model="legacy-tts",
+                            status=resp.status,
+                            error=f"HTTP {resp.status}",
+                            elapsed_ms=_elapsed,
+                        )
                         log_warning(
                             f"[legacy_http_tts] {url} returned HTTP {resp.status}"
                         )
                         return None
-                    return await resp.read()
+                    audio_data = await resp.read()
+                    _elapsed = (_time.monotonic() - _req_start) * 1000
+                    log_cortex_response(
+                        engine_tag,
+                        model="legacy-tts",
+                        status=200,
+                        body=f"<audio: {len(audio_data)} bytes>",
+                        elapsed_ms=_elapsed,
+                    )
+                    return audio_data
         except Exception as exc:
+            _elapsed = (_time.monotonic() - _req_start) * 1000
+            log_cortex_response(
+                engine_tag,
+                model="legacy-tts",
+                error=str(exc),
+                elapsed_ms=_elapsed,
+            )
             log_warning(f"[legacy_http_tts] request failed: {exc}")
             return None
 

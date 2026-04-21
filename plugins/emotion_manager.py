@@ -14,13 +14,13 @@ import json
 import math
 import re
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Tuple
 from dataclasses import dataclass
 import inspect
 
 from core.plugin_base import PluginBase
-from core.db import get_conn_ctx
+from core.db import get_conn_ctx, _get_db_type
 from core.logging_utils import log_debug, log_info, log_warning, log_error
 from core.config_manager import config_registry
 
@@ -83,16 +83,28 @@ _EMOTION_TAG_RE = re.compile(
     r"\s*\{\s*(?:\w+\s+-?\d+(?:\.\d+)?)(?:\s*,\s*\w+\s+-?\d+(?:\.\d+)?)*\s*\}"
 )
 
+# Meta tags like {meta.autonomous: true}, {meta.field=value} — LLM embeds
+# these as literal text when the prompt says "set a meta.autonomous flag".
+_META_TAG_RE = re.compile(r"\s*\{\s*meta\.\w+\s*[:=]\s*\w+\s*\}")
+
+# Facial expression tags used by WebUI/VRM animation guidance.
+# Matches: [em], [em_name], [em_name:0.5], [em:0.3]
+_FACIAL_TAG_RE = re.compile(r"\s*\[em(?:_[a-z_]+)?(?::[0-9.]+)?\]")
+
 
 def strip_emotion_tags(text: str) -> str:
-    """Remove emotion tags like ``{happy 8.5, love 5.0}`` from *text*.
+    """Remove emotion tags like ``{happy 8.5, love 5.0}`` and meta tags
+    like ``{meta.autonomous: true}``, plus facial-expression tags like
+    ``[em_smile:0.7]`` from *text*.
 
-    Uses a targeted regex that only matches the ``{word number, …}`` pattern
-    so JSON, code blocks, and other brace-delimited content are left intact.
+    Uses targeted regexes that only match specific ``{…}`` patterns so JSON,
+    code blocks, and other brace-delimited content are left intact.
     """
     if not text:
         return text
     cleaned = _EMOTION_TAG_RE.sub("", text)
+    cleaned = _META_TAG_RE.sub("", cleaned)
+    cleaned = _FACIAL_TAG_RE.sub("", cleaned)
     cleaned = re.sub(r" {2,}", " ", cleaned).strip()
     return cleaned
 
@@ -168,6 +180,12 @@ class EmotionState:
             "timestamp": self.timestamp.isoformat(),
         }
 
+    @staticmethod
+    def _normalize_datetime(value: datetime) -> datetime:
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+
     def get_decayed_intensity(self, current_time: Optional[datetime] = None) -> float:
         """Calculate intensity with exponential decay over time.
 
@@ -178,13 +196,16 @@ class EmotionState:
             Decayed intensity (0.0-10.0)
         """
         if current_time is None:
-            current_time = datetime.now()
+            current_time = datetime.now(timezone.utc)
+
+        current_time = self._normalize_datetime(current_time)
+        emotion_timestamp = self._normalize_datetime(self.timestamp)
 
         # Get decay half-life from config (in seconds, default 1 hour = 3600s)
         tau = config_registry.get_value("EMOTION_DECAY_TAU", 3600)
 
         # Calculate time delta in seconds
-        delta_t = (current_time - self.timestamp).total_seconds()
+        delta_t = (current_time - emotion_timestamp).total_seconds()
 
         # Exponential decay: intensity * e^(-delta_t / tau)
         decayed = self.intensity * math.exp(-delta_t / tau)
@@ -243,6 +264,15 @@ class EmotionManager(PluginBase):
                     "apply_balancing": "bool - apply Plutchik opposite balancing (default: true)",
                 },
             },
+            "update_emotion_state": {
+                "description": "Update multiple emotions using structured payload data",
+                "required_params": {
+                    "emotions": "object - map of emotion name to intensity (0.0-10.0)",
+                },
+                "optional_params": {
+                    "apply_balancing": "bool - apply Plutchik opposite balancing (default: true)",
+                },
+            },
             "set_emotion": {
                 "description": "Set a single emotion intensity directly",
                 "required_params": {
@@ -288,6 +318,13 @@ class EmotionManager(PluginBase):
             apply_balancing = payload.get("apply_balancing", True)
             return await self.update_emotion_from_tags(text, apply_balancing)
 
+        elif action_type == "update_emotion_state":
+            emotions = payload.get("emotions")
+            apply_balancing = payload.get("apply_balancing", True)
+            if isinstance(emotions, dict):
+                return await self.update_emotion_state(emotions, apply_balancing)
+            return await self.get_emotion_state()
+
         elif action_type == "set_emotion":
             emotion = payload.get("emotion")
             intensity = payload.get("intensity")
@@ -327,11 +364,11 @@ class EmotionManager(PluginBase):
             }
         return {
             "description": (
-                "To express emotions, include tags in your response like {emotion intensity}. "
+                "To adjust emotional state, call update_emotion_state with an emotions map. "
                 "Supported emotions: happy, sad, angry, fear, disgust, surprised, neutral, "
                 "relaxed, love, arousal, devotion. Intensity is 0.0 to 10.0."
             ),
-            "example": "I am so happy to see you! {happy 8.5, love 5.0}",
+            "example": '{"type":"update_emotion_state","payload":{"emotions":{"happy":8.5,"love":5.0}}}',
             "note": "Your emotional state will decay over time, so reinforce it if the feeling persists.",
         }
 
@@ -421,7 +458,7 @@ class EmotionManager(PluginBase):
                     rows = await cur.fetchall()
 
             result = {}
-            now = datetime.now()
+            now = datetime.now(timezone.utc)
 
             for row in rows:
                 emotion_name, intensity, timestamp = row
@@ -468,6 +505,137 @@ class EmotionManager(PluginBase):
         except Exception as e:
             log_error(f"[emotion_manager] Error loading emotions: {e}")
             return {}
+
+    async def _log_emotion_diary_entry(
+        self, cur: Any, emotion: str, intensity: float
+    ) -> None:
+        """Write an entry to emotion_diary with legacy-schema compatibility.
+
+        Older deployments may have a plugin-defined emotion_diary schema that
+        differs from the emotion_manager schema (for example, missing
+        ``timestamp`` or using a non-auto-increment ``id``). This method adapts
+        the INSERT to available columns so emotion updates never fail.
+        """
+
+        try:
+            if _get_db_type() == "postgres":
+                await cur.execute(
+                    """
+                    SELECT
+                        column_name,
+                        is_nullable,
+                        column_default,
+                        CASE
+                            WHEN is_identity = 'YES' THEN 'auto_increment'
+                            ELSE ''
+                        END AS extra
+                    FROM information_schema.columns
+                    WHERE table_schema = current_schema()
+                      AND table_name = 'emotion_diary'
+                    ORDER BY ordinal_position
+                    """
+                )
+            else:
+                await cur.execute("SHOW COLUMNS FROM emotion_diary")
+            column_rows = await cur.fetchall()
+        except Exception as e:
+            log_warning(
+                f"[emotion_manager] Could not inspect emotion_diary schema: {e}"
+            )
+            return
+
+        columns: dict[str, dict[str, str | None]] = {}
+        for row in column_rows:
+            if isinstance(row, dict):
+                field = str(
+                    row.get("Field") or row.get("field") or row.get("column_name") or ""
+                )
+                columns[field] = {
+                    "null": row.get("Null")
+                    or row.get("null")
+                    or row.get("is_nullable"),
+                    "default": row.get("Default")
+                    or row.get("default")
+                    or row.get("column_default"),
+                    "extra": row.get("Extra") or row.get("extra"),
+                }
+            else:
+                field = str(row[0]) if len(row) > 0 else ""
+                if len(row) >= 6:
+                    null_value = row[2]
+                    default_value = row[4]
+                    extra_value = row[5]
+                else:
+                    null_value = row[1] if len(row) > 1 else None
+                    default_value = row[2] if len(row) > 2 else None
+                    extra_value = row[3] if len(row) > 3 else None
+                columns[field] = {
+                    "null": null_value,
+                    "default": default_value,
+                    "extra": extra_value,
+                }
+
+        if not columns:
+            return
+
+        sql_columns: list[str] = []
+        sql_values: list[str] = []
+        params: list[Any] = []
+
+        id_meta = columns.get("id")
+        id_requires_value = False
+        if id_meta is not None:
+            extra = str(id_meta.get("extra") or "").lower()
+            null_flag = str(id_meta.get("null") or "").upper()
+            default_val = id_meta.get("default")
+            id_requires_value = (
+                "auto_increment" not in extra
+                and null_flag == "NO"
+                and default_val in (None, "")
+            )
+
+        if id_requires_value:
+            sql_columns.append("id")
+            sql_values.append("%s")
+            params.append(f"emotion:{emotion}:{int(datetime.now().timestamp() * 1000)}")
+
+        payload: list[tuple[str, Any]] = [
+            ("source", "emotion_manager"),
+            ("event", "set_emotion"),
+            ("emotion", emotion),
+            ("intensity", intensity),
+            ("state", "active"),
+            ("trigger_condition", "manual_or_tag"),
+            ("decision_logic", "set_emotion"),
+            ("next_check", None),
+        ]
+
+        for col_name, value in payload:
+            if col_name in columns:
+                sql_columns.append(col_name)
+                sql_values.append("%s")
+                params.append(value)
+
+        if "timestamp" in columns:
+            sql_columns.append("timestamp")
+            sql_values.append("%s")
+            params.append(datetime.now(timezone.utc))
+
+        if not sql_columns:
+            return
+
+        sql = (
+            "INSERT INTO emotion_diary ("
+            + ", ".join(sql_columns)
+            + ") VALUES ("
+            + ", ".join(sql_values)
+            + ")"
+        )
+
+        try:
+            await cur.execute(sql, tuple(params))
+        except Exception as e:
+            log_warning(f"[emotion_manager] emotion_diary insert skipped: {e}")
 
     async def set_emotion(self, emotion: str, intensity: float):
         """Set a single emotion intensity.
@@ -518,22 +686,9 @@ class EmotionManager(PluginBase):
                             (emotion, intensity),
                         )
 
-                    # Log to diary within the same transaction
-                    await cur.execute(
-                        """
-                        INSERT INTO emotion_diary 
-                        (source, event, emotion, intensity, state, trigger_condition, timestamp)
-                        VALUES (%s, %s, %s, %s, %s, %s, NOW())
-                        """,
-                        (
-                            "emotion_manager",
-                            "set_emotion",
-                            emotion,
-                            intensity,
-                            "active",
-                            "manual_or_tag",
-                        ),
-                    )
+                    # Log to diary within the same transaction. This uses a
+                    # schema-adaptive writer to support legacy table variants.
+                    await self._log_emotion_diary_entry(cur, emotion, intensity)
 
                     await conn.commit()
 
@@ -545,7 +700,14 @@ class EmotionManager(PluginBase):
 
                 handler = get_karada_state_server()
                 if handler:
-                    await handler.set_face_values({emotion: intensity / 10.0})
+                    if hasattr(handler, "set_face_values"):
+                        await handler.set_face_values({emotion: intensity / 10.0})
+                    elif hasattr(handler, "_notify_animation_state_changed"):
+                        await handler._notify_animation_state_changed(
+                            getattr(handler, "current_state", None),
+                            getattr(handler, "_current_animation_file", None),
+                            getattr(handler, "_current_animation_descriptor", None),
+                        )
             except Exception:
                 pass
             return True
@@ -615,6 +777,50 @@ class EmotionManager(PluginBase):
 
         return state
 
+    async def update_emotion_state(
+        self, emotions: Dict[str, float], apply_balancing: bool = True
+    ) -> Dict[str, float]:
+        """Update multiple emotions from structured payload data."""
+        if not isinstance(emotions, dict) or not emotions:
+            return await self.get_emotion_state()
+
+        current = await self._load_emotions_from_db()
+        normalized: Dict[str, float] = {}
+        for key, value in emotions.items():
+            norm_name = normalize_emotion_name(str(key))
+            if not norm_name:
+                continue
+            try:
+                intensity = max(0.0, min(10.0, float(value)))
+            except (TypeError, ValueError):
+                continue
+            normalized[norm_name] = intensity
+
+        if not normalized:
+            return await self.get_emotion_state()
+
+        for emotion, new_intensity in normalized.items():
+            await self.set_emotion(emotion, new_intensity)
+            if apply_balancing:
+                opposite = PLUTCHIK_OPPOSITES.get(emotion)
+                if opposite and opposite in current:
+                    old_intensity, _ = current[opposite]
+                    reduced = max(0.0, old_intensity - (new_intensity * 0.5))
+                    await self.set_emotion(opposite, reduced)
+                    current[opposite] = (reduced, datetime.now())
+
+        state = await self.get_emotion_state()
+        try:
+            from core.animation_handler import get_karada_state_server
+
+            handler = get_karada_state_server()
+            if handler and state:
+                await handler.set_face_values({k: v / 10.0 for k, v in state.items()})
+        except Exception:
+            pass
+
+        return state
+
     def _extract_emotion_tags(self, text: str) -> Dict[str, float]:
         """Extract emotion tags from text.
 
@@ -624,16 +830,15 @@ class EmotionManager(PluginBase):
         Returns:
             Dict mapping emotion names to intensities
         """
-        import re
-
         emotion_tags = {}
         invalid_emotions = {}
 
-        # Pattern: {emotion intensity, emotion intensity}
-        pattern = r"\{([^}]+)\}"
-        matches = re.findall(pattern, text, re.IGNORECASE)
+        # Only parse strict emotion-tag blocks (e.g. {happy 8, sad 2}),
+        # not arbitrary JSON/object braces.
+        matches = _EMOTION_TAG_RE.finditer(text or "")
 
-        for match in matches:
+        for match_obj in matches:
+            match = match_obj.group(0).strip().strip("{}").strip()
             # Split by comma
             parts = [p.strip() for p in match.split(",")]
 
@@ -969,8 +1174,9 @@ class EmotionManager(PluginBase):
 
         instruction = (
             f"Current Emotional State: {emotion_str}\n"
-            f"Available Emotion Tags: {avail_str}\n"
-            "Instruction: To express emotions, include tags in your response like {happy 8.5, surprised 3.0}. "
+            f"Available Emotion Types: {avail_str}\n"
+            "Instruction: Use structured emotion actions (update_emotion_state with an emotions map) to adjust emotional state. "
+            "Never include curly-brace emotion tags inside message text. "
             "Use only the provided emotion names. Your emotional state decays over time, so reinforce it if feelings persist."
         )
 
