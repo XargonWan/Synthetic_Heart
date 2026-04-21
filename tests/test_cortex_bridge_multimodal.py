@@ -42,7 +42,7 @@ class TestExtractAttachmentsAndRedact:
 
         # Redacted copy should have placeholder instead of raw base64
         att = redacted["input"]["attachments"][0]
-        assert att["data"].startswith("<binary:")
+        assert att["data"].startswith("<redacted:")
         assert att["mime_type"] == "image/jpeg"
 
     def test_extracts_multiple_attachments(self) -> None:
@@ -72,8 +72,8 @@ class TestExtractAttachmentsAndRedact:
         assert len(parts) == 1
         assert parts[0]["mime_type"] == "image/webp"
 
-    def test_skips_short_data_fields(self) -> None:
-        """Data shorter than 256 chars is not treated as base64 binary."""
+    def test_skips_invalid_short_data_fields(self) -> None:
+        """Short non-base64 strings are not treated as binary attachments."""
         prompt = {
             "input": {
                 "attachments": [{"mime_type": "image/jpeg", "data": "short"}],
@@ -81,6 +81,19 @@ class TestExtractAttachmentsAndRedact:
         }
         _, parts = _extract_attachments_and_redact(prompt)
         assert parts == []
+
+    def test_extracts_short_valid_base64_data_fields(self) -> None:
+        prompt = {
+            "input": {
+                "attachments": [{"mime_type": "image/jpeg", "data": "YWJjZA=="}],
+            },
+        }
+        redacted, parts = _extract_attachments_and_redact(prompt)
+
+        assert len(parts) == 1
+        assert parts[0]["mime_type"] == "image/jpeg"
+        assert parts[0]["data"] == "YWJjZA=="
+        assert redacted["input"]["attachments"][0]["data"] == "<redacted: 8 chars>"
 
     def test_skips_schema_subtrees(self) -> None:
         """Should not recurse into 'actions' / 'available_actions' / 'schema'."""
