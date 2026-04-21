@@ -33,6 +33,8 @@ let __synthKnockAudio = null; // legacy fallback
 let __synthKnockSfx = { buffer: null, loading: null };
 let __synthLastKnockAt = 0;
 let __synthKnockLook = { activeUntil: 0, startedAt: 0, durationMs: 520, maxStrength: 0.32 };
+const __synthTouchOverlayContextId = '__webui_touch_overlay';
+const __synthTouchOverlayPriority = 11;
 
 const __synthNeutralGaze = { yawOffsetRad: 0.0, distance: 2.2 };
 
@@ -89,6 +91,152 @@ function _showVrmLoadingOverlay() {
     if (!overlay.isConnected) {
         const container = document.querySelector('.home-vrm');
         if (container) container.appendChild(overlay);
+    }
+}
+
+function _clearPendingAnimationQueueForSummoning() {
+    try {
+        if (typeof pendingAnimationCommands !== 'undefined' && Array.isArray(pendingAnimationCommands)) {
+            pendingAnimationCommands.length = 0;
+        }
+    } catch (e) { /* ignore */ }
+    try {
+        if (window.pendingAnimationCommands && Array.isArray(window.pendingAnimationCommands)) {
+            window.pendingAnimationCommands.length = 0;
+        }
+    } catch (e) { /* ignore */ }
+}
+
+function _resetSummoningBootstrapCaches() {
+    try { window.__synth_current_animation_state = null; } catch (e) { /* ignore */ }
+    try { window.__synth_last_rich_animation_state = null; } catch (e) { /* ignore */ }
+    try { window.__synth_current_animation_id = null; } catch (e) { /* ignore */ }
+    try { window.__synth_pending_preloads = {}; } catch (e) { /* ignore */ }
+    try { _clearPendingAnimationQueueForSummoning(); } catch (e) { /* ignore */ }
+    try {
+        if (window.__synth_debug_last_remote) {
+            window.__synth_debug_last_remote.animation = null;
+            window.__synth_debug_last_remote.animation_state = null;
+        }
+        if (window.__synth_debug_last_remote_at) {
+            window.__synth_debug_last_remote_at.animation = 0;
+            window.__synth_debug_last_remote_at.animation_state = 0;
+        }
+    } catch (e) { /* ignore */ }
+}
+
+async function _fetchFreshSummoningState() {
+    let desiredState = null;
+    let desiredAnimation = null;
+    let desiredDescriptor = null;
+    let desiredPlaySection = null;
+    let desiredFrameRange = null;
+    let desiredPhaseAuthoritative = false;
+    let richAnimationState = null;
+    let faceValues = null;
+
+    try {
+        const resp = await fetch('/api/karada/state', { cache: 'no-store' });
+        if (resp && resp.ok) {
+            const fullState = await resp.json();
+            const animation = (fullState && typeof fullState.animation === 'object' && fullState.animation)
+                ? fullState.animation
+                : {};
+            desiredState = animation.state || null;
+            desiredAnimation = animation.file || animation.url || animation.animation || null;
+            desiredDescriptor = animation.descriptor || null;
+            desiredPlaySection = animation.play_section || null;
+            desiredFrameRange = animation.frame_range || null;
+            desiredPhaseAuthoritative = !!animation.phase_authoritative;
+            richAnimationState = animation.animation_state || null;
+            faceValues = (fullState && fullState.face_values && typeof fullState.face_values === 'object')
+                ? fullState.face_values
+                : null;
+
+            if (desiredState) {
+                try {
+                    window.__synth_current_animation_state = {
+                        state: desiredState,
+                        animation: desiredAnimation,
+                        descriptor: desiredDescriptor || null,
+                        play_section: desiredPlaySection,
+                        frame_range: desiredFrameRange,
+                        phase_authoritative: desiredPhaseAuthoritative,
+                    };
+                } catch (e) { /* ignore */ }
+            }
+            if (richAnimationState) {
+                try { window.__synth_last_rich_animation_state = richAnimationState; } catch (e) { /* ignore */ }
+            }
+            return {
+                state: desiredState,
+                animation: desiredAnimation,
+                descriptor: desiredDescriptor,
+                playSection: desiredPlaySection,
+                frameRange: desiredFrameRange,
+                phaseAuthoritative: desiredPhaseAuthoritative,
+                richAnimationState,
+                faceValues,
+            };
+        }
+    } catch (err) {
+        console.warn('[synth_webui] Fresh Karada state fetch failed during Summoning:', err);
+    }
+
+    try {
+        const resp = await fetch('/api/animation_state', { cache: 'no-store' });
+        if (resp && resp.ok) {
+            const summary = await resp.json();
+            desiredState = summary.state || null;
+            desiredAnimation = summary.animation || summary.file || null;
+            desiredDescriptor = summary.descriptor || null;
+            desiredPlaySection = summary.play_section || null;
+            desiredFrameRange = summary.frame_range || null;
+            desiredPhaseAuthoritative = !!summary.phase_authoritative;
+            richAnimationState = summary.animation_state || null;
+            if (desiredState) {
+                try {
+                    window.__synth_current_animation_state = {
+                        state: desiredState,
+                        animation: desiredAnimation,
+                        descriptor: desiredDescriptor || null,
+                        play_section: desiredPlaySection,
+                        frame_range: desiredFrameRange,
+                        phase_authoritative: desiredPhaseAuthoritative,
+                    };
+                } catch (e) { /* ignore */ }
+            }
+            if (richAnimationState) {
+                try { window.__synth_last_rich_animation_state = richAnimationState; } catch (e) { /* ignore */ }
+            }
+        }
+    } catch (err) {
+        console.warn('[synth_webui] Fresh animation_state fetch failed during Summoning:', err);
+    }
+
+    return {
+        state: desiredState,
+        animation: desiredAnimation,
+        descriptor: desiredDescriptor,
+        playSection: desiredPlaySection,
+        frameRange: desiredFrameRange,
+        phaseAuthoritative: desiredPhaseAuthoritative,
+        richAnimationState,
+        faceValues,
+    };
+}
+
+function _applyFreshSummoningFaceValues(faceValues) {
+    try {
+        if (!faceValues || typeof faceValues !== 'object') return;
+        if (window.VRMAnimations && typeof window.VRMAnimations.setFaceValues === 'function') {
+            window.VRMAnimations.setFaceValues(faceValues);
+        }
+        if (animationHandler && typeof animationHandler._flushFaceNow === 'function') {
+            animationHandler._flushFaceNow();
+        }
+    } catch (e) {
+        console.warn('[synth_webui] Failed to apply fresh Summoning face values:', e);
     }
 }
 
@@ -761,16 +909,22 @@ class AnimationHandler {
             const prevAction = (this._lastAnimationState && this._lastAnimationState.action) ? String(this._lastAnimationState.action).toLowerCase() : null;
             const incomingActionName = (state && state.action) ? String(state.action).toLowerCase() : null;
             const incomingPhase = (state && state.phase) ? String(state.phase).toLowerCase() : null;
+            const incomingPhaseAuthoritative = !!(state && state.phase_authoritative === true);
             const localStructuredPhase = (this.currentStructuredAction && this.currentActionPhase)
                 ? String(this.currentActionPhase).toLowerCase()
                 : null;
             // Preserve the locally-playing structured phase while intro/outro are still
             // transitioning on the client. Backend summaries report the logical steady
-            // state ('loop'), but that must not stomp the real local mixer phase.
+            // state ('loop' / 'clip'), but that must not stomp the real local mixer
+            // phase unless the server explicitly marked the phase as authoritative.
             const preserveLocalStructuredPlayback = !!(
                 this.currentStructuredAction
+                && this.currentActionName
+                && incomingActionName
+                && String(this.currentActionName).toLowerCase() === incomingActionName
                 && (localStructuredPhase === 'intro' || localStructuredPhase === 'outro')
-                && incomingPhase === 'loop'
+                && (incomingPhase === 'loop' || incomingPhase === 'clip')
+                && !incomingPhaseAuthoritative
             );
             // store for reference
             this._lastAnimationState = state;
@@ -785,11 +939,13 @@ class AnimationHandler {
             try { this._lastEmotions = (state && state.emotions) ? state.emotions : null; } catch (e) { this._lastEmotions = null; }
             try { this._lastFeelings = (state && state.feelings) ? state.feelings : null; } catch (e) { this._lastFeelings = null; }
 
-            // Emotion overlay: after an action starts, apply the dominant emotion face for
-            // a random duration that scales with intensity. This is action-agnostic because
-            // plugins may override writing/phase semantics.
+            // Idle micro-expressions: when we settle into idle, we may show a small
+            // emotion hint. Speech-tag expressions remain the only strong face layer.
             try {
                 const newAction = (state && state.action) ? String(state.action).toLowerCase() : null;
+                const isIdleLikeAction = !newAction || newAction === 'idle';
+                const hasExplicitFacialExpression = this._hasActiveFacialExpressionSource();
+                const incomingLipsync = !!(state && state.lipsync);
                 let startedAtMs = NaN;
                 try {
                     if (state && state.timing && state.timing.started_at) {
@@ -814,7 +970,7 @@ class AnimationHandler {
                     } catch (e) { /* ignore */ }
 
                     const emo = (state && state.emotions && state.emotions.values && typeof state.emotions.values === 'object') ? state.emotions.values : null;
-                    if (emo) {
+                    if (emo && isIdleLikeAction && !incomingLipsync && !hasExplicitFacialExpression) {
                         // pick max intensity; tie -> random
                         let maxVal = -Infinity;
                         Object.keys(emo).forEach(k => {
@@ -827,25 +983,25 @@ class AnimationHandler {
                                 return Number.isFinite(v) && v === maxVal;
                             });
                             if (candidates.length > 0) {
-                                const chosen = candidates[Math.floor(Math.random() * candidates.length)];
+                                const chosen = this._normalizeEmotionHintKey(candidates[Math.floor(Math.random() * candidates.length)]);
+                                if (!chosen) return;
 
-                                // normalize intensity to 0..1 (support 0..1 or 0..10-ish)
+                                // Normalize to 0..1 and clamp to a subtle idle-only micro-expression.
                                 let norm = maxVal;
                                 if (norm > 1) norm = norm / 10.0;
                                 norm = Math.max(0, Math.min(1, norm));
+                                const subtleNorm = Math.min(0.22, 0.05 + norm * 0.17);
 
-                                const delayS = 0.2 + Math.random() * 0.9; // X seconds after action start
-                                const baseMin = 0.8;
-                                const baseMax = 3.5;
-                                const durS = (baseMin + (baseMax - baseMin) * norm) * (0.8 + Math.random() * 0.45);
+                                const delayS = 0.35 + Math.random() * 1.25;
+                                const durS = 0.6 + Math.random() * 1.5;
 
                                 this._emotionOverlay = {
                                     action: newAction || 'unknown',
                                     emotion: String(chosen),
-                                    intensity: norm,
+                                    intensity: subtleNorm,
                                     startsAtMs: startedAtMs + Math.round(delayS * 1000),
                                     endsAtMs: startedAtMs + Math.round((delayS + durS) * 1000),
-                                    priority: 25,
+                                    priority: 10,
                                 };
                             }
                         }
@@ -1030,6 +1186,209 @@ class AnimationHandler {
         this._expressionSources = [];
     }
 
+    _hasActiveFacialExpressionSource() {
+        try {
+            return !!(
+                Array.isArray(this._expressionSources)
+                && this._expressionSources.some((src) => (
+                    src
+                    && src.source === 'facial_expression'
+                    && src.targets
+                    && typeof src.targets === 'object'
+                    && Object.keys(src.targets).length > 0
+                ))
+            );
+        } catch (e) {
+            return false;
+        }
+    }
+
+    _normalizeEmotionHintKey(name) {
+        try {
+            const raw = String(name || '').trim().toLowerCase();
+            if (!raw) return null;
+            if (raw === 'calm' || raw === 'neutral') return 'relaxed';
+            if (raw === 'love' || raw === 'devotion') return 'happy';
+            if (raw === 'arousal') return 'surprised';
+            if (raw === 'scared') return 'fear';
+            return raw;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    _buildIdleEmotionHintTargets(state) {
+        try {
+            const collectValues = (srcObj) => {
+                if (!srcObj) return null;
+                const valuesObj = (srcObj.values && typeof srcObj.values === 'object') ? srcObj.values
+                    : ((typeof srcObj === 'object') ? srcObj : null);
+                const out = {};
+                if (Array.isArray(valuesObj)) {
+                    valuesObj.forEach((it) => {
+                        try {
+                            const name = it && (it.type || it.name) ? String(it.type || it.name) : '';
+                            if (!name) return;
+                            const raw = Number(it.intensity !== undefined ? it.intensity : it.value);
+                            if (!Number.isFinite(raw)) return;
+                            const v01 = (raw > 1) ? (raw / 10.0) : raw;
+                            out[name] = Math.max(out[name] || 0, Math.max(0, Math.min(1, v01)));
+                        } catch (e) { /* ignore */ }
+                    });
+                } else if (valuesObj && typeof valuesObj === 'object') {
+                    Object.keys(valuesObj).forEach((key) => {
+                        if (!key || /^\d+$/.test(String(key))) return;
+                        const raw = Number(valuesObj[key]);
+                        if (!Number.isFinite(raw)) return;
+                        const v01 = (raw > 1) ? (raw / 10.0) : raw;
+                        out[String(key)] = Math.max(0, Math.min(1, v01));
+                    });
+                }
+                return Object.keys(out).length ? out : null;
+            };
+
+            const mergeCandidate = (bucket, key, rawValue, weight = 1.0) => {
+                const normalized = this._normalizeEmotionHintKey(key);
+                if (!normalized) return;
+                const weighted = Math.max(0, Math.min(1, (Number(rawValue) || 0) * weight));
+                if (weighted <= 0.02) return;
+                bucket[normalized] = Math.max(bucket[normalized] || 0, weighted);
+            };
+
+            const emotions = collectValues(state && state.emotions) || {};
+            const feelings = collectValues(state && state.feelings) || {};
+            const candidates = {};
+
+            Object.keys(emotions).forEach((key) => mergeCandidate(candidates, key, emotions[key], 1.0));
+            Object.keys(feelings).forEach((key) => mergeCandidate(candidates, key, feelings[key], 0.85));
+
+            const get = (key) => {
+                const fromFeelings = feelings[key];
+                const fromEmotions = emotions[key];
+                const val = Math.max(
+                    Number.isFinite(Number(fromFeelings)) ? Number(fromFeelings) : 0,
+                    Number.isFinite(Number(fromEmotions)) ? Number(fromEmotions) : 0,
+                );
+                return val > 0 ? val : null;
+            };
+
+            const valence = get('valence');
+            if (Number.isFinite(valence)) {
+                const v = Math.max(0, Math.min(1, valence));
+                const pos = Math.max(0, (v - 0.5) * 2);
+                const neg = Math.max(0, (0.5 - v) * 2);
+                if (pos > 0.02) mergeCandidate(candidates, 'happy', pos, 0.7);
+                if (neg > 0.02) mergeCandidate(candidates, 'sad', neg, 0.7);
+            }
+
+            const stress = Math.max(get('stress') || 0, get('angry') || 0);
+            if (stress > 0.05) {
+                mergeCandidate(candidates, 'angry', stress, 0.75);
+                mergeCandidate(candidates, 'fear', stress * 0.35, 0.7);
+            }
+
+            const calm = Math.max(get('calm') || 0, get('relaxed') || 0);
+            if (calm > 0.05) {
+                mergeCandidate(candidates, 'relaxed', calm, 0.75);
+            }
+
+            const loveLike = Math.max(get('love') || 0, get('devotion') || 0);
+            if (loveLike > 0.05) {
+                mergeCandidate(candidates, 'happy', loveLike, 0.55);
+                mergeCandidate(candidates, 'relaxed', loveLike, 0.45);
+            }
+
+            let dominantKey = null;
+            let dominantValue = 0;
+            Object.entries(candidates).forEach(([key, value]) => {
+                const v = Number(value) || 0;
+                if (v > dominantValue) {
+                    dominantKey = key;
+                    dominantValue = v;
+                }
+            });
+
+            if (!dominantKey || dominantValue < 0.08) return null;
+
+            const subtleFloor = (dominantKey === 'relaxed') ? 0.05 : 0.07;
+            const subtleCeil = (dominantKey === 'relaxed') ? 0.14 : 0.18;
+            const subtleIntensity = Math.min(
+                subtleCeil,
+                subtleFloor + dominantValue * ((dominantKey === 'relaxed') ? 0.07 : 0.12),
+            );
+
+            return { [dominantKey]: subtleIntensity };
+        } catch (e) {
+            console.warn('[AnimationHandler] _buildIdleEmotionHintTargets failed:', e);
+            return null;
+        }
+    }
+
+    clearRemoteFaceValues() {
+        try {
+            const prev = (this._remoteFaceValueKeys instanceof Set)
+                ? Array.from(this._remoteFaceValueKeys)
+                : [];
+            prev.forEach((key) => {
+                try { this._setFaceValue(String(key), 0); } catch (e) { /* ignore */ }
+                try { if (this._faceValueCache) delete this._faceValueCache[String(key)]; } catch (e) { /* ignore */ }
+            });
+            this._remoteFaceValueKeys = new Set();
+            try { this._flushFaceNow(); } catch (e) { /* ignore */ }
+        } catch (e) { /* ignore */ }
+    }
+
+    applyRemoteFaceValues(values) {
+        try {
+            const incoming = (values && typeof values === 'object') ? values : {};
+            const incomingKeys = new Set(Object.keys(incoming).map((key) => String(key)));
+            if (!(this._remoteFaceValueKeys instanceof Set)) {
+                this._remoteFaceValueKeys = new Set();
+            }
+
+            Array.from(this._remoteFaceValueKeys).forEach((key) => {
+                if (incomingKeys.has(key)) return;
+                try { this._setFaceValue(String(key), 0); } catch (e) { /* ignore */ }
+                try { if (this._faceValueCache) delete this._faceValueCache[String(key)]; } catch (e) { /* ignore */ }
+            });
+
+            this._remoteFaceValueKeys = new Set();
+            Object.entries(incoming).forEach(([key, rawValue]) => {
+                const name = String(key || '');
+                if (!name) return;
+                const value = Math.max(0, Math.min(1, Number(rawValue) || 0));
+                try { this._setFaceValue(name, value); } catch (e) { /* ignore */ }
+                if (value > 0) {
+                    this._remoteFaceValueKeys.add(name);
+                }
+            });
+
+            try { this._flushFaceNow(); } catch (e) { /* ignore */ }
+        } catch (e) {
+            console.warn('[AnimationHandler] applyRemoteFaceValues failed:', e);
+        }
+    }
+
+    resetBootstrapState() {
+        try {
+            this.currentAction = null;
+            this.currentActionName = null;
+            this.currentActionKey = null;
+            this.currentActionPhase = null;
+            this.currentStructuredAction = null;
+            this._emotionOverlay = null;
+            this._lastAnimationState = null;
+            this._lastEmotions = null;
+            this._lastFeelings = null;
+            this.clearExpressionSources();
+            this.clearRemoteFaceValues();
+            try { this._clearEyesState(); } catch (e) { /* ignore */ }
+            try { this._fadeOutAllExpressions(); } catch (e) { /* ignore */ }
+            try { this._forceOpenEyes(); } catch (e) { /* ignore */ }
+            try { this._flushFaceNow(); } catch (e) { /* ignore */ }
+        } catch (e) { /* ignore */ }
+    }
+
     // Placeholder: compute expressions for current frame and apply via blendShapeProxy
     // Apply expressions for the current frame with smoothing
     applyExpressionsForFrame(state, dt = 0.033) {
@@ -1144,46 +1503,23 @@ class AnimationHandler {
                 exprs.push(...this._expressionSources.map(e => Object.assign({priority:0}, e)));
             }
 
-            // Emotion/Feeling state injection: treat state.emotions/state.feelings as synthetic expressions keyed by name.
-            // The client will map these names to blendshape targets using the per-persona
-            // `persona.emotions` mapping exposed by the backend (no legacy fallback required).
+            const currentActionKey = (state && state.action)
+                ? String(state.action).toLowerCase()
+                : ((this.currentActionName && typeof this.currentActionName === 'string')
+                    ? String(this.currentActionName).toLowerCase()
+                    : null);
+            const hasExplicitFacialExpression = this._hasActiveFacialExpressionSource();
+            const isIdleLikeAction = !currentActionKey || currentActionKey === 'idle';
+            const suppressBaseEmotionLayers = hasExplicitFacialExpression || this._lipsyncEnabled || currentActionKey === 'talk';
+
+            // Background emotional expression: idle only, subtle only, and never while
+            // a speech-tag expression or lipsync is actively driving the face.
             try {
-                const collectValues = (srcObj) => {
-                    if (!srcObj) return null;
-                    const valuesObj = (srcObj.values && typeof srcObj.values === 'object') ? srcObj.values
-                        : ((typeof srcObj === 'object') ? srcObj : null);
-                    const t = {};
-                    if (Array.isArray(valuesObj)) {
-                        valuesObj.forEach((it) => {
-                            try {
-                                const name = it && (it.type || it.name) ? String(it.type || it.name) : '';
-                                if (!name) return;
-                                const raw = Number(it.intensity !== undefined ? it.intensity : it.value);
-                                if (!Number.isFinite(raw)) return;
-                                const v01 = (raw > 1) ? (raw / 10.0) : raw;
-                                t[name] = Math.max(t[name] || 0, Math.max(0, Math.min(1, v01)));
-                            } catch (e) { /* ignore */ }
-                        });
-                    } else if (valuesObj && typeof valuesObj === 'object') {
-                        Object.keys(valuesObj).forEach((k) => {
-                            if (!k || /^\d+$/.test(String(k))) return;
-                            const raw = Number(valuesObj[k]);
-                            if (!Number.isFinite(raw)) return;
-                            const v01 = (raw > 1) ? (raw / 10.0) : raw;
-                            t[String(k)] = Math.max(0, Math.min(1, v01));
-                        });
+                if (!suppressBaseEmotionLayers && isIdleLikeAction) {
+                    const idleEmotionHintTargets = this._buildIdleEmotionHintTargets(state);
+                    if (idleEmotionHintTargets) {
+                        exprs.push({ targets: idleEmotionHintTargets, priority: 8, source: 'idle_emotion_hint' });
                     }
-                    return Object.keys(t).length > 0 ? t : null;
-                };
-
-                const emTargets = collectValues(state && state.emotions);
-                if (emTargets) {
-                    exprs.push({ targets: emTargets, priority: 15, source: 'emotions_state' });
-                }
-
-                const fTargets = collectValues(state && state.feelings);
-                if (fTargets) {
-                    exprs.push({ targets: fTargets, priority: 14, source: 'feelings_state' });
                 }
             } catch (e) { /* ignore */ }
 
@@ -1204,73 +1540,19 @@ class AnimationHandler {
                 }
             } catch (e) { /* ignore */ }
 
-            // Derive expressions from high-level dimensions (valence/arousal/stress/calm/etc)
-            // consolidated across all active expressions (respecting priorities).
-            try {
-                const consolidatedFeelings = {};
-                const sortedExprs = exprs.slice().sort((a, b) => (a.priority || 0) - (b.priority || 0));
-                sortedExprs.forEach(ex => {
-                    if (!evaluateFrame(ex)) return;
-                    if (ex.targets) Object.keys(ex.targets).forEach(k => {
-                        consolidatedFeelings[k] = Math.max(0, Math.min(1, Number(ex.targets[k]) || 0));
-                    });
-                });
-
-                const derived = {};
-                const get = (k) => (consolidatedFeelings[k] !== undefined) ? Number(consolidatedFeelings[k]) : null;
-
-                // 1. Valence-based (happy/sad)
-                const valence = get('valence');
-                if (Number.isFinite(valence)) {
-                    const v = Math.max(0, Math.min(1, valence));
-                    const pos = Math.max(0, (v - 0.5) * 2);
-                    const neg = Math.max(0, (0.5 - v) * 2);
-                    if (pos > 0.02) derived['happy'] = Math.max(derived['happy'] || 0, pos);
-                    if (neg > 0.02) derived['sad'] = Math.max(derived['sad'] || 0, neg);
-                }
-
-                // 2. Arousal-based (surprised)
-                const arousal = get('arousal');
-                if (Number.isFinite(arousal)) {
-                    const a = Math.max(0, Math.min(1, arousal));
-                    if (a > 0.25) derived['surprised'] = Math.max(derived['surprised'] || 0, (a - 0.25) / 0.75);
-                }
-
-                // 3. Stress/Anger-based
-                const stress = get('stress');
-                const angryF = get('angry'); // 'angry' as feeling dimension
-                const sVal = Math.max(Number.isFinite(stress) ? stress : 0, Number.isFinite(angryF) ? angryF : 0);
-                if (sVal > 0.05) {
-                    derived['scared'] = Math.max(derived['scared'] || 0, sVal * 0.4);
-                    derived['angry'] = Math.max(derived['angry'] || 0, sVal);
-                }
-
-                // 4. Calmness/Relaxed
-                const calm = get('calm');
-                if (Number.isFinite(calm)) {
-                    const c = Math.max(0, Math.min(1, calm));
-                    if (c > 0.65) derived['relaxed'] = Math.max(derived['relaxed'] || 0, (c - 0.65) / 0.35);
-                }
-
-                if (Object.keys(derived).length) {
-                    // Derived expressions have slightly higher priority than base feelings
-                    // so they can override lower-priority presets if needed.
-                    exprs.push({ targets: derived, priority: 14.5, source: 'feelings_derived' });
-                }
-            } catch (e) { console.warn('[AnimationHandler] derivation failed', e); }
-
-            // Emotion overlay injection (client-side): during the scheduled window,
-            // inject a synthetic expression keyed by emotion name; the client will map
-            // it to blendshape targets using the per-persona `persona.emotions` mapping.
+            // Emotion overlay injection (client-side): subtle idle-only micro-expression.
+            // Explicit speech-tag expressions suppress it so layers cannot fight each other.
             try {
                 const ov = this._emotionOverlay || null;
-                const actionKey = (state && state.action) ? String(state.action).toLowerCase() : null;
+                const allowEmotionMicroOverlay = !suppressBaseEmotionLayers && isIdleLikeAction;
                 const now = Date.now();
-                if (ov && ov.emotion && Number.isFinite(ov.startsAtMs) && Number.isFinite(ov.endsAtMs)) {
+                if (!allowEmotionMicroOverlay) {
+                    this._emotionOverlay = null;
+                } else if (ov && ov.emotion && Number.isFinite(ov.startsAtMs) && Number.isFinite(ov.endsAtMs)) {
                     if (now > ov.endsAtMs) {
                         this._emotionOverlay = null;
                     } else if (now >= ov.startsAtMs && now <= ov.endsAtMs) {
-                        if (!ov.action || !actionKey || ov.action === actionKey) {
+                        if (!ov.action || !currentActionKey || ov.action === currentActionKey) {
                             const t = {};
                             t[String(ov.emotion)] = Math.max(0, Math.min(1, Number(ov.intensity) || 0));
                             exprs.push({ targets: t, priority: (ov.priority || 25), source: 'emotion_overlay' });
@@ -2103,6 +2385,8 @@ class AnimationHandler {
         this._pendingRequestedAction = null;
         this._queuedTransitionAfterOutro = null;
         this._lateRecoveryTokens = {};
+        this._transitionGeneration = 0;
+        this._baseIdleDropTimer = null;
 
         // Serialize animation switches to avoid concurrent startAction() calls
         // which can momentarily stop the current action and cause a visible T-pose.
@@ -2403,6 +2687,12 @@ class AnimationHandler {
         try {
             if (!action) return;
             try { this._activeActions && this._activeActions.delete(action); } catch (e) { /* ignore */ }
+            try {
+                if (action.__synthFadeStopTimer) {
+                    clearTimeout(action.__synthFadeStopTimer);
+                    action.__synthFadeStopTimer = null;
+                }
+            } catch (e) { /* ignore */ }
             // Only re-enable the action if it is currently running (or paused
             // mid-play).  Re-enabling a finished LoopOnce action can re-trigger
             // playback from t=0 on the next mixer update, causing a spurious
@@ -2416,16 +2706,58 @@ class AnimationHandler {
                 }
             } catch (e) { /* ignore */ }
             try { action.fadeOut(fadeSec); } catch (e) { /* ignore */ }
-            setTimeout(() => {
+            const stopTimer = setTimeout(() => {
                 try {
+                    const reclaimedByCurrentTransition = !!(
+                        action === this.currentAction
+                        || action === this._baseIdleAction
+                        || (this.currentStructuredAction && (
+                            action === this.currentStructuredAction.intro
+                            || action === this.currentStructuredAction.loop
+                            || action === this.currentStructuredAction.outro
+                        ))
+                    );
+                    try {
+                        if (action.__synthFadeStopTimer !== stopTimer) return;
+                        action.__synthFadeStopTimer = null;
+                    } catch (e) { /* ignore */ }
+                    if (reclaimedByCurrentTransition) return;
                     action.stop();
                     action.reset();
                     try { action.enabled = false; } catch (e) { /* ignore */ }
                 } catch (e) { /* ignore */ }
             }, Math.round(fadeSec * 1000) + 60);
+            try { action.__synthFadeStopTimer = stopTimer; } catch (e) { /* ignore */ }
         } catch (e) {
             /* ignore */
         }
+    }
+
+    _cancelBaseIdleFloorDrop() {
+        try {
+            if (this._baseIdleDropTimer) {
+                clearTimeout(this._baseIdleDropTimer);
+                this._baseIdleDropTimer = null;
+            }
+        } catch (e) { /* ignore */ }
+    }
+
+    _scheduleBaseIdleFloorDrop(targetWeight = 0.12, delayMs = 400) {
+        try {
+            this._cancelBaseIdleFloorDrop();
+            const generation = this._transitionGeneration;
+            const timer = setTimeout(() => {
+                try {
+                    if (this._baseIdleDropTimer !== timer) return;
+                    this._baseIdleDropTimer = null;
+                    if (this._transitionGeneration !== generation) return;
+                    if (this._baseIdleAction && typeof this._baseIdleAction.setEffectiveWeight === 'function') {
+                        this._baseIdleAction.setEffectiveWeight(targetWeight);
+                    }
+                } catch (e) { /* ignore */ }
+            }, delayMs);
+            this._baseIdleDropTimer = timer;
+        } catch (e) { /* ignore */ }
     }
 
     /**
@@ -2539,17 +2871,12 @@ class AnimationHandler {
             // seconds. If we reduced base idle immediately the total skeleton
             // coverage would drop to ~12% for that window, causing visible T-pose.
             // Waiting fadeSec + 50ms ensures the new clip is at full weight first.
+            // The delayed drop is tied to the active transition generation so an
+            // older timeout cannot lower base-idle in the middle of a newer crossfade.
             try {
                 if (baseIdle && typeof baseIdle.setEffectiveWeight === 'function') {
-                    const _b = baseIdle;
                     const _delay = Math.round(fadeSec * 1000) + 50;
-                    setTimeout(() => {
-                        try {
-                            if (_b && typeof _b.setEffectiveWeight === 'function') {
-                                _b.setEffectiveWeight(0.12);
-                            }
-                        } catch (e) { /* ignore */ }
-                    }, _delay);
+                    this._scheduleBaseIdleFloorDrop(0.12, _delay);
                 }
             } catch (e) { /* ignore */ }
         } catch (e) { /* ignore */ }
@@ -2857,7 +3184,55 @@ class AnimationHandler {
         // This way, switching IDLE variants does not depend on immediate IO.
         if (actionName === 'idle') {
             try {
+                // Some runtimes may contain transition clips inside the idle folder.
+                // Never use play-once or structured-without-loop clips as the base idle fallback.
+                try {
+                    const idleFilterResults = await Promise.all((files || []).map(async (file) => {
+                        try {
+                            const descriptor = await this.loadDescriptor('idle', file);
+                            const hasLoopSection = !!(
+                                descriptor
+                                && descriptor.loop
+                                && typeof descriptor.loop.start_frame === 'number'
+                                && typeof descriptor.loop.end_frame === 'number'
+                            );
+                            const hasStructuredNoLoop = !!(
+                                descriptor
+                                && (descriptor.intro || descriptor.outro)
+                                && !hasLoopSection
+                            );
+                            const isPlayOnce = !!(descriptor && descriptor.play_once);
+                            return {
+                                file,
+                                isLoopable: !(isPlayOnce || hasStructuredNoLoop),
+                            };
+                        } catch (e) {
+                            return { file, isLoopable: true };
+                        }
+                    }));
+
+                    const loopableFiles = idleFilterResults
+                        .filter((entry) => entry.isLoopable)
+                        .map((entry) => entry.file);
+                    const excludedIdleFiles = idleFilterResults
+                        .filter((entry) => !entry.isLoopable)
+                        .map((entry) => entry.file);
+
+                    if (excludedIdleFiles.length) {
+                        console.log('[AnimationHandler] Excluding non-loopable IDLE variants from fallback queue:', excludedIdleFiles);
+                    }
+                    if (loopableFiles.length) {
+                        files = loopableFiles;
+                    }
+                } catch (e) { /* ignore */ }
+
                 if (!this._idleQueue) this._idleQueue = { currentFile: null, nextFile: null };
+                if (this._idleQueue.currentFile && !files.includes(this._idleQueue.currentFile)) {
+                    this._idleQueue.currentFile = null;
+                }
+                if (this._idleQueue.nextFile && !files.includes(this._idleQueue.nextFile)) {
+                    this._idleQueue.nextFile = null;
+                }
                 const pickRandom = (arr, avoid) => {
                     if (!Array.isArray(arr) || arr.length === 0) return null;
                     if (arr.length === 1) return arr[0];
@@ -3380,21 +3755,23 @@ class AnimationHandler {
         }
     }
 
-    startAction(actionName, animationFile = null, playOnce = false, playSection = null, descriptorOverride = null) {
+    startAction(actionName, animationFile = null, playOnce = false, playSection = null, descriptorOverride = null, frameRange = null, phaseAuthoritative = false) {
         // Queue to prevent concurrent state switches (fixes transient T-pose and out-of-order visual transitions).
         this._startActionChain = (this._startActionChain || Promise.resolve())
-            .then(() => this._startActionInternal(actionName, animationFile, playOnce, playSection, descriptorOverride))
+            .then(() => this._startActionInternal(actionName, animationFile, playOnce, playSection, descriptorOverride, frameRange, phaseAuthoritative))
             .catch((err) => {
                 console.warn('[AnimationHandler] startAction chain error:', err);
             });
         return this._startActionChain;
     }
 
-    async _startActionInternal(actionName, animationFile = null, playOnce = false, playSection = null, descriptorOverride = null) {
+    async _startActionInternal(actionName, animationFile = null, playOnce = false, playSection = null, descriptorOverride = null, frameRange = null, phaseAuthoritative = false) {
         console.log(`[AnimationHandler] startAction called with actionName: ${actionName}, animationFile: ${animationFile}, playOnce: ${playOnce}, playSection: ${playSection}`);
         console.log(`[AnimationHandler] this.mixer exists:`, !!this.mixer);
         console.log(`[AnimationHandler] this.vrm exists:`, !!this.vrm);
-        this._pendingRequestedAction = { actionName, animationFile, playOnce, playSection, descriptorOverride };
+        this._transitionGeneration = (this._transitionGeneration || 0) + 1;
+        this._cancelBaseIdleFloorDrop();
+        this._pendingRequestedAction = { actionName, animationFile, playOnce, playSection, descriptorOverride, frameRange, phaseAuthoritative };
 
         // If we got a descriptorOverride but no explicit rich animation_state, apply a minimal
         // state so expression/blink configs are consistent across transitions.
@@ -3407,10 +3784,12 @@ class AnimationHandler {
                 const st = {
                     action: (actionName || '').toString().toLowerCase(),
                     phase,
+                    phase_authoritative: !!phaseAuthoritative,
                     animation: animationFile || null,
                     descriptor: desc,
                     clip: { fps: (Number.isFinite(fps) && fps > 0) ? fps : 30 },
                     timing: { started_at: new Date().toISOString(), time_in_clip: 0.0, current_frame: 0 },
+                    frame_range: frameRange || null,
                     expressions: Array.isArray(desc.expressions) ? desc.expressions : null,
                     blink: (desc && typeof desc.blink === 'object') ? desc.blink : null,
                     eye_movement: (desc && typeof desc.eye_movement === 'object') ? desc.eye_movement : null,
@@ -3536,7 +3915,7 @@ class AnimationHandler {
                                     const stillRequested = pendingRequest.actionName === actionName && pendingRequest.animationFile === animationFile;
                                     if (!stillRequested) return;
                                     console.warn('[AnimationHandler] Late animation preload recovered; replaying requested action:', actionName, animationFile);
-                                    this.startAction(actionName, animationFile, playOnce, playSection, descriptorOverride);
+                                    this.startAction(actionName, animationFile, playOnce, playSection, descriptorOverride, frameRange, phaseAuthoritative);
                                 } catch (lateErr) {
                                     console.warn('[AnimationHandler] Late animation recovery failed:', lateErr);
                                 }
@@ -3931,6 +4310,8 @@ class AnimationHandler {
                     playOnce,
                     playSection,
                     descriptorOverride,
+                    frameRange,
+                    phaseAuthoritative,
                 });
 
                 if (this.currentActionPhase === 'outro') {
@@ -4230,6 +4611,8 @@ class AnimationHandler {
                                                 queuedTransition.playOnce,
                                                 queuedTransition.playSection,
                                                 queuedTransition.descriptorOverride,
+                                                queuedTransition.frameRange,
+                                                queuedTransition.phaseAuthoritative,
                                             );
                                         } catch (e) {
                                             console.warn('[AnimationHandler] Failed to start queued action after outro:', e);
@@ -5205,6 +5588,13 @@ async function loadDefaultAnimations(vrm) {
         // always resolve to the live object, not the null stub set at module-load time.
         window.animationHandler = animationHandler;
 
+        // Summoning must always start from a fresh server snapshot.
+        // Clear any browser-side bootstrap caches and local expression state before rehydrating.
+        _resetSummoningBootstrapCaches();
+        if (typeof animationHandler.resetBootstrapState === 'function') {
+            animationHandler.resetBootstrapState();
+        }
+
         // Flush queued preloads captured before the handler existed.
         try {
             const q = window.__synth_pending_preloads || {};
@@ -5324,41 +5714,28 @@ async function loadDefaultAnimations(vrm) {
         console.log('[synth_webui] Server-driven mode: skipping eager WRITE/TALK preload');
 
         // Process any pending animation commands that arrived while loading
-        // Attempt to sync with backend animation state so page reloads pick
-        // up the current persona state instead of defaulting to idle.
         let desiredState = null;
         let desiredAnimation = null;
         let desiredDescriptor = null;
+        let desiredRichAnimationState = null;
+        let desiredFaceValues = null;
+        let desiredPlaySection = null;
+        let desiredFrameRange = null;
+        let desiredPhaseAuthoritative = false;
         try {
-            if (window.__synth_current_animation_state && window.__synth_current_animation_state.state) {
-                desiredState = window.__synth_current_animation_state.state;
-                desiredAnimation = window.__synth_current_animation_state.animation || null;
-                desiredDescriptor = window.__synth_current_animation_state.descriptor || null;
-                console.log('[synth_webui] Using cached animation state for VRM reload:', desiredState, desiredAnimation);
-            }
+            console.log('[synth_webui] Querying fresh Karada state for Summoning bootstrap...');
+            const freshSummoningState = await _fetchFreshSummoningState();
+            desiredState = freshSummoningState.state;
+            desiredAnimation = freshSummoningState.animation || null;
+            desiredDescriptor = freshSummoningState.descriptor || null;
+            desiredPlaySection = freshSummoningState.playSection || null;
+            desiredFrameRange = freshSummoningState.frameRange || null;
+            desiredPhaseAuthoritative = !!freshSummoningState.phaseAuthoritative;
+            desiredRichAnimationState = freshSummoningState.richAnimationState || null;
+            desiredFaceValues = freshSummoningState.faceValues || null;
+            console.log('[synth_webui] Fresh Summoning state:', desiredState || 'idle', desiredAnimation || null, desiredFaceValues ? '(with face values)' : '(no face values)');
         } catch (err) {
-            // ignore
-        }
-
-        if (!desiredState) {
-            try {
-                console.log('[synth_webui] Querying backend for current animation state...');
-                const resp = await fetch('/api/animation_state');
-                if (resp && resp.ok) {
-                    const summary = await resp.json();
-                    console.log('[synth_webui] Backend animation state:', summary);
-                    if (summary && summary.state) {
-                        desiredState = summary.state;
-                        desiredAnimation = summary.animation || null;
-                        desiredDescriptor = summary.descriptor || null;
-                        window.__synth_current_animation_state = { state: desiredState, animation: desiredAnimation, descriptor: desiredDescriptor || null };
-                    }
-                } else {
-                    console.warn('[synth_webui] Failed to fetch backend animation state, resp ok=', !!resp?.ok);
-                }
-            } catch (err) {
-                console.warn('[synth_webui] Error while querying backend animation state:', err);
-            }
+            console.warn('[synth_webui] Failed to load fresh Summoning state:', err);
         }
 
         // Start the desired state (avoids a visible reset to idle during skin/model reload).
@@ -5374,12 +5751,26 @@ async function loadDefaultAnimations(vrm) {
                         state: stateToStart,
                         animation: desiredAnimation || null,
                         descriptor: desiredDescriptor || null,
-                        animation_state: window.__synth_last_rich_animation_state || null,
+                        animation_state: desiredRichAnimationState || null,
                     };
                     window.__synth_debug_last_remote_at.animation_state = Date.now();
                 } catch (e) { /* ignore */ }
             } else {
-                await animationHandler.startAction(stateToStart, desiredAnimation || null, playOnce, null, desiredDescriptor || null);
+                await animationHandler.startAction(
+                    stateToStart,
+                    desiredAnimation || null,
+                    playOnce,
+                    desiredPlaySection || null,
+                    desiredDescriptor || null,
+                    desiredFrameRange || null,
+                    !!desiredPhaseAuthoritative,
+                );
+                if (desiredRichAnimationState && typeof animationHandler.applyAnimationState === 'function') {
+                    animationHandler.applyAnimationState(desiredRichAnimationState);
+                }
+                if (desiredFaceValues) {
+                    _applyFreshSummoningFaceValues(desiredFaceValues);
+                }
                 console.log('[synth_webui] Started initial animation state:', stateToStart, desiredAnimation || null);
             }
         } catch (e) {
@@ -5401,7 +5792,7 @@ async function loadDefaultAnimations(vrm) {
             const count = _pendingArray.length;
             // Clear the authoritative storage we found so we don't reprocess
             if (typeof pendingAnimationCommands !== 'undefined' && Array.isArray(pendingAnimationCommands)) pendingAnimationCommands.length = 0; else if (window.pendingAnimationCommands && Array.isArray(window.pendingAnimationCommands)) window.pendingAnimationCommands.length = 0;
-            console.log('[synth_webui] Processing last pending animation command (dropped', Math.max(0, count - 1), '):', last?.state, last?.animation);
+            console.log('[synth_webui] Processing last pending animation command (dropped', Math.max(0, count - 1), '):', last?.state, last?.animation || last?.file);
             if (last && last.state && animationHandler) {
                 // If WEB_DEBUG pause is active, keep last remote payload for resync but do not apply.
                 try {
@@ -5412,16 +5803,16 @@ async function loadDefaultAnimations(vrm) {
                     }
                 } catch (e) { /* ignore */ }
 
-                const animationFileOrUrl = last.animation || null;
+                const animationFileOrUrl = last.animation || last.file || null;
                 const lastPlayOnce = (last.descriptor && last.descriptor.play_once) || (last.loop === false);
                 const initialPlayOnce = !!(desiredDescriptor && desiredDescriptor.play_once);
 
                 // Skip if it matches what we just started as initial state.
                 try {
                     const startedKey = `${(desiredState || 'idle') || ''}|${desiredAnimation || ''}|${initialPlayOnce ? '1' : '0'}`;
-                    const lastKey = `${last.state || ''}|${last.animation || ''}|${lastPlayOnce ? '1' : '0'}`;
+                    const lastKey = `${last.state || ''}|${animationFileOrUrl || ''}|${lastPlayOnce ? '1' : '0'}`;
                     if (startedKey !== lastKey) {
-                        animationHandler.startAction(last.state, animationFileOrUrl, !!lastPlayOnce, last.play_section || null, last.descriptor || null);
+                        animationHandler.startAction(last.state, animationFileOrUrl, !!lastPlayOnce, last.play_section || null, last.descriptor || null, last.frame_range || null, !!last.phase_authoritative);
                     } else {
                         console.log('[synth_webui] Pending command matches started state; skipping');
                         // Even when skipping (because the action is already playing),
@@ -5435,7 +5826,7 @@ async function loadDefaultAnimations(vrm) {
                         } catch (e) { /* ignore */ }
                     }
                 } catch (e) {
-                    animationHandler.startAction(last.state, animationFileOrUrl, !!lastPlayOnce, last.play_section || null, last.descriptor || null);
+                    animationHandler.startAction(last.state, animationFileOrUrl, !!lastPlayOnce, last.play_section || null, last.descriptor || null, last.frame_range || null, !!last.phase_authoritative);
                 }
             }
         }
@@ -5933,7 +6324,9 @@ window.VRMAnimations = {
             const playOnce = !!opts.playOnce;
             const playSection = opts.playSection || null;
             const descriptor = opts.descriptor || null;
-            handler.startAction(s, animation, playOnce, playSection, descriptor);
+            const frameRange = opts.frameRange || null;
+            const phaseAuthoritative = !!opts.phaseAuthoritative;
+            handler.startAction(s, animation, playOnce, playSection, descriptor, frameRange, phaseAuthoritative);
         } catch (e) {
             console.warn('[synth_webui] VRMAnimations.play failed:', e);
         }
@@ -5953,10 +6346,15 @@ window.VRMAnimations = {
     setFaceValues: (values) => {
         try {
             const handler = animationHandler || window.animationHandler;
-            if (!handler || !values) return;
-            for (const [key, val] of Object.entries(values)) {
+            if (!handler) return;
+            if (typeof handler.applyRemoteFaceValues === 'function') {
+                handler.applyRemoteFaceValues(values || {});
+                return;
+            }
+            const nextValues = (values && typeof values === 'object') ? values : {};
+            for (const [key, val] of Object.entries(nextValues)) {
                 if (typeof handler._setFaceValue === 'function') {
-                    handler._setFaceValue(key, val);
+                    handler._setFaceValue(key, Math.max(0, Math.min(1, Number(val) || 0)));
                 }
             }
         } catch (e) {
@@ -6362,7 +6760,15 @@ try {
                         const summary = await resp.json();
                         if (summary && summary.state) {
                             const playOnce = !!(summary.descriptor && summary.descriptor.play_once);
-                            await animationHandler.startAction(summary.state, summary.animation || null, playOnce, null, summary.descriptor || null);
+                            await animationHandler.startAction(
+                                summary.state,
+                                summary.animation || summary.file || null,
+                                playOnce,
+                                summary.play_section || null,
+                                summary.descriptor || null,
+                                summary.frame_range || null,
+                                !!summary.phase_authoritative,
+                            );
                             return;
                         }
                     }
@@ -6378,7 +6784,7 @@ try {
                         if (last.animation_state && typeof animationHandler.applyAnimationState === 'function') {
                             animationHandler.applyAnimationState(last.animation_state);
                         }
-                        await animationHandler.startAction(last.state, last.animation || null, !!playOnce, last.play_section || null, last.descriptor || null);
+                        await animationHandler.startAction(last.state, last.animation || last.file || null, !!playOnce, last.play_section || null, last.descriptor || null, last.frame_range || null, !!last.phase_authoritative);
                     }
                 } catch (e) { /* ignore */ }
             } catch (e) { /* ignore */ }
@@ -6773,56 +7179,59 @@ try {
                 window.lastTouchedPart = { part: touchedPart, at: Date.now() };
                 window.lastTouchedPartHuman = { part: mapped.label, raw: touchedPart, confidence: mapped.confidence, at: Date.now(), method: 'heuristic' };
 
-                // Load available touch animations for current skin
-                if (!animationHandler || typeof animationHandler.getAnimationsForType !== 'function') return;
-                const files = await animationHandler.getAnimationsForType('touch');
-                if (!files || files.length === 0) {
-                    console.log('[synth_webui] No touch animations found for current skin');
-                    return;
-                }
+                const touchPayload = {
+                    type: 'touch',
+                    part: touchedPart,
+                    mapped_part: window.lastTouchedPartHuman ? window.lastTouchedPartHuman.part : null,
+                    mapped_confidence: window.lastTouchedPartHuman ? window.lastTouchedPartHuman.confidence : null,
+                    source: 'webui.touch',
+                    context_id: __synthTouchOverlayContextId,
+                    priority: __synthTouchOverlayPriority,
+                };
 
-                // pick a random animation
-                const animationFile = files[Math.floor(Math.random() * files.length)];
-
-                // Try to fetch descriptor next to the animation file (filename + .json)
-                let descriptor = null;
-                try {
-                    const skin = window.activeSkinName ? window.activeSkinName.split('/').pop().replace('.vrm', '') : 'Rei';
-                    const descUrl = `/api/skins/${skin}/animations/touch/${encodeURIComponent(animationFile)}.json`;
-                    const resp = await fetch(descUrl);
-                    if (resp.ok) descriptor = await resp.json();
-                } catch (err) {
-                    // ignore descriptor fetch errors
-                }
-
-                const playOnce = !!(descriptor && descriptor.play_once);
-
-                console.log('[synth_webui] Triggering touch animation:', animationFile, 'playOnce=', playOnce, 'descriptor=', descriptor);
-                try {
-                    animationHandler.startAction('touch', animationFile, playOnce);
-                } catch (err) {
-                    console.warn('[synth_webui] Failed to start touch action:', err);
-                }
-
-                // Notify backend about the touch (optional, reserved for future engine use)
+                let deliveredToServer = false;
                 try {
                     if (typeof ws !== 'undefined' && ws && ws.readyState === WebSocket.OPEN) {
                         try {
-                            const touchPayload = {
-                                type: 'touch',
-                                part: touchedPart,
-                                mapped_part: window.lastTouchedPartHuman ? window.lastTouchedPartHuman.part : null,
-                                mapped_confidence: window.lastTouchedPartHuman ? window.lastTouchedPartHuman.confidence : null,
-                                animation: animationFile,
-                                descriptor: descriptor || null
-                            };
                             ws.send(JSON.stringify(touchPayload));
+                            deliveredToServer = true;
                         } catch (err) {
                             console.warn('[synth_webui] Failed to send touch payload:', err);
                         }
                     }
                 } catch (err) {
                     console.warn('[synth_webui] Failed to notify backend of touch:', err);
+                }
+
+                if (!deliveredToServer) {
+                    try {
+                        const resp = await fetch('/api/animation_state', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            cache: 'no-store',
+                            body: JSON.stringify({
+                                state: 'touch',
+                                loop: false,
+                                context_id: __synthTouchOverlayContextId,
+                                priority: __synthTouchOverlayPriority,
+                                source: 'webui.touch',
+                                part: touchedPart,
+                                mapped_part: window.lastTouchedPartHuman ? window.lastTouchedPartHuman.part : null,
+                                mapped_confidence: window.lastTouchedPartHuman ? window.lastTouchedPartHuman.confidence : null,
+                            }),
+                        });
+                        if (resp && resp.ok) {
+                            deliveredToServer = true;
+                        } else {
+                            console.warn('[synth_webui] Touch animation state request failed:', resp ? resp.status : 'no-response');
+                        }
+                    } catch (err) {
+                        console.warn('[synth_webui] Failed to POST touch animation state:', err);
+                    }
+                }
+
+                if (deliveredToServer) {
+                    console.log('[synth_webui] Dispatched authoritative touch state to server');
                 }
 
             } catch (err) {

@@ -84,6 +84,52 @@ async def test_message_chain_triggers_corrector_for_unregistered_action(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_send_llm_fallback_message_clears_face_state(monkeypatch):
+    sent = {}
+    face_calls = []
+
+    class DummyKarada:
+        async def push_face_expression(self, name, intensity, targets=None):
+            face_calls.append(("expression", name, intensity, targets))
+
+        async def clear_face_values(self):
+            face_calls.append(("clear_face",))
+
+    async def fake_universal_send(send_fn, chat_id, **kwargs):
+        sent["chat_id"] = chat_id
+        sent["kwargs"] = kwargs
+        return None
+
+    async def fake_send_message(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(
+        "core.transport_layer.universal_send",
+        fake_universal_send,
+    )
+    monkeypatch.setattr(
+        "core.animation_handler.get_karada_state_server",
+        lambda: DummyKarada(),
+    )
+
+    bot = SimpleNamespace(send_message=fake_send_message)
+    msg = SimpleNamespace(chat_id="sid", interface_path="synth_webui/sid")
+
+    result = await message_chain.send_llm_fallback_message(
+        bot,
+        msg,
+        failure_reason="timeout",
+        context={"interface_path": "synth_webui/sid"},
+    )
+
+    assert result == message_chain.get_failed_message_text()
+    assert ("expression", None, 0, None) in face_calls
+    assert ("clear_face",) in face_calls
+    assert sent["chat_id"] == "sid"
+    assert sent["kwargs"]["text"] == message_chain.get_failed_message_text()
+
+
+@pytest.mark.asyncio
 async def test_message_chain_triggers_corrector_for_unregistered_top_level_key(
     monkeypatch,
 ):
