@@ -62,6 +62,36 @@ function showVrmFallback(err) {
     } catch (e) { /* ignore */ }
 }
 
+/**
+ * Fade out and remove the #vrm-loading-overlay element.
+ * Safe to call multiple times — does nothing if the overlay is already gone.
+ */
+function _hideVrmLoadingOverlay() {
+    const overlay = document.getElementById('vrm-loading-overlay');
+    if (!overlay) return;
+    overlay.classList.add('fade-out');
+    const cleanup = () => { try { overlay.remove(); } catch (_e) { /* ignore */ } };
+    overlay.addEventListener('transitionend', cleanup, { once: true });
+    // Safety timeout in case transitionend never fires (e.g. tab hidden, reduced-motion)
+    setTimeout(cleanup, 800);
+}
+
+/**
+ * Show the #vrm-loading-overlay (restore from a previous hide).
+ * Called before a new VRM model starts loading so the overlay covers
+ * any residual frame from the previous model.
+ */
+function _showVrmLoadingOverlay() {
+    const overlay = document.getElementById('vrm-loading-overlay');
+    if (!overlay) return;
+    overlay.classList.remove('fade-out');
+    // Re-insert if it was previously removed
+    if (!overlay.isConnected) {
+        const container = document.querySelector('.home-vrm');
+        if (container) container.appendChild(overlay);
+    }
+}
+
 function initVRMViewer() {
     canvas = document.getElementById('vrm-canvas');
     if (!canvas) {
@@ -69,6 +99,15 @@ function initVRMViewer() {
         document.addEventListener('DOMContentLoaded', initVRMViewer, { once: true });
         return;
     }
+
+    // Populate the "Summoning <name>…" text in the loading overlay as soon
+    // as we know the persona name from the server-injected config.
+    try {
+        const nameEl = document.getElementById('vrm-loading-name');
+        if (nameEl) {
+            nameEl.textContent = (window.__SYNTH_CONFIG && window.__SYNTH_CONFIG.SYNTH_NAME) || 'SyntH';
+        }
+    } catch (_e) { /* ignore */ }
 
     try {
         renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
@@ -720,10 +759,27 @@ class AnimationHandler {
             console.debug('[AnimationHandler] applyAnimationState START', state);
             // detect previous action so we can react to transitions (e.g., think -> write)
             const prevAction = (this._lastAnimationState && this._lastAnimationState.action) ? String(this._lastAnimationState.action).toLowerCase() : null;
+            const incomingActionName = (state && state.action) ? String(state.action).toLowerCase() : null;
+            const incomingPhase = (state && state.phase) ? String(state.phase).toLowerCase() : null;
+            const localStructuredPhase = (this.currentStructuredAction && this.currentActionPhase)
+                ? String(this.currentActionPhase).toLowerCase()
+                : null;
+            // Preserve the locally-playing structured phase while intro/outro are still
+            // transitioning on the client. Backend summaries report the logical steady
+            // state ('loop'), but that must not stomp the real local mixer phase.
+            const preserveLocalStructuredPlayback = !!(
+                this.currentStructuredAction
+                && (localStructuredPhase === 'intro' || localStructuredPhase === 'outro')
+                && incomingPhase === 'loop'
+            );
             // store for reference
             this._lastAnimationState = state;
-            this.currentActionName = state.action || this.currentActionName;
-            this.currentActionPhase = state.phase || this.currentActionPhase;
+            if (!preserveLocalStructuredPlayback && incomingActionName) {
+                this.currentActionName = incomingActionName;
+            }
+            if (!preserveLocalStructuredPlayback && incomingPhase) {
+                this.currentActionPhase = incomingPhase;
+            }
 
             // Keep emotions/feelings snapshot for downstream consumers
             try { this._lastEmotions = (state && state.emotions) ? state.emotions : null; } catch (e) { this._lastEmotions = null; }
@@ -2024,6 +2080,7 @@ class AnimationHandler {
         this.actions = {};
         this.currentAction = null;
         this.currentActionName = null; // track which action (think, write, etc.) is currently playing
+        this.currentActionKey = null;
         this.currentActionPhase = null; // track 'intro', 'loop', or 'outro'
         this.currentStructuredAction = null; // reference to the structured action object
         this.loadedAnimations = {};
@@ -2044,6 +2101,7 @@ class AnimationHandler {
         this._postOutroIdleTimer = null;
         this._postOutroIdleToken = 0;
         this._pendingRequestedAction = null;
+        this._queuedTransitionAfterOutro = null;
         this._lateRecoveryTokens = {};
 
         // Serialize animation switches to avoid concurrent startAction() calls
@@ -2069,44 +2127,17 @@ class AnimationHandler {
          *   descriptor: Optional descriptor JSON with frame ranges and structure
          */
         try {
-            const normalizedKey = this._normalizeAnimationKey(animationFile);
+            const info = this._inferAnimationReference(null, animationFile);
+            const normalizedKey = info.normalizedFile;
+            const inferredAction = info.actionName;
             console.log('[AnimationHandler] preloadAnimation:', normalizedKey, 'descriptor:', !!descriptor);
-
-            // Try to infer actionName (state folder) from a full URL/path like:
-            //   /skins/<Skin>/animations/<state>/<File>.fbx
-            // so we can call loadAnimation(state, <fullpath>) rather than loadAction(<filename>).
-            let inferredAction = null;
-            try {
-                if (typeof animationFile === 'string' && animationFile.includes('/animations/')) {
-                    const parts = animationFile.split('/animations/');
-                    const rest = (parts && parts[1]) ? parts[1] : '';
-                    const segs = rest.split('/').filter(Boolean);
-                    if (segs && segs.length >= 2) {
-                        inferredAction = String(segs[0] || '').toLowerCase();
-                    }
-                }
-            } catch (e) { /* ignore */ }
 
             // Cache the descriptor immediately if provided
             if (descriptor && typeof descriptor === 'object') {
-                this.loadedDescriptors[normalizedKey] = descriptor;
+                for (const key of this._getDescriptorCacheKeys(inferredAction, animationFile)) {
+                    this.loadedDescriptors[key] = descriptor;
+                }
                 console.log('[AnimationHandler] Cached descriptor for:', normalizedKey);
-
-                // Also cache under the canonical descriptor URL key used by loadDescriptor().
-                // loadDescriptor() constructs the path as /api/skins/<skin>/animations/<state>/<file>.json
-                // so we must cache under BOTH the bare path and the /api/-prefixed path to avoid
-                // a cache miss that would trigger a redundant HTTP fetch.
-                try {
-                    if (typeof animationFile === 'string' && animationFile.includes('/')) {
-                        const cleanAnim = animationFile.split('?')[0].split('#')[0];
-                        // Bare path: /skins/Rei/animations/think/Thinking.fbx.json
-                        this.loadedDescriptors[`${cleanAnim}.json`] = descriptor;
-                        // API-prefixed path: /api/skins/Rei/animations/think/Thinking.fbx.json
-                        if (cleanAnim.includes('/skins/')) {
-                            this.loadedDescriptors[`/api${cleanAnim}.json`] = descriptor;
-                        }
-                    }
-                } catch (e) { /* ignore */ }
             }
 
             // Attempt to load the animation asynchronously
@@ -2119,10 +2150,11 @@ class AnimationHandler {
                 // Prefer preloading the specific file (full path), not a logical action list.
                 // Also track readiness so startAction can wait for it.
                 if (!this._preloadPromises) this._preloadPromises = {};
-                const existing = this._preloadPromises[normalizedKey] || (animationFile && this._preloadPromises[animationFile]) || null;
+                const preloadAction = inferredAction || 'idle';
+                const existing = this._getCachedPreloadPromise(preloadAction, animationFile);
                 if (existing) return;
 
-                const actionName = inferredAction || 'idle';
+                const actionName = preloadAction;
                 const p = (async () => {
                     const clip = await this.loadAnimation(actionName, animationFile);
                     if (clip) {
@@ -2133,12 +2165,7 @@ class AnimationHandler {
                     return clip;
                 })();
 
-                this._preloadPromises[normalizedKey] = p;
-                try {
-                    if (animationFile && typeof animationFile === 'string' && animationFile !== normalizedKey) {
-                        this._preloadPromises[animationFile] = p;
-                    }
-                } catch (e) { /* ignore */ }
+                this._storeCachedPreloadPromise(actionName, animationFile, p);
 
                 // Do NOT delete the promise from _preloadPromises after it resolves.
                 // _preloadPromises stores in-flight AND completed promises so that
@@ -2168,6 +2195,161 @@ class AnimationHandler {
         }
     }
 
+    _getActiveSkinName() {
+        try {
+            return window.activeSkinName
+                ? window.activeSkinName.split('/').pop().replace('.vrm', '')
+                : 'Rei';
+        } catch (e) {
+            return 'Rei';
+        }
+    }
+
+    _cleanAnimationReference(animationFile) {
+        try {
+            if (!animationFile || typeof animationFile !== 'string') return animationFile;
+            return animationFile.split('?')[0].split('#')[0];
+        } catch (e) {
+            return animationFile;
+        }
+    }
+
+    _inferAnimationReference(actionName, animationFile) {
+        const clean = this._cleanAnimationReference(animationFile);
+        const normalizedFile = this._normalizeAnimationKey(animationFile);
+        let inferredAction = actionName ? String(actionName).toLowerCase() : null;
+        let inferredSkin = this._getActiveSkinName();
+
+        try {
+            if (typeof clean === 'string' && clean.includes('/skins/')) {
+                const afterSkins = clean.split('/skins/')[1] || '';
+                const skinSegs = afterSkins.split('/').filter(Boolean);
+                if (skinSegs.length >= 1) {
+                    inferredSkin = decodeURIComponent(String(skinSegs[0] || ''));
+                }
+            }
+            if (typeof clean === 'string' && clean.includes('/animations/')) {
+                const afterAnimations = clean.split('/animations/')[1] || '';
+                const segs = afterAnimations.split('/').filter(Boolean);
+                if (!inferredAction && segs.length >= 2) {
+                    inferredAction = decodeURIComponent(String(segs[0] || '')).toLowerCase();
+                }
+            }
+        } catch (e) { /* ignore */ }
+
+        return {
+            clean,
+            normalizedFile,
+            actionName: inferredAction,
+            skinName: inferredSkin,
+        };
+    }
+
+    _getAnimationCacheKeys(actionName, animationFile) {
+        try {
+            const info = this._inferAnimationReference(actionName, animationFile);
+            const keys = [];
+            if (info.actionName && info.normalizedFile) {
+                keys.push(`${info.actionName}:${info.normalizedFile}`);
+            }
+            if (typeof info.clean === 'string' && info.clean.includes('/')) {
+                keys.push(info.clean);
+            }
+            return Array.from(new Set(keys.filter(Boolean)));
+        } catch (e) {
+            return [];
+        }
+    }
+
+    _getDescriptorCacheKeys(actionName, animationFile) {
+        try {
+            const info = this._inferAnimationReference(actionName, animationFile);
+            const keys = [];
+            if (typeof info.clean === 'string' && info.clean.includes('/')) {
+                keys.push(`${info.clean}.json`);
+            }
+            if (info.skinName && info.actionName && info.normalizedFile) {
+                const encodedFile = encodeURIComponent(`${info.normalizedFile}.json`);
+                keys.push(`/api/skins/${info.skinName}/animations/${info.actionName}/${encodedFile}`);
+            }
+            return Array.from(new Set(keys.filter(Boolean)));
+        } catch (e) {
+            return [];
+        }
+    }
+
+    _getCachedAnimation(actionName, animationFile) {
+        try {
+            const keys = this._getAnimationCacheKeys(actionName, animationFile);
+            for (const key of keys) {
+                if (this.loadedAnimations && this.loadedAnimations[key]) {
+                    return this.loadedAnimations[key];
+                }
+            }
+        } catch (e) { /* ignore */ }
+        return null;
+    }
+
+    _storeCachedAnimation(actionName, animationFile, clip) {
+        try {
+            const keys = this._getAnimationCacheKeys(actionName, animationFile);
+            for (const key of keys) {
+                this.loadedAnimations[key] = clip;
+            }
+        } catch (e) { /* ignore */ }
+    }
+
+    _getCachedPreloadPromise(actionName, animationFile) {
+        try {
+            const keys = this._getAnimationCacheKeys(actionName, animationFile);
+            for (const key of keys) {
+                if (this._preloadPromises && this._preloadPromises[key]) {
+                    return this._preloadPromises[key];
+                }
+            }
+        } catch (e) { /* ignore */ }
+        return null;
+    }
+
+    _storeCachedPreloadPromise(actionName, animationFile, promise) {
+        try {
+            const keys = this._getAnimationCacheKeys(actionName, animationFile);
+            for (const key of keys) {
+                this._preloadPromises[key] = promise;
+            }
+        } catch (e) { /* ignore */ }
+    }
+
+    _queueTransitionAfterStructuredOutro(fromActionName, request) {
+        try {
+            this._queuedTransitionAfterOutro = {
+                ...request,
+                fromActionName: fromActionName ? String(fromActionName).toLowerCase() : null,
+            };
+            if (this._postOutroIdleTimer) {
+                clearTimeout(this._postOutroIdleTimer);
+                this._postOutroIdleTimer = null;
+            }
+            this._postOutroIdleToken = (this._postOutroIdleToken || 0) + 1;
+        } catch (e) { /* ignore */ }
+    }
+
+    _consumeQueuedTransitionAfterStructuredOutro(logicalActionName) {
+        try {
+            const queued = this._queuedTransitionAfterOutro;
+            if (!queued) return null;
+            const expectedFrom = queued.fromActionName ? String(queued.fromActionName).toLowerCase() : null;
+            const logical = logicalActionName ? String(logicalActionName).toLowerCase() : null;
+            if (expectedFrom && logical && expectedFrom !== logical) {
+                return null;
+            }
+            this._queuedTransitionAfterOutro = null;
+            return queued;
+        } catch (e) {
+            return null;
+        }
+    }
+
     async _awaitAnimationReady(actionName, animationFile, timeoutMs = 30000) {
         // HARD RULE: never start playback unless the animation is loaded.
         // Keep the current animation playing while we load; do not "fail open".
@@ -2178,20 +2360,17 @@ class AnimationHandler {
             const normalizedKey = this._normalizeAnimationKey(animationFile);
 
             // Fast path: clip already in the persistent cache — no need to wait for anything.
-            const cachedClip = (this.loadedAnimations && (this.loadedAnimations[normalizedKey] || this.loadedAnimations[animationFile])) || null;
+            const cachedClip = this._getCachedAnimation(actionName, animationFile);
             if (cachedClip) {
                 console.log(`[AnimationHandler] _awaitAnimationReady fast-path (already cached): ${normalizedKey}`);
                 return cachedClip;
             }
 
-            let p = this._preloadPromises[normalizedKey] || this._preloadPromises[animationFile] || null;
+            let p = this._getCachedPreloadPromise(actionName, animationFile);
             if (!p) {
                 // Ensure the clip is loaded while the current action still plays.
                 p = (async () => await this.loadAnimation(actionName, animationFile))();
-                this._preloadPromises[normalizedKey] = p;
-                try {
-                    if (animationFile !== normalizedKey) this._preloadPromises[animationFile] = p;
-                } catch (e) { /* ignore */ }
+                this._storeCachedPreloadPromise(actionName, animationFile, p);
             }
 
             // Hard timeout: abort the wait (not the download) if the clip takes too long.
@@ -2354,10 +2533,23 @@ class AnimationHandler {
                 this._activeActions.clear();
             }
 
-            // Lower base idle weight now that the new action is taking over
+            // Lower base idle weight now that the new action is taking over.
+            // IMPORTANT: defer this reduction until AFTER the new action's fadeIn()
+            // completes. During fadeIn the new clip weight ramps 0→1 over ~fadeSec
+            // seconds. If we reduced base idle immediately the total skeleton
+            // coverage would drop to ~12% for that window, causing visible T-pose.
+            // Waiting fadeSec + 50ms ensures the new clip is at full weight first.
             try {
                 if (baseIdle && typeof baseIdle.setEffectiveWeight === 'function') {
-                    baseIdle.setEffectiveWeight(0.12);
+                    const _b = baseIdle;
+                    const _delay = Math.round(fadeSec * 1000) + 50;
+                    setTimeout(() => {
+                        try {
+                            if (_b && typeof _b.setEffectiveWeight === 'function') {
+                                _b.setEffectiveWeight(0.12);
+                            }
+                        } catch (e) { /* ignore */ }
+                    }, _delay);
                 }
             } catch (e) { /* ignore */ }
         } catch (e) { /* ignore */ }
@@ -2375,7 +2567,12 @@ class AnimationHandler {
                         // fadeIn(t) resets the weight to 0 internally and ramps to 1
                         // over t seconds, which would leave the skeleton partially
                         // un-driven during that window and cause a visible T-pose.
-                        this._baseIdleAction.setEffectiveWeight(minWeight);
+                        // Use Math.max so this call never *lowers* the weight below
+                        // the current value — "ensure at least minWeight" semantics.
+                        const _curW = typeof this._baseIdleAction.getEffectiveWeight === 'function'
+                            ? (this._baseIdleAction.getEffectiveWeight() || 0)
+                            : 0;
+                        this._baseIdleAction.setEffectiveWeight(Math.max(_curW, minWeight));
                     }
                     this._baseIdleAction.play();
                 } catch (e) { /* ignore */ }
@@ -2399,9 +2596,14 @@ class AnimationHandler {
                         prevBaseIdle.setLoop(THREE.LoopRepeat);
                         prevBaseIdle.clampWhenFinished = false;
                         if (typeof prevBaseIdle.setEffectiveWeight === 'function') {
-                            prevBaseIdle.setEffectiveWeight(minWeight);
+                            const _prevW = typeof prevBaseIdle.getEffectiveWeight === 'function'
+                                ? (prevBaseIdle.getEffectiveWeight() || 0)
+                                : 0;
+                            prevBaseIdle.setEffectiveWeight(Math.max(_prevW, minWeight));
                         }
-                        prevBaseIdle.fadeIn(0.2);
+                        // Do not fadeIn() the fallback base idle: fadeIn resets the
+                        // action weight to 0 before ramping up, which can expose a
+                        // single-frame bind-pose blink if this is the only driver.
                         prevBaseIdle.play();
                     } catch (e) { /* ignore */ }
                 }
@@ -2425,8 +2627,10 @@ class AnimationHandler {
                 if (typeof idleAction.setEffectiveWeight === 'function') {
                     idleAction.setEffectiveWeight(minWeight);
                 }
-                // Longer fade-in (0.35s) for smoother transitions to base idle
-                idleAction.fadeIn(0.35).play();
+                // Do not fadeIn() the new base idle: previous overlays/base idle are
+                // already faded out separately, while a fadeIn here would reintroduce
+                // a one-frame zero-weight gap and visible bind-pose blink.
+                idleAction.play();
             } catch (e) { /* ignore */ }
 
             // Only after the new base idle is in play, fade out the previous base.
@@ -2514,42 +2718,28 @@ class AnimationHandler {
                 animationMappings[actionName] = [];
             }
         }
-
         return resolveCurrentList();
     }
 
     async loadAnimation(actionName, animationFile) {
         console.log(`[AnimationHandler] loadAnimation called for ${actionName} with file ${animationFile}`);
-        const normalizedFile = this._normalizeAnimationKey(animationFile);
-        // Include actionName in the cache key so the same filename in different
-        // state directories (e.g. write/Texting.fbx vs idle/Texting.fbx) doesn't
-        // collide.  Fall back to filename-only lookup for backward compatibility.
-        const cacheKey = actionName ? `${actionName}:${normalizedFile}` : normalizedFile;
-        if (this.loadedAnimations[cacheKey]) {
+        const info = this._inferAnimationReference(actionName, animationFile);
+        const cacheKey = info.actionName ? `${info.actionName}:${info.normalizedFile}` : info.normalizedFile;
+        const cachedClip = this._getCachedAnimation(actionName, animationFile);
+        if (cachedClip) {
             console.log(`[AnimationHandler] Using cached animation for ${cacheKey}`);
-            return this.loadedAnimations[cacheKey];
-        }
-        // Also allow lookup by normalized filename for backward compatibility
-        // (clips loaded before this fix used filename-only keys).
-        if (this.loadedAnimations[normalizedFile]) {
-            console.log(`[AnimationHandler] Using cached animation for ${normalizedFile}`);
-            return this.loadedAnimations[normalizedFile];
-        }
-        // Also allow lookup by the original string for backward compatibility.
-        if (animationFile && this.loadedAnimations[animationFile]) {
-            console.log(`[AnimationHandler] Using cached animation for ${animationFile}`);
-            return this.loadedAnimations[animationFile];
+            return cachedClip;
         }
         try {
             // Accept either a plain filename (resolved under /skins/<skin>/animations/<state>/)
             // or a full URL/path provided by the backend.
             let animPath = null;
-            if (typeof animationFile === 'string' && (animationFile.includes('/') || animationFile.startsWith('http'))) {
-                animPath = animationFile;
+            if (typeof info.clean === 'string' && (info.clean.includes('/') || info.clean.startsWith('http'))) {
+                animPath = info.clean;
             } else {
                 // Build path with action type subdirectory: /skins/{skin}/animations/{actionType}/{file}
-                const skinName = window.activeSkinName ? window.activeSkinName.split('/').pop().replace('.vrm', '') : 'Rei';
-                const encodedFile = encodeURIComponent(animationFile);
+                const skinName = info.skinName || this._getActiveSkinName();
+                const encodedFile = encodeURIComponent(info.normalizedFile || animationFile);
                 animPath = `/skins/${skinName}/animations/${actionName}/${encodedFile}`;
             }
             console.log(`[AnimationHandler] Calling loadMixamoAnimation for ${animPath}`);
@@ -2558,14 +2748,8 @@ class AnimationHandler {
             const clip = await loadMixamoAnimation(animPath, this.vrm);
             console.log(`[AnimationHandler] loadMixamoAnimation returned clip:`, !!clip);
             if (clip) {
-                // Cache by state-scoped key, normalized filename, and original string.
-                this.loadedAnimations[cacheKey] = clip;
-                if (normalizedFile !== cacheKey) {
-                    this.loadedAnimations[normalizedFile] = clip;
-                }
-                if (animationFile && animationFile !== cacheKey && animationFile !== normalizedFile) {
-                    this.loadedAnimations[animationFile] = clip;
-                }
+                // Cache by state-scoped key and, when available, by the canonical file path.
+                this._storeCachedAnimation(actionName, animationFile, clip);
                 console.log(`[AnimationHandler] Animation ${cacheKey} cached successfully`);
             }
             return clip;
@@ -2578,24 +2762,26 @@ class AnimationHandler {
     async loadDescriptor(actionName, animationFile) {
         console.log(`[AnimationHandler] loadDescriptor called for ${actionName}/${animationFile}`);
         try {
-            const cleanAnim = (typeof animationFile === 'string') ? animationFile.split('?')[0].split('#')[0] : animationFile;
+            const info = this._inferAnimationReference(actionName, animationFile);
+            const cleanAnim = info.clean;
             // Accept either filename (resolved under /skins/<skin>/animations/<state>/)
             // or full URL/path (descriptor expected at `<anim>.json`).
             let descriptorPath = null;
             if (typeof cleanAnim === 'string' && (cleanAnim.includes('/skins/') || cleanAnim.startsWith('/skins/'))) {
-                const skinName = window.activeSkinName ? window.activeSkinName.split('/').pop().replace('.vrm', '') : 'Rei';
-                const fileName = cleanAnim.split('/').pop();
-                const encodedFile = encodeURIComponent(String(fileName || '') + '.json');
-                descriptorPath = `/api/skins/${skinName}/animations/${actionName}/${encodedFile}`;
+                const skinName = info.skinName || this._getActiveSkinName();
+                const descriptorAction = info.actionName || String(actionName || '').toLowerCase();
+                const encodedFile = encodeURIComponent(String(info.normalizedFile || '') + '.json');
+                descriptorPath = `/api/skins/${skinName}/animations/${descriptorAction}/${encodedFile}`;
             } else if (typeof cleanAnim === 'string' && (cleanAnim.includes('/') || cleanAnim.startsWith('http'))) {
                 descriptorPath = `${cleanAnim}.json`;
             } else {
                 // Prefer API endpoint for descriptors. The API will return
                 // the on-disk descriptor if present or an implicit descriptor
                 // when the .json file is missing (avoids client-side 404s).
-                const skinName = window.activeSkinName ? window.activeSkinName.split('/').pop().replace('.vrm', '') : 'Rei';
-                const encodedFile = encodeURIComponent(String(cleanAnim) + '.json');
-                descriptorPath = `/api/skins/${skinName}/animations/${actionName}/${encodedFile}`;
+                const skinName = info.skinName || this._getActiveSkinName();
+                const descriptorAction = info.actionName || String(actionName || '').toLowerCase();
+                const encodedFile = encodeURIComponent(String(info.normalizedFile || cleanAnim) + '.json');
+                descriptorPath = `/api/skins/${skinName}/animations/${descriptorAction}/${encodedFile}`;
             }
             // Cache descriptors (including null when missing) to avoid repeated 404 fetches.
             if (descriptorPath && Object.prototype.hasOwnProperty.call(this.loadedDescriptors, descriptorPath)) {
@@ -2830,7 +3016,7 @@ class AnimationHandler {
                                         refined.enabled = true;
                                         refined.reset();
                                         if (typeof refined.setEffectiveWeight === 'function' && Number.isFinite(w)) refined.setEffectiveWeight(w);
-                                        refined.fadeIn(0.25).play();
+                                        refined.play();
                                         this._safeFadeStop(idleAction, 0.25);
                                         this._baseIdleAction = refined;
                                     }
@@ -2966,7 +3152,7 @@ class AnimationHandler {
                                     refined.enabled = true;
                                     refined.reset();
                                     if (typeof refined.setEffectiveWeight === 'function' && Number.isFinite(w)) refined.setEffectiveWeight(w);
-                                    refined.fadeIn(0.25).play();
+                                    refined.play();
                                     this._safeFadeStop(idleAction, 0.25);
                                     this._baseIdleAction = refined;
                                 }
@@ -2991,6 +3177,7 @@ class AnimationHandler {
         // Check if we should create structured animations (intro/loop/outro)
         // This can be for 'think' state or for any animation with intro/outro in descriptor
         const hasStructuredDescriptor = descriptor && descriptor.intro && descriptor.outro;
+        const shouldRetryStructured = !!(actionName === 'think' || hasStructuredDescriptor);
         console.log(`[AnimationHandler] For ${actionName}/${selectedFile}: hasStructuredDescriptor=${hasStructuredDescriptor}, actionName==='think' is ${actionName === 'think'}, descriptor=${descriptor ? JSON.stringify(descriptor) : 'null'}`);
         if ((actionName === 'think' || hasStructuredDescriptor) && clip && clip.duration && THREE.AnimationUtils && typeof THREE.AnimationUtils.subclip === 'function') {
             try {
@@ -3143,8 +3330,12 @@ class AnimationHandler {
             }
         } catch (e) { /* ignore */ }
         const storageKey = selectedFile ? `${actionName}:${selectedFile}` : actionName;
-        this.actions[storageKey] = action;
-        console.log(`[AnimationHandler] Stored simple action with key: ${storageKey}`);
+        if (!shouldRetryStructured) {
+            this.actions[storageKey] = action;
+            console.log(`[AnimationHandler] Stored simple action with key: ${storageKey}`);
+        } else {
+            console.warn(`[AnimationHandler] Leaving simple fallback uncached for structured candidate ${storageKey}`);
+        }
         return action;
     }
 
@@ -3168,7 +3359,7 @@ class AnimationHandler {
                     console.log(`[AnimationHandler] Preloading ${files.length} animation clips for ${at}`);
                     for (const f of files) {
                         try {
-                            if (!this.loadedAnimations[f]) {
+                            if (!this._getCachedAnimation(at, f)) {
                                 const clip = await this.loadAnimation(at, f);
                                 if (clip) {
                                     console.log(`[AnimationHandler] Preloaded clip for ${at}/${f}`);
@@ -3327,7 +3518,6 @@ class AnimationHandler {
                             if (typeof this._baseIdleAction.setEffectiveWeight === 'function') {
                                 this._baseIdleAction.setEffectiveWeight(1.0);
                             }
-                            this._baseIdleAction.fadeIn(0.2);
                             this._baseIdleAction.play();
                         }
                     } catch (_e) { /* ignore */ }
@@ -3369,7 +3559,6 @@ class AnimationHandler {
                     if (typeof this._baseIdleAction.setEffectiveWeight === 'function') {
                         this._baseIdleAction.setEffectiveWeight(1.0);
                     }
-                    this._baseIdleAction.fadeIn(0.2);
                     this._baseIdleAction.play();
                 }
             } catch (_e) { /* ignore */ }
@@ -3415,10 +3604,25 @@ class AnimationHandler {
         if (animationFile) {
             const normalizedFile = this._normalizeAnimationKey(animationFile);
             const specificKey = `${actionName}:${normalizedFile}`;
-            if (this.actions[specificKey]) {
-                action = this.actions[specificKey];
-                console.log(`[AnimationHandler] Using cached specific animation: ${specificKey}`);
+            const cachedAction = this.actions[specificKey];
+            // Bypass cache when the server sent a descriptor with full intro/outro structure
+            // but the cached action is a plain (non-structured) clip loaded during startup
+            // (before the descriptor was available). Using the unstructured cache here would
+            // produce a full-loop animation instead of intro → loop → outro.
+            const descExpectsStructured = !!(
+                descriptorOverride
+                && descriptorOverride.intro && (typeof descriptorOverride.intro.start_frame === 'number')
+                && descriptorOverride.outro && (typeof descriptorOverride.outro.start_frame === 'number')
+            );
+            const cachedIsStructured = !!(cachedAction && cachedAction.intro && cachedAction.outro);
+            const useCached = !!(cachedAction && (!descExpectsStructured || cachedIsStructured));
+            if (useCached) {
+                action = cachedAction;
+                console.log(`[AnimationHandler] Using cached specific animation: ${specificKey} (cachedIsStructured=${cachedIsStructured}, descExpectsStructured=${descExpectsStructured})`);
             } else {
+                if (cachedAction && descExpectsStructured && !cachedIsStructured) {
+                    console.log(`[AnimationHandler] Bypassing stale simple-action cache for ${specificKey}: descriptor has structured sections but cache has no intro/outro. Will recreate.`);
+                }
                 console.log(`[AnimationHandler] Loading specific animation: ${animationFile} for ${actionName}`);
                 // Load the specific animation file
                 const clip = await this.loadAnimation(actionName, animationFile);
@@ -3550,8 +3754,10 @@ class AnimationHandler {
                             action = structuredAction;
                             console.log(`[AnimationHandler] Created structured animation for ${animationFile}, playOnceOnly: ${structuredAction._playOnceOnly}`);
                         } catch (err) {
-                            console.warn(`[AnimationHandler] Failed to create structured animation for ${animationFile}, using simple action:`, err);
-                            // Fall back to simple action
+                            console.warn(`[AnimationHandler] Failed to create structured animation for ${animationFile}, using temporary simple fallback:`, err);
+                            // Fall back to a simple action for this start only. Do not cache it
+                            // under the structured key, otherwise one transient failure would pin
+                            // the clip in full-loop mode for the rest of the session.
                             action = this.mixer.clipAction(clip);
                             if (playOnce || (descriptor && descriptor.play_once)) {
                                 action.setLoop(THREE.LoopOnce, 0);
@@ -3561,7 +3767,6 @@ class AnimationHandler {
                                 action.setLoop(THREE.LoopRepeat);
                                 action.clampWhenFinished = false;
                             }
-                            this.actions[specificKey] = action;
                         }
                     } else {
                         // Simple animation without intro/outro structure.
@@ -3676,7 +3881,10 @@ class AnimationHandler {
                     base.clampWhenFinished = false;
                     base.reset();
                     if (typeof base.setEffectiveWeight === 'function') base.setEffectiveWeight(1.0);
-                    base.fadeIn(0.2).play();
+                    // Start the selected idle variant immediately at full weight.
+                    // The previous base idle fades out separately, so using fadeIn()
+                    // here would only create a transient zero-weight hole.
+                    base.play();
                 } catch (e) { /* ignore */ }
 
                 // Only after the new base idle is running, fade out the previous.
@@ -3716,6 +3924,19 @@ class AnimationHandler {
             // and transition to its outro before starting the new one
             if (this.currentActionName && this.currentActionName !== actionName && this.currentStructuredAction) {
                 console.log(`[AnimationHandler] Structured action change detected: ${this.currentActionName} -> ${actionName}`);
+
+                this._queueTransitionAfterStructuredOutro(this.currentActionName, {
+                    actionName,
+                    animationFile,
+                    playOnce,
+                    playSection,
+                    descriptorOverride,
+                });
+
+                if (this.currentActionPhase === 'outro') {
+                    console.log(`[AnimationHandler] Structured outro already in progress for ${this.currentActionName}; queued ${actionName} to start on finished outro`);
+                    return;
+                }
 
                 // If we're in intro or loop, transition to outro
                 if (this.currentActionPhase === 'intro' || this.currentActionPhase === 'loop') {
@@ -3758,17 +3979,7 @@ class AnimationHandler {
 
                             this.currentAction = outroAction;
                             this.currentActionPhase = 'outro';
-                            console.log(`[AnimationHandler] Started outro for ${this.currentActionName} (cross-fade from ${this.currentActionPhase})`);
-
-                            // Determine duration reliably, fallback to 1s
-                            const outroClip = this.currentStructuredAction.outro.getClip();
-                            const outroDuration = (outroClip && Number.isFinite(outroClip.duration) ? outroClip.duration : 1) * 1000;
-
-                            // Schedule the next action after outro completes
-                            setTimeout(() => {
-                                console.log(`[AnimationHandler] Outro completed for ${this.currentActionName}, now starting ${actionName}`);
-                                try { this.startAction(actionName, animationFile, playOnce, playSection); } catch (e) { console.warn('[AnimationHandler] Failed to start next action after outro:', e); }
-                            }, Math.round(outroDuration) + 100);
+                            console.log(`[AnimationHandler] Started outro for ${this.currentActionName}; next action is queued for finished outro crossfade`);
                             return;
                         }
                     } catch (err) {
@@ -3968,6 +4179,65 @@ class AnimationHandler {
                             if (finishedClipName === outroName) {
                                 console.log(`[AnimationHandler] outro finished for ${key} -> advancing to next animation`);
 
+                                const logical = String(key || '').split(':')[0];
+                                const queuedTransition = this._consumeQueuedTransitionAfterStructuredOutro(logical);
+                                if (queuedTransition) {
+                                    console.log(`[AnimationHandler] Starting queued transition after structured outro: ${logical} -> ${queuedTransition.actionName}`);
+
+                                    // ── MUST clear structured state BEFORE micro-task fires ─────────
+                                    // If currentStructuredAction / currentActionPhase are still set
+                                    // when startAction() runs, _startActionInternal sees
+                                    // currentActionPhase='outro' and re-queues — permanent deadlock.
+                                    // Boost base-idle first so the skeleton is never un-driven.
+                                    try {
+                                        if (this._baseIdleAction) {
+                                            this._baseIdleAction.enabled = true;
+                                            this._baseIdleAction.setLoop(THREE.LoopRepeat);
+                                            this._baseIdleAction.clampWhenFinished = false;
+                                            if (typeof this._baseIdleAction.setEffectiveWeight === 'function') {
+                                                this._baseIdleAction.setEffectiveWeight(1.0);
+                                            }
+                                            this._baseIdleAction.play();
+                                        }
+                                    } catch (_e) { /* ignore */ }
+                                    // Fade out all clips from the finished structured action.
+                                    try {
+                                        this._safeFadeStop(candidate.intro, 0.25);
+                                        this._safeFadeStop(candidate.loop, 0.25);
+                                        this._safeFadeStop(candidate.outro, 0.25);
+                                    } catch (_e) { /* ignore */ }
+                                    // Clear all state references so _startActionInternal gets a clean slate.
+                                    if (this.currentAction === candidate.outro) this.currentAction = null;
+                                    this.currentActionPhase = null;
+                                    this.currentActionName = null;
+                                    this.currentActionKey = null;
+                                    this.currentStructuredAction = null;
+                                    this._currentAnimationFile = null;
+
+                                    try {
+                                        this._lastOutroDispatched = this._lastOutroDispatched || {};
+                                        const now = Date.now();
+                                        if (!this._lastOutroDispatched[key] || (now - this._lastOutroDispatched[key] > 300)) {
+                                            this._lastOutroDispatched[key] = now;
+                                            window.dispatchEvent(new CustomEvent('synth_animation_outro_completed', { detail: { key } }));
+                                        }
+                                    } catch (e) { /* ignore non-browser env */ }
+                                    Promise.resolve().then(() => {
+                                        try {
+                                            this.startAction(
+                                                queuedTransition.actionName,
+                                                queuedTransition.animationFile,
+                                                queuedTransition.playOnce,
+                                                queuedTransition.playSection,
+                                                queuedTransition.descriptorOverride,
+                                            );
+                                        } catch (e) {
+                                            console.warn('[AnimationHandler] Failed to start queued action after outro:', e);
+                                        }
+                                    });
+                                    break;
+                                }
+
                                 // ── CRITICAL: boost base-idle to full weight FIRST ──────────────────
                                 // With clampWhenFinished=true, the outro holds its last frame.
                                 // Boost base idle to full weight before fading out the clamped
@@ -4000,7 +4270,6 @@ class AnimationHandler {
                                 // Fallback: if no new action arrives immediately after a structured outro,
                                 // force a return to idle to avoid a visible T-pose window.
                                 try {
-                                    const logical = String(key || '').split(':')[0];
                                     if (logical && logical !== 'idle') {
                                         const token = (this._postOutroIdleToken || 0) + 1;
                                         this._postOutroIdleToken = token;
@@ -4459,7 +4728,7 @@ class AnimationHandler {
             if (animationFile) {
                 // ensure it's loaded
                 try {
-                    clip = this.loadedAnimations[animationFile] || await this.loadAnimation(actionName, animationFile);
+                    clip = this._getCachedAnimation(actionName, animationFile) || await this.loadAnimation(actionName, animationFile);
                     try { console.debug('[AnimationHandler] load attempt result for animationFile', { animationFile, clip: clip && (clip.name || clip._clipName) }); } catch (e) { }
                 } catch (errLoad) {
                     console.warn('[AnimationHandler] loadAnimation threw for animationFile', animationFile, errLoad);
@@ -4472,7 +4741,7 @@ class AnimationHandler {
                     const pick = (files && files.length) ? files[0] : null;
                     try { console.debug('[AnimationHandler] picked file for action', { actionName, pick, filesCount: files && files.length }); } catch (e) { }
                     try {
-                        clip = pick ? (this.loadedAnimations[pick] || await this.loadAnimation(actionName, pick)) : null;
+                        clip = pick ? (this._getCachedAnimation(actionName, pick) || await this.loadAnimation(actionName, pick)) : null;
                         try { console.debug('[AnimationHandler] load attempt result for pick', { pick, clip: clip && (clip.name || clip._clipName) }); } catch (e) { }
                     } catch (errPick) {
                         console.warn('[AnimationHandler] loadAnimation threw for pick', pick, errPick);
@@ -4762,6 +5031,10 @@ async function loadVRM(url, name, { isObjectUrl = false } = {}) {
 
         console.log('[synth_webui] Preparing VRM before adding to scene...');
 
+        // Show the loading overlay so any residual frame from the previous
+        // model is covered while the new one initialises.
+        _showVrmLoadingOverlay();
+
         // Hide the VRM initially to avoid visible T-pose while animations
         // are being prepared. We'll unhide after animations are ready
         // (or on error to avoid leaving the scene invisible forever).
@@ -4792,6 +5065,8 @@ async function loadVRM(url, name, { isObjectUrl = false } = {}) {
             } catch (unvisErr) {
                 console.warn('[synth_webui] Failed to unhide VRM after preload:', unvisErr);
             }
+            // VRM is ready — fade out the loading overlay.
+            _hideVrmLoadingOverlay();
         } catch (animErr) {
             console.warn('[synth_webui] Warning: failed to preload animations before adding VRM:', animErr);
             // Ensure we unhide even on error to avoid invisible models
@@ -4800,6 +5075,8 @@ async function loadVRM(url, name, { isObjectUrl = false } = {}) {
             } catch (_e) {
                 /* ignore */
             }
+            // Hide overlay on error too so it doesn't block the fallback banner.
+            _hideVrmLoadingOverlay();
         }
 
         console.log('[synth_webui] Clearing existing VRM from scene...');
@@ -4989,9 +5266,23 @@ async function loadDefaultAnimations(vrm) {
             console.log('[synth_webui] DEBUG_VRM_HELPERS.dump available');
         } catch (e) { /* ignore */ }
 
+        console.log('[synth_webui] Loading base actions...');
+        try {
+            // Bootstrap the base idle FIRST — before any preloading — so _baseIdleAction
+            // is always non-null and the skeleton is fully driven from this point forward.
+            // Preloading other animations (especially 'write') can take up to 8 s before
+            // timing out; without an active idle the skeleton would show T-pose for that
+            // entire window.  Rule: idle at full weight before anything else loads.
+            await animationHandler._ensureBaseIdle(1.0, true);
+            console.log('[synth_webui] ✓ Base idle bootstrapped (weight=1.0, _baseIdleAction set)');
+        } catch (e) {
+            console.error('[synth_webui] ✗ Base idle bootstrap failed:', e);
+        }
+
         // Preload all animations for the current skin and action types to
         // reduce T-pose flashes when switching animations at runtime.
         // This will populate animationHandler.loadedAnimations cache.
+        // NOTE: done AFTER bootstrapping base idle so timeouts here cannot expose T-pose.
         try {
             console.log('[synth_webui] Preloading all animations (may take a moment)...');
             if (typeof animationHandler.preloadAllAnimations === 'function') {
@@ -5002,19 +5293,6 @@ async function loadDefaultAnimations(vrm) {
             }
         } catch (err) {
             console.warn('[synth_webui] Preload all animations failed:', err);
-        }
-
-        console.log('[synth_webui] Loading base actions...');
-        try {
-            // Bootstrap the base idle immediately so _baseIdleAction is always
-            // non-null before any other startAction runs. Using weight=1.0 means
-            // the skeleton is fully driven from this point forward. Any animation
-            // that follows will either succeed (fading idle to 0.12) or fail and
-            // boost idle back to 1.0 — but T-pose is never reachable.
-            await animationHandler._ensureBaseIdle(1.0, true);
-            console.log('[synth_webui] ✓ Base idle bootstrapped (weight=1.0, _baseIdleAction set)');
-        } catch (e) {
-            console.error('[synth_webui] ✗ Base idle bootstrap failed:', e);
         }
 
         console.log('[synth_webui] Server-driven mode: skipping eager THINK preload');
@@ -6258,10 +6536,11 @@ try {
                 let maxFrameIndex = 0;
                 try {
                     if (animationHandler && animationHandler.loadedAnimations) {
-                        const norm = (typeof animationHandler._normalizeAnimationKey === 'function') ? animationHandler._normalizeAnimationKey(file) : file;
-                        let clip = animationHandler.loadedAnimations[norm] || animationHandler.loadedAnimations[file] || null;
+                        const actionType = (selType && selType.value) ? selType.value : 'think';
+                        let clip = (typeof animationHandler._getCachedAnimation === 'function')
+                            ? animationHandler._getCachedAnimation(actionType, file)
+                            : null;
                         if (!clip && typeof animationHandler.loadAnimation === 'function') {
-                            const actionType = (selType && selType.value) ? selType.value : 'think';
                             try { clip = await animationHandler.loadAnimation(actionType, file); } catch (e) { /* ignore */ }
                         }
                         maxFrameIndex = computeMaxFramesFromClip(clip, fps);

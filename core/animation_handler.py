@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import random
 import uuid
+from collections.abc import Callable
 from enum import Enum
 from typing import Dict, List, Optional, TYPE_CHECKING, Any
 from datetime import datetime, timezone
@@ -34,6 +35,12 @@ class AnimationState(Enum):
     WRITE = "write"
     TALK = "talk"
     SKIN_CHANGE = "skin_change"
+
+
+AnimationStateChangedCallback = Callable[
+    [AnimationState, str, Optional[Dict[str, Any]]],
+    Any,
+]
 
 
 # Priority levels for animation states (matching action_state_manager.py priorities)
@@ -98,7 +105,7 @@ class KaradaStateServer:
 
         # Centralized animation state that syncs across all clients
         self._current_animation_file: Optional[str] = None  # Actual file being played
-        self._current_animation_descriptor: Optional[Dict] = (
+        self._current_animation_descriptor: Optional[Dict[str, Any]] = (
             None  # Descriptor with frame info
         )
         self._current_animation_started_at: Optional[datetime] = (
@@ -110,8 +117,9 @@ class KaradaStateServer:
         # animation after a reconnect or periodic re-sync.
         self._current_animation_id: str = ""
         self._animation_state_changed_callbacks: List[
-            callable
-        ] = []  # Callbacks when animation changes
+            AnimationStateChangedCallback
+        ] = []
+        # Callbacks when animation changes
 
         # new methods inserted here (will add after class header)
         # Plugin/override state animations: state_name -> {'loop': [...], 'post': [...], 'other': [...]}
@@ -327,7 +335,9 @@ class KaradaStateServer:
         except Exception as exc:
             log_warning(f"[KaradaStateServer] ensure_idle_preloaded failed: {exc}")
 
-    def register_animation_state_changed_callback(self, callback: callable) -> None:
+    def register_animation_state_changed_callback(
+        self, callback: AnimationStateChangedCallback
+    ) -> None:
         """Register a callback to be called when animation state changes.
 
         The callback will be called with (state, animation_file, descriptor) as arguments.
@@ -339,7 +349,10 @@ class KaradaStateServer:
         log_debug("[KaradaStateServer] Registered animation state changed callback")
 
     async def _notify_animation_state_changed(
-        self, state: AnimationState, animation_file: str, descriptor: Optional[Dict]
+        self,
+        state: AnimationState,
+        animation_file: str,
+        descriptor: Optional[Dict[str, Any]],
     ) -> None:
         """Notify all callbacks that animation state has changed.
 
@@ -365,7 +378,7 @@ class KaradaStateServer:
                     f"[KaradaStateServer] Error in animation state callback: {exc}"
                 )
 
-    def get_current_animation_state(self) -> Dict[str, any]:
+    def get_current_animation_state(self) -> Dict[str, Any]:
         """Get the current centralized animation state.
 
         Returns:
@@ -444,8 +457,7 @@ class KaradaStateServer:
                         elapsed = max(
                             0.0,
                             (
-                                datetime.utcnow().replace(tzinfo=timezone.utc)
-                                - started_at
+                                datetime.now(tz=timezone.utc) - started_at
                             ).total_seconds(),
                         )
                         timing["time_in_clip"] = elapsed
@@ -558,7 +570,7 @@ class KaradaStateServer:
 
         face_values: Dict[str, Any] = {}
         try:
-            from core.core_initializer import PLUGIN_REGISTRY  # type: ignore[import]
+            from core.core_initializer import PLUGIN_REGISTRY
 
             mgr = (
                 PLUGIN_REGISTRY.get("emotion_manager")
@@ -696,12 +708,12 @@ class KaradaStateServer:
 
         return unique_animations
 
-    def set_animation_search_paths(self, paths: List[Path]) -> None:
+    def set_animation_search_paths(self, paths: List[Path | str]) -> None:
         """Set additional search paths (ordered) to resolve animation files.
 
         These are checked after the active persona skin and before the Rei fallback.
         """
-        self._search_paths = list(paths)
+        self._search_paths = [Path(path) for path in paths]
         log_debug(
             f"[KaradaStateServer] Animation search paths set: {self._search_paths}"
         )
@@ -881,22 +893,7 @@ class KaradaStateServer:
                 # If descriptor parsing fails, treat as loopable by default
                 variants["loop"].append(fbx_path.name)
 
-        def _find_case_insensitive_file(
-            directory: Path, filename: str
-        ) -> Optional[Path]:
-            try:
-                direct = directory / filename
-                if direct.exists() and direct.is_file():
-                    return direct
-                lower = filename.lower()
-                for f in directory.glob("*.fbx"):
-                    if f.name.lower() == lower:
-                        return f
-            except Exception:
-                return None
-            return None
-
-        # 2) Resolve exact file match <state>.fbx ONLY in root animation dirs (case-insensitive)
+        # 2) Resolve folder variants by scanning ONLY <dir>/<state>/ (and Rei fallback)
         found_any = False
         active_persona_folder = None
         try:
@@ -913,23 +910,6 @@ class KaradaStateServer:
         except Exception:
             active_persona_folder = None
 
-        root_dirs: List[Path] = []
-        if active_persona_folder:
-            root_dirs.append(self.SKINS_DIR / str(active_persona_folder) / "animations")
-        for p in self._search_paths:
-            root_dirs.append(Path(p))
-        root_dirs.append(self.SKIN_DEFAULT_ANIMATIONS_DIR)
-
-        for rd in root_dirs:
-            if not (rd.exists() and rd.is_dir()):
-                continue
-            exact = _find_case_insensitive_file(rd, f"{key}.fbx")
-            if exact is not None:
-                found_any = True
-                _classify_and_add(exact)
-                break
-
-        # 3) Resolve folder variants by scanning ONLY <dir>/<state>/ (and Rei fallback)
         state_dirs: List[Path] = []
         if active_persona_folder:
             state_dirs.append(
@@ -1028,7 +1008,8 @@ class KaradaStateServer:
                 url = self._build_search_url_prefix(root)
                 if state_folder:
                     search_roots.append((root / state_folder, f"{url}/{state_folder}"))
-                search_roots.append((root, url))
+                else:
+                    search_roots.append((root, url))
             except Exception:
                 continue
 
@@ -1042,7 +1023,10 @@ class KaradaStateServer:
                         f"/skins/{active_persona_folder}/animations/{state_folder}",
                     )
                 )
-            search_roots.append((base, f"/skins/{active_persona_folder}/animations"))
+            else:
+                search_roots.append(
+                    (base, f"/skins/{active_persona_folder}/animations")
+                )
 
         # Default Rei fallback
         rei_base = self.SKINS_DIR / "Rei" / "animations"
@@ -1050,7 +1034,8 @@ class KaradaStateServer:
             search_roots.append(
                 (rei_base / state_folder, f"/skins/Rei/animations/{state_folder}")
             )
-        search_roots.append((rei_base, "/skins/Rei/animations"))
+        else:
+            search_roots.append((rei_base, "/skins/Rei/animations"))
 
         def _try_load_descriptor(fpath: Path) -> Optional[Dict[str, Any]]:
             dpath = fpath.with_suffix(fpath.suffix + ".json")
@@ -1292,6 +1277,7 @@ class KaradaStateServer:
 
             # Select animation file
             # Prefer variants discovered via descriptors and overrides
+            resolved_state = state
             variants = self.get_animation_variants(state.value)
             if state == AnimationState.IDLE:
                 # Never pick `post` variants for idle: they are often play-once/clamped.
@@ -1304,7 +1290,13 @@ class KaradaStateServer:
                 )
             if not animations:
                 # Fallback to idle if no animations found for this state
-                animations = self.get_animations_for_state(AnimationState.IDLE)
+                resolved_state = AnimationState.IDLE
+                idle_variants = self.get_animation_variants(AnimationState.IDLE.value)
+                animations = idle_variants.get("loop", []) or idle_variants.get(
+                    "other", []
+                )
+                if not animations:
+                    animations = self.get_animations_for_state(AnimationState.IDLE)
             if not animations:
                 log_warning(
                     f"[KaradaStateServer] No animations found for state {state.value}, skipping"
@@ -1312,30 +1304,33 @@ class KaradaStateServer:
                 return
 
             # Select animation based on rotation mode
-            if state.value in self._sequential_states and len(animations) > 1:
+            if resolved_state.value in self._sequential_states and len(animations) > 1:
                 # Sequential mode: use current index or start from 0
-                current_index = self._sequence_indices.get(state.value, -1)
+                current_index = self._sequence_indices.get(resolved_state.value, -1)
                 next_index = (current_index + 1) % len(animations)
                 selected_animation = animations[next_index]
-                self._sequence_indices[state.value] = next_index
+                self._sequence_indices[resolved_state.value] = next_index
             else:
                 # Random mode or single animation
                 selected_animation = random.choice(animations)
 
             # Update internal state
-            self.current_state = state
+            self.current_state = resolved_state
             self.current_animation = selected_animation
 
             log_debug(
-                f"[KaradaStateServer] Playing {state.value} animation: {selected_animation} "
-                f"(loop={loop}, session={session_id}, context={context_id}, priority={priority})"
+                f"[KaradaStateServer] Playing {resolved_state.value} animation: {selected_animation} "
+                f"(requested={state.value}, loop={loop}, session={session_id}, "
+                f"context={context_id}, priority={priority})"
             )
 
             # Send animation command to clients
             if self._has_any_transport():
                 # Resolve descriptor for intelligent section handling
-                resolved_path, descriptor = self._resolve_animation_descriptor(
-                    selected_animation
+                resolved_path, descriptor = (
+                    self._resolve_animation_descriptor_for_state(
+                        selected_animation, resolved_state.value
+                    )
                 )
                 structure = self._analyze_animation_structure(
                     descriptor, selected_animation
@@ -1347,7 +1342,7 @@ class KaradaStateServer:
                     f"structure=(intro:{structure['has_intro']}, loop:{structure['has_loop']}, outro:{structure['has_outro']})"
                 )
 
-                is_idle_state = state == AnimationState.IDLE
+                is_idle_state = resolved_state == AnimationState.IDLE
 
                 # Determine effective loop behavior based on descriptor structure:
                 # 1. If has intro/outro (structured animation): loop=True if has loop section, else play once
@@ -1420,14 +1415,14 @@ class KaradaStateServer:
                 try:
                     if self._has_any_transport():
                         # For non-idle animations, pre-load IDLE first to ensure smooth fallback
-                        if state != AnimationState.IDLE:
+                        if resolved_state != AnimationState.IDLE:
                             await self.ensure_idle_preloaded(session_id=session_id)
 
                         # Then pre-load the requested animation
                         await self._preload_animation(
                             session_id=session_id,
                             animation_file=selected_animation,
-                            state_folder=state.value,
+                            state_folder=resolved_state.value,
                         )
                 except Exception as exc:
                     log_warning(
@@ -1436,11 +1431,11 @@ class KaradaStateServer:
                     )
                     preload_ok = False
 
-                if not preload_ok and state != AnimationState.IDLE:
+                if not preload_ok and resolved_state != AnimationState.IDLE:
                     # Preload failed — do NOT play the animation (would T-pose).
                     # Fall back to IDLE instead.
                     log_warning(
-                        f"[KaradaStateServer] Skipping {state.value} animation due to preload failure"
+                        f"[KaradaStateServer] Skipping {resolved_state.value} animation due to preload failure"
                     )
                     if context_id:
                         self._active_tasks.pop(context_id, None)
@@ -1498,12 +1493,13 @@ class KaradaStateServer:
                     session_id=session_id,
                     animation_file=selected_animation,
                     loop=effective_loop,
-                    state=state.value,
+                    state=resolved_state.value,
                     descriptor=self._sanitize_idle_descriptor(descriptor)
                     if is_idle_state
                     else descriptor,
                     priority=priority,
                     source=source,
+                    state_for_resolution=resolved_state.value,
                 )
 
                 # Update centralized animation state and notify all clients
@@ -1514,7 +1510,7 @@ class KaradaStateServer:
                     else descriptor
                 )
                 await self._notify_animation_state_changed(
-                    state,
+                    resolved_state,
                     selected_animation,
                     self._current_animation_descriptor,
                 )
@@ -1533,7 +1529,7 @@ class KaradaStateServer:
                 # a conservative default of 3 s is used before the buffer.  This avoids
                 # premature transitions when metadata is missing.
                 try:
-                    if not effective_loop and state != AnimationState.IDLE:
+                    if not effective_loop and resolved_state != AnimationState.IDLE:
                         # Sum durations of ALL descriptor sections so we never fire mid-animation.
                         fallback_duration: float = 0.0
                         if descriptor and isinstance(descriptor, dict):
@@ -1566,7 +1562,7 @@ class KaradaStateServer:
                         running_loop.create_task(
                             self._non_loop_fallback(
                                 session_id,
-                                state,
+                                resolved_state,
                                 selected_animation,
                                 fallback_duration,
                             )
@@ -1583,9 +1579,9 @@ class KaradaStateServer:
             # rotation task that will randomly switch between them every 30-60s.
             # Skip rotation for animations with loop/intro/outro structure.
             if start_rotation:
-                await self._start_rotation_task(session_id, state, context_id)
+                await self._start_rotation_task(session_id, resolved_state, context_id)
             else:
-                await self._stop_rotation_task(session_id, state)
+                await self._stop_rotation_task(session_id, resolved_state)
 
         # Wait for outro to complete outside the lock (so other operations can proceed)
         if needs_outro_transition and outro_duration > 0:
@@ -1596,7 +1592,7 @@ class KaradaStateServer:
 
         # If this is a non-idle animation, pre-load IDLE in the background
         # so that when the animation stops, the fallback to IDLE is instant
-        if state != AnimationState.IDLE:
+        if resolved_state != AnimationState.IDLE:
             try:
                 asyncio.create_task(self.ensure_idle_preloaded(session_id=session_id))
             except Exception:
@@ -1614,6 +1610,7 @@ class KaradaStateServer:
             context_id: The context identifier to stop
             session_id: The WebUI session ID
         """
+        outro_duration = 0.0
         async with self._lock:
             # Get current animation descriptor to check structure
             current_animation = self.current_animation
@@ -1628,7 +1625,14 @@ class KaradaStateServer:
             structure = self._analyze_animation_structure(descriptor)
 
             # If the animation has an outro, play it first
-            if structure["has_outro"]:
+            outro_section = (
+                descriptor.get("outro") if isinstance(descriptor, dict) else None
+            )
+            if (
+                structure["has_outro"]
+                and current_animation is not None
+                and isinstance(outro_section, dict)
+            ):
                 log_debug(
                     f"[KaradaStateServer] Playing outro for {current_animation} "
                     f"before stopping (context={context_id}, session={session_id})"
@@ -1645,9 +1649,9 @@ class KaradaStateServer:
                 )
                 # Estimate outro duration and wait before transitioning to Idle
                 # Default: assume ~30 frames at 30fps = ~1 second per 30 frames
-                outro_frames = descriptor["outro"].get("end_frame", 0) - descriptor[
-                    "outro"
-                ].get("start_frame", 0)
+                outro_frames = outro_section.get("end_frame", 0) - outro_section.get(
+                    "start_frame", 0
+                )
                 outro_duration = max(
                     0.5, outro_frames / 30.0
                 )  # Minimum 0.5s, assume 30fps
@@ -1664,7 +1668,7 @@ class KaradaStateServer:
                     f"stopping immediately (context={context_id})"
                 )
                 self._active_tasks.pop(context_id, None)
-                outro_duration = 0
+                outro_duration = 0.0
 
         # Wait for outro if needed (outside the lock)
         if outro_duration > 0:
@@ -1786,7 +1790,7 @@ class KaradaStateServer:
 
         # Prepare optional rich animation_state payload
         animation_state: Dict[str, Any] = {}
-        started_at = datetime.utcnow().replace(tzinfo=timezone.utc)
+        started_at = datetime.now(tz=timezone.utc)
         try:
             resolved_path = resolved_rel_path
             phase = (

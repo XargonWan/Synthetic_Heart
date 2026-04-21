@@ -7,7 +7,6 @@ Covers:
 """
 
 import asyncio
-import os
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -72,7 +71,9 @@ class TestIrisResponseValidation(unittest.IsolatedAsyncioTestCase):
 
     @patch("plugins.iris_plugin.IRIS_REGISTRY")
     @patch("os.path.exists", return_value=True)
-    async def test_json_without_actions_key_passes_through(self, _exists, mock_registry):
+    async def test_json_without_actions_key_passes_through(
+        self, _exists, mock_registry
+    ):
         """JSON that does NOT contain 'actions' is treated as valid plain text."""
         from plugins.iris_base import IrisResult
 
@@ -126,7 +127,9 @@ class TestIrisCallTimeout(unittest.IsolatedAsyncioTestCase):
             async def fast_timeout(coro, timeout):  # type: ignore[override]
                 return await original_wait_for(coro, timeout=0.05)
 
-            with patch("core.plugin_instance.asyncio.wait_for", side_effect=fast_timeout):
+            with patch(
+                "core.plugin_instance.asyncio.wait_for", side_effect=fast_timeout
+            ):
                 result = await _describe_attachment_images_with_iris(attachments)
 
         from plugins.iris_base import IrisResult

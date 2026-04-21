@@ -115,7 +115,9 @@ async def test_handle_media_live_transcribes(tmp_path, monkeypatch):
         # onto the future rather than passed directly to enqueue().
         assert all_futures, "enqueue should have been called with media_future"
         finfo = all_futures[0]
-        assert finfo["future"].done(), "media_future should be resolved after handle_media_live"
+        assert finfo["future"].done(), (
+            "media_future should be resolved after handle_media_live"
+        )
         wrapped = finfo["future"].result()
         assert wrapped.text == "hello world"
         assert getattr(wrapped, "is_voice_input", False)
@@ -445,7 +447,9 @@ async def test_handle_media_live_auris_disabled_no_handler(monkeypatch):
     with patch("core.media_dispatcher.dispatch_media", AsyncMock(return_value=None)):
         try:
             await telegram_bot.handle_media_live(update, ctx)
-            assert futures, "transcription or fallback should be resolved onto media_future"
+            assert futures, (
+                "transcription or fallback should be resolved onto media_future"
+            )
             fut, orig_msg = futures[0]
             assert fut.done(), "media_future should be resolved after handle_media_live"
             wrapped = fut.result()
