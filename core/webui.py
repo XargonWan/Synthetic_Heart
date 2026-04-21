@@ -88,6 +88,8 @@ _LEGACY_AUTOSTART_ENV = "WEBWAIFU_AUTOSTART"
 _AUTOSTART_ENV = "SYNTH_WEBUI_AUTOSTART"
 _LEGACY_VRM_DIR_ENV = "WEBWAIFU_VRM_DIR"
 _VRM_DIR_ENV = "SYNTH_WEBUI_VRM_DIR"
+_WEBUI_TOUCH_CONTEXT_ID = "__webui_touch_overlay"
+_WEBUI_TOUCH_PRIORITY = 11
 
 
 # Ensure correct MIME types are registered
@@ -744,6 +746,10 @@ class SynthWebUIInterface:
                     "state": current.get("state"),
                     "animation": resolved,
                     "descriptor": current.get("descriptor"),
+                    "play_section": current.get("play_section"),
+                    "frame_range": current.get("frame_range"),
+                    "phase_authoritative": current.get("phase_authoritative", False),
+                    "animation_state": current.get("animation_state"),
                     "animation_id": current.get("animation_id"),
                 }
                 return JSONResponse(payload)
@@ -1030,7 +1036,7 @@ class SynthWebUIInterface:
 
     async def set_animation_state(self, request: Request):
         """Set the centralized animation state. Expected JSON:
-        {"state": "think|write|idle|talk", "session_id": "...", "loop": true}
+        {"state": "think|write|idle|talk|touch", "session_id": "...", "loop": true}
         """
         data = await request.json()
         state_str = data.get("state") if isinstance(data, dict) else None
@@ -1049,6 +1055,24 @@ class SynthWebUIInterface:
         loop = bool(data.get("loop", True))
         context_id = data.get("context_id")
         source = data.get("source")
+        priority = data.get("priority")
+        if priority is not None:
+            try:
+                priority = int(priority)
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=400, detail="'priority' must be an integer"
+                ) from exc
+
+        if state_enum == AnimationState.TOUCH:
+            if "loop" not in data:
+                loop = False
+            if not context_id:
+                context_id = _WEBUI_TOUCH_CONTEXT_ID
+            if priority is None:
+                priority = _WEBUI_TOUCH_PRIORITY
+            if not source:
+                source = "webui.touch"
 
         try:
             await self.animation_handler.play_animation(
@@ -1056,6 +1080,7 @@ class SynthWebUIInterface:
                 session_id=session_id,
                 loop=loop,
                 context_id=context_id,
+                priority=priority,
                 source=source,
             )
             return JSONResponse(
@@ -1064,6 +1089,34 @@ class SynthWebUIInterface:
         except Exception as exc:
             log_error(f"{LOG_PREFIX} set_animation_state failed: {exc}")
             raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    async def _handle_touch_animation_request(
+        self, session_id: str, payload: Dict[str, Any]
+    ) -> None:
+        """Convert a WebUI touch interaction into an authoritative Karada state."""
+        if not self.animation_handler:
+            return
+
+        source = payload.get("source") or "webui.touch"
+        priority = payload.get("priority")
+        if not isinstance(priority, int):
+            priority = _WEBUI_TOUCH_PRIORITY
+
+        context_id = payload.get("context_id") or _WEBUI_TOUCH_CONTEXT_ID
+        touched_part = payload.get("mapped_part") or payload.get("part") or "unknown"
+        log_info(
+            f"{LOG_PREFIX} Touch interaction from session {session_id}: part={touched_part}, "
+            f"context={context_id}, priority={priority}"
+        )
+
+        await self.animation_handler.play_animation(
+            AnimationState.TOUCH,
+            session_id=None,
+            loop=False,
+            context_id=str(context_id),
+            priority=int(priority),
+            source=str(source),
+        )
 
     # ------------------------------------------------------------------
     # Interface metadata
@@ -2047,7 +2100,13 @@ class SynthWebUIInterface:
                             "file": anim.get("url") or anim.get("file"),
                             "state": anim.get("state", "idle"),
                             "loop": anim.get("loop", True),
+                            "play_section": anim.get("play_section"),
+                            "frame_range": anim.get("frame_range"),
+                            "phase_authoritative": anim.get(
+                                "phase_authoritative", False
+                            ),
                             "descriptor": anim.get("descriptor"),
+                            "animation_state": anim.get("animation_state"),
                             "animation_id": anim.get("animation_id"),
                             "restore": True,
                         }
@@ -2083,6 +2142,14 @@ class SynthWebUIInterface:
                 # Ignore control messages that are not chat text
                 msg_type = payload.get("type")
                 if msg_type in ("hello",):
+                    continue
+                if msg_type == "touch":
+                    try:
+                        await self._handle_touch_animation_request(session_id, payload)
+                    except Exception as touch_exc:
+                        log_warning(
+                            f"{LOG_PREFIX} Failed to handle touch interaction from {session_id}: {touch_exc}"
+                        )
                     continue
 
                 text = (payload.get("text") or "").strip()
@@ -2999,6 +3066,10 @@ class SynthWebUIInterface:
                 "state": current.get("state"),
                 "animation": resolved,
                 "descriptor": current.get("descriptor"),
+                "play_section": current.get("play_section"),
+                "frame_range": current.get("frame_range"),
+                "phase_authoritative": current.get("phase_authoritative", False),
+                "animation_state": current.get("animation_state"),
             }
             return JSONResponse(payload)
         except Exception as exc:
