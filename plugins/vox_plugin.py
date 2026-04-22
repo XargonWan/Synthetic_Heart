@@ -108,7 +108,7 @@ def _detect_language(text: str) -> str | None:
 register_exposed_var(
     "ACTIVE_VOX_ENGINE",
     label="Active Vox Engine",
-    default="disabled",
+    default="kitten",
     value_type=str,
     ui_type="string",
     description=(
