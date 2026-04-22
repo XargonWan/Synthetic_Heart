@@ -780,7 +780,6 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                 entry.minimized = false;
                 try { entry.winbox.show(); } catch (e) { /* ignore */ }
                 try { entry.winbox.restore(); } catch (e) { /* ignore */ }
-                try { if (!entry.winbox.max && !entry.winbox.min) applyNormalRect(entry); } catch (e) { /* ignore */ }
                 try { entry.winbox.focus(); } catch (e) { /* ignore */ }
                 if (entry.dockButton) {
                     try {
@@ -933,7 +932,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                     iconText: opts.iconText || null,
                     minimized: false,
                     lastNormalRect: null,
-                    restoringFromMax: false
+                    maximizingInProgress: false
                 };
                 const className = `${opts.className || 'synth-winbox no-full no-close'} modern`;
                 const desktopRoot = document.getElementById('desktop-root');
@@ -955,36 +954,45 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                         try { saveState(opts.id); } catch (e) { /* ignore */ }
                     },
                     onrestore: function() {
-                        try {
-                            if (entry.restoringFromMax && !this.max && !this.min) applyNormalRect(entry);
-                        } catch (e) { /* ignore */ }
-                        entry.restoringFromMax = false;
-                        try { saveState(opts.id); } catch (e) { /* ignore */ }
+                        // Defer all post-restore work so WinBox fully completes its own restore
+                        // sequence before we touch resize/move (avoids re-entrant freeze).
+                        setTimeout(() => {
+                            try {
+                                if (entry.winbox && !entry.winbox.max && !entry.winbox.min) {
+                                    clampEntryToViewport(entry);
+                                    captureNormalRect(entry);
+                                }
+                            } catch (e) { /* ignore */ }
+                            try { saveState(opts.id); } catch (e) { /* ignore */ }
+                        }, 0);
                     },
                     onmove: function() {
-                        if (!entry.restoringFromMax && !this.max && !this.min) try { captureNormalRect(entry); } catch (e) { /* ignore */ }
+                        if (!entry.maximizingInProgress && !this.max && !this.min) try { captureNormalRect(entry); } catch (e) { /* ignore */ }
                     },
                     onresize: function() {
-                        if (!entry.restoringFromMax && !this.max && !this.min) try { captureNormalRect(entry); } catch (e) { /* ignore */ }
+                        if (!entry.maximizingInProgress && !this.max && !this.min) try { captureNormalRect(entry); } catch (e) { /* ignore */ }
                     }
                 });
                 try { console.debug('[SynthWindowManager] created winbox for', opts.id, 'instance=', winbox); } catch (e) { /* ignore */ }
                 entry.winbox = winbox;
                 try {
-                    const nativeRestore = typeof winbox.restore === 'function' ? winbox.restore.bind(winbox) : null;
                     const nativeMaximize = typeof winbox.maximize === 'function' ? winbox.maximize.bind(winbox) : null;
-                    if (nativeRestore) {
-                        winbox.restore = function(...args) {
-                            entry.restoringFromMax = !!this.max;
-                            return nativeRestore(...args);
-                        };
-                    }
                     if (nativeMaximize) {
                         winbox.maximize = function(...args) {
+                            // Capture pre-maximize rect before WinBox resizes to fullscreen.
+                            // Guard captureNormalRect in onresize/onmove while WinBox internal
+                            // maximize is running (this.max is still false during resize/move
+                            // calls inside maximize(), so without the flag captureNormalRect
+                            // would snapshot the fullscreen dimensions and corrupt lastNormalRect).
                             try {
                                 if (!this.max && !this.min) captureNormalRect(entry);
                             } catch (e) { /* ignore */ }
-                            return nativeMaximize(...args);
+                            entry.maximizingInProgress = true;
+                            try {
+                                return nativeMaximize(...args);
+                            } finally {
+                                entry.maximizingInProgress = false;
+                            }
                         };
                     }
                 } catch (e) { /* ignore */ }

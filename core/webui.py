@@ -7238,11 +7238,14 @@ class SynthWebUIInterface:
             component = None
 
         try:
-            await config_registry.set_value(key, value)
+            await config_registry.set_value(key, value, require_persist=True)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            log_error(f"{LOG_PREFIX} failed to persist config {key}: {exc}")
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
         except Exception as exc:
             log_error(f"{LOG_PREFIX} failed to update config {key}: {exc}")
             raise HTTPException(

@@ -7,6 +7,7 @@ This test verifies that the action state manager correctly enforces priority rul
 """
 
 import pytest
+import core.action_state_manager as action_state_manager_module
 from core.action_state_manager import (
     get_action_state_manager,
     init_action_state_manager,
@@ -185,6 +186,34 @@ class TestActionStatePriority:
         # Current phase should be IDLE
         phase = await manager.get_current_phase()
         assert phase == AnimationPhase.IDLE
+
+    @pytest.mark.asyncio
+    async def test_update_phase_logs_previous_phase_name(self, monkeypatch):
+        """The update log must preserve the original phase name for debugging."""
+        manager = get_action_state_manager()
+        captured: list[str] = []
+
+        monkeypatch.setattr(
+            action_state_manager_module,
+            "log_info",
+            lambda msg: captured.append(msg),
+        )
+
+        result = await manager.push_action(
+            action_id="webui_msg_1",
+            phase=AnimationPhase.THINKING,
+            component=INTERNAL_CHAT_NAME,
+        )
+        assert result is True
+
+        captured.clear()
+
+        result = await manager.update_phase("webui_msg_1", AnimationPhase.WRITING)
+
+        assert result is True
+        assert any(
+            "THINKING (priority=10) -> WRITING (priority=3)" in msg for msg in captured
+        )
 
 
 if __name__ == "__main__":

@@ -747,7 +747,7 @@ docker exec synth-dev tail -f /app/logs/synth.log | grep -E "\[grillo\]|grillo"
 **Symptom:** `uv run ruff check --fix .` fails on pre-existing files outside most feature slices (observed in `interface/message_send_utils.py`, `interface_dev/reddit_interface.py`, `interface_dev/telethon_userbot.py`, `interface_dev/x_interface.py`, `plugins/bio_manager.py`), and broad `uv run pytest --ignore=tests/plugins/test_selenium_ttsfree.py` can still surface unrelated failing tests (observed during one run: `tests/test_exposed_variables_static.py`, `tests/test_iris.py`).
 **Location:** Mixed pre-existing validation debt across interfaces, plugins, and broad regression suite.
 **Status:** known, not fixed.
-**Notes:** When working on a focused feature, still run the mandatory repo-wide commands for signal, but expect unrelated failures. Use scoped lint/type checks on touched files plus targeted pytest around the modified area to verify the feature itself until the broader repo debt is cleaned up.
+**Notes:** When working on a focused feature, still run the mandatory repo-wide commands for signal, but expect unrelated failures. Use scoped lint/type checks on touched files plus targeted pytest around the modified area to verify the feature itself until the broader repo debt is cleaned up. Additional unrelated pytest failures observed on `2026-04-22`: `tests/test_mobile_chat_behavior.py`, `tests/test_multimodal_attachment.py`, `tests/test_ollama_compat_server.py`, `tests/test_selkies_api.py`, `tests/test_vox_plugin.py`.
 
 ---
 

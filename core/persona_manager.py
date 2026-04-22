@@ -340,7 +340,14 @@ SYNTH_PROFILE = config_registry.get_var(
     description="Core personality description of the current synth.",
     group="synth",
     component="persona",
+    getter=_get_persona_profile,
+    setter=_set_persona_profile,
 )
+
+if "SYNTH_PROFILE" in config_registry._definitions:
+    defn = config_registry._definitions["SYNTH_PROFILE"]
+    defn.getter = _get_persona_profile
+    defn.setter = _set_persona_profile
 
 # Autonomy configuration: controls how proactive the synth is and which actions it may run
 SYNTH_AUTONOMY_MODE = config_registry.get_var(
@@ -1154,8 +1161,20 @@ class PersonaManager(PluginBase):
     async def save_persona(self, persona: PersonaData) -> bool:
         """Save persona data to config registry."""
         try:
-            # Update config registry directly via _update_persona_configs
-            # This syncs both value and raw_value without requiring async calls
+            self._current_persona = persona
+
+            await config_registry.set_value("SYNTH_NAME", persona.name)
+            await config_registry.set_value("SYNTH_PROFILE", persona.profile)
+            await config_registry.set_value(
+                "SYNTH_ALIASES", build_canonical_aliases(persona)
+            )
+            await config_registry.set_value(
+                "SYNTH_LIKES", getattr(persona, "likes", []) or []
+            )
+            await config_registry.set_value(
+                "SYNTH_DISLIKES", getattr(persona, "dislikes", []) or []
+            )
+
             _update_persona_configs(persona)
 
             log_debug(

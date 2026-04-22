@@ -82,9 +82,10 @@ def test_native_winbox_maximize_captures_normal_rect():
     p = Path(__file__).parent.parent / "res" / "synth_webui" / "js" / "main.js"
     assert p.exists(), f"Script not found: {p}"
     txt = p.read_text(encoding="utf-8")
-    assert "const nativeMaximize = typeof winbox.maximize === 'function' ? winbox.maximize.bind(winbox) : null;" in txt, (
-        "Native WinBox maximize should be wrapped before use"
-    )
+    assert (
+        "const nativeMaximize = typeof winbox.maximize === 'function' ? winbox.maximize.bind(winbox) : null;"
+        in txt
+    ), "Native WinBox maximize should be wrapped before use"
     assert "winbox.maximize = function(...args) {" in txt, (
         "WinBox maximize wrapper not found in main.js"
     )
@@ -93,21 +94,32 @@ def test_native_winbox_maximize_captures_normal_rect():
     )
 
 
-def test_restore_from_max_skips_transient_capture_overwrite():
+def test_maximize_in_progress_guards_capture_during_transition():
+    """maximizingInProgress flag must block captureNormalRect while WinBox fires
+    onresize/onmove internally during maximize (this.max is still false at that
+    point, so without the flag captureNormalRect would snapshot fullscreen dims
+    into lastNormalRect, causing restore to keep the window fullscreen)."""
     from pathlib import Path
 
     p = Path(__file__).parent.parent / "res" / "synth_webui" / "js" / "main.js"
     assert p.exists(), f"Script not found: {p}"
     txt = p.read_text(encoding="utf-8")
-    assert "restoringFromMax: false" in txt, (
-        "Window entries should track restore-from-max transitions"
+    assert "maximizingInProgress: false" in txt, (
+        "Window entries should have maximizingInProgress flag"
     )
-    assert "entry.restoringFromMax = !!this.max;" in txt, (
-        "Native restore should mark when it is leaving the maximized state"
+    assert "entry.maximizingInProgress = true;" in txt, (
+        "maximize wrapper should set maximizingInProgress before calling nativeMaximize"
     )
-    assert "if (!entry.restoringFromMax && !this.max && !this.min) try { captureNormalRect(entry); } catch (e) { /* ignore */ }" in txt, (
-        "Move/resize handlers should not overwrite lastNormalRect during restore-from-max"
+    assert "entry.maximizingInProgress = false;" in txt, (
+        "maximize wrapper should clear maximizingInProgress in finally block"
     )
-    assert "if (entry.restoringFromMax && !this.max && !this.min) applyNormalRect(entry);" in txt, (
-        "onrestore should only reapply the saved normal rect for restore-from-max transitions"
+    assert (
+        "if (!entry.maximizingInProgress && !this.max && !this.min) try { captureNormalRect(entry); } catch (e) { /* ignore */ }"
+        in txt
+    ), (
+        "onmove/onresize handlers should skip captureNormalRect while maximize is in progress"
+    )
+    # onrestore must NOT call applyNormalRect (avoids re-entrant resize/move freeze)
+    assert "if (entry.restoringFromMax" not in txt, (
+        "Old restoringFromMax pattern must be gone — applyNormalRect must not be called inside onrestore"
     )
