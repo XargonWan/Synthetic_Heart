@@ -1261,6 +1261,7 @@ export function initChatUI() {
                             }
                         } else if (data && data.type === 'action_state') {
                             const phase = String(data.phase || '').toUpperCase();
+                            console.log('[chat-window] action_state received:', phase, data.action_id || null, data.component || null);
                             if (phase === 'THINKING' || phase === 'WRITING' || phase === 'TALKING') {
                                 // Cancel any pending debounced IDLE removal
                                 if (window.__synth_idle_removal_timer) {

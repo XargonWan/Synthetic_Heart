@@ -1,17 +1,34 @@
 import json
+import itertools
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
 import pytest
 
-from core.llm_failure_log import build_failure_entry, infer_failure_code, record_failure_entry
+from core.llm_failure_log import (
+    build_failure_entry,
+    delete_failure_entry,
+    infer_failure_code,
+    list_failure_entries,
+    record_failure_entry,
+)
+import core.llm_failure_log as llm_failure_log_module
 from core.webui import SynthWebUIInterface
 
 
 def create_client() -> TestClient:
     ui = SynthWebUIInterface(autostart=False)
     return TestClient(ui.app)
+
+
+@pytest.fixture(autouse=True)
+def reset_in_memory_failure_store() -> None:
+    llm_failure_log_module._in_memory_failure_entries.clear()
+    llm_failure_log_module._in_memory_failure_id_counter = itertools.count(
+        start=-1, step=-1
+    )
+    llm_failure_log_module._in_memory_failure_lock = None
 
 
 def test_infer_failure_code_uses_validation_errors() -> None:
@@ -148,3 +165,59 @@ async def test_record_failure_entry_serializes_non_json_metadata(monkeypatch) ->
         "tts_speak",
     ]
     assert stored_metadata["created"] == "2026-04-22T12:30:00+00:00"
+
+
+@pytest.mark.asyncio
+async def test_record_failure_entry_falls_back_to_memory_when_db_unavailable(
+    monkeypatch,
+) -> None:
+    async def failing_ensure() -> None:
+        raise RuntimeError("aiomysql is not installed")
+
+    monkeypatch.setattr(
+        "core.llm_failure_log.ensure_failure_log_table",
+        failing_ensure,
+    )
+
+    entry = build_failure_entry(
+        reason="timeout after 60s",
+        stage="llm_fallback",
+        interface_path="synth_webui/demo",
+        chat_id="demo",
+    )
+
+    inserted_id = await record_failure_entry(entry)
+    payload = await list_failure_entries()
+
+    assert inserted_id == -1
+    assert payload["total_count"] == 1
+    assert payload["entries"][0]["id"] == -1
+    assert payload["entries"][0]["interface_path"] == "synth_webui/demo"
+    assert payload["entries"][0]["failure_code"] == "timeout"
+
+
+@pytest.mark.asyncio
+async def test_delete_failure_entry_removes_memory_backed_entry(monkeypatch) -> None:
+    async def failing_ensure() -> None:
+        raise RuntimeError("aiomysql is not installed")
+
+    monkeypatch.setattr(
+        "core.llm_failure_log.ensure_failure_log_table",
+        failing_ensure,
+    )
+
+    entry = build_failure_entry(
+        reason="delivery websocket failure",
+        stage="delivery",
+        interface_path="synth_webui/demo",
+        chat_id="demo",
+    )
+
+    inserted_id = await record_failure_entry(entry)
+    assert inserted_id == -1
+
+    deleted = await delete_failure_entry(inserted_id)
+    payload = await list_failure_entries()
+
+    assert deleted is True
+    assert payload["total_count"] == 0

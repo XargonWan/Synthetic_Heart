@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
+import itertools
 import json
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from core.logging_utils import log_debug, log_warning
@@ -29,6 +31,12 @@ CREATE TABLE IF NOT EXISTS llm_failure_log (
     INDEX idx_failure_engine (engine)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 """
+
+_IN_MEMORY_TTL = timedelta(days=7)
+_IN_MEMORY_MAX_ENTRIES = 500
+_in_memory_failure_entries: list[dict[str, Any]] = []
+_in_memory_failure_id_counter = itertools.count(start=-1, step=-1)
+_in_memory_failure_lock: asyncio.Lock | None = None
 
 
 def infer_failure_code(
@@ -90,9 +98,11 @@ def build_failure_entry(
 ) -> dict[str, Any]:
     normalized_metadata: dict[str, Any] = {}
     if isinstance(metadata, dict):
-        normalized_metadata.update(metadata)
+        normalized_metadata.update(_sanitize_for_storage(metadata))
     if isinstance(correction_context, dict) and correction_context:
-        normalized_metadata.setdefault("correction_context", correction_context)
+        normalized_metadata.setdefault(
+            "correction_context", _sanitize_for_storage(correction_context)
+        )
 
     return {
         "failure_code": failure_code
@@ -139,66 +149,179 @@ def _parse_metadata(raw_metadata: Any) -> dict[str, Any]:
     return {}
 
 
-async def record_failure_entry(entry: dict[str, Any]) -> int | None:
-    from core.db import get_conn_ctx
+def _sanitize_for_storage(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {str(key): _sanitize_for_storage(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_sanitize_for_storage(item) for item in value]
+    if isinstance(value, (set, frozenset)):
+        return sorted((_sanitize_for_storage(item) for item in value), key=str)
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    if isinstance(value, BaseException):
+        return str(value)
+    if hasattr(value, "__dict__"):
+        return _sanitize_for_storage(vars(value))
+    return str(value)
 
-    await ensure_failure_log_table()
 
-    metadata_json = json.dumps(entry.get("metadata") or {}, ensure_ascii=False)
-    async with get_conn_ctx() as conn:
-        async with conn.cursor() as cur:
-            await cur.execute(
-                """
-                INSERT INTO llm_failure_log (
-                    failure_code,
-                    stage,
-                    reason,
-                    interface_path,
-                    chat_id,
-                    thread_id,
-                    engine,
-                    model,
-                    message_id,
-                    content_preview,
-                    metadata
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                """,
-                [
-                    entry.get("failure_code") or "llm_failure",
-                    entry.get("stage") or "unknown",
-                    entry.get("reason") or "Unknown failure",
-                    entry.get("interface_path"),
-                    entry.get("chat_id"),
-                    entry.get("thread_id"),
-                    entry.get("engine"),
-                    entry.get("model"),
-                    entry.get("message_id"),
-                    entry.get("content_preview"),
-                    metadata_json,
-                ],
-            )
-            inserted_id = getattr(cur, "lastrowid", None)
+def _get_in_memory_failure_lock() -> asyncio.Lock:
+    global _in_memory_failure_lock
+    if _in_memory_failure_lock is None:
+        _in_memory_failure_lock = asyncio.Lock()
+    return _in_memory_failure_lock
+
+
+def _normalize_created_at(value: Any) -> datetime:
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+    if isinstance(value, str) and value.strip():
         try:
-            await conn.commit()
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                return parsed.replace(tzinfo=timezone.utc)
+            return parsed.astimezone(timezone.utc)
         except Exception:
             pass
-    return inserted_id
+    return datetime.now(timezone.utc)
 
 
-async def list_failure_entries(
+def _normalize_entry_for_storage(entry: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": entry.get("id"),
+        "failure_code": str(entry.get("failure_code") or "llm_failure"),
+        "stage": str(entry.get("stage") or "unknown"),
+        "reason": str(entry.get("reason") or "Unknown failure"),
+        "interface_path": entry.get("interface_path"),
+        "chat_id": None
+        if entry.get("chat_id") is None
+        else str(entry.get("chat_id")),
+        "thread_id": None
+        if entry.get("thread_id") is None
+        else str(entry.get("thread_id")),
+        "engine": entry.get("engine"),
+        "model": entry.get("model"),
+        "message_id": None
+        if entry.get("message_id") is None
+        else str(entry.get("message_id")),
+        "content_preview": entry.get("content_preview"),
+        "metadata": _sanitize_for_storage(entry.get("metadata") or {}),
+        "created_at": _normalize_created_at(entry.get("created_at")),
+    }
+
+
+def _prune_in_memory_failure_entries_locked() -> None:
+    cutoff = datetime.now(timezone.utc) - _IN_MEMORY_TTL
+    _in_memory_failure_entries[:] = [
+        entry
+        for entry in _in_memory_failure_entries
+        if _normalize_created_at(entry.get("created_at")) >= cutoff
+    ]
+    if len(_in_memory_failure_entries) > _IN_MEMORY_MAX_ENTRIES:
+        _in_memory_failure_entries[:] = _in_memory_failure_entries[
+            -_IN_MEMORY_MAX_ENTRIES:
+        ]
+
+
+async def _store_in_memory_failure_entry(entry: dict[str, Any]) -> int:
+    normalized = _normalize_entry_for_storage(entry)
+    normalized["id"] = next(_in_memory_failure_id_counter)
+
+    async with _get_in_memory_failure_lock():
+        _prune_in_memory_failure_entries_locked()
+        _in_memory_failure_entries.append(normalized)
+
+    return int(normalized["id"])
+
+
+def _entry_matches_filters(
+    entry: dict[str, Any],
     *,
-    page: int = 1,
-    per_page: int = 20,
-    search: str = "",
-    failure_code: str = "",
-    stage: str = "",
-    sort: str = "desc",
-) -> dict[str, Any]:
+    search: str,
+    failure_code: str,
+    stage: str,
+) -> bool:
+    if failure_code and str(entry.get("failure_code") or "") != failure_code:
+        return False
+    if stage and str(entry.get("stage") or "") != stage:
+        return False
+    if not search:
+        return True
+
+    lowered = search.lower()
+    searchable_parts = [
+        entry.get("failure_code"),
+        entry.get("stage"),
+        entry.get("reason"),
+        entry.get("interface_path"),
+        entry.get("chat_id"),
+        entry.get("thread_id"),
+        entry.get("engine"),
+        entry.get("model"),
+        entry.get("message_id"),
+        entry.get("content_preview"),
+    ]
+    searchable_text = " ".join(
+        str(part) for part in searchable_parts if isinstance(part, str) and part
+    ).lower()
+    return lowered in searchable_text
+
+
+def _entry_sort_key(entry: dict[str, Any]) -> tuple[datetime, int]:
+    return (
+        _normalize_created_at(entry.get("created_at")),
+        int(entry.get("id") or 0),
+    )
+
+
+async def _list_in_memory_failure_entries(
+    *,
+    search: str,
+    failure_code: str,
+    stage: str,
+) -> list[dict[str, Any]]:
+    async with _get_in_memory_failure_lock():
+        _prune_in_memory_failure_entries_locked()
+        entries = [
+            dict(entry)
+            for entry in _in_memory_failure_entries
+            if _entry_matches_filters(
+                entry,
+                search=search,
+                failure_code=failure_code,
+                stage=stage,
+            )
+        ]
+    return entries
+
+
+async def _delete_in_memory_failure_entry(entry_id: int) -> bool:
+    async with _get_in_memory_failure_lock():
+        _prune_in_memory_failure_entries_locked()
+        for index, entry in enumerate(_in_memory_failure_entries):
+            if int(entry.get("id") or 0) == entry_id:
+                del _in_memory_failure_entries[index]
+                return True
+    return False
+
+
+async def _list_db_failure_entries(
+    *,
+    search: str,
+    failure_code: str,
+    stage: str,
+    sort: str,
+) -> list[dict[str, Any]]:
     from core.db import get_conn_ctx
 
     await ensure_failure_log_table()
 
-    offset = max(page - 1, 0) * per_page
     order = "DESC" if str(sort).lower() != "asc" else "ASC"
     where_clauses: list[str] = []
     where_params: list[Any] = []
@@ -224,15 +347,6 @@ async def list_failure_entries(
     async with get_conn_ctx() as conn:
         async with conn.cursor() as cur:
             await cur.execute(
-                f"SELECT COUNT(*) FROM llm_failure_log {where_sql}",
-                where_params,
-            )
-            count_row = await cur.fetchone()
-            total_count = (
-                int(count_row[0]) if count_row and count_row[0] is not None else 0
-            )
-
-            await cur.execute(
                 f"""
                 SELECT
                     id,
@@ -251,9 +365,8 @@ async def list_failure_entries(
                 FROM llm_failure_log
                 {where_sql}
                 ORDER BY created_at {order}, id {order}
-                LIMIT %s OFFSET %s
                 """,
-                where_params + [per_page, offset],
+                where_params,
             )
             rows = await cur.fetchall()
 
@@ -279,9 +392,100 @@ async def list_failure_entries(
             }
         )
 
+    return entries
+
+
+async def record_failure_entry(entry: dict[str, Any]) -> int | None:
+    from core.db import get_conn_ctx
+
+    normalized_entry = _normalize_entry_for_storage(entry)
+    metadata_json = json.dumps(normalized_entry["metadata"], ensure_ascii=False)
+
+    try:
+        await ensure_failure_log_table()
+
+        async with get_conn_ctx() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """
+                    INSERT INTO llm_failure_log (
+                        failure_code,
+                        stage,
+                        reason,
+                        interface_path,
+                        chat_id,
+                        thread_id,
+                        engine,
+                        model,
+                        message_id,
+                        content_preview,
+                        metadata
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    [
+                        normalized_entry["failure_code"],
+                        normalized_entry["stage"],
+                        normalized_entry["reason"],
+                        normalized_entry["interface_path"],
+                        normalized_entry["chat_id"],
+                        normalized_entry["thread_id"],
+                        normalized_entry["engine"],
+                        normalized_entry["model"],
+                        normalized_entry["message_id"],
+                        normalized_entry["content_preview"],
+                        metadata_json,
+                    ],
+                )
+                inserted_id = getattr(cur, "lastrowid", None)
+            try:
+                await conn.commit()
+            except Exception:
+                pass
+        return inserted_id
+    except Exception as exc:
+        fallback_id = await _store_in_memory_failure_entry(normalized_entry)
+        log_warning(
+            f"[llm_failure_log] Falling back to in-memory failure log store: {exc}"
+        )
+        return fallback_id
+
+
+async def list_failure_entries(
+    *,
+    page: int = 1,
+    per_page: int = 20,
+    search: str = "",
+    failure_code: str = "",
+    stage: str = "",
+    sort: str = "desc",
+) -> dict[str, Any]:
+    offset = max(page - 1, 0) * per_page
+    reverse = str(sort).lower() != "asc"
+    memory_entries = await _list_in_memory_failure_entries(
+        search=search,
+        failure_code=failure_code,
+        stage=stage,
+    )
+
+    db_entries: list[dict[str, Any]] = []
+    try:
+        db_entries = await _list_db_failure_entries(
+            search=search,
+            failure_code=failure_code,
+            stage=stage,
+            sort=sort,
+        )
+    except Exception as exc:
+        log_warning(f"[llm_failure_log] DB list failed, serving degraded view: {exc}")
+
+    merged_entries = db_entries + memory_entries
+    merged_entries.sort(key=_entry_sort_key, reverse=reverse)
+
+    total_count = len(merged_entries)
+    paged_entries = merged_entries[offset : offset + per_page]
     total_pages = (total_count + per_page - 1) // per_page if total_count > 0 else 1
     return {
-        "entries": entries,
+        "entries": paged_entries,
         "page": page,
         "per_page": per_page,
         "total_count": total_count,
@@ -290,6 +494,14 @@ async def list_failure_entries(
 
 
 async def delete_failure_entry(entry_id: int) -> bool:
+    if entry_id < 0:
+        deleted = await _delete_in_memory_failure_entry(entry_id)
+        if not deleted:
+            log_warning(
+                f"[llm_failure_log] In-memory failure entry {entry_id} not found for delete"
+            )
+        return deleted
+
     from core.db import get_conn_ctx
 
     await ensure_failure_log_table()
