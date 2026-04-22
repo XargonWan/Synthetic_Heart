@@ -60,7 +60,9 @@ async def test_non_loop_fallback_duration_sum_and_buffer(monkeypatch):
 
     captured: list[float] = []
 
-    async def fake_fallback(session_id, state, animation_file, duration):
+    async def fake_fallback(
+        session_id, state, animation_file, duration, context_id=None
+    ):
         captured.append(duration)
         # do nothing else
 
@@ -108,7 +110,9 @@ async def test_non_loop_fallback_default_when_no_descriptor(monkeypatch):
 
     captured: list[float] = []
 
-    async def fake_fallback(session_id, state, animation_file, duration):
+    async def fake_fallback(
+        session_id, state, animation_file, duration, context_id=None
+    ):
         captured.append(duration)
 
     handler._non_loop_fallback = fake_fallback  # type: ignore

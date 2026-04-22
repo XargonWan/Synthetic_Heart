@@ -116,6 +116,12 @@ class KaradaStateServer:
         self._current_animation_started_at: Optional[datetime] = (
             None  # UTC timestamp for current animation start
         )
+        self._current_animation_phase: str = "loop"
+        self._current_animation_frame_range: Optional[Dict[str, int]] = None
+        self._current_phase_authoritative: bool = False
+        self._current_animation_session_id: Optional[str] = None
+        self._phase_task: Optional[asyncio.Task] = None
+        self._phase_generation: int = 0
         # Stable identifier for the currently playing animation; changes only when
         # a genuinely new animation file starts (not during outro or re-send of the
         # same file).  All interfaces use this to avoid restarting an already-running
@@ -578,20 +584,29 @@ class KaradaStateServer:
         }
 
         clip = None
-        phase = "loop"
-        frame_range: Optional[Dict[str, int]] = None
+        phase = self._current_animation_phase or "loop"
+        frame_range: Optional[Dict[str, int]] = self._current_animation_frame_range
         try:
             if isinstance(desc, dict):
                 fps = (
                     desc.get("fps") if isinstance(desc.get("fps"), (int, float)) else 30
                 )
                 duration = None
-                # Prefer the loop section for timing calculations, fall back to intro/outro
+                # Prefer the canonical tracked phase for timing calculations, fall back to loop/intros/outros.
                 section = None
                 try:
-                    section = (
-                        desc.get("loop") if isinstance(desc.get("loop"), dict) else None
-                    )
+                    if phase in {"intro", "loop", "outro"}:
+                        section = (
+                            desc.get(phase)
+                            if isinstance(desc.get(phase), dict)
+                            else None
+                        )
+                    if not section:
+                        section = (
+                            desc.get("loop")
+                            if isinstance(desc.get("loop"), dict)
+                            else None
+                        )
                     if not section:
                         section = (
                             desc.get("intro")
@@ -604,9 +619,13 @@ class KaradaStateServer:
                             if isinstance(desc.get("outro"), dict)
                             else None
                         )
-                    if desc.get("play_once") and not isinstance(desc.get("loop"), dict):
-                        phase = "clip"
                     if (
+                        phase not in {"intro", "loop", "outro"}
+                        and desc.get("play_once")
+                        and not isinstance(desc.get("loop"), dict)
+                    ):
+                        phase = "clip"
+                    if frame_range is None and (
                         section
                         and isinstance(section.get("start_frame"), (int, float))
                         and isinstance(section.get("end_frame"), (int, float))
@@ -656,7 +675,7 @@ class KaradaStateServer:
                                 end = float(section.get("end_frame"))
                                 span = max(1.0, end - start)
                                 tframes = int(elapsed * fps_val)
-                                if desc.get("loop"):
+                                if phase == "loop":
                                     current_frame = int(start + (tframes % span))
                                 else:
                                     current_frame = int(start + min(span, tframes))
@@ -674,17 +693,18 @@ class KaradaStateServer:
             "animation_file": anim,
             "animation": resolved,
             "descriptor": desc,
-            "play_section": None,
+            "play_section": phase if self._current_phase_authoritative else None,
             "frame_range": frame_range,
-            "phase_authoritative": False,
+            "phase_authoritative": self._current_phase_authoritative,
             "animation_id": self._current_animation_id,
             "animation_state": {
                 "action": self.current_state.value,
                 "phase": phase,
-                "phase_authoritative": False,
+                "phase_authoritative": self._current_phase_authoritative,
                 "animation": resolved,
                 "descriptor": desc,
                 "timing": timing,
+                "frame_range": frame_range,
                 "expressions": desc.get("expressions")
                 if isinstance(desc, dict)
                 else None,
@@ -1384,6 +1404,126 @@ class KaradaStateServer:
 
         return sanitized or None
 
+    def _is_server_authoritative_structure(
+        self,
+        state: AnimationState,
+        structure: Dict[str, bool],
+    ) -> bool:
+        """Return True when the server should drive explicit phase progression."""
+        return bool(
+            state != AnimationState.IDLE
+            and not self._is_overlay_state(state)
+            and structure.get("has_intro")
+            and structure.get("has_loop")
+            and structure.get("has_outro")
+        )
+
+    def _get_phase_frame_range(
+        self,
+        descriptor: Optional[Dict[str, Any]],
+        play_section: str,
+    ) -> Optional[Dict[str, int]]:
+        """Return the inclusive frame range for a descriptor section."""
+        if not isinstance(descriptor, dict):
+            return None
+        section = descriptor.get(play_section)
+        if not isinstance(section, dict):
+            return None
+        if not isinstance(section.get("start_frame"), (int, float)):
+            return None
+        if not isinstance(section.get("end_frame"), (int, float)):
+            return None
+        return {
+            "start_frame": int(section.get("start_frame")),
+            "end_frame": int(section.get("end_frame")),
+        }
+
+    def _get_phase_duration_seconds(
+        self,
+        descriptor: Optional[Dict[str, Any]],
+        play_section: str,
+    ) -> Optional[float]:
+        """Return the wall-clock duration of a descriptor section."""
+        frame_range = self._get_phase_frame_range(descriptor, play_section)
+        if frame_range is None:
+            return None
+        fps = 30.0
+        if isinstance(descriptor, dict) and isinstance(
+            descriptor.get("fps"), (int, float)
+        ):
+            fps = float(descriptor.get("fps") or 30.0)
+        if fps <= 0:
+            fps = 30.0
+        frames = max(
+            0.0, float(frame_range["end_frame"]) - float(frame_range["start_frame"])
+        )
+        return frames / fps
+
+    async def _cancel_phase_task(self) -> None:
+        """Cancel any pending authoritative phase transition task."""
+        task = self._phase_task
+        self._phase_task = None
+        self._phase_generation += 1
+        if task is None or task is asyncio.current_task():
+            return
+        try:
+            task.cancel()
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            log_warning(f"[KaradaStateServer] Error cancelling phase task: {exc}")
+
+    def _schedule_phase_task(
+        self, delay_s: float, callback: Callable[[int], Any]
+    ) -> int:
+        """Schedule a callback tied to the current authoritative phase generation."""
+        generation = self._phase_generation
+
+        async def _runner() -> None:
+            try:
+                await asyncio.sleep(max(0.0, float(delay_s)))
+                async with self._lock:
+                    if generation != self._phase_generation:
+                        return
+                result = callback(generation)
+                if asyncio.iscoroutine(result):
+                    await result
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                log_warning(
+                    f"[KaradaStateServer] Phase task error (generation={generation}): {exc}"
+                )
+            finally:
+                if self._phase_task is asyncio.current_task():
+                    self._phase_task = None
+
+        self._phase_task = asyncio.get_running_loop().create_task(_runner())
+        return generation
+
+    def _commit_animation_phase(
+        self,
+        state: AnimationState,
+        animation_file: str,
+        descriptor: Optional[Dict[str, Any]],
+        play_section: str,
+        frame_range: Optional[Dict[str, int]],
+        session_id: Optional[str],
+        phase_authoritative: bool,
+        context_id: Optional[str],
+    ) -> None:
+        """Persist the canonical animation phase exposed to all clients."""
+        self.current_state = state
+        self.current_animation = animation_file
+        self._current_context_id = context_id
+        self._current_animation_file = animation_file
+        self._current_animation_descriptor = descriptor
+        self._current_animation_phase = play_section
+        self._current_animation_frame_range = frame_range
+        self._current_phase_authoritative = phase_authoritative
+        self._current_animation_session_id = session_id
+
     async def play_animation(
         self,
         state: AnimationState,
@@ -1435,6 +1575,10 @@ class KaradaStateServer:
                 and self.current_animation
                 and not incoming_is_overlay
                 and not self._is_overlay_state(self.current_state)
+                and not (
+                    self._current_phase_authoritative
+                    and self._current_animation_phase == "outro"
+                )
             ):
                 prev_animation_for_outro = self.current_animation
                 prev_state_for_outro = self.current_state.value
@@ -1540,11 +1684,6 @@ class KaradaStateServer:
                 # Random mode or single animation
                 selected_animation = random.choice(animations)
 
-            # Update internal state
-            self.current_state = resolved_state
-            self.current_animation = selected_animation
-            self._current_context_id = resolved_context_id
-
             log_debug(
                 f"[KaradaStateServer] Playing {resolved_state.value} animation: {selected_animation} "
                 f"(requested={state.value}, loop={loop}, session={session_id}, "
@@ -1634,6 +1773,14 @@ class KaradaStateServer:
                     f"effective_loop: {effective_loop}"
                 )
 
+                authoritative_structure = (
+                    self._is_server_authoritative_structure(
+                        resolved_state,
+                        structure,
+                    )
+                    if isinstance(descriptor, dict)
+                    else False
+                )
                 play_section_override: Optional[str] = None
                 if resume_section in {"intro", "loop", "outro"} and isinstance(
                     descriptor, dict
@@ -1641,6 +1788,8 @@ class KaradaStateServer:
                     requested_section = descriptor.get(resume_section)
                     if isinstance(requested_section, dict):
                         play_section_override = resume_section
+                elif authoritative_structure:
+                    play_section_override = "intro"
 
                 if resolved_context_id:
                     self._remember_active_context(
@@ -1689,10 +1838,14 @@ class KaradaStateServer:
                         self._forget_active_context(context_id)
                     return
 
-                # If we need to play outro before transitioning, do it now
-                # (before releasing lock).  Use the PREVIOUS animation/state/descriptor
-                # captured before the lock, not self.current_animation which already
-                # points to the NEW animation.
+                committed_descriptor = (
+                    self._sanitize_idle_descriptor(descriptor)
+                    if is_idle_state
+                    else descriptor
+                )
+
+                # If we need to play an outgoing outro first, do that and only start the
+                # next animation after the outro duration has elapsed.
                 if (
                     needs_outro_transition
                     and self._has_any_transport()
@@ -1702,10 +1855,7 @@ class KaradaStateServer:
                         f"[KaradaStateServer] Sending outro command for {prev_animation_for_outro} "
                         f"before transitioning to {state.value}"
                     )
-
-                    # Send outro command using the PREVIOUS animation data.
-                    # Pass state_for_resolution so the path is resolved against the
-                    # OLD state folder (e.g. 'think'), not the NEW one ('idle').
+                    await self._cancel_phase_task()
                     await self._send_animation_command(
                         session_id=session_id,
                         animation_file=prev_animation_for_outro,
@@ -1717,51 +1867,177 @@ class KaradaStateServer:
                         source=source,
                         state_for_resolution=prev_state_for_outro,
                     )
+                    prev_outro_range = self._get_phase_frame_range(
+                        prev_descriptor_for_outro,
+                        "outro",
+                    )
+                    try:
+                        prev_state_enum = AnimationState(prev_state_for_outro)
+                    except Exception:
+                        prev_state_enum = self.current_state
+                    self._commit_animation_phase(
+                        prev_state_enum,
+                        prev_animation_for_outro,
+                        prev_descriptor_for_outro,
+                        "outro",
+                        prev_outro_range,
+                        session_id,
+                        True,
+                        self._current_context_id,
+                    )
+                    await self._notify_animation_state_changed(
+                        prev_state_enum,
+                        prev_animation_for_outro,
+                        prev_descriptor_for_outro,
+                    )
+                    outro_duration = (
+                        self._get_phase_duration_seconds(
+                            prev_descriptor_for_outro, "outro"
+                        )
+                        or 0.3
+                    )
+                    log_debug(
+                        f"[KaradaStateServer] Outro duration: {outro_duration:.2f}s"
+                    )
 
-                    # Calculate outro duration to wait before sending the new animation command
-                    if (
-                        prev_descriptor_for_outro
-                        and "outro" in prev_descriptor_for_outro
-                    ):
-                        outro_start = prev_descriptor_for_outro["outro"].get(
-                            "start_frame", 0
-                        )
-                        outro_end = prev_descriptor_for_outro["outro"].get(
-                            "end_frame", 0
-                        )
-                        outro_fps = float(
-                            prev_descriptor_for_outro.get("fps", 30) or 30
-                        )
-                        outro_duration = max(0.3, (outro_end - outro_start) / outro_fps)
-                        log_debug(
-                            f"[KaradaStateServer] Outro duration: {outro_duration:.2f}s"
+                    async def _start_after_outro(_: int) -> None:
+                        await self.play_animation(
+                            resolved_state,
+                            session_id=session_id,
+                            loop=loop,
+                            context_id=context_id,
+                            priority=priority,
+                            source=source,
+                            animation_file=selected_animation,
+                            resume_section=resume_section,
                         )
 
+                    self._schedule_phase_task(outro_duration, _start_after_outro)
+                    return
+
+                if authoritative_structure:
+                    await self._cancel_phase_task()
+                    authoritative_section = play_section_override or "intro"
+                    phase_range = self._get_phase_frame_range(
+                        committed_descriptor,
+                        authoritative_section,
+                    )
+                    await self._send_animation_command(
+                        session_id=session_id,
+                        animation_file=selected_animation,
+                        loop=authoritative_section == "loop",
+                        state=resolved_state.value,
+                        descriptor=committed_descriptor,
+                        play_section=authoritative_section,
+                        priority=priority,
+                        source=source,
+                        state_for_resolution=resolved_state.value,
+                    )
+                    self._commit_animation_phase(
+                        resolved_state,
+                        selected_animation,
+                        committed_descriptor,
+                        authoritative_section,
+                        phase_range,
+                        session_id,
+                        True,
+                        resolved_context_id,
+                    )
+                    await self._notify_animation_state_changed(
+                        resolved_state,
+                        selected_animation,
+                        committed_descriptor,
+                    )
+
+                    if authoritative_section == "intro":
+                        intro_duration = (
+                            self._get_phase_duration_seconds(
+                                committed_descriptor, "intro"
+                            )
+                            or 0.0
+                        )
+
+                        async def _advance_to_loop(generation: int) -> None:
+                            async with self._lock:
+                                if generation != self._phase_generation:
+                                    return
+                                if (
+                                    self.current_state != resolved_state
+                                    or self.current_animation != selected_animation
+                                    or self._current_animation_phase != "intro"
+                                ):
+                                    return
+                            loop_range = self._get_phase_frame_range(
+                                committed_descriptor,
+                                "loop",
+                            )
+                            await self._send_animation_command(
+                                session_id=session_id,
+                                animation_file=selected_animation,
+                                loop=True,
+                                state=resolved_state.value,
+                                descriptor=committed_descriptor,
+                                play_section="loop",
+                                priority=priority,
+                                source=source,
+                                state_for_resolution=resolved_state.value,
+                            )
+                            async with self._lock:
+                                if generation != self._phase_generation:
+                                    return
+                                self._commit_animation_phase(
+                                    resolved_state,
+                                    selected_animation,
+                                    committed_descriptor,
+                                    "loop",
+                                    loop_range,
+                                    session_id,
+                                    True,
+                                    resolved_context_id,
+                                )
+                            await self._notify_animation_state_changed(
+                                resolved_state,
+                                selected_animation,
+                                committed_descriptor,
+                            )
+
+                        self._schedule_phase_task(intro_duration, _advance_to_loop)
+
+                    await self._stop_rotation_task(session_id, resolved_state)
+                    return
+
+                await self._cancel_phase_task()
                 await self._send_animation_command(
                     session_id=session_id,
                     animation_file=selected_animation,
                     loop=effective_loop,
                     state=resolved_state.value,
-                    descriptor=self._sanitize_idle_descriptor(descriptor)
-                    if is_idle_state
-                    else descriptor,
+                    descriptor=committed_descriptor,
                     play_section=play_section_override,
                     priority=priority,
                     source=source,
                     state_for_resolution=resolved_state.value,
                 )
 
-                # Update centralized animation state and notify all clients
-                self._current_animation_file = selected_animation
-                self._current_animation_descriptor = (
-                    self._sanitize_idle_descriptor(descriptor)
-                    if is_idle_state
-                    else descriptor
+                self._commit_animation_phase(
+                    resolved_state,
+                    selected_animation,
+                    committed_descriptor,
+                    play_section_override or ("loop" if effective_loop else "clip"),
+                    self._get_phase_frame_range(
+                        committed_descriptor,
+                        play_section_override,
+                    )
+                    if play_section_override
+                    else None,
+                    session_id,
+                    play_section_override is not None,
+                    resolved_context_id,
                 )
                 await self._notify_animation_state_changed(
                     resolved_state,
                     selected_animation,
-                    self._current_animation_descriptor,
+                    committed_descriptor,
                 )
                 # If animation is not looping and is not idle, schedule a fallback transition
                 # to Idle after the clip duration in case the client doesn't trigger a transition.
@@ -1823,6 +2099,52 @@ class KaradaStateServer:
             else:
                 log_warning(
                     "[KaradaStateServer] No transports registered, cannot send animation command"
+                )
+                try:
+                    _, fallback_descriptor = (
+                        self._resolve_animation_descriptor_for_state(
+                            selected_animation,
+                            resolved_state.value,
+                        )
+                    )
+                except Exception:
+                    fallback_descriptor = None
+                fallback_is_idle = resolved_state == AnimationState.IDLE
+                fallback_structure = self._analyze_animation_structure(
+                    fallback_descriptor,
+                    selected_animation,
+                )
+                fallback_play_section: Optional[str] = None
+                if resume_section in {"intro", "loop", "outro"} and isinstance(
+                    fallback_descriptor, dict
+                ):
+                    requested_section = fallback_descriptor.get(resume_section)
+                    if isinstance(requested_section, dict):
+                        fallback_play_section = resume_section
+                elif self._is_server_authoritative_structure(
+                    resolved_state,
+                    fallback_structure,
+                ):
+                    fallback_play_section = "intro"
+                committed_descriptor = (
+                    self._sanitize_idle_descriptor(fallback_descriptor)
+                    if fallback_is_idle
+                    else fallback_descriptor
+                )
+                self._commit_animation_phase(
+                    resolved_state,
+                    selected_animation,
+                    committed_descriptor,
+                    fallback_play_section or ("loop" if loop else "clip"),
+                    self._get_phase_frame_range(
+                        committed_descriptor,
+                        fallback_play_section,
+                    )
+                    if fallback_play_section
+                    else None,
+                    session_id,
+                    fallback_play_section is not None,
+                    resolved_context_id,
                 )
                 start_rotation = False
 
@@ -1891,6 +2213,7 @@ class KaradaStateServer:
                     f"[KaradaStateServer] Playing outro for {current_animation} "
                     f"before stopping (context={context_id}, session={session_id})"
                 )
+                await self._cancel_phase_task()
                 # Play outro with loop=False (play once), explicitly requesting 'outro' section
                 await self._send_animation_command(
                     session_id=session_id,
@@ -1901,14 +2224,25 @@ class KaradaStateServer:
                     play_section="outro",
                     state_for_resolution=current_state_value,
                 )
-                # Estimate outro duration and wait before transitioning to Idle
-                # Default: assume ~30 frames at 30fps = ~1 second per 30 frames
-                outro_frames = outro_section.get("end_frame", 0) - outro_section.get(
-                    "start_frame", 0
+                outro_range = self._get_phase_frame_range(descriptor, "outro")
+                self._commit_animation_phase(
+                    self.current_state,
+                    current_animation,
+                    descriptor,
+                    "outro",
+                    outro_range,
+                    session_id,
+                    True,
+                    context_id,
                 )
-                outro_duration = max(
-                    0.5, outro_frames / 30.0
-                )  # Minimum 0.5s, assume 30fps
+                await self._notify_animation_state_changed(
+                    self.current_state,
+                    current_animation,
+                    descriptor,
+                )
+                outro_duration = (
+                    self._get_phase_duration_seconds(descriptor, "outro") or 0.5
+                )
                 log_debug(
                     f"[KaradaStateServer] Waiting {outro_duration:.1f}s for outro to complete"
                 )

@@ -183,6 +183,53 @@ async def test_stop_animation_multiple_contexts(animation_handler, mock_webui):
 
 
 @pytest.mark.asyncio
+async def test_stop_current_context_restores_highest_remaining_context(
+    animation_handler, mock_webui, monkeypatch
+):
+    """Stopping the current dominant context should resume the best remaining one."""
+    session_id = "test_session"
+    mock_ws = AsyncMock()
+    mock_webui.connections[session_id] = mock_ws
+
+    def _resolve_without_descriptor(animation_file: str):
+        return animation_file, None
+
+    monkeypatch.setattr(
+        animation_handler,
+        "_resolve_animation_descriptor",
+        _resolve_without_descriptor,
+    )
+    monkeypatch.setattr(
+        animation_handler,
+        "_resolve_animation_descriptor_for_state",
+        lambda animation_file, state_name: _resolve_without_descriptor(animation_file),
+    )
+
+    await animation_handler.play_animation(
+        AnimationState.WRITE,
+        session_id=session_id,
+        context_id="context_write",
+    )
+    await animation_handler.play_animation(
+        AnimationState.THINK,
+        session_id=session_id,
+        context_id="context_think",
+    )
+
+    assert animation_handler.current_state == AnimationState.THINK
+
+    await animation_handler.stop_animation("context_think", session_id)
+
+    assert animation_handler.current_state == AnimationState.WRITE
+    assert animation_handler._current_context_id == "context_write"
+
+    sent = [call.args[0] for call in mock_ws.send_json.call_args_list if call.args]
+    anim_msgs = [payload for payload in sent if payload.get("type") == "vrm_animation"]
+    assert anim_msgs
+    assert anim_msgs[-1]["state"] == "write"
+
+
+@pytest.mark.asyncio
 async def test_transition_to(animation_handler, mock_webui):
     """Test transition_to convenience method."""
     session_id = "test_session"
@@ -358,8 +405,11 @@ async def test_websocket_message_format(animation_handler, mock_webui):
     assert isinstance(msg["file"], str)
     assert msg["file"].endswith("Thinking.fbx")
     assert "animations/" in msg["file"]
-    assert msg["loop"] is True
+    assert msg["loop"] is False
     assert msg["state"] == "think"
+    assert msg["play_section"] == "intro"
+    assert msg["phase_authoritative"] is True
+    assert msg["frame_range"] == {"start_frame": 0, "end_frame": 70}
     assert isinstance(msg.get("descriptor"), dict)
     assert "intro" in msg["descriptor"]
     assert "loop" in msg["descriptor"]

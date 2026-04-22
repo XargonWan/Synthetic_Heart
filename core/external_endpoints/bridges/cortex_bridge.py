@@ -81,8 +81,10 @@ def _extract_attachments_and_redact(
             return
         for field in ("data", "base64"):
             b64 = item.get(field)
-            if b64 and isinstance(b64, str) and (
-                len(b64) > 256 or _looks_like_base64_payload(b64)
+            if (
+                b64
+                and isinstance(b64, str)
+                and (len(b64) > 256 or _looks_like_base64_payload(b64))
             ):
                 parts.append({"mime_type": str(mime), "data": b64})
                 item[field] = f"<redacted: {len(b64)} chars>"

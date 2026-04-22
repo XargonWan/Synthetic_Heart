@@ -934,6 +934,9 @@ class AnimationHandler {
             if (!preserveLocalStructuredPlayback && incomingPhase) {
                 this.currentActionPhase = incomingPhase;
             }
+            if (!preserveLocalStructuredPlayback && (incomingActionName || incomingPhase)) {
+                this.currentActionPhaseAuthoritative = incomingPhaseAuthoritative;
+            }
 
             // Keep emotions/feelings snapshot for downstream consumers
             try { this._lastEmotions = (state && state.emotions) ? state.emotions : null; } catch (e) { this._lastEmotions = null; }
@@ -2364,6 +2367,7 @@ class AnimationHandler {
         this.currentActionName = null; // track which action (think, write, etc.) is currently playing
         this.currentActionKey = null;
         this.currentActionPhase = null; // track 'intro', 'loop', or 'outro'
+        this.currentActionPhaseAuthoritative = false;
         this.currentStructuredAction = null; // reference to the structured action object
         this.loadedAnimations = {};
         this.loadedDescriptors = {}; // cache descriptor JSON (including null for 404)
@@ -3846,7 +3850,7 @@ class AnimationHandler {
                 if (this._blinkAutoEnabled && !this._blinkLoopRunning) { try { this._startBlinkLoop(); } catch (e) { } }
                 if (this._eyeAutoEnabled && !this._eyeLoopRunning) { try { this._startEyeMovement(); } catch (e) { } }
                 // Replace last rich state with an idle-ish empty expression state.
-                this._lastAnimationState = { action: 'idle', phase: 'loop', expressions: [] };
+                this._lastAnimationState = { action: 'idle', phase: 'loop', phase_authoritative: false, frame_range: null, expressions: [] };
             } catch (e) { /* ignore */ }
             await this._ensureBaseIdle(1.0, true);
             // Stop ALL overlay actions (including any orphaned clips) with a smooth fade.
@@ -3854,6 +3858,7 @@ class AnimationHandler {
             this.currentAction = null;
             this.currentActionName = 'idle';
             this.currentActionPhase = null;
+            this.currentActionPhaseAuthoritative = false;
             this.currentStructuredAction = null;
             this._currentAnimationFile = null;
             return;
@@ -3951,8 +3956,18 @@ class AnimationHandler {
         // The debug-window resyncs every 2 s and would otherwise call reset().play() on an
         // already-running action, preventing it from ever reaching its natural end.
         try {
-            if (this.currentActionName === actionName && this.currentActionPhase && this.currentActionPhase !== 'outro' &&
-                (!animationFile || animationFile === this._currentAnimationFile)) {
+            const requestedPhase = (playSection != null) ? String(playSection).toLowerCase() : (playOnce ? 'clip' : 'loop');
+            const currentPhase = this.currentActionPhase ? String(this.currentActionPhase).toLowerCase() : null;
+            const samePhase = !!(requestedPhase && currentPhase && requestedPhase === currentPhase);
+            const sameAuthority = (!!this.currentActionPhaseAuthoritative) === (!!phaseAuthoritative);
+            if (
+                this.currentActionName === actionName
+                && currentPhase
+                && currentPhase !== 'outro'
+                && (!animationFile || animationFile === this._currentAnimationFile)
+                && samePhase
+                && sameAuthority
+            ) {
                 console.log(`[AnimationHandler] startAction: ${actionName} (${animationFile || 'any'}) already active (phase=${this.currentActionPhase}) - no-op`);
                 return;
             }
@@ -4285,7 +4300,8 @@ class AnimationHandler {
                     try { this._resetEyesSmoothly(250); } catch (e) { }
                     if (this._blinkAutoEnabled && !this._blinkLoopRunning) { try { this._startBlinkLoop(); } catch (e) { } }
                     if (this._eyeAutoEnabled && !this._eyeLoopRunning) { try { this._startEyeMovement(); } catch (e) { } }
-                    this._lastAnimationState = { action: 'idle', phase: 'loop', expressions: [] };
+                    this._lastAnimationState = { action: 'idle', phase: 'loop', phase_authoritative: false, frame_range: null, expressions: [] };
+                    this.currentActionPhaseAuthoritative = false;
                 } catch (e) { /* ignore */ }
                 return;
             } catch (e) {
@@ -4301,7 +4317,12 @@ class AnimationHandler {
 
             // Check if we need to interrupt a currently playing structured action
             // and transition to its outro before starting the new one
-            if (this.currentActionName && this.currentActionName !== actionName && this.currentStructuredAction) {
+            if (
+                this.currentActionName
+                && this.currentActionName !== actionName
+                && this.currentStructuredAction
+                && !this.currentActionPhaseAuthoritative
+            ) {
                 console.log(`[AnimationHandler] Structured action change detected: ${this.currentActionName} -> ${actionName}`);
 
                 this._queueTransitionAfterStructuredOutro(this.currentActionName, {
@@ -4360,6 +4381,7 @@ class AnimationHandler {
 
                             this.currentAction = outroAction;
                             this.currentActionPhase = 'outro';
+                            this.currentActionPhaseAuthoritative = false;
                             console.log(`[AnimationHandler] Started outro for ${this.currentActionName}; next action is queued for finished outro crossfade`);
                             return;
                         }
@@ -4383,7 +4405,9 @@ class AnimationHandler {
                 this.currentAction = structured.intro;
                 this.currentActionName = actionName;
                 this.currentActionPhase = 'intro';
+                this.currentActionPhaseAuthoritative = !!phaseAuthoritative;
                 this.currentStructuredAction = structured;
+                this._currentAnimationFile = animationFile || null;
                 // Fade out previous after new is playing
                 if (prevAct && prevAct !== structured.intro) {
                     if (_prevStructured && _prevStructured === structured) {
@@ -4408,7 +4432,9 @@ class AnimationHandler {
                 this.currentAction = structured.loop;
                 this.currentActionName = actionName;
                 this.currentActionPhase = 'loop';
+                this.currentActionPhaseAuthoritative = !!phaseAuthoritative;
                 this.currentStructuredAction = structured;
+                this._currentAnimationFile = animationFile || null;
                 // Fade out previous after new is playing
                 if (prevAct && prevAct !== structured.loop) {
                     if (_prevStructured && _prevStructured === structured) {
@@ -4440,7 +4466,9 @@ class AnimationHandler {
                 this.currentAction = structured.outro;
                 this.currentActionName = actionName;
                 this.currentActionPhase = 'outro';
+                this.currentActionPhaseAuthoritative = !!phaseAuthoritative;
                 this.currentStructuredAction = structured;
+                this._currentAnimationFile = animationFile || null;
                 // Fade out previous after new is playing
                 if (prevAct && prevAct !== structured.outro) {
                     if (_prevStructured && _prevStructured === structured) {
@@ -4475,6 +4503,7 @@ class AnimationHandler {
                 this.currentAction = structured.intro;
                 this.currentActionName = actionName;
                 this.currentActionPhase = 'intro';
+                this.currentActionPhaseAuthoritative = !!phaseAuthoritative;
                 this.currentStructuredAction = structured;
                 this._currentAnimationFile = animationFile || null;
                 console.log(`[AnimationHandler] Structured action started (intro playing)`);
@@ -4510,6 +4539,15 @@ class AnimationHandler {
                                 // Intro finished: either start loop or go directly to outro for playOnce animations
                                 try {
                                     const logicalName = String(key || '').split(':')[0] || String(key || '');
+                                    const introIsServerAuthoritative = !!(
+                                        this.currentStructuredAction === candidate
+                                        && this.currentActionPhaseAuthoritative
+                                        && this.currentActionPhase === 'intro'
+                                    );
+                                    if (introIsServerAuthoritative) {
+                                        console.log(`[AnimationHandler] intro finished for ${key}; waiting for server-authoritative next phase command`);
+                                        break;
+                                    }
                                     if (candidate._playOnceOnly || !candidate.loop) {
                                         console.log(`[AnimationHandler] intro finished for play_once animation ${key} -> starting outro`);
                                         // Proactively boost base idle so skeleton is covered when outro finishes.
@@ -4530,6 +4568,7 @@ class AnimationHandler {
                                         this.currentActionName = logicalName;
                                         this.currentActionKey = key;
                                         this.currentActionPhase = 'outro';
+                                        this.currentActionPhaseAuthoritative = false;
                                         this.currentStructuredAction = candidate;
                                     } else {
                                         // Ensure loop is set to LoopRepeat on clip and action, then start it
@@ -4544,6 +4583,7 @@ class AnimationHandler {
                                         this.currentActionName = logicalName;
                                         this.currentActionKey = key;
                                         this.currentActionPhase = 'loop';
+                                        this.currentActionPhaseAuthoritative = false;
                                         this.currentStructuredAction = candidate;
                                     }
                                 } catch (e) { /* ignore */ }
@@ -4590,6 +4630,7 @@ class AnimationHandler {
                                     // Clear all state references so _startActionInternal gets a clean slate.
                                     if (this.currentAction === candidate.outro) this.currentAction = null;
                                     this.currentActionPhase = null;
+                                    this.currentActionPhaseAuthoritative = false;
                                     this.currentActionName = null;
                                     this.currentActionKey = null;
                                     this.currentStructuredAction = null;
@@ -4645,6 +4686,7 @@ class AnimationHandler {
                                 } catch (e) { /* ignore */ }
                                 if (this.currentAction === candidate.outro) this.currentAction = null;
                                 this.currentActionPhase = null;
+                                this.currentActionPhaseAuthoritative = false;
                                 this.currentActionName = null;
                                 this.currentActionKey = null;
                                 this.currentStructuredAction = null;
@@ -4972,6 +5014,7 @@ class AnimationHandler {
         // accidentally skip the OLD structured parts via the skip set.
         this.currentStructuredAction = null;
         this.currentActionPhase = null;
+        this.currentActionPhaseAuthoritative = false;
         try {
             this._crossFadeCleanup(_prevAction, _prevStructured, action, 0.5);
         } catch (e) { /* ignore */ }
