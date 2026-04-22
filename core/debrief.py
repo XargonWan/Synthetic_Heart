@@ -53,7 +53,7 @@ async def run_debrief(
     processed_actions: List[Dict],
     failed_actions: List[Dict],
     results: Dict,
-    context: Dict | None = None,
+    context: dict[str, Any] | None = None,
     original_message: Any = None,
 ) -> None:
     enabled = bool(config_registry.get_var("ENABLE_DEBRIEF", True))
@@ -149,12 +149,32 @@ async def run_debrief(
                     to_execute.append(action)
 
                 if to_execute:
+                    run_context = dict(context or {})
+                    run_context["from_debrief"] = True
+                    run_context["debrief_ran"] = True
+                    run_context["debrief_depth"] = (
+                        int(run_context.get("debrief_depth", 0) or 0) + 1
+                    )
+                    run_context["recovery_actions"] = recovery_actions
+
+                    if original_message is not None:
+                        chat_id = getattr(original_message, "chat_id", None)
+                        thread_id = getattr(original_message, "thread_id", None)
+                        interface_path = getattr(
+                            original_message, "interface_path", None
+                        )
+
+                        if chat_id is not None and "chat_id" not in run_context:
+                            run_context["chat_id"] = chat_id
+                        if thread_id is not None and "thread_id" not in run_context:
+                            run_context["thread_id"] = thread_id
+                        if interface_path and "interface_path" not in run_context:
+                            run_context["interface_path"] = interface_path
+
                     log_info(
                         f"[debrief] Executing {len(to_execute)} recovery action(s) (policy={policy})"
                     )
-                    await run_actions(
-                        to_execute, {"from_debrief": True}, None, original_message
-                    )
+                    await run_actions(to_execute, run_context, None, original_message)
             except Exception as e:
                 log_warning(f"[debrief] Recovery execution failed: {e}")
         else:

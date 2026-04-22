@@ -51,6 +51,23 @@ Plugin hooks and schemas
   Run after actions and event delivery. May return recovery actions such as
   ``{"recovery_actions": [...], "metadata": {...}}``.
 
+Debrief action-intent recovery
+------------------------------
+- The action-intent Debrief plugin is the canonical postflight path for
+  missing-action recovery. It compares the original user message, the raw
+  assistant reply, and the actions already processed or failed.
+- Recovery is LLM-based and context-sensitive. It is not a keyword or fuzzy
+  text scan.
+- The plugin asks the LLM for canonical action JSON (``{"actions": [...]}``),
+  then normalizes the result back into Debrief ``recovery_actions`` for the
+  core orchestrator.
+- If the Debrief LLM returns malformed or unusable JSON, the plugin may invoke
+  the standard corrector middleware before giving up, using the same
+  action-scope restrictions as the main response path.
+- When auto-recovery is enabled, recovered actions are executed through the
+  canonical action parser with the original interface/chat context preserved,
+  so validation, safety policy, and selective correction still apply.
+
 How Recon affects the main prompt
 ---------------------------------
 - Recon contributions are attached to ``context.recon`` during
@@ -92,7 +109,8 @@ Testing & compatibility
 - Debrief hooks are fail-safe: plugin exceptions are logged and ignored.
 - The action-intent Debrief plugin (see `plugins/debrief_action_intent.py`) can
   propose recovery actions when the assistant implied or promised an action
-  but did not execute it.
+  but did not execute it. Typical examples are reminders or follow-up actions
+  promised in natural language but omitted from the main JSON reply.
 
 See also
 --------
