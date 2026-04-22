@@ -1,9 +1,11 @@
+import json
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
+import pytest
 
-from core.llm_failure_log import infer_failure_code
+from core.llm_failure_log import build_failure_entry, infer_failure_code, record_failure_entry
 from core.webui import SynthWebUIInterface
 
 
@@ -87,3 +89,62 @@ def test_delete_log_failure_returns_success() -> None:
 
     assert response.status_code == 200
     assert response.json() == {"success": True, "deleted": True, "id": 8}
+
+
+@pytest.mark.asyncio
+async def test_record_failure_entry_serializes_non_json_metadata(monkeypatch) -> None:
+    class FakeCursor:
+        def __init__(self) -> None:
+            self.calls = []
+            self.lastrowid = 42
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def execute(self, sql, params=None) -> None:
+            self.calls.append((sql, params))
+
+    class FakeConn:
+        def __init__(self) -> None:
+            self.cursor_obj = FakeCursor()
+            self.commit_count = 0
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        def cursor(self) -> FakeCursor:
+            return self.cursor_obj
+
+        async def commit(self) -> None:
+            self.commit_count += 1
+
+    fake_conn = FakeConn()
+    monkeypatch.setattr("core.db.get_conn_ctx", lambda: fake_conn)
+
+    entry = build_failure_entry(
+        reason="Exhausted 2 correction attempts for invalid JSON",
+        stage="llm_fallback",
+        interface_path="synth_webui/demo",
+        metadata={
+            "allowed_action_types": {"message_synth_webui", "tts_speak"},
+            "created": datetime(2026, 4, 22, 12, 30, tzinfo=timezone.utc),
+        },
+    )
+
+    inserted_id = await record_failure_entry(entry)
+
+    assert inserted_id == 42
+    insert_sql, insert_params = fake_conn.cursor_obj.calls[-1]
+    assert "INSERT INTO llm_failure_log" in insert_sql
+    stored_metadata = json.loads(insert_params[-1])
+    assert sorted(stored_metadata["allowed_action_types"]) == [
+        "message_synth_webui",
+        "tts_speak",
+    ]
+    assert stored_metadata["created"] == "2026-04-22T12:30:00+00:00"

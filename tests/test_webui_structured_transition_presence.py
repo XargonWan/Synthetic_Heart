@@ -211,3 +211,10 @@ def test_webui_idle_emotion_hint_is_subtle() -> None:
     assert "const subtleCeil = (dominantKey === 'relaxed') ? 0.14 : 0.18;" in content
     assert "const subtleNorm = Math.min(0.22, 0.05 + norm * 0.17);" in content
     assert "priority: 10," in content
+
+
+def test_webui_chat_window_logs_action_state_reception() -> None:
+    """Browser logs should show action_state events so THINKING/WRITING are
+    diagnosable without inspecting backend container logs."""
+    content = Path("res/synth_webui/js/chat-window.mjs").read_text(encoding="utf-8")
+    assert "[chat-window] action_state received:" in content
