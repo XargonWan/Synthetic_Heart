@@ -437,6 +437,20 @@ async def send_llm_fallback_message(
     )
     log_error(f"[message_chain] Sending fallback message: '{fallback_text}'")
 
+    # Clear transient avatar face state so upstream outages do not leave the
+    # persona stuck with stale failure-adjacent expressions on reconnect.
+    try:
+        from core.animation_handler import get_karada_state_server
+
+        karada = get_karada_state_server()
+        if karada is not None:
+            await karada.push_face_expression(None, 0)
+            await karada.clear_face_values()
+    except Exception as face_exc:
+        log_warning(
+            f"[message_chain] Failed to clear face state on fallback: {face_exc}"
+        )
+
     # Send fallback message through transport layer
     try:
         from core.transport_layer import universal_send
