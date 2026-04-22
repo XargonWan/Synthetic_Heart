@@ -743,6 +743,14 @@ docker exec synth-dev tail -f /app/logs/synth.log | grep -E "\[grillo\]|grillo"
 
 ---
 
+### Broad validation is currently blocked by unrelated repo issues  <!-- 2026-04-22 -->
+**Symptom:** `uv run ruff check --fix .` fails on pre-existing files outside most feature slices (observed in `interface/message_send_utils.py`, `interface_dev/reddit_interface.py`, `interface_dev/telethon_userbot.py`, `interface_dev/x_interface.py`, `plugins/bio_manager.py`), and broad `uv run pytest --ignore=tests/plugins/test_selenium_ttsfree.py` can still surface unrelated failing tests (observed during one run: `tests/test_exposed_variables_static.py`, `tests/test_iris.py`).
+**Location:** Mixed pre-existing validation debt across interfaces, plugins, and broad regression suite.
+**Status:** known, not fixed.
+**Notes:** When working on a focused feature, still run the mandatory repo-wide commands for signal, but expect unrelated failures. Use scoped lint/type checks on touched files plus targeted pytest around the modified area to verify the feature itself until the broader repo debt is cleaned up.
+
+---
+
 ## 13. Database Quick Reference
 
 > Tables are created inline in `core/db.py` and each plugin — **`init-db.sql` only seeds a subset.** If you need a table's full column list, `grep -A20 "CREATE TABLE IF NOT EXISTS <name>"` in the relevant file.

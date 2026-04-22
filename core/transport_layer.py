@@ -1189,10 +1189,44 @@ async def universal_send(interface_send_func, *args, text: str | None = None, **
     for param in excluded_params:
         kwargs.pop(param, None)
 
+    async def _record_delivery_failure(exc: Exception, message_text: str) -> None:
+        try:
+            from core.llm_failure_log import build_failure_entry, record_failure_entry
+
+            target_chat_id = kwargs.get("chat_id")
+            if target_chat_id is None and args:
+                first_arg = args[0]
+                if not hasattr(first_arg, "send_message"):
+                    target_chat_id = first_arg
+
+            sender_owner = getattr(interface_send_func, "__self__", None)
+            entry = build_failure_entry(
+                reason=f"Send failed: {exc}",
+                stage="delivery",
+                interface_path=interface_path,
+                chat_id=target_chat_id,
+                thread_id=kwargs.get("message_thread_id"),
+                content_preview=message_text[:500]
+                if isinstance(message_text, str)
+                else None,
+                metadata={
+                    "exception_type": type(exc).__name__,
+                    "sender": sender_owner.__class__.__name__ if sender_owner else None,
+                },
+                failure_code="delivery_failed",
+            )
+            await record_failure_entry(entry)
+        except Exception as failure_exc:
+            log_debug(f"[transport] Failed to persist delivery failure: {failure_exc}")
+
     async def _send_text(message_text: str):
-        return await _call_interface_send(
-            interface_send_func, *args, text=message_text, **kwargs
-        )
+        try:
+            return await _call_interface_send(
+                interface_send_func, *args, text=message_text, **kwargs
+            )
+        except Exception as exc:
+            await _record_delivery_failure(exc, message_text)
+            raise
 
     # Log LLM response for debugging
     if text:

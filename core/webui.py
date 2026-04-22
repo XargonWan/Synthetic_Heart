@@ -696,6 +696,8 @@ class SynthWebUIInterface:
         self.app.get("/api/history/diary")(self.history_diary)
         self.app.get("/api/history/grillo")(self.history_grillo)
         self.app.get("/api/history/chat")(self.history_chat)
+        self.app.get("/api/log-failures")(self.list_log_failures)
+        self.app.delete("/api/log-failures/{failure_id}")(self.delete_log_failure)
         self.app.get("/api/selkies")(self.get_selkies_config)
         self.app.get("/api/selkies/health")(self.get_selkies_health)
 
@@ -6736,6 +6738,73 @@ class SynthWebUIInterface:
 
             log_error(f"{LOG_PREFIX} Failed to fetch chat history: {exc}")
             return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+
+    async def list_log_failures(self, request: Request):
+        """Return paginated failure events for the Logs > Failures sub-tab."""
+        params = request.query_params
+
+        def _bounded_int(value: Any, default: int, minimum: int, maximum: int) -> int:
+            try:
+                parsed = int(value)
+            except (TypeError, ValueError):
+                return default
+            return max(minimum, min(maximum, parsed))
+
+        page = _bounded_int(params.get("page"), default=1, minimum=1, maximum=1000)
+        per_page = _bounded_int(
+            params.get("per_page"), default=20, minimum=1, maximum=100
+        )
+        search = params.get("search", "").strip()
+        failure_code = params.get("failure_code", "").strip()
+        stage = params.get("stage", "").strip()
+        sort = params.get("sort", "desc")
+
+        try:
+            from core.llm_failure_log import list_failure_entries
+
+            payload = await list_failure_entries(
+                page=page,
+                per_page=per_page,
+                search=search,
+                failure_code=failure_code,
+                stage=stage,
+                sort=sort,
+            )
+
+            entries = []
+            for entry in payload.get("entries", []):
+                normalized = dict(entry)
+                normalized["created_at"] = self._dt_to_utc_iso(entry.get("created_at"))
+                entries.append(normalized)
+
+            return JSONResponse(
+                {
+                    "success": True,
+                    "entries": entries,
+                    "page": payload.get("page", page),
+                    "per_page": payload.get("per_page", per_page),
+                    "total_count": payload.get("total_count", 0),
+                    "total_pages": payload.get("total_pages", 1),
+                }
+            )
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to fetch log failures: {exc}")
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+
+    async def delete_log_failure(self, failure_id: int):
+        """Delete a persistent failure-log entry."""
+        try:
+            from core.llm_failure_log import delete_failure_entry
+
+            deleted = await delete_failure_entry(failure_id)
+            if not deleted:
+                raise HTTPException(status_code=404, detail="Failure entry not found")
+            return JSONResponse({"success": True, "deleted": True, "id": failure_id})
+        except HTTPException:
+            raise
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to delete log failure {failure_id}: {exc}")
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     # ------------------------------------------------------------------
     # Chat archive endpoints (filesystem-backed)

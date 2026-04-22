@@ -3783,6 +3783,35 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                 const logFilters = document.querySelectorAll('.log-filter');
                 const logSearchInput = document.getElementById('log-search');
                 const logsRefreshBtn = document.getElementById('logs-refresh');
+                const logsSubtabButtons = document.querySelectorAll('.logs-subnav-btn[data-logs-subtab]');
+                const logsSubtabPanels = document.querySelectorAll('.logs-subpanel[data-logs-subtab]');
+                const logsFailuresOutput = document.getElementById('logs-failures-output');
+                const logsFailuresPagination = document.getElementById('logs-failures-pagination');
+                const logsFailuresRefreshBtn = document.getElementById('logs-failures-refresh');
+                const logsFailuresSearch = document.getElementById('logs-failures-search');
+                const logsFailuresCode = document.getElementById('logs-failures-code');
+                const logsFailuresStage = document.getElementById('logs-failures-stage');
+                const logsFailuresSort = document.getElementById('logs-failures-sort');
+                const logsState = window.__synth_logs_state || {
+                    currentSubtab: 'live',
+                    failurePage: 1,
+                    failurePerPage: 20,
+                    failureSearch: '',
+                    failureCode: '',
+                    failureStage: '',
+                    failureSort: 'desc',
+                    failureTotalPages: 1,
+                    loadingFailures: false,
+                };
+                window.__synth_logs_state = logsState;
+
+                function debounce(fn, wait) {
+                    let timer = null;
+                    return (...args) => {
+                        if (timer) window.clearTimeout(timer);
+                        timer = window.setTimeout(() => fn(...args), wait);
+                    };
+                }
 
                 function detectLevel(text) {
                     const match = String(text || '').match(/\b(DEBUG|INFO|WARNING|ERROR)\b/i);
@@ -3833,6 +3862,152 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                     applyFilters();
                 }
 
+                function switchLogsSubtab(nextSubtab) {
+                    logsState.currentSubtab = nextSubtab;
+                    logsSubtabButtons.forEach((button) => {
+                        const active = button.dataset.logsSubtab === nextSubtab;
+                        button.classList.toggle('active', active);
+                        button.setAttribute('aria-selected', active ? 'true' : 'false');
+                    });
+                    logsSubtabPanels.forEach((panel) => {
+                        panel.classList.toggle('active', panel.dataset.logsSubtab === nextSubtab);
+                    });
+                    if (nextSubtab === 'failures') {
+                        loadFailureLog();
+                        return;
+                    }
+                    applyFilters();
+                }
+
+                function formatFailureDate(value) {
+                    if (!value) return 'Unknown time';
+                    const date = new Date(value);
+                    if (Number.isNaN(date.getTime())) return safeEscapeHtml(value);
+                    return safeEscapeHtml(date.toLocaleString());
+                }
+
+                function renderFailurePagination(payload) {
+                    if (!logsFailuresPagination) return;
+                    const page = Number(payload.page || logsState.failurePage || 1);
+                    const totalPages = Number(payload.total_pages || 1);
+                    const totalCount = Number(payload.total_count || 0);
+                    logsState.failureTotalPages = totalPages;
+                    logsFailuresPagination.innerHTML = `
+                        <div class="logs-page-summary">${safeEscapeHtml(String(totalCount))} entries</div>
+                        <div class="logs-page-buttons">
+                            <button type="button" class="logs-pagination-btn" data-page-action="prev" ${page <= 1 ? 'disabled' : ''}>Previous</button>
+                            <span>Page ${safeEscapeHtml(String(page))} / ${safeEscapeHtml(String(totalPages))}</span>
+                            <button type="button" class="logs-pagination-btn" data-page-action="next" ${page >= totalPages ? 'disabled' : ''}>Next</button>
+                        </div>
+                    `;
+
+                    logsFailuresPagination.querySelectorAll('[data-page-action]').forEach((button) => {
+                        button.addEventListener('click', () => {
+                            const action = button.dataset.pageAction;
+                            if (action === 'prev' && logsState.failurePage > 1) {
+                                logsState.failurePage -= 1;
+                                loadFailureLog();
+                            }
+                            if (action === 'next' && logsState.failurePage < logsState.failureTotalPages) {
+                                logsState.failurePage += 1;
+                                loadFailureLog();
+                            }
+                        });
+                    });
+                }
+
+                function renderFailureEntries(payload) {
+                    if (!logsFailuresOutput) return;
+                    const entries = Array.isArray(payload.entries) ? payload.entries : [];
+                    if (!entries.length) {
+                        logsFailuresOutput.innerHTML = '<div class="logs-empty-state">No failure entries match the current filters.</div>';
+                        renderFailurePagination(payload);
+                        return;
+                    }
+
+                    logsFailuresOutput.innerHTML = entries.map((entry) => {
+                        const reason = safeEscapeHtml(entry.reason || 'Unknown failure');
+                        const preview = entry.content_preview ? `<div class="logs-failure-preview">${safeEscapeHtml(entry.content_preview)}</div>` : '';
+                        const meta = [
+                            entry.engine ? `Engine: ${entry.engine}` : '',
+                            entry.model ? `Model: ${entry.model}` : '',
+                            entry.interface_path ? `Interface: ${entry.interface_path}` : '',
+                            entry.chat_id ? `Chat: ${entry.chat_id}` : '',
+                            entry.thread_id ? `Thread: ${entry.thread_id}` : '',
+                            `At: ${formatFailureDate(entry.created_at)}`,
+                        ].filter(Boolean).map((value) => `<span>${safeEscapeHtml(value)}</span>`).join('');
+
+                        return `
+                            <article class="logs-failure-entry" data-failure-id="${safeEscapeHtml(String(entry.id))}">
+                                <div class="logs-failure-entry-header">
+                                    <div>
+                                        <div class="logs-failure-title">
+                                            <span class="logs-failure-pill code">${safeEscapeHtml(entry.failure_code || 'llm_failure')}</span>
+                                            <span class="logs-failure-pill stage">${safeEscapeHtml(entry.stage || 'unknown')}</span>
+                                        </div>
+                                        <div class="logs-failure-meta">${meta}</div>
+                                    </div>
+                                    <button class="logs-failure-delete" type="button" data-delete-failure="${safeEscapeHtml(String(entry.id))}">Delete</button>
+                                </div>
+                                <div class="logs-failure-reason">${reason}</div>
+                                ${preview}
+                            </article>
+                        `;
+                    }).join('');
+
+                    logsFailuresOutput.querySelectorAll('[data-delete-failure]').forEach((button) => {
+                        button.addEventListener('click', async () => {
+                            const failureId = button.dataset.deleteFailure;
+                            if (!failureId) return;
+                            if (!window.confirm('Delete this failure entry? This cannot be undone.')) return;
+                            try {
+                                const response = await fetch(`/api/log-failures/${encodeURIComponent(failureId)}`, { method: 'DELETE' });
+                                if (!response.ok) {
+                                    const payloadText = await response.text();
+                                    throw new Error(payloadText || `HTTP ${response.status}`);
+                                }
+                                if (window.showToast) window.showToast('Failure entry deleted', false);
+                                loadFailureLog();
+                            } catch (error) {
+                                console.error('[logs] failed to delete failure entry', error);
+                                if (window.showToast) window.showToast('Failed to delete failure entry', true);
+                            }
+                        });
+                    });
+
+                    renderFailurePagination(payload);
+                }
+
+                async function loadFailureLog() {
+                    if (!logsFailuresOutput || logsState.loadingFailures) return;
+                    logsState.loadingFailures = true;
+                    logsFailuresOutput.innerHTML = '<div class="logs-empty-state">Loading failure log...</div>';
+
+                    const params = new URLSearchParams({
+                        page: String(logsState.failurePage),
+                        per_page: String(logsState.failurePerPage),
+                        search: logsState.failureSearch || '',
+                        failure_code: logsState.failureCode || '',
+                        stage: logsState.failureStage || '',
+                        sort: logsState.failureSort || 'desc',
+                    });
+
+                    try {
+                        const response = await fetch(`/api/log-failures?${params.toString()}`);
+                        const payload = await response.json();
+                        if (!response.ok || !payload.success) {
+                            throw new Error((payload && payload.error) || `HTTP ${response.status}`);
+                        }
+                        renderFailureEntries(payload);
+                    } catch (error) {
+                        console.error('[logs] failed to load failure log', error);
+                        logsFailuresOutput.innerHTML = '<div class="logs-empty-state">Failed to load failure log.</div>';
+                        if (logsFailuresPagination) logsFailuresPagination.innerHTML = '';
+                    } finally {
+                        logsState.loadingFailures = false;
+                    }
+                }
+
                 function connectLogs() {
                     if (window.__synth_logs_socket && (window.__synth_logs_socket.readyState === WebSocket.OPEN || window.__synth_logs_socket.readyState === WebSocket.CONNECTING)) {
                         return;
@@ -3865,6 +4040,46 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                 }
 
                 connectLogs();
+                logsSubtabButtons.forEach((button) => {
+                    button.addEventListener('click', () => {
+                        const nextSubtab = button.dataset.logsSubtab || 'live';
+                        switchLogsSubtab(nextSubtab);
+                    });
+                });
+                if (logsFailuresRefreshBtn) {
+                    logsFailuresRefreshBtn.addEventListener('click', () => {
+                        loadFailureLog();
+                    });
+                }
+                if (logsFailuresSearch) {
+                    logsFailuresSearch.addEventListener('input', debounce(() => {
+                        logsState.failureSearch = logsFailuresSearch.value || '';
+                        logsState.failurePage = 1;
+                        loadFailureLog();
+                    }, 350));
+                }
+                if (logsFailuresCode) {
+                    logsFailuresCode.addEventListener('change', () => {
+                        logsState.failureCode = logsFailuresCode.value || '';
+                        logsState.failurePage = 1;
+                        loadFailureLog();
+                    });
+                }
+                if (logsFailuresStage) {
+                    logsFailuresStage.addEventListener('change', () => {
+                        logsState.failureStage = logsFailuresStage.value || '';
+                        logsState.failurePage = 1;
+                        loadFailureLog();
+                    });
+                }
+                if (logsFailuresSort) {
+                    logsFailuresSort.addEventListener('change', () => {
+                        logsState.failureSort = logsFailuresSort.value || 'desc';
+                        logsState.failurePage = 1;
+                        loadFailureLog();
+                    });
+                }
+                switchLogsSubtab(logsState.currentSubtab || 'live');
                 window.__synth_logs_initialized = true;
             }
 

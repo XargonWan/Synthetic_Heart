@@ -437,6 +437,73 @@ async def send_llm_fallback_message(
     )
     log_error(f"[message_chain] Sending fallback message: '{fallback_text}'")
 
+    async def _record_failure_event(
+        stage: str,
+        reason_text: str,
+        *,
+        failure_code: str | None = None,
+        extra_metadata: dict[str, Any] | None = None,
+    ) -> None:
+        if stage == "llm_fallback" and getattr(message, "_llm_failure_logged", False):
+            return
+
+        try:
+            from core.llm_failure_log import build_failure_entry, record_failure_entry
+
+            correction_context = getattr(message, "correction_context", None)
+            last_action_result = getattr(message, "last_action_result", None)
+            metadata: dict[str, Any] = {}
+            if isinstance(extra_metadata, dict):
+                metadata.update(extra_metadata)
+            if isinstance(last_action_result, dict) and last_action_result:
+                metadata["last_action_result"] = last_action_result
+            if context:
+                for key in (
+                    "source",
+                    "interface_name",
+                    "payload_thread_id",
+                    "allowed_action_types",
+                ):
+                    if key in context:
+                        metadata[key] = context.get(key)
+
+            original_text = None
+            if context:
+                original_text = context.get("original_text")
+            if not isinstance(original_text, str):
+                original_text = getattr(message, "original_text", None)
+            if not isinstance(original_text, str):
+                original_text = None
+
+            entry = build_failure_entry(
+                reason=reason_text,
+                stage=stage,
+                interface_path=interface_path,
+                chat_id=chat_id,
+                thread_id=thread_id,
+                engine=(context or {}).get("engine")
+                or (context or {}).get("cortex_engine"),
+                model=(context or {}).get("model")
+                or (context or {}).get("cortex_model"),
+                message_id=getattr(message, "event_id", None)
+                or getattr(message, "message_id", None),
+                content_preview=original_text[:500]
+                if isinstance(original_text, str)
+                else None,
+                correction_context=correction_context
+                if isinstance(correction_context, dict)
+                else None,
+                metadata=metadata,
+                failure_code=failure_code,
+            )
+            await record_failure_entry(entry)
+            if stage == "llm_fallback":
+                message._llm_failure_logged = True
+        except Exception as exc:
+            log_warning(f"[message_chain] Failed to persist failure log entry: {exc}")
+
+    await _record_failure_event("llm_fallback", failure_reason)
+
     # Clear transient avatar face state so upstream outages do not leave the
     # persona stuck with stale failure-adjacent expressions on reconnect.
     try:
@@ -491,6 +558,12 @@ async def send_llm_fallback_message(
                         f"[message_chain] Failed to send fallback message after retry: {e} (original: {te})"
                     )
         else:
+            await _record_failure_event(
+                "delivery",
+                "Fallback delivery skipped: bot does not have send_message method",
+                failure_code="delivery_failed",
+                extra_metadata={"fallback_text": fallback_text},
+            )
             log_warning(
                 "[message_chain] Bot does not have send_message method, cannot send fallback"
             )

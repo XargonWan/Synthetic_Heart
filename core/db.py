@@ -1299,6 +1299,31 @@ async def ensure_plugin_tables() -> None:
                     """
                 )
 
+                await cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS llm_failure_log (
+                        id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                        failure_code VARCHAR(100) NOT NULL,
+                        stage VARCHAR(100) NOT NULL,
+                        reason TEXT NOT NULL,
+                        interface_path VARCHAR(255),
+                        chat_id VARCHAR(255),
+                        thread_id VARCHAR(255),
+                        engine VARCHAR(255),
+                        model VARCHAR(255),
+                        message_id VARCHAR(255),
+                        content_preview TEXT,
+                        metadata JSON,
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        INDEX idx_failure_created_at (created_at),
+                        INDEX idx_failure_code (failure_code),
+                        INDEX idx_failure_stage (stage),
+                        INDEX idx_failure_interface_path (interface_path),
+                        INDEX idx_failure_engine (engine)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+                    """
+                )
+
                 try:
                     await conn.commit()
                 except Exception:
