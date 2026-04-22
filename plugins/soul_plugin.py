@@ -543,7 +543,7 @@ class SoulPlugin(PluginBase):
             trace = f"{trace} Key facts: {fact_text}"
 
         header_parts = [
-            "SOUL",
+            "SOUL recalled memory",
             cell.timestamp.astimezone(timezone.utc).date().isoformat(),
         ]
         if cell.session_id == active_session_id:

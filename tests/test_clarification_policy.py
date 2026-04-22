@@ -9,6 +9,9 @@ def test_json_instructions_require_clarification():
         or "clarification policy" in inst.lower()
         or "do not guess" in inst.lower()
     ), "Prompt must instruct model to ask clarifying questions when ambiguous"
+    assert "memory honesty" in inst.lower()
+    assert "prefer honesty over confidence" in inst.lower()
+    assert "say so" in inst.lower()
 
 
 def test_unminified_chat_instruction_includes_clarify():
@@ -18,3 +21,5 @@ def test_unminified_chat_instruction_includes_clarify():
     assert "clarify" in txt.lower() or "clarifying" in txt.lower(), (
         "Unminified chat instructions should tell the model to ask clarifying questions"
     )
+    assert "prefer explicit honesty over confident reconstruction" in txt.lower()
+    assert "potentially incomplete or reconstructed" in txt.lower()

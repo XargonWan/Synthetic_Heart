@@ -115,6 +115,41 @@ async def test_static_injection_recalls_relevant_memories() -> None:
     assert any("jasmine tea" in entry.lower() for entry in recalled_entries)
 
 
+def test_format_recalled_memory_marks_entry_as_recalled() -> None:
+    plugin = SoulPlugin()
+    now = datetime.now(timezone.utc)
+    emotional_tag = EmotionalTag(
+        state_snapshot={"joy": 0.2, "fear": 0.0, "sad": 0.0, "anger": 0.0},
+        dominant_emotion="joy",
+        intensity=0.2,
+        valence=0.2,
+    )
+    cell = MemCell(
+        id="memory-1",
+        episodic_trace="Scarlet mentioned jasmine tea.",
+        atomic_facts=["Scarlet|likes|jasmine tea"],
+        emotional_tag=emotional_tag,
+        foresight_signals=[],
+        timestamp=now,
+        session_id="telegram_bot/999",
+    )
+    match = MemCellRecall(
+        cell=cell,
+        similarity=0.9,
+        lexical_score=0.8,
+        score=0.9,
+    )
+
+    formatted = plugin._format_recalled_memory(
+        match,
+        active_session_id="telegram_bot/999",
+    )
+
+    assert formatted.startswith("[SOUL recalled memory | ")
+    assert "same chat" in formatted
+    assert "jasmine tea" in formatted.lower()
+
+
 @pytest.mark.asyncio
 async def test_static_injection_excludes_diary_merge_housekeeping_memories() -> None:
     plugin = SoulPlugin()

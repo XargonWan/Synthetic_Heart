@@ -84,6 +84,9 @@ def test_instructions_enforce_first_person_identity():
     assert "Stay inside the active persona in first person" in instructions
     assert "treat that as stale style noise" in instructions
     assert "PRONOUN CONSISTENCY" in instructions
+    assert "MEMORY HONESTY" in instructions
+    assert "prefer honesty over confidence" in instructions
+    assert "never turn uncertainty into fiction" in instructions
     assert (
         "Do not neutralize an established he/him or she/her person into singular they/them"
         in instructions
@@ -95,10 +98,29 @@ def test_unminified_chat_instruction_enforces_identity_rules():
     assert "Stay in the active persona in first person" in instructions
     assert "Treat that as stale style noise" in instructions
     assert "Keep pronouns consistent" in instructions
+    assert "prefer explicit honesty over confident reconstruction" in instructions
+    assert "potentially incomplete or reconstructed" in instructions
     assert (
         "do not replace an established he/him or she/her person with singular they/them"
         in instructions
     )
+
+
+def test_build_context_summary_adds_memory_honesty_notice_when_memories_present() -> (
+    None
+):
+    summary = _build_context_summary(
+        {
+            "memories": [
+                "[SOUL recalled memory | 2026-04-20 | same chat] Scarlet loves jasmine tea."
+            ]
+        }
+    )
+
+    assert "[Memory honesty notice]" in summary
+    assert "recalled internal records" in summary
+    assert "acknowledge uncertainty instead of inventing a recollection" in summary
+    assert "[SOUL recalled memory | 2026-04-20 | same chat]" in summary
 
 
 def test_build_live_system_instruction_enforces_identity_rules(monkeypatch):

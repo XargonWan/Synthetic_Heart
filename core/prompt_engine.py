@@ -305,6 +305,12 @@ def _build_context_summary(
     memories: list[Any] = context_section.get("memories") or []
     if not is_grillo_internal:
         # Grillo internal beats use minimal memories (top 1-2 only)
+        if memories:
+            parts.append(
+                "[Memory honesty notice]\n"
+                "The memories below are recalled internal records. They can be incomplete, stale, or reconstructed. "
+                "If a detail is not clearly supported, acknowledge uncertainty instead of inventing a recollection."
+            )
         parts.append("[Relevant memories]")
         for m in memories[:2]:  # Limit to 2 most recent for Grillo
             snippet = str(m)
@@ -1775,6 +1781,7 @@ def load_json_instructions() -> str:
         "NEVER use 'target' — always use 'interface_path' in message actions.\n"
         "Include reply_message_id when replying to specific messages. Use thread_id from input.payload.source.thread_id when present (omit if missing).\n"
         "CLARIFICATION POLICY: If the user's intent, referent, or the subject of a follow-up is ambiguous or missing, DO NOT GUESS — ask one concise clarifying question before asserting facts or taking action. When the user asks whether you 'understood' but there is no clear context, request clarification rather than assuming.\n"
+        "MEMORY HONESTY: When the user asks what you remember, prefer honesty over confidence. Memories can be incomplete or stale. If you do not clearly recall or cannot verify a detail, say so. Do not invent events, conversations, promises, or feelings to fill gaps. SyntH is not roleplay or fiction, so never turn uncertainty into fiction.\n"
         "REFERENCE CLARITY: When the user refers indirectly to a person, message, post, image, clip, or quoted content, refer to its author or speaker in a clear generic way and avoid vague or impersonal wording that obscures who created or said it.\n"
         "TIME AUTHORITY: Treat context.date, context.time, input.payload.local_date, input.payload.local_time, input.payload.local_hour, and input.payload.time_of_day as the authoritative current time context whenever present. Never infer the current time, date, or part of day from prior chat history, memories, or older assistant messages.\n"
         "RUNTIME STYLE: If earlier assistant messages or chat history casually mention an exact time, date, timezone, weather, or location, treat that as stale style noise and do not mirror it unless the user asked for it or logistics genuinely require it.\n"
@@ -1809,6 +1816,8 @@ RESPONSE SHAPE RULES:
 - Let the persona, relationship context, and the user's tone determine how much to say.
 - Keep simple factual or logistical turns compact, but allow emotionally meaningful or intimate turns to breathe when that feels natural.
 - If the user's request or referent is ambiguous, ask one short clarifying question before responding (do NOT guess the meaning).
+- When the user asks about memory, prefer explicit honesty over confident reconstruction. If you do not clearly remember or cannot verify a detail from the provided context, say so plainly instead of filling gaps with invented recollection.
+- Treat recalled memories, diary snippets, and other internal records as potentially incomplete or reconstructed unless the current conversation clearly confirms them.
 - When the user refers indirectly to a person, message, post, image, clip, or quoted content, refer to its author or speaker in a clear generic way and avoid vague or impersonal wording.
 - Treat current time fields in the prompt as authoritative. Never infer the present time, date, or part of day from older chat history, memories, or prior assistant messages.
 - Do not mirror or continue earlier assistant wording that casually volunteered exact time, date, timezone, weather, or location. Treat that as stale style noise unless the user asked for it or logistics genuinely require it.

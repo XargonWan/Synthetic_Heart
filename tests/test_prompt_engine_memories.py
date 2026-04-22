@@ -63,7 +63,9 @@ async def test_search_memories_includes_ai_diary(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_build_json_prompt_merges_soul_recalled_memories(monkeypatch):
-    soul_memory = "[SOUL | 2026-04-18 | same chat] Scarlet loves jasmine tea."
+    soul_memory = (
+        "[SOUL recalled memory | 2026-04-18 | same chat] Scarlet loves jasmine tea."
+    )
 
     async def fake_build_context(
         self,
