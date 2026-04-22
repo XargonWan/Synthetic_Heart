@@ -130,42 +130,7 @@
                             // Ensure the Home section (and #chat mount) is available before creating the window
                             try { if (window.SynthWebUI && typeof window.SynthWebUI.loadSection === 'function') await window.SynthWebUI.loadSection('home'); } catch (e) { /* ignore */ }
                             // createChatWindow returns a Promise resolving to the WinBox instance (or null)
-                            const winbox = await mod.createChatWindow().catch(() => null);
-                            if (winbox) {
-                                try {
-                                    attachHeaderTools('chat', winbox, [{
-                                        label: '↺',
-                                        title: 'Reset position',
-                                        onClick: () => {
-                                            try {
-                                                const resetBtn = document.getElementById('reset-window-positions');
-                                                if (resetBtn) {
-                                                    resetBtn.click();
-                                                    return;
-                                                }
-                                            } catch (e) { /* ignore */ }
-
-                                            try {
-                                                if (window.SynthWindowManager && typeof window.SynthWindowManager.ensureChatWindow === 'function') {
-                                                    try { window.SynthWindowManager.ensureChatWindow(); } catch (e) {}
-                                                    try {
-                                                        if (
-                                                            window.SynthWindowManager.has
-                                                            && typeof window.SynthWindowManager.has === 'function'
-                                                            && window.SynthWindowManager.has('chat')
-                                                            && typeof window.SynthWindowManager.restore === 'function'
-                                                        ) {
-                                                            window.SynthWindowManager.restore('chat');
-                                                        }
-                                                    } catch (e) {}
-                                                }
-                                            } catch (e) { /* ignore */ }
-
-                                            try { if (typeof window.resetWindowPositions === 'function') window.resetWindowPositions(); } catch (e) { /* ignore */ }
-                                        }
-                                    }]);
-                                } catch (e) { /* ignore */ }
-                            }
+                            await mod.createChatWindow().catch(() => null);
                         }
                     } catch (e) { /* ignore */ }
                 }).catch((e) => { try { console.debug('[synth_webui] chat-window import failed', e); } catch (e) {} });
@@ -561,6 +526,79 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                 };
             }
 
+            function setNormalRect(entry, rect) {
+                if (!entry || !rect) return false;
+                const x = Number.isFinite(rect.x) ? rect.x : rect.left;
+                const y = Number.isFinite(rect.y) ? rect.y : rect.top;
+                const width = Number.isFinite(rect.width) ? rect.width : null;
+                const height = Number.isFinite(rect.height) ? rect.height : null;
+                if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(width) || !Number.isFinite(height)) {
+                    return false;
+                }
+                if (width < 120 || height < 120) return false;
+                entry.lastNormalRect = {
+                    x: Math.round(x),
+                    y: Math.round(y),
+                    width: Math.round(width),
+                    height: Math.round(height)
+                };
+                return true;
+            }
+
+            function applyNormalRect(entry) {
+                if (!entry || !entry.winbox) return false;
+                if (!setNormalRect(entry, entry.lastNormalRect)) return false;
+                const topbar = getTopbarHeight() || 0;
+                const rect = entry.lastNormalRect;
+                try { entry.winbox.resize(rect.width, rect.height); } catch (e) { /* ignore */ }
+                try { entry.winbox.move(rect.x, Math.max(topbar, rect.y)); } catch (e) { /* ignore */ }
+                try { clampEntryToViewport(entry); } catch (e) { /* ignore */ }
+                try { captureNormalRect(entry); } catch (e) { /* ignore */ }
+                return true;
+            }
+
+            function getWindowStorageKeys(id) {
+                const stableStateKey = `${CHAT_WINDOW_STATE_KEY}-${id}`;
+                const stableRectKey = `${CHAT_RECT_KEY}-${id}`;
+                const sessionStateKey = sessionId ? `${CHAT_WINDOW_STATE_KEY}-${id}-${sessionId}` : null;
+                const sessionRectKey = sessionId ? `${CHAT_RECT_KEY}-${id}-${sessionId}` : null;
+                return {
+                    stableStateKey,
+                    stableRectKey,
+                    sessionStateKey,
+                    sessionRectKey,
+                    stateLookupKeys: [
+                        stableStateKey,
+                        sessionStateKey,
+                        sessionStateKey ? `${sessionStateKey}-desktop` : null,
+                        sessionStateKey ? `${sessionStateKey}-mobile` : null,
+                        `${CHAT_WINDOW_STATE_KEY}-${id}-desktop`,
+                        `${CHAT_WINDOW_STATE_KEY}-${id}-mobile`,
+                        CHAT_WINDOW_STATE_KEY,
+                    ].filter(Boolean),
+                    rectLookupKeys: [
+                        stableRectKey,
+                        sessionRectKey,
+                        sessionRectKey ? `${sessionRectKey}-desktop` : null,
+                        sessionRectKey ? `${sessionRectKey}-mobile` : null,
+                        `${CHAT_RECT_KEY}-${id}-desktop`,
+                        `${CHAT_RECT_KEY}-${id}-mobile`,
+                        CHAT_RECT_KEY,
+                    ].filter(Boolean),
+                };
+            }
+
+            function getFirstStoredValue(keys) {
+                if (!Array.isArray(keys)) return null;
+                for (const key of keys) {
+                    try {
+                        const value = localStorage.getItem(key);
+                        if (value) return value;
+                    } catch (e) { /* ignore */ }
+                }
+                return null;
+            }
+
             function clampToTopbar(entry) {
                 if (!entry || !entry.winbox) return;
                 const top = getTopbarHeight();
@@ -742,6 +780,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                 entry.minimized = false;
                 try { entry.winbox.show(); } catch (e) { /* ignore */ }
                 try { entry.winbox.restore(); } catch (e) { /* ignore */ }
+                try { if (!entry.winbox.max && !entry.winbox.min) applyNormalRect(entry); } catch (e) { /* ignore */ }
                 try { entry.winbox.focus(); } catch (e) { /* ignore */ }
                 if (entry.dockButton) {
                     try {
@@ -766,6 +805,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                     if (entry.winbox.max) {
                         entry.winbox.restore();
                     } else {
+                        captureNormalRect(entry);
                         entry.winbox.maximize();
                     }
                 } catch (e) { /* ignore */ }
@@ -776,21 +816,26 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                 const entry = windows.get(id);
                 if (!entry || !entry.winbox) return;
                 try {
-                    // Use id in keys so we can persist multiple windows (chat, debug, etc.)
-                    const stateKey = sessionId ? `${CHAT_WINDOW_STATE_KEY}-${id}-${sessionId}` : `${CHAT_WINDOW_STATE_KEY}-${id}`;
+                    const { stableStateKey, stableRectKey, sessionStateKey, sessionRectKey } = getWindowStorageKeys(id);
                     let state = 'normal';
                     if (entry.minimized) state = 'minimized';
                     else if (entry.winbox.max) state = 'maximized';
-                    try { localStorage.setItem(stateKey, state); } catch (e) { /* ignore */ }
+                    try { localStorage.setItem(stableStateKey, state); } catch (e) { /* ignore */ }
+                    if (sessionStateKey) {
+                        try { localStorage.setItem(sessionStateKey, state); } catch (e) { /* ignore */ }
+                    }
 
-                    const rectKey = sessionId ? `${CHAT_RECT_KEY}-${id}-${sessionId}` : `${CHAT_RECT_KEY}-${id}`;
+                    const storedRect = (entry.winbox.max || entry.minimized) ? entry.lastNormalRect : null;
                     const payload = {
-                        left: Math.round(entry.winbox.x || 0),
-                        top: Math.round(entry.winbox.y || 0),
-                        width: Math.round(entry.winbox.width || 0),
-                        height: Math.round(entry.winbox.height || 0)
+                        left: Math.round((storedRect && storedRect.x) || entry.winbox.x || 0),
+                        top: Math.round((storedRect && storedRect.y) || entry.winbox.y || 0),
+                        width: Math.round((storedRect && storedRect.width) || entry.winbox.width || 0),
+                        height: Math.round((storedRect && storedRect.height) || entry.winbox.height || 0)
                     };
-                    try { localStorage.setItem(rectKey, JSON.stringify(payload)); } catch (e) { /* ignore */ }
+                    try { localStorage.setItem(stableRectKey, JSON.stringify(payload)); } catch (e) { /* ignore */ }
+                    if (sessionRectKey) {
+                        try { localStorage.setItem(sessionRectKey, JSON.stringify(payload)); } catch (e) { /* ignore */ }
+                    }
                 } catch (e) { /* ignore */ }
             }
 
@@ -798,12 +843,11 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                 const entry = windows.get(id);
                 if (!entry || !entry.winbox) return false;
                 try {
-                    const rectKey = sessionId ? `${CHAT_RECT_KEY}-${id}-${sessionId}` : `${CHAT_RECT_KEY}-${id}`;
-                    const legacyRectMobileKey = sessionId ? `${CHAT_RECT_KEY}-${id}-${sessionId}-mobile` : `${CHAT_RECT_KEY}-${id}-mobile`;
-                    const legacyRectDesktopKey = sessionId ? `${CHAT_RECT_KEY}-${id}-${sessionId}-desktop` : `${CHAT_RECT_KEY}-${id}-desktop`;
-                    const rectRaw = localStorage.getItem(rectKey) || localStorage.getItem(legacyRectDesktopKey) || localStorage.getItem(legacyRectMobileKey) || localStorage.getItem(sessionId ? `${CHAT_RECT_KEY}-${id}-${sessionId}` : `${CHAT_RECT_KEY}-${id}`) || localStorage.getItem(CHAT_RECT_KEY);
+                    const { stateLookupKeys, rectLookupKeys } = getWindowStorageKeys(id);
+                    const rectRaw = getFirstStoredValue(rectLookupKeys);
                     if (rectRaw) {
                         const rect = JSON.parse(rectRaw);
+                        setNormalRect(entry, rect);
                         const hasWidth = typeof rect.width === 'number' && rect.width >= 260;
                         const hasHeight = typeof rect.height === 'number' && rect.height >= 180;
                         if (hasWidth && hasHeight) {
@@ -838,12 +882,10 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                             const top = Math.max(topbar, Math.round(viewport.height - height - 18));
                             try { entry.winbox.move(18, top); } catch (e) { /* ignore */ }
                         } catch (e) { /* ignore */ }
+                        try { captureNormalRect(entry); } catch (e) { /* ignore */ }
                     }
 
-                    const stateKey = sessionId ? `${CHAT_WINDOW_STATE_KEY}-${id}-${sessionId}` : `${CHAT_WINDOW_STATE_KEY}-${id}`;
-                    const legacyStateMobileKey = sessionId ? `${CHAT_WINDOW_STATE_KEY}-${id}-${sessionId}-mobile` : `${CHAT_WINDOW_STATE_KEY}-${id}-mobile`;
-                    const legacyStateDesktopKey = sessionId ? `${CHAT_WINDOW_STATE_KEY}-${id}-${sessionId}-desktop` : `${CHAT_WINDOW_STATE_KEY}-${id}-desktop`;
-                    const localState = localStorage.getItem(stateKey) || localStorage.getItem(legacyStateDesktopKey) || localStorage.getItem(legacyStateMobileKey) || localStorage.getItem(sessionId ? `${CHAT_WINDOW_STATE_KEY}-${id}-${sessionId}` : `${CHAT_WINDOW_STATE_KEY}-${id}`) || localStorage.getItem(CHAT_WINDOW_STATE_KEY);
+                    const localState = getFirstStoredValue(stateLookupKeys);
                     if (localState === 'minimized') {
                         minimize(id);
                     } else if (localState === 'maximized') {
@@ -890,7 +932,8 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                     dockLabel: opts.dockLabel || null,
                     iconText: opts.iconText || null,
                     minimized: false,
-                    lastNormalRect: null
+                    lastNormalRect: null,
+                    restoringFromMax: false
                 };
                 const className = `${opts.className || 'synth-winbox no-full no-close'} modern`;
                 const desktopRoot = document.getElementById('desktop-root');
@@ -912,17 +955,39 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                         try { saveState(opts.id); } catch (e) { /* ignore */ }
                     },
                     onrestore: function() {
+                        try {
+                            if (entry.restoringFromMax && !this.max && !this.min) applyNormalRect(entry);
+                        } catch (e) { /* ignore */ }
+                        entry.restoringFromMax = false;
                         try { saveState(opts.id); } catch (e) { /* ignore */ }
                     },
                     onmove: function() {
-                        if (!this.max && !this.min) try { captureNormalRect(entry); } catch (e) { /* ignore */ }
+                        if (!entry.restoringFromMax && !this.max && !this.min) try { captureNormalRect(entry); } catch (e) { /* ignore */ }
                     },
                     onresize: function() {
-                        if (!this.max && !this.min) try { captureNormalRect(entry); } catch (e) { /* ignore */ }
+                        if (!entry.restoringFromMax && !this.max && !this.min) try { captureNormalRect(entry); } catch (e) { /* ignore */ }
                     }
                 });
                 try { console.debug('[SynthWindowManager] created winbox for', opts.id, 'instance=', winbox); } catch (e) { /* ignore */ }
                 entry.winbox = winbox;
+                try {
+                    const nativeRestore = typeof winbox.restore === 'function' ? winbox.restore.bind(winbox) : null;
+                    const nativeMaximize = typeof winbox.maximize === 'function' ? winbox.maximize.bind(winbox) : null;
+                    if (nativeRestore) {
+                        winbox.restore = function(...args) {
+                            entry.restoringFromMax = !!this.max;
+                            return nativeRestore(...args);
+                        };
+                    }
+                    if (nativeMaximize) {
+                        winbox.maximize = function(...args) {
+                            try {
+                                if (!this.max && !this.min) captureNormalRect(entry);
+                            } catch (e) { /* ignore */ }
+                            return nativeMaximize(...args);
+                        };
+                    }
+                } catch (e) { /* ignore */ }
                 // Ensure we cleanup windows map when the WinBox instance is closed so
                 // it can be recreated correctly on subsequent opens (hot-reload / repeated opens).
                 try {
@@ -975,6 +1040,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                 ensureDockButton(entry);
                 try { applyViewportInsets(entry); } catch (e) { /* ignore */ }
                 try { clampEntryToViewport(entry); } catch (e) { /* ignore */ }
+                try { captureNormalRect(entry); } catch (e) { /* ignore */ }
                 return winbox;
             }
 

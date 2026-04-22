@@ -3777,6 +3777,19 @@ class AnimationHandler {
         this._cancelBaseIdleFloorDrop();
         this._pendingRequestedAction = { actionName, animationFile, playOnce, playSection, descriptorOverride, frameRange, phaseAuthoritative };
 
+        // Any new action supersedes old play-once safety timers. Keep only the
+        // timer for the exact same request, if we're restarting that same clip.
+        try {
+            const keepTimerKey = playOnce
+                ? (animationFile ? `${actionName}:${animationFile}` : actionName)
+                : null;
+            for (const timerKey of Object.keys(this._playOnceTimers || {})) {
+                if (keepTimerKey && timerKey === keepTimerKey) continue;
+                clearTimeout(this._playOnceTimers[timerKey]);
+                delete this._playOnceTimers[timerKey];
+            }
+        } catch (e) { /* ignore */ }
+
         // If we got a descriptorOverride but no explicit rich animation_state, apply a minimal
         // state so expression/blink configs are consistent across transitions.
         try {
@@ -4261,7 +4274,17 @@ class AnimationHandler {
                         const running = typeof base.isRunning === 'function'
                             ? base.isRunning()
                             : (base.enabled && !base.paused);
-                        if (running) {
+                        const baseWeight = typeof base.getEffectiveWeight === 'function'
+                            ? Number(base.getEffectiveWeight())
+                            : NaN;
+                        const idleAlreadyForeground = !!(
+                            running
+                            && this.currentActionName === 'idle'
+                            && !this.currentAction
+                            && !this.currentStructuredAction
+                            && (!Number.isFinite(baseWeight) || baseWeight >= 0.95)
+                        );
+                        if (idleAlreadyForeground) {
                             console.log(`[AnimationHandler] startAction: IDLE '${animationFile}' already running as base idle - no-op`);
                             return;
                         }

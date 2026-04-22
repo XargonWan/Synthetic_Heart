@@ -175,7 +175,6 @@ export function createDebugWindow() {
                 }
                 if (typeof window.WinBox === 'undefined') return null;
                 createNow();
-                try { renderHeaderToolsIntoWinBox(); } catch (e) { /* ignore */ }
                 return winbox;
             } catch (e) { return null; }
         };
@@ -260,36 +259,6 @@ export function createDebugWindow() {
             console.warn('[debug-window] running without WinBox; legacy DOM window support removed.');
         }
 
-        const minimizeDebugWindow = () => {
-            try {
-                if (winbox && window.SynthWindowManager && typeof window.SynthWindowManager.minimize === 'function') {
-                    window.SynthWindowManager.minimize('debug');
-                    return;
-                }
-            } catch (e) { /* ignore */ }
-
-            try {
-                if (!win) return;
-                win.style.display = 'none';
-                const dock = getDock();
-                if (!dock) return;
-                let restoreBtn = dock.querySelector('[data-debug-restore="1"]');
-                if (!restoreBtn) {
-                    restoreBtn = document.createElement('button');
-                    restoreBtn.type = 'button';
-                    restoreBtn.dataset.debugRestore = '1';
-                    restoreBtn.className = 'pill secondary';
-                    restoreBtn.textContent = 'Debug';
-                    restoreBtn.title = 'Restore Debug';
-                    restoreBtn.addEventListener('click', () => {
-                        try { win.style.display = 'flex'; } catch (e) { /* ignore */ }
-                        try { restoreBtn.remove(); } catch (e) { /* ignore */ }
-                    });
-                    dock.appendChild(restoreBtn);
-                }
-            } catch (e) { /* ignore */ }
-        };
-
         async function resyncFromBackend(force = false) {
             try {
                 if (!window.animationHandler) return;
@@ -331,64 +300,6 @@ export function createDebugWindow() {
                 } catch (e) { /* ignore */ }
             } catch (e) { /* ignore */ }
         }
-
-
-
-        // Attach header tools both for WinBox-managed header and legacy DOM header area
-        const renderHeaderToolsIntoWinBox = () => {
-            try {
-                if (!winbox) return;
-                const winEl = winbox.window || winbox.dom || winbox.g || null;
-                if (!winEl) return;
-                const drag = winEl.querySelector('.wb-drag');
-                if (!drag) return;
-                let toolsEl = drag.querySelector('.synth-wb-tools[data-tools-id="debug"]');
-                if (!toolsEl) {
-                    toolsEl = document.createElement('div');
-                    toolsEl.className = 'synth-wb-tools';
-                    toolsEl.dataset.toolsId = 'debug';
-                    drag.appendChild(toolsEl);
-                }
-                toolsEl.innerHTML = '';
-                const addBtn = (label, title, clickFn, cls) => {
-                    const btn = document.createElement('button');
-                    btn.type = 'button';
-                    btn.className = 'synth-wb-tool-btn' + (cls ? (' ' + cls) : '');
-                    btn.textContent = label;
-                    if (title) { btn.title = title; btn.setAttribute('aria-label', title); }
-                    btn.addEventListener('pointerdown', (ev) => { try { ev.stopPropagation(); } catch (e) {} });
-                    btn.addEventListener('click', (ev) => { try { ev.stopPropagation(); } catch (e) {} try { if (typeof clickFn === 'function') clickFn(); } catch (e) {} });
-                    toolsEl.appendChild(btn);
-                };
-                addBtn('▁', 'Minimize', minimizeDebugWindow, 'synth-debug-minimize-tool');
-            } catch (e) { /* ignore */ }
-        };
-
-        const renderHeaderToolsIntoDOM = () => {
-            try {
-                if (winbox) return;
-                const headerTools = (win && win.querySelector) ? win.querySelector('#synth-debug-header-tools') : null;
-                if (!headerTools) return;
-                headerTools.innerHTML = '';
-                const addBtn = (label, title, clickFn, cls) => {
-                    const btn = document.createElement('button');
-                    btn.type = 'button';
-                    btn.className = 'synth-wb-tool-btn' + (cls ? (' ' + cls) : '');
-                    btn.textContent = label;
-                    if (title) { btn.title = title; btn.setAttribute('aria-label', title); }
-                    btn.addEventListener('click', (ev) => { try { ev.stopPropagation(); } catch (e) {} try { if (typeof clickFn === 'function') clickFn(); } catch (e) {} });
-                    headerTools.appendChild(btn);
-                };
-                addBtn('▁', 'Minimize', minimizeDebugWindow, 'synth-debug-minimize-tool');
-            } catch (e) { /* ignore */ }
-        };
-
-        // Try to render header tools now and again after WinBox becomes available or DOM ready
-        try { renderHeaderToolsIntoDOM(); } catch (e) {}
-        try { renderHeaderToolsIntoWinBox(); } catch (e) {}
-        setTimeout(() => { try { renderHeaderToolsIntoWinBox(); } catch (e) {} try { renderHeaderToolsIntoDOM(); } catch (e) {} }, 300);
-        window.addEventListener('synth-winbox-ready', () => { try { renderHeaderToolsIntoWinBox(); } catch (e) {} });
-
         // Ensure that if advanced debug UI failed to appear we fall back to the inline debug overlay
         setTimeout(() => {
             try {

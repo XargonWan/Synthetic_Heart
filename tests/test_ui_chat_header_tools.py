@@ -1,14 +1,14 @@
-def test_chat_header_tools_added_in_main():
+def test_chat_header_tools_not_injected_in_main():
     from pathlib import Path
 
     p = Path(__file__).parent.parent / "res" / "synth_webui" / "js" / "main.js"
     assert p.exists(), f"File not found: {p}"
     txt = p.read_text(encoding="utf-8")
-    assert "attachHeaderTools('chat', winbox," in txt, (
-        "attachHeaderTools for chat not found in main.js"
+    assert "attachHeaderTools('chat', winbox, [{" not in txt, (
+        "Chat should rely on native WinBox controls only"
     )
-    assert "title: 'Reset position'" in txt or 'title: "Reset position"' in txt, (
-        "Reset position tool not present for chat"
+    assert "Reset position" not in txt, (
+        "Reset position should not be injected into the chat titlebar"
     )
 
 

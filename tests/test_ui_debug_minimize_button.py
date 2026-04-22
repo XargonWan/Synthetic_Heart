@@ -16,8 +16,8 @@ def test_debug_minimize_tool_present_in_vrm_viewer():
     ), "vrm-viewer.mjs should reference debug-window.mjs loader"
 
 
-def test_debug_minimize_tool_present_in_index_template():
-    """Index should load the debug module and the module should contain the Minimize tool definition."""
+def test_debug_window_uses_native_winbox_controls():
+    """Index should load the debug module, and the module should not inject duplicate header buttons."""
     from pathlib import Path
 
     p = (
@@ -38,6 +38,9 @@ def test_debug_minimize_tool_present_in_index_template():
     q = Path(__file__).parent.parent / "res" / "synth_webui" / "js" / "debug-window.mjs"
     assert q.exists(), f"File not found: {q}"
     qtxt = q.read_text(encoding="utf-8")
-    assert "Minimize" in qtxt and "minimize('debug')" in qtxt, (
-        "Minimize tool not present in debug-window.mjs header tools"
+    assert "renderHeaderToolsIntoWinBox" not in qtxt, (
+        "Debug should not inject extra WinBox header tools"
+    )
+    assert "synth-debug-minimize-tool" not in qtxt, (
+        "Debug should not define a duplicate minimize titlebar tool"
     )
