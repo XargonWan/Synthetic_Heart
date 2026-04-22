@@ -1303,7 +1303,9 @@ export function initChatUI() {
                                             animation: animFile,
                                             playOnce: data.loop === false,
                                             playSection: data.play_section,
-                                            descriptor: data.descriptor
+                                            descriptor: data.descriptor,
+                                            frameRange: data.frame_range,
+                                            phaseAuthoritative: !!data.phase_authoritative
                                         });
                                     }
                                 } catch (e) { /* ignore */ }
@@ -1320,7 +1322,14 @@ export function initChatUI() {
                             // Cache animation state for VRM reload recovery
                             try {
                                 if (data.state) {
-                                    window.__synth_current_animation_state = { state: data.state, animation: animFile, descriptor: data.descriptor || null };
+                                    window.__synth_current_animation_state = {
+                                        state: data.state,
+                                        animation: animFile,
+                                        descriptor: data.descriptor || null,
+                                        play_section: data.play_section || null,
+                                        frame_range: data.frame_range || null,
+                                        phase_authoritative: !!data.phase_authoritative,
+                                    };
                                 }
                                 if (data.animation_state) {
                                     window.__synth_last_rich_animation_state = data.animation_state;
