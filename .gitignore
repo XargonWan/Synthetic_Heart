@@ -70,6 +70,7 @@ git_*.txt
 .ruff_cache
 _[Bb]uild
 .gitnexus
+opencode.json
 
 # Local installer outputs and downloaded packaging dependencies
 installer/Output/
