@@ -345,13 +345,23 @@ class ExternalCortexEngine(AIPluginBase):
             )
         )
 
+    def _get_request_timeout(self) -> float:
+        """Get the request timeout from endpoint extra_config or use a safe default."""
+        extra = self._endpoint.extra_config or {}
+        timeout = extra.get("timeout")
+        if timeout is not None:
+            try:
+                return float(timeout)
+            except (ValueError, TypeError):
+                pass
+        return 300.0
+
     async def generate_response(self, messages: list[dict[str, Any]] | Any) -> str:
         """Forward ``messages`` to the external endpoint and return the response text.
 
         Accepts either a list of OpenAI-style message dicts (e.g. from recon) or a
         SyntH JSON-prompt dict/str — same flexible contract as the built-in engines.
         """
-        # Normalise to a messages list, same way openrouter/gemini handle the prompt
         if isinstance(messages, list):
             msg_list = messages
         else:
@@ -361,14 +371,35 @@ class ExternalCortexEngine(AIPluginBase):
         if not model and self._endpoint.available_models:
             model = self._endpoint.available_models[0]
         max_retries, backoff = self._get_retry_settings()
+        request_timeout = self._get_request_timeout()
         attempt = 0
         while True:
             attempt += 1
             try:
-                chat_resp = await self._adapter.chat_completion(
-                    msg_list, model=model, **self._extra_api_kwargs()
+                chat_resp = await asyncio.wait_for(
+                    self._adapter.chat_completion(
+                        msg_list, model=model, **self._extra_api_kwargs()
+                    ),
+                    timeout=request_timeout,
                 )
                 return chat_resp.content
+            except asyncio.TimeoutError:
+                log_warning(
+                    f"[cortex_bridge:{self._endpoint.name}] generate_response timed out "
+                    f"after {request_timeout}s (attempt {attempt}/{max_retries})"
+                )
+                should_retry = attempt < max_retries
+                if should_retry:
+                    delay = backoff * (2 ** (attempt - 1))
+                    log_warning(
+                        f"[cortex_bridge:{self._endpoint.name}] timed out, retrying in {delay:.1f}s"
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                raise TimeoutError(
+                    f"LLM request timed out after {request_timeout}s "
+                    f"and {max_retries} retry attempts"
+                )
             except Exception as exc:
                 should_retry = attempt < max_retries and self._is_retryable_exception(
                     exc
@@ -554,11 +585,23 @@ class ExternalCortexEngine(AIPluginBase):
     async def stream_response(self, messages: list[dict[str, Any]]):
         """Yield text chunks from a streaming completion."""
         model = self._endpoint.default_model or None
+        request_timeout = self._get_request_timeout()
         try:
-            async for chunk in self._adapter.stream_chat_completion(
-                messages, model=model
+            async for chunk in asyncio.wait_for(
+                self._adapter.stream_chat_completion(
+                    messages, model=model
+                ),
+                timeout=request_timeout,
             ):
                 yield chunk
+        except asyncio.TimeoutError:
+            log_warning(
+                f"[cortex_bridge:{self._endpoint.name}] stream_response timed out "
+                f"after {request_timeout}s"
+            )
+            raise TimeoutError(
+                f"LLM streaming request timed out after {request_timeout}s"
+            )
         except Exception as exc:
             log_warning(
                 f"[cortex_bridge:{self._endpoint.name}] stream_response failed: {exc}"

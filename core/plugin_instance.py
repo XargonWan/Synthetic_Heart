@@ -54,12 +54,13 @@ try:
     register_exposed_var(
         "LLM_CHAIN_LEASE_TIMEOUT_SEC",
         label="LLM chain lease timeout (s)",
-        default=300,
+        default=600,
         value_type=int,
         ui_type="number",
         description=(
             "Force-release the global LLM chain lease after this many seconds to "
-            "avoid deadlocks. Set to 0 to disable."
+            "avoid deadlocks. Set to 0 to disable. Recommended: 600s (10 min) for "
+            "slow engines like selenium-llm-engine with Gemini."
         ),
         scope="agent",
         component="agent",
@@ -84,12 +85,12 @@ async def _llm_chain_lease():
     try:
         timeout = int(
             config_registry.get_value(
-                "LLM_CHAIN_LEASE_TIMEOUT_SEC", 300, value_type=int
+                "LLM_CHAIN_LEASE_TIMEOUT_SEC", 600, value_type=int
             )
-            or 300
+            or 600
         )
     except Exception:
-        timeout = 300
+        timeout = 600
 
     acquired = False
     try:

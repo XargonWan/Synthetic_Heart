@@ -3,9 +3,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 from typing import TYPE_CHECKING
 
+from core.logging_utils import log_warning
 from plugins.iris_base import IrisEngineBase, IrisResult
 
 if TYPE_CHECKING:
@@ -26,6 +28,17 @@ class ExternalIrisEngine(IrisEngineBase):
         self._adapter._engine_label = endpoint.name or "iris_bridge"
         self.display_name = f"{endpoint.display_label or endpoint.name} (Vision)"
 
+    def _get_request_timeout(self) -> float:
+        """Get the request timeout from endpoint extra_config or use a safe default."""
+        extra = self._endpoint.extra_config or {}
+        timeout = extra.get("timeout")
+        if timeout is not None:
+            try:
+                return float(timeout)
+            except (ValueError, TypeError):
+                pass
+        return 120.0
+
     async def describe_image(
         self,
         file_path: str,
@@ -43,13 +56,23 @@ class ExternalIrisEngine(IrisEngineBase):
         if not image_bytes:
             return None
 
+        request_timeout = self._get_request_timeout()
         try:
-            text = await self._adapter.describe_image(
-                image_bytes,
-                mime_type=mime_type,
-                prompt=prompt,
-                model=model or self._endpoint.default_model,
+            text = await asyncio.wait_for(
+                self._adapter.describe_image(
+                    image_bytes,
+                    mime_type=mime_type,
+                    prompt=prompt,
+                    model=model or self._endpoint.default_model,
+                ),
+                timeout=request_timeout,
             )
+        except asyncio.TimeoutError:
+            log_warning(
+                f"[iris_bridge:{self._endpoint.name}] describe_image timed out "
+                f"after {request_timeout}s"
+            )
+            return None
         except Exception:
             return None
 
