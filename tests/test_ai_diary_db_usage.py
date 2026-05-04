@@ -186,6 +186,163 @@ async def test_upsert_retries_insert_when_user_message_overflows(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_upsert_refreshes_origin_fields_from_real_message_context(monkeypatch):
+    class UpdateOriginCursor:
+        def __init__(self):
+            self.executed = []
+            self._last_query = ""
+
+        async def execute(self, q, params=None):
+            self._last_query = q
+            self.executed.append((q, params))
+
+        async def fetchone(self):
+            if "INFORMATION_SCHEMA.COLUMNS" in self._last_query:
+                return ("text", None)
+            if "FROM ai_diary WHERE DATE(timestamp) = CURDATE()" in self._last_query:
+                return (
+                    99,
+                    "existing content",
+                    "existing thought",
+                    "existing summary",
+                    "existing user",
+                    "[]",
+                    "[]",
+                    "[]",
+                    "grillo",
+                    "-1",
+                    None,
+                )
+            return None
+
+    class UpdateOriginConn:
+        def __init__(self, cursor):
+            self._cursor = cursor
+            self.commits = 0
+
+        async def cursor(self):
+            return self._cursor
+
+        async def commit(self):
+            self.commits += 1
+
+    class UpdateOriginCtx:
+        def __init__(self):
+            self.cursor = UpdateOriginCursor()
+            self.conn = UpdateOriginConn(self.cursor)
+
+        async def __aenter__(self):
+            return self.conn
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    ctx = UpdateOriginCtx()
+    monkeypatch.setattr(ai_diary, "get_db", lambda: ctx)
+
+    entry_id = await ai_diary._upsert_diary_impl(
+        content="content",
+        personal_thought="thought",
+        emotions=[],
+        interaction_summary="summary",
+        user_message="user",
+        context_tags=[],
+        involved_users=[],
+        interface="telegram_bot",
+        chat_id="123",
+        thread_id="777",
+    )
+
+    assert entry_id == 99
+    update_calls = [
+        params for q, params in ctx.cursor.executed if "UPDATE ai_diary" in q
+    ]
+    assert len(update_calls) == 1
+    assert update_calls[0][7] == "telegram_bot"
+    assert update_calls[0][8] == "123"
+    assert update_calls[0][9] == "777"
+    assert ctx.conn.commits == 1
+
+
+@pytest.mark.asyncio
+async def test_upsert_does_not_replace_real_interface_with_diary_merge(monkeypatch):
+    class UpdateOriginCursor:
+        def __init__(self):
+            self.executed = []
+            self._last_query = ""
+
+        async def execute(self, q, params=None):
+            self._last_query = q
+            self.executed.append((q, params))
+
+        async def fetchone(self):
+            if "INFORMATION_SCHEMA.COLUMNS" in self._last_query:
+                return ("text", None)
+            if "FROM ai_diary WHERE DATE(timestamp) = CURDATE()" in self._last_query:
+                return (
+                    99,
+                    "existing content",
+                    "existing thought",
+                    "existing summary",
+                    "existing user",
+                    "[]",
+                    "[]",
+                    "[]",
+                    "telegram_bot",
+                    "123",
+                    "777",
+                )
+            return None
+
+    class UpdateOriginConn:
+        def __init__(self, cursor):
+            self._cursor = cursor
+            self.commits = 0
+
+        async def cursor(self):
+            return self._cursor
+
+        async def commit(self):
+            self.commits += 1
+
+    class UpdateOriginCtx:
+        def __init__(self):
+            self.cursor = UpdateOriginCursor()
+            self.conn = UpdateOriginConn(self.cursor)
+
+        async def __aenter__(self):
+            return self.conn
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    ctx = UpdateOriginCtx()
+    monkeypatch.setattr(ai_diary, "get_db", lambda: ctx)
+
+    entry_id = await ai_diary._upsert_diary_impl(
+        content="merged content",
+        personal_thought="thought",
+        emotions=[],
+        interaction_summary="summary",
+        user_message="user",
+        context_tags=[],
+        involved_users=[],
+        interface="diary_merge",
+        chat_id="123",
+        thread_id="777",
+    )
+
+    assert entry_id == 99
+    update_calls = [
+        params for q, params in ctx.cursor.executed if "UPDATE ai_diary" in q
+    ]
+    assert len(update_calls) == 1
+    assert update_calls[0][7] == "telegram_bot"
+    assert update_calls[0][8] == "123"
+    assert update_calls[0][9] == "777"
+
+
+@pytest.mark.asyncio
 async def test_on_debrief_uses_postgres_string_agg(monkeypatch):
     captured: dict[str, object] = {}
 

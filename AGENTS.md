@@ -383,6 +383,38 @@ docker exec synth-dev tail -f /app/logs/synth.log | grep -E "\[grillo\]|grillo"
 
 ---
 
+### `mcp_synth-db_get_recent_diary` still queries a stale `created_at` column  <!-- 2026-05-04 -->
+**Symptom:** The MCP diary helper returns `DB error: (1054, "Unknown column 'created_at' in 'SELECT'")` even though `ai_diary` uses `timestamp`.
+**Location:** `synth-db` MCP diary helper / live `ai_diary` schema mismatch.
+**Status:** fixed.
+**Notes:** `get_recent_diary()` now queries the canonical `timestamp` column and dynamically limits the selected columns to those actually present in the current schema.
+
+---
+
+### `grillo_activity_log` inserts could return `None` ids on Postgres  <!-- 2026-05-04 -->
+**Symptom:** Logs showed lines like `[grillo_outreach] Created activity log None`, followed by outreach rows that existed in `grillo_activity_log` but kept `response_text` / `diary_entry_id` as `NULL` because downstream code never learned the inserted row id.
+**Location:** `plugins/grillo/grillo_impl.py`, `GrilloPlugin.create_activity_log`.
+**Status:** fixed.
+**Notes:** MariaDB callers relied on `cursor.lastrowid`, but the Postgres compat cursor only populates `lastrowid` when the statement returns rows. The insert path now uses `RETURNING id` on Postgres and Grillo synthetic messages also carry the activity id in `message_id` for fallback recovery.
+
+---
+
+### Automatic diary logging could create internal `diary_consolidation` noise rows  <!-- 2026-05-04 -->
+**Symptom:** `ai_diary` could gain rows whose `content` looked like `Performed update_diary_entry action` and whose `user_message` started with `[DIARY CONSOLIDATION - INTERNAL SYSTEM TASK] ...`.
+**Location:** `core/action_parser.py`, automatic diary hook in `_create_diary_entry_for_actions`.
+**Status:** fixed.
+**Notes:** Internal merge beats execute `update_diary_entry` as maintenance, not as a user-facing interaction. The diary hook now skips auto-entry creation for `beat_type == "diary_consolidation"` / `interface == "diary_merge"` so consolidation work no longer pollutes introspection rows.
+
+---
+
+### `diary_merge` upserts could overwrite a real `ai_diary.interface` origin  <!-- 2026-05-04 -->
+**Symptom:** A same-day diary update triggered by internal merge flow could replace a real external interface such as `telegram_bot` with `diary_merge`, making the row look system-generated.
+**Location:** `plugins/ai_diary.py`, `_merge_diary_interface` during same-day upsert merge.
+**Status:** fixed.
+**Notes:** `diary_merge` is an internal maintenance interface and should be treated like `grillo` / `unknown` for origin merge purposes. The merge helper now preserves meaningful external origins instead of promoting `diary_merge`.
+
+---
+
 ### Corrector returns empty when `successful_actions = []`  <!-- 2026-04-13 -->
 **Symptom:** LLM outputs actions without a `type` field (e.g. `{"arousal": 5}`). The unsupported-action check fires, sets `correction_context` with `successful_actions=[]`, and calls the corrector. The corrector told the LLM "PARTIAL SUCCESS — 0 actions succeeded, do NOT repeat successful ones", which was self-contradictory and caused the LLM to return an empty string all 4 attempts → fallback '😵'.
 **Location:** `core/transport_layer.py` → `run_corrector_middleware`, the `if correction_context:` block that builds `correction_message_text`.
@@ -587,7 +619,7 @@ docker exec synth-dev tail -f /app/logs/synth.log | grep -E "\[grillo\]|grillo"
 **Symptom:** Runtime logs show `get_static_injection() on SoulPlugin timed out after 5s` even though memcells and embeddings are present in Postgres; direct profiling shows `PostgresSoulRepository.recall_memories()` taking about 5.2 seconds on warm calls.
 **Location:** `core/soul/repository.py` (`PostgresSoulRepository.recall_memories`), SOUL Postgres tables `mem_cells` / `mem_cell_vectors`.
 **Status:** fixed.
-**Notes:** The lexical fallback query used unindexed `atomic_facts::text` trigram checks plus a composite `to_tsvector(episodic_trace || atomic_facts::text)` expression, forcing a sequential scan over `mem_cells`. Candidate selection now stays on indexed `episodic_trace` trigram/tsvector expressions and computes richer episodic-trace-plus-atomic-facts lexical overlap in Python after fetch. Live probe on `2026-04-19` dropped warm repo recall from about `5.2s` to about `3.3s` end-to-end static injection. When verifying SOUL state, query the separate `SOUL_POSTGRES_DSN` store directly; the `synth-db` MCP points at the legacy `synth` schema and cannot see `mem_cells`.
+**Notes:** The lexical fallback query used unindexed `atomic_facts::text` trigram checks plus a composite `to_tsvector(episodic_trace || atomic_facts::text)` expression, forcing a sequential scan over `mem_cells`. Candidate selection now stays on indexed `episodic_trace` trigram/tsvector expressions and computes richer episodic-trace-plus-atomic-facts lexical overlap in Python after fetch. Live probe on `2026-04-19` dropped warm repo recall from about `5.2s` to about `3.3s` end-to-end static injection. The `synth-db` MCP now supports explicit `target` selection (`runtime`, `source`, `soul`, `process_env`) so SOUL-state inspection no longer requires a separate ad hoc query path.
 
 ---
 

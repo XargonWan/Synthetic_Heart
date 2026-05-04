@@ -3,6 +3,7 @@ import inspect
 import time
 import queue as _thread_queue
 import heapq
+import re
 from datetime import datetime
 import traceback
 from types import SimpleNamespace
@@ -41,6 +42,22 @@ _counter = 0  # Monotonic counter to prevent dict comparison when priorities are
 # This prevents duplicate responses when a grillo outreach beat and a user
 # message target the same interface_path concurrently.
 _bg_tasks: dict[str, asyncio.Task] = {}
+
+_GRILLO_ACTIVITY_MESSAGE_ID_RE = re.compile(r"^grillo_[a-z_]+_(\d+)$")
+
+
+def _extract_grillo_activity_log_id(message: object) -> int | None:
+    """Recover a Grillo activity id from a synthetic message id when needed."""
+    message_id = getattr(message, "message_id", None)
+    if not isinstance(message_id, str):
+        return None
+    match = _GRILLO_ACTIVITY_MESSAGE_ID_RE.match(message_id.strip())
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except (TypeError, ValueError):
+        return None
 
 
 def _get_queue() -> asyncio.PriorityQueue:
@@ -939,6 +956,15 @@ async def _consumer_loop() -> None:
                     # Add interface_path to context dict so prompt_engine can access it
                     context = final.get("context", {})
                     if isinstance(context, dict):
+                        if not context.get("activity_log_id"):
+                            recovered_activity_log_id = _extract_grillo_activity_log_id(
+                                final.get("message")
+                            )
+                            if recovered_activity_log_id is not None:
+                                context["activity_log_id"] = recovered_activity_log_id
+                                context["grillo_activity_log_id"] = (
+                                    recovered_activity_log_id
+                                )
                         context["interface_path"] = interface_path
                         context["thread_id"] = thread_id
                         # Propagate trainer flag so plugin_instance can route

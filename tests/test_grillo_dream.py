@@ -15,6 +15,8 @@ async def test_build_dream_prompt_contains_instructions():
     assert "Rely SOLELY on the provided fragments" in prompt
     assert "Do NOT output any text outside a valid JSON object" in prompt
     assert "INSTRUCTIONS (dream):" in prompt
+    assert "personal_thought" in prompt
+    assert "emotions" in prompt
 
 
 @pytest.mark.asyncio

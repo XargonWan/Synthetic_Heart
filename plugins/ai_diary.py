@@ -519,6 +519,46 @@ def _clip_for_column(text: str | None, max_len: int) -> str | None:
     return f"{text[:keep]}{suffix}"
 
 
+def _normalize_diary_origin_value(value: Any) -> str | None:
+    """Normalize optional diary origin metadata into a comparable string."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text or text.lower() in {"none", "null"}:
+        return None
+    return text
+
+
+def _merge_diary_interface(existing: Any, incoming: Any) -> str | None:
+    """Prefer meaningful external interfaces over placeholders/internal ones."""
+    internal_interfaces = {"unknown", "grillo", "diary_merge"}
+    existing_text = _normalize_diary_origin_value(existing)
+    incoming_text = _normalize_diary_origin_value(incoming)
+    if incoming_text and incoming_text not in internal_interfaces:
+        return incoming_text
+    if existing_text and existing_text not in internal_interfaces:
+        return existing_text
+    return incoming_text or existing_text
+
+
+def _merge_diary_chat_id(existing: Any, incoming: Any) -> str | None:
+    """Prefer real chat ids over internal sentinel ids when merging a day row."""
+    existing_text = _normalize_diary_origin_value(existing)
+    incoming_text = _normalize_diary_origin_value(incoming)
+    if incoming_text and incoming_text != "-1":
+        return incoming_text
+    if existing_text and existing_text != "-1":
+        return existing_text
+    return incoming_text or existing_text
+
+
+def _merge_diary_thread_id(existing: Any, incoming: Any) -> str | None:
+    """Fill thread ids when available without blanking an existing value."""
+    return _normalize_diary_origin_value(incoming) or _normalize_diary_origin_value(
+        existing
+    )
+
+
 def _is_user_message_overflow_error(exc: Exception) -> bool:
     """Check whether DB error corresponds to ai_diary.user_message overflow."""
     msg = str(exc).lower()
@@ -554,7 +594,8 @@ async def _upsert_diary_impl(
             # Look for today's entry
             await cursor.execute(
                 "SELECT id, content, personal_thought, interaction_summary, "
-                "user_message, emotions, context_tags, involved_users "
+                "user_message, emotions, context_tags, involved_users, "
+                "interface, chat_id, thread_id "
                 "FROM ai_diary WHERE DATE(timestamp) = CURDATE() "
                 "ORDER BY timestamp DESC LIMIT 1"
             )
@@ -569,6 +610,9 @@ async def _upsert_diary_impl(
                     ex_emotions,
                     ex_tags,
                     ex_involved,
+                    ex_interface,
+                    ex_chat_id,
+                    ex_thread_id,
                 ) = existing
                 merged_content = (
                     f"{ex_content}{_SEP}{content}" if ex_content else content
@@ -589,11 +633,15 @@ async def _upsert_diary_impl(
                     else (user_message or ex_user_msg)
                 )
                 merged_user_msg = _clip_for_column(merged_user_msg, user_message_limit)
+                merged_interface = _merge_diary_interface(ex_interface, interface)
+                merged_chat_id = _merge_diary_chat_id(ex_chat_id, chat_id)
+                merged_thread_id = _merge_diary_thread_id(ex_thread_id, thread_id)
                 update_sql = """
                     UPDATE ai_diary
                     SET content=%s, personal_thought=%s, interaction_summary=%s,
                         user_message=%s, emotions=%s, context_tags=%s,
-                        involved_users=%s, timestamp=NOW()
+                        involved_users=%s, interface=%s, chat_id=%s,
+                        thread_id=%s, timestamp=NOW()
                     WHERE id=%s
                     """
                 update_params = (
@@ -604,6 +652,9 @@ async def _upsert_diary_impl(
                     json.dumps(_merge_json_list(ex_emotions, emotions)),
                     json.dumps(_merge_json_list(ex_tags, context_tags)),
                     json.dumps(_merge_json_list(ex_involved, involved_users)),
+                    merged_interface,
+                    merged_chat_id,
+                    merged_thread_id,
                     ex_id,
                 )
                 try:

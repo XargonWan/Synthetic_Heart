@@ -104,7 +104,31 @@ async def test_grillo_outreach_prompt_generation() -> None:
 
     assert "G.R.I.L.L.O. OUTREACH" in prompt
     assert "message_telegram_bot" in prompt
+    assert "create_personal_diary_entry" in prompt
+    assert "personal_thought" in prompt
+    assert "emotions" in prompt
     assert "Test context 1" in prompt
+
+
+@pytest.mark.asyncio
+async def test_grillo_reflection_prompts_request_introspection_fields() -> None:
+    from plugins.grillo.grillo_self_reflection import GrilloSelfReflectionPlugin
+    from plugins.grillo.grillo_curiosity import GrilloCuriosityPlugin
+    from plugins.grillo.grillo_tag import GrilloTagPlugin
+    from plugins.grillo.grillo_relationship import GrilloRelationshipPlugin
+
+    prompts = [
+        await GrilloSelfReflectionPlugin().build_prompt(),
+        await GrilloCuriosityPlugin().build_prompt(),
+        await GrilloTagPlugin().build_prompt(),
+        await GrilloRelationshipPlugin().build_prompt(),
+    ]
+
+    for prompt in prompts:
+        assert "create_personal_diary_entry" in prompt
+        assert "interaction_summary" in prompt
+        assert "personal_thought" in prompt
+        assert "emotions" in prompt
 
 
 @pytest.mark.asyncio
@@ -139,7 +163,7 @@ async def test_grillo_response_extraction() -> None:
 @pytest.mark.asyncio
 async def test_grillo_activity_log_creation() -> None:
     """Test activity log creation."""
-    mock_ctx, _ = _create_mock_db_context()
+    mock_ctx, mock_cursor = _create_mock_db_context()
 
     def mock_get_conn_ctx() -> MagicMock:
         return mock_ctx
@@ -157,8 +181,42 @@ async def test_grillo_activity_log_creation() -> None:
         )
 
         assert result == 999
+        _, params = mock_cursor.execute.await_args_list[0][0]
+        assert params[2] == "{}"
     finally:
         core.db.get_conn_ctx = original
+
+
+@pytest.mark.asyncio
+async def test_grillo_activity_log_creation_postgres_returns_id() -> None:
+    """Postgres inserts should use RETURNING id instead of relying on lastrowid."""
+    mock_ctx, mock_cursor = _create_mock_db_context()
+    mock_cursor.lastrowid = None
+    mock_cursor.fetchone = AsyncMock(return_value={"id": 4242})
+
+    def mock_get_conn_ctx() -> MagicMock:
+        return mock_ctx
+
+    import core.db
+
+    original_get_conn_ctx = core.db.get_conn_ctx
+    original_get_db_type = core.db._get_db_type
+    core.db.get_conn_ctx = mock_get_conn_ctx  # type: ignore[assignment]
+    core.db._get_db_type = lambda: "postgres"  # type: ignore[assignment]
+
+    try:
+        from plugins.grillo.grillo_impl import GrilloPlugin
+
+        result = await GrilloPlugin.create_activity_log(
+            beat_type="test_beat", prompt_text="Test prompt"
+        )
+
+        assert result == 4242
+        executed_sql = mock_cursor.execute.await_args_list[0][0][0]
+        assert "RETURNING id" in executed_sql
+    finally:
+        core.db.get_conn_ctx = original_get_conn_ctx
+        core.db._get_db_type = original_get_db_type
 
 
 @pytest.mark.asyncio

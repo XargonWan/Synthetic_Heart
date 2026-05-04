@@ -3,6 +3,7 @@
 
 import asyncio
 import inspect
+import re
 import time
 from typing import Any, Dict, List, Tuple
 
@@ -23,6 +24,7 @@ register_action_safety_config()
 
 _retry_tracker = {}
 _STATIC_INJECTION_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+_GRILLO_ACTIVITY_MESSAGE_ID_RE = re.compile(r"^grillo_[a-z_]+_(\d+)$")
 
 
 def _extract_json_local(text: str):
@@ -34,6 +36,93 @@ def _extract_json_local(text: str):
     from core.transport_layer import extract_json_from_text
 
     return extract_json_from_text(text, return_metadata=False)
+
+
+def _extract_grillo_activity_log_id(
+    context: Dict[str, Any] | None, message: Any
+) -> int | None:
+    """Resolve the current Grillo activity id from context or synthetic message id."""
+    if isinstance(context, dict):
+        for key in ("activity_log_id", "grillo_activity_log_id"):
+            value = context.get(key)
+            if value is None:
+                continue
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                continue
+
+    message_id = getattr(message, "message_id", None)
+    if not isinstance(message_id, str):
+        return None
+
+    match = _GRILLO_ACTIVITY_MESSAGE_ID_RE.match(message_id.strip())
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except (TypeError, ValueError):
+        return None
+
+
+def _normalize_diary_emotions(emotions_payload: Any) -> List[Dict[str, Any]]:
+    """Normalize emotion payloads into ai_diary's list-of-dicts shape."""
+    if isinstance(emotions_payload, list):
+        normalized: List[Dict[str, Any]] = []
+        for entry in emotions_payload:
+            if isinstance(entry, dict) and entry.get("type"):
+                normalized.append(entry)
+        return normalized
+
+    if not isinstance(emotions_payload, dict):
+        return []
+
+    normalized = []
+    for emotion_type, intensity in emotions_payload.items():
+        normalized.append({"type": str(emotion_type), "intensity": intensity})
+    return normalized
+
+
+def _extract_diary_metadata_from_actions(
+    processed_actions: List[Dict[str, Any]],
+    context: Dict[str, Any] | None,
+) -> Dict[str, Any]:
+    """Collect diary metadata explicitly expressed by the LLM across actions/meta."""
+    diary_payload: Dict[str, Any] = {}
+
+    for action in processed_actions:
+        if action.get("type") == "create_personal_diary_entry":
+            payload = action.get("payload") or {}
+            if isinstance(payload, dict):
+                diary_payload.update(payload)
+            break
+
+    if not diary_payload.get("emotions"):
+        for action in reversed(processed_actions):
+            if action.get("type") != "update_emotion_state":
+                continue
+            payload = action.get("payload") or {}
+            if isinstance(payload, dict):
+                emotions_payload = payload.get("emotions", payload)
+                diary_payload["emotions"] = _normalize_diary_emotions(emotions_payload)
+            break
+
+    llm_response_text = (
+        context.get("llm_response_text") if isinstance(context, dict) else None
+    )
+    if isinstance(llm_response_text, str) and llm_response_text.strip():
+        parsed_llm = _extract_json_local(llm_response_text)
+        if isinstance(parsed_llm, dict):
+            meta = parsed_llm.get("meta") or {}
+            rationale = meta.get("rationale") if isinstance(meta, dict) else None
+            if (
+                isinstance(meta, dict)
+                and isinstance(rationale, str)
+                and rationale.strip()
+            ):
+                diary_payload.setdefault("personal_thought", rationale.strip())
+
+    return diary_payload
 
 
 def _maybe_unescape_text_in_payload(payload: dict) -> None:
@@ -1752,17 +1841,29 @@ async def _create_diary_entry_for_actions(processed_actions, context, original_m
             log_debug("[action_parser] Diary plugin disabled, skipping diary entry")
             return
 
+        if isinstance(context, dict) and (
+            context.get("beat_type") == "diary_consolidation"
+            or context.get("interface") == "diary_merge"
+        ):
+            log_debug(
+                "[action_parser] Skipping automatic diary entry for internal diary consolidation"
+            )
+            return
+
         # Extract relevant information
         interface_name = context.get("interface", "unknown")
         chat_id = getattr(original_message, "chat_id", None)
+        thread_id = getattr(original_message, "thread_id", None)
+        if thread_id is None:
+            thread_id = getattr(original_message, "message_thread_id", None)
+        if thread_id is None and isinstance(context, dict):
+            thread_id = context.get("thread_id") or context.get("payload_thread_id")
 
         # Prefer LLM-provided diary metadata when present.
         # This avoids generic/hardcoded reflections unrelated to the real context.
-        llm_diary_payload = {}
-        for action in processed_actions:
-            if action.get("type") == "create_personal_diary_entry":
-                llm_diary_payload = action.get("payload") or {}
-                break
+        llm_diary_payload = _extract_diary_metadata_from_actions(
+            processed_actions, context if isinstance(context, dict) else None
+        )
 
         # Get user message from context or original_message
         user_message = ""
@@ -1866,9 +1967,11 @@ async def _create_diary_entry_for_actions(processed_actions, context, original_m
             involved_users=involved_list,
             interface=interface_name,
             chat_id=str(chat_id) if chat_id else None,
-            grillo_activity_log_id=context.get("activity_log_id")
-            if isinstance(context, dict)
-            else None,
+            thread_id=str(thread_id) if thread_id is not None else None,
+            grillo_activity_log_id=_extract_grillo_activity_log_id(
+                context if isinstance(context, dict) else None,
+                original_message,
+            ),
             interaction_summary=llm_diary_payload.get("interaction_summary"),
             personal_thought=llm_diary_payload.get("personal_thought"),
             emotions=llm_diary_payload.get("emotions"),
