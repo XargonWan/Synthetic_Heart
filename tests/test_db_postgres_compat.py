@@ -30,6 +30,60 @@ def test_translate_postgres_sql_strips_mysql_ddl_bits() -> None:
     )
 
 
+def test_primary_db_selector_forces_soul_connection_settings(monkeypatch) -> None:
+    monkeypatch.setenv("SYNTH_PRIMARY_DB", "soul")
+    monkeypatch.setenv("DB_HOST", "memory-db")
+    monkeypatch.setenv("DB_PORT", "3306")
+    monkeypatch.setenv("DB_USER", "memory-user")
+    monkeypatch.setenv("DB_PASS", "memory-pass")
+    monkeypatch.setenv("DB_NAME", "memory-db")
+    monkeypatch.setenv(
+        "SOUL_POSTGRES_DSN",
+        "postgresql://soul_user:soul_pass@soul-db.example:5544/soul_main",
+    )
+    monkeypatch.delenv("SOUL_PG_HOST", raising=False)
+    monkeypatch.delenv("SOUL_PG_PORT", raising=False)
+    monkeypatch.delenv("SOUL_PG_USER", raising=False)
+    monkeypatch.delenv("SOUL_PG_PASSWORD", raising=False)
+    monkeypatch.delenv("SOUL_PG_DB", raising=False)
+
+    assert db_module._get_db_type() == "postgres"
+    assert db_module._get_db_dsn() == (
+        "postgresql://soul_user:soul_pass@soul-db.example:5544/soul_main"
+    )
+    assert db_module._read_db_config() == (
+        "soul-db.example",
+        5544,
+        "soul_user",
+        "soul_pass",
+        "soul_main",
+    )
+
+
+def test_primary_db_selector_forces_memory_connection_settings(monkeypatch) -> None:
+    monkeypatch.setenv("SYNTH_PRIMARY_DB", "memory")
+    monkeypatch.setenv("DB_HOST", "memory-db")
+    monkeypatch.setenv("DB_PORT", "3306")
+    monkeypatch.setenv("DB_USER", "memory-user")
+    monkeypatch.setenv("DB_PASS", "memory-pass")
+    monkeypatch.setenv("DB_NAME", "memory-main")
+    monkeypatch.setenv(
+        "SOUL_POSTGRES_DSN",
+        "postgresql://soul_user:soul_pass@soul-db.example:5544/soul_main",
+    )
+    monkeypatch.setenv("DATABASE_URL", "postgresql://other:other@other-host:5432/other")
+
+    assert db_module._get_db_type() == "mariadb"
+    assert db_module._get_db_dsn() is None
+    assert db_module._read_db_config() == (
+        "memory-db",
+        3306,
+        "memory-user",
+        "memory-pass",
+        "memory-main",
+    )
+
+
 @pytest.mark.asyncio
 async def test_get_conn_ctx_postgres_translates_replace_into(monkeypatch) -> None:
     calls: list[tuple[str, str, tuple[object, ...]]] = []

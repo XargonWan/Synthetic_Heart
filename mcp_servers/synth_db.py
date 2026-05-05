@@ -20,6 +20,7 @@ from pathlib import Path
 import os
 import re
 from typing import Any, Optional
+from urllib.parse import unquote, urlparse
 
 try:
     from mcp.server.fastmcp import FastMCP
@@ -84,6 +85,14 @@ _TARGET_ALIASES = {
     "legacy": "source",
     "process": "process_env",
 }
+_PRIMARY_DB_TARGET_ALIASES = {
+    "memory": "memory",
+    "mariadb": "memory",
+    "mysql": "memory",
+    "soul": "soul",
+    "postgres": "soul",
+    "postgresql": "soul",
+}
 
 
 def _strip_wrapping_quotes(value: str) -> str:
@@ -126,6 +135,28 @@ def _normalize_db_type(value: str | None, default: str = "mariadb") -> str:
     return default
 
 
+def _normalize_primary_db_target(value: str | None) -> str | None:
+    normalized = str(value or "").strip().lower()
+    return _PRIMARY_DB_TARGET_ALIASES.get(normalized)
+
+
+def _parse_dsn_components(
+    dsn: str | None,
+) -> tuple[str | None, int | None, str | None, str | None, str | None]:
+    if not dsn:
+        return None, None, None, None, None
+
+    parsed = urlparse(dsn)
+    database = parsed.path.lstrip("/") or None
+    return (
+        parsed.hostname,
+        parsed.port,
+        unquote(parsed.username) if parsed.username else None,
+        unquote(parsed.password) if parsed.password else None,
+        database,
+    )
+
+
 def _repo_or_process_value(key: str, default: str | None = None) -> str | None:
     repo_value = _REPO_ENV.get(key)
     if repo_value not in {None, ""}:
@@ -150,13 +181,27 @@ def _coerce_port(value: str | None, default: int) -> int:
         return default
 
 
-def _build_runtime_target() -> DbTarget:
-    db_type = _normalize_db_type(
+def _build_runtime_db_target(
+    *, forced_db_type: str | None = None, include_dsn: bool = True
+) -> DbTarget:
+    db_type = forced_db_type or _normalize_db_type(
         _repo_or_process_value(
             "SYNTH_DB_TYPE", _repo_or_process_value("DB_TYPE", "mariadb")
         )
     )
     default_port = 5432 if db_type == "postgres" else 3306
+    dsn = None
+    if include_dsn:
+        dsn = (
+            str(
+                _repo_or_process_value(
+                    "DATABASE_URL", _repo_or_process_value("DB_DSN", "")
+                )
+                or ""
+            )
+            or None
+        )
+
     return DbTarget(
         name="runtime",
         db_type=db_type,
@@ -165,16 +210,76 @@ def _build_runtime_target() -> DbTarget:
         user=str(_repo_or_process_value("DB_USER", "synth") or "synth"),
         password=str(_repo_or_process_value("DB_PASS", "synth") or "synth"),
         database=str(_repo_or_process_value("DB_NAME", "synth") or "synth"),
-        dsn=(
-            str(
-                _repo_or_process_value(
-                    "DATABASE_URL", _repo_or_process_value("DB_DSN", "")
-                )
-                or ""
-            )
-            or None
-        ),
+        dsn=dsn,
     )
+
+
+def _resolve_soul_dsn(*, allow_runtime_fallback: bool = False) -> str | None:
+    dsn = str(_repo_or_process_value("SOUL_POSTGRES_DSN", "") or "") or None
+    if dsn or not allow_runtime_fallback:
+        return dsn
+    return (
+        str(
+            _repo_or_process_value("DATABASE_URL", _repo_or_process_value("DB_DSN", ""))
+            or ""
+        )
+        or None
+    )
+
+
+def _build_soul_target_config(
+    *, name: str = "soul", allow_runtime_fallback: bool = False
+) -> DbTarget | None:
+    soul_dsn = _resolve_soul_dsn(allow_runtime_fallback=allow_runtime_fallback)
+    if not soul_dsn and not any(
+        _repo_or_process_value(key)
+        for key in ("SOUL_PG_DB", "SOUL_PG_USER", "SOUL_PG_HOST", "SOUL_PG_PORT")
+    ):
+        return None
+
+    dsn_host, dsn_port, dsn_user, dsn_pass, dsn_db = _parse_dsn_components(soul_dsn)
+    return DbTarget(
+        name=name,
+        db_type="postgres",
+        host=str(
+            _repo_or_process_value("SOUL_PG_HOST", dsn_host or "localhost")
+            or dsn_host
+            or "localhost"
+        ),
+        port=_coerce_port(_repo_or_process_value("SOUL_PG_PORT"), dsn_port or 5432),
+        user=str(
+            _repo_or_process_value("SOUL_PG_USER", dsn_user or "soul")
+            or dsn_user
+            or "soul"
+        ),
+        password=str(
+            _repo_or_process_value(
+                "SOUL_PG_PASSWORD",
+                _repo_or_process_value("SOUL_PG_PASS", dsn_pass or "soul"),
+            )
+            or dsn_pass
+            or "soul"
+        ),
+        database=str(
+            _repo_or_process_value("SOUL_PG_DB", dsn_db or "soul") or dsn_db or "soul"
+        ),
+        dsn=soul_dsn,
+    )
+
+
+def _build_runtime_target() -> DbTarget:
+    primary_db_target = _normalize_primary_db_target(
+        _repo_or_process_value("SYNTH_PRIMARY_DB")
+    )
+    if primary_db_target == "soul":
+        soul_target = _build_soul_target_config(
+            name="runtime", allow_runtime_fallback=True
+        )
+        if soul_target is not None:
+            return soul_target
+    if primary_db_target == "memory":
+        return _build_runtime_db_target(forced_db_type="mariadb", include_dsn=False)
+    return _build_runtime_db_target()
 
 
 def _build_source_target() -> DbTarget | None:
@@ -210,68 +315,94 @@ def _build_source_target() -> DbTarget | None:
 
 
 def _build_soul_target() -> DbTarget | None:
-    soul_dsn = _repo_or_process_value("SOUL_POSTGRES_DSN", "") or ""
-    if not soul_dsn and not any(
-        _repo_or_process_value(key)
-        for key in ("SOUL_PG_DB", "SOUL_PG_USER", "SOUL_PG_HOST", "SOUL_PG_PORT")
-    ):
-        return None
-
-    runtime_target = _build_runtime_target()
-    return DbTarget(
-        name="soul",
-        db_type="postgres",
-        host=str(
-            _repo_or_process_value("SOUL_PG_HOST", runtime_target.host)
-            or runtime_target.host
-        ),
-        port=_coerce_port(_repo_or_process_value("SOUL_PG_PORT"), runtime_target.port),
-        user=str(
-            _repo_or_process_value("SOUL_PG_USER", runtime_target.user)
-            or runtime_target.user
-        ),
-        password=str(
-            _repo_or_process_value("SOUL_PG_PASSWORD", runtime_target.password)
-            or runtime_target.password
-        ),
-        database=str(
-            _repo_or_process_value("SOUL_PG_DB", runtime_target.database)
-            or runtime_target.database
-        ),
-        dsn=soul_dsn or runtime_target.dsn,
-    )
+    return _build_soul_target_config(name="soul")
 
 
 def _build_process_env_target() -> DbTarget | None:
     if not any(
         _process_value(key)
         for key in (
+            "SYNTH_PRIMARY_DB",
             "DB_TYPE",
             "DB_HOST",
             "DB_PORT",
             "DB_USER",
             "DB_NAME",
             "DATABASE_URL",
+            "SOUL_POSTGRES_DSN",
+            "SOUL_PG_HOST",
+            "SOUL_PG_PORT",
+            "SOUL_PG_USER",
+            "SOUL_PG_DB",
         )
     ):
         return None
 
-    db_type = _normalize_db_type(
-        _process_value("SYNTH_DB_TYPE", _process_value("DB_TYPE", "mariadb"))
-    )
+    primary_db_target = _normalize_primary_db_target(_process_value("SYNTH_PRIMARY_DB"))
+    if primary_db_target == "memory":
+        db_type = "mariadb"
+    elif primary_db_target == "soul":
+        db_type = "postgres"
+    else:
+        db_type = _normalize_db_type(
+            _process_value("SYNTH_DB_TYPE", _process_value("DB_TYPE", "mariadb"))
+        )
     default_port = 5432 if db_type == "postgres" else 3306
+    process_dsn = (
+        str(_process_value("DATABASE_URL", _process_value("DB_DSN", "")) or "") or None
+    )
+    if primary_db_target == "memory":
+        process_dsn = None
+    elif primary_db_target == "soul":
+        process_dsn = (
+            str(
+                _process_value(
+                    "SOUL_POSTGRES_DSN",
+                    _process_value("DATABASE_URL", _process_value("DB_DSN", "")),
+                )
+                or ""
+            )
+            or None
+        )
+
+    dsn_host, dsn_port, dsn_user, dsn_pass, dsn_db = _parse_dsn_components(process_dsn)
+    if primary_db_target == "soul":
+        host = str(
+            _process_value("SOUL_PG_HOST", dsn_host or "localhost")
+            or dsn_host
+            or "localhost"
+        )
+        port = _coerce_port(_process_value("SOUL_PG_PORT"), dsn_port or default_port)
+        user = str(
+            _process_value("SOUL_PG_USER", dsn_user or "soul") or dsn_user or "soul"
+        )
+        password = str(
+            _process_value(
+                "SOUL_PG_PASSWORD",
+                _process_value("SOUL_PG_PASS", dsn_pass or "soul"),
+            )
+            or dsn_pass
+            or "soul"
+        )
+        database = str(
+            _process_value("SOUL_PG_DB", dsn_db or "soul") or dsn_db or "soul"
+        )
+    else:
+        host = str(_process_value("DB_HOST", "localhost") or "localhost")
+        port = _coerce_port(_process_value("DB_PORT"), default_port)
+        user = str(_process_value("DB_USER", "synth") or "synth")
+        password = str(_process_value("DB_PASS", "synth") or "synth")
+        database = str(_process_value("DB_NAME", "synth") or "synth")
+
     return DbTarget(
         name="process_env",
         db_type=db_type,
-        host=str(_process_value("DB_HOST", "localhost") or "localhost"),
-        port=_coerce_port(_process_value("DB_PORT"), default_port),
-        user=str(_process_value("DB_USER", "synth") or "synth"),
-        password=str(_process_value("DB_PASS", "synth") or "synth"),
-        database=str(_process_value("DB_NAME", "synth") or "synth"),
-        dsn=(
-            str(_process_value("DATABASE_URL", _process_value("DB_DSN", "")) or "")
-            or None
-        ),
+        host=host,
+        port=port,
+        user=user,
+        password=password,
+        database=database,
+        dsn=process_dsn,
     )
 
 

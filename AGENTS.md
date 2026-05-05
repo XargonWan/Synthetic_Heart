@@ -791,6 +791,14 @@ docker exec synth-dev tail -f /app/logs/synth.log | grep -E "\[grillo\]|grillo"
 
 ---
 
+### `SYNTH_PRIMARY_DB=memory` can inherit stale MariaDB cortex settings for Grillo  <!-- 2026-05-05 -->
+**Symptom:** After switching to `SYNTH_PRIMARY_DB=memory`, fresh `grillo_activity_log` rows can appear in MariaDB with empty `response_text` / `diary_entry_id`, while logs show `[cortex_bridge:<engine>] generate_response failed: Connection error.` for internal `grillo/-1` beats.
+**Location:** Selected primary DB config registry (`BASE_CORTEX`, `GRILLO_CORTEX`) plus runtime Grillo prompt execution.
+**Status:** known / configuration-dependent.
+**Notes:** The DB selector itself can work correctly while still exposing older config values from the chosen DB. In the observed MariaDB case, `GRILLO_CORTEX=Default` fell through to `BASE_CORTEX=gemma`, so Grillo inherited a dead engine after the switch. When changing primary DBs, verify or realign the selected DB's cortex config keys, not just the connection settings.
+
+---
+
 ## 13. Database Quick Reference
 
 > Tables are created inline in `core/db.py` and each plugin — **`init-db.sql` only seeds a subset.** If you need a table's full column list, `grep -A20 "CREATE TABLE IF NOT EXISTS <name>"` in the relevant file.
@@ -886,7 +894,7 @@ All keys stored in the `config` table and accessible via `config_registry.get_va
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **synthetic_heart** (9044 symbols, 29174 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **Synthetic_Heart** (9433 symbols, 30446 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
 
@@ -902,7 +910,7 @@ This project is indexed by GitNexus as **synthetic_heart** (9044 symbols, 29174 
 
 1. `gitnexus_query({query: "<error or symptom>"})` — find execution flows related to the issue
 2. `gitnexus_context({name: "<suspect function>"})` — see all callers, callees, and process participation
-3. `READ gitnexus://repo/synthetic_heart/process/{processName}` — trace the full execution flow step by step
+3. `READ gitnexus://repo/Synthetic_Heart/process/{processName}` — trace the full execution flow step by step
 4. For regressions: `gitnexus_detect_changes({scope: "compare", base_ref: "main"})` — see what your branch changed
 
 ## When Refactoring
@@ -941,10 +949,10 @@ This project is indexed by GitNexus as **synthetic_heart** (9044 symbols, 29174 
 
 | Resource | Use for |
 |----------|---------|
-| `gitnexus://repo/synthetic_heart/context` | Codebase overview, check index freshness |
-| `gitnexus://repo/synthetic_heart/clusters` | All functional areas |
-| `gitnexus://repo/synthetic_heart/processes` | All execution flows |
-| `gitnexus://repo/synthetic_heart/process/{name}` | Step-by-step execution trace |
+| `gitnexus://repo/Synthetic_Heart/context` | Codebase overview, check index freshness |
+| `gitnexus://repo/Synthetic_Heart/clusters` | All functional areas |
+| `gitnexus://repo/Synthetic_Heart/processes` | All execution flows |
+| `gitnexus://repo/Synthetic_Heart/process/{name}` | Step-by-step execution trace |
 
 ## Self-Check Before Finishing
 

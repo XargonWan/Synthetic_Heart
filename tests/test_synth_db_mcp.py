@@ -6,13 +6,14 @@ def test_configured_targets_prefer_repo_env(monkeypatch):
         synth_db,
         "_REPO_ENV",
         {
-            "DB_TYPE": "postgres",
+            "SYNTH_PRIMARY_DB": "soul",
+            "DB_TYPE": "mariadb",
             "DB_HOST": "192.168.1.13",
-            "DB_PORT": "5432",
-            "DB_USER": "soul",
-            "DB_PASS": "soul",
-            "DB_NAME": "soul",
-            "DATABASE_URL": "postgresql://soul:soul@192.168.1.13:5432/soul",
+            "DB_PORT": "3306",
+            "DB_USER": "raineadmin",
+            "DB_PASS": "secret",
+            "DB_NAME": "synth",
+            "DATABASE_URL": "postgresql://legacy:legacy@ignored:5432/ignored",
             "SOURCE_DB_HOST": "192.168.1.13",
             "SOURCE_DB_PORT": "3306",
             "SOURCE_DB_USER": "raineadmin",
@@ -32,6 +33,56 @@ def test_configured_targets_prefer_repo_env(monkeypatch):
     assert targets["source"].db_type == "mariadb"
     assert targets["source"].database == "synth"
     assert targets["soul"].db_type == "postgres"
+
+
+def test_runtime_target_can_be_forced_to_memory(monkeypatch):
+    monkeypatch.setattr(
+        synth_db,
+        "_REPO_ENV",
+        {
+            "SYNTH_PRIMARY_DB": "memory",
+            "DB_TYPE": "mariadb",
+            "DB_HOST": "192.168.1.13",
+            "DB_PORT": "3306",
+            "DB_USER": "raineadmin",
+            "DB_PASS": "secret",
+            "DB_NAME": "synth",
+            "DATABASE_URL": "postgresql://legacy:legacy@ignored:5432/ignored",
+            "SOUL_POSTGRES_DSN": "postgresql://soul:soul@192.168.1.13:5432/soul",
+        },
+    )
+
+    targets = synth_db._configured_targets()
+
+    assert targets["runtime"].db_type == "mariadb"
+    assert targets["runtime"].database == "synth"
+    assert targets["runtime"].dsn is None
+
+
+def test_process_env_target_uses_soul_settings_when_selected(monkeypatch):
+    monkeypatch.setenv("SYNTH_PRIMARY_DB", "soul")
+    monkeypatch.setenv(
+        "SOUL_POSTGRES_DSN",
+        "postgresql://soul:soul@soul-host:5544/soul_runtime",
+    )
+    monkeypatch.setenv("SOUL_PG_USER", "soul_user")
+    monkeypatch.setenv("SOUL_PG_PASSWORD", "soul_pass")
+    monkeypatch.delenv("DB_HOST", raising=False)
+    monkeypatch.delenv("DB_PORT", raising=False)
+    monkeypatch.delenv("DB_USER", raising=False)
+    monkeypatch.delenv("DB_PASS", raising=False)
+    monkeypatch.delenv("DB_NAME", raising=False)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+
+    target = synth_db._build_process_env_target()
+
+    assert target is not None
+    assert target.db_type == "postgres"
+    assert target.host == "soul-host"
+    assert target.port == 5544
+    assert target.user == "soul_user"
+    assert target.password == "soul_pass"
+    assert target.database == "soul_runtime"
 
 
 def test_get_db_targets_reports_available_targets(monkeypatch):

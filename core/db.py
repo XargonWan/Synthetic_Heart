@@ -4,6 +4,7 @@ from datetime import datetime, timezone, timedelta
 import calendar
 import asyncio
 import time
+from urllib.parse import unquote, urlparse
 
 from types import SimpleNamespace
 from typing import Any
@@ -43,23 +44,101 @@ from core.config_manager import config_registry
 import os
 
 
+_PRIMARY_DB_TARGET_ALIASES = {
+    "memory": "memory",
+    "mariadb": "memory",
+    "mysql": "memory",
+    "soul": "soul",
+    "postgres": "soul",
+    "postgresql": "soul",
+}
+
+
 # NOTE: To avoid import-time circular dependencies between `core.db` and
 # `core.config_manager` (many modules import `get_conn` at import time),
 # read database configuration lazily from `config_registry` when needed
 # instead of at module import time. This prevents partially-initialized
 # module errors during startup.
+def _get_primary_db_target() -> str | None:
+    value = os.getenv("SYNTH_PRIMARY_DB")
+    normalized = str(value or "").strip().lower()
+    return _PRIMARY_DB_TARGET_ALIASES.get(normalized)
+
+
+def _parse_dsn_components(
+    dsn: str | None,
+) -> tuple[str | None, int | None, str | None, str | None, str | None]:
+    if not dsn:
+        return None, None, None, None, None
+
+    parsed = urlparse(dsn)
+    database = parsed.path.lstrip("/") or None
+    return (
+        parsed.hostname,
+        parsed.port,
+        unquote(parsed.username) if parsed.username else None,
+        unquote(parsed.password) if parsed.password else None,
+        database,
+    )
+
+
+def _get_db_dsn() -> str | None:
+    target = _get_primary_db_target()
+    if target == "memory":
+        return None
+    if target == "soul":
+        return (
+            os.getenv("SOUL_POSTGRES_DSN")
+            or os.getenv("DATABASE_URL")
+            or os.getenv("DB_DSN")
+        )
+    return os.getenv("DATABASE_URL") or os.getenv("DB_DSN")
+
+
 def _get_db_type() -> str:
+    target = _get_primary_db_target()
+    if target == "memory":
+        return "mariadb"
+    if target == "soul":
+        return "postgres"
+
     value = os.getenv("SYNTH_DB_TYPE", os.getenv("DB_TYPE", "mariadb"))
     normalized = str(value or "mariadb").strip().lower()
-    return normalized if normalized in {"mariadb", "postgres"} else "mariadb"
+    if normalized in {"mysql", "mariadb"}:
+        return "mariadb"
+    if normalized in {"postgres", "postgresql"}:
+        return "postgres"
+    return "mariadb"
 
 
 def _read_db_config():
     """Return DB_HOST, DB_PORT, DB_USER, DB_PASS, DB_NAME reading from
     config_registry when available, otherwise from environment or defaults.
     """
+    target = _get_primary_db_target()
     backend = _get_db_type()
     default_port = 5432 if backend == "postgres" else 3306
+
+    if target == "soul":
+        dsn = _get_db_dsn()
+        dsn_host, dsn_port, dsn_user, dsn_pass, dsn_name = _parse_dsn_components(dsn)
+
+        env_host = os.getenv("SOUL_PG_HOST")
+        env_port = os.getenv("SOUL_PG_PORT")
+        env_user = os.getenv("SOUL_PG_USER")
+        env_pass = os.getenv("SOUL_PG_PASSWORD") or os.getenv("SOUL_PG_PASS")
+        env_name = os.getenv("SOUL_PG_DB")
+
+        host = env_host or dsn_host or "localhost"
+        try:
+            port = int(env_port) if env_port is not None else (dsn_port or default_port)
+        except Exception:
+            port = dsn_port or default_port
+        user = env_user or dsn_user or "soul"
+        passwd = env_pass or dsn_pass or "soul"
+        dbname = env_name or dsn_name or "soul"
+        return host, port, user, passwd, dbname
+
     # DB connection settings must be environment-driven.
     # If a previous run persisted an incorrect DB_HOST (e.g. "localhost") into
     # config_registry/DB, preferring that value can lock the system out of DB.
@@ -113,7 +192,7 @@ async def wait_for_db(max_attempts=10, delay=3):
                     user=user,
                     password=passwd,
                     database=dbname,
-                    dsn=os.getenv("DATABASE_URL") or os.getenv("DB_DSN"),
+                    dsn=_get_db_dsn(),
                 )
                 await conn.close()
             else:
@@ -257,7 +336,7 @@ async def get_pool():
                         database=dbname,
                         minsize=DB_POOL_MINSIZE,
                         maxsize=DB_POOL_MAXSIZE,
-                        dsn=os.getenv("DATABASE_URL") or os.getenv("DB_DSN"),
+                        dsn=_get_db_dsn(),
                     )
                 else:
                     new_pool = await aiomysql.create_pool(

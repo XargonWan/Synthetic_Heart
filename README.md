@@ -114,9 +114,10 @@ The project ships with an **Ollama-compatible interface** (`interface/ollama_com
 By default, SOUL uses in-memory persistence. To enable persistent SOUL storage:
 
 1. Set these environment variables in your `.env`:
+   - `SYNTH_PRIMARY_DB=soul` if you want the main app DB to use the SOUL Postgres connection explicitly
    - `SOUL_REPOSITORY_BACKEND=postgres`
    - `SOUL_POSTGRES_DSN=postgresql://soul:soul@synth-soul-db:5432/soul_memory`
-   - Optional overrides: `SOUL_PG_DB`, `SOUL_PG_USER`, `SOUL_PG_PASSWORD`, `EXT_SOUL_DB_PORT`
+   - Optional overrides: `SOUL_PG_HOST`, `SOUL_PG_PORT`, `SOUL_PG_DB`, `SOUL_PG_USER`, `SOUL_PG_PASSWORD`, `EXT_SOUL_DB_PORT`
 2. Start the SOUL DB service and apply schema:
    - Linux/macOS: `bash scripts/bootstrap_soul_postgres.sh`
    - Windows PowerShell: `./scripts/bootstrap_soul_postgres.ps1`
