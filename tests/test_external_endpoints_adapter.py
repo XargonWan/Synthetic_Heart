@@ -1,9 +1,12 @@
+import sys
+import types
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
 from core.external_endpoints.adapters.base import ModelInfo
+from core.external_endpoints.adapters.gemini_adapter import GeminiAdapter
 from core.external_endpoints.adapters.openai_compat import OpenAICompatAdapter
 from core.external_endpoints.models import EndpointProtocol, ExternalEndpoint
 
@@ -354,7 +357,7 @@ class FakeOpenAIClient:
 async def test_openai_compat_chat_completion_uses_reasoning_content(monkeypatch):
     adapter = OpenAICompatAdapter(base_url="http://fake-host", api_key="x")
     fake_client = FakeOpenAIClient()
-    adapter._get_client = lambda: fake_client
+    monkeypatch.setattr(adapter, "_get_client", lambda: fake_client)
 
     response = await adapter.chat_completion(
         [{"role": "user", "content": "ping"}], model="qwen/qwen3.5-9b"
@@ -391,11 +394,171 @@ async def test_external_cortex_engine_falls_back_to_first_available_model(monkey
             called["model"] = model
             return SimpleNamespace(content="ok", model=model)
 
-    engine = ExternalCortexEngine(endpoint, FakeAdapter())
+    engine = ExternalCortexEngine(endpoint, cast(Any, FakeAdapter()))
     response = await engine.generate_response([{"role": "user", "content": "ping"}])
 
     assert response == "ok"
     assert called["model"] == "qwen/qwen3.5-9b"
+
+
+@pytest.mark.asyncio
+async def test_gemini_adapter_chat_completion_logs_usage_metadata(monkeypatch):
+    class FakeGenerateContentConfig:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+
+    class FakeSafetySetting:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+
+    fake_types = SimpleNamespace(
+        GenerateContentConfig=FakeGenerateContentConfig,
+        SafetySetting=FakeSafetySetting,
+        HarmCategory=SimpleNamespace(
+            HARM_CATEGORY_HARASSMENT="harassment",
+            HARM_CATEGORY_HATE_SPEECH="hate",
+            HARM_CATEGORY_SEXUALLY_EXPLICIT="sex",
+            HARM_CATEGORY_DANGEROUS_CONTENT="danger",
+        ),
+        HarmBlockThreshold=SimpleNamespace(OFF="OFF"),
+    )
+    fake_google = cast(Any, types.ModuleType("google"))
+    fake_genai = cast(Any, types.ModuleType("google.genai"))
+    fake_genai.types = fake_types
+    fake_google.genai = fake_genai
+    monkeypatch.setitem(sys.modules, "google", fake_google)
+    monkeypatch.setitem(sys.modules, "google.genai", fake_genai)
+
+    captured: dict[str, Any] = {}
+
+    class FakeResponse:
+        def __init__(self) -> None:
+            self.text = '{"actions": []}'
+            self.prompt_feedback = None
+            self.candidates = []
+            self.usage_metadata = SimpleNamespace(
+                prompt_token_count=123,
+                candidates_token_count=45,
+                total_token_count=168,
+                cached_content_token_count=12,
+            )
+
+    class FakeModels:
+        def generate_content(self, **kwargs: Any) -> FakeResponse:
+            captured["generate_kwargs"] = kwargs
+            return FakeResponse()
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.models = FakeModels()
+
+    adapter = GeminiAdapter(api_key="unused")
+    monkeypatch.setattr(adapter, "_get_client", lambda: FakeClient())
+    monkeypatch.setattr(
+        "core.external_endpoints.adapters.gemini_adapter.log_cortex_request",
+        lambda *args, **kwargs: None,
+    )
+
+    def _capture_response(*args: Any, **kwargs: Any) -> None:
+        captured["log_args"] = args
+        captured["log_kwargs"] = kwargs
+
+    monkeypatch.setattr(
+        "core.external_endpoints.adapters.gemini_adapter.log_cortex_response",
+        _capture_response,
+    )
+
+    response = await adapter.chat_completion(
+        [{"role": "user", "content": "ping"}],
+        model="gemini-3.1-flash-lite-preview",
+    )
+
+    assert response.content == '{"actions": []}'
+    assert response.model == "gemini-3.1-flash-lite-preview"
+    assert captured["log_args"][0] == "gemini:default"
+    assert captured["log_kwargs"]["usage"] == {
+        "prompt_tokens": 123,
+        "completion_tokens": 45,
+        "total_tokens": 168,
+        "cache_read_input_tokens": 12,
+    }
+
+
+@pytest.mark.asyncio
+async def test_gemini_adapter_preserves_provider_error_status(monkeypatch):
+    class FakeGenerateContentConfig:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+
+    class FakeSafetySetting:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+
+    fake_types = SimpleNamespace(
+        GenerateContentConfig=FakeGenerateContentConfig,
+        SafetySetting=FakeSafetySetting,
+        HarmCategory=SimpleNamespace(
+            HARM_CATEGORY_HARASSMENT="harassment",
+            HARM_CATEGORY_HATE_SPEECH="hate",
+            HARM_CATEGORY_SEXUALLY_EXPLICIT="sex",
+            HARM_CATEGORY_DANGEROUS_CONTENT="danger",
+        ),
+        HarmBlockThreshold=SimpleNamespace(OFF="OFF"),
+    )
+    fake_google = cast(Any, types.ModuleType("google"))
+    fake_genai = cast(Any, types.ModuleType("google.genai"))
+    fake_genai.types = fake_types
+    fake_google.genai = fake_genai
+    monkeypatch.setitem(sys.modules, "google", fake_google)
+    monkeypatch.setitem(sys.modules, "google.genai", fake_genai)
+
+    captured: dict[str, Any] = {}
+
+    class FakeGeminiError(Exception):
+        def __init__(self) -> None:
+            super().__init__(
+                "429 RESOURCE_EXHAUSTED. {'error': {'code': 429, 'status': 'RESOURCE_EXHAUSTED'}}"
+            )
+            self.code = 429
+            self.details = [{"@type": "type.googleapis.com/google.rpc.RetryInfo"}]
+            self.status = "RESOURCE_EXHAUSTED"
+
+    class FakeModels:
+        def generate_content(self, **kwargs: Any) -> Any:
+            raise FakeGeminiError()
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.models = FakeModels()
+
+    adapter = GeminiAdapter(api_key="unused")
+    monkeypatch.setattr(adapter, "_get_client", lambda: FakeClient())
+    monkeypatch.setattr(
+        "core.external_endpoints.adapters.gemini_adapter.log_cortex_request",
+        lambda *args, **kwargs: None,
+    )
+
+    def _capture_response(*args: Any, **kwargs: Any) -> None:
+        captured["log_args"] = args
+        captured["log_kwargs"] = kwargs
+
+    monkeypatch.setattr(
+        "core.external_endpoints.adapters.gemini_adapter.log_cortex_response",
+        _capture_response,
+    )
+
+    with pytest.raises(FakeGeminiError):
+        await adapter.chat_completion(
+            [{"role": "user", "content": "ping"}],
+            model="gemini-3.1-flash-lite-preview",
+        )
+
+    assert captured["log_args"][0] == "gemini:default"
+    assert captured["log_kwargs"]["status"] == 429
+    assert captured["log_kwargs"]["body"] == {
+        "status": "RESOURCE_EXHAUSTED",
+        "details": [{"@type": "type.googleapis.com/google.rpc.RetryInfo"}],
+    }
 
 
 @pytest.mark.asyncio
@@ -426,7 +589,7 @@ async def test_external_cortex_engine_redacts_prompt_and_sends_multimodal_parts(
             captured["model"] = model
             return SimpleNamespace(content="ok", model=model)
 
-    engine = ExternalCortexEngine(endpoint, FakeAdapter())
+    engine = ExternalCortexEngine(endpoint, cast(Any, FakeAdapter()))
     prompt = {
         "instructions_verbose": "Use valid JSON.",
         "input": {

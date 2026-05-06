@@ -4,7 +4,7 @@ import asyncio
 import json
 import re
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from core.logging_utils import log_debug, log_error, log_info, log_warning
@@ -419,19 +419,31 @@ class SoulPlugin(PluginBase):
 
     async def _build_daily_transcript(self) -> str:
         try:
+            cutoff = datetime.now(timezone.utc) - timedelta(days=1)
             async with get_conn_ctx() as conn:
                 async with conn.cursor() as cur:
                     await cur.execute(
                         """
-                        SELECT message_text
+                        SELECT sender_name, sender_id, message_text, timestamp
                         FROM chat_history_cache
-                        WHERE timestamp >= (UTC_TIMESTAMP() - INTERVAL 1 DAY)
+                        WHERE timestamp >= %s
                         ORDER BY timestamp ASC
                         LIMIT 500
-                        """
+                        """,
+                        (cutoff,),
                     )
                     rows = await cur.fetchall()
-                    parts = [str(r[0]) for r in rows if r and r[0]]
+                    parts: list[str] = []
+                    for row in rows:
+                        if not row or not row[2]:
+                            continue
+                        speaker = str(row[0] or row[1] or "user").strip() or "user"
+                        message_text = " ".join(str(row[2]).split())
+                        timestamp = row[3]
+                        prefix = f"[{timestamp.isoformat()}] " if timestamp else ""
+                        parts.append(
+                            f"{prefix}{speaker}: {json.dumps(message_text, ensure_ascii=False)}"
+                        )
                     return "\n".join(parts)
         except Exception as exc:
             log_debug(f"[soul_plugin] Falling back to buffered transcript: {exc}")

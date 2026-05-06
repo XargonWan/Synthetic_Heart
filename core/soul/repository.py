@@ -776,15 +776,23 @@ class PostgresSoulRepository:
         async with pool.acquire() as conn:
             vector_rows = await conn.fetch(
                 """
+                WITH vector_candidates AS (
+                    SELECT
+                        v.mem_cell_id,
+                        (1 - (v.embedding <=> $1::vector)) AS vector_similarity
+                    FROM mem_cell_vectors v
+                    ORDER BY v.embedding <=> $1::vector ASC
+                    LIMIT $2
+                )
                 SELECT
                     c.id, c.session_id, c.episodic_trace, c.atomic_facts, c.emotional_tag,
                     c.foresight_signals, c.timestamp, c.retrieval_count, c.explicit_importance,
                     c.consolidated, c.scene_id,
-                    (1 - (v.embedding <=> $1::vector)) AS vector_similarity
-                FROM mem_cells c
-                JOIN mem_cell_vectors v ON v.mem_cell_id = c.id
+                    vc.vector_similarity
+                FROM vector_candidates vc
+                JOIN mem_cells c ON c.id = vc.mem_cell_id
                 WHERE c.episodic_trace <> ''
-                ORDER BY v.embedding <=> $1::vector ASC, c.timestamp DESC
+                ORDER BY vc.vector_similarity DESC, c.timestamp DESC
                 LIMIT $2
                 """,
                 vector_literal,
@@ -792,7 +800,7 @@ class PostgresSoulRepository:
             )
 
             text_rows: list[Any] = []
-            if len(normalized_query) >= 3:
+            if len(vector_rows) < candidate_cap and len(normalized_query) >= 3:
                 text_rows = list(
                     await conn.fetch(
                         # Keep SQL candidate selection on indexed episodic-trace

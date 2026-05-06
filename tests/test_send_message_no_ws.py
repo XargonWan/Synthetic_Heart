@@ -1,6 +1,7 @@
 import pytest
 from unittest.mock import AsyncMock, patch
 from types import SimpleNamespace
+from typing import Any, cast
 
 from core.webui import SynthWebUIInterface
 
@@ -20,6 +21,7 @@ async def test_send_message_persists_when_no_websocket():
         patch(
             "core.chat_context_manager.save_response_message", AsyncMock()
         ) as mock_save,
+        patch("core.chat_history_cache.save_chat_message", AsyncMock()),
     ):
         # Call send_message with interface_path
         await webui.send_message(
@@ -97,7 +99,7 @@ async def test_send_message_prefers_payload_content_over_positional_object_text(
                 "interface_path": f"synth_webui/{session_id}",
                 "content": "expected content",
             },
-            SimpleNamespace(text="wrong positional text"),
+            cast(Any, SimpleNamespace(text="wrong positional text")),
         )
 
     assert websocket.send_json.called

@@ -78,6 +78,70 @@ async def test_grillo_set_activity_response_text_with_valid_id() -> None:
 
 
 @pytest.mark.asyncio
+async def test_grillo_set_activity_response_text_uses_postgres_append_sql() -> None:
+    """Postgres append path should cast params to text instead of using CONCAT."""
+    mock_ctx, mock_cursor = _create_mock_db_context()
+
+    def mock_get_conn_ctx() -> MagicMock:
+        return mock_ctx
+
+    import core.db
+
+    original_get_conn_ctx = core.db.get_conn_ctx
+    original_get_db_type = core.db._get_db_type
+    core.db.get_conn_ctx = mock_get_conn_ctx  # type: ignore[assignment]
+    core.db._get_db_type = lambda: "postgres"  # type: ignore[assignment]
+
+    try:
+        from plugins.grillo.grillo_impl import GrilloPlugin
+
+        await GrilloPlugin.set_activity_response_text(
+            activity_log_id=123,
+            response_text="Test response",
+        )
+
+        executed_sql = mock_cursor.execute.await_args_list[0][0][0]
+        assert "CONCAT" not in executed_sql
+        assert "%s::text" in executed_sql
+        assert "response_text || E'\\n\\n' || %s::text" in executed_sql
+    finally:
+        core.db.get_conn_ctx = original_get_conn_ctx
+        core.db._get_db_type = original_get_db_type
+
+
+@pytest.mark.asyncio
+async def test_grillo_record_suppressed_event_uses_postgres_append_sql() -> None:
+    """Suppressed-event annotations should use the Postgres-safe append SQL."""
+    mock_ctx, mock_cursor = _create_mock_db_context()
+
+    def mock_get_conn_ctx() -> MagicMock:
+        return mock_ctx
+
+    import core.db
+
+    original_get_conn_ctx = core.db.get_conn_ctx
+    original_get_db_type = core.db._get_db_type
+    core.db.get_conn_ctx = mock_get_conn_ctx  # type: ignore[assignment]
+    core.db._get_db_type = lambda: "postgres"  # type: ignore[assignment]
+
+    try:
+        from plugins.grillo.grillo_impl import GrilloPlugin
+
+        await GrilloPlugin.record_suppressed_event(
+            activity_log_id=123,
+            reason="duplicate",
+        )
+
+        executed_sql = mock_cursor.execute.await_args_list[-1][0][0]
+        assert "suppressed_count = COALESCE(suppressed_count, 0) + 1" in executed_sql
+        assert "CONCAT" not in executed_sql
+        assert "%s::text" in executed_sql
+    finally:
+        core.db.get_conn_ctx = original_get_conn_ctx
+        core.db._get_db_type = original_get_db_type
+
+
+@pytest.mark.asyncio
 async def test_grillo_set_activity_response_text_with_none_id() -> None:
     """Test that set_activity_response_text handles None activity_log_id."""
     from plugins.grillo.grillo_impl import GrilloPlugin
@@ -114,12 +178,14 @@ async def test_grillo_outreach_prompt_generation() -> None:
 async def test_grillo_reflection_prompts_request_introspection_fields() -> None:
     from plugins.grillo.grillo_self_reflection import GrilloSelfReflectionPlugin
     from plugins.grillo.grillo_curiosity import GrilloCuriosityPlugin
+    from plugins.grillo.grillo_memory import GrilloMemoryPlugin
     from plugins.grillo.grillo_tag import GrilloTagPlugin
     from plugins.grillo.grillo_relationship import GrilloRelationshipPlugin
 
     prompts = [
         await GrilloSelfReflectionPlugin().build_prompt(),
         await GrilloCuriosityPlugin().build_prompt(),
+        await GrilloMemoryPlugin().build_prompt(),
         await GrilloTagPlugin().build_prompt(),
         await GrilloRelationshipPlugin().build_prompt(),
     ]
@@ -214,6 +280,35 @@ async def test_grillo_activity_log_creation_postgres_returns_id() -> None:
         assert result == 4242
         executed_sql = mock_cursor.execute.await_args_list[0][0][0]
         assert "RETURNING id" in executed_sql
+    finally:
+        core.db.get_conn_ctx = original_get_conn_ctx
+        core.db._get_db_type = original_get_db_type
+
+
+@pytest.mark.asyncio
+async def test_plugin_instance_grillo_response_uses_postgres_append_sql() -> None:
+    """plugin_instance should use the same Postgres-safe append expression."""
+    mock_ctx, mock_cursor = _create_mock_db_context()
+
+    def mock_get_conn_ctx() -> MagicMock:
+        return mock_ctx
+
+    import core.db
+
+    original_get_conn_ctx = core.db.get_conn_ctx
+    original_get_db_type = core.db._get_db_type
+    core.db.get_conn_ctx = mock_get_conn_ctx  # type: ignore[assignment]
+    core.db._get_db_type = lambda: "postgres"  # type: ignore[assignment]
+
+    try:
+        from core.plugin_instance import _update_grillo_response
+
+        await _update_grillo_response(123, "chunk one")
+
+        executed_sql = mock_cursor.execute.await_args_list[0][0][0]
+        assert "CONCAT" not in executed_sql
+        assert "%s::text" in executed_sql
+        assert "response_text || E'\\n\\n' || %s::text" in executed_sql
     finally:
         core.db.get_conn_ctx = original_get_conn_ctx
         core.db._get_db_type = original_get_db_type

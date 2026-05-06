@@ -80,6 +80,42 @@ def test_run_falls_back_to_asyncio_run_when_no_loop(monkeypatch):
     assert res == "ok"
 
 
+def test_get_entries_by_tags_uses_postgres_jsonb(monkeypatch):
+    captured: dict[str, object] = {}
+
+    async def fake_fetchall(query, params=None):
+        captured["query"] = query
+        captured["params"] = params
+        return []
+
+    monkeypatch.setattr(ai_diary, "_get_db_type", lambda: "postgres")
+    monkeypatch.setattr(ai_diary, "_fetchall", fake_fetchall)
+    monkeypatch.setattr(ai_diary, "_run", lambda coro: asyncio.run(coro))
+
+    assert ai_diary.get_entries_by_tags(["food"], limit=5) == []
+    assert "::jsonb ? %s" in str(captured["query"])
+    assert "JSON_CONTAINS" not in str(captured["query"])
+    assert captured["params"] == ("food", 5)
+
+
+def test_get_entries_with_person_uses_postgres_jsonb(monkeypatch):
+    captured: dict[str, object] = {}
+
+    async def fake_fetchall(query, params=None):
+        captured["query"] = query
+        captured["params"] = params
+        return []
+
+    monkeypatch.setattr(ai_diary, "_get_db_type", lambda: "postgres")
+    monkeypatch.setattr(ai_diary, "_fetchall", fake_fetchall)
+    monkeypatch.setattr(ai_diary, "_run", lambda coro: asyncio.run(coro))
+
+    assert ai_diary.get_entries_with_person("Scar", limit=5) == []
+    assert "::jsonb ? %s" in str(captured["query"])
+    assert "JSON_CONTAINS" not in str(captured["query"])
+    assert captured["params"] == ("Scar", 5)
+
+
 def test_clip_for_column_noop_when_under_limit():
     text = "hello"
     assert ai_diary._clip_for_column(text, 10) == "hello"

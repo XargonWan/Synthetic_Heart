@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import re
 import time as _time
 from typing import Any, AsyncIterator
 
@@ -18,6 +19,137 @@ from core.external_endpoints.adapters.base import (
     ChatResponse,
     ModelInfo,
 )
+
+
+def _coerce_usage_int(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _usage_meta_value(source: Any, *names: str) -> int | None:
+    for name in names:
+        value: Any = None
+        if isinstance(source, dict):
+            value = source.get(name)
+        else:
+            value = getattr(source, name, None)
+        coerced = _coerce_usage_int(value)
+        if coerced is not None:
+            return coerced
+    return None
+
+
+def _extract_usage_metadata(response: Any) -> dict[str, int] | None:
+    usage_meta = getattr(response, "usage_metadata", None)
+    if usage_meta is None:
+        usage_meta = getattr(response, "usageMetadata", None)
+    if usage_meta is None:
+        return None
+
+    usage: dict[str, int] = {}
+
+    prompt_tokens = _usage_meta_value(
+        usage_meta,
+        "prompt_token_count",
+        "promptTokenCount",
+        "input_token_count",
+        "inputTokenCount",
+    )
+    completion_tokens = _usage_meta_value(
+        usage_meta,
+        "candidates_token_count",
+        "candidatesTokenCount",
+        "output_token_count",
+        "outputTokenCount",
+    )
+    total_tokens = _usage_meta_value(
+        usage_meta,
+        "total_token_count",
+        "totalTokenCount",
+    )
+    cached_tokens = _usage_meta_value(
+        usage_meta,
+        "cached_content_token_count",
+        "cachedContentTokenCount",
+        "cache_read_input_tokens",
+    )
+
+    if prompt_tokens is not None:
+        usage["prompt_tokens"] = prompt_tokens
+    if completion_tokens is not None:
+        usage["completion_tokens"] = completion_tokens
+    if total_tokens is not None:
+        usage["total_tokens"] = total_tokens
+    elif prompt_tokens is not None or completion_tokens is not None:
+        usage["total_tokens"] = (prompt_tokens or 0) + (completion_tokens or 0)
+    if cached_tokens is not None:
+        usage["cache_read_input_tokens"] = cached_tokens
+
+    return usage or None
+
+
+def _extract_exception_status_and_body(
+    exc: Exception,
+) -> tuple[int | None, dict[str, Any] | str | None]:
+    status_value = getattr(exc, "status_code", None)
+    if status_value is None:
+        status_value = getattr(exc, "code", None)
+
+    status: int | None = None
+    try:
+        if status_value is not None:
+            status = int(status_value)
+    except (TypeError, ValueError):
+        status = None
+
+    response = getattr(exc, "response", None)
+    response_body: dict[str, Any] | str | None = None
+    if response is not None:
+        response_status = getattr(response, "status_code", None)
+        try:
+            if status is None and response_status is not None:
+                status = int(response_status)
+        except (TypeError, ValueError):
+            pass
+
+        json_method = getattr(response, "json", None)
+        if callable(json_method):
+            try:
+                response_body = json_method()
+            except Exception:
+                response_body = None
+
+        if response_body is None:
+            response_text = getattr(response, "text", None)
+            if isinstance(response_text, str) and response_text.strip():
+                response_body = response_text
+
+    if status is None:
+        match = re.search(r"\b([45]\d\d)\b", str(exc))
+        if match:
+            try:
+                status = int(match.group(1))
+            except ValueError:
+                status = None
+
+    if response_body is None:
+        details = getattr(exc, "details", None)
+        provider_status = getattr(exc, "status", None)
+        if details is not None or provider_status is not None:
+            response_body = {
+                key: value
+                for key, value in {
+                    "status": provider_status,
+                    "details": details,
+                }.items()
+                if value is not None
+            }
+
+    return status, response_body
 
 
 def _messages_to_gemini(
@@ -241,11 +373,13 @@ class GeminiAdapter(BaseProtocolAdapter):
                     "finish_reason": finish,
                     "block_reason": block_reason,
                 }
+            usage = _extract_usage_metadata(response)
             log_cortex_response(
                 engine_tag,
                 model=request_model,
                 status=200,
                 body=logged_body,
+                usage=usage,
                 elapsed_ms=_elapsed,
             )
 
@@ -276,10 +410,12 @@ class GeminiAdapter(BaseProtocolAdapter):
             raise
         except Exception as exc:
             _elapsed = (_time.monotonic() - _req_start) * 1000
+            error_status, error_body = _extract_exception_status_and_body(exc)
             log_cortex_response(
                 engine_tag,
                 model=request_model,
-                status=500,
+                status=error_status or 500,
+                body=error_body,
                 error=str(exc),
                 elapsed_ms=_elapsed,
             )

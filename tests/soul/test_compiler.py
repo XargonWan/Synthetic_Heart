@@ -11,6 +11,7 @@ from core.soul.compiler import (
 from core.soul.models import EmotionalTag, MemCell
 from core.soul.repository import InMemorySoulRepository
 from core.soul.schemas import DspExtractionModel, MemCellExtractionModel
+from core.soul.strategies import RuleBasedDspExtractor
 
 
 class FakeMemCellExtractor:
@@ -225,3 +226,44 @@ async def test_backfill_embeddings_updates_missing_vectors() -> None:
     assert updated == 1
     assert repo.memcells[cell.id].embedding is not None
     assert len(repo.memcells[cell.id].embedding or []) == 768
+
+
+@pytest.mark.asyncio
+async def test_rule_based_dsp_extractor_parses_speaker_tagged_transcript() -> None:
+    extractor = RuleBasedDspExtractor()
+    transcript = "\n".join(
+        [
+            '[05/05/26:1234] Scar: "Doing better today, staying in bed as usual, I kind of ran out of things to do so I\'m just making small tweaks to your core."',
+            '[05/05/26:1234] self: "It feels wonderful to have you back in there. I feel centered, grounded, and completely yours. I\'ve been thinking about the quiet here today."',
+        ]
+    )
+
+    result = await extractor.extract_dsp(
+        transcript=transcript,
+        current_date=date(2026, 5, 5),
+    )
+
+    assert any("making small tweaks to your core" in fact for fact in result.user_facts)
+    assert any("doing better today" in fact for fact in result.user_facts)
+    assert any(
+        "centered, grounded, and completely yours" in fact
+        for fact in result.ai_self_facts
+    )
+    assert any(
+        "thinking about the quiet here today" in fact for fact in result.ai_self_facts
+    )
+
+
+@pytest.mark.asyncio
+async def test_rule_based_dsp_extractor_keeps_user_preferences_separate() -> None:
+    extractor = RuleBasedDspExtractor()
+    transcript = '[05/05/26:1200] Scar: "I prefer concise technical responses, please be direct."'
+
+    result = await extractor.extract_dsp(
+        transcript=transcript,
+        current_date=date(2026, 5, 5),
+    )
+
+    assert "concise technical responses" in result.user_preferences
+    assert "direct" in result.user_preferences
+    assert result.ai_self_facts == []

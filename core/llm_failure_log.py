@@ -199,9 +199,7 @@ def _normalize_entry_for_storage(entry: dict[str, Any]) -> dict[str, Any]:
         "stage": str(entry.get("stage") or "unknown"),
         "reason": str(entry.get("reason") or "Unknown failure"),
         "interface_path": entry.get("interface_path"),
-        "chat_id": None
-        if entry.get("chat_id") is None
-        else str(entry.get("chat_id")),
+        "chat_id": None if entry.get("chat_id") is None else str(entry.get("chat_id")),
         "thread_id": None
         if entry.get("thread_id") is None
         else str(entry.get("thread_id")),

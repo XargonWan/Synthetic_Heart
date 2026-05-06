@@ -3,6 +3,8 @@ from types import SimpleNamespace
 
 import pytest
 
+import core.prompt_engine as pe
+import core.synth_core_memory as scm
 from core.prompt_engine import build_json_prompt, search_memories
 
 
@@ -59,6 +61,112 @@ async def test_search_memories_includes_ai_diary(monkeypatch):
     results = await search_memories(tags=["food"], limit=5)
     assert "Diary memory A" in results
     assert "Diary memory B" in results
+
+
+@pytest.mark.asyncio
+async def test_search_memories_uses_postgres_tag_predicates(monkeypatch) -> None:
+    class DummyCursor:
+        def __init__(self) -> None:
+            self.queries: list[tuple[str, list[object] | None]] = []
+
+        async def execute(self, sql: str, params=None) -> None:
+            stored_params = list(params) if params is not None else None
+            self.queries.append((sql, stored_params))
+
+        async def fetchall(self) -> list[list[str]]:
+            return []
+
+        async def __aenter__(self) -> "DummyCursor":
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+    class DummyConn:
+        def __init__(self) -> None:
+            self.cursor_obj = DummyCursor()
+
+        async def __aenter__(self) -> "DummyConn":
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+        def cursor(self) -> DummyCursor:
+            return self.cursor_obj
+
+    conn_instance = DummyConn()
+
+    def mock_get_conn_ctx() -> DummyConn:
+        return conn_instance
+
+    monkeypatch.setattr(pe, "get_conn_ctx", mock_get_conn_ctx)
+    monkeypatch.setattr(pe, "_get_db_type", lambda: "postgres")
+
+    results = await pe.search_memories(tags=["food", "work"], limit=5)
+
+    assert results == []
+    queries = [sql for sql, _ in conn_instance.cursor_obj.queries]
+    assert queries
+    assert all("JSON_CONTAINS" not in sql for sql in queries)
+    assert all("SELECT DISTINCT" not in sql for sql in queries)
+    assert any("::jsonb ? %s" in sql for sql in queries)
+    assert conn_instance.cursor_obj.queries[0][1] == ["food", "work", 5]
+
+
+@pytest.mark.asyncio
+async def test_synth_core_search_memories_uses_postgres_tag_predicates(
+    monkeypatch,
+) -> None:
+    class DummyCursor:
+        def __init__(self) -> None:
+            self.queries: list[tuple[str, list[object] | None]] = []
+
+        async def execute(self, sql: str, params=None) -> None:
+            stored_params = list(params) if params is not None else None
+            self.queries.append((sql, stored_params))
+
+        async def fetchall(self) -> list[tuple[str, int, datetime, str, str | None]]:
+            return []
+
+        async def __aenter__(self) -> "DummyCursor":
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+    class DummyConn:
+        def __init__(self) -> None:
+            self.cursor_obj = DummyCursor()
+
+        async def __aenter__(self) -> "DummyConn":
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+        def cursor(self) -> DummyCursor:
+            return self.cursor_obj
+
+    conn_instance = DummyConn()
+
+    def mock_get_conn_ctx() -> DummyConn:
+        return conn_instance
+
+    monkeypatch.setattr(scm, "get_conn_ctx", mock_get_conn_ctx)
+    monkeypatch.setattr(scm, "_get_db_type", lambda: "postgres")
+
+    results = await scm.search_memories(tags=["food"], limit=5)
+
+    assert results == []
+    queries = [sql for sql, _ in conn_instance.cursor_obj.queries]
+    assert len(queries) == 3
+    assert all("JSON_CONTAINS" not in sql for sql in queries)
+    assert "COALESCE(NULLIF(BTRIM(tags), ''), '[]')::jsonb ? %s" in queries[0]
+    assert "COALESCE(NULLIF(BTRIM(context_tags), ''), '[]')::jsonb ? %s" in queries[1]
+    assert conn_instance.cursor_obj.queries[0][1] == ["food", 15]
+    assert conn_instance.cursor_obj.queries[1][1] == ["food", 15]
+    assert conn_instance.cursor_obj.queries[2][1] == ["%food%", 15]
 
 
 @pytest.mark.asyncio

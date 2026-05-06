@@ -102,6 +102,46 @@ def test_generate_response_retries_on_connection_error(monkeypatch):
     assert adapter_mock.chat_completion.call_count == 2
 
 
+def test_generate_response_does_not_retry_timeout_by_default(monkeypatch):
+    """Timeouts should fail fast unless the endpoint explicitly opts into retrying them."""
+
+    endpoint = _make_endpoint()
+    endpoint.extra_config = {"retry_attempts": 3, "retry_backoff": 0.0}
+    adapter_mock = MagicMock()
+    adapter_mock.chat_completion = AsyncMock(side_effect=asyncio.TimeoutError())
+    bridge = ExternalCortexEngine(endpoint, adapter_mock)
+
+    with patch(
+        "core.external_endpoints.bridges.cortex_bridge.asyncio.sleep", return_value=None
+    ) as sleep_mock:
+        with pytest.raises(TimeoutError):
+            asyncio.run(bridge.generate_response([{"role": "user", "content": "hi"}]))
+
+    assert adapter_mock.chat_completion.call_count == 1
+    sleep_mock.assert_not_called()
+
+
+def test_generate_response_passes_bridge_timeout_to_adapter(monkeypatch):
+    """The bridge timeout and adapter timeout should stay aligned."""
+
+    endpoint = _make_endpoint()
+    endpoint.extra_config = {"timeout": 42.0}
+    captured: dict[str, object] = {}
+
+    async def _chat_completion(*_args, **kwargs):
+        captured["timeout"] = kwargs.get("timeout")
+        return MagicMock(content="ok")
+
+    adapter_mock = MagicMock()
+    adapter_mock.chat_completion = AsyncMock(side_effect=_chat_completion)
+    bridge = ExternalCortexEngine(endpoint, adapter_mock)
+
+    result = asyncio.run(bridge.generate_response([{"role": "user", "content": "hi"}]))
+
+    assert result == "ok"
+    assert captured["timeout"] == 42.0
+
+
 def test_handle_incoming_message_propagates_after_retry_exhaustion(monkeypatch):
     """If retries are exhausted, ExternalCortexEngine.handle_incoming_message should raise."""
 

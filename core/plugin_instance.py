@@ -1569,19 +1569,21 @@ async def _update_grillo_response(activity_log_id, response_text):
         return
 
     try:
-        from core.db import get_conn_ctx
+        from core.db import _get_db_type, get_conn_ctx
+        from plugins.grillo.grillo_response_recorder import (
+            build_grillo_response_append_expression,
+        )
+
+        append_expression = build_grillo_response_append_expression(_get_db_type())
 
         async with get_conn_ctx() as conn:
             async with conn.cursor() as cur:
                 # Logic similar to GrilloPlugin.set_activity_response_text: append if exists
                 # We use append because sometimes multiple messages/chunks might be associated
                 await cur.execute(
-                    """
+                    f"""
                     UPDATE grillo_activity_log
-                    SET response_text = CASE
-                        WHEN response_text IS NULL OR response_text = '' THEN %s
-                        ELSE CONCAT(response_text, '\n\n', %s)
-                    END
+                    SET response_text = {append_expression}
                     WHERE id=%s
                     """,
                     (response_text, response_text, activity_log_id),

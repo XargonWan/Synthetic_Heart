@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 from typing import Any, cast
 
 import pytest
@@ -373,6 +373,40 @@ def _build_recall_row(
 
 
 @pytest.mark.asyncio
+async def test_postgres_recall_uses_hnsw_friendly_vector_candidate_query() -> None:
+    row = _build_recall_row(
+        cell_id="cell-0",
+        session_id="telegram_bot_999",
+        episodic_trace="Scarlet mentioned jasmine tea and rainy nights.",
+        atomic_facts=["Scarlet|likes|jasmine tea"],
+        vector_similarity=0.82,
+    )
+    conn = _FakeRecallConn(vector_rows=[row], text_rows=[])
+    repo = PostgresSoulRepository(dsn="postgresql://unused")
+    repo._pool = _FakeRecallPool(conn)
+
+    matches = await repo.recall_memories(
+        query_text="jasmine tea",
+        query_embedding=[0.1, 0.2],
+        session_id="telegram_bot_999",
+        candidate_limit=5,
+    )
+
+    assert matches
+    vector_sql = next(
+        sql
+        for sql, _ in conn.queries
+        if "ORDER BY v.embedding <=> $1::vector ASC" in sql
+    )
+    assert "WITH vector_candidates AS" in vector_sql
+    assert "FROM mem_cell_vectors v" in vector_sql
+    assert (
+        "FROM mem_cells c\n                JOIN mem_cell_vectors v ON v.mem_cell_id = c.id"
+        not in vector_sql
+    )
+
+
+@pytest.mark.asyncio
 async def test_postgres_recall_uses_index_friendly_text_query() -> None:
     row = _build_recall_row(
         cell_id="cell-1",
@@ -402,6 +436,33 @@ async def test_postgres_recall_uses_index_friendly_text_query() -> None:
 
 
 @pytest.mark.asyncio
+async def test_postgres_recall_skips_text_query_when_vector_window_is_full() -> None:
+    row = _build_recall_row(
+        cell_id="cell-full",
+        session_id="telegram_bot_999",
+        episodic_trace="Scarlet loves jasmine tea and cozy rainy evenings.",
+        atomic_facts=["Scarlet|likes|jasmine tea"],
+        vector_similarity=0.88,
+    )
+    conn = _FakeRecallConn(vector_rows=[row], text_rows=[row])
+    repo = PostgresSoulRepository(dsn="postgresql://unused")
+    repo._pool = _FakeRecallPool(conn)
+
+    matches = await repo.recall_memories(
+        query_text="What tea does Scarlet love again?",
+        query_embedding=[0.1, 0.2],
+        session_id="telegram_bot_999",
+        candidate_limit=1,
+    )
+
+    assert matches
+    assert any(
+        "ORDER BY v.embedding <=> $1::vector ASC" in sql for sql, _ in conn.queries
+    )
+    assert not any("ORDER BY GREATEST(" in sql for sql, _ in conn.queries)
+
+
+@pytest.mark.asyncio
 async def test_postgres_recall_scores_atomic_facts_in_python() -> None:
     row = _build_recall_row(
         cell_id="cell-2",
@@ -423,3 +484,51 @@ async def test_postgres_recall_scores_atomic_facts_in_python() -> None:
 
     assert matches
     assert matches[0].lexical_score > 0.5
+
+
+@pytest.mark.asyncio
+async def test_build_daily_transcript_uses_parameterized_cutoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plugin = SoulPlugin()
+
+    mock_cursor = AsyncMock()
+    mock_cursor.fetchall = AsyncMock(
+        return_value=[
+            (
+                "Scar",
+                "5208932647",
+                "first",
+                datetime(2026, 5, 5, 11, 37, tzinfo=timezone.utc),
+            ),
+            (
+                "self",
+                "self",
+                "second",
+                datetime(2026, 5, 5, 11, 38, tzinfo=timezone.utc),
+            ),
+        ]
+    )
+
+    mock_conn = AsyncMock()
+    mock_conn.cursor = MagicMock(
+        return_value=AsyncMock(
+            __aenter__=AsyncMock(return_value=mock_cursor),
+            __aexit__=AsyncMock(return_value=None),
+        )
+    )
+
+    mock_ctx = MagicMock()
+    mock_ctx.__aenter__ = AsyncMock(return_value=mock_conn)
+    mock_ctx.__aexit__ = AsyncMock(return_value=None)
+
+    monkeypatch.setattr("plugins.soul_plugin.get_conn_ctx", lambda: mock_ctx)
+
+    transcript = await plugin._build_daily_transcript()
+
+    executed_sql, params = mock_cursor.execute.await_args_list[0][0]
+    assert "INTERVAL 1 DAY" not in executed_sql
+    assert "WHERE timestamp >= %s" in executed_sql
+    assert isinstance(params[0], datetime)
+    assert '[2026-05-05T11:37:00+00:00] Scar: "first"' in transcript
+    assert '[2026-05-05T11:38:00+00:00] self: "second"' in transcript

@@ -71,6 +71,21 @@ DIARY_CONFIG = {
 }
 
 
+def _build_json_array_membership_clause(
+    column: str, values: List[str]
+) -> tuple[list[str], list[Any]]:
+    if _get_db_type() == "postgres":
+        return (
+            [f"COALESCE(NULLIF(BTRIM({column}), ''), '[]')::jsonb ? %s"] * len(values),
+            list(values),
+        )
+
+    return (
+        [f"JSON_CONTAINS({column}, %s)"] * len(values),
+        [json.dumps(value) for value in values],
+    )
+
+
 def get_diary_config(interface_name: str) -> dict:
     """Get diary configuration for a specific interface."""
     return DIARY_CONFIG
@@ -1080,12 +1095,9 @@ def get_entries_by_tags(tags: List[str], limit: int = 10) -> List[Dict[str, Any]
     """Get diary entries that contain any of the specified context tags."""
     try:
         # Create OR conditions for tag matching
-        tag_conditions = []
-        params = []
-
-        for tag in tags:
-            tag_conditions.append("JSON_CONTAINS(context_tags, %s)")
-            params.append(json.dumps(tag))
+        tag_conditions, params = _build_json_array_membership_clause(
+            "context_tags", tags
+        )
 
         if not tag_conditions:
             return []
@@ -1121,17 +1133,22 @@ def get_entries_by_tags(tags: List[str], limit: int = 10) -> List[Dict[str, Any]
 def get_entries_with_person(person: str, limit: int = 10) -> List[Dict[str, Any]]:
     """Get diary entries that involve a specific person."""
     try:
+        person_conditions, person_params = _build_json_array_membership_clause(
+            "involved_users", [person]
+        )
         entries = _run(
             _fetchall(
                 """
             SELECT id, content, personal_thought, timestamp, context_tags, involved_users, 
                    emotions, interface, chat_id, thread_id, interaction_summary, user_message
             FROM ai_diary
-            WHERE JSON_CONTAINS(involved_users, %s)
+            WHERE """
+                + " OR ".join(person_conditions)
+                + """
             ORDER BY timestamp DESC
             LIMIT %s
             """,
-                (json.dumps(person), limit),
+                tuple(person_params + [limit]),
             )
         )
 

@@ -743,6 +743,30 @@ docker exec synth-dev tail -f /app/logs/synth.log | grep -E "\[grillo\]|grillo"
 
 ---
 
+### `grillo_chat_observer` direct DB probe still uses MySQL `UNIX_TIMESTAMP(...)` syntax  <!-- 2026-05-05 -->
+**Symptom:** Runtime logs can show `Error executing query: SELECT COUNT(*) as cnt, MAX(UNIX_TIMESTAMP(timestamp)) ...` followed by `[grillo_chat_observer] Direct DB check failed; falling back to checker: function unix_timestamp(timestamp with time zone) does not exist` on Postgres-backed runs.
+**Location:** `plugins/grillo/grillo_chat_observer.py` (`GrilloChatObserverPlugin._run_observer`).
+**Status:** fixed.
+**Notes:** The observer fast-path now queries raw timestamps from `chat_history_cache`, passes a timezone-aware `datetime` cutoff into the DB layer, and normalizes the returned `MAX(timestamp)` value back to epoch seconds before advancing `GRILLO_OBSERVER_LAST_RUN_TS`. This removes the Postgres error log while preserving the observer's non-consuming update check.
+
+---
+
+### `memory_consolidation` beats were using a stale plugin prompt override  <!-- 2026-05-05 -->
+**Symptom:** Runtime `memory_consolidation` beats could bypass the richer built-in prompt in `GrilloPlugin._create_memory_consolidation_prompt()` and instead use the older `plugins/grillo/grillo_memory.py` prompt, which lagged the current diary schema and omitted the newer first-person diary fields.
+**Location:** `plugins/grillo/grillo_impl.py` (`GrilloPlugin._create_beat_prompt`) with the stale override in `plugins/grillo/grillo_memory.py`.
+**Status:** fixed.
+**Notes:** `_create_beat_prompt()` now routes `memory_consolidation` through the built-in prompt before consulting beat-plugin `build_prompt()` overrides. This makes the runtime path match the tested rewrite-safe prompt that includes history-derived context and the current `create_personal_diary_entry` payload shape.
+
+---
+
+### Tagged memory recall helpers still used MariaDB-only JSON predicates on Postgres  <!-- 2026-05-06 -->
+**Symptom:** Internal prompt/memory recall paths could log warnings like `[search_memories] query failed: function json_contains(text, unknown) does not exist`, then fall back to zero tag-based memory hits on Postgres-backed runs. Related memory search/diary utilities also still relied on MariaDB-only `JSON_CONTAINS(...)`, `DATE_SUB(...)`, or `RAND()` forms.
+**Location:** `core/synth_core_memory.py` (`search_memories`), `core/prompt_engine.py` (`search_memories`), `plugins/memory_search.py`, `plugins/ai_diary.py` tag/person lookups, and `plugins/grillo/grillo_compactor.py` marker filtering.
+**Status:** fixed.
+**Notes:** The active recall/search helpers now branch on the runtime DB backend: MariaDB keeps `JSON_CONTAINS(...)`, while Postgres uses `::jsonb ? %s` against text-backed JSON arrays. The prompt-layer helper now deduplicates in Python instead of relying on a MariaDB-tolerated `SELECT DISTINCT ... ORDER BY timestamp` shape that Postgres rejects. The memory search plugin also switches `RAND()` to `RANDOM()` on Postgres, and the Grillo compactor uses Postgres-safe timestamp cutoffs instead of `DATE_SUB(...)` when filtering old diary rows by marker. Live Postgres verification returned tag-based `environment` hits from both recall paths after the fix.
+
+---
+
 ### SOUL static injection could time out on internal `grillo/-1` turns  <!-- 2026-04-20 -->
 **Symptom:** Runtime logs could show `get_static_injection() on SoulPlugin timed out after 5s` during internal Grillo memory-consolidation prompt assembly, even though the prompt later completed without any `soul_*` injections.
 **Location:** `plugins/soul_plugin.py` (`SoulPlugin.get_static_injection`).
@@ -796,6 +820,78 @@ docker exec synth-dev tail -f /app/logs/synth.log | grep -E "\[grillo\]|grillo"
 **Location:** Selected primary DB config registry (`BASE_CORTEX`, `GRILLO_CORTEX`) plus runtime Grillo prompt execution.
 **Status:** known / configuration-dependent.
 **Notes:** The DB selector itself can work correctly while still exposing older config values from the chosen DB. In the observed MariaDB case, `GRILLO_CORTEX=Default` fell through to `BASE_CORTEX=gemma`, so Grillo inherited a dead engine after the switch. When changing primary DBs, verify or realign the selected DB's cortex config keys, not just the connection settings.
+
+---
+
+### `universal_send skip_history=True` was ignored and polluted `chat_history_cache`  <!-- 2026-05-05 -->
+**Symptom:** Fallback/test sends could still appear in prompt history as rows like `fake / fallback / 😵`, even when the caller explicitly passed `skip_history=True`.
+**Location:** `core/transport_layer.py` (`universal_send` history-save path), plus tests calling `send_llm_fallback_message()` / `universal_send()` with synthetic interface paths.
+**Status:** fixed.
+**Notes:** The transport layer now checks `skip_history` before calling `add_message_to_context()`. This prevents fallback deliveries and similar synthetic sends from polluting `history_recent`.
+
+---
+
+### Telegram send failures could mask the real error with undefined `correction_payload`  <!-- 2026-05-05 -->
+**Symptom:** Logs could show a real Telegram delivery failure such as `Chat not found`, followed by `[message_plugin] Failed to send message via telegram_bot: cannot access local variable 'correction_payload' where it is not associated with a value`.
+**Location:** `interface/telegram_bot.py`, `TelegramInterface.send_message` exception handling.
+**Status:** fixed.
+**Notes:** The send path now initializes a default correction payload before resolution/sending, and overrides it with more specific messaging when chat-name resolution fails. Delivery errors now surface consistently instead of raising a secondary `UnboundLocalError`.
+
+---
+
+### Telegram startup timeout could leave the interface permanently half-initialized  <!-- 2026-05-06 -->
+**Symptom:** Logs could show `Error during Telegram bot startup: TimedOut('Timed out')`, followed by outbound attempts logging `Bot not initialized, cannot send message` while `message_plugin` still logged `Message successfully sent ...` for the same action.
+**Location:** `interface/telegram_bot.py` (`start_bot`, `TelegramInterface.send_message`, `shutdown_interface`) and `plugins/message_plugin.py`.
+**Status:** fixed.
+**Notes:** `start_bot()` previously set `_bot_started = True` before initialization succeeded, so one transient timeout could brick Telegram for the rest of the process. Startup now tracks `starting` separately, retries transient timeout/network failures inline before disabling the interface, resets the state on failure, marks the interface disabled with the failure reason, and still schedules a delayed retry if all inline attempts fail. `TelegramInterface.send_message()` / `add_reaction()` now attempt recovery when the bot is missing, and `MessagePlugin` treats an explicit `False` return from `send_message()` as a real delivery failure instead of logging false success.
+
+---
+
+### Langfuse Gemini generations could keep token summaries empty  <!-- 2026-05-06 -->
+**Symptom:** Langfuse trace and observation summaries could show zero/empty token usage for Gemini calls even though the stored observation still contained full `input` and `output` bodies.
+**Location:** `core/cortex_api_logger.py` generation logging, `engines/external_engines/gemini_api.py` usageMetadata mapping, and `core/external_endpoints/adapters/gemini_adapter.py` SDK usage-metadata logging.
+**Status:** fixed.
+**Notes:** Langfuse SDK `2.60.10` accepts canonical generation `usage` in `{input, output, total}` form. The logger previously forwarded only provider-style `usage_details`, which preserved raw metadata but did not populate the summary token columns. `log_cortex_response()` now normalizes provider usage into both canonical `usage` and detailed `usage_details`, Gemini HTTP responses now forward `totalTokenCount` / cached-token counts from `usageMetadata`, and the Google SDK-backed external Gemini adapter now extracts `usage_metadata` so live `engine=gemini:...` calls in `cortex_api.log` include token tags too.
+
+---
+
+### External cortex bridge could misreport adapter timeouts as 300s and keep retrying them  <!-- 2026-05-06 -->
+**Symptom:** Runtime logs could show warnings like `[cortex_bridge:gemini] generate_response timed out after 300.0s (attempt 1/3)` even when the underlying adapter request had already timed out much earlier (for example a `status=504` in `cortex_api.log`). Interactive chats and Grillo beats could then sit through repeated full-request timeout retries.
+**Location:** `core/external_endpoints/bridges/cortex_bridge.py` (`_get_request_timeout`, `generate_response`).
+**Status:** fixed.
+**Notes:** The bridge timeout default (`300s`) had drifted from adapter-level defaults (for example Gemini's `120s`), so nested `asyncio.TimeoutError` exceptions were logged against the bridge timeout instead of the adapter timeout. The bridge now defaults to `120s`, forwards that timeout into `chat_completion(...)` so bridge and adapter stay aligned, and does not retry full request timeouts unless the endpoint explicitly opts in with `extra_config.retry_on_timeout=true`.
+
+---
+
+### Langfuse request traces could remain invisible until the response finished  <!-- 2026-05-06 -->
+**Symptom:** Operators could see a request hit `cortex_api.log` or the console, but the matching Langfuse trace would only appear after the response finished because the request-side trace was created without an immediate flush.
+**Location:** `core/cortex_api_logger.py` (`log_cortex_request`).
+**Status:** fixed.
+**Notes:** When `LANGFUSE_FLUSH_EACH_CALL=true`, `log_cortex_request()` now flushes the client right after pushing the request trace. This makes in-flight requests visible earlier in Langfuse. The response path still performs its own flush, and both request/response flush warnings are deduplicated.
+
+---
+
+### Langfuse API-error traces could look half-empty and mislabel Gemini provider failures  <!-- 2026-05-06 -->
+**Symptom:** Langfuse could show a Gemini trace row with `metadata.error`, but the trace/generation output itself stayed empty and the status could appear as generic `500` even when the upstream provider error was really `429 RESOURCE_EXHAUSTED` or another API status.
+**Location:** `core/cortex_api_logger.py` (`log_cortex_response` error-output handling) and `core/external_endpoints/adapters/gemini_adapter.py` exception logging.
+**Status:** fixed.
+**Notes:** `log_cortex_response()` now emits a structured Langfuse output payload for error paths instead of leaving `output=None`, so failed API calls carry visible error details in the trace. The Google SDK-backed Gemini adapter also preserves provider-side status/body details when exceptions expose them, so Langfuse metadata no longer collapses quota/API failures into a misleading local `500` by default.
+
+---
+
+### Same-chat user activity could cancel an in-flight Grillo outreach  <!-- 2026-05-06 -->
+**Symptom:** Logs could show `Cancelled LOW_PRIORITY background task for telegram_bot/... (superseded by incoming user message)`, followed by Gemini `HTTP499` / `request cancelled`, and the expected outreach never reached Telegram even though the beat had already been enqueued and started prompt generation.
+**Location:** `core/message_queue.py` low-priority background task tracking and cancellation.
+**Status:** fixed.
+**Notes:** The queue previously tracked low-priority work only by `interface_path` and always cancelled any same-chat background task when a user message arrived. That is fine for disposable background work, but it could abort an already-running outreach beat mid-generation. Background task tracking now carries per-task cancellation policy so `beat_type="outreach"` can finish while other low-priority tasks remain cancellable.
+
+---
+
+### Interface tests can leak into the live `chat_history_cache` if persistence is not stubbed  <!-- 2026-05-05 -->
+**Symptom:** Running pytest can inject obvious test rows into runtime prompt context, for example `telegram_bot/123456789 -> "Private Rekku test"`, `synth_webui/session1 -> "Hello"`, or `discord_bot/888888 -> "hi"`.
+**Location:** Tests that call real interface entry points such as `interface.telegram_bot.handle_message`, `SynthWebUIInterface.send_message`, or `DiscordInterface.send_message` without mocking `add_message_to_context`, `save_chat_message`, or `save_response_message`.
+**Status:** workaround in place for the known offenders.
+**Notes:** The affected tests now stub persistence explicitly. When adding new interface tests, mock chat-history persistence or use isolated DB fixtures, otherwise runtime prompt context can be contaminated by test data.
 
 ---
 

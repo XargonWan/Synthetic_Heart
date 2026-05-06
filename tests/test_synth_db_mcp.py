@@ -73,6 +73,10 @@ def test_process_env_target_uses_soul_settings_when_selected(monkeypatch):
     monkeypatch.delenv("DB_PASS", raising=False)
     monkeypatch.delenv("DB_NAME", raising=False)
     monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.delenv("SOUL_PG_HOST", raising=False)
+    monkeypatch.delenv("SOUL_PG_PORT", raising=False)
+    monkeypatch.delenv("SOUL_PG_DB", raising=False)
+    monkeypatch.delenv("SOUL_PG_PASS", raising=False)
 
     target = synth_db._build_process_env_target()
 

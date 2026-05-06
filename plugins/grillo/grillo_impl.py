@@ -126,6 +126,11 @@ class GrilloPlugin(AIPluginBase):
                 await asyncio.sleep(60)
 
     async def _create_beat_prompt(self, beat_type: str) -> Optional[str]:
+        # Memory consolidation has a richer built-in prompt that includes
+        # history-derived context and the current diary schema.
+        if beat_type == "memory_consolidation":
+            return await self._create_memory_consolidation_prompt()
+
         # Prefer plugin-provided prompt builder when available
         plugin = self.beat_plugins.get(beat_type)
         if plugin and hasattr(plugin, "build_prompt"):
@@ -144,8 +149,6 @@ class GrilloPlugin(AIPluginBase):
         # Fallback to built-in simple prompts
         if beat_type == "tag_elaboration":
             return await self._create_tag_elaboration_prompt()
-        elif beat_type == "memory_consolidation":
-            return await self._create_memory_consolidation_prompt()
         elif beat_type == "self_reflection":
             return await self._create_self_reflection_prompt()
         elif beat_type == "curiosity":
@@ -541,18 +544,20 @@ class GrilloPlugin(AIPluginBase):
             return
 
         try:
-            from core.db import get_conn_ctx
+            from core.db import _get_db_type, get_conn_ctx
+            from plugins.grillo.grillo_response_recorder import (
+                build_grillo_response_append_expression,
+            )
+
+            append_expression = build_grillo_response_append_expression(_get_db_type())
 
             async with get_conn_ctx() as conn:
                 async with conn.cursor() as cur:
                     if append:
                         await cur.execute(
-                            """
+                            f"""
                             UPDATE grillo_activity_log
-                            SET response_text = CASE
-                                WHEN response_text IS NULL OR response_text = '' THEN %s
-                                ELSE CONCAT(response_text, '\n\n', %s)
-                            END
+                            SET response_text = {append_expression}
                             WHERE id=%s
                             """,
                             (response_text, response_text, activity_log_id),
@@ -592,19 +597,23 @@ class GrilloPlugin(AIPluginBase):
             if activity_log_id:
                 try:
                     resolved_activity_log_id = int(activity_log_id)
-                    from core.db import get_conn_ctx
+                    from core.db import _get_db_type, get_conn_ctx
+                    from plugins.grillo.grillo_response_recorder import (
+                        build_grillo_response_append_expression,
+                    )
+
+                    append_expression = build_grillo_response_append_expression(
+                        _get_db_type()
+                    )
 
                     async with get_conn_ctx() as conn:
                         async with conn.cursor() as cur:
                             # Atomically increment suppressed_count and optionally append a note
                             await cur.execute(
-                                """
+                                f"""
                                 UPDATE grillo_activity_log
                                 SET suppressed_count = COALESCE(suppressed_count, 0) + 1,
-                                    response_text = CASE
-                                        WHEN response_text IS NULL OR response_text = '' THEN %s
-                                        ELSE CONCAT(response_text, '\n\n', %s)
-                                    END
+                                    response_text = {append_expression}
                                 WHERE id=%s
                                 """,
                                 (

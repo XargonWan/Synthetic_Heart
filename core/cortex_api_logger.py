@@ -38,10 +38,12 @@ _LOG_DIR = os.getenv("LOG_DIR", _DEFAULT_LOG_DIR)
 _LOG_FILE = os.path.join(_LOG_DIR, "cortex_api.log")
 
 _logger: logging.Logger | None = None
+_runtime_logger: logging.Logger | None = None
 _langfuse_client: Any | None = None
 _langfuse_ctx: contextvars.ContextVar[list[dict[str, Any]]] = contextvars.ContextVar(
     "cortex_api_langfuse_ctx", default=[]
 )
+_langfuse_warning_keys: set[str] = set()
 
 # Separator widths
 _WIDTH = 90
@@ -73,6 +75,31 @@ def _get_logger() -> logging.Logger:
 
     _logger = logger
     return logger
+
+
+def _get_runtime_logger() -> logging.Logger:
+    """Return the main runtime logger used for Langfuse diagnostics."""
+    global _runtime_logger
+    if _runtime_logger is None:
+        _runtime_logger = logging.getLogger("synth.langfuse")
+    return _runtime_logger
+
+
+def _warn_langfuse_once(
+    key: str,
+    message: str,
+    *,
+    exc: Exception | None = None,
+) -> None:
+    if key in _langfuse_warning_keys:
+        return
+    _langfuse_warning_keys.add(key)
+
+    logger = _get_runtime_logger()
+    if exc is None:
+        logger.warning(message)
+        return
+    logger.warning("%s: %s", message, exc, exc_info=exc)
 
 
 def _ts() -> str:
@@ -168,6 +195,120 @@ def _coerce_for_langfuse(data: Any, *, redact_sensitive: bool = False) -> Any:
     return coerced
 
 
+def _coerce_int(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _coerce_float(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _normalize_langfuse_usage(
+    usage: dict[str, Any] | None,
+) -> tuple[dict[str, Any] | None, dict[str, int] | None]:
+    if not isinstance(usage, dict) or not usage:
+        return None, None
+
+    prompt_tokens = _coerce_int(usage.get("prompt_tokens", usage.get("input")))
+    completion_tokens = _coerce_int(usage.get("completion_tokens", usage.get("output")))
+    total_tokens = _coerce_int(usage.get("total_tokens", usage.get("total")))
+    if total_tokens is None and (
+        prompt_tokens is not None or completion_tokens is not None
+    ):
+        total_tokens = (prompt_tokens or 0) + (completion_tokens or 0)
+
+    cache_read_tokens = _coerce_int(
+        (usage.get("prompt_tokens_details") or {}).get("cached_tokens")
+        if isinstance(usage.get("prompt_tokens_details"), dict)
+        else usage.get("cache_read_input_tokens")
+    )
+
+    normalized_usage = {
+        key: value
+        for key, value in {
+            "unit": usage.get("unit"),
+            "input": prompt_tokens,
+            "output": completion_tokens,
+            "total": total_tokens,
+            "input_cost": _coerce_float(
+                usage.get("input_cost", usage.get("prompt_cost"))
+            ),
+            "output_cost": _coerce_float(
+                usage.get("output_cost", usage.get("completion_cost"))
+            ),
+            "total_cost": _coerce_float(usage.get("total_cost")),
+        }.items()
+        if value is not None
+    }
+
+    usage_details: dict[str, int] = {}
+    if prompt_tokens is not None:
+        usage_details["prompt_tokens"] = prompt_tokens
+    if completion_tokens is not None:
+        usage_details["completion_tokens"] = completion_tokens
+    if total_tokens is not None:
+        usage_details["total_tokens"] = total_tokens
+    if cache_read_tokens is not None:
+        usage_details["cache_read_input_tokens"] = cache_read_tokens
+
+    for key, value in usage.items():
+        if key in {
+            "unit",
+            "prompt_tokens",
+            "completion_tokens",
+            "total_tokens",
+            "input",
+            "output",
+            "total",
+            "input_cost",
+            "output_cost",
+            "total_cost",
+            "prompt_cost",
+            "completion_cost",
+            "prompt_tokens_details",
+            "cache_read_input_tokens",
+        }:
+            continue
+        numeric_value = _coerce_int(value)
+        if numeric_value is not None:
+            usage_details.setdefault(key, numeric_value)
+
+    return normalized_usage or None, usage_details or None
+
+
+def _build_langfuse_output_payload(
+    *,
+    body: dict[str, Any] | str | None,
+    error: str | None,
+    status: int | None,
+) -> dict[str, Any] | str:
+    if error:
+        payload: dict[str, Any] = {"error": error}
+        if status is not None:
+            payload["status"] = status
+        if body is not None and (not isinstance(body, str) or body.strip()):
+            payload["response_body"] = body
+        return payload
+
+    if body is None:
+        return {"empty_response": True, "reason": "body_none"}
+
+    if isinstance(body, str) and not body.strip():
+        return {"empty_response": True, "reason": "body_empty_string"}
+
+    return body
+
+
 def _get_langfuse_client() -> Any | None:
     global _langfuse_client
     if _langfuse_client is not None:
@@ -180,10 +321,19 @@ def _get_langfuse_client() -> Any | None:
         langfuse_module = import_module("langfuse")
         langfuse_cls = getattr(langfuse_module, "Langfuse", None)
         if langfuse_cls is None:
+            _warn_langfuse_once(
+                "langfuse-missing-class",
+                "Langfuse tracing is enabled but the installed langfuse package does not expose Langfuse().",
+            )
             return None
         _langfuse_client = langfuse_cls()
         return _langfuse_client
-    except Exception:
+    except Exception as exc:
+        _warn_langfuse_once(
+            f"langfuse-client-init:{type(exc).__name__}",
+            "Failed to initialize Langfuse client",
+            exc=exc,
+        )
         return None
 
 
@@ -227,7 +377,12 @@ def _push_langfuse_request(
                         redact_sensitive=True,
                     )
                 trace.update(**update_kwargs)
-        except Exception:
+        except Exception as exc:
+            _warn_langfuse_once(
+                f"langfuse-request-trace:{type(exc).__name__}",
+                f"Failed to create or update Langfuse request trace for engine={engine}",
+                exc=exc,
+            )
             trace = None
 
     stack = list(_langfuse_ctx.get())
@@ -319,6 +474,20 @@ def log_cortex_request(
         payload=payload,
     )
 
+    if lf_enabled and _langfuse_flush_each_call():
+        client = _get_langfuse_client()
+        if client is not None:
+            try:
+                flush_fn = getattr(client, "flush", None)
+                if callable(flush_fn):
+                    flush_fn()
+            except Exception as exc:
+                _warn_langfuse_once(
+                    f"langfuse-request-flush:{type(exc).__name__}",
+                    "Failed to flush Langfuse client after cortex API request",
+                    exc=exc,
+                )
+
     if logger is None:
         return
 
@@ -365,11 +534,15 @@ def log_cortex_response(
     started = lf_item.get("started_at_monotonic") if isinstance(lf_item, dict) else None
     started_utc = lf_item.get("started_at_utc") if isinstance(lf_item, dict) else None
 
-    output_payload: dict[str, Any] | str | None = body
-    if output_payload is None and not error:
-        output_payload = {"empty_response": True, "reason": "body_none"}
-    elif isinstance(output_payload, str) and not output_payload.strip() and not error:
-        output_payload = {"empty_response": True, "reason": "body_empty_string"}
+    output_payload = _build_langfuse_output_payload(
+        body=body,
+        error=error,
+        status=status,
+    )
+
+    normalized_langfuse_usage, normalized_langfuse_usage_details = (
+        _normalize_langfuse_usage(usage)
+    )
 
     # Backfill elapsed if caller did not provide it.
     if elapsed_ms is None and isinstance(started, float):
@@ -384,7 +557,7 @@ def log_cortex_response(
                         "status": status,
                         "error": error,
                         "elapsed_ms": elapsed_ms,
-                        "usage": usage or {},
+                        "usage": normalized_langfuse_usage_details or usage or {},
                         "engine": engine,
                         "model": model,
                         "url": url,
@@ -406,8 +579,10 @@ def log_cortex_response(
                         "url": url,
                     },
                 }
-                if isinstance(usage, dict) and usage:
-                    gen_kwargs["usage_details"] = usage
+                if normalized_langfuse_usage is not None:
+                    gen_kwargs["usage"] = normalized_langfuse_usage
+                if normalized_langfuse_usage_details is not None:
+                    gen_kwargs["usage_details"] = normalized_langfuse_usage_details
                 if elapsed_ms is not None:
                     gen_kwargs["metadata"]["elapsed_ms"] = elapsed_ms
                 if isinstance(started_utc, datetime):
@@ -426,11 +601,19 @@ def log_cortex_response(
                     try:
                         trace.generation(**gen_kwargs)
                     except TypeError:
-                        gen_kwargs.pop("start_time", None)
-                        gen_kwargs.pop("end_time", None)
-                        trace.generation(**gen_kwargs)
-        except Exception:
-            pass
+                        gen_kwargs.pop("usage", None)
+                        try:
+                            trace.generation(**gen_kwargs)
+                        except TypeError:
+                            gen_kwargs.pop("start_time", None)
+                            gen_kwargs.pop("end_time", None)
+                            trace.generation(**gen_kwargs)
+        except Exception as exc:
+            _warn_langfuse_once(
+                f"langfuse-response-trace:{type(exc).__name__}",
+                f"Failed to update Langfuse response trace for engine={engine}",
+                exc=exc,
+            )
 
     client = _get_langfuse_client()
     if client is not None and _langfuse_flush_each_call():
@@ -438,8 +621,12 @@ def log_cortex_response(
             flush_fn = getattr(client, "flush", None)
             if callable(flush_fn):
                 flush_fn()
-        except Exception:
-            pass
+        except Exception as exc:
+            _warn_langfuse_once(
+                f"langfuse-flush:{type(exc).__name__}",
+                "Failed to flush Langfuse client after cortex API call",
+                exc=exc,
+            )
 
     if logger is None:
         return

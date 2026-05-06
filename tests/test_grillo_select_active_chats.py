@@ -57,6 +57,27 @@ async def test_memory_consolidation_prompt_instructions_are_specific(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_create_beat_prompt_prefers_builtin_memory_consolidation_prompt(
+    monkeypatch,
+):
+    gp = GrilloPlugin()
+    gp.history_evaluator = FakeHistoryEvaluator()
+
+    class StaleMemoryPlugin:
+        async def build_prompt(self):
+            return "stale plugin prompt"
+
+    gp.beat_plugins["memory_consolidation"] = StaleMemoryPlugin()
+
+    prompt = await gp._create_beat_prompt("memory_consolidation")
+
+    assert prompt is not None
+    assert prompt != "stale plugin prompt"
+    assert "context_tags" in prompt
+    assert "interaction_summary" in prompt
+
+
+@pytest.mark.asyncio
 async def test_grillo_uses_trainer_chat_even_if_last_is_synth(monkeypatch):
     import core.recent_chats as recent_chats
     from core.interfaces_registry import get_interface_registry

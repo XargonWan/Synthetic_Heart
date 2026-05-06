@@ -327,6 +327,10 @@ class ExternalCortexEngine(AIPluginBase):
         backoff = float(extra.get("retry_backoff", 0.5))
         return max_retries, backoff
 
+    def _retry_on_timeout(self) -> bool:
+        extra = self._endpoint.extra_config or {}
+        return bool(extra.get("retry_on_timeout", False))
+
     @staticmethod
     def _is_retryable_exception(exc: Exception) -> bool:
         if isinstance(exc, (ConnectionError, TimeoutError, OSError)):
@@ -354,7 +358,7 @@ class ExternalCortexEngine(AIPluginBase):
                 return float(timeout)
             except (ValueError, TypeError):
                 pass
-        return 300.0
+        return 120.0
 
     async def generate_response(self, messages: list[dict[str, Any]] | Any) -> str:
         """Forward ``messages`` to the external endpoint and return the response text.
@@ -372,13 +376,16 @@ class ExternalCortexEngine(AIPluginBase):
             model = self._endpoint.available_models[0]
         max_retries, backoff = self._get_retry_settings()
         request_timeout = self._get_request_timeout()
+        retry_on_timeout = self._retry_on_timeout()
         attempt = 0
         while True:
             attempt += 1
             try:
+                extra_kwargs = self._extra_api_kwargs()
+                extra_kwargs.setdefault("timeout", request_timeout)
                 chat_resp = await asyncio.wait_for(
                     self._adapter.chat_completion(
-                        msg_list, model=model, **self._extra_api_kwargs()
+                        msg_list, model=model, **extra_kwargs
                     ),
                     timeout=request_timeout,
                 )
@@ -388,7 +395,7 @@ class ExternalCortexEngine(AIPluginBase):
                     f"[cortex_bridge:{self._endpoint.name}] generate_response timed out "
                     f"after {request_timeout}s (attempt {attempt}/{max_retries})"
                 )
-                should_retry = attempt < max_retries
+                should_retry = retry_on_timeout and attempt < max_retries
                 if should_retry:
                     delay = backoff * (2 ** (attempt - 1))
                     log_warning(
@@ -587,10 +594,9 @@ class ExternalCortexEngine(AIPluginBase):
         model = self._endpoint.default_model or None
         request_timeout = self._get_request_timeout()
         try:
-            async for chunk in asyncio.wait_for(
-                self._adapter.stream_chat_completion(
-                    messages, model=model
-                ),
+            async for chunk in self._adapter.stream_chat_completion(
+                messages,
+                model=model,
                 timeout=request_timeout,
             ):
                 yield chunk

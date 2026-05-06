@@ -6,7 +6,7 @@ import random
 import re
 import time as time_module
 
-from core.db import get_conn_ctx
+from core.db import _get_db_type, get_conn_ctx
 from core.synth_tagging import extract_tags, expand_tags
 from core.logging_utils import log_debug, log_info, log_warning, log_error
 from core.json_utils import dumps as json_dumps, redact_multimodal_for_logging
@@ -1501,18 +1501,27 @@ async def search_memories(tags=None, scope=None, limit=5):
     if not tags:
         return []
 
-    # Build OR conditions using JSON_CONTAINS to check if any tag exists in the JSON array
-    conditions = " OR ".join(["JSON_CONTAINS(tags, %s)"] * len(tags))
+    is_postgres = _get_db_type() == "postgres"
+
+    if is_postgres:
+        conditions = " OR ".join(
+            ["COALESCE(NULLIF(BTRIM(tags), ''), '[]')::jsonb ? %s"] * len(tags)
+        )
+    else:
+        # Build OR conditions using JSON_CONTAINS to check if any tag exists in the JSON array
+        conditions = " OR ".join(["JSON_CONTAINS(tags, %s)"] * len(tags))
 
     query = f"""
-        SELECT DISTINCT content
+        SELECT content, timestamp
         FROM memories
-        WHERE json_valid(tags)
-          AND ({conditions})
+        WHERE ({conditions})
     """
 
-    # Parameters: each tag encoded as a JSON string for JSON_CONTAINS
-    params = [json_dumps(tag) for tag in tags]
+    if not is_postgres:
+        query = query.replace("WHERE", "WHERE json_valid(tags) AND", 1)
+
+    # MariaDB expects JSON-encoded strings for JSON_CONTAINS; Postgres uses raw text with jsonb '?'.
+    params = [tag if is_postgres else json_dumps(tag) for tag in tags]
 
     if scope:
         query += " AND scope = %s"
@@ -1532,21 +1541,44 @@ async def search_memories(tags=None, scope=None, limit=5):
                 rows = await cur.fetchall()
                 # Truncate each memory to max 400 chars to keep JSON payload lightweight
                 memories = []
+                seen_memories: set[str] = set()
                 for row in rows:
                     mem = row[0]
+                    if not isinstance(mem, str):
+                        mem = str(mem)
+                    if mem in seen_memories:
+                        continue
+                    seen_memories.add(mem)
                     if isinstance(mem, str) and len(mem) > 400:
                         mem = mem[:400] + "..."
                     memories.append(mem)
 
                 # Also search ai_diary for context_tags to include diary entries in memories
                 try:
-                    diary_query = f"SELECT DISTINCT content FROM ai_diary WHERE json_valid(context_tags) AND ({conditions}) ORDER BY timestamp DESC LIMIT %s"
-                    diary_params = [json_dumps(tag) for tag in tags]
+                    diary_conditions = conditions.replace("tags", "context_tags")
+                    diary_query = (
+                        "SELECT content, timestamp FROM ai_diary "
+                        f"WHERE ({diary_conditions}) ORDER BY timestamp DESC LIMIT %s"
+                    )
+                    if not is_postgres:
+                        diary_query = diary_query.replace(
+                            "WHERE",
+                            "WHERE json_valid(context_tags) AND",
+                            1,
+                        )
+                    diary_params = [
+                        tag if is_postgres else json_dumps(tag) for tag in tags
+                    ]
                     diary_params.append(limit)
                     await cur.execute(diary_query, diary_params)
                     rows2 = await cur.fetchall()
                     for r in rows2:
                         mem = r[0]
+                        if not isinstance(mem, str):
+                            mem = str(mem)
+                        if mem in seen_memories:
+                            continue
+                        seen_memories.add(mem)
                         if isinstance(mem, str) and len(mem) > 400:
                             mem = mem[:400] + "..."
                         memories.append(mem)

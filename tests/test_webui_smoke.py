@@ -2,8 +2,9 @@ import asyncio
 import base64
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 import tempfile
+from unittest.mock import AsyncMock, patch
 
 import core
 import core.message_queue
@@ -130,7 +131,7 @@ def test_send_message_forwards_attachments_to_websocket(monkeypatch):
         async def send_json(self, payload: dict[str, Any]) -> None:
             sent_payloads.append(payload)
 
-    ui.connections["session1"] = DummyWebSocket()
+    ui.connections["session1"] = cast(Any, DummyWebSocket())
     metadata = {
         "attachments": [
             {
@@ -144,7 +145,11 @@ def test_send_message_forwards_attachments_to_websocket(monkeypatch):
 
     import asyncio
 
-    asyncio.run(ui.send_message("session1", text="Hello", metadata=metadata))
+    with (
+        patch("core.chat_history_cache.save_chat_message", AsyncMock()),
+        patch("core.chat_context_manager.save_response_message", AsyncMock()),
+    ):
+        asyncio.run(ui.send_message("session1", text="Hello", metadata=metadata))
 
     assert len(sent_payloads) == 1
     payload = sent_payloads[0]
