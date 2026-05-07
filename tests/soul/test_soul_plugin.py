@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 from typing import Any, cast
 
 import pytest
@@ -11,6 +11,16 @@ from plugins.soul_plugin import SoulPlugin
 from plugins.soul_plugin import _SessionState
 from core.soul.models import EmotionalTag, MemCell, MemCellRecall
 from core.soul.repository import InMemorySoulRepository, PostgresSoulRepository
+
+
+def test_soul_plugin_is_enabled_uses_config_gate() -> None:
+    plugin = SoulPlugin.__new__(SoulPlugin)
+
+    with patch.object(SoulPlugin, "_is_enabled", return_value=False):
+        assert plugin.is_enabled() is False
+
+    with patch.object(SoulPlugin, "_is_enabled", return_value=True):
+        assert plugin.is_enabled() is True
 
 
 @pytest.mark.asyncio

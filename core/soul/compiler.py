@@ -7,13 +7,17 @@ from datetime import date, datetime
 from typing import Any, Protocol, cast
 
 from .models import (
+    CurationResult,
+    CuratorDecision,
     DspExtraction,
     DspVersion,
     EmotionalTag,
     ForesightSignal,
     KgTriple,
     MemCell,
+    MemCellSummary,
     MemScene,
+    compute_memcell_salience,
     now_utc,
     new_memcell_id,
     new_scene_id,
@@ -48,12 +52,85 @@ class SummaryBuilder(Protocol):
     async def summarize_scene(self, *, cells: list[MemCell]) -> SummaryResultModel: ...
 
 
+class MemCellCurator(Protocol):
+    async def classify(
+        self,
+        summaries: list[MemCellSummary],
+        current_date: date,
+    ) -> list[tuple[str, CuratorDecision]]: ...
+
+
 class Embedder(Protocol):
     async def embed(self, text: str) -> list[float]: ...
 
 
 class LangfuseTraceLike(Protocol):
     def update(self, **kwargs: Any) -> None: ...
+
+
+_FUTURE_DATE_RE = re.compile(r"\b(20\d{2}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01]))\b")
+_CURATOR_SALIENCE_KEEP_THRESHOLD = 0.4
+_CURATOR_HALF_LIFE_SECONDS = 14 * 24 * 3600
+
+
+class RuleBasedMemCellCurator:
+    """Deterministic curator using salience scores and foresight detection.
+
+    KEEP_FUTURE  — has an active foresight signal or mentions a future ISO date.
+    KEEP_IMPORTANT — salience >= threshold or explicit_importance > 0.
+    REMOVE       — everything else.
+    """
+
+    async def classify(
+        self,
+        summaries: list[MemCellSummary],
+        current_date: date,
+    ) -> list[tuple[str, CuratorDecision]]:
+        now = datetime(
+            current_date.year,
+            current_date.month,
+            current_date.day,
+            tzinfo=__import__("datetime").timezone.utc,
+        )
+        return [(s.id, self._classify_one(s, current_date, now)) for s in summaries]
+
+    @staticmethod
+    def _classify_one(
+        summary: MemCellSummary,
+        current_date: date,
+        now: datetime,
+    ) -> CuratorDecision:
+        if summary.has_active_foresight:
+            return CuratorDecision.KEEP_FUTURE
+
+        for m in _FUTURE_DATE_RE.finditer(summary.episodic_trace):
+            try:
+                if date.fromisoformat(m.group(1)) > current_date:
+                    return CuratorDecision.KEEP_FUTURE
+            except ValueError:
+                pass
+
+        ts = summary.timestamp
+        if ts.tzinfo is None:
+            from datetime import timezone as _tz
+
+            ts = ts.replace(tzinfo=_tz.utc)
+        age_seconds = max(0.0, (now - ts.astimezone(now.tzinfo)).total_seconds())
+        recency = 0.5 ** (age_seconds / _CURATOR_HALF_LIFE_SECONDS)
+
+        salience = compute_memcell_salience(
+            emotional_intensity=summary.emotional_intensity,
+            retrieval_count=summary.retrieval_count,
+            recency_score=recency,
+            explicit_importance=summary.explicit_importance,
+        )
+        if (
+            salience >= _CURATOR_SALIENCE_KEEP_THRESHOLD
+            or summary.explicit_importance > 0
+        ):
+            return CuratorDecision.KEEP_IMPORTANT
+
+        return CuratorDecision.REMOVE
 
 
 class NoopEmbedder:
@@ -89,6 +166,7 @@ class SoulCompiler:
     embedder: Embedder
     dsp_bootstrap_min_extractions: int = 5
     dsp_update_batch_size: int = 3
+    curator: MemCellCurator | None = None
 
     async def post_session_compile(
         self,
@@ -283,6 +361,103 @@ class SoulCompiler:
                 "expired_foresight_signals": expired,
                 "dsp_updated": dsp_updated,
             }
+
+    async def run_curator(
+        self,
+        *,
+        current_date: date,
+        max_memories: int = 500,
+    ) -> CurationResult:
+        """Classify all MemCells and delete low-value ones.
+
+        Runs the configured curator (or RuleBasedMemCellCurator by default).
+        If the retained count still exceeds max_memories, the lowest-salience
+        KEEP_IMPORTANT entries are evicted until the limit is met.
+        KEEP_FUTURE entries are never evicted by the overflow pass.
+        """
+        effective_curator: MemCellCurator = self.curator or RuleBasedMemCellCurator()
+
+        with maybe_langfuse_trace("memory_curator") as trace:
+            summaries = await self.repository.list_memcell_summaries(today=current_date)
+            if not summaries:
+                return CurationResult(
+                    inspected=0,
+                    removed=0,
+                    retained=0,
+                    kept_future=0,
+                    kept_important=0,
+                )
+
+            decisions = await effective_curator.classify(summaries, current_date)
+            summary_by_id = {s.id: s for s in summaries}
+
+            to_remove: list[str] = []
+            kept_future: list[tuple[str, MemCellSummary]] = []
+            kept_important: list[tuple[str, MemCellSummary]] = []
+
+            for cell_id, decision in decisions:
+                if decision == CuratorDecision.REMOVE:
+                    to_remove.append(cell_id)
+                elif decision == CuratorDecision.KEEP_FUTURE:
+                    kept_future.append((cell_id, summary_by_id[cell_id]))
+                else:
+                    kept_important.append((cell_id, summary_by_id[cell_id]))
+
+            # Evict lowest-salience KEEP_IMPORTANT entries when over the cap.
+            # KEEP_FUTURE is protected and never evicted in this pass.
+            retained_count = len(kept_future) + len(kept_important)
+            if retained_count > max_memories:
+                from datetime import timezone as _tz
+
+                now = datetime(
+                    current_date.year,
+                    current_date.month,
+                    current_date.day,
+                    tzinfo=_tz.utc,
+                )
+
+                def _salience(s: MemCellSummary) -> float:
+                    ts = s.timestamp
+                    if ts.tzinfo is None:
+                        ts = ts.replace(tzinfo=_tz.utc)
+                    age_s = max(0.0, (now - ts.astimezone(_tz.utc)).total_seconds())
+                    recency = 0.5 ** (age_s / _CURATOR_HALF_LIFE_SECONDS)
+                    return compute_memcell_salience(
+                        emotional_intensity=s.emotional_intensity,
+                        retrieval_count=s.retrieval_count,
+                        recency_score=recency,
+                        explicit_importance=s.explicit_importance,
+                    )
+
+                kept_important.sort(key=lambda t: _salience(t[1]))
+                overage = retained_count - max_memories
+                evicted = kept_important[:overage]
+                kept_important = kept_important[overage:]
+                to_remove.extend(cell_id for cell_id, _ in evicted)
+
+            removed = await self.repository.delete_memcells(to_remove)
+            result = CurationResult(
+                inspected=len(summaries),
+                removed=removed,
+                retained=len(kept_future) + len(kept_important),
+                kept_future=len(kept_future),
+                kept_important=len(kept_important),
+            )
+
+            if trace is not None:
+                try:
+                    typed_trace = cast(LangfuseTraceLike, trace)
+                    typed_trace.update(
+                        output={
+                            "inspected": result.inspected,
+                            "removed": result.removed,
+                            "retained": result.retained,
+                        }
+                    )
+                except Exception:
+                    pass
+
+        return result
 
     @staticmethod
     def _to_emotional_tag(raw_cell: MemCellExtractionModel) -> EmotionalTag:

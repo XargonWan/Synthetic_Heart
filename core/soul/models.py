@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
+from enum import Enum
 
 
 @dataclass(slots=True)
@@ -161,6 +162,42 @@ class EmotionalEvent:
     factor_deltas: dict[str, float]
     intensity: float
     context: str
+
+
+class CuratorDecision(str, Enum):
+    """Classification verdict from the Memory Curator."""
+
+    KEEP_FUTURE = "KEEP_FUTURE"
+    KEEP_IMPORTANT = "KEEP_IMPORTANT"
+    REMOVE = "REMOVE"
+
+
+@dataclass(slots=True)
+class MemCellSummary:
+    """Lightweight MemCell descriptor passed to the Memory Curator.
+
+    Only the fields needed for classification are fetched — embeddings and
+    full atomic facts are intentionally excluded to keep the operation cheap.
+    """
+
+    id: str
+    episodic_trace: str
+    timestamp: datetime
+    retrieval_count: int
+    explicit_importance: float
+    emotional_intensity: float
+    has_active_foresight: bool
+
+
+@dataclass(slots=True)
+class CurationResult:
+    """Result summary returned by SoulCompiler.run_curator()."""
+
+    inspected: int
+    removed: int
+    retained: int
+    kept_future: int
+    kept_important: int
 
 
 def compute_memcell_salience(

@@ -156,6 +156,7 @@ class SoulPlugin(PluginBase):
         if self._scheduler_task and not self._scheduler_task.done():
             return
         self._scheduler_task = asyncio.create_task(self._scheduler_loop())
+        asyncio.create_task(self._run_curator_background())
         log_info("[soul_plugin] Started")
 
     async def stop(self) -> None:
@@ -196,7 +197,17 @@ class SoulPlugin(PluginBase):
                 "required_params": {},
                 "optional_params": {},
             },
+            "soul_run_curator": {
+                "description": "Run the Memory Curator to prune outdated or low-value MemCells",
+                "required_params": {},
+                "optional_params": {
+                    "max_memories": "Maximum number of MemCells to retain (default 500)"
+                },
+            },
         }
+
+    def is_enabled(self) -> bool:
+        return self._is_enabled()
 
     async def execute_action(
         self,
@@ -217,6 +228,9 @@ class SoulPlugin(PluginBase):
             return await self._run_rollup_now()
         if action_type == "soul_get_status":
             return await self._get_status()
+        if action_type == "soul_run_curator":
+            max_memories = int(payload.get("max_memories") or 500)
+            return await self._run_curator_now(max_memories=max_memories)
         return None
 
     async def get_static_injection(
@@ -402,6 +416,30 @@ class SoulPlugin(PluginBase):
         result["embeddings_backfilled"] = backfilled
         log_info(f"[soul_plugin] Nightly rollup result: {result}")
         return result
+
+    async def _run_curator_now(self, *, max_memories: int = 500) -> dict[str, int]:
+        result = await self._compiler.run_curator(
+            current_date=datetime.now(timezone.utc).date(),
+            max_memories=max_memories,
+        )
+        log_info(
+            f"[soul_plugin] Memory Curator: inspected={result.inspected} "
+            f"removed={result.removed} retained={result.retained} "
+            f"(future={result.kept_future} important={result.kept_important})"
+        )
+        return {
+            "inspected": result.inspected,
+            "removed": result.removed,
+            "retained": result.retained,
+            "kept_future": result.kept_future,
+            "kept_important": result.kept_important,
+        }
+
+    async def _run_curator_background(self) -> None:
+        try:
+            await self._run_curator_now()
+        except Exception as exc:
+            log_warning(f"[soul_plugin] Background curator run failed: {exc}")
 
     async def _get_status(self) -> dict[str, object]:
         dsp = await self._repo.get_active_dsp()
