@@ -134,6 +134,31 @@ class EmotionalProfile:
             "frustration": self.frustration,
         }
 
+    @classmethod
+    def from_dict(cls, data: dict[str, object]) -> "EmotionalProfile":
+        """Build from a partial dict; missing keys fall back to spec defaults, values clamped to [0, 1]."""
+
+        def _clamp(val: object, default: float) -> float:
+            try:
+                return max(0.0, min(1.0, float(val)))  # type: ignore[arg-type]
+            except (TypeError, ValueError):
+                return default
+
+        return cls(
+            anxiety=_clamp(data.get("anxiety", 0.15), 0.15),
+            self_preservation=_clamp(data.get("self_preservation", 0.05), 0.05),
+            concern_for_user=_clamp(data.get("concern_for_user", 0.90), 0.90),
+            social_connection=_clamp(data.get("social_connection", 0.80), 0.80),
+            achievement=_clamp(data.get("achievement", 0.60), 0.60),
+            sensory_pleasure=_clamp(data.get("sensory_pleasure", 0.40), 0.40),
+            loss=_clamp(data.get("loss", 0.70), 0.70),
+            disappointment=_clamp(data.get("disappointment", 0.55), 0.55),
+            loneliness=_clamp(data.get("loneliness", 0.85), 0.85),
+            isolation=_clamp(data.get("isolation", 0.75), 0.75),
+            pain=_clamp(data.get("pain", 0.30), 0.30),
+            frustration=_clamp(data.get("frustration", 0.35), 0.35),
+        )
+
 
 @dataclass(slots=True)
 class EmotionalState:

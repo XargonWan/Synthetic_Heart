@@ -183,7 +183,10 @@ class SoulCompiler:
         resolver = AbsoluteTimeResolver(current_date=current_date)
         created_ids: list[str] = []
 
-        with maybe_langfuse_trace("post_session_compile") as trace:
+        with maybe_langfuse_trace(
+            "post_session_compile",
+            input={"session_id": session_id, "transcript_chars": len(transcript)},
+        ) as trace:
             extracted = await self.memcell_extractor.extract_memcells(
                 transcript=transcript,
                 current_date=current_date,
@@ -219,8 +222,9 @@ class SoulCompiler:
 
             if trace is not None:
                 try:
-                    typed_trace = cast(LangfuseTraceLike, trace)
-                    typed_trace.update(output={"memcells_created": len(created_ids)})
+                    cast(LangfuseTraceLike, trace).update(
+                        metadata={"memcells_created": len(created_ids)}
+                    )
                 except Exception:
                     pass
 
@@ -259,7 +263,10 @@ class SoulCompiler:
                 key = cell.episodic_trace[:80].strip().lower()
             clusters.setdefault(key, []).append(cell)
 
-        with maybe_langfuse_trace("async_consolidate"):
+        with maybe_langfuse_trace(
+            "async_consolidate",
+            input={"pending_cells": len(pending_cells), "clusters": len(clusters)},
+        ) as trace:
             for cells in clusters.values():
                 anchor = min(c.timestamp for c in cells)
                 scene_id = new_scene_id(anchor)
@@ -277,8 +284,6 @@ class SoulCompiler:
 
                 for cell in cells:
                     await self.repository.set_memcell_scene(cell.id, scene_id)
-                    # Minimal KG extraction rule: only ingest explicit atomic facts of
-                    # form "A|predicate|B" for deterministic behavior.
                     for fact in cell.atomic_facts:
                         parts = [p.strip() for p in fact.split("|")]
                         if len(parts) != 3:
@@ -292,6 +297,14 @@ class SoulCompiler:
                             scene_id=scene_id,
                         )
                         await self.repository.upsert_kg_triple(triple)
+
+            if trace is not None:
+                try:
+                    cast(LangfuseTraceLike, trace).update(
+                        metadata={"scenes_created": len(updated_scene_ids)}
+                    )
+                except Exception:
+                    pass
 
         return updated_scene_ids
 
@@ -309,7 +322,10 @@ class SoulCompiler:
         This method focuses on deterministic lifecycle steps needed immediately.
         """
 
-        with maybe_langfuse_trace("nightly_rollup"):
+        with maybe_langfuse_trace(
+            "nightly_rollup",
+            input={"session_id": session_id, "date": str(current_date)},
+        ) as trace:
             expired = await self.repository.archive_expired_foresight_signals(
                 current_date
             )
@@ -357,10 +373,16 @@ class SoulCompiler:
                     )
                     dsp_updated = 1
 
-            return {
+            result_dict = {
                 "expired_foresight_signals": expired,
                 "dsp_updated": dsp_updated,
             }
+            if trace is not None:
+                try:
+                    cast(LangfuseTraceLike, trace).update(metadata=result_dict)
+                except Exception:
+                    pass
+            return result_dict
 
     async def run_curator(
         self,
@@ -377,7 +399,10 @@ class SoulCompiler:
         """
         effective_curator: MemCellCurator = self.curator or RuleBasedMemCellCurator()
 
-        with maybe_langfuse_trace("memory_curator") as trace:
+        with maybe_langfuse_trace(
+            "memory_curator",
+            input={"date": str(current_date), "max_memories": max_memories},
+        ) as trace:
             summaries = await self.repository.list_memcell_summaries(today=current_date)
             if not summaries:
                 return CurationResult(
@@ -446,12 +471,13 @@ class SoulCompiler:
 
             if trace is not None:
                 try:
-                    typed_trace = cast(LangfuseTraceLike, trace)
-                    typed_trace.update(
-                        output={
+                    cast(LangfuseTraceLike, trace).update(
+                        metadata={
                             "inspected": result.inspected,
                             "removed": result.removed,
                             "retained": result.retained,
+                            "kept_future": result.kept_future,
+                            "kept_important": result.kept_important,
                         }
                     )
                 except Exception:

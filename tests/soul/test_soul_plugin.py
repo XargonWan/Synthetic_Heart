@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 from typing import Any, cast
@@ -9,7 +10,8 @@ import pytest
 
 from plugins.soul_plugin import SoulPlugin
 from plugins.soul_plugin import _SessionState
-from core.soul.models import EmotionalTag, MemCell, MemCellRecall
+from core.soul.emotion_engine import EmotionalEngine
+from core.soul.models import EmotionalProfile, EmotionalTag, MemCell, MemCellRecall
 from core.soul.repository import InMemorySoulRepository, PostgresSoulRepository
 
 
@@ -44,13 +46,14 @@ async def test_static_injection_contains_soul_keys() -> None:
 
 
 @pytest.mark.asyncio
-async def test_static_injection_skips_internal_grillo_interface() -> None:
+async def test_static_injection_provides_passive_context_for_grillo_beat() -> None:
     plugin = SoulPlugin()
     plugin._repo = SimpleNamespace(
         get_active_dsp=AsyncMock(return_value=None),
         list_active_foresight_signals=AsyncMock(return_value=[]),
     )
-    recall_memories_mock = AsyncMock(return_value=["should not be used"])
+    recalled = ["[SOUL recalled memory | 2026-05-07] recent memory text"]
+    recall_memories_mock = AsyncMock(return_value=recalled)
     plugin._recall_memories = cast(Any, recall_memories_mock)
 
     message = SimpleNamespace(
@@ -63,10 +66,19 @@ async def test_static_injection_skips_internal_grillo_interface() -> None:
         message, {"interface_path": "grillo/-1", "grillo_beat": True}
     )
 
-    assert payload == {}
-    plugin._repo.get_active_dsp.assert_not_awaited()
-    plugin._repo.list_active_foresight_signals.assert_not_awaited()
-    recall_memories_mock.assert_not_awaited()
+    assert "soul_recalled_memories" in payload
+    assert payload["soul_recalled_memories"] == recalled
+    assert "soul_user_profile" in payload
+    assert "soul_session_state" in payload
+    assert "grillo/beat" in str(payload["soul_session_state"])
+    assert payload["soul_active_foresight"] == []
+    # DSP and foresight fetched passively; recall runs with beat prompt text
+    plugin._repo.get_active_dsp.assert_awaited_once()
+    plugin._repo.list_active_foresight_signals.assert_awaited_once()
+    recall_memories_mock.assert_awaited_once()
+    # Session tracking must NOT happen — no _sessions entry for grillo beats
+    assert "grillo/-1" not in plugin._sessions
+    assert "grillo/beat" not in plugin._sessions
 
 
 @pytest.mark.asyncio
@@ -542,3 +554,62 @@ async def test_build_daily_transcript_uses_parameterized_cutoff(
     assert isinstance(params[0], datetime)
     assert '[2026-05-05T11:37:00+00:00] Scar: "first"' in transcript
     assert '[2026-05-05T11:38:00+00:00] self: "second"' in transcript
+
+
+def test_build_emotion_engine_returns_emotional_engine() -> None:
+    plugin = SoulPlugin()
+    assert isinstance(plugin._emotion_engine, EmotionalEngine)
+
+
+def test_load_emotional_profile_falls_back_when_no_skins_dir(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    profile = SoulPlugin._load_emotional_profile()
+    assert isinstance(profile, EmotionalProfile)
+    assert profile.as_dict() == EmotionalProfile().as_dict()
+
+
+def test_load_emotional_profile_reads_emotional_profile_section(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import json as _json
+
+    monkeypatch.chdir(tmp_path)
+    skin_dir = tmp_path / "skins" / "TestSkin"
+    skin_dir.mkdir(parents=True)
+    (skin_dir / "persona.json").write_text(
+        _json.dumps({"emotional_profile": {"anxiety": 0.99, "loneliness": 0.01}}),
+        encoding="utf-8",
+    )
+
+    with patch("core.config_manager.config_registry") as mock_reg:
+        mock_reg.get_value.return_value = "TestSkin"
+        profile = SoulPlugin._load_emotional_profile()
+
+    assert profile.anxiety == 0.99
+    assert profile.loneliness == 0.01
+    assert profile.concern_for_user == 0.90
+
+
+def test_load_emotional_profile_falls_back_when_no_emotional_profile_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import json as _json
+
+    monkeypatch.chdir(tmp_path)
+    skin_dir = tmp_path / "skins" / "Rei"
+    skin_dir.mkdir(parents=True)
+    (skin_dir / "persona.json").write_text(
+        _json.dumps({"name": "Rei", "description": "A persona"}),
+        encoding="utf-8",
+    )
+
+    with patch("core.config_manager.config_registry") as mock_reg:
+        mock_reg.get_value.return_value = "Rei"
+        profile = SoulPlugin._load_emotional_profile()
+
+    assert profile.as_dict() == EmotionalProfile().as_dict()

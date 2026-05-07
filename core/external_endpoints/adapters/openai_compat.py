@@ -11,6 +11,7 @@ retry logic, and streaming are all handled by the SDK.
 
 from __future__ import annotations
 
+import re
 import time as _time
 from typing import Any, AsyncIterator
 from urllib.parse import urlparse, urlunparse
@@ -31,6 +32,16 @@ from core.external_endpoints.adapters.base import (
 # Endpoints that are known to support audio/speech (best-effort heuristic)
 _KNOWN_TTS_PATHS = ["/audio/speech", "/v1/audio/speech"]
 _KNOWN_STT_PATHS = ["/audio/transcriptions", "/v1/audio/transcriptions"]
+
+# Matches <think>…</think> and <thinking>…</thinking> blocks produced by
+# reasoning models (Qwen3.5, DeepSeek-R1, etc.) when thinking leaks into content.
+_THINKING_RE = re.compile(
+    r"<think(?:ing)?>.*?</think(?:ing)?>", re.DOTALL | re.IGNORECASE
+)
+
+
+def _strip_thinking(text: str) -> str:
+    return _THINKING_RE.sub("", text).strip()
 
 
 class OpenAICompatAdapter(BaseProtocolAdapter):
@@ -149,8 +160,7 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
                     "type": getattr(tool_call, "type", "function"),
                     "function": {
                         "name": getattr(function_obj, "name", None),
-                        "arguments": getattr(function_obj, "arguments", "{}")
-                        or "{}",
+                        "arguments": getattr(function_obj, "arguments", "{}") or "{}",
                     },
                 }
             )
@@ -186,12 +196,15 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
 
         # Pull out vendor-extension keys that need to travel via ``extra_body``
         # (the OpenAI SDK rejects unknown root-level kwargs, but accepts extra_body).
-        # Currently handled: ``enable_thinking`` — Qwen3.5 / LM Studio extension
-        # that disables chain-of-thought reasoning to avoid consuming the entire
-        # context window on thinking tokens before generating a response.
+        # ``enable_thinking`` — Qwen3.5 / LM Studio: disables chain-of-thought so
+        # reasoning tokens don't fill the context window before the response, and
+        # don't bleed into message content where they corrupt action parsing.
+        # Defaulting to False here matches the behaviour of the vision path and of
+        # Gemini/OpenRouter which never expose thinking in the response content.
         extra_body: dict[str, Any] = kwargs.pop("extra_body", {}) or {}
         if "enable_thinking" in kwargs:
             extra_body["enable_thinking"] = kwargs.pop("enable_thinking")
+        extra_body.setdefault("enable_thinking", False)
 
         filtered = {
             k: v for k, v in kwargs.items() if k not in ("model", "messages", "stream")
@@ -225,9 +238,20 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
                     "completion_tokens": response.usage.completion_tokens or 0,
                     "total_tokens": response.usage.total_tokens or 0,
                 }
-            content = self._extract_message_content(choice.message)
-            if not content:
+            # Prefer native tool_calls over message content — when a reasoning
+            # model emits chain-of-thought before calling a function, its thinking
+            # text ends up in `content` while the actual call is in `tool_calls`.
+            # Checking tool_calls first avoids returning thinking text as the
+            # response and matches the behaviour of Gemini / OpenRouter engines.
+            _raw_tool_calls = (
+                choice.message.get("tool_calls")
+                if isinstance(choice.message, dict)
+                else getattr(choice.message, "tool_calls", None)
+            )
+            if _raw_tool_calls:
                 content = self._extract_tool_call_actions(choice.message)
+            else:
+                content = _strip_thinking(self._extract_message_content(choice.message))
             finish_reason = choice.finish_reason or "stop"
             if finish_reason == "tool_calls":
                 finish_reason = "tool_call"

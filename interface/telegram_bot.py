@@ -2110,7 +2110,7 @@ class TelegramInterface:
                     "chat_name",
                     "reply_to_message_id",
                 ],
-                "description": "Send a text message via Telegram",
+                "description": "Send a text reply to the user via Telegram - REQUIRED whenever responding to a human message",
             },
             "audio_telegram_bot": {
                 "required_fields": ["audio", "interface_path"],

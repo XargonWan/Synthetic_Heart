@@ -79,6 +79,19 @@ def test_instructions_prohibit_embedded_emotion_tags():
     )
 
 
+def test_instructions_prohibit_referencing_input_metadata_prefix():
+    instructions = load_json_instructions()
+    assert "INPUT METADATA" in instructions
+    assert "the user did not write it" in instructions
+
+
+def test_instructions_require_chat_reply_action():
+    instructions = load_json_instructions()
+    assert "CHAT REPLY REQUIRED" in instructions
+    assert "GRILLO INTERNAL MODE is NOT active" in instructions
+    assert "hard failure" in instructions
+
+
 def test_instructions_enforce_first_person_identity():
     instructions = load_json_instructions()
     assert "Stay inside the active persona in first person" in instructions

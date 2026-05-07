@@ -927,6 +927,14 @@ docker exec synth-dev tail -f /app/logs/synth.log | grep -E "\[grillo\]|grillo"
 
 ---
 
+### `interface/telegram_bot.py` has ~60 pre-existing `ty check` errors  <!-- 2026-05-07 -->
+**Symptom:** `uv run ty check interface/telegram_bot.py` emits ~60 errors: `unresolved-attribute` on `Message | None` and `User | None` unions, `invalid-return-type` on `get_trainer_id`, `invalid-argument-type` on coroutine-vs-Iterable, etc.
+**Location:** `interface/telegram_bot.py` throughout.
+**Status:** known, not fixed — all pre-existing before any session modifications.
+**Notes:** These are python-telegram-bot optional-chaining patterns that `ty` doesn't resolve without stub annotations. Any agent editing this file will see the same errors and should confirm via `git diff` that their change is limited to a single line before concluding the errors are pre-existing.
+
+---
+
 ### `grillo_activity_log` can show silent blank outreach rows after log rotation  <!-- 2026-05-07 -->
 **Symptom:** A user reports "no outreach fired," but `logs/synth*` only start at the most recent restart time while `grillo_activity_log` still contains hourly `outreach` rows. Some of those rows have `response_text = ''` and `diary_entry_id = NULL`, so they look like missing beats with no obvious runtime trace left in the rotated logs.
 **Location:** Runtime observability split across `logs/synth*`, `grillo_activity_log`, `chat_history_cache`, `core/external_endpoints/adapters/gemini_adapter.py`, and `core/plugin_instance.py` (`_update_grillo_response`).

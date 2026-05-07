@@ -5,6 +5,7 @@ import json
 import re
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 from core.logging_utils import log_debug, log_error, log_info, log_warning
@@ -19,7 +20,13 @@ from core.soul.compiler import (
 )
 from core.soul.fastembed_embedder import FastEmbedder
 from core.soul.emotion_engine import EmotionalEngine
-from core.soul.models import EmotionalEvent, EmotionalState, MemCell, MemCellRecall
+from core.soul.models import (
+    EmotionalEvent,
+    EmotionalProfile,
+    EmotionalState,
+    MemCell,
+    MemCellRecall,
+)
 from core.soul.repository import (
     InMemorySoulRepository,
     PostgresSoulRepository,
@@ -111,7 +118,7 @@ class SoulPlugin(PluginBase):
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         super().__init__(config)
         self._repo = self._build_repository()
-        self._emotion_engine = EmotionalEngine()
+        self._emotion_engine = self._build_emotion_engine()
         self._compiler = SoulCompiler(
             repository=self._repo,
             memcell_extractor=RuleBasedMemCellExtractor(),
@@ -148,6 +155,28 @@ class SoulPlugin(PluginBase):
                     f"[soul_plugin] FastEmbedder unavailable ({exc}), falling back to NoopEmbedder"
                 )
         return NoopEmbedder()
+
+    def _build_emotion_engine(self) -> EmotionalEngine:
+        return EmotionalEngine(profile=self._load_emotional_profile())
+
+    @staticmethod
+    def _load_emotional_profile() -> EmotionalProfile:
+        try:
+            from core.config_manager import config_registry
+
+            skin = str(
+                config_registry.get_value("SYNTH_NAME", "SyntH", value_type=str)
+                or "SyntH"
+            )
+            persona_path = Path("skins") / skin / "persona.json"
+            if persona_path.is_file():
+                data = json.loads(persona_path.read_text(encoding="utf-8"))
+                ep_data = data.get("emotional_profile")
+                if isinstance(ep_data, dict):
+                    return EmotionalProfile.from_dict(ep_data)
+        except Exception:
+            pass
+        return EmotionalProfile()
 
     async def start(self) -> None:
         if not self._is_enabled():
@@ -241,10 +270,7 @@ class SoulPlugin(PluginBase):
 
         interface_path = self._extract_interface_path(message, context_memory)
         if interface_path.startswith("grillo/"):
-            log_debug(
-                "[soul_plugin] Skipping SOUL static injection for internal Grillo interface"
-            )
-            return {}
+            return await self._get_grillo_beat_context(message)
 
         now = datetime.now(timezone.utc)
 
@@ -308,6 +334,65 @@ class SoulPlugin(PluginBase):
             else "<user_profile>No profile compiled yet.</user_profile>",
             "soul_session_state": session_state,
             "soul_turn_emotion_delta": json.dumps(turn_delta),
+            "soul_active_foresight": [
+                {
+                    "content": signal.content,
+                    "valid_until": signal.valid_until.isoformat(),
+                    "trigger": signal.trigger,
+                }
+                for signal in foresight[:8]
+            ],
+            "soul_recalled_memories": recalled_memories,
+        }
+
+    async def _get_grillo_beat_context(self, message: Any) -> dict[str, object]:
+        """Return passive SOUL context for Grillo beats.
+
+        Provides recalled memories and DSP without session side-effects:
+        no buffer append, no emotional tracking, no session mutation.
+        """
+        active_dsp = None
+        recalled_memories: list[str] = []
+        foresight: list[Any] = []
+
+        try:
+            active_dsp = await self._repo.get_active_dsp()
+        except Exception:
+            pass
+
+        try:
+            foresight = await self._repo.list_active_foresight_signals(
+                datetime.now(timezone.utc).date()
+            )
+        except Exception:
+            pass
+
+        incoming_text = self._extract_message_text(message)
+        if incoming_text:
+            try:
+                recalled_memories = await self._recall_memories(
+                    interface_path="grillo/beat",
+                    incoming_text=incoming_text,
+                    session=_SessionState(),
+                )
+            except Exception as exc:
+                log_debug(f"[soul_plugin] Grillo beat memory recall failed: {exc}")
+
+        foresight_lines = [
+            f"- {signal.content} (until {signal.valid_until.isoformat()})"
+            for signal in foresight[:8]
+        ]
+        foresight_text = "\n".join(foresight_lines) if foresight_lines else "- None"
+
+        return {
+            "soul_user_profile": active_dsp.content
+            if active_dsp
+            else "<user_profile>No profile compiled yet.</user_profile>",
+            "soul_session_state": (
+                "<session_state>\ninterface_path: grillo/beat\n"
+                f"active_foresight:\n{foresight_text}\n</session_state>"
+            ),
+            "soul_turn_emotion_delta": "{}",
             "soul_active_foresight": [
                 {
                     "content": signal.content,

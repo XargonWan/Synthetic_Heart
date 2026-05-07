@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import logging
 import os
-from importlib import import_module
 from contextlib import contextmanager
-from typing import Iterator
+from importlib import import_module
+from typing import Any, Iterator
 
 
 LANGFUSE_ENABLED = os.getenv("LANGFUSE_ENABLED", "false").lower() == "true"
@@ -37,8 +37,11 @@ def _warn_langfuse_once(
 
 
 @contextmanager
-def maybe_langfuse_trace(name: str) -> Iterator[object | None]:
+def maybe_langfuse_trace(name: str, **trace_kwargs: Any) -> Iterator[object | None]:
     """Create a Langfuse trace if enabled and available.
+
+    Extra keyword arguments are forwarded to ``client.trace()`` so callers can
+    attach ``input``, ``metadata``, or ``tags`` at construction time.
 
     This helper must never crash the application. It always yields either a
     trace object or None.
@@ -52,7 +55,7 @@ def maybe_langfuse_trace(name: str) -> Iterator[object | None]:
             langfuse_module = import_module("langfuse")
             Langfuse = getattr(langfuse_module, "Langfuse")
             client = Langfuse()
-            trace = client.trace(name=name)
+            trace = client.trace(name=name, **trace_kwargs)
         except Exception as exc:
             _warn_langfuse_once(
                 f"soul-langfuse-init:{type(exc).__name__}",
