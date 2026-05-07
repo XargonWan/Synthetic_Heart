@@ -679,11 +679,19 @@ docker exec synth-dev tail -f /app/logs/synth.log | grep -E "\[grillo\]|grillo"
 
 ---
 
-### External endpoint adapters still do not use native tool calls end-to-end  <!-- 2026-04-20 -->
-**Symptom:** Even after PromptRequest rendering, external endpoint-backed cortex engines can still rely on freeform JSON-in-text responses instead of native tool calls. MCP traces for external OpenRouter-backed turns may show `messages` only, with no observable `tools` payload, and malformed multi-action JSON can still occur.
-**Location:** `core/external_endpoints/bridges/cortex_bridge.py` (`generate_response` only forwards `messages`), `core/external_endpoints/adapters/openai_compat.py` (`chat_completion` returns `message.content` only, no tool-call parsing), plus other external adapters.
-**Status:** known, not fixed.
-**Notes:** The PromptRequest handoff bug is fixed, so external bridges now render structured messages, but the external adapter stack still lacks a full tool-declaration and tool-call-response path comparable to the built-in OpenRouter engine. Until that lands, external endpoints remain vulnerable to malformed text JSON in multi-action replies.
+### External OpenAI-compatible adapters still do not use native tool calls end-to-end  <!-- 2026-05-07 -->
+**Symptom:** External Gemini cortex turns now log native `tools` payloads and can return parsed function-call actions, but OpenAI-compatible external endpoints can still rely on freeform JSON-in-text responses instead of native tool calls. MCP traces for external OpenRouter-backed turns may still show `messages` only or text-only completions with malformed multi-action JSON.
+**Location:** Remaining gap is primarily `core/external_endpoints/adapters/openai_compat.py` (`chat_completion` still returns `message.content` only, no tool-call parsing) plus any other non-Gemini external adapters that do not consume native tool declarations. External Gemini path is now handled by `core/external_endpoints/bridges/cortex_bridge.py` and `core/external_endpoints/adapters/gemini_adapter.py`.
+**Status:** partially fixed.
+**Notes:** The external bridge now preserves `PromptRequest` tool declarations for Gemini endpoints, forwards Gemini-native `tools`, and the SDK adapter normalizes Gemini `function_call` responses back into SyntH JSON actions. The remaining end-to-end native tool-calling gap is on external OpenAI-compatible and other non-Gemini adapters.
+
+---
+
+### Gemini tool manifests could lose normalized action parameters and yield empty payloads  <!-- 2026-05-07 -->
+**Symptom:** `cortex_api.log` could show Gemini requests with native `tools` present, yet each `function_declaration.parameters.properties` object was empty. The resulting response then normalized into actions like `{"type":"message_telegram_bot","payload":{}}`, causing downstream validation errors such as missing `payload.text` and empty diary payloads.
+**Location:** `core/live_tool_registry.py` (`build_manifests_from_actions`, plus shared manifest extraction for action definitions built from normalized `schema` blocks).
+**Status:** fixed.
+**Notes:** The prompt action registry largely stores normalized actions in `{"schema": {"properties": ...}, "brief": ...}` form, but the manifest builder only read a legacy `payload` dict. Gemini tool declarations now fall back to `schema.properties` and `schema.required`, so native tool calls retain required arguments like `text` and `interface_path`.
 
 ---
 
@@ -799,11 +807,35 @@ docker exec synth-dev tail -f /app/logs/synth.log | grep -E "\[grillo\]|grillo"
 
 ---
 
-### Broad validation is currently blocked by unrelated repo issues  <!-- 2026-04-22 -->
-**Symptom:** `uv run ruff check --fix .` fails on pre-existing files outside most feature slices (observed in `interface/message_send_utils.py`, `interface_dev/reddit_interface.py`, `interface_dev/telethon_userbot.py`, `interface_dev/x_interface.py`, `plugins/bio_manager.py`), and broad `uv run pytest --ignore=tests/plugins/test_selenium_ttsfree.py` can still surface unrelated failing tests (observed during one run: `tests/test_exposed_variables_static.py`, `tests/test_iris.py`).
+### Repo-wide lint still has unrelated failures, but broad pytest is green  <!-- 2026-05-07 -->
+**Symptom:** `uv run ruff check --fix .` can still fail on pre-existing files outside most feature slices (observed in `interface/message_send_utils.py`, `interface_dev/reddit_interface.py`, `interface_dev/telethon_userbot.py`, `interface_dev/x_interface.py`, `plugins/bio_manager.py`), but broad `uv run pytest --ignore=tests/plugins/test_selenium_ttsfree.py -q --disable-warnings` passed on `2026-05-07` with `1185 passed, 15 skipped`.
 **Location:** Mixed pre-existing validation debt across interfaces, plugins, and broad regression suite.
+**Status:** partially fixed.
+**Notes:** The order-dependent pytest failures observed on `2026-05-06` in `tests/test_ai_diary_pool_behavior.py`, `tests/test_current_chat_history.py`, `tests/test_grillo_observer.py`, `tests/test_iris.py`, `tests/test_mobile_chat_behavior.py`, `tests/test_ollama_compat_server.py`, `tests/test_send_message_no_ws.py`, and `tests/test_vox_plugin.py` were fixed on `2026-05-07`. When working on a focused feature, still run the mandatory repo-wide commands for signal, but treat repo-wide Ruff failures as unrelated debt unless your slice touches those files. Use scoped lint/type checks on touched files plus targeted pytest around the modified area when the global lint pass is still dirty.
+
+---
+
+### `plugins/ai_diary.py` still has pre-existing scoped `ty` failures  <!-- 2026-05-07 -->
+**Symptom:** Even focused validation can fail on `uv run ty check plugins/ai_diary.py` with existing Optional/default and loose-type diagnostics such as `invalid-parameter-default`, `invalid-return-type`, and `unsupported-operator`, even when the only new edit is a small schema dict change.
+**Location:** `plugins/ai_diary.py`
 **Status:** known, not fixed.
-**Notes:** When working on a focused feature, still run the mandatory repo-wide commands for signal, but expect unrelated failures. Use scoped lint/type checks on touched files plus targeted pytest around the modified area to verify the feature itself until the broader repo debt is cleaned up. Additional unrelated pytest failures observed on `2026-04-22`: `tests/test_mobile_chat_behavior.py`, `tests/test_multimodal_attachment.py`, `tests/test_ollama_compat_server.py`, `tests/test_selkies_api.py`, `tests/test_vox_plugin.py`.
+**Notes:** This is separate from the Gemini tool-schema regressions. If you only touch prompt/action metadata inside `DiaryPlugin.get_supported_actions()`, validate behavior with targeted pytest plus scoped type checks on the new shared schema-conversion files; do not assume fresh `ty` failures in `plugins/ai_diary.py` were introduced by the schema edit.
+
+---
+
+### PromptRequest history could replay autonomous outreach as assistant-only monologues  <!-- 2026-05-07 -->
+**Symptom:** Manual Telegram prompts could reach Gemini with a `contents` history containing long runs of consecutive `model` turns such as multiple prior outreach messages, making the assembled conversation look malformed or oddly anchored even when the wire schema was valid.
+**Location:** `core/prompt_engine.py` (`_history_to_turns`) fed by same-chat `history_current_chat` from `core/history_engine.py` / `chat_history_cache`.
+**Status:** fixed.
+**Notes:** Outreach messages are valid visible chat history and were not persisted with a special marker, so the safest fix was at turn normalization: drop unmatched leading assistant turns when a user turn appears later in the visible window, and coalesce consecutive same-role turns into one `Turn`. This keeps normal alternating conversations intact while preventing autonomous assistant streaks from poisoning the next manual prompt.
+
+---
+
+### External Gemini 503 overloads were not considered retryable  <!-- 2026-05-07 -->
+**Symptom:** A single upstream error like `503 UNAVAILABLE ... high demand ... Please try again later` could immediately bubble out of `ExternalCortexEngine.generate_response()`, causing the queue fallback response instead of a retry even when the endpoint already allowed retries.
+**Location:** `core/external_endpoints/bridges/cortex_bridge.py` (`ExternalCortexEngine._is_retryable_exception`).
+**Status:** fixed.
+**Notes:** The retry classifier only matched connection/timeouts and a narrow `temporarily unavailable` phrase, so Gemini overload errors with `status: UNAVAILABLE` were treated as fatal. The bridge now treats common transient API overload markers (`429`, `502/503/504`, `UNAVAILABLE`, `high demand`, `rate limit`, `try again later`, etc.) as retryable.
 
 ---
 
@@ -892,6 +924,14 @@ docker exec synth-dev tail -f /app/logs/synth.log | grep -E "\[grillo\]|grillo"
 **Location:** Tests that call real interface entry points such as `interface.telegram_bot.handle_message`, `SynthWebUIInterface.send_message`, or `DiscordInterface.send_message` without mocking `add_message_to_context`, `save_chat_message`, or `save_response_message`.
 **Status:** workaround in place for the known offenders.
 **Notes:** The affected tests now stub persistence explicitly. When adding new interface tests, mock chat-history persistence or use isolated DB fixtures, otherwise runtime prompt context can be contaminated by test data.
+
+---
+
+### `grillo_activity_log` can show silent blank outreach rows after log rotation  <!-- 2026-05-07 -->
+**Symptom:** A user reports "no outreach fired," but `logs/synth*` only start at the most recent restart time while `grillo_activity_log` still contains hourly `outreach` rows. Some of those rows have `response_text = ''` and `diary_entry_id = NULL`, so they look like missing beats with no obvious runtime trace left in the rotated logs.
+**Location:** Runtime observability split across `logs/synth*`, `grillo_activity_log`, `chat_history_cache`, `core/external_endpoints/adapters/gemini_adapter.py`, and `core/plugin_instance.py` (`_update_grillo_response`).
+**Status:** fixed.
+**Notes:** After a restart, the current synth logs may no longer cover the user-reported window, so check `grillo_activity_log` plus `chat_history_cache` for the target `interface_path` before assuming the scheduler stalled. Successful outreach leaves a self-authored chat-history row near the activity timestamp. Blank outreach rows were caused by empty external-model replies being dropped twice: `handle_incoming_message()` skipped Grillo write-back for falsey results and `_update_grillo_response()` also returned early on empty text. The Grillo path now persists a diagnostic `[EMPTY LLM RESPONSE] ...` marker with engine / finish / block metadata when the visible reply is empty, so scheduler issues and safety-filtered model silences are distinguishable in the DB.
 
 ---
 
