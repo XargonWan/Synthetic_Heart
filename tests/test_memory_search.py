@@ -5,6 +5,28 @@ import plugins.memory_search as memory_search_module
 from plugins.memory_search import MemorySearchPlugin, _parse_time_window_spec
 
 
+def test_memory_search_is_enabled_uses_config(monkeypatch) -> None:
+    monkeypatch.setattr(
+        memory_search_module.config_registry,
+        "get_value",
+        lambda key, default=None, **kwargs: (
+            False if key == "ENABLE_MEMORY_SEARCH" else default
+        ),
+    )
+
+    plugin = MemorySearchPlugin()
+    assert plugin.is_enabled() is False
+
+    monkeypatch.setattr(
+        memory_search_module.config_registry,
+        "get_value",
+        lambda key, default=None, **kwargs: (
+            True if key == "ENABLE_MEMORY_SEARCH" else default
+        ),
+    )
+    assert plugin.is_enabled() is True
+
+
 def test_build_query_tags(monkeypatch):
     monkeypatch.setattr(memory_search_module, "_get_db_type", lambda: "mariadb")
     plugin = MemorySearchPlugin()

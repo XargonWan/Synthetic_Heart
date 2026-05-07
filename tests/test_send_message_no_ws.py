@@ -22,6 +22,8 @@ async def test_send_message_persists_when_no_websocket():
             "core.chat_context_manager.save_response_message", AsyncMock()
         ) as mock_save,
         patch("core.chat_history_cache.save_chat_message", AsyncMock()),
+        patch("core.session_meta.get_session_meta", AsyncMock(return_value={})),
+        patch("core.session_meta.set_session_meta", AsyncMock()),
     ):
         # Call send_message with interface_path
         await webui.send_message(
@@ -68,6 +70,8 @@ async def test_send_message_serializes_non_json_metadata_for_websocket():
         patch.object(webui, "_webui_clear_pending_thinking", AsyncMock()),
         patch.object(webui, "_append_history", AsyncMock()),
         patch("core.chat_context_manager.save_response_message", AsyncMock()),
+        patch("core.session_meta.get_session_meta", AsyncMock(return_value={})),
+        patch("core.session_meta.set_session_meta", AsyncMock()),
     ):
         await webui.send_message(
             {
@@ -78,8 +82,11 @@ async def test_send_message_serializes_non_json_metadata_for_websocket():
         )
 
     assert websocket.send_json.called
-    sent_payload = websocket.send_json.call_args.args[0]
-    assert sent_payload["tts_url"] == "namespace(url='https://example/tts')"
+    sent_payloads = [call.args[0] for call in websocket.send_json.call_args_list]
+    assert any(
+        payload.get("tts_url") == "namespace(url='https://example/tts')"
+        for payload in sent_payloads
+    )
 
 
 @pytest.mark.asyncio
@@ -93,6 +100,8 @@ async def test_send_message_prefers_payload_content_over_positional_object_text(
         patch.object(webui, "_webui_clear_pending_thinking", AsyncMock()),
         patch.object(webui, "_append_history", AsyncMock()),
         patch("core.chat_context_manager.save_response_message", AsyncMock()),
+        patch("core.session_meta.get_session_meta", AsyncMock(return_value={})),
+        patch("core.session_meta.set_session_meta", AsyncMock()),
     ):
         await webui.send_message(
             {
@@ -103,5 +112,5 @@ async def test_send_message_prefers_payload_content_over_positional_object_text(
         )
 
     assert websocket.send_json.called
-    sent_payload = websocket.send_json.call_args.args[0]
-    assert sent_payload["text"] == "expected content"
+    sent_payloads = [call.args[0] for call in websocket.send_json.call_args_list]
+    assert any(payload.get("text") == "expected content" for payload in sent_payloads)

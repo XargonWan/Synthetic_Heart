@@ -480,6 +480,10 @@ class VoxPlugin(AIPluginBase):
             }
         }
 
+    def is_enabled(self) -> bool:
+        self.refresh_config()
+        return self._active_engine_name != "disabled"
+
     def get_prompt_instructions(self, action_name: str) -> dict:
         if action_name == "tts_speak":
             return {
@@ -626,9 +630,10 @@ class VoxPlugin(AIPluginBase):
 
             persona_json: dict[str, Any] | None = None
             pm = get_persona_manager()
-            if pm and getattr(pm, "_current_persona", None):
+            current_persona = getattr(pm, "_current_persona", None) if pm else None
+            if pm and current_persona:
                 try:
-                    persona_json = pm._load_persona_json(pm._current_persona.name)
+                    persona_json = pm._load_persona_json(current_persona.name)
                 except Exception:
                     persona_json = None
 
@@ -704,7 +709,7 @@ class VoxPlugin(AIPluginBase):
             if iface_name == "synth_webui" and hasattr(target_iface, "send_tts_audio"):
                 session_id = levels[0] if levels else None
                 if session_id:
-                    send_kwargs = {
+                    send_kwargs: dict[str, Any] = {
                         "session_id": session_id,
                         "audio_path": str(audio_path),
                         "text": caption,

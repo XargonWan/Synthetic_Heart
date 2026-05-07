@@ -9,6 +9,9 @@ from fastapi.responses import StreamingResponse
 
 @pytest.mark.asyncio
 async def test_streaming_deltas_and_processing_chunk(monkeypatch):
+    monkeypatch.setattr(
+        OllamaCompatServer, "_schedule_server_startup", lambda self: None
+    )
     server = OllamaCompatServer()
 
     # Capture session_meta calls
@@ -18,6 +21,13 @@ async def test_streaming_deltas_and_processing_chunk(monkeypatch):
         recorded_meta_calls.append((interface_path, dict(meta)))
 
     monkeypatch.setattr("core.session_meta.set_session_meta", fake_set_session_meta)
+
+    async def fake_add_message_to_context(**kwargs):
+        return None
+
+    monkeypatch.setattr(
+        "core.chat_context_manager.add_message_to_context", fake_add_message_to_context
+    )
 
     # Simulate plugin_instance producing a delayed string response
     async def fake_enqueue_and_wait(
@@ -73,7 +83,21 @@ async def test_streaming_deltas_and_processing_chunk(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_nonstream_completion_includes_text(monkeypatch):
+    monkeypatch.setattr(
+        OllamaCompatServer, "_schedule_server_startup", lambda self: None
+    )
     server = OllamaCompatServer()
+
+    async def fake_add_message_to_context(**kwargs):
+        return None
+
+    async def fake_set_session_meta(interface_path, meta):
+        return None
+
+    monkeypatch.setattr(
+        "core.chat_context_manager.add_message_to_context", fake_add_message_to_context
+    )
+    monkeypatch.setattr("core.session_meta.set_session_meta", fake_set_session_meta)
 
     async def fake_enqueue_and_wait(
         *,
@@ -106,17 +130,37 @@ async def test_nonstream_completion_includes_text(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_nonstream_completion_with_actions_executed(monkeypatch):
+    monkeypatch.setattr(
+        OllamaCompatServer, "_schedule_server_startup", lambda self: None
+    )
     server = OllamaCompatServer()
 
-    async def fake_handle_incoming_message(
-        interface, message_obj, context_memory, iface_id
-    ):
+    async def fake_add_message_to_context(**kwargs):
         return None
 
     monkeypatch.setattr(
-        "core.plugin_instance.handle_incoming_message",
-        fake_handle_incoming_message,
+        "core.chat_context_manager.add_message_to_context", fake_add_message_to_context
     )
+
+    async def fake_set_session_meta(interface_path, meta):
+        return None
+
+    async def fake_enqueue_and_wait(
+        *,
+        bot,
+        message,
+        context_memory=None,
+        history_scope=None,
+        priority=None,
+        interface_id=None,
+        skip_mention_check=None,
+        original_message=None,
+        timeout=None,
+    ):
+        return None
+
+    monkeypatch.setattr("core.session_meta.set_session_meta", fake_set_session_meta)
+    monkeypatch.setattr("core.message_queue.enqueue_and_wait", fake_enqueue_and_wait)
 
     payload = {"messages": [{"role": "user", "content": "ciao"}], "stream": False}
     resp = await server._handle_chat_payload(payload)

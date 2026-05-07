@@ -315,6 +315,46 @@ async def test_plugin_instance_grillo_response_uses_postgres_append_sql() -> Non
 
 
 @pytest.mark.asyncio
+async def test_plugin_instance_grillo_response_records_empty_response_marker() -> None:
+    """Empty Grillo responses should still persist a diagnostic marker."""
+    mock_ctx, mock_cursor = _create_mock_db_context()
+
+    def mock_get_conn_ctx() -> MagicMock:
+        return mock_ctx
+
+    import core.db
+
+    original_get_conn_ctx = core.db.get_conn_ctx
+    original_get_db_type = core.db._get_db_type
+    core.db.get_conn_ctx = mock_get_conn_ctx  # type: ignore[assignment]
+    core.db._get_db_type = lambda: "postgres"  # type: ignore[assignment]
+
+    try:
+        from core.plugin_instance import _update_grillo_response
+
+        await _update_grillo_response(
+            123,
+            "",
+            response_metadata={
+                "finish_reason": "safety",
+                "block_reason": "PROHIBITED_CONTENT",
+                "model": "gemini-2.5-flash",
+            },
+            engine_label="gemini-endpoint",
+        )
+
+        executed_params = mock_cursor.execute.await_args_list[0][0][1]
+        assert executed_params[0] == executed_params[1]
+        assert "[EMPTY LLM RESPONSE]" in executed_params[0]
+        assert "engine=gemini-endpoint" in executed_params[0]
+        assert "finish_reason=safety" in executed_params[0]
+        assert "block_reason=PROHIBITED_CONTENT" in executed_params[0]
+    finally:
+        core.db.get_conn_ctx = original_get_conn_ctx
+        core.db._get_db_type = original_get_db_type
+
+
+@pytest.mark.asyncio
 async def test_grillo_outreach_uses_last_active_interface(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

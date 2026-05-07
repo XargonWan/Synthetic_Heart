@@ -1483,10 +1483,12 @@ class DiaryPlugin:
                         "context_tags": {
                             "type": "array",
                             "description": "Tags for topics discussed (optional)",
+                            "items": {"type": "string"},
                         },
                         "involved_users": {
                             "type": "array",
                             "description": "Users involved in the interaction (optional)",
+                            "items": {"type": "string"},
                         },
                     },
                     "required": ["interaction_summary"],

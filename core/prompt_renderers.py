@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from core.live_tool_registry import tool_parameter_schema
 from core.prompt_request import PromptRequest, RuntimeContext
 
 if TYPE_CHECKING:
@@ -178,12 +179,7 @@ def _manifest_to_openai_schema(manifest: "ToolManifest") -> dict[str, Any]:
         "required": [],
     }
     for p in manifest.parameters:
-        prop: dict[str, Any] = {"type": p.type}
-        if p.description:
-            prop["description"] = p.description
-        if p.enum:
-            prop["enum"] = p.enum
-        params["properties"][p.name] = prop
+        params["properties"][p.name] = tool_parameter_schema(p)
         if p.required:
             params["required"].append(p.name)
 
@@ -205,12 +201,7 @@ def _manifest_to_anthropic_tool(manifest: "ToolManifest") -> dict[str, Any]:
         "required": [],
     }
     for p in manifest.parameters:
-        prop: dict[str, Any] = {"type": p.type}
-        if p.description:
-            prop["description"] = p.description
-        if p.enum:
-            prop["enum"] = p.enum
-        input_schema["properties"][p.name] = prop
+        input_schema["properties"][p.name] = tool_parameter_schema(p)
         if p.required:
             input_schema["required"].append(p.name)
 
@@ -228,21 +219,10 @@ def _manifest_to_gemini_tool(manifest: "ToolManifest") -> dict[str, Any]:
         "properties": {},
         "required": [],
     }
-    _TYPE_MAP = {
-        "string": "STRING",
-        "integer": "INTEGER",
-        "number": "NUMBER",
-        "boolean": "BOOLEAN",
-        "object": "OBJECT",
-        "array": "ARRAY",
-    }
     for p in manifest.parameters:
-        prop: dict[str, Any] = {"type": _TYPE_MAP.get(p.type, "STRING")}
-        if p.description:
-            prop["description"] = p.description
-        if p.enum:
-            prop["enum"] = p.enum
-        parameters["properties"][p.name] = prop
+        parameters["properties"][p.name] = tool_parameter_schema(
+            p, uppercase_types=True
+        )
         if p.required:
             parameters["required"].append(p.name)
 

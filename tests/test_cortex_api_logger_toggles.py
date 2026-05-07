@@ -139,6 +139,83 @@ def test_langfuse_generation_includes_canonical_usage(monkeypatch):
     assert trace_metadata["usage"] == generation_kwargs["usage_details"]
 
 
+def test_langfuse_includes_tool_prompt_metadata(monkeypatch):
+    monkeypatch.setenv("CORTEX_API_LOG_ENABLED", "false")
+    monkeypatch.setenv("CORTEX_LANGFUSE_ENABLED", "true")
+    monkeypatch.setenv("CORTEX_LANGFUSE_CAPTURE_GENERATIONS", "true")
+
+    captured: dict[str, Any] = {}
+
+    class DummyTrace:
+        def update(self, **kwargs):
+            if "input" in kwargs:
+                captured["request_metadata"] = kwargs.get("metadata")
+            if "output" in kwargs:
+                captured["response_metadata"] = kwargs.get("metadata")
+
+        def generation(self, **kwargs):
+            captured["generation_metadata"] = kwargs.get("metadata")
+
+    class DummyClient:
+        def trace(self, **kwargs):
+            return DummyTrace()
+
+        def flush(self):
+            return None
+
+    monkeypatch.setattr(cal, "_get_langfuse_client", lambda: DummyClient())
+
+    payload = {
+        "messages": [{"role": "user", "content": "ping"}],
+        "tools": [
+            {
+                "type": "function",
+                "function": {
+                    "name": "send_message",
+                    "description": "Send a reply",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "update_emotion_state",
+                    "description": "Update emotion state",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            },
+        ],
+        "tool_choice": {"type": "function", "function": {"name": "send_message"}},
+    }
+
+    cal.log_cortex_request("test", model="m", payload=payload)
+    cal.log_cortex_response("test", model="m", status=200, body={"ok": True})
+
+    request_metadata = captured["request_metadata"]
+    assert isinstance(request_metadata, dict)
+    request_metadata = cast(dict[str, Any], request_metadata)
+    assert request_metadata["tool_declaration_count"] == 2
+    assert request_metadata["tool_prompt_size_chars"] > 0
+
+    response_metadata = captured["response_metadata"]
+    assert isinstance(response_metadata, dict)
+    response_metadata = cast(dict[str, Any], response_metadata)
+    assert response_metadata["tool_declaration_count"] == 2
+    assert (
+        response_metadata["tool_prompt_size_chars"]
+        == request_metadata["tool_prompt_size_chars"]
+    )
+
+    generation_metadata = captured["generation_metadata"]
+    assert isinstance(generation_metadata, dict)
+    generation_metadata = cast(dict[str, Any], generation_metadata)
+    assert generation_metadata["tool_declaration_count"] == 2
+    assert (
+        generation_metadata["tool_prompt_size_chars"]
+        == request_metadata["tool_prompt_size_chars"]
+    )
+
+
 def test_pop_langfuse_request_does_not_pop_unrelated_engine() -> None:
     token = cal._langfuse_ctx.set(
         [

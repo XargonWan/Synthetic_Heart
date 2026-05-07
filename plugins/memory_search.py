@@ -246,6 +246,11 @@ class MemorySearchPlugin:
     def __init__(self):
         register_plugin("memory_search", self)
 
+    def is_enabled(self) -> bool:
+        return bool(
+            config_registry.get_value("ENABLE_MEMORY_SEARCH", True, value_type=bool)
+        )
+
     def get_supported_actions(self):
         return {
             "memory_search": {

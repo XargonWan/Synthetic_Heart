@@ -15,6 +15,9 @@ def test_mobile_auto_restore_comment_present():
         encoding="utf-8"
     )
     main_js = Path("res/synth_webui/js/main.js").read_text(encoding="utf-8")
+    chat_window_js = Path("res/synth_webui/js/chat-window.mjs").read_text(
+        encoding="utf-8"
+    )
 
     # Legacy index remains present, but runtime behavior moved into shell + modular JS.
     assert "runtime uses synth_webui_shell.html + modular JS" in legacy_tpl
@@ -33,7 +36,8 @@ def test_mobile_auto_restore_comment_present():
     assert "z-index: 20000" in base_tpl
     assert "border-bottom: none" in base_tpl
 
-    # Chat window restore logic and legacy mobile key migration live in modular JS.
-    assert "legacyRectMobileKey" in main_js
-    assert "legacyStateMobileKey" in main_js
+    # Chat window restore logic lives in the dedicated chat module, while main.js bootstraps it.
+    assert "chat-window.mjs" in main_js
+    assert "restoreChatState" in chat_window_js
+    assert "localStorage" in chat_window_js
     assert "getBoundingClientRect" in main_js

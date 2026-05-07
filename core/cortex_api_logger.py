@@ -309,6 +309,73 @@ def _build_langfuse_output_payload(
     return body
 
 
+def _serialized_size_chars(value: Any) -> int | None:
+    try:
+        return len(
+            json.dumps(
+                value,
+                ensure_ascii=False,
+                default=str,
+                separators=(",", ":"),
+            )
+        )
+    except Exception:
+        try:
+            return len(str(value))
+        except Exception:
+            return None
+
+
+def _count_tool_declarations(value: Any) -> int:
+    if isinstance(value, list):
+        nested_count = sum(_count_tool_declarations(item) for item in value)
+        return nested_count or len(value)
+    if not isinstance(value, dict):
+        return 0
+    if isinstance(value.get("function"), dict):
+        return 1
+    for key in ("functionDeclarations", "function_declarations"):
+        declarations = value.get(key)
+        if isinstance(declarations, list):
+            return len(declarations)
+    if "name" in value and ("parameters" in value or "parameters_json_schema" in value):
+        return 1
+    return 1 if value else 0
+
+
+def _extract_tool_prompt_metadata(payload: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(payload, dict) or not payload:
+        return {}
+
+    total_chars = 0
+    present = False
+    for key in (
+        "tools",
+        "tool_declarations",
+        "tool_choice",
+        "toolChoice",
+        "tool_config",
+        "toolConfig",
+    ):
+        value = payload.get(key)
+        if value in (None, "", [], {}):
+            continue
+        present = True
+        size_chars = _serialized_size_chars(value)
+        if size_chars is not None:
+            total_chars += size_chars
+
+    if not present:
+        return {}
+
+    metadata: dict[str, Any] = {"tool_prompt_size_chars": total_chars}
+    tools_value = payload.get("tools")
+    tool_count = _count_tool_declarations(tools_value)
+    if tool_count > 0:
+        metadata["tool_declaration_count"] = tool_count
+    return metadata
+
+
 def _get_langfuse_client() -> Any | None:
     global _langfuse_client
     if _langfuse_client is not None:
@@ -347,6 +414,13 @@ def _push_langfuse_request(
 ) -> str:
     request_id = uuid4().hex[:12]
     trace: Any | None = None
+    request_metadata: dict[str, Any] = {
+        "request_id": request_id,
+        "engine": engine,
+        "model": model,
+        "url": url,
+        **_extract_tool_prompt_metadata(payload),
+    }
 
     client = _get_langfuse_client()
     if client is not None:
@@ -354,22 +428,12 @@ def _push_langfuse_request(
             trace = client.trace(
                 name=f"cortex_api:{engine}",
                 session_id=f"{engine}:{request_id}",
-                metadata={
-                    "request_id": request_id,
-                    "engine": engine,
-                    "model": model,
-                    "url": url,
-                },
+                metadata=request_metadata,
             )
             if trace is not None and hasattr(trace, "update"):
                 update_kwargs: dict[str, Any] = {
                     "input": _coerce_for_langfuse(payload or {}),
-                    "metadata": {
-                        "request_id": request_id,
-                        "engine": engine,
-                        "model": model,
-                        "url": url,
-                    },
+                    "metadata": dict(request_metadata),
                 }
                 if _langfuse_capture_headers() and headers:
                     update_kwargs["metadata"]["headers"] = _coerce_for_langfuse(
@@ -395,6 +459,7 @@ def _push_langfuse_request(
             "url": url,
             "headers": headers,
             "input_payload": payload,
+            "request_metadata": request_metadata,
             "started_at_monotonic": time.monotonic(),
             "started_at_utc": datetime.now(timezone.utc),
         }
@@ -530,6 +595,9 @@ def log_cortex_response(
     trace = lf_item.get("trace") if isinstance(lf_item, dict) else None
     input_payload = lf_item.get("input_payload") if isinstance(lf_item, dict) else None
     headers = lf_item.get("headers") if isinstance(lf_item, dict) else None
+    request_metadata = (
+        lf_item.get("request_metadata") if isinstance(lf_item, dict) else None
+    )
     url = lf_item.get("url") if isinstance(lf_item, dict) else ""
     started = lf_item.get("started_at_monotonic") if isinstance(lf_item, dict) else None
     started_utc = lf_item.get("started_at_utc") if isinstance(lf_item, dict) else None
@@ -550,34 +618,46 @@ def log_cortex_response(
 
     if trace is not None:
         try:
+            response_metadata: dict[str, Any] = {}
+            if isinstance(request_metadata, dict):
+                response_metadata.update(request_metadata)
+            response_metadata.update(
+                {
+                    "status": status,
+                    "error": error,
+                    "elapsed_ms": elapsed_ms,
+                    "usage": normalized_langfuse_usage_details or usage or {},
+                    "engine": engine,
+                    "model": model,
+                    "url": url,
+                }
+            )
             if hasattr(trace, "update"):
                 trace.update(
                     output=_coerce_for_langfuse(output_payload),
-                    metadata={
-                        "status": status,
-                        "error": error,
-                        "elapsed_ms": elapsed_ms,
-                        "usage": normalized_langfuse_usage_details or usage or {},
-                        "engine": engine,
-                        "model": model,
-                        "url": url,
-                    },
+                    metadata=response_metadata,
                 )
 
             # Emit a generation record to populate model/token columns.
             if _langfuse_capture_generations() and hasattr(trace, "generation"):
-                gen_kwargs: dict[str, Any] = {
-                    "name": f"completion:{engine}",
-                    "model": model or None,
-                    "input": _coerce_for_langfuse(input_payload or {}),
-                    "output": _coerce_for_langfuse(output_payload),
-                    "metadata": {
+                generation_metadata: dict[str, Any] = {}
+                if isinstance(request_metadata, dict):
+                    generation_metadata.update(request_metadata)
+                generation_metadata.update(
+                    {
                         "request_id": request_id,
                         "engine": engine,
                         "status": status,
                         "error": error,
                         "url": url,
-                    },
+                    }
+                )
+                gen_kwargs: dict[str, Any] = {
+                    "name": f"completion:{engine}",
+                    "model": model or None,
+                    "input": _coerce_for_langfuse(input_payload or {}),
+                    "output": _coerce_for_langfuse(output_payload),
+                    "metadata": generation_metadata,
                 }
                 if normalized_langfuse_usage is not None:
                     gen_kwargs["usage"] = normalized_langfuse_usage

@@ -129,6 +129,27 @@ def test_auris_plugin_refresh_config_uses_vosk_default() -> None:
     assert plugin._active_engine_name == "vosk"
 
 
+def test_auris_plugin_is_enabled_tracks_active_engine() -> None:
+    from plugins.auris_plugin import AurisPlugin
+
+    plugin = AurisPlugin.__new__(AurisPlugin)
+    plugin._active_engine_name = "vosk"
+
+    with patch.object(
+        plugin,
+        "refresh_config",
+        side_effect=lambda: setattr(plugin, "_active_engine_name", "disabled"),
+    ):
+        assert plugin.is_enabled() is False
+
+    with patch.object(
+        plugin,
+        "refresh_config",
+        side_effect=lambda: setattr(plugin, "_active_engine_name", "vosk"),
+    ):
+        assert plugin.is_enabled() is True
+
+
 @pytest.mark.asyncio
 async def test_auris_plugin_transcribe_calls_engine() -> None:
     """transcribe_audio should call the engine's transcribe method."""

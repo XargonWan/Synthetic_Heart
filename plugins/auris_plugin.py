@@ -220,6 +220,10 @@ class AurisPlugin(AIPluginBase):
             }
         }
 
+    def is_enabled(self) -> bool:
+        self.refresh_config()
+        return self._active_engine_name != "disabled"
+
     def get_prompt_instructions(self, action_name: str) -> dict:
         if action_name == "stt_transcribe":
             return {
@@ -344,7 +348,7 @@ class AurisPlugin(AIPluginBase):
         if not text or not text.strip():
             return None
         try:
-            from lingua import LanguageDetectorBuilder  # type: ignore[import]
+            from lingua import LanguageDetectorBuilder
 
             detector = (
                 LanguageDetectorBuilder.from_all_languages()

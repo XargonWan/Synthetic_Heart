@@ -109,6 +109,66 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
         """Return the first candidate chat URL for direct HTTP calls."""
         return self._http_chat_urls()[0]
 
+    @staticmethod
+    def _extract_tool_call_actions(message: Any) -> str:
+        """Normalize OpenAI tool_calls payloads into SyntH action JSON."""
+        from core.prompt_renderers import OpenAIRenderer
+
+        content = ""
+        tool_calls_raw: Any = None
+
+        if isinstance(message, dict):
+            content = str(message.get("content") or "")
+            tool_calls_raw = message.get("tool_calls")
+        else:
+            content = str(getattr(message, "content", "") or "")
+            tool_calls_raw = getattr(message, "tool_calls", None)
+
+        tool_calls: list[dict[str, Any]] = []
+        for tool_call in tool_calls_raw or []:
+            if isinstance(tool_call, dict):
+                function = tool_call.get("function") or {}
+                tool_calls.append(
+                    {
+                        "id": tool_call.get("id"),
+                        "type": tool_call.get("type") or "function",
+                        "function": {
+                            "name": function.get("name"),
+                            "arguments": function.get("arguments") or "{}",
+                        },
+                    }
+                )
+                continue
+
+            function_obj = getattr(tool_call, "function", None)
+            if function_obj is None:
+                continue
+            tool_calls.append(
+                {
+                    "id": getattr(tool_call, "id", None),
+                    "type": getattr(tool_call, "type", "function"),
+                    "function": {
+                        "name": getattr(function_obj, "name", None),
+                        "arguments": getattr(function_obj, "arguments", "{}")
+                        or "{}",
+                    },
+                }
+            )
+
+        parsed = OpenAIRenderer.parse_tool_call_response(
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "content": content,
+                            "tool_calls": tool_calls,
+                        }
+                    }
+                ]
+            }
+        )
+        return str(parsed or "").strip()
+
     # ------------------------------------------------------------------
     # Chat
     # ------------------------------------------------------------------
@@ -136,12 +196,16 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
         filtered = {
             k: v for k, v in kwargs.items() if k not in ("model", "messages", "stream")
         }
+        logged_payload: dict[str, Any] = {"messages": messages}
+        logged_payload.update(filtered)
+        if extra_body:
+            logged_payload["extra_body"] = extra_body
 
         log_cortex_request(
             engine_tag,
             model=request_model,
             url=self._sdk_base_url(),
-            payload={"messages": messages},
+            payload=logged_payload,
         )
         _req_start = _time.monotonic()
 
@@ -162,6 +226,12 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
                     "total_tokens": response.usage.total_tokens or 0,
                 }
             content = self._extract_message_content(choice.message)
+            if not content:
+                content = self._extract_tool_call_actions(choice.message)
+            finish_reason = choice.finish_reason or "stop"
+            if finish_reason == "tool_calls":
+                finish_reason = "tool_call"
+
             _elapsed = (_time.monotonic() - _req_start) * 1000
             log_cortex_response(
                 engine_tag,
@@ -174,7 +244,7 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
             return ChatResponse(
                 content=content,
                 model=response.model or request_model,
-                finish_reason=choice.finish_reason or "stop",
+                finish_reason=finish_reason,
                 usage=usage,
             )
         except Exception as exc:
@@ -196,12 +266,17 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
         client = self._get_client()
         request_model = model or "default"
         engine_tag = f"openai_compat:{self._engine_label or 'default'}"
+        filtered = {
+            k: v for k, v in kwargs.items() if k not in ("model", "messages", "stream")
+        }
+        logged_payload: dict[str, Any] = {"messages": messages, "stream": True}
+        logged_payload.update(filtered)
 
         log_cortex_request(
             engine_tag,
             model=request_model,
             url=self._sdk_base_url(),
-            payload={"messages": messages, "stream": True},
+            payload=logged_payload,
         )
         _req_start = _time.monotonic()
         _accumulated: list[str] = []
@@ -211,11 +286,7 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
                 model=request_model,
                 messages=messages,
                 stream=True,
-                **{
-                    k: v
-                    for k, v in kwargs.items()
-                    if k not in ("model", "messages", "stream")
-                },
+                **filtered,
             )
             async for chunk in stream:
                 delta = chunk.choices[0].delta if chunk.choices else None

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import time as _time
 from typing import Any, AsyncIterator
@@ -210,6 +211,113 @@ def _messages_to_gemini(
     return "\n".join(system_parts), contents
 
 
+def _normalize_gemini_tools_for_sdk(
+    raw_tools: Any, types_module: Any
+) -> list[Any] | None:
+    if not isinstance(raw_tools, list) or not raw_tools:
+        return None
+
+    sdk_tools: list[Any] = []
+    for tool in raw_tools:
+        if hasattr(tool, "function_declarations"):
+            sdk_tools.append(tool)
+            continue
+
+        declaration_items: list[Any] = []
+        if isinstance(tool, dict):
+            declarations = tool.get("function_declarations") or tool.get(
+                "functionDeclarations"
+            )
+            if isinstance(declarations, list):
+                declaration_items = declarations
+            elif isinstance(tool.get("function"), dict):
+                declaration_items = [tool["function"]]
+            elif "name" in tool:
+                declaration_items = [tool]
+
+        sdk_declarations: list[Any] = []
+        for declaration in declaration_items:
+            if hasattr(declaration, "name"):
+                sdk_declarations.append(declaration)
+                continue
+            if not isinstance(declaration, dict):
+                continue
+
+            name = str(declaration.get("name") or "").strip()
+            if not name:
+                continue
+
+            parameters = declaration.get("parameters") or {
+                "type": "OBJECT",
+                "properties": {},
+            }
+            sdk_declarations.append(
+                types_module.FunctionDeclaration(
+                    name=name,
+                    description=str(declaration.get("description") or ""),
+                    parameters=parameters,
+                )
+            )
+
+        if sdk_declarations:
+            sdk_tools.append(types_module.Tool(function_declarations=sdk_declarations))
+
+    return sdk_tools or None
+
+
+def _extract_function_call_actions(response: Any) -> str:
+    candidates = getattr(response, "candidates", None)
+    if not candidates:
+        return ""
+
+    actions: list[dict[str, Any]] = []
+    for candidate in candidates:
+        content = getattr(candidate, "content", None)
+        parts = getattr(content, "parts", None) if content is not None else None
+        if not parts:
+            continue
+
+        for part in parts:
+            function_call = getattr(part, "function_call", None)
+            if function_call is None:
+                function_call = getattr(part, "functionCall", None)
+            if function_call is None and isinstance(part, dict):
+                function_call = part.get("function_call") or part.get("functionCall")
+            if function_call is None:
+                continue
+
+            if isinstance(function_call, dict):
+                name = function_call.get("name")
+                args = function_call.get("args", function_call.get("arguments"))
+            else:
+                name = getattr(function_call, "name", None)
+                args = getattr(function_call, "args", None)
+                if args is None:
+                    args = getattr(function_call, "arguments", None)
+
+            if not isinstance(name, str) or not name.strip():
+                continue
+
+            payload: dict[str, Any]
+            if isinstance(args, dict):
+                payload = args
+            elif isinstance(args, str):
+                try:
+                    parsed_args = json.loads(args)
+                    payload = parsed_args if isinstance(parsed_args, dict) else {}
+                except Exception:
+                    payload = {}
+            else:
+                payload = {}
+
+            actions.append({"type": name, "payload": payload})
+
+    if not actions:
+        return ""
+
+    return json.dumps({"actions": actions}, ensure_ascii=False)
+
+
 class GeminiAdapter(BaseProtocolAdapter):
     """Adapter using the ``google-genai`` SDK for Google Gemini services."""
 
@@ -217,6 +325,7 @@ class GeminiAdapter(BaseProtocolAdapter):
 
     def __init__(self, api_key: str) -> None:
         self._api_key = api_key
+        self._last_completion_metadata: dict[str, Any] = {}
 
     def _get_client(self) -> Any:
         try:
@@ -243,6 +352,7 @@ class GeminiAdapter(BaseProtocolAdapter):
     ) -> ChatResponse:
         import asyncio
 
+        self._last_completion_metadata = {}
         client = self._get_client()
         request_model = model or self.DEFAULT_MODEL
         system_instruction, contents = _messages_to_gemini(messages)
@@ -253,10 +363,15 @@ class GeminiAdapter(BaseProtocolAdapter):
             from google.genai import types
 
             config_kwargs: dict[str, Any] = {}
+            raw_tools = kwargs.pop("tools", None)
+            raw_tool_choice = kwargs.pop("tool_choice", None)
             if system_instruction:
                 config_kwargs["system_instruction"] = system_instruction
             # Enforce JSON output — SyntH action parser requires structured JSON.
             config_kwargs["response_mime_type"] = "application/json"
+            sdk_tools = _normalize_gemini_tools_for_sdk(raw_tools, types)
+            if sdk_tools:
+                config_kwargs["tools"] = sdk_tools
 
             # ── Safety settings — disable all content filters ─────────
             # The persona context can contain extreme content that trips
@@ -288,6 +403,8 @@ class GeminiAdapter(BaseProtocolAdapter):
                     "system_instruction": system_instruction or None,
                     "contents": contents,
                     "response_mime_type": config_kwargs.get("response_mime_type"),
+                    "tools": raw_tools,
+                    "tool_choice": raw_tool_choice,
                 },
             )
 
@@ -342,6 +459,13 @@ class GeminiAdapter(BaseProtocolAdapter):
                     )
                     finish = "safety"
 
+                # Native function calling returns structured calls instead of text.
+                if not content_text:
+                    function_call_text = _extract_function_call_actions(response)
+                    if function_call_text:
+                        content_text = function_call_text
+                        finish = "tool_call"
+
                 # Fallback: iterate candidates manually
                 if not content_text and not prompt_blocked:
                     try:
@@ -374,6 +498,16 @@ class GeminiAdapter(BaseProtocolAdapter):
                     "block_reason": block_reason,
                 }
             usage = _extract_usage_metadata(response)
+            completion_metadata: dict[str, Any] = {
+                "model": request_model,
+                "finish_reason": finish,
+                "empty_response": not bool(content_text),
+            }
+            if block_reason:
+                completion_metadata["block_reason"] = block_reason
+            if prompt_blocked:
+                completion_metadata["prompt_blocked"] = True
+            self._last_completion_metadata = completion_metadata
             log_cortex_response(
                 engine_tag,
                 model=request_model,

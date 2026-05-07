@@ -27,7 +27,7 @@ from __future__ import annotations
 from typing import Any
 
 from core.logging_utils import log_info
-from core.live_tool_registry import ToolManifest
+from core.live_tool_registry import ToolManifest, tool_parameter_schema
 
 
 class OpenAIRealtimeToolAdapter:
@@ -50,12 +50,7 @@ class OpenAIRealtimeToolAdapter:
             required_fields: list[str] = []
 
             for param in manifest.parameters:
-                prop: dict[str, Any] = {"type": param.type}
-                if param.description:
-                    prop["description"] = param.description
-                if param.enum:
-                    prop["enum"] = param.enum
-                properties[param.name] = prop
+                properties[param.name] = tool_parameter_schema(param)
                 if param.required:
                     required_fields.append(param.name)
 

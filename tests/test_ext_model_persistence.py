@@ -102,6 +102,33 @@ def test_generate_response_retries_on_connection_error(monkeypatch):
     assert adapter_mock.chat_completion.call_count == 2
 
 
+def test_generate_response_retries_on_unavailable_api_error(monkeypatch):
+    """ExternalCortexEngine.generate_response should retry transient provider overloads."""
+
+    endpoint = _make_endpoint()
+    endpoint.extra_config = {"retry_attempts": 2, "retry_backoff": 0.0}
+    adapter_mock = MagicMock()
+    adapter_mock.chat_completion = AsyncMock(
+        side_effect=[
+            Exception(
+                "503 UNAVAILABLE. {'error': {'code': 503, 'message': 'This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.', 'status': 'UNAVAILABLE'}}"
+            ),
+            MagicMock(content="retry-ok"),
+        ]
+    )
+    bridge = ExternalCortexEngine(endpoint, adapter_mock)
+
+    with patch(
+        "core.external_endpoints.bridges.cortex_bridge.asyncio.sleep", return_value=None
+    ):
+        result = asyncio.run(
+            bridge.generate_response([{"role": "user", "content": "hi"}])
+        )
+
+    assert result == "retry-ok"
+    assert adapter_mock.chat_completion.call_count == 2
+
+
 def test_generate_response_does_not_retry_timeout_by_default(monkeypatch):
     """Timeouts should fail fast unless the endpoint explicitly opts into retrying them."""
 
@@ -140,6 +167,34 @@ def test_generate_response_passes_bridge_timeout_to_adapter(monkeypatch):
 
     assert result == "ok"
     assert captured["timeout"] == 42.0
+
+
+def test_generate_response_tracks_empty_response_metadata() -> None:
+    endpoint = _make_endpoint(default_model="model-a")
+    adapter_mock = MagicMock()
+    adapter_mock._last_completion_metadata = {
+        "block_reason": "PROHIBITED_CONTENT",
+        "prompt_blocked": True,
+    }
+    adapter_mock.chat_completion = AsyncMock(
+        return_value=MagicMock(
+            content="",
+            model="model-a",
+            finish_reason="safety",
+        )
+    )
+    bridge = ExternalCortexEngine(endpoint, adapter_mock)
+
+    result = asyncio.run(bridge.generate_response([{"role": "user", "content": "hi"}]))
+
+    assert result == ""
+    assert bridge._last_response_metadata == {
+        "model": "model-a",
+        "finish_reason": "safety",
+        "empty_response": True,
+        "block_reason": "PROHIBITED_CONTENT",
+        "prompt_blocked": True,
+    }
 
 
 def test_handle_incoming_message_propagates_after_retry_exhaustion(monkeypatch):

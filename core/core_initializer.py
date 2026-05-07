@@ -1409,10 +1409,28 @@ class CoreInitializer:
         log_debug("[core_initializer] Starting plugin loop")
         for name, plugin in PLUGIN_REGISTRY.items():
             log_debug(f"[core_initializer] Processing plugin: {name}")
-            # Skip plugins that expose an `enabled` attribute and are currently disabled
-            if hasattr(plugin, "enabled") and not getattr(plugin, "enabled"):
+            plugin_enabled = True
+            if hasattr(plugin, "is_enabled"):
+                try:
+                    plugin_enabled = bool(plugin.is_enabled())
+                    log_debug(
+                        f"[core_initializer] Plugin {name} is_enabled={plugin_enabled}"
+                    )
+                except Exception as e:
+                    log_warning(
+                        f"[core_initializer] Error checking is_enabled for {name}: {e}"
+                    )
+
+            if (
+                plugin_enabled
+                and hasattr(plugin, "enabled")
+                and not getattr(plugin, "enabled")
+            ):
+                plugin_enabled = False
+
+            if not plugin_enabled:
                 log_debug(
-                    f"[core_initializer] Plugin {name} has `enabled=False`, skipping action registration"
+                    f"[core_initializer] Plugin {name} is disabled, skipping action registration"
                 )
                 continue
             if not hasattr(plugin, "get_supported_actions"):
@@ -1459,7 +1477,7 @@ class CoreInitializer:
 
         # --- Collect static context from registry members ---
         log_debug("[core_initializer] Starting static context collection")
-        static_context = {}
+        static_context: dict[str, Any] = {}
         log_debug("[core_initializer] Starting static injection from plugins")
         for plugin in PLUGIN_REGISTRY.values():
             log_debug(
@@ -1490,8 +1508,13 @@ class CoreInitializer:
                             f"[core_initializer] Error awaiting static injection from {plugin.__class__.__name__}: {e}"
                         )
                         continue
-                if data:
-                    static_context.update(data)
+                if isinstance(data, dict) and data:
+                    for key, value in data.items():
+                        static_context[str(key)] = value
+                elif data:
+                    log_warning(
+                        f"[core_initializer] Static injection from {plugin.__class__.__name__} must be a dict, got {type(data)}"
+                    )
         for iface in INTERFACE_REGISTRY.values():
             if hasattr(iface, "get_static_injection"):
                 try:
@@ -1510,8 +1533,13 @@ class CoreInitializer:
                                 f"[core_initializer] Error awaiting static injection from {iface.__class__.__name__}: {e}"
                             )
                             continue
-                    if data:
-                        static_context.update(data)
+                    if isinstance(data, dict) and data:
+                        for key, value in data.items():
+                            static_context[str(key)] = value
+                    elif data:
+                        log_warning(
+                            f"[core_initializer] Static injection from {iface.__class__.__name__} must be a dict, got {type(data)}"
+                        )
                 except Exception as e:
                     log_warning(
                         f"[core_initializer] Errore static injection da interfaccia {iface}: {e}"
@@ -1688,13 +1716,15 @@ class CoreInitializer:
 
             # Check if the plugin exposes action schemas and log them
             plugin_obj = PLUGIN_REGISTRY.get(plugin_name)
-            actions = []
+            actions: list[str] = []
 
             try:
                 if plugin_obj and hasattr(plugin_obj, "get_supported_actions"):
                     supported_actions = plugin_obj.get_supported_actions()
                     if isinstance(supported_actions, dict):
-                        actions = list(supported_actions.keys())
+                        actions = [
+                            str(action_name) for action_name in supported_actions.keys()
+                        ]
 
                 # Track successful plugin loading
                 self.track_component(

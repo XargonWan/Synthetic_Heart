@@ -5,6 +5,7 @@ from typing import Any, cast
 
 import pytest
 
+from core.external_endpoints.adapters.anthropic_adapter import AnthropicAdapter
 from core.external_endpoints.adapters.base import ModelInfo
 from core.external_endpoints.adapters.gemini_adapter import GeminiAdapter
 from core.external_endpoints.adapters.openai_compat import OpenAICompatAdapter
@@ -368,6 +369,114 @@ async def test_openai_compat_chat_completion_uses_reasoning_content(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_openai_compat_chat_completion_logs_tool_payload(monkeypatch):
+    adapter = OpenAICompatAdapter(base_url="http://fake-host", api_key="x")
+    captured: dict[str, Any] = {}
+
+    class FakeChoice:
+        def __init__(self) -> None:
+            self.message = SimpleNamespace(content='{"actions": []}')
+            self.finish_reason = "stop"
+
+    class FakeResponse:
+        def __init__(self) -> None:
+            self.choices = [FakeChoice()]
+            self.model = "qwen/qwen3.5-9b"
+            self.usage = None
+
+    class FakeCompletions:
+        async def create(self, **kwargs: Any) -> FakeResponse:
+            return FakeResponse()
+
+    fake_client = SimpleNamespace(chat=SimpleNamespace(completions=FakeCompletions()))
+    monkeypatch.setattr(adapter, "_get_client", lambda: fake_client)
+
+    monkeypatch.setattr(
+        "core.external_endpoints.adapters.openai_compat.log_cortex_response",
+        lambda *args, **kwargs: None,
+    )
+
+    def _capture_request(*args: Any, **kwargs: Any) -> None:
+        captured["payload"] = kwargs.get("payload")
+
+    monkeypatch.setattr(
+        "core.external_endpoints.adapters.openai_compat.log_cortex_request",
+        _capture_request,
+    )
+
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "send_message",
+                "description": "Send a reply",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+    ]
+    tool_choice = {"type": "function", "function": {"name": "send_message"}}
+
+    response = await adapter.chat_completion(
+        [{"role": "user", "content": "ping"}],
+        model="qwen/qwen3.5-9b",
+        tools=tools,
+        tool_choice=tool_choice,
+    )
+
+    assert response.content == '{"actions": []}'
+    assert captured["payload"]["tools"] == tools
+    assert captured["payload"]["tool_choice"] == tool_choice
+
+
+@pytest.mark.asyncio
+async def test_openai_compat_chat_completion_parses_native_tool_calls(monkeypatch):
+    adapter = OpenAICompatAdapter(base_url="http://fake-host", api_key="x")
+
+    class FakeFunction:
+        def __init__(self) -> None:
+            self.name = "send_message"
+            self.arguments = '{"text":"hello from native tool"}'
+
+    class FakeToolCall:
+        def __init__(self) -> None:
+            self.id = "tc_1"
+            self.type = "function"
+            self.function = FakeFunction()
+
+    class FakeChoice:
+        def __init__(self) -> None:
+            self.message = SimpleNamespace(content=None, tool_calls=[FakeToolCall()])
+            self.finish_reason = "tool_calls"
+
+    class FakeResponse:
+        def __init__(self) -> None:
+            self.choices = [FakeChoice()]
+            self.model = "qwen/qwen3.5-9b"
+            self.usage = None
+
+    class FakeCompletions:
+        async def create(self, **kwargs: Any) -> FakeResponse:
+            return FakeResponse()
+
+    fake_client = SimpleNamespace(chat=SimpleNamespace(completions=FakeCompletions()))
+    monkeypatch.setattr(adapter, "_get_client", lambda: fake_client)
+    monkeypatch.setattr(
+        "core.external_endpoints.adapters.openai_compat.log_cortex_response",
+        lambda *args, **kwargs: None,
+    )
+
+    response = await adapter.chat_completion(
+        [{"role": "user", "content": "ping"}], model="qwen/qwen3.5-9b"
+    )
+
+    assert response.finish_reason == "tool_call"
+    assert response.content == (
+        '{"actions": [{"type": "send_message", '
+        '"payload": {"text": "hello from native tool"}}]}'
+    )
+
+
+@pytest.mark.asyncio
 async def test_external_cortex_engine_falls_back_to_first_available_model(monkeypatch):
     from core.external_endpoints.bridges.cortex_bridge import ExternalCortexEngine
 
@@ -482,6 +591,137 @@ async def test_gemini_adapter_chat_completion_logs_usage_metadata(monkeypatch):
         "total_tokens": 168,
         "cache_read_input_tokens": 12,
     }
+
+
+@pytest.mark.asyncio
+async def test_gemini_adapter_forwards_tools_and_parses_function_calls(monkeypatch):
+    class FakeGenerateContentConfig:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+
+    class FakeSafetySetting:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+
+    class FakeFunctionDeclaration:
+        def __init__(self, **kwargs: Any) -> None:
+            self.name = kwargs["name"]
+            self.description = kwargs.get("description", "")
+            self.parameters = kwargs.get("parameters")
+
+    class FakeTool:
+        def __init__(self, **kwargs: Any) -> None:
+            self.function_declarations = kwargs.get("function_declarations", [])
+
+    fake_types = SimpleNamespace(
+        GenerateContentConfig=FakeGenerateContentConfig,
+        SafetySetting=FakeSafetySetting,
+        FunctionDeclaration=FakeFunctionDeclaration,
+        Tool=FakeTool,
+        HarmCategory=SimpleNamespace(
+            HARM_CATEGORY_HARASSMENT="harassment",
+            HARM_CATEGORY_HATE_SPEECH="hate",
+            HARM_CATEGORY_SEXUALLY_EXPLICIT="sex",
+            HARM_CATEGORY_DANGEROUS_CONTENT="danger",
+        ),
+        HarmBlockThreshold=SimpleNamespace(OFF="OFF"),
+    )
+    fake_google = cast(Any, types.ModuleType("google"))
+    fake_genai = cast(Any, types.ModuleType("google.genai"))
+    fake_genai.types = fake_types
+    fake_google.genai = fake_genai
+    monkeypatch.setitem(sys.modules, "google", fake_google)
+    monkeypatch.setitem(sys.modules, "google.genai", fake_genai)
+
+    captured: dict[str, Any] = {}
+
+    class FakeFunctionCall:
+        def __init__(self, name: str, args: dict[str, Any]) -> None:
+            self.name = name
+            self.args = args
+
+    class FakePart:
+        def __init__(self) -> None:
+            self.function_call = FakeFunctionCall(
+                "send_message", {"text": "hello from tool call"}
+            )
+
+    class FakeContent:
+        def __init__(self) -> None:
+            self.parts = [FakePart()]
+
+    class FakeCandidate:
+        def __init__(self) -> None:
+            self.finish_reason = None
+            self.content = FakeContent()
+
+    class FakeResponse:
+        def __init__(self) -> None:
+            self.text = ""
+            self.prompt_feedback = None
+            self.candidates = [FakeCandidate()]
+            self.usage_metadata = None
+
+    class FakeModels:
+        def generate_content(self, **kwargs: Any) -> FakeResponse:
+            captured["generate_kwargs"] = kwargs
+            return FakeResponse()
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.models = FakeModels()
+
+    adapter = GeminiAdapter(api_key="unused")
+    monkeypatch.setattr(adapter, "_get_client", lambda: FakeClient())
+
+    def _capture_request(*args: Any, **kwargs: Any) -> None:
+        captured["request_payload"] = kwargs.get("payload")
+
+    monkeypatch.setattr(
+        "core.external_endpoints.adapters.gemini_adapter.log_cortex_request",
+        _capture_request,
+    )
+    monkeypatch.setattr(
+        "core.external_endpoints.adapters.gemini_adapter.log_cortex_response",
+        lambda *args, **kwargs: None,
+    )
+
+    raw_tools = [
+        {
+            "function_declarations": [
+                {
+                    "name": "send_message",
+                    "description": "Send a reply",
+                    "parameters": {
+                        "type": "OBJECT",
+                        "properties": {"text": {"type": "STRING"}},
+                        "required": ["text"],
+                    },
+                }
+            ]
+        }
+    ]
+
+    response = await adapter.chat_completion(
+        [{"role": "user", "content": "ping"}],
+        model="gemini-3.1-flash-lite-preview",
+        tools=raw_tools,
+    )
+
+    assert response.model == "gemini-3.1-flash-lite-preview"
+    assert response.finish_reason == "tool_call"
+    assert response.content == (
+        '{"actions": [{"type": "send_message", '
+        '"payload": {"text": "hello from tool call"}}]}'
+    )
+    assert captured["request_payload"]["tools"] == raw_tools
+
+    config = captured["generate_kwargs"]["config"]
+    assert isinstance(config, FakeGenerateContentConfig)
+    sdk_tools = config.kwargs["tools"]
+    assert len(sdk_tools) == 1
+    assert isinstance(sdk_tools[0], FakeTool)
+    assert sdk_tools[0].function_declarations[0].name == "send_message"
 
 
 @pytest.mark.asyncio
@@ -620,6 +860,253 @@ async def test_external_cortex_engine_redacts_prompt_and_sends_multimodal_parts(
     assert "YWJjZA==" not in user_content[0]["text"]
     assert user_content[1]["type"] == "image_url"
     assert user_content[1]["image_url"]["url"] == "data:image/png;base64,YWJjZA=="
+
+
+@pytest.mark.asyncio
+async def test_external_cortex_engine_forwards_openai_tool_declarations():
+    from core.external_endpoints.bridges.cortex_bridge import ExternalCortexEngine
+    from core.prompt_request import PromptRequest
+
+    endpoint = ExternalEndpoint(
+        id=31,
+        name="openai-endpoint",
+        display_label="OpenAI Endpoint",
+        protocol=EndpointProtocol.OPENAI,
+        base_url="https://example.com",
+        api_key_enc=None,
+        enabled=True,
+        capabilities={"cortex": True},
+        subsystem_map={"cortex": True},
+        available_models=["qwen/qwen3.5-9b"],
+        default_model="qwen/qwen3.5-9b",
+        probe_status="success",
+        last_probe_at=None,
+        extra_config={},
+    )
+    captured: dict[str, Any] = {}
+
+    class FakeAdapter:
+        async def chat_completion(self, messages, model=None, **kwargs):
+            captured["messages"] = messages
+            captured["model"] = model
+            captured["kwargs"] = kwargs
+            return SimpleNamespace(content='{"actions": []}', model=model)
+
+    manifest = SimpleNamespace(
+        name="send_message",
+        description="Send a reply",
+        parameters=[
+            SimpleNamespace(
+                name="text",
+                type="string",
+                description="Reply text",
+                enum=None,
+                required=True,
+            )
+        ],
+    )
+    prompt = PromptRequest(
+        system_instruction="Use valid JSON.",
+        current_text="ping",
+        tool_declarations=[manifest],
+        mode="chat",
+    )
+
+    engine = ExternalCortexEngine(endpoint, cast(Any, FakeAdapter()))
+    response = await engine.handle_incoming_message(None, None, prompt)
+
+    assert response == '{"actions": []}'
+    assert prompt.supports_tool_calling is True
+    assert captured["kwargs"]["tool_choice"] == "auto"
+    tools = captured["kwargs"]["tools"]
+    assert len(tools) == 1
+    assert tools[0]["type"] == "function"
+    assert tools[0]["function"]["name"] == "send_message"
+
+
+@pytest.mark.asyncio
+async def test_anthropic_chat_completion_parses_tool_use_blocks(monkeypatch):
+    adapter = AnthropicAdapter(api_key="test-key", base_url="https://anthropic.example")
+
+    session = FakeAiohttpSession()
+    session.responses = [
+        FakeAiohttpResponse(
+            status=200,
+            payload={
+                "model": "claude-sonnet-4-5",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "name": "send_message",
+                        "input": {"text": "hello from anthropic tool"},
+                    }
+                ],
+                "usage": {"input_tokens": 11, "output_tokens": 7},
+                "stop_reason": "tool_use",
+            },
+        )
+    ]
+
+    import aiohttp
+
+    monkeypatch.setattr(aiohttp, "ClientSession", lambda: session)
+    monkeypatch.setattr(
+        "core.external_endpoints.adapters.anthropic_adapter.log_cortex_request",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "core.external_endpoints.adapters.anthropic_adapter.log_cortex_response",
+        lambda *args, **kwargs: None,
+    )
+
+    tools = [
+        {
+            "name": "send_message",
+            "description": "Send reply",
+            "input_schema": {
+                "type": "object",
+                "properties": {"text": {"type": "string"}},
+                "required": ["text"],
+            },
+        }
+    ]
+    response = await adapter.chat_completion(
+        [{"role": "user", "content": "ping"}],
+        model="claude-sonnet-4-5",
+        tools=tools,
+        tool_choice={"type": "auto"},
+    )
+
+    assert response.finish_reason == "tool_use"
+    assert response.content == (
+        '{"actions": [{"type": "send_message", '
+        '"payload": {"text": "hello from anthropic tool"}}]}'
+    )
+    posted_payload = session.request_kwargs[0]["json"]
+    assert posted_payload["tools"] == tools
+    assert posted_payload["tool_choice"] == {"type": "auto"}
+
+
+@pytest.mark.asyncio
+async def test_external_cortex_engine_forwards_anthropic_tool_declarations():
+    from core.external_endpoints.bridges.cortex_bridge import ExternalCortexEngine
+    from core.prompt_request import PromptRequest
+
+    endpoint = ExternalEndpoint(
+        id=32,
+        name="anthropic-endpoint",
+        display_label="Anthropic Endpoint",
+        protocol=EndpointProtocol.ANTHROPIC,
+        base_url="https://example.com",
+        api_key_enc=None,
+        enabled=True,
+        capabilities={"cortex": True},
+        subsystem_map={"cortex": True},
+        available_models=["claude-sonnet-4-5"],
+        default_model="claude-sonnet-4-5",
+        probe_status="success",
+        last_probe_at=None,
+        extra_config={},
+    )
+    captured: dict[str, Any] = {}
+
+    class FakeAdapter:
+        async def chat_completion(self, messages, model=None, **kwargs):
+            captured["kwargs"] = kwargs
+            return SimpleNamespace(content='{"actions": []}', model=model)
+
+    manifest = SimpleNamespace(
+        name="send_message",
+        description="Send a reply",
+        parameters=[
+            SimpleNamespace(
+                name="text",
+                type="string",
+                description="Reply text",
+                enum=None,
+                required=True,
+            )
+        ],
+    )
+    prompt = PromptRequest(
+        system_instruction="Use valid JSON.",
+        current_text="ping",
+        tool_declarations=[manifest],
+        mode="chat",
+    )
+
+    engine = ExternalCortexEngine(endpoint, cast(Any, FakeAdapter()))
+    await engine.handle_incoming_message(None, None, prompt)
+
+    tools = captured["kwargs"]["tools"]
+    assert len(tools) == 1
+    assert tools[0]["name"] == "send_message"
+    assert captured["kwargs"]["tool_choice"] == {"type": "auto"}
+
+
+@pytest.mark.asyncio
+async def test_external_cortex_engine_forwards_gemini_tool_declarations():
+    from core.external_endpoints.bridges.cortex_bridge import ExternalCortexEngine
+    from core.prompt_request import PromptRequest
+
+    endpoint = ExternalEndpoint(
+        id=3,
+        name="gemini-endpoint",
+        display_label="Gemini Endpoint",
+        protocol=EndpointProtocol.GEMINI,
+        base_url="https://generativelanguage.googleapis.com",
+        api_key_enc=None,
+        enabled=True,
+        capabilities={"cortex": True},
+        subsystem_map={"cortex": True},
+        available_models=["gemini-3.1-flash-lite-preview"],
+        default_model="gemini-3.1-flash-lite-preview",
+        probe_status="success",
+        last_probe_at=None,
+        extra_config={},
+    )
+    captured: dict[str, Any] = {}
+
+    class FakeAdapter:
+        async def chat_completion(self, messages, model=None, **kwargs):
+            captured["messages"] = messages
+            captured["model"] = model
+            captured["kwargs"] = kwargs
+            return SimpleNamespace(content='{"actions": []}', model=model)
+
+    manifest = SimpleNamespace(
+        name="send_message",
+        description="Send a reply",
+        parameters=[
+            SimpleNamespace(
+                name="text",
+                type="string",
+                description="Reply text",
+                enum=None,
+                required=True,
+            )
+        ],
+    )
+    prompt = PromptRequest(
+        system_instruction="Use valid JSON.",
+        current_text="ping",
+        tool_declarations=[manifest],
+        mode="chat",
+    )
+
+    engine = ExternalCortexEngine(endpoint, cast(Any, FakeAdapter()))
+    response = await engine.handle_incoming_message(None, None, prompt)
+
+    assert response == '{"actions": []}'
+    assert prompt.supports_tool_calling is True
+    assert captured["model"] == "gemini-3.1-flash-lite-preview"
+    assert captured["kwargs"]["timeout"] == 120.0
+    tools = captured["kwargs"]["tools"]
+    assert len(tools) == 1
+    declarations = tools[0]["function_declarations"]
+    assert declarations[0]["name"] == "send_message"
+    assert captured["messages"][0]["role"] == "system"
+    assert captured["messages"][-1]["role"] == "user"
 
 
 @pytest.mark.asyncio

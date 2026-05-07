@@ -234,4 +234,7 @@ async def test_build_json_prompt_merges_soul_recalled_memories(monkeypatch):
 
     result = await build_json_prompt(message, {}, interface_name="telegram_bot")
 
-    assert result["context"]["memories"] == ["Legacy memory", soul_memory]
+    assert result["context"]["memories"] == [
+        "Legacy memory",
+        "Recalled memory from 2026-04-18 (same chat): Scarlet loves jasmine tea.",
+    ]

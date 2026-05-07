@@ -325,6 +325,11 @@ async def test_observer_db_check_updates_and_advances_last_run_ts(monkeypatch):
 async def test_observer_skips_when_no_updates(monkeypatch):
     plugin = gco.GrilloChatObserverPlugin()
 
+    async def fake_execute_query(*args, **kwargs):
+        raise RuntimeError("db unavailable")
+
+    monkeypatch.setattr("core.db.execute_query", fake_execute_query)
+
     # Make the checker report that there are NO updates
     async def fake_check(consume=True):
         return {
