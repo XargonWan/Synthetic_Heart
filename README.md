@@ -109,20 +109,24 @@ The project ships with an **Ollama-compatible interface** (`interface/ollama_com
 
 4.  Connect to the WebUI via HTTPS (default port is **8000**): `https://localhost:8000`.
 
-#### Optional: Enable SOUL PostgreSQL + pgvector backend
+#### Database runtime and automatic migration
 
-By default, SOUL uses in-memory persistence. To enable persistent SOUL storage:
+The Docker stack now runs the main Synthetic Heart runtime on **PostgreSQL** by default.
+SOUL shares that same runtime Postgres database as part of the default stack.
 
-1. Set these environment variables in your `.env`:
-   - `SYNTH_PRIMARY_DB=soul` if you want the main app DB to use the SOUL Postgres connection explicitly
-   - `SOUL_REPOSITORY_BACKEND=postgres`
-   - `SOUL_POSTGRES_DSN=postgresql://soul:soul@synth-soul-db:5432/soul_memory`
-   - Optional overrides: `SOUL_PG_HOST`, `SOUL_PG_PORT`, `SOUL_PG_DB`, `SOUL_PG_USER`, `SOUL_PG_PASSWORD`, `EXT_SOUL_DB_PORT`
-2. Start the SOUL DB service and apply schema:
-   - Linux/macOS: `bash scripts/bootstrap_soul_postgres.sh`
-   - Windows PowerShell: `./scripts/bootstrap_soul_postgres.ps1`
-3. Restart the stack:
-   - `docker compose up -d --build`
+If you are upgrading from an older MariaDB-based deployment:
+
+1. Keep the existing Docker volume and existing backups.
+2. Start the updated stack normally with `docker compose up -d --build`.
+3. On first boot, Synth will:
+   - import any legacy standalone SOUL Postgres data into the runtime Postgres when a legacy SOUL DSN is configured,
+   - archive the legacy MySQL source into the mounted `backups/` directory,
+   - migrate runtime data from the internal legacy MariaDB source into Postgres,
+   - resume normal startup entirely on Postgres.
+
+The legacy database is preserved for verification and archival purposes, but the active runtime uses a single Postgres database.
+
+Manual runtime backups are available from the WebUI Settings tab and write compressed dumps into the mounted `backups/` directory.
 
 #### Optional: Migrate Existing MariaDB memories into SOUL
 
@@ -147,7 +151,7 @@ Migration notes:
 
 > [!WARNING]
 > **DATABASE SETUP REQUIRED**
-> Database setup is **not automated** on Windows native environments. You must install MariaDB/MySQL separately, configure your local database (using the schema found in `init-db.sql`), and manually set the connection parameters in your `.env` file before running the application!
+> Database setup is **not automated** on Windows native environments. You must install PostgreSQL locally, create the application database, and configure the `DB_*` connection values in your `.env` file before running the application.
 
 For the fastest development experience on Windows, we recommend using **uv**. It handles Python installation, virtual environments, and dependencies automatically.
 
@@ -161,8 +165,8 @@ For the fastest development experience on Windows, we recommend using **uv**. It
     cd Synthetic_Heart
     ```
 3.  **Configure `.env` and Database:**
-    - Install MariaDB or MySQL.
-    - Create a database and run the `init-db.sql` script to set up the necessary tables.
+   - Install PostgreSQL.
+   - Create a database for Synthetic Heart.
     - Copy `.env.example` to `.env` and update the `DB_*` connection strings to match your local setup.
 4.  **Sync Dependencies:**
     ```powershell

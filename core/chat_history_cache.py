@@ -245,11 +245,13 @@ async def save_chat_message(
         return False
 
 
-async def load_chat_history(interface_path: str) -> deque:
+async def load_chat_history(interface_path: str, limit: int | None = None) -> deque:
     """Load chat history from cache for a specific interface path.
 
     Args:
         interface_path: The interface path (e.g., telegram_bot/123456/2)
+        limit: Optional explicit row limit. When omitted, uses the configured
+            history limit for the calling subsystem.
 
     Returns:
         deque of message objects in chronological order
@@ -260,15 +262,22 @@ async def load_chat_history(interface_path: str) -> deque:
     try:
         async with get_conn_ctx() as conn:
             async with conn.cursor() as cur:
-                history_limit = _get_history_limit(10)
-                # Load messages in chronological order
+                history_limit = (
+                    max(1, int(limit)) if limit is not None else _get_history_limit(10)
+                )
+                # Fetch the most recent N rows, then reorder them chronologically
+                # for downstream consumers such as WebUI replay and prompt context.
                 await cur.execute(
                     """
                     SELECT sender_name, sender_id, message_text, timestamp, interface_path, metadata
-                    FROM chat_history_cache
-                    WHERE interface_path = %s
+                    FROM (
+                        SELECT sender_name, sender_id, message_text, timestamp, interface_path, metadata, id
+                        FROM chat_history_cache
+                        WHERE interface_path = %s
+                        ORDER BY timestamp DESC, id DESC
+                        LIMIT %s
+                    ) AS recent_messages
                     ORDER BY timestamp ASC, id ASC
-                    LIMIT %s
                 """,
                     (interface_path, history_limit),
                 )

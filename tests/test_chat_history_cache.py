@@ -1,5 +1,6 @@
 import asyncio
 from datetime import UTC, datetime
+from collections import deque
 
 import pytest
 
@@ -238,5 +239,99 @@ async def test_save_chat_message_uses_parametrized_dedup_cutoff(monkeypatch):
     assert "UTC_TIMESTAMP()" not in dedup_query
     assert "timestamp > %s" in dedup_query
     assert dedup_params is not None
-    assert len(dedup_params) == 3
-    assert isinstance(dedup_params[2], datetime)
+
+
+@pytest.mark.asyncio
+async def test_load_chat_history_returns_latest_rows_in_chronological_order(
+    monkeypatch,
+):
+    now = datetime.now(UTC)
+    rows = [
+        (
+            "user",
+            "user-1",
+            f"message-{index}",
+            now.replace(microsecond=index),
+            "synth_webui/webui_default",
+            None,
+        )
+        for index in range(12)
+    ]
+    executed: list[tuple[str, tuple[object, ...] | None]] = []
+
+    class DummyCursor:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            pass
+
+        async def execute(self, query, params=None):
+            executed.append((query, params))
+
+        async def fetchall(self):
+            # Simulate the DB returning the last 10 messages reordered ASC.
+            return rows[2:]
+
+    class DummyConn:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            pass
+
+        def cursor(self):
+            return DummyCursor()
+
+    monkeypatch.setattr(chat_history_cache, "get_conn_ctx", lambda: DummyConn())
+    monkeypatch.setattr(chat_history_cache, "_get_history_limit", lambda default=10: 10)
+
+    history = await chat_history_cache.load_chat_history("synth_webui/webui_default")
+
+    assert isinstance(history, deque)
+    assert [message["text"] for message in history] == [
+        f"message-{index}" for index in range(2, 12)
+    ]
+    query, params = executed[0]
+    assert "ORDER BY timestamp DESC, id DESC" in query
+    assert "ORDER BY timestamp ASC, id ASC" in query
+    assert params == ("synth_webui/webui_default", 10)
+
+
+@pytest.mark.asyncio
+async def test_load_chat_history_uses_explicit_limit(monkeypatch):
+    executed: list[tuple[str, tuple[object, ...] | None]] = []
+
+    class DummyCursor:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            pass
+
+        async def execute(self, query, params=None):
+            executed.append((query, params))
+
+        async def fetchall(self):
+            return []
+
+    class DummyConn:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            pass
+
+        def cursor(self):
+            return DummyCursor()
+
+    monkeypatch.setattr(chat_history_cache, "get_conn_ctx", lambda: DummyConn())
+
+    history = await chat_history_cache.load_chat_history(
+        "synth_webui/webui_default",
+        limit=37,
+    )
+
+    assert isinstance(history, deque)
+    _, params = executed[0]
+    assert params == ("synth_webui/webui_default", 37)

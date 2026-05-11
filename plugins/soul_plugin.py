@@ -73,18 +73,18 @@ register_exposed_var(
     default="memory",
     value_type=str,
     ui_type="text",
-    description="SOUL persistence backend: memory or postgres.",
+    description="Legacy compatibility flag. When the main runtime DB is PostgreSQL, SOUL uses that Postgres backend automatically.",
     scope="plugins",
     component="soul_plugin",
 )
 
 register_exposed_var(
     "SOUL_POSTGRES_DSN",
-    label="SOUL Postgres DSN",
+    label="Legacy SOUL Postgres DSN",
     default="",
     value_type=str,
     ui_type="text",
-    description="PostgreSQL DSN used when SOUL_REPOSITORY_BACKEND=postgres.",
+    description="Legacy SOUL PostgreSQL source DSN used only for one-time migration into the main runtime Postgres.",
     scope="plugins",
     component="soul_plugin",
 )
@@ -135,14 +135,8 @@ class SoulPlugin(PluginBase):
 
     def _build_embedder(self) -> Any:
         from importlib.util import find_spec
-        from core.config_manager import config_registry
 
-        backend = str(
-            config_registry.get_value(
-                "SOUL_REPOSITORY_BACKEND", "memory", value_type=str
-            )
-            or "memory"
-        )
+        backend = self._get_repository_backend()
         if backend == "postgres":
             model_id = "BAAI/bge-base-en-v1.5"
             try:
@@ -807,7 +801,7 @@ class SoulPlugin(PluginBase):
             if dsn:
                 return PostgresSoulRepository(dsn=dsn)
             log_warning(
-                "[soul_plugin] SOUL_REPOSITORY_BACKEND=postgres but SOUL_POSTGRES_DSN is empty; falling back to memory"
+                "[soul_plugin] Runtime Postgres DSN is empty; falling back to memory"
             )
         return InMemorySoulRepository()
 
@@ -853,31 +847,25 @@ class SoulPlugin(PluginBase):
     @staticmethod
     def _get_repository_backend() -> str:
         try:
-            from core.config_manager import config_registry
+            from core.db import _get_db_type
 
-            value = str(
-                config_registry.get_value(
-                    "SOUL_REPOSITORY_BACKEND", "memory", value_type=str
-                )
-                or "memory"
-            )
-            value = value.strip().lower()
-            if value in {"memory", "postgres"}:
-                return value
-            return "memory"
+            return "postgres" if _get_db_type() == "postgres" else "memory"
         except Exception:
             return "memory"
 
     @staticmethod
     def _get_postgres_dsn() -> str:
         try:
-            from core.config_manager import config_registry
+            from core.db import build_runtime_postgres_dsn
 
-            return str(
-                config_registry.get_value("SOUL_POSTGRES_DSN", "", value_type=str) or ""
-            )
+            return build_runtime_postgres_dsn()
         except Exception:
-            return ""
+            try:
+                from core.db import build_runtime_postgres_dsn
+
+                return build_runtime_postgres_dsn()
+            except Exception:
+                return ""
 
 
 PLUGIN_CLASS = SoulPlugin

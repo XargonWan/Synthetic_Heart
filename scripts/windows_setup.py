@@ -1062,10 +1062,10 @@ def stage_soul(args: argparse.Namespace, env_values: dict[str, str]) -> bool:
     _print("  Validating Postgres connection...")
     try:
         import asyncio
-        import asyncpg
+        from core.db import connect_postgres_dsn
 
         async def _check() -> None:
-            conn = await asyncpg.connect(dsn, timeout=10)
+            conn = await connect_postgres_dsn(dsn)
             await conn.close()
 
         asyncio.run(_check())
@@ -1085,9 +1085,10 @@ def stage_soul(args: argparse.Namespace, env_values: dict[str, str]) -> bool:
         _print(f"  Applying SOUL schema (VECTOR({chosen_spec.dims}))...")
         try:
             import asyncio
+            from core.db import connect_postgres_dsn
 
             async def _apply() -> None:
-                conn = await asyncpg.connect(dsn, timeout=10)
+                conn = await connect_postgres_dsn(dsn)
                 await conn.execute(sql)
                 await conn.close()
 

@@ -84,6 +84,14 @@ def test_primary_db_selector_forces_memory_connection_settings(monkeypatch) -> N
     )
 
 
+def test_db_type_defaults_to_postgres(monkeypatch) -> None:
+    monkeypatch.delenv("SYNTH_PRIMARY_DB", raising=False)
+    monkeypatch.delenv("SYNTH_DB_TYPE", raising=False)
+    monkeypatch.delenv("DB_TYPE", raising=False)
+
+    assert db_module._get_db_type() == "postgres"
+
+
 @pytest.mark.asyncio
 async def test_get_conn_ctx_postgres_translates_replace_into(monkeypatch) -> None:
     calls: list[tuple[str, str, tuple[object, ...]]] = []
