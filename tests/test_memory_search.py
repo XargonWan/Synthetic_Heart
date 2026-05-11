@@ -1,10 +1,34 @@
 import json
 import re
 
+import plugins.memory_search as memory_search_module
 from plugins.memory_search import MemorySearchPlugin, _parse_time_window_spec
 
 
-def test_build_query_tags():
+def test_memory_search_is_enabled_uses_config(monkeypatch) -> None:
+    monkeypatch.setattr(
+        memory_search_module.config_registry,
+        "get_value",
+        lambda key, default=None, **kwargs: (
+            False if key == "ENABLE_MEMORY_SEARCH" else default
+        ),
+    )
+
+    plugin = MemorySearchPlugin()
+    assert plugin.is_enabled() is False
+
+    monkeypatch.setattr(
+        memory_search_module.config_registry,
+        "get_value",
+        lambda key, default=None, **kwargs: (
+            True if key == "ENABLE_MEMORY_SEARCH" else default
+        ),
+    )
+    assert plugin.is_enabled() is True
+
+
+def test_build_query_tags(monkeypatch):
+    monkeypatch.setattr(memory_search_module, "_get_db_type", lambda: "mariadb")
     plugin = MemorySearchPlugin()
     payload = {"mode": "tags", "tags": ["Mostro", "Austriaco"]}
     union_q, params = plugin._build_query_and_params(payload, 5)
@@ -42,7 +66,8 @@ def test_build_query_tags():
     ]
 
 
-def test_build_query_free_includes_chat():
+def test_build_query_free_includes_chat(monkeypatch):
+    monkeypatch.setattr(memory_search_module, "_get_db_type", lambda: "mariadb")
     plugin = MemorySearchPlugin()
     payload = {"mode": "free", "keywords": ["mostro", "austriaco"]}
     union_q, params = plugin._build_query_and_params(payload, 10)
@@ -93,13 +118,35 @@ def test_build_query_free_includes_chat():
     ]
 
 
-def test_build_query_random_order():
+def test_build_query_random_order(monkeypatch):
+    monkeypatch.setattr(memory_search_module, "_get_db_type", lambda: "mariadb")
     plugin = MemorySearchPlugin()
     payload = {"mode": "free", "keywords": ["x"], "random": True}
     union_q, params = plugin._build_query_and_params(payload, 3)
     assert union_q.endswith("ORDER BY RAND() LIMIT %s")
     # 1 keyword -> mem(1+1) + diary(3+1) + chat(1+1) + outer(1) = 9
     assert len(params) == 9
+
+
+def test_build_query_tags_postgres(monkeypatch):
+    monkeypatch.setattr(memory_search_module, "_get_db_type", lambda: "postgres")
+    plugin = MemorySearchPlugin()
+    payload = {"mode": "tags", "tags": ["Mostro", "Austriaco"]}
+    union_q, params = plugin._build_query_and_params(payload, 5)
+
+    assert "JSON_CONTAINS" not in union_q
+    assert "COALESCE(NULLIF(BTRIM(tags), ''), '[]')::jsonb ? %s" in union_q
+    assert "COALESCE(NULLIF(BTRIM(context_tags), ''), '[]')::jsonb ? %s" in union_q
+    assert params == ["Mostro", "Austriaco", 5, "Mostro", "Austriaco", 5, 5]
+
+
+def test_build_query_random_order_postgres(monkeypatch):
+    monkeypatch.setattr(memory_search_module, "_get_db_type", lambda: "postgres")
+    plugin = MemorySearchPlugin()
+    payload = {"mode": "free", "keywords": ["x"], "random": True}
+    union_q, _params = plugin._build_query_and_params(payload, 3)
+
+    assert union_q.endswith("ORDER BY RANDOM() LIMIT %s")
 
 
 def test_parse_time_window_yesterday():

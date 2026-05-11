@@ -75,3 +75,59 @@ async def test_history_engine_ignores_cortex_switch_notifications(
     assert "cross chat line" in joined_recent
     assert "Cortex engine dynamically updated" not in joined_current
     assert "Cortex engine dynamically updated" not in joined_recent
+
+
+@pytest.mark.asyncio
+async def test_history_engine_ignores_cortex_scope_override_notifications(
+    monkeypatch,
+) -> None:
+    from core.history_engine import HistoryEngine
+
+    current_path = "telegram_bot/123"
+
+    context_memory = {
+        current_path: deque(
+            [
+                {
+                    "sender_name": "self",
+                    "text": "✅ Cortex engine override for grillo updated to `xtx`.",
+                    "timestamp": "2026-05-08T10:00:00+00:00",
+                    "interface_path": current_path,
+                },
+                {
+                    "sender_name": "self",
+                    "text": "✅ Cortex engine override for trainer updated to `openrouter`.",
+                    "timestamp": "2026-05-08T10:00:01+00:00",
+                    "interface_path": current_path,
+                },
+                {
+                    "sender_name": "Scar",
+                    "text": "alright, done",
+                    "timestamp": "2026-05-08T10:00:02+00:00",
+                    "interface_path": current_path,
+                },
+            ]
+        )
+    }
+
+    monkeypatch.setattr(
+        "core.chat_history_cache.load_chat_history",
+        AsyncMock(return_value=deque()),
+    )
+    monkeypatch.setattr(
+        "core.chat_history_cache.load_global_chat_history",
+        AsyncMock(return_value=deque()),
+    )
+    monkeypatch.setattr("core.core_initializer.PLUGIN_REGISTRY", {})
+
+    context = await HistoryEngine().build_context(
+        message=SimpleNamespace(interface_path=current_path),
+        context_memory=context_memory,
+        interface_name="telegram_bot",
+        text="how's it going",
+    )
+
+    joined = "\n".join(context["history_current_chat"])
+    assert "alright, done" in joined
+    assert "override for grillo" not in joined
+    assert "override for trainer" not in joined

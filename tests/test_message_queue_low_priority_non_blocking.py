@@ -138,3 +138,88 @@ async def test_queue_rebinds_to_current_event_loop():
         message_queue._lock = original_lock
         message_queue._queue_loop = original_queue_loop
         message_queue._lock_loop = original_lock_loop
+
+
+@pytest.mark.asyncio
+async def test_outreach_background_task_is_not_cancelled_by_user_message(
+    monkeypatch,
+):
+    import core.plugin_instance as pi
+
+    class DummyPlugin:
+        def get_rate_limit(self):
+            return 1000, 1, 1.0
+
+    original_queue = message_queue._queue
+    original_lock = message_queue._lock
+    original_queue_loop = getattr(message_queue, "_queue_loop", None)
+    original_lock_loop = getattr(message_queue, "_lock_loop", None)
+    original_bg_tasks = dict(message_queue._bg_tasks)
+
+    finished = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def fake_background_task():
+        try:
+            await asyncio.sleep(0.2)
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+        finished.set()
+
+    async def fake_handle(bot, message, context, interface):
+        return
+
+    monkeypatch.setattr(pi, "handle_incoming_message", fake_handle)
+    monkeypatch.setattr(pi, "get_plugin", lambda: DummyPlugin())
+
+    try:
+        message_queue._queue = asyncio.PriorityQueue()
+        message_queue._lock = asyncio.Lock()
+        message_queue._queue_loop = asyncio.get_running_loop()
+        message_queue._lock_loop = asyncio.get_running_loop()
+        message_queue._bg_tasks.clear()
+
+        background_task = asyncio.create_task(fake_background_task())
+        message_queue._bg_tasks["telegram_bot/1"] = message_queue._BackgroundTaskEntry(
+            task=background_task,
+            cancel_on_user_message=False,
+        )
+
+        user_item = {
+            "bot": FastBot(),
+            "message": SimpleNamespace(
+                chat_id=1,
+                text="incoming user message",
+                from_user=SimpleNamespace(id=42),
+            ),
+            "chat_id": 1,
+            "thread_id": None,
+            "interface": "telegram_bot",
+            "chat_name": None,
+            "message_thread_name": None,
+            "timestamp": 1,
+            "context": {"core_animation_broadcast": False},
+            "priority": False,
+        }
+
+        queue = message_queue._get_queue()
+        consumer_task = asyncio.create_task(message_queue._consumer_loop())
+        await queue.put((message_queue.NORMAL_PRIORITY, 2, user_item))
+        await asyncio.wait_for(finished.wait(), timeout=1.0)
+
+        assert not cancelled.is_set()
+
+        consumer_task.cancel()
+        try:
+            await consumer_task
+        except asyncio.CancelledError:
+            pass
+        await background_task
+    finally:
+        message_queue._queue = original_queue
+        message_queue._lock = original_lock
+        message_queue._queue_loop = original_queue_loop
+        message_queue._lock_loop = original_lock_loop
+        message_queue._bg_tasks.clear()
+        message_queue._bg_tasks.update(original_bg_tasks)

@@ -345,7 +345,13 @@ class MessagePlugin:
             send_payload["interface_path"] = rebuilt_interface_path
 
         try:
-            await handler.send_message(send_payload, original_message=original_message)
+            send_result = await handler.send_message(
+                send_payload, original_message=original_message
+            )
+            if send_result is False:
+                raise RuntimeError(
+                    f"{interface_name} send_message() reported delivery failure"
+                )
             log_info(
                 f"[message_plugin] Message successfully sent to {target} (thread: {thread_id}, reply_to: {reply_to})"
             )
@@ -354,6 +360,7 @@ class MessagePlugin:
             log_error(
                 f"[message_plugin] Failed to send message via {interface_name}: {e}"
             )
+            raise
 
 
 # Export the plugin class

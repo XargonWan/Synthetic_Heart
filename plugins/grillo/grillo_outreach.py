@@ -350,10 +350,14 @@ Consider:
 IMPORTANT: Generate a warm, natural message to start a conversation.
 Do NOT be overly formal or robotic. Be genuine and personable.
 
+Return TWO actions:
+- a `{action_type}` message action with the outreach text
+- a `create_personal_diary_entry` action that records why you reached out, with `interaction_summary`, `personal_thought`, and `emotions`
+
 {GRILLO_INSTRUCTIONS}
 
 RESPOND ONLY WITH VALID JSON:
-{{"actions": [{{"type": "{action_type}", "payload": {{"text": "your message here", "interface_path": "{interface_path_example}"}}}}], "meta": {{"autonomous": true, "rationale": "Grillo outreach"}}}}
+{{"actions": [{{"type": "{action_type}", "payload": {{"text": "your message here", "interface_path": "{interface_path_example}"}}}}, {{"type": "create_personal_diary_entry", "payload": {{"interaction_summary": "brief summary of this outreach", "personal_thought": "private first-person thought behind the outreach", "emotions": [{{"type": "longing", "intensity": 0.6}}]}}}}], "meta": {{"autonomous": true, "rationale": "Grillo outreach"}}}}
 """
         return prompt
 
@@ -381,6 +385,12 @@ RESPOND ONLY WITH VALID JSON:
             activity_id = await GrilloPlugin.create_activity_log(
                 beat_type="outreach",
                 prompt_text=prompt,
+                metadata={
+                    "origin": "grillo_outreach",
+                    "target_interface": interface,
+                    "target_chat_id": str(chat_id),
+                    "context_count": len(context),
+                },
             )
             log_info(f"[grillo_outreach] Created activity log {activity_id}")
         except Exception as e:

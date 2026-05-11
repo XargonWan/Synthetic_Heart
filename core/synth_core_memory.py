@@ -1,4 +1,4 @@
-from core.db import insert_memory, get_conn_ctx
+from core.db import _get_db_type, get_conn_ctx, insert_memory
 import logging
 import json
 import os
@@ -22,6 +22,20 @@ DEFAULT_SCOPE = "general"
 DEFAULT_SOURCE = "chat"
 
 REMEMBER_KEYWORDS = []
+
+
+def _build_json_tag_conditions(column: str, tags: list[str]) -> tuple[str, list[str]]:
+    if not tags:
+        return "", []
+
+    if _get_db_type() == "postgres":
+        conditions = " OR ".join(
+            [f"COALESCE(NULLIF(BTRIM({column}), ''), '[]')::jsonb ? %s"] * len(tags)
+        )
+        return conditions, list(tags)
+
+    conditions = " OR ".join([f"JSON_CONTAINS({column}, %s)"] * len(tags))
+    return conditions, [json.dumps(tag) for tag in tags]
 
 
 def should_remember(user_text: str, response_text: str) -> bool:
@@ -122,11 +136,11 @@ async def search_memories(
                 mem_conditions = []
                 mem_params: list = []
                 if tags:
-                    tag_conditions = " OR ".join(
-                        ["JSON_CONTAINS(tags, %s)"] * len(tags)
+                    tag_conditions, tag_params = _build_json_tag_conditions(
+                        "tags", tags
                     )
                     mem_conditions.append(f"({tag_conditions})")
-                    mem_params.extend([json.dumps(tag) for tag in tags])
+                    mem_params.extend(tag_params)
                 if keywords:
                     kw_conditions = " OR ".join(["content LIKE %s"] * len(keywords))
                     mem_conditions.append(f"({kw_conditions})")
@@ -172,11 +186,11 @@ async def search_memories(
                 diary_conditions = []
                 diary_params: list = []
                 if tags:
-                    tag_conditions = " OR ".join(
-                        ["JSON_CONTAINS(context_tags, %s)"] * len(tags)
+                    tag_conditions, tag_params = _build_json_tag_conditions(
+                        "context_tags", tags
                     )
                     diary_conditions.append(f"({tag_conditions})")
-                    diary_params.extend([json.dumps(tag) for tag in tags])
+                    diary_params.extend(tag_params)
                 if keywords:
                     kw_conditions = " OR ".join(
                         [
@@ -286,7 +300,8 @@ async def search_memories(
     seen = set()
     deduped: list[dict] = []
     for h in hits:
-        key = f"{h.get('source')}::{h.get('id')}::{h.get('snippet')[:80]}"
+        snippet_key = str(h.get("snippet") or "")[:80]
+        key = f"{h.get('source')}::{h.get('id')}::{snippet_key}"
         if key in seen:
             continue
         seen.add(key)

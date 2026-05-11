@@ -48,6 +48,10 @@ class AIPluginBase:
         """Return custom action types handled by this plugin."""
         return []
 
+    def is_enabled(self) -> bool:
+        """Return True when this plugin should expose actions in the prompt."""
+        return True
+
     # --- Agent hooks (optional) ---
     def supports_agent(self) -> bool:
         """Return True if this engine/plugin supports agentic extensions.
@@ -98,7 +102,11 @@ class AIPluginBase:
         Default implementation extracts action type and payload.
         """
         action_type = action.get("type")
+        if not isinstance(action_type, str):
+            action_type = ""
         payload = action.get("payload", {})
+        if not isinstance(payload, dict):
+            payload = {}
         return await self.handle_custom_action(action_type, payload)
 
     @staticmethod

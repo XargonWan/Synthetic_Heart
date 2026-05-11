@@ -8,11 +8,12 @@ from plugins.message_plugin import MessagePlugin
 class FakeTelegramInterface:
     def __init__(self):
         self.sent = []
+        self.send_result = None
 
     async def send_message(self, payload, original_message=None):
         # record payload exactly as received
         self.sent.append((payload, original_message))
-        return None
+        return self.send_result
 
 
 class TestMessagePluginThreadHandling(unittest.IsolatedAsyncioTestCase):
@@ -60,6 +61,33 @@ class TestMessagePluginThreadHandling(unittest.IsolatedAsyncioTestCase):
 
         finally:
             # restore registry
+            if orig_iface is None:
+                core_init.INTERFACE_REGISTRY.pop("telegram_bot", None)
+            else:
+                core_init.INTERFACE_REGISTRY["telegram_bot"] = orig_iface
+
+    async def test_raises_when_interface_reports_delivery_failure(self):
+        orig_iface = core_init.INTERFACE_REGISTRY.get("telegram_bot")
+        fake_iface = FakeTelegramInterface()
+        fake_iface.send_result = False
+        core_init.INTERFACE_REGISTRY["telegram_bot"] = fake_iface
+
+        try:
+            plugin = MessagePlugin()
+
+            action = {
+                "type": "message_telegram_bot",
+                "payload": {
+                    "text": "Hey",
+                    "interface_path": "telegram_bot/12345",
+                },
+            }
+
+            with self.assertRaises(RuntimeError):
+                await plugin._handle_message_action(
+                    action, context={}, bot=None, original_message=None
+                )
+        finally:
             if orig_iface is None:
                 core_init.INTERFACE_REGISTRY.pop("telegram_bot", None)
             else:

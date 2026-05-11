@@ -17,7 +17,7 @@ class GrilloMemoryPlugin(AIPluginBase):
     def get_supported_actions(self) -> dict:
         return {}
 
-    async def build_prompt(self, entry_count=0) -> str:
+    async def build_prompt(self, entry_count: int = 0) -> str:
         base = (
             "[G.R.I.L.L.O. Memory Consolidation]\n\n"
             f"You have {entry_count} diary entries available for review. Review them and find recurring patterns.\n\n"
@@ -25,8 +25,9 @@ class GrilloMemoryPlugin(AIPluginBase):
             "- Recurring patterns or themes\n"
             "- Connections between experiences\n"
             "- Lessons learned or insights gained\n\n"
-            "IMPORTANT: End with a JSON action to create a diary entry with your synthesis."
-            '{"actions": [{"type": "create_personal_diary_entry", "payload": {"content": "your synthesis"}}]}'
+            "Write a concise synthesis in first person and include why this pattern matters to you.\n"
+            "IMPORTANT: End with a JSON action to create a diary entry using the current schema."
+            '{"actions": [{"type": "create_personal_diary_entry", "payload": {"interaction_summary": "brief summary", "personal_thought": "private first-person reflection", "emotions": [{"type": "neutral", "intensity": 0.5}], "content": "your synthesis", "context_tags": ["tag1", "tag2"]}}]}'
         )
         return base
 

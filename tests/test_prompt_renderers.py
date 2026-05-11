@@ -11,6 +11,7 @@ from core.prompt_renderers import (
     OpenAIRenderer,
     TextRenderer,
 )
+from core.live_tool_registry import LiveToolRegistry
 from core.prompt_request import PromptRequest, RuntimeContext, Turn
 
 
@@ -436,6 +437,127 @@ class TestGeminiRenderer:
         decls = result["tools"][0].get("function_declarations", [])
         assert len(decls) == 1
         assert decls[0]["name"] == "send_message"
+
+    def test_tools_built_from_normalized_actions_preserve_parameters(self) -> None:
+        actions = {
+            "message_telegram_bot": {
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "text": {
+                            "type": "string",
+                            "description": "Field: text",
+                        },
+                        "interface_path": {
+                            "type": "string",
+                            "description": "Field: interface_path",
+                        },
+                    },
+                    "required": ["text", "interface_path"],
+                },
+                "brief": "Send a text message via Telegram",
+                "source": "message_plugin, telegram_bot",
+            }
+        }
+
+        req = _basic_request(supports_tool_calling=True)
+        req.tool_declarations = LiveToolRegistry.build_manifests_from_actions(actions)
+        renderer = GeminiRenderer(req)
+        result = renderer.render()
+
+        decls = result["tools"][0].get("function_declarations", [])
+        assert len(decls) == 1
+        params = decls[0]["parameters"]
+        assert params["properties"]["text"]["type"] == "STRING"
+        assert params["properties"]["interface_path"]["type"] == "STRING"
+        assert sorted(params["required"]) == ["interface_path", "text"]
+
+    def test_tools_built_from_normalized_actions_preserve_array_items(self) -> None:
+        actions = {
+            "create_personal_diary_entry": {
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "interaction_summary": {
+                            "type": "string",
+                            "description": "Brief summary",
+                        },
+                        "emotions": {
+                            "type": "array",
+                            "description": "Emotion entries",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "type": {"type": "string"},
+                                    "intensity": {"type": "number"},
+                                },
+                                "required": ["type", "intensity"],
+                            },
+                        },
+                        "context_tags": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                        },
+                        "involved_users": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                        },
+                    },
+                    "required": ["interaction_summary"],
+                },
+                "brief": "Add a diary entry.",
+                "source": "ai_diary",
+            }
+        }
+
+        req = _basic_request(supports_tool_calling=True)
+        req.tool_declarations = LiveToolRegistry.build_manifests_from_actions(actions)
+        renderer = GeminiRenderer(req)
+        result = renderer.render()
+
+        params = result["tools"][0]["function_declarations"][0]["parameters"]
+        emotions = params["properties"]["emotions"]
+        assert emotions["type"] == "ARRAY"
+        assert emotions["items"]["type"] == "OBJECT"
+        assert emotions["items"]["properties"]["type"]["type"] == "STRING"
+        assert emotions["items"]["properties"]["intensity"]["type"] == "NUMBER"
+        assert params["properties"]["context_tags"]["items"]["type"] == "STRING"
+        assert params["properties"]["involved_users"]["items"]["type"] == "STRING"
+
+    def test_tools_built_from_normalized_actions_default_missing_array_items(
+        self,
+    ) -> None:
+        actions = {
+            "create_personal_diary_entry": {
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "context_tags": {
+                            "type": "array",
+                            "description": "Tags for topics discussed (optional)",
+                        },
+                        "meta_blob": {
+                            "type": "object",
+                            "description": "Optional nested object.",
+                        },
+                    },
+                    "required": [],
+                },
+                "brief": "Add a diary entry.",
+                "source": "ai_diary",
+            }
+        }
+
+        req = _basic_request(supports_tool_calling=True)
+        req.tool_declarations = LiveToolRegistry.build_manifests_from_actions(actions)
+        renderer = GeminiRenderer(req)
+        result = renderer.render()
+
+        params = result["tools"][0]["function_declarations"][0]["parameters"]
+        assert params["properties"]["context_tags"]["type"] == "ARRAY"
+        assert params["properties"]["context_tags"]["items"]["type"] == "STRING"
+        assert params["properties"]["meta_blob"]["type"] == "OBJECT"
+        assert params["properties"]["meta_blob"]["properties"] == {}
 
     def test_no_tools_key_when_disabled(self) -> None:
         req = _basic_request(supports_tool_calling=False)

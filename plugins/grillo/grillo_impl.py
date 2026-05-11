@@ -10,6 +10,7 @@ maintains beat scheduling and optional usage of the `history_evaluator` plugin.
 
 import asyncio
 import random
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Optional, Any, List, Dict
 
@@ -125,6 +126,11 @@ class GrilloPlugin(AIPluginBase):
                 await asyncio.sleep(60)
 
     async def _create_beat_prompt(self, beat_type: str) -> Optional[str]:
+        # Memory consolidation has a richer built-in prompt that includes
+        # history-derived context and the current diary schema.
+        if beat_type == "memory_consolidation":
+            return await self._create_memory_consolidation_prompt()
+
         # Prefer plugin-provided prompt builder when available
         plugin = self.beat_plugins.get(beat_type)
         if plugin and hasattr(plugin, "build_prompt"):
@@ -143,8 +149,6 @@ class GrilloPlugin(AIPluginBase):
         # Fallback to built-in simple prompts
         if beat_type == "tag_elaboration":
             return await self._create_tag_elaboration_prompt()
-        elif beat_type == "memory_consolidation":
-            return await self._create_memory_consolidation_prompt()
         elif beat_type == "self_reflection":
             return await self._create_self_reflection_prompt()
         elif beat_type == "curiosity":
@@ -159,7 +163,7 @@ class GrilloPlugin(AIPluginBase):
             "[G.R.I.L.L.O. Tag Elaboration]\n\n"
             "Reflect on your recent conversations and consider themes, patterns and insights.\n"
             "IMPORTANT: end with a JSON action to write a diary entry.\n"
-            '{"actions": [{"type": "create_personal_diary_entry", "payload": {"content":"your reflection"}}]}'
+            '{"actions": [{"type": "create_personal_diary_entry", "payload": {"interaction_summary": "brief summary", "personal_thought": "private first-person reflection", "emotions": [{"type": "thoughtful", "intensity": 0.6}], "content":"your reflection"}}]}'
         )
 
     async def _is_public_active_chat(self, chat_path: str) -> bool:
@@ -282,7 +286,7 @@ class GrilloPlugin(AIPluginBase):
             'Example: "We talked about Power Rangers — Jay asked what Super Sentai is, and I explained Super Sentai is the original Japanese series with different stories than Power Rangers."\n\n'
             'Also provide 2-4 short tags (as a JSON array) describing the memory (e.g., ["power_rangers", "sentai"]).\n'
             "Return ONLY valid JSON that creates a diary entry using the `create_personal_diary_entry` action. The JSON must look like: \n"
-            '{"actions": [{"type": "create_personal_diary_entry", "payload": {"content": "<your concise summary>", "context_tags": ["tag1","tag2"]}}]}\n'
+            '{"actions": [{"type": "create_personal_diary_entry", "payload": {"interaction_summary": "<brief summary>", "personal_thought": "private first-person reflection", "emotions": [{"type": "reflective", "intensity": 0.5}], "content": "<your concise summary>", "context_tags": ["tag1","tag2"]}}]}\n'
             "Do NOT include any extra text outside the JSON."
         )
         return base
@@ -291,7 +295,7 @@ class GrilloPlugin(AIPluginBase):
         return (
             "[G.R.I.L.L.O. Self-Reflection]\n\n"
             "Check in with yourself and record a concise reflection.\n"
-            '{"actions": [{"type": "create_personal_diary_entry", "payload": {"content":"your reflection"}}]}'
+            '{"actions": [{"type": "create_personal_diary_entry", "payload": {"interaction_summary": "brief summary", "personal_thought": "private first-person reflection", "emotions": [{"type": "calm", "intensity": 0.6}], "content":"your reflection"}}]}'
         )
 
     async def _create_curiosity_prompt(self) -> str:
@@ -337,7 +341,7 @@ class GrilloPlugin(AIPluginBase):
             )
         intro += (
             "Based on your recent experiences: what questions have emerged? End with JSON action.\n"
-            '{"actions": [{"type": "create_personal_diary_entry", "payload": {"content": "your curious thoughts"}}]}'
+            '{"actions": [{"type": "create_personal_diary_entry", "payload": {"interaction_summary": "brief summary", "personal_thought": "private first-person reflection", "emotions": [{"type": "curious", "intensity": 0.7}], "content": "your curious thoughts"}}]}'
         )
         return intro
 
@@ -345,7 +349,7 @@ class GrilloPlugin(AIPluginBase):
         return (
             "[G.R.I.L.L.O. Relationship Reflection]\n\n"
             "Reflect on interactions with people; end with JSON action.\n"
-            '{"actions": [{"type": "create_personal_diary_entry", "payload": {"content":"relationship insight"}}]}'
+            '{"actions": [{"type": "create_personal_diary_entry", "payload": {"interaction_summary": "brief summary", "personal_thought": "private first-person reflection", "emotions": [{"type": "affection", "intensity": 0.6}], "content":"relationship insight"}}]}'
         )
 
     def _get_allowed_action_types_for_beat(self, beat_type: str) -> list[str] | None:
@@ -365,10 +369,19 @@ class GrilloPlugin(AIPluginBase):
         try:
             from core import message_queue
 
+            allowed_action_types = self._get_allowed_action_types_for_beat(beat_type)
             activity_log_id: Optional[int] = None
             try:
                 activity_log_id = await self.create_activity_log(
-                    beat_type=beat_type, prompt_text=prompt
+                    beat_type=beat_type,
+                    prompt_text=prompt,
+                    metadata={
+                        "origin": "grillo_scheduler",
+                        "interface": "grillo",
+                        "chat_id": "-1",
+                        "allowed_action_types": allowed_action_types or [],
+                        "skip_history": True,
+                    },
                 )
             except Exception as e:
                 log_debug(f"[grillo] Failed to create activity log entry: {e}")
@@ -376,7 +389,7 @@ class GrilloPlugin(AIPluginBase):
             # Create a minimal message object representing internal event
             message = SimpleNamespace()
             message.chat_id = -1
-            message.message_id = 0
+            message.message_id = f"grillo_{beat_type}_{activity_log_id or 0}"
             message.text = prompt
             message.from_user = SimpleNamespace(
                 id=-1,
@@ -384,11 +397,9 @@ class GrilloPlugin(AIPluginBase):
                 full_name="G.R.I.L.L.O.",
                 first_name="G.R.I.L.L.O.",
             )
-            from datetime import datetime
-
             message.chat = SimpleNamespace(id=-1, type="internal")
             # Ensure the synthetic message has a date so prompt building doesn't fail
-            message.date = datetime.utcnow()
+            message.date = datetime.now(timezone.utc)
             item = {
                 "bot": None,
                 "message": message,
@@ -402,9 +413,7 @@ class GrilloPlugin(AIPluginBase):
                     "grillo_beat": True,
                     "beat_type": beat_type,
                     "activity_log_id": activity_log_id,
-                    "allowed_action_types": self._get_allowed_action_types_for_beat(
-                        beat_type
-                    ),
+                    "allowed_action_types": allowed_action_types,
                     "skip_history": True,
                 },
                 "priority": False,
@@ -438,23 +447,37 @@ class GrilloPlugin(AIPluginBase):
         """
         try:
             import json
-            from core.db import get_conn_ctx
+            from core.db import _get_db_type, get_conn_ctx
+
+            is_postgres = _get_db_type() == "postgres"
+            insert_sql = """
+                        INSERT INTO grillo_activity_log (beat_type, prompt_text, response_text, diary_entry_id, metadata)
+                        VALUES (%s, %s, NULL, NULL, %s)
+                        """
+            if is_postgres:
+                insert_sql = insert_sql.strip() + " RETURNING id"
+
+            metadata_payload = dict(metadata or {})
 
             async with get_conn_ctx() as conn:
                 async with conn.cursor() as cur:
                     await cur.execute(
-                        """
-                        INSERT INTO grillo_activity_log (beat_type, prompt_text, response_text, diary_entry_id, metadata)
-                        VALUES (%s, %s, NULL, NULL, %s)
-                        """,
+                        insert_sql,
                         (
                             beat_type,
                             prompt_text,
-                            json.dumps(metadata) if metadata else None,
+                            json.dumps(metadata_payload),
                         ),
                     )
+                    inserted_id = getattr(cur, "lastrowid", None)
+                    if inserted_id is None and is_postgres:
+                        row = await cur.fetchone()
+                        if isinstance(row, dict):
+                            inserted_id = row.get("id")
+                        elif row:
+                            inserted_id = row[0]
                     await conn.commit()
-                    return getattr(cur, "lastrowid", None)
+                    return inserted_id
         except Exception as e:
             log_error(f"[grillo] create_activity_log failed: {e}")
             return None
@@ -521,18 +544,20 @@ class GrilloPlugin(AIPluginBase):
             return
 
         try:
-            from core.db import get_conn_ctx
+            from core.db import _get_db_type, get_conn_ctx
+            from plugins.grillo.grillo_response_recorder import (
+                build_grillo_response_append_expression,
+            )
+
+            append_expression = build_grillo_response_append_expression(_get_db_type())
 
             async with get_conn_ctx() as conn:
                 async with conn.cursor() as cur:
                     if append:
                         await cur.execute(
-                            """
+                            f"""
                             UPDATE grillo_activity_log
-                            SET response_text = CASE
-                                WHEN response_text IS NULL OR response_text = '' THEN %s
-                                ELSE CONCAT(response_text, '\n\n', %s)
-                            END
+                            SET response_text = {append_expression}
                             WHERE id=%s
                             """,
                             (response_text, response_text, activity_log_id),
@@ -569,35 +594,43 @@ class GrilloPlugin(AIPluginBase):
                     )
 
             # Best-effort: increment persistent counter in DB if available
-            try:
-                from core.db import get_conn_ctx
+            if activity_log_id:
+                try:
+                    resolved_activity_log_id = int(activity_log_id)
+                    from core.db import _get_db_type, get_conn_ctx
+                    from plugins.grillo.grillo_response_recorder import (
+                        build_grillo_response_append_expression,
+                    )
 
-                async with get_conn_ctx() as conn:
-                    async with conn.cursor() as cur:
-                        # Atomically increment suppressed_count and optionally append a note
-                        await cur.execute(
-                            """
-                            UPDATE grillo_activity_log
-                            SET suppressed_count = COALESCE(suppressed_count, 0) + 1,
-                                response_text = CASE
-                                    WHEN response_text IS NULL OR response_text = '' THEN %s
-                                    ELSE CONCAT(response_text, '\n\n', %s)
-                                END
-                            WHERE id=%s
-                            """,
-                            (
-                                f"[suppressed: {reason}]",
-                                f"[suppressed: {reason}]",
-                                int(activity_log_id),
-                            ),
-                        )
-                        try:
-                            await conn.commit()
-                        except Exception:
-                            pass
-            except Exception as e:
-                # DB may be unavailable (aiomysql missing or DB down) — this is best-effort
-                log_debug(f"[grillo] record_suppressed_event DB update skipped: {e}")
+                    append_expression = build_grillo_response_append_expression(
+                        _get_db_type()
+                    )
+
+                    async with get_conn_ctx() as conn:
+                        async with conn.cursor() as cur:
+                            # Atomically increment suppressed_count and optionally append a note
+                            await cur.execute(
+                                f"""
+                                UPDATE grillo_activity_log
+                                SET suppressed_count = COALESCE(suppressed_count, 0) + 1,
+                                    response_text = {append_expression}
+                                WHERE id=%s
+                                """,
+                                (
+                                    f"[suppressed: {reason}]",
+                                    f"[suppressed: {reason}]",
+                                    resolved_activity_log_id,
+                                ),
+                            )
+                            try:
+                                await conn.commit()
+                            except Exception:
+                                pass
+                except Exception as e:
+                    # DB may be unavailable (aiomysql missing or DB down) — this is best-effort
+                    log_debug(
+                        f"[grillo] record_suppressed_event DB persist skipped: {e}"
+                    )
         except Exception as e:
             log_debug(f"[grillo] record_suppressed_event unexpected error: {e}")
 

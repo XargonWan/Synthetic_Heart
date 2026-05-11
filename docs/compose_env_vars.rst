@@ -55,9 +55,28 @@ Provider credentials:
 
 Persistence:
 
+- ``SYNTH_PRIMARY_DB`` (``memory`` -> ``DB_*`` MariaDB, ``soul`` -> ``SOUL_*`` / ``SOUL_POSTGRES_DSN``)
 - ``DB_HOST`` / ``DB_PORT`` / ``DB_USER`` / ``DB_PASS`` / ``DB_NAME``
 - ``SOUL_REPOSITORY_BACKEND``
 - ``SOUL_POSTGRES_DSN``
+
+Primary DB selection
+--------------------
+
+Use ``SYNTH_PRIMARY_DB`` when your deployment keeps both the legacy MariaDB
+settings and the SOUL PostgreSQL settings in the same ``.env`` and you want an
+explicit, exclusive switch for the app's primary runtime database.
+
+- ``SYNTH_PRIMARY_DB=memory`` forces the application to use ``DB_*`` as the
+  active MariaDB connection settings and ignores Postgres DSNs for the primary
+  runtime DB.
+- ``SYNTH_PRIMARY_DB=soul`` forces the application to use
+  ``SOUL_POSTGRES_DSN`` and optional ``SOUL_PG_*`` overrides for the active
+  PostgreSQL connection settings.
+
+If ``SYNTH_PRIMARY_DB`` is unset, the application falls back to the older
+driver-based behavior using ``SYNTH_DB_TYPE`` / ``DB_TYPE`` plus ``DB_*`` /
+``DATABASE_URL``.
 
 Observability:
 

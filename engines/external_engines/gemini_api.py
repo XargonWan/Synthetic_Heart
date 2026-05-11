@@ -1360,6 +1360,10 @@ class GeminiAPIPlugin(AIPluginBase):
                 {
                     "prompt_tokens": usage_meta.get("promptTokenCount"),
                     "completion_tokens": usage_meta.get("candidatesTokenCount"),
+                    "total_tokens": usage_meta.get("totalTokenCount"),
+                    "cache_read_input_tokens": usage_meta.get(
+                        "cachedContentTokenCount"
+                    ),
                 }
                 if usage_meta
                 else None
@@ -1561,6 +1565,10 @@ class GeminiAPIPlugin(AIPluginBase):
                 {
                     "prompt_tokens": usage_meta.get("promptTokenCount"),
                     "completion_tokens": usage_meta.get("candidatesTokenCount"),
+                    "total_tokens": usage_meta.get("totalTokenCount"),
+                    "cache_read_input_tokens": usage_meta.get(
+                        "cachedContentTokenCount"
+                    ),
                 }
                 if usage_meta
                 else None

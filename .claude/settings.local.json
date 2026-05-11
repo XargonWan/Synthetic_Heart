@@ -3,7 +3,8 @@
     "allow": [
       "Bash(npx gitnexus *)",
       "mcp__affine__list_workspaces",
-      "mcp__affine__search_docs"
+      "mcp__affine__search_docs",
+      "mcp__langfuse__get_traces"
     ]
   },
   "enabledMcpjsonServers": [

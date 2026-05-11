@@ -11,6 +11,7 @@ retry logic, and streaming are all handled by the SDK.
 
 from __future__ import annotations
 
+import re
 import time as _time
 from typing import Any, AsyncIterator
 from urllib.parse import urlparse, urlunparse
@@ -31,6 +32,16 @@ from core.external_endpoints.adapters.base import (
 # Endpoints that are known to support audio/speech (best-effort heuristic)
 _KNOWN_TTS_PATHS = ["/audio/speech", "/v1/audio/speech"]
 _KNOWN_STT_PATHS = ["/audio/transcriptions", "/v1/audio/transcriptions"]
+
+# Matches <think>…</think> and <thinking>…</thinking> blocks produced by
+# reasoning models (Qwen3.5, DeepSeek-R1, etc.) when thinking leaks into content.
+_THINKING_RE = re.compile(
+    r"<think(?:ing)?>.*?</think(?:ing)?>", re.DOTALL | re.IGNORECASE
+)
+
+
+def _strip_thinking(text: str) -> str:
+    return _THINKING_RE.sub("", text).strip()
 
 
 class OpenAICompatAdapter(BaseProtocolAdapter):
@@ -109,6 +120,65 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
         """Return the first candidate chat URL for direct HTTP calls."""
         return self._http_chat_urls()[0]
 
+    @staticmethod
+    def _extract_tool_call_actions(message: Any) -> str:
+        """Normalize OpenAI tool_calls payloads into SyntH action JSON."""
+        from core.prompt_renderers import OpenAIRenderer
+
+        content = ""
+        tool_calls_raw: Any = None
+
+        if isinstance(message, dict):
+            content = str(message.get("content") or "")
+            tool_calls_raw = message.get("tool_calls")
+        else:
+            content = str(getattr(message, "content", "") or "")
+            tool_calls_raw = getattr(message, "tool_calls", None)
+
+        tool_calls: list[dict[str, Any]] = []
+        for tool_call in tool_calls_raw or []:
+            if isinstance(tool_call, dict):
+                function = tool_call.get("function") or {}
+                tool_calls.append(
+                    {
+                        "id": tool_call.get("id"),
+                        "type": tool_call.get("type") or "function",
+                        "function": {
+                            "name": function.get("name"),
+                            "arguments": function.get("arguments") or "{}",
+                        },
+                    }
+                )
+                continue
+
+            function_obj = getattr(tool_call, "function", None)
+            if function_obj is None:
+                continue
+            tool_calls.append(
+                {
+                    "id": getattr(tool_call, "id", None),
+                    "type": getattr(tool_call, "type", "function"),
+                    "function": {
+                        "name": getattr(function_obj, "name", None),
+                        "arguments": getattr(function_obj, "arguments", "{}") or "{}",
+                    },
+                }
+            )
+
+        parsed = OpenAIRenderer.parse_tool_call_response(
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "content": content,
+                            "tool_calls": tool_calls,
+                        }
+                    }
+                ]
+            }
+        )
+        return str(parsed or "").strip()
+
     # ------------------------------------------------------------------
     # Chat
     # ------------------------------------------------------------------
@@ -126,22 +196,29 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
 
         # Pull out vendor-extension keys that need to travel via ``extra_body``
         # (the OpenAI SDK rejects unknown root-level kwargs, but accepts extra_body).
-        # Currently handled: ``enable_thinking`` — Qwen3.5 / LM Studio extension
-        # that disables chain-of-thought reasoning to avoid consuming the entire
-        # context window on thinking tokens before generating a response.
+        # ``enable_thinking`` — Qwen3.5 / LM Studio: disables chain-of-thought so
+        # reasoning tokens don't fill the context window before the response, and
+        # don't bleed into message content where they corrupt action parsing.
+        # Defaulting to False here matches the behaviour of the vision path and of
+        # Gemini/OpenRouter which never expose thinking in the response content.
         extra_body: dict[str, Any] = kwargs.pop("extra_body", {}) or {}
         if "enable_thinking" in kwargs:
             extra_body["enable_thinking"] = kwargs.pop("enable_thinking")
+        extra_body.setdefault("enable_thinking", False)
 
         filtered = {
             k: v for k, v in kwargs.items() if k not in ("model", "messages", "stream")
         }
+        logged_payload: dict[str, Any] = {"messages": messages}
+        logged_payload.update(filtered)
+        if extra_body:
+            logged_payload["extra_body"] = extra_body
 
         log_cortex_request(
             engine_tag,
             model=request_model,
             url=self._sdk_base_url(),
-            payload={"messages": messages},
+            payload=logged_payload,
         )
         _req_start = _time.monotonic()
 
@@ -161,7 +238,24 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
                     "completion_tokens": response.usage.completion_tokens or 0,
                     "total_tokens": response.usage.total_tokens or 0,
                 }
-            content = self._extract_message_content(choice.message)
+            # Prefer native tool_calls over message content — when a reasoning
+            # model emits chain-of-thought before calling a function, its thinking
+            # text ends up in `content` while the actual call is in `tool_calls`.
+            # Checking tool_calls first avoids returning thinking text as the
+            # response and matches the behaviour of Gemini / OpenRouter engines.
+            _raw_tool_calls = (
+                choice.message.get("tool_calls")
+                if isinstance(choice.message, dict)
+                else getattr(choice.message, "tool_calls", None)
+            )
+            if _raw_tool_calls:
+                content = self._extract_tool_call_actions(choice.message)
+            else:
+                content = _strip_thinking(self._extract_message_content(choice.message))
+            finish_reason = choice.finish_reason or "stop"
+            if finish_reason == "tool_calls":
+                finish_reason = "tool_call"
+
             _elapsed = (_time.monotonic() - _req_start) * 1000
             log_cortex_response(
                 engine_tag,
@@ -174,7 +268,7 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
             return ChatResponse(
                 content=content,
                 model=response.model or request_model,
-                finish_reason=choice.finish_reason or "stop",
+                finish_reason=finish_reason,
                 usage=usage,
             )
         except Exception as exc:
@@ -196,12 +290,17 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
         client = self._get_client()
         request_model = model or "default"
         engine_tag = f"openai_compat:{self._engine_label or 'default'}"
+        filtered = {
+            k: v for k, v in kwargs.items() if k not in ("model", "messages", "stream")
+        }
+        logged_payload: dict[str, Any] = {"messages": messages, "stream": True}
+        logged_payload.update(filtered)
 
         log_cortex_request(
             engine_tag,
             model=request_model,
             url=self._sdk_base_url(),
-            payload={"messages": messages, "stream": True},
+            payload=logged_payload,
         )
         _req_start = _time.monotonic()
         _accumulated: list[str] = []
@@ -211,11 +310,7 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
                 model=request_model,
                 messages=messages,
                 stream=True,
-                **{
-                    k: v
-                    for k, v in kwargs.items()
-                    if k not in ("model", "messages", "stream")
-                },
+                **filtered,
             )
             async for chunk in stream:
                 delta = chunk.choices[0].delta if chunk.choices else None

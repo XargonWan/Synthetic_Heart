@@ -12,6 +12,7 @@ import base64
 import os
 import tempfile
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 from core.logging_utils import log_debug, log_info, log_warning, log_error
 from core.json_utils import (
     dumps as json_dumps,
@@ -31,6 +32,48 @@ from core.multimodal_attachment import (
 
 # Plugin managed centrally in initialize_core_components
 plugin = None
+
+if TYPE_CHECKING:
+    from plugins.iris_base import IrisResult
+
+
+def _get_grillo_engine_label(plugin_obj: Any) -> str | None:
+    """Return a short engine label for Grillo activity diagnostics."""
+    endpoint = getattr(plugin_obj, "_endpoint", None)
+    for candidate in (
+        getattr(endpoint, "name", None),
+        getattr(plugin_obj, "display_name", None),
+        getattr(plugin_obj, "_engine_label", None),
+    ):
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
+
+    if plugin_obj is None:
+        return None
+    return plugin_obj.__class__.__name__
+
+
+def _build_empty_grillo_response_text(
+    response_metadata: dict[str, Any] | None,
+    engine_label: str | None,
+) -> str:
+    """Render a diagnostic placeholder for empty Grillo LLM replies."""
+    details: list[str] = []
+    if isinstance(engine_label, str) and engine_label.strip():
+        details.append(f"engine={engine_label.strip()}")
+
+    metadata = response_metadata if isinstance(response_metadata, dict) else {}
+    for key in ("model", "finish_reason", "block_reason", "error"):
+        value = metadata.get(key)
+        if value in (None, ""):
+            continue
+        if key == "model" and isinstance(value, str) and value == engine_label:
+            continue
+        details.append(f"{key}={value}")
+
+    if details:
+        return "[EMPTY LLM RESPONSE] " + " ".join(details)
+    return "[EMPTY LLM RESPONSE]"
 
 
 def _restore_plugin_instance(instance: object) -> None:
@@ -356,8 +399,11 @@ async def load_plugin(
 
 
 async def handle_incoming_message(
-    bot, message, context_memory_or_prompt, interface: str | None = None
-):
+    bot: Any,
+    message: Any,
+    context_memory_or_prompt: Any,
+    interface: str | None = None,
+) -> Any:
     """Process incoming messages or pre-built prompts."""
 
     async with _llm_chain_lease():
@@ -868,8 +914,23 @@ async def handle_incoming_message(
             if isinstance(context_memory_or_prompt, dict):
                 activity_log_id = context_memory_or_prompt.get("activity_log_id")
 
-            if activity_log_id and result:
-                await _update_grillo_response(activity_log_id, result)
+            if activity_log_id is not None:
+                response_metadata = getattr(
+                    effective_plugin,
+                    "_last_response_metadata",
+                    None,
+                )
+                if not result:
+                    log_warning(
+                        "[plugin_instance] Empty LLM response for Grillo activity "
+                        f"{activity_log_id}; persisting diagnostic marker"
+                    )
+                await _update_grillo_response(
+                    activity_log_id,
+                    result,
+                    response_metadata=response_metadata,
+                    engine_label=_get_grillo_engine_label(effective_plugin),
+                )
         except Exception as e:
             log_warning(f"[plugin_instance] Failed to update Grillo log: {e}")
         # Log that plugin finished processing
@@ -1563,32 +1624,55 @@ async def _extract_multimodal_attachments(
         return []
 
 
-async def _update_grillo_response(activity_log_id, response_text):
+async def _update_grillo_response(
+    activity_log_id: Any,
+    response_text: Any,
+    *,
+    response_metadata: dict[str, Any] | None = None,
+    engine_label: str | None = None,
+) -> None:
     """Update the grillo_activity_log with the raw response text."""
-    if not activity_log_id or not response_text:
+    if not activity_log_id:
         return
 
     try:
-        from core.db import get_conn_ctx
+        from core.db import _get_db_type, get_conn_ctx
+        from plugins.grillo.grillo_response_recorder import (
+            build_grillo_response_append_expression,
+            extract_response_text_from_cortex_response,
+        )
+
+        normalized_response_text = await extract_response_text_from_cortex_response(
+            response_text
+        )
+        if not normalized_response_text.strip():
+            normalized_response_text = _build_empty_grillo_response_text(
+                response_metadata,
+                engine_label,
+            )
+
+        append_expression = build_grillo_response_append_expression(_get_db_type())
 
         async with get_conn_ctx() as conn:
             async with conn.cursor() as cur:
                 # Logic similar to GrilloPlugin.set_activity_response_text: append if exists
                 # We use append because sometimes multiple messages/chunks might be associated
                 await cur.execute(
-                    """
+                    f"""
                     UPDATE grillo_activity_log
-                    SET response_text = CASE
-                        WHEN response_text IS NULL OR response_text = '' THEN %s
-                        ELSE CONCAT(response_text, '\n\n', %s)
-                    END
+                    SET response_text = {append_expression}
                     WHERE id=%s
                     """,
-                    (response_text, response_text, activity_log_id),
+                    (
+                        normalized_response_text,
+                        normalized_response_text,
+                        activity_log_id,
+                    ),
                 )
                 await conn.commit()
         log_debug(
-            f"[plugin_instance] Updated grillo_activity_log {activity_log_id} with response ({len(response_text)} chars)"
+            "[plugin_instance] Updated grillo_activity_log "
+            f"{activity_log_id} with response ({len(normalized_response_text)} chars)"
         )
     except Exception as e:
         log_error(f"[plugin_instance] Failed to update Grillo log: {e}")

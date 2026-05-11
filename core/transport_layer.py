@@ -1115,11 +1115,14 @@ async def universal_send(interface_send_func, *args, text: str | None = None, **
     # Save LLM response to chat history (before JSON parsing)
     # Extract interface_path for saving to chat history
     interface_path = kwargs.get("interface_path")
+    skip_history = bool(kwargs.get("skip_history", False))
     log_debug(
-        f"[transport] Checking for chat history save: interface_path={interface_path}, text_len={len(text) if text else 0}"
+        f"[transport] Checking for chat history save: interface_path={interface_path}, text_len={len(text) if text else 0}, skip_history={skip_history}"
     )
 
-    if interface_path and text:
+    if skip_history:
+        log_debug("[transport] Skipping chat history save because skip_history=True")
+    elif interface_path and text:
         try:
             from core.chat_context_manager import add_message_to_context
             from datetime import datetime

@@ -15,6 +15,7 @@ import json
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from core.ai_plugin_base import AIPluginBase
+from core.external_endpoints.models import EndpointProtocol
 from core.logging_utils import log_debug, log_warning
 
 if TYPE_CHECKING:
@@ -126,6 +127,7 @@ class ExternalCortexEngine(AIPluginBase):
         self._adapter._engine_label = endpoint.name or "cortex_bridge"
         self.notify_fn = notify_fn
         self.display_name = endpoint.display_label or endpoint.name
+        self._last_response_metadata: dict[str, Any] = {}
 
     # ------------------------------------------------------------------
     # Multimodal format helpers
@@ -327,11 +329,31 @@ class ExternalCortexEngine(AIPluginBase):
         backoff = float(extra.get("retry_backoff", 0.5))
         return max_retries, backoff
 
+    def _retry_on_timeout(self) -> bool:
+        extra = self._endpoint.extra_config or {}
+        return bool(extra.get("retry_on_timeout", False))
+
     @staticmethod
     def _is_retryable_exception(exc: Exception) -> bool:
         if isinstance(exc, (ConnectionError, TimeoutError, OSError)):
             return True
         msg = str(exc).lower()
+        transient_api_markers = (
+            "503",
+            "502",
+            "504",
+            "429",
+            "unavailable",
+            "service unavailable",
+            "bad gateway",
+            "gateway timeout",
+            "too many requests",
+            "rate limit",
+            "resource exhausted",
+            "overloaded",
+            "high demand",
+            "try again later",
+        )
         return any(
             token in msg
             for token in (
@@ -342,6 +364,7 @@ class ExternalCortexEngine(AIPluginBase):
                 "temporarily unavailable",
                 "dns",
                 "unreachable",
+                *transient_api_markers,
             )
         )
 
@@ -354,7 +377,61 @@ class ExternalCortexEngine(AIPluginBase):
                 return float(timeout)
             except (ValueError, TypeError):
                 pass
-        return 300.0
+        return 120.0
+
+    def _tool_api_kwargs(self, prompt: Any) -> dict[str, Any]:
+        """Build adapter kwargs derived from a typed PromptRequest.
+
+        Preserve native tool declarations for external protocols that support
+        function/tool calling so adapters can parse structured tool responses.
+        """
+        try:
+            from core.prompt_renderers import (
+                AnthropicRenderer,
+                GeminiRenderer,
+                OpenAIRenderer,
+            )
+            from core.prompt_request import PromptRequest
+
+            prompt_request: PromptRequest | None = None
+            if isinstance(prompt, PromptRequest):
+                prompt_request = prompt
+            elif isinstance(prompt, dict):
+                candidate = prompt.get("__prompt_request")
+                if isinstance(candidate, PromptRequest):
+                    prompt_request = candidate
+
+            if prompt_request is None or not prompt_request.tool_declarations:
+                return {}
+
+            prompt_request.supports_tool_calling = True
+
+            if self._endpoint.protocol is EndpointProtocol.GEMINI:
+                rendered = GeminiRenderer(prompt_request).render()
+                tools = rendered.get("tools") or []
+                return {"tools": tools} if tools else {}
+
+            if self._endpoint.protocol is EndpointProtocol.OPENAI:
+                tools = OpenAIRenderer(prompt_request).tool_schemas()
+                return {"tools": tools, "tool_choice": "auto"} if tools else {}
+
+            if self._endpoint.protocol is EndpointProtocol.ANTHROPIC:
+                rendered = AnthropicRenderer(prompt_request).render()
+                tools = rendered.get("tools") or []
+                if not tools:
+                    return {}
+                payload: dict[str, Any] = {"tools": tools}
+                tool_choice = rendered.get("tool_choice")
+                if tool_choice:
+                    payload["tool_choice"] = tool_choice
+                return payload
+
+            return {}
+        except Exception as exc:
+            log_debug(
+                f"[cortex_bridge:{self._endpoint.name}] tool extraction skipped: {exc}"
+            )
+            return {}
 
     async def generate_response(self, messages: list[dict[str, Any]] | Any) -> str:
         """Forward ``messages`` to the external endpoint and return the response text.
@@ -362,33 +439,57 @@ class ExternalCortexEngine(AIPluginBase):
         Accepts either a list of OpenAI-style message dicts (e.g. from recon) or a
         SyntH JSON-prompt dict/str — same flexible contract as the built-in engines.
         """
+        prompt_extra_kwargs: dict[str, Any] = {}
         if isinstance(messages, list):
             msg_list = messages
         else:
+            prompt_extra_kwargs = self._tool_api_kwargs(messages)
             msg_list = self._build_messages(messages)
 
         model = self._endpoint.default_model
         if not model and self._endpoint.available_models:
             model = self._endpoint.available_models[0]
+        self._last_response_metadata = {}
         max_retries, backoff = self._get_retry_settings()
         request_timeout = self._get_request_timeout()
+        retry_on_timeout = self._retry_on_timeout()
         attempt = 0
         while True:
             attempt += 1
             try:
+                extra_kwargs = self._extra_api_kwargs()
+                extra_kwargs.update(prompt_extra_kwargs)
+                extra_kwargs.setdefault("timeout", request_timeout)
                 chat_resp = await asyncio.wait_for(
                     self._adapter.chat_completion(
-                        msg_list, model=model, **self._extra_api_kwargs()
+                        msg_list, model=model, **extra_kwargs
                     ),
                     timeout=request_timeout,
                 )
+                response_metadata: dict[str, Any] = {
+                    "model": getattr(chat_resp, "model", None) or model,
+                    "finish_reason": getattr(chat_resp, "finish_reason", None)
+                    or "stop",
+                    "empty_response": not bool(getattr(chat_resp, "content", "")),
+                }
+                adapter_response_metadata = getattr(
+                    self._adapter,
+                    "_last_completion_metadata",
+                    None,
+                )
+                if isinstance(adapter_response_metadata, dict):
+                    for key, value in adapter_response_metadata.items():
+                        if value is None or value == "":
+                            continue
+                        response_metadata[key] = value
+                self._last_response_metadata = response_metadata
                 return chat_resp.content
             except asyncio.TimeoutError:
                 log_warning(
                     f"[cortex_bridge:{self._endpoint.name}] generate_response timed out "
                     f"after {request_timeout}s (attempt {attempt}/{max_retries})"
                 )
-                should_retry = attempt < max_retries
+                should_retry = retry_on_timeout and attempt < max_retries
                 if should_retry:
                     delay = backoff * (2 ** (attempt - 1))
                     log_warning(
@@ -516,8 +617,7 @@ class ExternalCortexEngine(AIPluginBase):
         Correction prompts are forwarded to the engine like any other prompt;
         the corrector loop is managed entirely by the message chain.
         """
-        messages = self._build_messages(prompt)
-        return await self.generate_response(messages)
+        return await self.generate_response(prompt)
 
     # NOTE: generate_response already uses _extra_api_kwargs(), so all call
     # paths (Recon via generate_response, main LLM via handle_incoming_message)
@@ -587,10 +687,9 @@ class ExternalCortexEngine(AIPluginBase):
         model = self._endpoint.default_model or None
         request_timeout = self._get_request_timeout()
         try:
-            async for chunk in asyncio.wait_for(
-                self._adapter.stream_chat_completion(
-                    messages, model=model
-                ),
+            async for chunk in self._adapter.stream_chat_completion(
+                messages,
+                model=model,
                 timeout=request_timeout,
             ):
                 yield chunk

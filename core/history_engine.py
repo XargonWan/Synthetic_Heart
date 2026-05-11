@@ -276,6 +276,8 @@ def _is_ignored_prompt_history_entry(entry: HistoryEntry) -> bool:
     return text.startswith(
         (
             "✅ Cortex engine dynamically updated to `",
+            "✅ Cortex engine override for grillo updated to `",
+            "✅ Cortex engine override for trainer updated to `",
             "❌ Failed to switch Cortex to `",
         )
     )

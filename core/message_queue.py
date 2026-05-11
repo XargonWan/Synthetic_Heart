@@ -1,9 +1,12 @@
 import asyncio
+from dataclasses import dataclass
 import inspect
 import time
 import queue as _thread_queue
 import heapq
+import re
 from datetime import datetime
+from typing import cast
 import traceback
 from types import SimpleNamespace
 
@@ -36,11 +39,44 @@ _lock_loop: asyncio.AbstractEventLoop | None = None
 _consumer_task: asyncio.Task | None = None
 _counter = 0  # Monotonic counter to prevent dict comparison when priorities are equal
 
+
+@dataclass(slots=True)
+class _BackgroundTaskEntry:
+    task: asyncio.Task
+    cancel_on_user_message: bool = True
+
+
 # Track running LOW_PRIORITY background tasks by interface_path so they can be
 # cancelled when a higher-priority (user) message arrives for the same chat.
 # This prevents duplicate responses when a grillo outreach beat and a user
 # message target the same interface_path concurrently.
-_bg_tasks: dict[str, asyncio.Task] = {}
+_bg_tasks: dict[str, _BackgroundTaskEntry] = {}
+
+_GRILLO_ACTIVITY_MESSAGE_ID_RE = re.compile(r"^grillo_[a-z_]+_(\d+)$")
+
+
+def _should_cancel_low_priority_on_user_message(context: object) -> bool:
+    if not isinstance(context, dict):
+        return True
+    context_dict = cast(dict[str, object], context)
+    return not (
+        bool(context_dict.get("grillo_beat"))
+        and context_dict.get("beat_type") == "outreach"
+    )
+
+
+def _extract_grillo_activity_log_id(message: object) -> int | None:
+    """Recover a Grillo activity id from a synthetic message id when needed."""
+    message_id = getattr(message, "message_id", None)
+    if not isinstance(message_id, str):
+        return None
+    match = _GRILLO_ACTIVITY_MESSAGE_ID_RE.match(message_id.strip())
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except (TypeError, ValueError):
+        return None
 
 
 def _get_queue() -> asyncio.PriorityQueue:
@@ -939,6 +975,15 @@ async def _consumer_loop() -> None:
                     # Add interface_path to context dict so prompt_engine can access it
                     context = final.get("context", {})
                     if isinstance(context, dict):
+                        if not context.get("activity_log_id"):
+                            recovered_activity_log_id = _extract_grillo_activity_log_id(
+                                final.get("message")
+                            )
+                            if recovered_activity_log_id is not None:
+                                context["activity_log_id"] = recovered_activity_log_id
+                                context["grillo_activity_log_id"] = (
+                                    recovered_activity_log_id
+                                )
                         context["interface_path"] = interface_path
                         context["thread_id"] = thread_id
                         # Propagate trainer flag so plugin_instance can route
@@ -1181,9 +1226,17 @@ async def _consumer_loop() -> None:
                         # yields — so the Grillo task cannot make further progress
                         # (e.g. write to chat history) between now and when we
                         # actually start processing the user message.
-                        _existing_bg = _bg_tasks.pop(interface_path, None)
-                        if _existing_bg is not None and not _existing_bg.done():
-                            _existing_bg.cancel()
+                        _existing_bg = _bg_tasks.get(interface_path)
+                        if _existing_bg is not None and _existing_bg.task.done():
+                            _bg_tasks.pop(interface_path, None)
+                            _existing_bg = None
+                        if (
+                            _existing_bg is not None
+                            and _existing_bg.cancel_on_user_message
+                            and not _existing_bg.task.done()
+                        ):
+                            _bg_tasks.pop(interface_path, None)
+                            _existing_bg.task.cancel()
                             log_info(
                                 f"[QUEUE] Cancelled LOW_PRIORITY background task for {interface_path} "
                                 f"(superseded by incoming user message)"
@@ -1198,9 +1251,13 @@ async def _consumer_loop() -> None:
                         for _gk in [
                             k for k in list(_bg_tasks) if k.startswith("grillo/")
                         ]:
-                            _gt = _bg_tasks.pop(_gk, None)
-                            if _gt is not None and not _gt.done():
-                                _gt.cancel()
+                            _gt = _bg_tasks.get(_gk)
+                            if _gt is not None and _gt.task.done():
+                                _bg_tasks.pop(_gk, None)
+                                _gt = None
+                            if _gt is not None and not _gt.task.done():
+                                _bg_tasks.pop(_gk, None)
+                                _gt.task.cancel()
                                 log_info(
                                     f"[QUEUE] Cancelled Grillo internal beat {_gk} "
                                     f"(user message arrived for {interface_path})"
@@ -1266,7 +1323,13 @@ async def _consumer_loop() -> None:
 
                             # Track this background task so it can be cancelled if a
                             # user message arrives for the same interface_path.
-                            _bg_tasks[interface_path] = processing_task
+                            _bg_entry = _BackgroundTaskEntry(
+                                task=processing_task,
+                                cancel_on_user_message=_should_cancel_low_priority_on_user_message(
+                                    context
+                                ),
+                            )
+                            _bg_tasks[interface_path] = _bg_entry
 
                             # Ensure generation_end hook is called when background task completes
                             processing_task.add_done_callback(
@@ -1281,9 +1344,12 @@ async def _consumer_loop() -> None:
                             def _bg_done_cb(
                                 t: asyncio.Task,
                                 _ipath: str = _captured_ipath,
+                                _entry: _BackgroundTaskEntry = _bg_entry,
                             ) -> None:
                                 # Remove from tracking dict
-                                _bg_tasks.pop(_ipath, None)
+                                current_entry = _bg_tasks.get(_ipath)
+                                if current_entry is _entry:
+                                    _bg_tasks.pop(_ipath, None)
                                 try:
                                     exc = t.exception()
                                     if exc is not None:

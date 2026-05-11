@@ -17,15 +17,7 @@
     "synth-db": {
       "type": "stdio",
       "command": "uv",
-      "args": ["run", "python", "mcp_servers/synth_db.py"],
-      "env": {
-        "DB_TYPE": "mariadb",
-        "DB_HOST": "192.168.1.13",
-        "DB_PORT": "3307",
-        "DB_USER": "synth",
-        "DB_PASS": "synth",
-        "DB_NAME": "synth"
-      }
+      "args": ["run", "python", "mcp_servers/synth_db.py"]
     },
     "synth-cortex": {
       "type": "stdio",

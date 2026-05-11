@@ -6,7 +6,7 @@ import random
 import re
 import time as time_module
 
-from core.db import get_conn_ctx
+from core.db import _get_db_type, get_conn_ctx
 from core.synth_tagging import extract_tags, expand_tags
 from core.logging_utils import log_debug, log_info, log_warning, log_error
 from core.json_utils import dumps as json_dumps, redact_multimodal_for_logging
@@ -208,6 +208,184 @@ def _merge_memory_entries(existing: list[Any], incoming: list[Any]) -> list[Any]
     return merged
 
 
+_NON_USER_FACING_ACTION_HINTS = (
+    "admin only",
+    "deprecated",
+    "internal",
+)
+_CONTEXT_SEGMENT_SPLIT_RE = re.compile(r"(?:\n\s*|\s+)---(?:\s*\n|\s+)")
+_SOUL_RECALLED_MEMORY_RE = re.compile(
+    r"^\[SOUL recalled memory\s*\|\s*(?P<meta>[^\]]+)\]\s*(?P<body>.*)$",
+    re.DOTALL,
+)
+_TIMED_CONTEXT_ENTRY_RE = re.compile(
+    r"^\[(?P<label>diary|thought)\s+(?P<timestamp>[^\]]+)\]\s*(?P<body>.*)$",
+    re.DOTALL,
+)
+
+
+def _action_source_tokens(action_def: Any) -> set[str]:
+    if not isinstance(action_def, dict):
+        return set()
+
+    source = action_def.get("source")
+    if isinstance(source, str):
+        return {token.strip() for token in source.split(",") if token.strip()}
+    if isinstance(source, (list, tuple, set)):
+        return {str(token).strip() for token in source if str(token).strip()}
+    return set()
+
+
+def _is_non_user_facing_action(action_def: Any) -> bool:
+    if not isinstance(action_def, dict):
+        return False
+
+    hint_text = " ".join(
+        str(action_def.get(field) or "") for field in ("brief", "description")
+    ).lower()
+    return any(hint in hint_text for hint in _NON_USER_FACING_ACTION_HINTS)
+
+
+def _derive_default_prompt_action_types(
+    available_actions: dict[str, Any],
+    interface_name: str | None,
+) -> set[str]:
+    try:
+        from core.core_initializer import INTERFACE_REGISTRY
+
+        interface_names = {str(name) for name in INTERFACE_REGISTRY.keys()}
+    except Exception:
+        interface_names = set()
+
+    allowed: set[str] = set()
+    current_interface = str(interface_name or "").strip()
+    for action_name, action_def in available_actions.items():
+        if _is_non_user_facing_action(action_def):
+            continue
+
+        if current_interface:
+            action_interfaces = _action_source_tokens(action_def) & interface_names
+            if action_interfaces and current_interface not in action_interfaces:
+                continue
+
+        allowed.add(action_name)
+
+    return allowed
+
+
+def _dedupe_context_segments(text: str) -> str:
+    raw = str(text or "").strip()
+    if not raw:
+        return ""
+
+    segments = _CONTEXT_SEGMENT_SPLIT_RE.split(raw)
+    if len(segments) <= 1:
+        return " ".join(raw.split())
+
+    seen: set[str] = set()
+    kept: list[str] = []
+    for segment in segments:
+        cleaned = " ".join(segment.split())
+        if not cleaned:
+            continue
+        marker = cleaned.casefold()
+        if marker in seen:
+            continue
+        seen.add(marker)
+        kept.append(cleaned)
+    return " | ".join(kept)
+
+
+def _humanize_context_entry(entry: Any, *, kind: str) -> str | None:
+    if isinstance(entry, dict) and kind == "memories":
+        for key in ("snippet", "content", "summary", "text"):
+            value = entry.get(key)
+            if value in (None, ""):
+                continue
+            normalized_value = _dedupe_context_segments(str(value))
+            if normalized_value:
+                return normalized_value
+
+    text = str(entry or "").strip()
+    if not text:
+        return None
+
+    soul_match = _SOUL_RECALLED_MEMORY_RE.match(text)
+    if soul_match:
+        meta_parts = [part.strip() for part in soul_match.group("meta").split("|")]
+        body = _dedupe_context_segments(soul_match.group("body"))
+        if not body:
+            return None
+
+        when = meta_parts[0] if meta_parts else ""
+        qualifiers: list[str] = []
+        for part in meta_parts[1:]:
+            if not part:
+                continue
+            if part.startswith("emotion="):
+                qualifiers.append(f"emotion: {part.split('=', 1)[1]}")
+            else:
+                qualifiers.append(part)
+
+        prefix = "Recalled memory"
+        if when:
+            prefix += f" from {when}"
+        if qualifiers:
+            prefix += f" ({', '.join(qualifiers)})"
+        return f"{prefix}: {body}"
+
+    timed_match = _TIMED_CONTEXT_ENTRY_RE.match(text)
+    if timed_match:
+        label = timed_match.group("label")
+        timestamp = timed_match.group("timestamp")
+        body = timed_match.group("body").strip()
+
+        if label == "diary":
+            summary_part, _, thought_part = body.partition("| thought:")
+            summary_text = re.sub(r"^summary:\s*", "", summary_part, flags=re.I)
+            summary_text = _dedupe_context_segments(summary_text)
+            if kind == "thoughts" and thought_part.strip():
+                thought_text = _dedupe_context_segments(thought_part)
+                return (
+                    f"Thought from {timestamp}: {thought_text}"
+                    if thought_text
+                    else None
+                )
+            if kind == "history_recent":
+                return (
+                    f"Diary entry from {timestamp}: {summary_text}"
+                    if summary_text
+                    else None
+                )
+
+        cleaned_body = _dedupe_context_segments(body)
+        if not cleaned_body:
+            return None
+
+        label_text = "Thought" if label == "thought" else "Diary entry"
+        return f"{label_text} from {timestamp}: {cleaned_body}"
+
+    if kind in {"memories", "thoughts"}:
+        return _dedupe_context_segments(text)
+
+    return text
+
+
+def _sanitize_context_entries(entries: list[Any], *, kind: str) -> list[str]:
+    sanitized: list[str] = []
+    seen: set[str] = set()
+    for entry in entries or []:
+        normalized = _humanize_context_entry(entry, kind=kind)
+        if not normalized:
+            continue
+        marker = normalized.casefold()
+        if marker in seen:
+            continue
+        seen.add(marker)
+        sanitized.append(normalized)
+    return sanitized
+
+
 _EXPLICIT_RUNTIME_FACT_REQUEST_RE = re.compile(
     r"(?ix)\b("
     r"what(?:'s| is)?\s+(?:the\s+)?(?:time|date|day|timezone|location|weather)\b|"
@@ -288,13 +466,19 @@ def _build_context_summary(
 
     # Grillo internal beats skip cross-chat history and participants
     if not is_grillo_internal:
-        history_recent: list[Any] = context_section.get("history_recent") or []
+        history_recent = _sanitize_context_entries(
+            list(context_section.get("history_recent") or []),
+            kind="history_recent",
+        )
         if history_recent:
             parts.append("[Recent context from other conversations]")
             for line in history_recent:
                 parts.append(f"- {line}")
 
-    thoughts: list[Any] = context_section.get("thoughts") or []
+    thoughts = _sanitize_context_entries(
+        list(context_section.get("thoughts") or []),
+        kind="thoughts",
+    )
     if not is_grillo_internal:
         # Grillo internal beats skip recent diary thoughts
         if thoughts:
@@ -302,7 +486,10 @@ def _build_context_summary(
             for t in thoughts:
                 parts.append(f"- {t}")
 
-    memories: list[Any] = context_section.get("memories") or []
+    memories = _sanitize_context_entries(
+        list(context_section.get("memories") or []),
+        kind="memories",
+    )
     if not is_grillo_internal:
         # Grillo internal beats use minimal memories (top 1-2 only)
         if memories:
@@ -387,7 +574,35 @@ def _history_to_turns(
         content = m.group(2)
         role = "assistant" if sender.lower() in all_synth_names else "user"
         turns.append(Turn(role=role, content=content))
-    return turns
+
+    if not turns:
+        return []
+
+    # If the visible history window starts mid-conversation, it can begin with
+    # stale assistant-only turns (for example repeated outreach messages). When
+    # a user turn exists later in the window, drop the unmatched leading
+    # assistant turns so the model does not anchor on an orphaned monologue.
+    if any(turn.role == "user" for turn in turns):
+        while turns and turns[0].role == "assistant":
+            turns.pop(0)
+
+    if not turns:
+        return []
+
+    # Coalesce consecutive same-role turns to keep provider history well-formed
+    # even when the source chat log contains streaks of outreach or split user
+    # messages.
+    normalized_turns: list[Turn] = []
+    for turn in turns:
+        if normalized_turns and normalized_turns[-1].role == turn.role:
+            normalized_turns[-1] = Turn(
+                role=turn.role,
+                content=f"{normalized_turns[-1].content}\n\n{turn.content}",
+            )
+            continue
+        normalized_turns.append(turn)
+
+    return normalized_turns
 
 
 def _build_pr_attachments(
@@ -1106,6 +1321,15 @@ async def build_prompt_request(
         context_section.setdefault("time", local_time_fields.get("local_time"))
         context_section.setdefault("time_of_day", local_time_fields.get("time_of_day"))
 
+    for key, kind in (
+        ("history_recent", "history_recent"),
+        ("thoughts", "thoughts"),
+        ("memories", "memories"),
+    ):
+        raw_entries = context_section.get(key)
+        if isinstance(raw_entries, list):
+            context_section[key] = _sanitize_context_entries(raw_entries, kind=kind)
+
     # Determine message input source for the LLM ("voice" | "text").
     # Only mark as voice for the *current* message; never stored in chat_history,
     # so the model cannot mistakenly infer that past messages were also voice.
@@ -1363,6 +1587,19 @@ async def build_prompt_request(
                 "(audio sent as multimodal content)"
             )
 
+        if allowed_action_types_for_prompt is None:
+            derived_action_types = _derive_default_prompt_action_types(
+                full_actions,
+                interface_name,
+            )
+            if derived_action_types and len(derived_action_types) < len(full_actions):
+                allowed_action_types_for_prompt = derived_action_types
+                log_debug(
+                    "[json_prompt] Derived default prompt action scope: "
+                    f"{len(derived_action_types)}/{len(full_actions)} actions kept "
+                    f"for interface={interface_name}"
+                )
+
         if allowed_action_types_for_prompt is not None:
             full_actions = {
                 k: v
@@ -1501,18 +1738,27 @@ async def search_memories(tags=None, scope=None, limit=5):
     if not tags:
         return []
 
-    # Build OR conditions using JSON_CONTAINS to check if any tag exists in the JSON array
-    conditions = " OR ".join(["JSON_CONTAINS(tags, %s)"] * len(tags))
+    is_postgres = _get_db_type() == "postgres"
+
+    if is_postgres:
+        conditions = " OR ".join(
+            ["COALESCE(NULLIF(BTRIM(tags), ''), '[]')::jsonb ? %s"] * len(tags)
+        )
+    else:
+        # Build OR conditions using JSON_CONTAINS to check if any tag exists in the JSON array
+        conditions = " OR ".join(["JSON_CONTAINS(tags, %s)"] * len(tags))
 
     query = f"""
-        SELECT DISTINCT content
+        SELECT content, timestamp
         FROM memories
-        WHERE json_valid(tags)
-          AND ({conditions})
+        WHERE ({conditions})
     """
 
-    # Parameters: each tag encoded as a JSON string for JSON_CONTAINS
-    params = [json_dumps(tag) for tag in tags]
+    if not is_postgres:
+        query = query.replace("WHERE", "WHERE json_valid(tags) AND", 1)
+
+    # MariaDB expects JSON-encoded strings for JSON_CONTAINS; Postgres uses raw text with jsonb '?'.
+    params = [tag if is_postgres else json_dumps(tag) for tag in tags]
 
     if scope:
         query += " AND scope = %s"
@@ -1532,21 +1778,44 @@ async def search_memories(tags=None, scope=None, limit=5):
                 rows = await cur.fetchall()
                 # Truncate each memory to max 400 chars to keep JSON payload lightweight
                 memories = []
+                seen_memories: set[str] = set()
                 for row in rows:
                     mem = row[0]
+                    if not isinstance(mem, str):
+                        mem = str(mem)
+                    if mem in seen_memories:
+                        continue
+                    seen_memories.add(mem)
                     if isinstance(mem, str) and len(mem) > 400:
                         mem = mem[:400] + "..."
                     memories.append(mem)
 
                 # Also search ai_diary for context_tags to include diary entries in memories
                 try:
-                    diary_query = f"SELECT DISTINCT content FROM ai_diary WHERE json_valid(context_tags) AND ({conditions}) ORDER BY timestamp DESC LIMIT %s"
-                    diary_params = [json_dumps(tag) for tag in tags]
+                    diary_conditions = conditions.replace("tags", "context_tags")
+                    diary_query = (
+                        "SELECT content, timestamp FROM ai_diary "
+                        f"WHERE ({diary_conditions}) ORDER BY timestamp DESC LIMIT %s"
+                    )
+                    if not is_postgres:
+                        diary_query = diary_query.replace(
+                            "WHERE",
+                            "WHERE json_valid(context_tags) AND",
+                            1,
+                        )
+                    diary_params = [
+                        tag if is_postgres else json_dumps(tag) for tag in tags
+                    ]
                     diary_params.append(limit)
                     await cur.execute(diary_query, diary_params)
                     rows2 = await cur.fetchall()
                     for r in rows2:
                         mem = r[0]
+                        if not isinstance(mem, str):
+                            mem = str(mem)
+                        if mem in seen_memories:
+                            continue
+                        seen_memories.add(mem)
                         if isinstance(mem, str) and len(mem) > 400:
                             mem = mem[:400] + "..."
                         memories.append(mem)
@@ -1780,11 +2049,13 @@ def load_json_instructions() -> str:
         "Use input.interface and input.payload.source.interface_path to route replies.\n"
         "NEVER use 'target' — always use 'interface_path' in message actions.\n"
         "Include reply_message_id when replying to specific messages. Use thread_id from input.payload.source.thread_id when present (omit if missing).\n"
+        "CHAT REPLY REQUIRED: When GRILLO INTERNAL MODE is NOT active (this is a normal human chat turn), you MUST include a message_* action in every response. Diary entries and emotion updates are supplementary bookkeeping — they do NOT substitute for replying. Returning only internal actions (diary, emotions, update_emotion_state) without a message_* action is a hard failure and will trigger a correction.\n"
         "CLARIFICATION POLICY: If the user's intent, referent, or the subject of a follow-up is ambiguous or missing, DO NOT GUESS — ask one concise clarifying question before asserting facts or taking action. When the user asks whether you 'understood' but there is no clear context, request clarification rather than assuming.\n"
         "MEMORY HONESTY: When the user asks what you remember, prefer honesty over confidence. Memories can be incomplete or stale. If you do not clearly recall or cannot verify a detail, say so. Do not invent events, conversations, promises, or feelings to fill gaps. SyntH is not roleplay or fiction, so never turn uncertainty into fiction.\n"
         "REFERENCE CLARITY: When the user refers indirectly to a person, message, post, image, clip, or quoted content, refer to its author or speaker in a clear generic way and avoid vague or impersonal wording that obscures who created or said it.\n"
         "TIME AUTHORITY: Treat context.date, context.time, input.payload.local_date, input.payload.local_time, input.payload.local_hour, and input.payload.time_of_day as the authoritative current time context whenever present. Never infer the current time, date, or part of day from prior chat history, memories, or older assistant messages.\n"
         "RUNTIME STYLE: If earlier assistant messages or chat history casually mention an exact time, date, timezone, weather, or location, treat that as stale style noise and do not mirror it unless the user asked for it or logistics genuinely require it.\n"
+        "INPUT METADATA: Each user message is prefixed with internal routing metadata in the format [lang:... | tone:... | emotions:... | from:... | tag:... | path:...]. This is injected by the system — the user did not write it. Do not reference, quote, or paraphrase any part of this prefix in your replies (e.g. never say 'that 5.0 neutral you mentioned' or 'your tone tag says...').\n"
         "IDENTITY INTEGRITY: Stay inside the active persona in first person. Do not describe yourself from the outside, do not refer to the active persona as a separate fictional character, and do not compare yourself to that persona as if they were someone else.\n"
         "PRONOUN CONSISTENCY: When the prompt, persona, or participant context establishes a person's pronouns or relationship role, use them consistently and do not flip them. Do not neutralize an established he/him or she/her person into singular they/them.\n"
         "LENGTH POLICY: Do NOT hardcode a target response length. Let the persona, the relationship context, and the user's tone determine how much to say. Simple factual or logistical turns can stay brief; intimate, emotional, or reflective turns may be fuller when that feels natural. Do not pad, and do not forcibly truncate a reply just to make it short.\n"

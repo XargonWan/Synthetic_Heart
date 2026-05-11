@@ -198,3 +198,49 @@ def test_plugin_instance_forwards_prompt_request_to_external_bridge(monkeypatch)
     assert sent_messages[-1]["role"] == "user"
     assert "task run" in str(sent_messages[-1]["content"])
     assert "input" not in str(sent_messages[-1]["content"])
+
+
+def test_plugin_instance_updates_grillo_log_for_empty_response(monkeypatch):
+    prebuilt = {
+        "input": {
+            "payload": {
+                "text": "task run",
+                "source": {"interface_path": "agent:task"},
+            }
+        },
+        "system_message": {"type": "agent_iteration"},
+        "activity_log_id": 42,
+        "grillo_beat": True,
+    }
+
+    async def fake_handle_incoming_message(bot, message, prompt):
+        return ""
+
+    fake_plugin = SimpleNamespace(
+        handle_incoming_message=fake_handle_incoming_message,
+        model_limits_map={"default": 1000},
+        _last_response_metadata={
+            "finish_reason": "safety",
+            "block_reason": "PROHIBITED_CONTENT",
+        },
+    )
+    _route_to_fake_plugin(monkeypatch, fake_plugin)
+
+    update_mock = AsyncMock()
+    monkeypatch.setattr(plugin_instance, "_update_grillo_response", update_mock)
+
+    asyncio.run(
+        plugin_instance.handle_incoming_message(
+            bot=None, message=None, context_memory_or_prompt=prebuilt
+        )
+    )
+
+    update_mock.assert_awaited_once()
+    await_call = update_mock.await_args
+    assert await_call is not None
+    assert await_call.args[0] == 42
+    assert await_call.args[1] == ""
+    assert await_call.kwargs["response_metadata"] == {
+        "finish_reason": "safety",
+        "block_reason": "PROHIBITED_CONTENT",
+    }

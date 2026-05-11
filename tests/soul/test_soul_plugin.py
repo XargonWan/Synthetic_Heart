@@ -1,16 +1,28 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock, patch
 from typing import Any, cast
 
 import pytest
 
 from plugins.soul_plugin import SoulPlugin
 from plugins.soul_plugin import _SessionState
-from core.soul.models import EmotionalTag, MemCell, MemCellRecall
+from core.soul.emotion_engine import EmotionalEngine
+from core.soul.models import EmotionalProfile, EmotionalTag, MemCell, MemCellRecall
 from core.soul.repository import InMemorySoulRepository, PostgresSoulRepository
+
+
+def test_soul_plugin_is_enabled_uses_config_gate() -> None:
+    plugin = SoulPlugin.__new__(SoulPlugin)
+
+    with patch.object(SoulPlugin, "_is_enabled", return_value=False):
+        assert plugin.is_enabled() is False
+
+    with patch.object(SoulPlugin, "_is_enabled", return_value=True):
+        assert plugin.is_enabled() is True
 
 
 @pytest.mark.asyncio
@@ -34,13 +46,14 @@ async def test_static_injection_contains_soul_keys() -> None:
 
 
 @pytest.mark.asyncio
-async def test_static_injection_skips_internal_grillo_interface() -> None:
+async def test_static_injection_provides_passive_context_for_grillo_beat() -> None:
     plugin = SoulPlugin()
     plugin._repo = SimpleNamespace(
         get_active_dsp=AsyncMock(return_value=None),
         list_active_foresight_signals=AsyncMock(return_value=[]),
     )
-    recall_memories_mock = AsyncMock(return_value=["should not be used"])
+    recalled = ["[SOUL recalled memory | 2026-05-07] recent memory text"]
+    recall_memories_mock = AsyncMock(return_value=recalled)
     plugin._recall_memories = cast(Any, recall_memories_mock)
 
     message = SimpleNamespace(
@@ -53,10 +66,19 @@ async def test_static_injection_skips_internal_grillo_interface() -> None:
         message, {"interface_path": "grillo/-1", "grillo_beat": True}
     )
 
-    assert payload == {}
-    plugin._repo.get_active_dsp.assert_not_awaited()
-    plugin._repo.list_active_foresight_signals.assert_not_awaited()
-    recall_memories_mock.assert_not_awaited()
+    assert "soul_recalled_memories" in payload
+    assert payload["soul_recalled_memories"] == recalled
+    assert "soul_user_profile" in payload
+    assert "soul_session_state" in payload
+    assert "grillo/beat" in str(payload["soul_session_state"])
+    assert payload["soul_active_foresight"] == []
+    # DSP and foresight fetched passively; recall runs with beat prompt text
+    plugin._repo.get_active_dsp.assert_awaited_once()
+    plugin._repo.list_active_foresight_signals.assert_awaited_once()
+    recall_memories_mock.assert_awaited_once()
+    # Session tracking must NOT happen — no _sessions entry for grillo beats
+    assert "grillo/-1" not in plugin._sessions
+    assert "grillo/beat" not in plugin._sessions
 
 
 @pytest.mark.asyncio
@@ -373,6 +395,40 @@ def _build_recall_row(
 
 
 @pytest.mark.asyncio
+async def test_postgres_recall_uses_hnsw_friendly_vector_candidate_query() -> None:
+    row = _build_recall_row(
+        cell_id="cell-0",
+        session_id="telegram_bot_999",
+        episodic_trace="Scarlet mentioned jasmine tea and rainy nights.",
+        atomic_facts=["Scarlet|likes|jasmine tea"],
+        vector_similarity=0.82,
+    )
+    conn = _FakeRecallConn(vector_rows=[row], text_rows=[])
+    repo = PostgresSoulRepository(dsn="postgresql://unused")
+    repo._pool = _FakeRecallPool(conn)
+
+    matches = await repo.recall_memories(
+        query_text="jasmine tea",
+        query_embedding=[0.1, 0.2],
+        session_id="telegram_bot_999",
+        candidate_limit=5,
+    )
+
+    assert matches
+    vector_sql = next(
+        sql
+        for sql, _ in conn.queries
+        if "ORDER BY v.embedding <=> $1::vector ASC" in sql
+    )
+    assert "WITH vector_candidates AS" in vector_sql
+    assert "FROM mem_cell_vectors v" in vector_sql
+    assert (
+        "FROM mem_cells c\n                JOIN mem_cell_vectors v ON v.mem_cell_id = c.id"
+        not in vector_sql
+    )
+
+
+@pytest.mark.asyncio
 async def test_postgres_recall_uses_index_friendly_text_query() -> None:
     row = _build_recall_row(
         cell_id="cell-1",
@@ -402,6 +458,33 @@ async def test_postgres_recall_uses_index_friendly_text_query() -> None:
 
 
 @pytest.mark.asyncio
+async def test_postgres_recall_skips_text_query_when_vector_window_is_full() -> None:
+    row = _build_recall_row(
+        cell_id="cell-full",
+        session_id="telegram_bot_999",
+        episodic_trace="Scarlet loves jasmine tea and cozy rainy evenings.",
+        atomic_facts=["Scarlet|likes|jasmine tea"],
+        vector_similarity=0.88,
+    )
+    conn = _FakeRecallConn(vector_rows=[row], text_rows=[row])
+    repo = PostgresSoulRepository(dsn="postgresql://unused")
+    repo._pool = _FakeRecallPool(conn)
+
+    matches = await repo.recall_memories(
+        query_text="What tea does Scarlet love again?",
+        query_embedding=[0.1, 0.2],
+        session_id="telegram_bot_999",
+        candidate_limit=1,
+    )
+
+    assert matches
+    assert any(
+        "ORDER BY v.embedding <=> $1::vector ASC" in sql for sql, _ in conn.queries
+    )
+    assert not any("ORDER BY GREATEST(" in sql for sql, _ in conn.queries)
+
+
+@pytest.mark.asyncio
 async def test_postgres_recall_scores_atomic_facts_in_python() -> None:
     row = _build_recall_row(
         cell_id="cell-2",
@@ -423,3 +506,110 @@ async def test_postgres_recall_scores_atomic_facts_in_python() -> None:
 
     assert matches
     assert matches[0].lexical_score > 0.5
+
+
+@pytest.mark.asyncio
+async def test_build_daily_transcript_uses_parameterized_cutoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plugin = SoulPlugin()
+
+    mock_cursor = AsyncMock()
+    mock_cursor.fetchall = AsyncMock(
+        return_value=[
+            (
+                "Scar",
+                "5208932647",
+                "first",
+                datetime(2026, 5, 5, 11, 37, tzinfo=timezone.utc),
+            ),
+            (
+                "self",
+                "self",
+                "second",
+                datetime(2026, 5, 5, 11, 38, tzinfo=timezone.utc),
+            ),
+        ]
+    )
+
+    mock_conn = AsyncMock()
+    mock_conn.cursor = MagicMock(
+        return_value=AsyncMock(
+            __aenter__=AsyncMock(return_value=mock_cursor),
+            __aexit__=AsyncMock(return_value=None),
+        )
+    )
+
+    mock_ctx = MagicMock()
+    mock_ctx.__aenter__ = AsyncMock(return_value=mock_conn)
+    mock_ctx.__aexit__ = AsyncMock(return_value=None)
+
+    monkeypatch.setattr("plugins.soul_plugin.get_conn_ctx", lambda: mock_ctx)
+
+    transcript = await plugin._build_daily_transcript()
+
+    executed_sql, params = mock_cursor.execute.await_args_list[0][0]
+    assert "INTERVAL 1 DAY" not in executed_sql
+    assert "WHERE timestamp >= %s" in executed_sql
+    assert isinstance(params[0], datetime)
+    assert '[2026-05-05T11:37:00+00:00] Scar: "first"' in transcript
+    assert '[2026-05-05T11:38:00+00:00] self: "second"' in transcript
+
+
+def test_build_emotion_engine_returns_emotional_engine() -> None:
+    plugin = SoulPlugin()
+    assert isinstance(plugin._emotion_engine, EmotionalEngine)
+
+
+def test_load_emotional_profile_falls_back_when_no_skins_dir(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    profile = SoulPlugin._load_emotional_profile()
+    assert isinstance(profile, EmotionalProfile)
+    assert profile.as_dict() == EmotionalProfile().as_dict()
+
+
+def test_load_emotional_profile_reads_emotional_profile_section(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import json as _json
+
+    monkeypatch.chdir(tmp_path)
+    skin_dir = tmp_path / "skins" / "TestSkin"
+    skin_dir.mkdir(parents=True)
+    (skin_dir / "persona.json").write_text(
+        _json.dumps({"emotional_profile": {"anxiety": 0.99, "loneliness": 0.01}}),
+        encoding="utf-8",
+    )
+
+    with patch("core.config_manager.config_registry") as mock_reg:
+        mock_reg.get_value.return_value = "TestSkin"
+        profile = SoulPlugin._load_emotional_profile()
+
+    assert profile.anxiety == 0.99
+    assert profile.loneliness == 0.01
+    assert profile.concern_for_user == 0.90
+
+
+def test_load_emotional_profile_falls_back_when_no_emotional_profile_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import json as _json
+
+    monkeypatch.chdir(tmp_path)
+    skin_dir = tmp_path / "skins" / "Rei"
+    skin_dir.mkdir(parents=True)
+    (skin_dir / "persona.json").write_text(
+        _json.dumps({"name": "Rei", "description": "A persona"}),
+        encoding="utf-8",
+    )
+
+    with patch("core.config_manager.config_registry") as mock_reg:
+        mock_reg.get_value.return_value = "Rei"
+        profile = SoulPlugin._load_emotional_profile()
+
+    assert profile.as_dict() == EmotionalProfile().as_dict()

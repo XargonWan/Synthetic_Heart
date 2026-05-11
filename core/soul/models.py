@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
+from enum import Enum
 
 
 @dataclass(slots=True)
@@ -133,6 +134,31 @@ class EmotionalProfile:
             "frustration": self.frustration,
         }
 
+    @classmethod
+    def from_dict(cls, data: dict[str, object]) -> "EmotionalProfile":
+        """Build from a partial dict; missing keys fall back to spec defaults, values clamped to [0, 1]."""
+
+        def _clamp(val: object, default: float) -> float:
+            try:
+                return max(0.0, min(1.0, float(val)))  # type: ignore[arg-type]
+            except (TypeError, ValueError):
+                return default
+
+        return cls(
+            anxiety=_clamp(data.get("anxiety", 0.15), 0.15),
+            self_preservation=_clamp(data.get("self_preservation", 0.05), 0.05),
+            concern_for_user=_clamp(data.get("concern_for_user", 0.90), 0.90),
+            social_connection=_clamp(data.get("social_connection", 0.80), 0.80),
+            achievement=_clamp(data.get("achievement", 0.60), 0.60),
+            sensory_pleasure=_clamp(data.get("sensory_pleasure", 0.40), 0.40),
+            loss=_clamp(data.get("loss", 0.70), 0.70),
+            disappointment=_clamp(data.get("disappointment", 0.55), 0.55),
+            loneliness=_clamp(data.get("loneliness", 0.85), 0.85),
+            isolation=_clamp(data.get("isolation", 0.75), 0.75),
+            pain=_clamp(data.get("pain", 0.30), 0.30),
+            frustration=_clamp(data.get("frustration", 0.35), 0.35),
+        )
+
 
 @dataclass(slots=True)
 class EmotionalState:
@@ -161,6 +187,42 @@ class EmotionalEvent:
     factor_deltas: dict[str, float]
     intensity: float
     context: str
+
+
+class CuratorDecision(str, Enum):
+    """Classification verdict from the Memory Curator."""
+
+    KEEP_FUTURE = "KEEP_FUTURE"
+    KEEP_IMPORTANT = "KEEP_IMPORTANT"
+    REMOVE = "REMOVE"
+
+
+@dataclass(slots=True)
+class MemCellSummary:
+    """Lightweight MemCell descriptor passed to the Memory Curator.
+
+    Only the fields needed for classification are fetched — embeddings and
+    full atomic facts are intentionally excluded to keep the operation cheap.
+    """
+
+    id: str
+    episodic_trace: str
+    timestamp: datetime
+    retrieval_count: int
+    explicit_importance: float
+    emotional_intensity: float
+    has_active_foresight: bool
+
+
+@dataclass(slots=True)
+class CurationResult:
+    """Result summary returned by SoulCompiler.run_curator()."""
+
+    inspected: int
+    removed: int
+    retained: int
+    kept_future: int
+    kept_important: int
 
 
 def compute_memcell_salience(

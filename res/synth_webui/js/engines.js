@@ -144,10 +144,12 @@
 
         const models = Array.isArray(ep.available_models) ? ep.available_models : [];
         if (models.length === 0) {
-            modelInput.placeholder = ep.probe_status === 'never' ? '— probe first —' : '— none found —';
-            modelInput.disabled = true;
+            modelInput.placeholder = ep.probe_status === 'never'
+                ? 'Type a model name or probe first...'
+                : 'Type a model name or probe to refresh...';
+            modelInput.disabled = false;
         } else {
-            modelInput.placeholder = 'Type to search or select a model...';
+            modelInput.placeholder = 'Type to search, select, or enter a model...';
             modelInput.disabled = false;
             for (const m of models) {
                 const opt = document.createElement('option');

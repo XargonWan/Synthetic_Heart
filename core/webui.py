@@ -1586,7 +1586,9 @@ class SynthWebUIInterface:
         sessions = len(self.connections)
         python_version = platform.python_version()
         platform_label = os.getenv("SYNTH_HOST_OS") or platform.platform()
-        database_label = os.getenv("SYNTH_DB_TYPE", os.getenv("DB_TYPE", "unknown"))
+        database_label = os.getenv("SYNTH_PRIMARY_DB") or os.getenv(
+            "SYNTH_DB_TYPE", os.getenv("DB_TYPE", "unknown")
+        )
         version = os.getenv("SYNTH_VERSION", self.app.version)
         components_count = 0
         try:
