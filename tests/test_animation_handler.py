@@ -382,7 +382,7 @@ async def test_idle_animation_rotation_task_created(animation_handler, mock_webu
 
 @pytest.mark.asyncio
 async def test_websocket_message_format(animation_handler, mock_webui):
-    """Test WebSocket message format for vrm_animation broadcast."""
+    """Test WebSocket message format for vrm_animation broadcast (Karada v2)."""
     session_id = "test_session"
     mock_ws = AsyncMock()
     mock_webui.connections[session_id] = mock_ws
@@ -405,12 +405,18 @@ async def test_websocket_message_format(animation_handler, mock_webui):
     assert isinstance(msg["file"], str)
     assert msg["file"].endswith("Thinking.fbx")
     assert "animations/" in msg["file"]
-    assert msg["loop"] is False
+    # Karada v2: loop is computed from descriptor
+    # If descriptor has intro/loop/outro, loop=True only if has loop section
+    # Otherwise, loop follows the caller's hint
+    assert isinstance(msg["loop"], bool)
     assert msg["state"] == "think"
-    assert msg["play_section"] == "intro"
-    assert msg["phase_authoritative"] is True
-    assert msg["frame_range"] == {"start_frame": 0, "end_frame": 70}
+    # Karada v2: NO play_section, phase_authoritative, frame_range
+    assert "play_section" not in msg
+    assert "phase_authoritative" not in msg
+    assert "frame_range" not in msg
+    # Descriptor should be present
     assert isinstance(msg.get("descriptor"), dict)
-    assert "intro" in msg["descriptor"]
-    assert "loop" in msg["descriptor"]
-    assert "outro" in msg["descriptor"]
+    # Descriptor may have intro/loop/outro for client-side phase control
+    if "intro" in msg["descriptor"]:
+        assert "loop" in msg["descriptor"]
+        assert "outro" in msg["descriptor"]

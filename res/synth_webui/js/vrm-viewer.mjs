@@ -1,10 +1,24 @@
-import * as THREE from 'three';
-import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
-import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
+import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js';
+import { OrbitControls } from 'https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/controls/OrbitControls.js';
+import { GLTFLoader } from 'https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/loaders/GLTFLoader.js';
+import { FBXLoader } from 'https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/loaders/FBXLoader.js';
 import { VRM, VRMLoaderPlugin, VRMUtils } from 'https://cdn.jsdelivr.net/npm/@pixiv/three-vrm@3/lib/three-vrm.module.js';
 import { loadMixamoAnimation } from '/js/loadMixamoAnimation.js';
 import { mixamoVRMRigMap } from '/js/mixamoVRMRigMap.js';
+import { AnimationUtils } from '/js/AnimationUtils.js';
+
+import {
+    initAnimationEngine,
+    playAnimation as karadaPlayAnimation,
+    stopAnimation as karadaStopAnimation,
+    transitionToIdle,
+    updateEngine,
+    getEngineState,
+    setOnStateChange,
+    setOnSectionChange,
+    getAnimationTime,
+} from '/js/vrm-animation-engine.mjs';
+
 
 // Module-scoped variables (initialized when the canvas is available)
 let canvas = null;
@@ -259,7 +273,7 @@ function initVRMViewer() {
 
     try {
         renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
-        renderer.outputEncoding = THREE.sRGBEncoding;
+        renderer.outputColorSpace = THREE.SRGBColorSpace;
         renderer.setPixelRatio(window.devicePixelRatio);
         scene = new THREE.Scene();
         camera = new THREE.PerspectiveCamera(30, canvas.clientWidth / Math.max(1, canvas.clientHeight), 0.1, 20);
@@ -2951,6 +2965,18 @@ class AnimationHandler {
             this._baseIdleKey = 'idle';
 
             try {
+                const clip = idleAction.getClip ? idleAction.getClip() : null;
+                console.log('[AnimationHandler] === IDLE ACTION DEBUG ===');
+                console.log('[AnimationHandler] Clip name:', clip?.name);
+                console.log('[AnimationHandler] Clip duration:', clip?.duration);
+                console.log('[AnimationHandler] Clip tracks count:', clip?.tracks?.length ?? 'N/A');
+                if (clip?.tracks?.length > 0) {
+                    console.log('[AnimationHandler] First 3 track names:', clip.tracks.slice(0, 3).map(t => t.name));
+                }
+                if (!clip || clip.tracks.length === 0) {
+                    console.error('[AnimationHandler] ❌ IDLE CLIP HAS NO TRACKS! This is why the VRM is in T-pose.');
+                }
+
                 idleAction.enabled = true;
                 idleAction.setLoop(THREE.LoopRepeat);
                 idleAction.clampWhenFinished = false;
@@ -2958,11 +2984,15 @@ class AnimationHandler {
                 if (typeof idleAction.setEffectiveWeight === 'function') {
                     idleAction.setEffectiveWeight(minWeight);
                 }
-                // Do not fadeIn() the new base idle: previous overlays/base idle are
-                // already faded out separately, while a fadeIn here would reintroduce
-                // a one-frame zero-weight gap and visible bind-pose blink.
+                console.log('[AnimationHandler] Action enabled:', idleAction.enabled);
+                console.log('[AnimationHandler] Action weight:', typeof idleAction.getEffectiveWeight === 'function' ? idleAction.getEffectiveWeight() : 'N/A');
+                console.log('[AnimationHandler] Action paused:', idleAction.paused);
+                console.log('[AnimationHandler] Action time:', idleAction.time);
                 idleAction.play();
-            } catch (e) { /* ignore */ }
+                console.log('[AnimationHandler] === END IDLE ACTION DEBUG ===');
+            } catch (e) {
+                console.error('[AnimationHandler] Failed to play idle action:', e);
+            }
 
             // Only after the new base idle is in play, fade out the previous base.
             if (prevBaseIdle && prevBaseIdle !== idleAction) {
@@ -3357,7 +3387,7 @@ class AnimationHandler {
                                 if (this._idleRefineToken !== currentToken) return;
                                 descriptor = d;
                                 if (!descriptor || !descriptor.loop) return;
-                                if (!__idle_clip || !__idle_clip.duration || !THREE.AnimationUtils || typeof THREE.AnimationUtils.subclip !== 'function') return;
+                                if (!__idle_clip || !__idle_clip.duration || !AnimationUtils || typeof AnimationUtils.subclip !== 'function') return;
 
                                 const fps = (d && typeof d.fps === 'number' && d.fps > 0) ? d.fps : 30;
                                 const totalFrames = Math.max(2, Math.round(__idle_clip.duration * fps));
@@ -3379,7 +3409,7 @@ class AnimationHandler {
                                 // Descriptors use inclusive end_frame; subclip() expects exclusive. Add +1.
                                 const loopEnd = (descriptor.loop?.end_frame ?? (totalFrames - 1)) + 1;
                                 const loopR = normalizeRange(loopStart, loopEnd, 'idle.loop');
-                                const loopClip = THREE.AnimationUtils.subclip(__idle_clip, `${storageKey}_idle_loop`, loopR.start, loopR.end, fps);
+                                const loopClip = AnimationUtils.subclip(__idle_clip, `${storageKey}_idle_loop`, loopR.start, loopR.end, fps);
                                 loopClip.loop = THREE.LoopRepeat;
                                 const refined = this.mixer.clipAction(loopClip);
                                 refined.setLoop(THREE.LoopRepeat);
@@ -3491,7 +3521,7 @@ class AnimationHandler {
                             if (this._idleRefineToken !== currentToken) return;
                             descriptor = d;
                             if (!descriptor || !descriptor.loop) return;
-                            if (!clip || !clip.duration || !THREE.AnimationUtils || typeof THREE.AnimationUtils.subclip !== 'function') return;
+                            if (!clip || !clip.duration || !AnimationUtils || typeof AnimationUtils.subclip !== 'function') return;
 
                             const fps = (descriptor && typeof descriptor.fps === 'number' && descriptor.fps > 0) ? descriptor.fps : 30;
                             const totalFrames = Math.max(2, Math.round(clip.duration * fps));
@@ -3513,7 +3543,7 @@ class AnimationHandler {
                             // Descriptors use inclusive end_frame; subclip() expects exclusive. Add +1.
                             const loopEnd = (descriptor.loop?.end_frame ?? (totalFrames - 1)) + 1;
                             const loopR = normalizeRange(loopStart, loopEnd, 'idle.loop');
-                            const loopClip = THREE.AnimationUtils.subclip(clip, `${storageKey}_idle_loop`, loopR.start, loopR.end, fps);
+                            const loopClip = AnimationUtils.subclip(clip, `${storageKey}_idle_loop`, loopR.start, loopR.end, fps);
                             loopClip.loop = THREE.LoopRepeat;
                             const refined = this.mixer.clipAction(loopClip);
                             refined.setLoop(THREE.LoopRepeat);
@@ -3558,7 +3588,7 @@ class AnimationHandler {
         const hasStructuredDescriptor = descriptor && descriptor.intro && descriptor.outro;
         const shouldRetryStructured = !!(actionName === 'think' || hasStructuredDescriptor);
         console.log(`[AnimationHandler] For ${actionName}/${selectedFile}: hasStructuredDescriptor=${hasStructuredDescriptor}, actionName==='think' is ${actionName === 'think'}, descriptor=${descriptor ? JSON.stringify(descriptor) : 'null'}`);
-        if ((actionName === 'think' || hasStructuredDescriptor) && clip && clip.duration && THREE.AnimationUtils && typeof THREE.AnimationUtils.subclip === 'function') {
+        if ((actionName === 'think' || hasStructuredDescriptor) && clip && clip.duration && AnimationUtils && typeof AnimationUtils.subclip === 'function') {
             try {
                 const fps = (descriptor && typeof descriptor.fps === 'number' && descriptor.fps > 0) ? descriptor.fps : 30;
                 const totalFrames = Math.max(2, Math.round(clip.duration * fps));
@@ -3633,8 +3663,8 @@ class AnimationHandler {
 
                 // Use selectedFile in clip names so they match the storage key in mixer finished handler
                 const clipKeyBase = selectedFile ? `${actionName}:${selectedFile}` : actionName;
-                const introClip = THREE.AnimationUtils.subclip(clip, `${clipKeyBase}_intro`, introStart, introEnd, fps);
-                const outroClip = THREE.AnimationUtils.subclip(clip, `${clipKeyBase}_outro`, outroStart, outroEnd, fps);
+                const introClip = AnimationUtils.subclip(clip, `${clipKeyBase}_intro`, introStart, introEnd, fps);
+                const outroClip = AnimationUtils.subclip(clip, `${clipKeyBase}_outro`, outroStart, outroEnd, fps);
 
                 const introAction = this.mixer.clipAction(introClip);
                 const outroAction = this.mixer.clipAction(outroClip);
@@ -3656,7 +3686,7 @@ class AnimationHandler {
 
                 // Only create loop section if it exists in the descriptor or is default 'think'
                 if (loopStart !== null && loopEnd !== null) {
-                    const loopClip = THREE.AnimationUtils.subclip(clip, `${clipKeyBase}_loop`, loopStart, loopEnd, fps);
+                    const loopClip = AnimationUtils.subclip(clip, `${clipKeyBase}_loop`, loopStart, loopEnd, fps);
                     // Attach loop frame metadata so we can verify during playback
                     try {
                         loopClip._meta = loopClip._meta || {};
@@ -4066,7 +4096,7 @@ class AnimationHandler {
                         (typeof descriptor.intro.start_frame === 'number') && (typeof descriptor.intro.end_frame === 'number') &&
                         (typeof descriptor.outro.start_frame === 'number') && (typeof descriptor.outro.end_frame === 'number');
                     console.log(`[AnimationHandler] hasStructuredDescriptor: ${hasStructuredDescriptor}, hasLoopSection: ${descriptor && descriptor.loop ? 'yes' : 'no'}`);
-                    if (hasStructuredDescriptor && clip && clip.duration && THREE.AnimationUtils && typeof THREE.AnimationUtils.subclip === 'function') {
+                    if (hasStructuredDescriptor && clip && clip.duration && AnimationUtils && typeof AnimationUtils.subclip === 'function') {
                         // Create structured animation (intro/loop/outro)
                         try {
                             const fps = (descriptor && typeof descriptor.fps === 'number' && descriptor.fps > 0) ? descriptor.fps : 30;
@@ -4119,8 +4149,8 @@ class AnimationHandler {
                                 loopEnd = loopR.end;
                             }
 
-                            const introClip = THREE.AnimationUtils.subclip(clip, `${specificKey}_intro`, introStart, introEnd, fps);
-                            const outroClip = THREE.AnimationUtils.subclip(clip, `${specificKey}_outro`, outroStart, outroEnd, fps);
+                            const introClip = AnimationUtils.subclip(clip, `${specificKey}_intro`, introStart, introEnd, fps);
+                            const outroClip = AnimationUtils.subclip(clip, `${specificKey}_outro`, outroStart, outroEnd, fps);
 
                             const introAction = this.mixer.clipAction(introClip);
                             const outroAction = this.mixer.clipAction(outroClip);
@@ -4139,7 +4169,7 @@ class AnimationHandler {
                             };
 
                             if (loopStart !== null && loopEnd !== null) {
-                                const loopClip = THREE.AnimationUtils.subclip(clip, `${specificKey}_loop`, loopStart, loopEnd, fps);
+                                const loopClip = AnimationUtils.subclip(clip, `${specificKey}_loop`, loopStart, loopEnd, fps);
                                 // Attach loop frame metadata so we can verify during playback
                                 try {
                                     loopClip._meta = loopClip._meta || {};
@@ -4178,7 +4208,7 @@ class AnimationHandler {
                     } else {
                         // Simple animation without intro/outro structure.
                         // For IDLE, if a loop section is provided, subclip to that range and loop it.
-                        if (actionName === 'idle' && descriptor && descriptor.loop && clip && clip.duration && THREE.AnimationUtils && typeof THREE.AnimationUtils.subclip === 'function') {
+                        if (actionName === 'idle' && descriptor && descriptor.loop && clip && clip.duration && AnimationUtils && typeof AnimationUtils.subclip === 'function') {
                             try {
                                 const fps = (descriptor && typeof descriptor.fps === 'number' && descriptor.fps > 0) ? descriptor.fps : 30;
                                 const totalFrames = Math.max(2, Math.round(clip.duration * fps));
@@ -4201,7 +4231,7 @@ class AnimationHandler {
                                 // Descriptors use inclusive end_frame; subclip() expects exclusive. Add +1.
                                 const loopEnd = (descriptor.loop?.end_frame ?? (totalFrames - 1)) + 1;
                                 const loopR = normalizeRange(loopStart, loopEnd, 'loop');
-                                const loopClip = THREE.AnimationUtils.subclip(clip, `${specificKey}_idle_loop`, loopR.start, loopR.end, fps);
+                                const loopClip = AnimationUtils.subclip(clip, `${specificKey}_idle_loop`, loopR.start, loopR.end, fps);
                                 loopClip.loop = THREE.LoopRepeat;
                                 action = this.mixer.clipAction(loopClip);
                                 action.setLoop(THREE.LoopRepeat);
@@ -4976,71 +5006,26 @@ class AnimationHandler {
                                 try {
                                     // Ensure base idle is at full weight to cover the gap between old and new idle.
                                     if (this._baseIdleAction) {
-                                        try {
-                                            this._baseIdleAction.enabled = true;
-                                            this._baseIdleAction.setLoop(THREE.LoopRepeat);
-                                            this._baseIdleAction.clampWhenFinished = false;
-                                            if (typeof this._baseIdleAction.setEffectiveWeight === 'function') {
-                                                this._baseIdleAction.setEffectiveWeight(1.0);
-                                            }
-                                            this._baseIdleAction.play();
-                                        } catch (e) { /* ignore */ }
-                                    }
-                                    await this.startAction('idle', nextFile, false);
-                                } catch (e) {
-                                    console.warn('[AnimationHandler] Failed to start next idle action:', e);
-                                }
-                            }
-                        } catch (e) {
-                            console.warn('[AnimationHandler] Error advancing idle after playOnce:', e);
-                        }
-                    } catch (err) {
-                        console.warn('[AnimationHandler] global mixer finished handler error:', err);
-                    }
-                });
-            }
-        } catch (err) {
-            console.warn('[AnimationHandler] Failed to bind global mixer finished handler:', err);
-        }
-
-        // Start new action (single clip) and cross-fade previous action after ensuring
-        // the new action is playing to avoid a momentary T-pose gap.
-        console.log(`[AnimationHandler] Starting new action for ${actionName} (playOnce=${playOnce})`);
-        try {
-            if (playOnce) {
-                // Ensure action is configured to play once
-                action.setLoop(THREE.LoopOnce, 0);
-                // Do not clamp non-idle: some exports end in bind pose (T-pose)
-                action.clampWhenFinished = (actionName === 'idle');
-                try { action._synthPlayOnce = true; action._synthLogical = actionName; } catch (e) { /* ignore */ }
-            }
-        } catch (err) {
-            console.warn('[AnimationHandler] Failed to set action playOnce:', err);
-        }
-
-        // Start the new action first (fade in), THEN cross-fade out previous actions.
-        // This guarantees the skeleton is never un-driven during transitions.
-        try {
-            action.enabled = true;
-            action.reset().fadeIn(0.5).play();
-            this.currentAction = action;
-            this.currentActionName = actionName;
-            this._currentAnimationFile = animationFile || null;
-            console.log(`[AnimationHandler] New simple action started (cross-fade in)`);
-        } catch (e) {
-            console.warn('[AnimationHandler] Failed to start new action:', e);
-            try { action.reset().fadeIn(0.5).play(); this.currentAction = action; } catch (ee) { /* ignore */ }
-        }
-
-        // Now that the new action is playing, fade out all previous actions + orphans.
-        // Clear structured action reference first so _crossFadeCleanup doesn't
-        // accidentally skip the OLD structured parts via the skip set.
-        this.currentStructuredAction = null;
-        this.currentActionPhase = null;
-        this.currentActionPhaseAuthoritative = false;
-        try {
-            this._crossFadeCleanup(_prevAction, _prevStructured, action, 0.5);
-        } catch (e) { /* ignore */ }
+            try {
+                idleAction.enabled = true;
+                idleAction.setLoop(THREE.LoopRepeat);
+                idleAction.clampWhenFinished = false;
+                idleAction.reset();
+                if (typeof idleAction.setEffectiveWeight === 'function') {
+                    idleAction.setEffectiveWeight(minWeight);
+                }
+                // Do not fadeIn() the new base idle: previous overlays/base idle are
+                // already faded out separately, while a fadeIn here would reintroduce
+                // a one-frame zero-weight gap and visible bind-pose blink.
+                idleAction.play();
+                const idleClip = idleAction.getClip?.();
+                console.log('[AnimationHandler] IDLE action playing:', idleClip?.name, 'tracks:', idleClip?.tracks?.length ?? 'N/A');
+                if (idleClip?.tracks?.length > 0) {
+                    console.log('[AnimationHandler] IDLE first track:', idleClip.tracks[0].name);
+                } else {
+                    console.error('[AnimationHandler] ❌ IDLE action has NO tracks! This is why VRM is in T-pose.');
+                }
+            } catch (e) { /* ignore */ }
 
         // Safety fallback: if playOnce requested, schedule a timer to
         // advance to next animation after the clip duration + buffer
@@ -5206,7 +5191,7 @@ class AnimationHandler {
             try { console.debug('[AnimationHandler] startTemporaryLoop using clip', { name: clip && (clip.name || clip._clipName || '(unknown)'), duration: clip && clip.duration, frames: Math.round((clip && clip.duration || 0) * tfps) }); } catch (e) { }
 
             // Create subclip using frame indices.
-            // Note: THREE.AnimationUtils.subclip expects an *exclusive* end frame.
+            // Note: AnimationUtils.subclip expects an *exclusive* end frame.
             // Our UI + descriptors use inclusive end_frame, so we add +1.
             // Use descriptor FPS when available to avoid "range looks ignored" due to FPS mismatches.
             let tfps = (Number.isFinite(Number(fps)) && Number(fps) > 0) ? Number(fps) : NaN;
@@ -5228,7 +5213,7 @@ class AnimationHandler {
                 eInc = Math.max(0, Math.min(maxFrame, eInc));
             } catch (e) { /* ignore */ }
             const eExc = Math.max(sInc + 1, eInc + 1);
-            const loopClip = THREE.AnimationUtils.subclip(clip, subName, sInc, eExc, tfps);
+            const loopClip = AnimationUtils.subclip(clip, subName, sInc, eExc, tfps);
             try { loopClip._meta = loopClip._meta || {}; loopClip._meta.loopFrames = { startFrame: sInc, endFrame: eInc, fps: tfps }; } catch (e) { /* ignore */ }
 
             // Ensure the clip intends to repeat
@@ -5443,13 +5428,12 @@ async function loadVRM(url, name, { isObjectUrl = false } = {}) {
             console.log('[synth_webui] Processing VRM scene...');
             console.log('[synth_webui] Scene children count:', vrm.scene.children.length);
 
-            console.log('[synth_webui] Combining and optimizing skeleton...');
-            VRMUtils.combineSkeletons(vrm.scene);
-            console.log('[synth_webui] ✓ Skeleton combined and optimized');
-
-            console.log('[synth_webui] Removing unnecessary vertices...');
-            VRMUtils.removeUnnecessaryVertices(vrm.scene);
-            console.log('[synth_webui] ✓ Unnecessary vertices removed');
+            // NOTE: VRMUtils.combineSkeletons() and removeUnnecessaryVertices()
+            // rename/merge bones, which BREAKS the FBX-to-VRM bone mapping.
+            // The Mixamo→VRM retargeting relies on exact bone names from
+            // getNormalizedBoneNode(), so these utils MUST NOT be called.
+            // See: https://github.com/pixiv/three-vrm/issues/1351
+            console.log('[synth_webui] ⚠️ Skipping VRMUtils (combineSkeletons/removeUnnecessaryVertices) to preserve bone names for animation retargeting');
 
             if (vrm.meta?.metaVersion === '0') {
                 console.log('[synth_webui] Rotating VRM0 model (metaVersion=0)');
@@ -5503,12 +5487,50 @@ async function loadVRM(url, name, { isObjectUrl = false } = {}) {
             window.vrmMixer = currentMixer; // Make mixer available globally for AnimationHandler
             console.log('[synth_webui] AnimationMixer created and set globally (pre-add)');
 
+            // Initialize Karada v2 Animation Engine
+            initAnimationEngine(currentMixer);
+            console.log('[synth_webui] Karada v2 Animation Engine initialized');
+
             console.log('[synth_webui] Loading default animations (pre-add)...');
             // Load and start idle/talk/think/write actions before adding to scene
             await loadDefaultAnimations(vrm);
             console.log('[synth_webui] Default animations loaded (pre-add)');
-            // If animations loaded successfully, unhide the VRM so it
-            // will be displayed already animated when added to the scene.
+
+            // Add VRM to scene but keep it invisible so spring bones can
+            // settle from their initial T-pose before the user sees anything.
+            console.log('[synth_webui] Clearing existing VRM from scene...');
+            clearVRM();
+            console.log('[synth_webui] ✓ Previous VRM cleared');
+
+            console.log('[synth_webui] Adding VRM to scene (invisible for physics warmup)...');
+            scene.add(vrm.scene);
+            console.log('[synth_webui] ✓ VRM added to scene');
+
+            currentVRM = vrm;
+            currentModel = name;
+            console.log('[synth_webui] currentVRM set:', currentVRM);
+
+            // Warm up spring bones: run several physics update cycles while
+            // invisible so hair/clothes settle from T-pose to their natural
+            // resting position before the VRM becomes visible.
+            try {
+                console.log('[synth_webui] Warming up spring bones...');
+                const warmupFrames = 30;
+                const warmupDelta = 1 / 60;
+                for (let i = 0; i < warmupFrames; i++) {
+                    if (currentVRM && typeof currentVRM.update === 'function') {
+                        currentVRM.update(warmupDelta);
+                    }
+                    if (currentMixer) {
+                        currentMixer.update(warmupDelta);
+                    }
+                }
+                console.log('[synth_webui] ✓ Spring bones settled');
+            } catch (warmupErr) {
+                console.warn('[synth_webui] Spring bone warmup failed (non-fatal):', warmupErr);
+            }
+
+            // Now make the VRM visible — physics is already settled.
             try {
                 if (vrm.scene) vrm.scene.visible = true;
             } catch (unvisErr) {
@@ -5518,7 +5540,14 @@ async function loadVRM(url, name, { isObjectUrl = false } = {}) {
             _hideVrmLoadingOverlay();
         } catch (animErr) {
             console.warn('[synth_webui] Warning: failed to preload animations before adding VRM:', animErr);
-            // Ensure we unhide even on error to avoid invisible models
+
+            // Ensure we add and unhide even on error to avoid invisible scene
+            try {
+                clearVRM();
+                scene.add(vrm.scene);
+                currentVRM = vrm;
+                currentModel = name;
+            } catch (_e) { /* ignore */ }
             try {
                 if (vrm.scene) vrm.scene.visible = true;
             } catch (_e) {
@@ -5528,19 +5557,9 @@ async function loadVRM(url, name, { isObjectUrl = false } = {}) {
             _hideVrmLoadingOverlay();
         }
 
-        console.log('[synth_webui] Clearing existing VRM from scene...');
-        clearVRM();
-        console.log('[synth_webui] ✓ Previous VRM cleared');
-
-        console.log('[synth_webui] Adding new VRM to scene (already animated)...');
-        console.log('[synth_webui] Scene before add - children count:', scene.children.length);
-        scene.add(vrm.scene);
-        console.log('[synth_webui] ✓ VRM added to scene');
-        console.log('[synth_webui] Scene after add - children count:', scene.children.length);
-
-        currentVRM = vrm;
-        currentModel = name;
-        console.log('[synth_webui] currentVRM set:', currentVRM);
+        // NOTE: VRM is already added to scene and currentVRM is already set
+        // above (before the warmup). The following blocks only handle
+        // raycast targets, capabilities, and LookAt setup.
 
         // Build raycast target list once for this model (meshes only)
         try {
@@ -6138,6 +6157,10 @@ function _sampleVisemeTimeline(timeline, currentTime) {
 function render() {
     requestAnimationFrame(render);
     const delta = clock.getDelta();
+
+    // Update Karada v2 Animation Engine
+    updateEngine();
+
     if (currentVRM) {
         if (window.__synthIsLipSyncing && window.__synthLipSyncAnalyser && currentVRM.expressionManager) {
             try {

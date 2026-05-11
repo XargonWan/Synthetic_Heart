@@ -1336,6 +1336,60 @@ export function initChatUI() {
                                     window.__synth_last_rich_animation_state = data.animation_state;
                                 }
                             } catch (e) { /* ignore */ }
+                        } else if (data && data.type === 'vrm_animation_v2') {
+                            // Karada v2 Protocol - Server ONLY sends: state + descriptor + started_at + animation_id
+                            // NO phase control, NO timing control, NO frame-level logic
+                            // Client handles intro→loop→outro locally using descriptor + local clock
+                            console.log('[chat-window] vrm_animation_v2 received:', data.state, data.animation_id);
+
+                            // Get the pre-loaded clip from VRMAnimations cache
+                            let clip = null;
+                            try {
+                                if (window.VRMAnimations && typeof window.VRMAnimations._getCachedAnimation === 'function') {
+                                    clip = window.VRMAnimations._getCachedAnimation(data.file || data.animation);
+                                }
+                            } catch (e) { /* ignore */ }
+
+                            // Call Karada v2 engine
+                            if (clip && window.karadaPlayAnimation) {
+                                window.karadaPlayAnimation({
+                                    state: data.state,
+                                    animationFile: data.file || data.animation,
+                                    descriptor: data.descriptor || null,
+                                    startedAt: data.started_at,
+                                    animationId: data.animation_id,
+                                    loop: !!data.loop,
+                                    clip: clip,
+                                });
+                            } else {
+                                // Fallback: use legacy handler if engine not ready
+                                console.warn('[chat-window] Karada v2 engine not ready, using fallback');
+                                try {
+                                    if (window.VRMAnimations && typeof window.VRMAnimations.play === 'function') {
+                                        window.VRMAnimations.play(data.state, {
+                                            animation: data.file || data.animation,
+                                            playOnce: data.loop === false,
+                                            descriptor: data.descriptor,
+                                        });
+                                    }
+                                } catch (e) { /* ignore */ }
+                            }
+
+                            // Track animation_id for restore deduplication
+                            try { if (data.animation_id) window.__synth_current_animation_id = data.animation_id; } catch (e) { /* ignore */ }
+
+                            // Cache animation state for recovery
+                            try {
+                                if (data.state) {
+                                    window.__synth_current_animation_state = {
+                                        state: data.state,
+                                        animation: data.file || data.animation,
+                                        descriptor: data.descriptor || null,
+                                        started_at: data.started_at,
+                                        animation_id: data.animation_id,
+                                    };
+                                }
+                            } catch (e) { /* ignore */ }
                         } else if (data && data.type === 'vrm_preload') {
                             // Preload an animation file into the cache
                             try {

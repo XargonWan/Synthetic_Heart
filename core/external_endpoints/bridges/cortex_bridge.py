@@ -588,9 +588,7 @@ class ExternalCortexEngine(AIPluginBase):
         request_timeout = self._get_request_timeout()
         try:
             async for chunk in asyncio.wait_for(
-                self._adapter.stream_chat_completion(
-                    messages, model=model
-                ),
+                self._adapter.stream_chat_completion(messages, model=model),
                 timeout=request_timeout,
             ):
                 yield chunk
