@@ -7,7 +7,7 @@
  * - Crossfade transitions between animations
  * - Pose safety and idle fallback
  *
- * Server ONLY sends: state + descriptor + started_at + animation_id
+ * Server ONLY sends: state + descriptor + started_at
  * Client decides HOW and WHEN to play (no server phase control)
  */
 
@@ -21,7 +21,8 @@ let currentAction = null;
 let currentClip = null;
 let currentDescriptor = null;
 let currentState = null;
-let currentAnimationId = null;
+let currentDescriptorId = null;
+let currentStartedAtKey = null;
 let animationStartedAt = 0; // Local ms timestamp from server started_at
 let animationClock = 0; // (Date.now() - animationStartedAt) / 1000
 
@@ -60,6 +61,15 @@ function initAnimationEngine(mixerInstance) {
  */
 function parseStartedAt(startedAtIso) {
     try {
+        if (typeof startedAtIso === 'number' && Number.isFinite(startedAtIso)) {
+            return startedAtIso < 1e12 ? startedAtIso * 1000 : startedAtIso;
+        }
+        if (typeof startedAtIso === 'string' && startedAtIso.trim() !== '') {
+            const numericValue = Number(startedAtIso);
+            if (Number.isFinite(numericValue)) {
+                return numericValue < 1e12 ? numericValue * 1000 : numericValue;
+            }
+        }
         return new Date(startedAtIso).getTime();
     } catch (e) {
         console.warn('[KaradaEngine] Failed to parse started_at:', e);
@@ -239,12 +249,16 @@ function updateDescriptorStateMachine() {
  * @param {THREE.AnimationClip} params.clip - Pre-loaded animation clip
  */
 function playAnimation(params) {
-    const { state, animationFile, descriptor, startedAt, animationId, loop, clip } = params;
+    const { state, animationFile, descriptor, descriptorId, startedAt, loop, clip } = params;
 
-    console.debug(`[KaradaEngine] playAnimation: state=${state}, id=${animationId}`);
+    console.debug(`[KaradaEngine] playAnimation: state=${state}, descriptor=${descriptorId || 'unknown'}`);
 
-    // Skip if same animation is already playing
-    if (currentAnimationId === animationId && currentState === state) {
+    // Skip if the canonical Karada tuple is unchanged.
+    if (
+        currentState === state
+        && currentDescriptorId === (descriptorId || null)
+        && currentStartedAtKey === startedAt
+    ) {
         console.debug('[KaradaEngine] Same animation already playing, skipping');
         return;
     }
@@ -252,7 +266,8 @@ function playAnimation(params) {
     // Store new state
     currentState = state;
     currentDescriptor = descriptor || null;
-    currentAnimationId = animationId;
+    currentDescriptorId = descriptorId || null;
+    currentStartedAtKey = startedAt;
     animationStartedAt = parseStartedAt(startedAt);
     animationClock = (Date.now() - animationStartedAt) / 1000;
 
@@ -356,7 +371,8 @@ function transitionToIdle(idleClipParam) {
     currentState = IDLE_FALLBACK_STATE;
     currentSection = 'loop';
     currentDescriptor = null;
-    currentAnimationId = null;
+    currentDescriptorId = null;
+    currentStartedAtKey = null;
     animationStartedAt = Date.now();
     animationClock = 0;
 }
@@ -390,7 +406,7 @@ function getEngineState() {
         state: currentState,
         section: currentSection,
         animationTime: animationClock,
-        animationId: currentAnimationId,
+        descriptorId: currentDescriptorId,
         isTransitioning,
     };
 }

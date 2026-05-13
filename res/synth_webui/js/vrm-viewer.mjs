@@ -139,13 +139,94 @@ function _resetSummoningBootstrapCaches() {
     } catch (e) { /* ignore */ }
 }
 
+async function _fetchKaradaAnimationManifest(forceRefresh = false) {
+    try {
+        const cached = window.__karada_animation_manifest;
+        if (
+            !forceRefresh
+            && cached
+            && typeof cached === 'object'
+            && cached.animations
+            && typeof cached.animations === 'object'
+        ) {
+            return cached;
+        }
+    } catch (e) { /* ignore */ }
+
+    try {
+        const resp = await fetch('/api/karada/animations/manifest', { cache: 'no-store' });
+        if (resp && resp.ok) {
+            const manifest = await resp.json();
+            try { window.__karada_animation_manifest = manifest; } catch (e) { /* ignore */ }
+            return manifest;
+        }
+    } catch (err) {
+        console.warn('[synth_webui] Failed to fetch Karada animation manifest:', err);
+    }
+
+    return { version: 2, animations: {} };
+}
+
+async function _resolveKaradaAnimationDescriptor(descriptorId, forceRefresh = false) {
+    if (!descriptorId || typeof descriptorId !== 'string') {
+        return null;
+    }
+
+    try {
+        const manifest = await _fetchKaradaAnimationManifest(forceRefresh);
+        const animations = (manifest && typeof manifest === 'object' && manifest.animations && typeof manifest.animations === 'object')
+            ? manifest.animations
+            : null;
+        if (animations && animations[descriptorId]) {
+            return animations[descriptorId];
+        }
+    } catch (e) { /* ignore */ }
+
+    try {
+        const resp = await fetch(`/api/karada/animations/resolve?descriptor_id=${encodeURIComponent(descriptorId)}`, { cache: 'no-store' });
+        if (resp && resp.ok) {
+            const entry = await resp.json();
+            try {
+                const manifest = window.__karada_animation_manifest && typeof window.__karada_animation_manifest === 'object'
+                    ? window.__karada_animation_manifest
+                    : { version: 2, animations: {} };
+                manifest.animations = (manifest.animations && typeof manifest.animations === 'object') ? manifest.animations : {};
+                manifest.animations[descriptorId] = entry;
+                window.__karada_animation_manifest = manifest;
+            } catch (e) { /* ignore */ }
+            return entry;
+        }
+    } catch (err) {
+        console.warn('[synth_webui] Failed to resolve Karada descriptor:', descriptorId, err);
+    }
+
+    return null;
+}
+
+async function _resolveKaradaPlaybackStateTuple(payload, forceRefresh = false) {
+    const descriptorId = (payload && typeof payload.descriptor === 'string') ? payload.descriptor : null;
+    const resolvedEntry = descriptorId
+        ? await _resolveKaradaAnimationDescriptor(descriptorId, forceRefresh)
+        : null;
+
+    return {
+        descriptorId,
+        resolvedEntry,
+        animation: resolvedEntry
+            ? (resolvedEntry.animation_url || resolvedEntry.animation || null)
+            : ((payload && (payload.animation || payload.file)) || null),
+        descriptorData: resolvedEntry
+            ? (resolvedEntry.descriptor_data || null)
+            : ((payload && typeof payload.descriptor === 'object') ? payload.descriptor : null),
+    };
+}
+
 async function _fetchFreshSummoningState() {
     let desiredState = null;
     let desiredAnimation = null;
     let desiredDescriptor = null;
-    let desiredPlaySection = null;
-    let desiredFrameRange = null;
-    let desiredPhaseAuthoritative = false;
+    let desiredDescriptorId = null;
+    let desiredStartedAt = null;
     let richAnimationState = null;
     let faceValues = null;
 
@@ -156,12 +237,12 @@ async function _fetchFreshSummoningState() {
             const animation = (fullState && typeof fullState.animation === 'object' && fullState.animation)
                 ? fullState.animation
                 : {};
+            const resolvedPlayback = await _resolveKaradaPlaybackStateTuple(animation);
             desiredState = animation.state || null;
-            desiredAnimation = animation.file || animation.url || animation.animation || null;
-            desiredDescriptor = animation.descriptor || null;
-            desiredPlaySection = animation.play_section || null;
-            desiredFrameRange = animation.frame_range || null;
-            desiredPhaseAuthoritative = !!animation.phase_authoritative;
+            desiredAnimation = resolvedPlayback.animation;
+            desiredDescriptor = resolvedPlayback.descriptorData;
+            desiredDescriptorId = resolvedPlayback.descriptorId;
+            desiredStartedAt = animation.started_at || null;
             richAnimationState = animation.animation_state || null;
             faceValues = (fullState && fullState.face_values && typeof fullState.face_values === 'object')
                 ? fullState.face_values
@@ -172,10 +253,9 @@ async function _fetchFreshSummoningState() {
                     window.__synth_current_animation_state = {
                         state: desiredState,
                         animation: desiredAnimation,
+                        descriptor_id: desiredDescriptorId,
                         descriptor: desiredDescriptor || null,
-                        play_section: desiredPlaySection,
-                        frame_range: desiredFrameRange,
-                        phase_authoritative: desiredPhaseAuthoritative,
+                        started_at: desiredStartedAt,
                     };
                 } catch (e) { /* ignore */ }
             }
@@ -185,10 +265,9 @@ async function _fetchFreshSummoningState() {
             return {
                 state: desiredState,
                 animation: desiredAnimation,
+                descriptorId: desiredDescriptorId,
                 descriptor: desiredDescriptor,
-                playSection: desiredPlaySection,
-                frameRange: desiredFrameRange,
-                phaseAuthoritative: desiredPhaseAuthoritative,
+                startedAt: desiredStartedAt,
                 richAnimationState,
                 faceValues,
             };
@@ -201,22 +280,21 @@ async function _fetchFreshSummoningState() {
         const resp = await fetch('/api/animation_state', { cache: 'no-store' });
         if (resp && resp.ok) {
             const summary = await resp.json();
+            const resolvedPlayback = await _resolveKaradaPlaybackStateTuple(summary);
             desiredState = summary.state || null;
-            desiredAnimation = summary.animation || summary.file || null;
-            desiredDescriptor = summary.descriptor || null;
-            desiredPlaySection = summary.play_section || null;
-            desiredFrameRange = summary.frame_range || null;
-            desiredPhaseAuthoritative = !!summary.phase_authoritative;
-            richAnimationState = summary.animation_state || null;
+            desiredAnimation = resolvedPlayback.animation;
+            desiredDescriptor = resolvedPlayback.descriptorData;
+            desiredDescriptorId = resolvedPlayback.descriptorId;
+            desiredStartedAt = summary.started_at || null;
+            richAnimationState = null;
             if (desiredState) {
                 try {
                     window.__synth_current_animation_state = {
                         state: desiredState,
                         animation: desiredAnimation,
+                        descriptor_id: desiredDescriptorId,
                         descriptor: desiredDescriptor || null,
-                        play_section: desiredPlaySection,
-                        frame_range: desiredFrameRange,
-                        phase_authoritative: desiredPhaseAuthoritative,
+                        started_at: desiredStartedAt,
                     };
                 } catch (e) { /* ignore */ }
             }
@@ -231,10 +309,9 @@ async function _fetchFreshSummoningState() {
     return {
         state: desiredState,
         animation: desiredAnimation,
+        descriptorId: desiredDescriptorId,
         descriptor: desiredDescriptor,
-        playSection: desiredPlaySection,
-        frameRange: desiredFrameRange,
-        phaseAuthoritative: desiredPhaseAuthoritative,
+        startedAt: desiredStartedAt,
         richAnimationState,
         faceValues,
     };
@@ -5006,26 +5083,72 @@ class AnimationHandler {
                                 try {
                                     // Ensure base idle is at full weight to cover the gap between old and new idle.
                                     if (this._baseIdleAction) {
-            try {
-                idleAction.enabled = true;
-                idleAction.setLoop(THREE.LoopRepeat);
-                idleAction.clampWhenFinished = false;
-                idleAction.reset();
-                if (typeof idleAction.setEffectiveWeight === 'function') {
-                    idleAction.setEffectiveWeight(minWeight);
-                }
-                // Do not fadeIn() the new base idle: previous overlays/base idle are
-                // already faded out separately, while a fadeIn here would reintroduce
-                // a one-frame zero-weight gap and visible bind-pose blink.
-                idleAction.play();
-                const idleClip = idleAction.getClip?.();
-                console.log('[AnimationHandler] IDLE action playing:', idleClip?.name, 'tracks:', idleClip?.tracks?.length ?? 'N/A');
-                if (idleClip?.tracks?.length > 0) {
-                    console.log('[AnimationHandler] IDLE first track:', idleClip.tracks[0].name);
-                } else {
-                    console.error('[AnimationHandler] ❌ IDLE action has NO tracks! This is why VRM is in T-pose.');
-                }
-            } catch (e) { /* ignore */ }
+                                        this._baseIdleAction.enabled = true;
+                                        this._baseIdleAction.setLoop(THREE.LoopRepeat);
+                                        this._baseIdleAction.clampWhenFinished = false;
+                                        if (typeof this._baseIdleAction.setEffectiveWeight === 'function') {
+                                            this._baseIdleAction.setEffectiveWeight(1.0);
+                                        }
+                                        this._baseIdleAction.play();
+                                    }
+                                } catch (e) { /* ignore */ }
+
+                                try {
+                                    await this.startAction('idle', nextFile);
+                                } catch (e) {
+                                    console.warn('[AnimationHandler] Failed to start next idle animation:', e);
+                                }
+                            }
+                        } catch (err) {
+                            console.warn('[AnimationHandler] Error while advancing idle animation:', err);
+                        }
+                    } catch (err) {
+                        console.warn('[AnimationHandler] mixer finished handler error:', err);
+                    }
+                });
+            }
+        } catch (err) {
+            console.warn('[AnimationHandler] Failed to bind global mixer finished handler:', err);
+        }
+
+        // Start new action (single clip) and cross-fade previous action after ensuring
+        // the new action is playing to avoid a momentary T-pose gap.
+        console.log(`[AnimationHandler] Starting new action for ${actionName} (playOnce=${playOnce})`);
+        try {
+            if (playOnce) {
+                // Ensure action is configured to play once
+                action.setLoop(THREE.LoopOnce, 0);
+                // Do not clamp non-idle: some exports end in bind pose (T-pose)
+                action.clampWhenFinished = (actionName === 'idle');
+                try { action._synthPlayOnce = true; action._synthLogical = actionName; } catch (e) { /* ignore */ }
+            }
+        } catch (err) {
+            console.warn('[AnimationHandler] Failed to set action playOnce:', err);
+        }
+
+        // Start the new action first (fade in), THEN cross-fade out previous actions.
+        // This guarantees the skeleton is never un-driven during transitions.
+        try {
+            action.enabled = true;
+            action.reset().fadeIn(0.5).play();
+            this.currentAction = action;
+            this.currentActionName = actionName;
+            this._currentAnimationFile = animationFile || null;
+            console.log(`[AnimationHandler] New simple action started (cross-fade in)`);
+        } catch (e) {
+            console.warn('[AnimationHandler] Failed to start new action:', e);
+            try { action.reset().fadeIn(0.5).play(); this.currentAction = action; } catch (ee) { /* ignore */ }
+        }
+
+        // Now that the new action is playing, fade out all previous actions + orphans.
+        // Clear structured action reference first so _crossFadeCleanup doesn't
+        // accidentally skip the OLD structured parts via the skip set.
+        this.currentStructuredAction = null;
+        this.currentActionPhase = null;
+        this.currentActionPhaseAuthoritative = false;
+        try {
+            this._crossFadeCleanup(_prevAction, _prevStructured, action, 0.5);
+        } catch (e) { /* ignore */ }
 
         // Safety fallback: if playOnce requested, schedule a timer to
         // advance to next animation after the clip duration + buffer
@@ -5802,20 +5925,18 @@ async function loadDefaultAnimations(vrm) {
         let desiredState = null;
         let desiredAnimation = null;
         let desiredDescriptor = null;
+        let desiredDescriptorId = null;
+        let desiredStartedAt = null;
         let desiredRichAnimationState = null;
         let desiredFaceValues = null;
-        let desiredPlaySection = null;
-        let desiredFrameRange = null;
-        let desiredPhaseAuthoritative = false;
         try {
             console.log('[synth_webui] Querying fresh Karada state for Summoning bootstrap...');
             const freshSummoningState = await _fetchFreshSummoningState();
             desiredState = freshSummoningState.state;
             desiredAnimation = freshSummoningState.animation || null;
             desiredDescriptor = freshSummoningState.descriptor || null;
-            desiredPlaySection = freshSummoningState.playSection || null;
-            desiredFrameRange = freshSummoningState.frameRange || null;
-            desiredPhaseAuthoritative = !!freshSummoningState.phaseAuthoritative;
+            desiredDescriptorId = freshSummoningState.descriptorId || null;
+            desiredStartedAt = freshSummoningState.startedAt || null;
             desiredRichAnimationState = freshSummoningState.richAnimationState || null;
             desiredFaceValues = freshSummoningState.faceValues || null;
             console.log('[synth_webui] Fresh Summoning state:', desiredState || 'idle', desiredAnimation || null, desiredFaceValues ? '(with face values)' : '(no face values)');
@@ -5845,10 +5966,8 @@ async function loadDefaultAnimations(vrm) {
                     stateToStart,
                     desiredAnimation || null,
                     playOnce,
-                    desiredPlaySection || null,
+                    null,
                     desiredDescriptor || null,
-                    desiredFrameRange || null,
-                    !!desiredPhaseAuthoritative,
                 );
                 if (desiredRichAnimationState && typeof animationHandler.applyAnimationState === 'function') {
                     animationHandler.applyAnimationState(desiredRichAnimationState);
@@ -5888,16 +6007,28 @@ async function loadDefaultAnimations(vrm) {
                     }
                 } catch (e) { /* ignore */ }
 
-                const animationFileOrUrl = last.animation || last.file || null;
-                const lastPlayOnce = (last.descriptor && last.descriptor.play_once) || (last.loop === false);
+                const lastDescriptorId = (typeof last.descriptor === 'string')
+                    ? last.descriptor
+                    : (last.descriptor_id || null);
+                let resolvedLast = null;
+                if (lastDescriptorId && typeof window.karadaResolveAnimationDescriptor === 'function') {
+                    try {
+                        resolvedLast = await window.karadaResolveAnimationDescriptor(lastDescriptorId);
+                    } catch (e) { /* ignore */ }
+                }
+                const animationFileOrUrl = last.animation || last.file || (resolvedLast ? (resolvedLast.animation_url || null) : null);
+                const lastDescriptor = (last && typeof last.descriptor === 'object')
+                    ? last.descriptor
+                    : (resolvedLast ? (resolvedLast.descriptor_data || null) : null);
+                const lastPlayOnce = !!(lastDescriptor && lastDescriptor.play_once);
                 const initialPlayOnce = !!(desiredDescriptor && desiredDescriptor.play_once);
 
                 // Skip if it matches what we just started as initial state.
                 try {
-                    const startedKey = `${(desiredState || 'idle') || ''}|${desiredAnimation || ''}|${initialPlayOnce ? '1' : '0'}`;
-                    const lastKey = `${last.state || ''}|${animationFileOrUrl || ''}|${lastPlayOnce ? '1' : '0'}`;
+                    const startedKey = `${(desiredState || 'idle') || ''}|${desiredDescriptorId || desiredAnimation || ''}|${desiredStartedAt ?? ''}|${initialPlayOnce ? '1' : '0'}`;
+                    const lastKey = `${last.state || ''}|${lastDescriptorId || animationFileOrUrl || ''}|${last.started_at ?? ''}|${lastPlayOnce ? '1' : '0'}`;
                     if (startedKey !== lastKey) {
-                        animationHandler.startAction(last.state, animationFileOrUrl, !!lastPlayOnce, last.play_section || null, last.descriptor || null, last.frame_range || null, !!last.phase_authoritative);
+                        animationHandler.startAction(last.state, animationFileOrUrl, !!lastPlayOnce, null, lastDescriptor || null);
                     } else {
                         console.log('[synth_webui] Pending command matches started state; skipping');
                         // Even when skipping (because the action is already playing),
@@ -5911,7 +6042,7 @@ async function loadDefaultAnimations(vrm) {
                         } catch (e) { /* ignore */ }
                     }
                 } catch (e) {
-                    animationHandler.startAction(last.state, animationFileOrUrl, !!lastPlayOnce, last.play_section || null, last.descriptor || null, last.frame_range || null, !!last.phase_authoritative);
+                    animationHandler.startAction(last.state, animationFileOrUrl, !!lastPlayOnce, null, lastDescriptor || null);
                 }
             }
         }
@@ -6453,11 +6584,25 @@ window.VRMAnimations = {
     // Registry accessors for plugins/interfaces.
     getMappings: () => (window.VRMAnimationMappings || {}),
     setMappings: (m) => { window.VRMAnimationMappings = m || {}; },
+    _getCachedAnimation: (state, file) => {
+        try {
+            const handler = animationHandler || window.animationHandler;
+            if (!handler || typeof handler._getCachedAnimation !== 'function') return null;
+            return handler._getCachedAnimation(state, file);
+        } catch (e) {
+            return null;
+        }
+    },
+    resolveDescriptor: async (descriptorId, forceRefresh = false) => {
+        return await _resolveKaradaAnimationDescriptor(descriptorId, forceRefresh);
+    },
     // NOTE: startThinking/startTalking are intentionally NOT exposed here.
-    // Animations are now server-driven via vrm_animation WS messages.
+    // Animations are now server-driven via vrm_animation_v2 WS messages.
     // The frontend plays whichever file the server selects; it never picks animations independently.
 };
 window.animationHandler = animationHandler;
+window.karadaPlayAnimation = karadaPlayAnimation;
+window.karadaResolveAnimationDescriptor = _resolveKaradaAnimationDescriptor;
 console.log('[synth_webui] Animation functions exposed globally via window.VRMAnimations');
 console.log('[synth_webui] animationHandler exposed globally');
 try {
@@ -6848,15 +6993,21 @@ try {
                     if (resp && resp.ok) {
                         const summary = await resp.json();
                         if (summary && summary.state) {
-                            const playOnce = !!(summary.descriptor && summary.descriptor.play_once);
+                            let resolved = null;
+                            if (summary.descriptor && typeof window.karadaResolveAnimationDescriptor === 'function') {
+                                try {
+                                    resolved = await window.karadaResolveAnimationDescriptor(summary.descriptor);
+                                } catch (e) { /* ignore */ }
+                            }
+                            const animationRef = resolved ? (resolved.animation_url || null) : null;
+                            const descriptorData = resolved ? (resolved.descriptor_data || null) : null;
+                            const playOnce = !!(descriptorData && descriptorData.play_once);
                             await animationHandler.startAction(
                                 summary.state,
-                                summary.animation || summary.file || null,
+                                animationRef,
                                 playOnce,
-                                summary.play_section || null,
-                                summary.descriptor || null,
-                                summary.frame_range || null,
-                                !!summary.phase_authoritative,
+                                null,
+                                descriptorData || null,
                             );
                             return;
                         }
@@ -6869,11 +7020,24 @@ try {
                 try {
                     const last = (window.__synth_debug_last_remote && window.__synth_debug_last_remote.animation) ? window.__synth_debug_last_remote.animation : null;
                     if (last && last.state) {
-                        const playOnce = (last.descriptor && last.descriptor.play_once) || (last.loop === false);
+                        const lastDescriptorId = (typeof last.descriptor === 'string')
+                            ? last.descriptor
+                            : (last.descriptor_id || null);
+                        let resolved = null;
+                        if (lastDescriptorId && typeof window.karadaResolveAnimationDescriptor === 'function') {
+                            try {
+                                resolved = await window.karadaResolveAnimationDescriptor(lastDescriptorId);
+                            } catch (e) { /* ignore */ }
+                        }
+                        const animationRef = last.animation || last.file || (resolved ? (resolved.animation_url || null) : null);
+                        const descriptorData = (last && typeof last.descriptor === 'object')
+                            ? last.descriptor
+                            : (resolved ? (resolved.descriptor_data || null) : null);
+                        const playOnce = !!(descriptorData && descriptorData.play_once);
                         if (last.animation_state && typeof animationHandler.applyAnimationState === 'function') {
                             animationHandler.applyAnimationState(last.animation_state);
                         }
-                        await animationHandler.startAction(last.state, last.animation || last.file || null, !!playOnce, last.play_section || null, last.descriptor || null, last.frame_range || null, !!last.phase_authoritative);
+                        await animationHandler.startAction(last.state, animationRef, !!playOnce, null, descriptorData || null);
                     }
                 } catch (e) { /* ignore */ }
             } catch (e) { /* ignore */ }

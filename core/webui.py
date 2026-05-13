@@ -735,37 +735,21 @@ class SynthWebUIInterface:
         # Provide an internal endpoint implementation that doesn't rely on a
         # bound `get_animation_state` method at init time. This avoids
         # AttributeError in environments with dynamic reloads.
-        async def _animation_state_endpoint(request: Request = None):
+        async def _animation_state_endpoint():
             try:
                 if not getattr(self, "animation_handler", None):
                     return JSONResponse(
-                        {"state": "idle", "animation": None, "descriptor": None}
+                        {"state": "idle", "descriptor": None, "started_at": None}
                     )
 
                 current = self.animation_handler.get_current_animation_state()
-                animation_file = current.get("animation_file")
-                resolved = None
-                if animation_file:
-                    try:
-                        resolved, _ = (
-                            self.animation_handler._resolve_animation_descriptor(
-                                animation_file
-                            )
-                        )
-                    except Exception:
-                        resolved = animation_file
-
-                payload = {
-                    "state": current.get("state"),
-                    "animation": resolved,
-                    "descriptor": current.get("descriptor"),
-                    "play_section": current.get("play_section"),
-                    "frame_range": current.get("frame_range"),
-                    "phase_authoritative": current.get("phase_authoritative", False),
-                    "animation_state": current.get("animation_state"),
-                    "animation_id": current.get("animation_id"),
-                }
-                return JSONResponse(payload)
+                return JSONResponse(
+                    {
+                        "state": current.get("state"),
+                        "descriptor": current.get("descriptor"),
+                        "started_at": current.get("started_at"),
+                    }
+                )
             except Exception as exc:
                 log_error(f"{LOG_PREFIX} animation_state endpoint failed: {exc}")
                 raise HTTPException(
@@ -2108,21 +2092,13 @@ class SynthWebUIInterface:
 
                 # 2) Current animation (if any)
                 anim = full_state.get("animation", {})
-                if anim.get("file"):
+                if anim.get("descriptor"):
                     await websocket.send_json(
                         {
-                            "type": "vrm_animation",
-                            "file": anim.get("url") or anim.get("file"),
+                            "type": "vrm_animation_v2",
                             "state": anim.get("state", "idle"),
-                            "loop": anim.get("loop", True),
-                            "play_section": anim.get("play_section"),
-                            "frame_range": anim.get("frame_range"),
-                            "phase_authoritative": anim.get(
-                                "phase_authoritative", False
-                            ),
                             "descriptor": anim.get("descriptor"),
-                            "animation_state": anim.get("animation_state"),
-                            "animation_id": anim.get("animation_id"),
+                            "started_at": anim.get("started_at"),
                             "restore": True,
                         }
                     )
@@ -2136,7 +2112,7 @@ class SynthWebUIInterface:
                     await websocket.send_json({"type": "vrm_face", "values": face})
 
                 # 5) If no animation is set yet, start idle
-                if not anim.get("file") and self.persona_manager:
+                if not anim.get("descriptor") and self.persona_manager:
                     await self.persona_manager.set_animation_state("idle")
                     log_debug(f"{LOG_PREFIX} Started idle animation for first session")
         except Exception as push_exc:
@@ -3059,30 +3035,23 @@ class SynthWebUIInterface:
             except Exception:
                 current = {}
 
-        animation_state = dict(current.get("animation_state") or {})
-        if not animation_state:
-            animation_state = {
-                "action": getattr(state, "value", state),
-                "phase": "loop",
-                "animation": current.get("animation") or animation_file,
-                "descriptor": descriptor,
-                "timing": None,
-                "expressions": descriptor.get("expressions")
-                if isinstance(descriptor, dict)
-                else None,
-                "blink": descriptor.get("blink")
-                if isinstance(descriptor, dict)
-                else None,
-                "eye_movement": descriptor.get("eye_movement")
-                if isinstance(descriptor, dict)
-                else None,
-                "emotions": None,
-                "lipsync": (
-                    descriptor.get("lipsync")
-                    if isinstance(descriptor, dict) and "lipsync" in descriptor
-                    else False
-                ),
-            }
+        animation_state = {
+            "descriptor": current.get("descriptor"),
+            "started_at": current.get("started_at"),
+            "expressions": descriptor.get("expressions")
+            if isinstance(descriptor, dict)
+            else None,
+            "blink": descriptor.get("blink") if isinstance(descriptor, dict) else None,
+            "eye_movement": (
+                descriptor.get("eye_movement") if isinstance(descriptor, dict) else None
+            ),
+            "emotions": None,
+            "lipsync": (
+                descriptor.get("lipsync")
+                if isinstance(descriptor, dict) and "lipsync" in descriptor
+                else False
+            ),
+        }
 
         emotions = None
         try:
@@ -3147,8 +3116,8 @@ class SynthWebUIInterface:
         message = {
             "type": "animation_state",
             "state": current.get("state") or getattr(state, "value", state),
-            "animation": current.get("animation") or animation_file,
-            "descriptor": current.get("descriptor") or descriptor,
+            "descriptor": current.get("descriptor"),
+            "started_at": current.get("started_at"),
             "animation_state": animation_state,
         }
 
@@ -3164,33 +3133,19 @@ class SynthWebUIInterface:
         """HTTP endpoint that returns a lightweight animation state summary.
 
         This endpoint is used by clients to query the current canonical
-        animation state (state name, resolved animation path and descriptor).
+        animation state tuple (state name, descriptor id, started_at).
         """
         try:
             if not self.animation_handler:
                 return JSONResponse(
-                    {"state": "idle", "animation": None, "descriptor": None}
+                    {"state": "idle", "descriptor": None, "started_at": None}
                 )
 
             current = self.animation_handler.get_current_animation_state()
-            animation_file = current.get("animation_file")
-            resolved = None
-            if animation_file:
-                try:
-                    resolved, _ = self.animation_handler._resolve_animation_descriptor(
-                        animation_file
-                    )
-                except Exception:
-                    resolved = animation_file
-
             payload = {
                 "state": current.get("state"),
-                "animation": resolved,
                 "descriptor": current.get("descriptor"),
-                "play_section": current.get("play_section"),
-                "frame_range": current.get("frame_range"),
-                "phase_authoritative": current.get("phase_authoritative", False),
-                "animation_state": current.get("animation_state"),
+                "started_at": current.get("started_at"),
             }
             return JSONResponse(payload)
         except Exception as exc:
@@ -10254,6 +10209,9 @@ class SynthWebUIInterface:
 
 async def start_server() -> None:
     """Compatibility helper to run the Synthetic Heart Web UI server in the foreground."""
+    if synth_webui_interface is None:
+        raise RuntimeError("WebUI interface is not initialized")
+
     if not synth_webui_interface.autostart:
         await synth_webui_interface._run_server()
         return

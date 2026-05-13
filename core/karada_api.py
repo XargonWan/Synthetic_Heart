@@ -166,6 +166,21 @@ def create_karada_router(
         info = handler.get_current_animation_state()
         return JSONResponse(content=info)
 
+    @router.get("/animations/manifest")
+    async def get_animation_manifest() -> JSONResponse:
+        """Return the Karada animation manifest keyed by descriptor id."""
+        return JSONResponse(content=handler.get_animation_manifest())
+
+    @router.get("/animations/resolve")
+    async def resolve_animation_contract(descriptor_id: str) -> JSONResponse:
+        """Resolve one descriptor id into an animation manifest entry."""
+        entry = handler.get_animation_manifest_entry_by_id(descriptor_id)
+        if entry is None:
+            return JSONResponse(
+                status_code=404, content={"error": "descriptor_not_found"}
+            )
+        return JSONResponse(content=entry)
+
     @router.get("/state/model")
     async def get_model_state() -> JSONResponse:
         """Return the active VRM model info."""

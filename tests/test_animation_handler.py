@@ -119,11 +119,13 @@ async def test_play_animation_fallback_to_idle_reports_actual_state(
     assert animation_handler.current_animation in {"Idle.fbx", "Idle2.fbx"}
 
     sent = [c[0][0] for c in mock_ws.send_json.call_args_list]
-    anim_msgs = [m for m in sent if m.get("type") == "vrm_animation"]
+    anim_msgs = [m for m in sent if m.get("type") == "vrm_animation_v2"]
     assert anim_msgs
     msg = anim_msgs[-1]
     assert msg["state"] == "idle"
-    assert "/animations/idle/" in msg["file"]
+    assert isinstance(msg.get("descriptor"), str)
+    assert msg["descriptor"].startswith("rei/idle/")
+    assert isinstance(msg.get("started_at"), (int, float))
 
 
 @pytest.mark.asyncio
@@ -224,9 +226,12 @@ async def test_stop_current_context_restores_highest_remaining_context(
     assert animation_handler._current_context_id == "context_write"
 
     sent = [call.args[0] for call in mock_ws.send_json.call_args_list if call.args]
-    anim_msgs = [payload for payload in sent if payload.get("type") == "vrm_animation"]
+    anim_msgs = [
+        payload for payload in sent if payload.get("type") == "vrm_animation_v2"
+    ]
     assert anim_msgs
     assert anim_msgs[-1]["state"] == "write"
+    assert isinstance(anim_msgs[-1].get("descriptor"), str)
 
 
 @pytest.mark.asyncio
@@ -314,7 +319,7 @@ async def test_get_current_animation(animation_handler, mock_webui):
 
 @pytest.mark.asyncio
 async def test_vrm_animation_broadcast_on_play():
-    """Ensure that play_animation broadcasts a vrm_animation message to all
+    """Ensure that play_animation broadcasts a vrm_animation_v2 message to all
     connected WebSocket clients (KaradaStateServer architecture)."""
     handler = KaradaStateServer()
 
@@ -338,9 +343,11 @@ async def test_vrm_animation_broadcast_on_play():
         AnimationState.THINK, session_id=None, loop=True, context_id="ctx"
     )
 
-    # At least one vrm_animation message must have been sent
-    anim_msgs = [m for m in sent_messages if m.get("type") == "vrm_animation"]
-    assert anim_msgs, f"Expected vrm_animation message, got: {sent_messages}"
+    # At least one vrm_animation_v2 message must have been sent
+    anim_msgs = [m for m in sent_messages if m.get("type") == "vrm_animation_v2"]
+    assert anim_msgs, f"Expected vrm_animation_v2 message, got: {sent_messages}"
+    assert isinstance(anim_msgs[-1].get("descriptor"), str)
+    assert isinstance(anim_msgs[-1].get("started_at"), (int, float))
 
 
 @pytest.mark.asyncio
@@ -382,7 +389,7 @@ async def test_idle_animation_rotation_task_created(animation_handler, mock_webu
 
 @pytest.mark.asyncio
 async def test_websocket_message_format(animation_handler, mock_webui):
-    """Test WebSocket message format for vrm_animation broadcast (Karada v2)."""
+    """Test WebSocket message format for vrm_animation_v2 broadcast."""
     session_id = "test_session"
     mock_ws = AsyncMock()
     mock_webui.connections[session_id] = mock_ws
@@ -394,29 +401,15 @@ async def test_websocket_message_format(animation_handler, mock_webui):
     # send_json may be called multiple times (preloads + animation command)
     assert mock_ws.send_json.called, "Expected send_json to be called at least once"
 
-    # Find the vrm_animation command among all calls
+    # Find the vrm_animation_v2 command among all calls
     sent = [c[0][0] for c in mock_ws.send_json.call_args_list]
-    anim_msgs = [m for m in sent if m.get("type") == "vrm_animation"]
+    anim_msgs = [m for m in sent if m.get("type") == "vrm_animation_v2"]
     assert anim_msgs, (
-        f"Expected a vrm_animation message, got types: {[m.get('type') for m in sent]}"
+        f"Expected a vrm_animation_v2 message, got types: {[m.get('type') for m in sent]}"
     )
 
-    msg = anim_msgs[-1]  # Last vrm_animation is the final play command
-    assert isinstance(msg["file"], str)
-    assert msg["file"].endswith("Thinking.fbx")
-    assert "animations/" in msg["file"]
-    # Karada v2: loop is computed from descriptor
-    # If descriptor has intro/loop/outro, loop=True only if has loop section
-    # Otherwise, loop follows the caller's hint
-    assert isinstance(msg["loop"], bool)
+    msg = anim_msgs[-1]  # Last vrm_animation_v2 is the final play command
     assert msg["state"] == "think"
-    # Karada v2: NO play_section, phase_authoritative, frame_range
-    assert "play_section" not in msg
-    assert "phase_authoritative" not in msg
-    assert "frame_range" not in msg
-    # Descriptor should be present
-    assert isinstance(msg.get("descriptor"), dict)
-    # Descriptor may have intro/loop/outro for client-side phase control
-    if "intro" in msg["descriptor"]:
-        assert "loop" in msg["descriptor"]
-        assert "outro" in msg["descriptor"]
+    assert isinstance(msg.get("descriptor"), str)
+    assert msg["descriptor"].endswith("/thinking")
+    assert isinstance(msg.get("started_at"), (int, float))

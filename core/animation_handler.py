@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import asyncio
 import random
-import uuid
 from collections.abc import Callable
 from enum import Enum
 from typing import Dict, List, Optional, TYPE_CHECKING, Any
@@ -109,7 +108,7 @@ class KaradaStateServer:
         self._sequential_states = {AnimationState.IDLE.value}
 
         # Centralized animation state that syncs across all clients (Karada v2)
-        # Server ONLY sends: state + descriptor + started_at + animation_id
+        # Server ONLY sends: state + descriptor + started_at.
         # NO phase control, NO timing control, NO frame-level logic
         self._current_animation_file: Optional[str] = None  # Actual file being played
         self._current_animation_descriptor: Optional[Dict[str, Any]] = (
@@ -118,11 +117,6 @@ class KaradaStateServer:
         self._current_animation_started_at: Optional[datetime] = (
             None  # UTC timestamp for current animation start (authoritative)
         )
-        # Stable identifier for the currently playing animation; changes only when
-        # a genuinely new animation file starts (not during outro or re-send of the
-        # same file).  All interfaces use this to avoid restarting an already-running
-        # animation after a reconnect or periodic re-sync.
-        self._current_animation_id: str = ""
         # Animation clock: server sends started_at, client computes animation_time locally
         self._animation_state_changed_callbacks: List[
             AnimationStateChangedCallback
@@ -557,65 +551,213 @@ class KaradaStateServer:
                     f"[KaradaStateServer] Error in animation state callback: {exc}"
                 )
 
+    @staticmethod
+    def _started_at_epoch(started_at: Optional[datetime]) -> Optional[float]:
+        """Convert a datetime to UTC epoch seconds for the Karada v2 contract."""
+        if started_at is None:
+            return None
+
+        try:
+            if started_at.tzinfo is None:
+                started_at = started_at.replace(tzinfo=timezone.utc)
+            return float(started_at.astimezone(timezone.utc).timestamp())
+        except Exception:
+            return None
+
+    @staticmethod
+    def _slug_contract_part(value: Optional[str]) -> str:
+        """Normalize a contract segment into a stable ASCII slug."""
+        raw = str(value or "").strip().lower()
+        if not raw:
+            return "unknown"
+
+        out: List[str] = []
+        last_was_sep = False
+        for char in raw:
+            if char.isalnum():
+                out.append(char)
+                last_was_sep = False
+            elif not last_was_sep:
+                out.append("_")
+                last_was_sep = True
+
+        normalized = "".join(out).strip("_")
+        return normalized or "unknown"
+
+    def _extract_contract_identity(
+        self,
+        state_name: Optional[str],
+        resolved_path: Optional[str],
+        animation_file: Optional[str],
+    ) -> tuple[str, str, str]:
+        """Return ``(skin, state, stem)`` for contract and manifest generation."""
+        resolved = str(resolved_path or "").split("?", 1)[0].split("#", 1)[0]
+        segments = [segment for segment in resolved.split("/") if segment]
+
+        skin_name = "local"
+        state_value = str(state_name or "").strip() or "unknown"
+
+        if (
+            len(segments) >= 5
+            and segments[0] == "skins"
+            and segments[2] == "animations"
+        ):
+            skin_name = segments[1] or skin_name
+            if not state_name:
+                state_value = segments[3] or state_value
+
+        stem_source = (
+            animation_file or (segments[-1] if segments else "") or state_value
+        )
+        stem = Path(stem_source).stem or stem_source or state_value
+        return skin_name, state_value, stem
+
+    def _build_descriptor_id(
+        self,
+        state_name: Optional[str],
+        animation_file: Optional[str],
+        resolved_path: Optional[str] = None,
+    ) -> Optional[str]:
+        """Build the logical Karada v2 descriptor identifier for an animation."""
+        if not state_name and not animation_file and not resolved_path:
+            return None
+
+        skin_name, state_value, stem = self._extract_contract_identity(
+            state_name=state_name,
+            resolved_path=resolved_path,
+            animation_file=animation_file,
+        )
+        return (
+            f"{self._slug_contract_part(skin_name)}/"
+            f"{self._slug_contract_part(state_value)}/"
+            f"{self._slug_contract_part(stem)}"
+        )
+
+    def get_animation_manifest_entry(
+        self,
+        state_name: Optional[str],
+        animation_file: Optional[str],
+        descriptor: Optional[Dict[str, Any]] = None,
+        resolved_path: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Build one reusable Karada animation manifest entry."""
+        if not animation_file:
+            return None
+
+        resolved = resolved_path
+        descriptor_data = descriptor if isinstance(descriptor, dict) else None
+        effective_state = state_name or (
+            self.current_state.value if self.current_state else None
+        )
+
+        if resolved is None:
+            try:
+                resolved, resolved_descriptor = (
+                    self._resolve_animation_descriptor_for_state(
+                        animation_file,
+                        effective_state,
+                    )
+                )
+            except Exception:
+                resolved = animation_file
+                resolved_descriptor = None
+            if descriptor_data is None and isinstance(resolved_descriptor, dict):
+                descriptor_data = resolved_descriptor
+
+        descriptor_id = self._build_descriptor_id(
+            state_name=effective_state,
+            animation_file=animation_file,
+            resolved_path=resolved,
+        )
+        if not descriptor_id:
+            return None
+
+        skin_name, state_value, _ = self._extract_contract_identity(
+            state_name=effective_state,
+            resolved_path=resolved,
+            animation_file=animation_file,
+        )
+
+        return {
+            "id": descriptor_id,
+            "state": state_value,
+            "skin": skin_name,
+            "animation_file": animation_file,
+            "animation_url": resolved,
+            "descriptor_url": (
+                f"/api/karada/animations/resolve?descriptor_id={descriptor_id}"
+            ),
+            "descriptor_data": descriptor_data,
+        }
+
+    def get_animation_manifest(self) -> Dict[str, Any]:
+        """Return the client-facing Karada animation manifest keyed by descriptor id."""
+        animations: Dict[str, Dict[str, Any]] = {}
+        state_names = sorted(
+            {
+                *(state.value for state in AnimationState),
+                *self._registered_state_animations.keys(),
+            }
+        )
+
+        for state_name in state_names:
+            try:
+                variants = self.get_animation_variants(state_name)
+            except Exception:
+                continue
+
+            for category, files in variants.items():
+                for animation_file in files:
+                    entry = self.get_animation_manifest_entry(
+                        state_name=state_name,
+                        animation_file=animation_file,
+                    )
+                    if not entry:
+                        continue
+                    manifest_entry = dict(entry)
+                    manifest_entry["category"] = category
+                    animations.setdefault(entry["id"], manifest_entry)
+
+        return {"version": 2, "animations": animations}
+
+    def get_animation_manifest_entry_by_id(
+        self, descriptor_id: str
+    ) -> Optional[Dict[str, Any]]:
+        """Resolve one manifest entry by descriptor id."""
+        if not descriptor_id:
+            return None
+        return self.get_animation_manifest().get("animations", {}).get(descriptor_id)
+
     def get_current_animation_state(self) -> Dict[str, Any]:
         """Get the current centralized animation state (Karada v2).
 
-        Karada v2: Returns ONLY state + descriptor + started_at + animation_id.
+        Karada v2: Returns ONLY state + descriptor + started_at.
         NO phase control, NO timing control, NO frame-level logic.
 
         Returns:
             Dict with state information for clients
         """
         anim = self._current_animation_file
-        desc = self._current_animation_descriptor
+        state_name = self.current_state.value if self.current_state else None
 
-        # Resolve path for client
-        try:
-            resolved, _ = (
-                self._resolve_animation_descriptor(anim) if anim else (None, None)
-            )
-        except Exception:
-            resolved = anim
+        resolved_path: Optional[str] = None
+        if anim:
+            try:
+                resolved_path, _ = self._resolve_animation_descriptor_for_state(
+                    anim, state_name
+                )
+            except Exception:
+                resolved_path = anim
 
-        # Build simplified state (Karada v2 protocol)
-        state = {
-            "state": self.current_state.value if self.current_state else None,
-            "animation_file": anim,
-            "animation": resolved,
-            "descriptor": desc if isinstance(desc, dict) else None,
-            "started_at": (
-                self._current_animation_started_at.isoformat()
-                if self._current_animation_started_at
-                else None
+        return {
+            "state": state_name,
+            "descriptor": self._build_descriptor_id(
+                state_name=state_name,
+                animation_file=anim,
+                resolved_path=resolved_path,
             ),
-            "animation_id": self._current_animation_id,
-            # Rich state for clients that want the full payload
-            "animation_state": {
-                "action": self.current_state.value if self.current_state else None,
-                "descriptor": desc if isinstance(desc, dict) else None,
-                "timing": {
-                    "started_at": (
-                        self._current_animation_started_at.isoformat()
-                        if self._current_animation_started_at
-                        else None
-                    ),
-                },
-                "expressions": desc.get("expressions")
-                if isinstance(desc, dict)
-                else None,
-                "blink": desc.get("blink") if isinstance(desc, dict) else None,
-                "eye_movement": desc.get("eye_movement")
-                if isinstance(desc, dict)
-                else None,
-                "lipsync": (
-                    desc.get("lipsync")
-                    if isinstance(desc, dict) and "lipsync" in desc
-                    else False
-                ),
-            },
+            "started_at": self._started_at_epoch(self._current_animation_started_at),
         }
-
-        return state
 
     async def get_full_state(self) -> Dict[str, Any]:
         """Return the complete VRM state for clients on WebSocket connect (Karada v2).
@@ -659,21 +801,19 @@ class KaradaStateServer:
         anim_file = self._current_animation_file
         if anim_file:
             try:
-                resolved, desc = self._resolve_animation_descriptor(anim_file)
+                resolved, _ = self._resolve_animation_descriptor(anim_file)
             except Exception:
                 resolved = anim_file
-                desc = self._current_animation_descriptor
             animation = {
-                "file": anim_file,
-                "url": resolved,
                 "state": self.current_state.value if self.current_state else None,
-                "descriptor": desc or self._current_animation_descriptor,
-                "started_at": (
-                    self._current_animation_started_at.isoformat()
-                    if self._current_animation_started_at
-                    else None
+                "descriptor": self._build_descriptor_id(
+                    state_name=self.current_state.value if self.current_state else None,
+                    animation_file=anim_file,
+                    resolved_path=resolved,
                 ),
-                "animation_id": self._current_animation_id,
+                "started_at": self._started_at_epoch(
+                    self._current_animation_started_at
+                ),
             }
 
         # Face values
@@ -1431,6 +1571,13 @@ class KaradaStateServer:
                 self._forget_active_context(_KARADA_AUTO_CTX)
                 self._current_context_id = None
 
+            if not should_update_state:
+                log_debug(
+                    "[KaradaStateServer] Higher-priority animation active; deferring "
+                    f"{resolved_state.value} until the dominant context ends"
+                )
+                return
+
             # Step 4: Pre-load animation before sending command
             if self._has_any_transport():
                 try:
@@ -1453,7 +1600,6 @@ class KaradaStateServer:
 
             # Step 5: Karada v2 - Update state and broadcast
             self._current_animation_started_at = datetime.now(timezone.utc)
-            self._current_animation_id = str(uuid.uuid4())
             if should_update_state:
                 self.current_state = resolved_state
             self.current_animation = selected_animation
@@ -1472,48 +1618,13 @@ class KaradaStateServer:
             else:
                 self._current_animation_descriptor = descriptor
 
-            # Step 7: Broadcast to all clients - send BOTH old and new format for compatibility
+            # Step 7: Broadcast Karada v2 payload only
             if self._has_any_transport():
-                # New Karada v2 format
                 await self._send_animation_command_v2(
                     session_id=session_id,
                     state=resolved_state.value,
                     animation_file=selected_animation,
-                    descriptor=self._current_animation_descriptor,
                     started_at=self._current_animation_started_at,
-                    animation_id=self._current_animation_id,
-                    loop=bool(loop),
-                    priority=priority,
-                    source=source,
-                )
-                # Old format (for backward compatibility with existing clients)
-                loop_value = True
-                if descriptor and isinstance(descriptor, dict):
-                    has_loop = bool(
-                        descriptor.get("loop")
-                        and isinstance(descriptor.get("loop"), dict)
-                    )
-                    has_intro = bool(
-                        descriptor.get("intro")
-                        and isinstance(descriptor.get("intro"), dict)
-                    )
-                    has_outro = bool(
-                        descriptor.get("outro")
-                        and isinstance(descriptor.get("outro"), dict)
-                    )
-                    if has_intro or has_outro:
-                        loop_value = has_loop
-                    else:
-                        loop_value = bool(loop)
-
-                await self._send_animation_command(
-                    session_id=session_id,
-                    animation_file=selected_animation,
-                    loop=loop_value,
-                    state=resolved_state.value,
-                    descriptor=self._current_animation_descriptor,
-                    priority=priority,
-                    source=source,
                 )
 
             # Step 8: Notify callbacks
@@ -1573,7 +1684,7 @@ class KaradaStateServer:
             await self.play_animation(
                 restore_state,
                 session_id=restore_session_id or session_id,
-                loop=restore_loop,
+                loop=bool(restore_loop),
                 context_id=restore_context_id,
                 priority=restore_priority,
                 source=restore_source,
@@ -1622,94 +1733,9 @@ class KaradaStateServer:
             context_id=context_id,
         )
 
-    async def _send_animation_command(
-        self,
-        session_id: Optional[str],
-        animation_file: str,
-        loop: bool,
-        state: str,
-        descriptor: Optional[Dict] = None,
-        play_section: Optional[str] = None,
-        priority: Optional[int] = None,
-        source: Optional[str] = None,
-        state_for_resolution: Optional[str] = None,
-    ) -> None:
-        """Send animation command to the WebUI via WebSocket.
-
-        Karada v2: Simplified message - only sends file, loop, state, descriptor.
-        Client uses descriptor to handle intro/loop/outro locally.
-
-        Args:
-            session_id: The WebUI session ID
-            animation_file: The animation file name
-            loop: Whether to loop the animation
-            state: The logical state name
-            descriptor: Optional animation descriptor with frame info (intro/loop/outro)
-            play_section: Deprecated - ignored in Karada v2
-            priority: Optional numeric priority for client-side preemption.
-            source: Optional origin string forwarded to the WebUI.
-            state_for_resolution: Optional state folder override for path resolution.
-        """
-        if not self._has_any_transport():
-            return
-
-        # Resolve path
-        if state_for_resolution:
-            resolved_rel_path, _ = self._resolve_animation_descriptor_for_state(
-                animation_file, state_for_resolution
-            )
-        else:
-            resolved_rel_path, _ = self._resolve_animation_descriptor(animation_file)
-
-        # If session_id is None, broadcast to all connected clients via transports
-        try:
-            payload: Dict[str, Any] = {
-                "type": "vrm_animation",
-                "file": resolved_rel_path,
-                "loop": loop,
-                "state": state,
-                "animation_id": self._current_animation_id,
-                "reset_eyes": True,
-            }
-            if isinstance(priority, int):
-                payload["priority"] = int(priority)
-            if source:
-                payload["source"] = str(source)
-            if descriptor is not None:
-                payload["descriptor"] = descriptor
-
-            if session_id is None:
-                for transport in self._transports:
-                    try:
-                        await transport.broadcast_animation(payload)
-                        log_debug(
-                            f"[KaradaStateServer] Broadcast animation via "
-                            f"{type(transport).__name__}: {resolved_rel_path}"
-                        )
-                    except Exception as exc:
-                        log_warning(
-                            f"[KaradaStateServer] Failed to broadcast animation via "
-                            f"{type(transport).__name__}: {exc}"
-                        )
-                return
-
-            for transport in self._transports:
-                try:
-                    await transport.send_to_session(session_id, payload)
-                    log_debug(
-                        f"[KaradaStateServer] Sent animation to session {session_id}: {resolved_rel_path}"
-                    )
-                except Exception as exc:
-                    log_warning(
-                        f"[KaradaStateServer] Failed to send animation to session "
-                        f"{session_id} via {type(transport).__name__}: {exc}"
-                    )
-        except Exception as exc:
-            log_warning(f"[KaradaStateServer] Failed to send animation command: {exc}")
-
     # ------------------------------------------------------------------
     # Karada v2 Protocol - Simplified Animation Command
-    # Server ONLY sends: state + descriptor + started_at + animation_id
+    # Server ONLY sends: state + descriptor + started_at.
     # NO phase control, NO timing control, NO frame-level logic
     # ------------------------------------------------------------------
 
@@ -1718,17 +1744,12 @@ class KaradaStateServer:
         session_id: Optional[str],
         state: str,
         animation_file: str,
-        descriptor: Optional[Dict],
         started_at: datetime,
-        animation_id: str,
-        loop: bool = True,
-        priority: Optional[int] = None,
-        source: Optional[str] = None,
     ) -> None:
         """Send Karada v2 animation command to clients.
 
         Karada v2 Protocol:
-        - Server sends WHAT to play (state, descriptor, animation file)
+        - Server sends WHAT to play (state, descriptor id)
         - Server sends authoritative timestamp (started_at)
         - Client decides HOW and WHEN to play it locally
         - No phase control, no timing control, no frame-level logic
@@ -1737,40 +1758,32 @@ class KaradaStateServer:
             session_id: Target session or None for broadcast
             state: The logical state name (e.g., 'think', 'idle')
             animation_file: The animation file name
-            descriptor: Animation descriptor with intro/loop/outro sections
             started_at: Authoritative UTC timestamp when animation started
-            animation_id: Unique identifier for this animation (prevents restarts on reconnect)
-            loop: Hint for client whether to loop (descriptor may override)
-            priority: Optional priority for client-side preemption
-            source: Optional origin string
         """
         if not self._has_any_transport():
             return
 
-        # Resolve path for the animation file
+        # Resolve descriptor id for the animation file
         try:
             resolved_path, _ = self._resolve_animation_descriptor_for_state(
                 animation_file, state
             )
         except Exception:
-            resolved_path = f"/skins/Rei/animations/{state}/{animation_file}"
+            resolved_path = None
+
+        descriptor_id = self._build_descriptor_id(
+            state_name=state,
+            animation_file=animation_file,
+            resolved_path=resolved_path,
+        )
 
         # Build Karada v2 payload
         payload: Dict[str, Any] = {
             "type": "vrm_animation_v2",
             "state": state,
-            "file": resolved_path,
-            "descriptor": descriptor if isinstance(descriptor, dict) else None,
-            "started_at": started_at.isoformat(),
-            "animation_id": animation_id,
-            "loop": bool(loop),
-            "reset_eyes": True,
+            "descriptor": descriptor_id,
+            "started_at": self._started_at_epoch(started_at),
         }
-
-        if isinstance(priority, int):
-            payload["priority"] = priority
-        if source:
-            payload["source"] = str(source)
 
         # Send to clients
         try:
@@ -1886,7 +1899,18 @@ class KaradaStateServer:
                     # If current state changed, stop the loop
                     if self.current_state != state:
                         break
-                    animations = self.get_animations_for_state(state)
+
+                    variants = self.get_animation_variants(state.value)
+                    if state == AnimationState.IDLE:
+                        animations = variants.get("loop", []) or variants.get(
+                            "other", []
+                        )
+                    else:
+                        animations = (
+                            variants.get("loop", [])
+                            or variants.get("post", [])
+                            or variants.get("other", [])
+                        )
                     if not animations or len(animations) <= 1:
                         break
 
@@ -1912,26 +1936,33 @@ class KaradaStateServer:
                                 a for a in animations if a != self.current_animation
                             ]
                             candidate = random.choice(choices) if choices else candidate
+                    self.current_state = state
                     self.current_animation = candidate
-                    # Resolve descriptor for candidate to respect play_once if present
-                    _, candidate_descriptor = self._resolve_animation_descriptor(
-                        candidate
-                    )
-                    candidate_loop = (
-                        False
-                        if (
-                            candidate_descriptor
-                            and candidate_descriptor.get("play_once")
+                    self._current_animation_file = candidate
+                    self._current_animation_started_at = datetime.now(timezone.utc)
+
+                    _, candidate_descriptor = (
+                        self._resolve_animation_descriptor_for_state(
+                            candidate, state.value
                         )
-                        else True
                     )
-                    # send new animation command (loop depends on descriptor)
-                    await self._send_animation_command(
+                    if state == AnimationState.IDLE:
+                        self._current_animation_descriptor = (
+                            self._sanitize_idle_descriptor(candidate_descriptor)
+                        )
+                    else:
+                        self._current_animation_descriptor = candidate_descriptor
+
+                    await self._send_animation_command_v2(
                         session_id=session_id,
-                        animation_file=candidate,
-                        loop=candidate_loop,
                         state=state.value,
-                        priority=ANIMATION_STATE_PRIORITIES.get(state, 0),
+                        animation_file=candidate,
+                        started_at=self._current_animation_started_at,
+                    )
+                    await self._notify_animation_state_changed(
+                        state,
+                        candidate,
+                        self._current_animation_descriptor,
                     )
         except asyncio.CancelledError:
             # Normal cancellation path

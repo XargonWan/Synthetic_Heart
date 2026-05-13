@@ -274,15 +274,43 @@ export function createDebugWindow() {
                     if (resp && resp.ok) {
                         const summary = await resp.json();
                         if (summary && summary.state) {
-                            // Skip startAction if the animation_id hasn't changed.
-                            // This prevents restarting an already-running animation on
-                            // every polling cycle (every 2 s when debug-window is open).
-                            const serverId = summary.animation_id || null;
-                            if (serverId && window.__synth_current_animation_id && serverId === window.__synth_current_animation_id) {
+                            const descriptorId = (typeof summary.descriptor === 'string')
+                                ? summary.descriptor
+                                : null;
+                            const startedAt = summary.started_at ?? null;
+                            const serverTuple = (summary.state && descriptorId && startedAt != null)
+                                ? `${summary.state}|${descriptorId}|${startedAt}`
+                                : null;
+                            if (serverTuple && window.__synth_current_animation_id === serverTuple) {
                                 return;
                             }
-                            const playOnce = !!(summary.descriptor && summary.descriptor.play_once);
-                            await window.animationHandler.startAction(summary.state, summary.animation || null, playOnce, null, summary.descriptor || null);
+
+                            let animationRef = null;
+                            let descriptorData = (summary && typeof summary.descriptor === 'object')
+                                ? summary.descriptor
+                                : null;
+
+                            try {
+                                if (descriptorId && typeof window.karadaResolveAnimationDescriptor === 'function') {
+                                    const resolved = await window.karadaResolveAnimationDescriptor(descriptorId);
+                                    if (resolved) {
+                                        animationRef = resolved.animation_url || animationRef;
+                                        descriptorData = resolved.descriptor_data || descriptorData;
+                                    }
+                                }
+                            } catch (e) { /* ignore */ }
+
+                            const playOnce = !!(descriptorData && descriptorData.play_once);
+                            await window.animationHandler.startAction(
+                                summary.state,
+                                animationRef,
+                                playOnce,
+                                null,
+                                descriptorData || null,
+                            );
+                            if (serverTuple) {
+                                window.__synth_current_animation_id = serverTuple;
+                            }
                             return;
                         }
                     }
@@ -291,11 +319,27 @@ export function createDebugWindow() {
                 try {
                     const last = (window.__synth_debug_last_remote && window.__synth_debug_last_remote.animation) ? window.__synth_debug_last_remote.animation : null;
                     if (last && last.state) {
-                        const playOnce = (last.descriptor && last.descriptor.play_once) || (last.loop === false);
+                        const descriptorId = (typeof last.descriptor === 'string')
+                            ? last.descriptor
+                            : (last.descriptor_id || null);
+                        let animationRef = last.animation || null;
+                        let descriptorData = (last && typeof last.descriptor === 'object')
+                            ? last.descriptor
+                            : null;
+                        if (descriptorId && typeof window.karadaResolveAnimationDescriptor === 'function') {
+                            try {
+                                const resolved = await window.karadaResolveAnimationDescriptor(descriptorId);
+                                if (resolved) {
+                                    animationRef = resolved.animation_url || animationRef;
+                                    descriptorData = resolved.descriptor_data || descriptorData;
+                                }
+                            } catch (e) { /* ignore */ }
+                        }
+                        const playOnce = !!(descriptorData && descriptorData.play_once);
                         if (last.animation_state && typeof window.animationHandler.applyAnimationState === 'function') {
                             window.animationHandler.applyAnimationState(last.animation_state);
                         }
-                        await window.animationHandler.startAction(last.state, last.animation || null, !!playOnce, last.play_section || null, last.descriptor || null);
+                        await window.animationHandler.startAction(last.state, animationRef, !!playOnce, null, descriptorData || null);
                     }
                 } catch (e) { /* ignore */ }
             } catch (e) { /* ignore */ }

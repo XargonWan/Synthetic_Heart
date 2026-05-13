@@ -1220,7 +1220,7 @@ export function initChatUI() {
                     updateButtonMode();
                 };
                 window.pendingAnimationCommands = window.pendingAnimationCommands || window.pendingAnimationCommands;
-                ws.onmessage = (event) => {
+                ws.onmessage = async (event) => {
                     try {
                         const data = JSON.parse(event.data);
 
@@ -1286,67 +1286,28 @@ export function initChatUI() {
                                     }
                                 }, 600);
                             }
-                        } else if (data && (data.type === 'vrm_animation' || data.type === 'animation')) {
-                            // Canonical animation command from VRMStateServer.
-                            // Legacy type 'animation' is also accepted for backward compat.
-                            const animFile = data.file || data.animation || null;
-                            const animId = data.animation_id || null;
-                            // If this is a state-restore on reconnect and the same animation is already
-                            // running (same animation_id), skip play() to avoid restarting from frame 0.
-                            // Any interface connecting after the animation started must see the same
-                            // logical state without triggering a visible restart.
-                            const isRestoreSkip = !!(data.restore && animId && window.__synth_current_animation_id === animId);
-                            console.log('[chat-window] vrm_animation received:', data.state, animFile, isRestoreSkip ? '(restore-skip)' : '');
-                            if (!isRestoreSkip) {
-                                try {
-                                    if (window.VRMAnimations && typeof window.VRMAnimations.play === 'function') {
-                                        window.VRMAnimations.play(data.state, {
-                                            animation: animFile,
-                                            playOnce: data.loop === false,
-                                            playSection: data.play_section,
-                                            descriptor: data.descriptor,
-                                            frameRange: data.frame_range,
-                                            phaseAuthoritative: !!data.phase_authoritative
-                                        });
-                                    }
-                                } catch (e) { /* ignore */ }
-                                // Track the animation_id so future restores can be deduplicated
-                                try { if (animId) window.__synth_current_animation_id = animId; } catch (e) { /* ignore */ }
-                            }
-                            // Apply rich animation_state payload (blink, expressions, lipsync, eye_movement)
-                            // even on restore, so blend-shapes are always up-to-date.
-                            try {
-                                if (data.animation_state && window.animationHandler && typeof window.animationHandler.applyAnimationState === 'function') {
-                                    window.animationHandler.applyAnimationState(data.animation_state);
-                                }
-                            } catch (e) { /* ignore */ }
-                            // Cache animation state for VRM reload recovery
-                            try {
-                                if (data.state) {
-                                    window.__synth_current_animation_state = {
-                                        state: data.state,
-                                        animation: animFile,
-                                        descriptor: data.descriptor || null,
-                                        play_section: data.play_section || null,
-                                        frame_range: data.frame_range || null,
-                                        phase_authoritative: !!data.phase_authoritative,
-                                    };
-                                }
-                                if (data.animation_state) {
-                                    window.__synth_last_rich_animation_state = data.animation_state;
-                                }
-                            } catch (e) { /* ignore */ }
                         } else if (data && data.type === 'vrm_animation_v2') {
-                            // Karada v2 Protocol - Server ONLY sends: state + descriptor + started_at + animation_id
+                            // Karada v2 Protocol - Server ONLY sends: state + descriptor + started_at
                             // NO phase control, NO timing control, NO frame-level logic
                             // Client handles intro→loop→outro locally using descriptor + local clock
-                            console.log('[chat-window] vrm_animation_v2 received:', data.state, data.animation_id);
+                            console.log('[chat-window] vrm_animation_v2 received:', data.state, data.descriptor);
+
+                            let resolvedEntry = null;
+                            let animationRef = null;
+                            let descriptorData = null;
+                            try {
+                                if (data.descriptor && window.karadaResolveAnimationDescriptor) {
+                                    resolvedEntry = await window.karadaResolveAnimationDescriptor(data.descriptor);
+                                }
+                                animationRef = resolvedEntry ? (resolvedEntry.animation_url || null) : null;
+                                descriptorData = resolvedEntry ? (resolvedEntry.descriptor_data || null) : null;
+                            } catch (e) { /* ignore */ }
 
                             // Get the pre-loaded clip from VRMAnimations cache
                             let clip = null;
                             try {
                                 if (window.VRMAnimations && typeof window.VRMAnimations._getCachedAnimation === 'function') {
-                                    clip = window.VRMAnimations._getCachedAnimation(data.file || data.animation);
+                                    clip = window.VRMAnimations._getCachedAnimation(data.state, animationRef);
                                 }
                             } catch (e) { /* ignore */ }
 
@@ -1354,39 +1315,42 @@ export function initChatUI() {
                             if (clip && window.karadaPlayAnimation) {
                                 window.karadaPlayAnimation({
                                     state: data.state,
-                                    animationFile: data.file || data.animation,
-                                    descriptor: data.descriptor || null,
+                                    animationFile: animationRef,
+                                    descriptor: descriptorData,
+                                    descriptorId: data.descriptor || null,
                                     startedAt: data.started_at,
-                                    animationId: data.animation_id,
-                                    loop: !!data.loop,
                                     clip: clip,
                                 });
                             } else {
                                 // Fallback: use legacy handler if engine not ready
-                                console.warn('[chat-window] Karada v2 engine not ready, using fallback');
+                                console.warn('[chat-window] Karada v2 clip not ready, using renderer fallback');
                                 try {
                                     if (window.VRMAnimations && typeof window.VRMAnimations.play === 'function') {
                                         window.VRMAnimations.play(data.state, {
-                                            animation: data.file || data.animation,
-                                            playOnce: data.loop === false,
-                                            descriptor: data.descriptor,
+                                            animation: animationRef,
+                                            playOnce: !!(descriptorData && descriptorData.play_once),
+                                            descriptor: descriptorData,
                                         });
                                     }
                                 } catch (e) { /* ignore */ }
                             }
 
-                            // Track animation_id for restore deduplication
-                            try { if (data.animation_id) window.__synth_current_animation_id = data.animation_id; } catch (e) { /* ignore */ }
+                            // Track the canonical tuple for restore deduplication and debug resyncs.
+                            try {
+                                if (data.state && data.descriptor && data.started_at != null) {
+                                    window.__synth_current_animation_id = `${data.state}|${data.descriptor}|${data.started_at}`;
+                                }
+                            } catch (e) { /* ignore */ }
 
                             // Cache animation state for recovery
                             try {
                                 if (data.state) {
                                     window.__synth_current_animation_state = {
                                         state: data.state,
-                                        animation: data.file || data.animation,
-                                        descriptor: data.descriptor || null,
+                                        animation: animationRef,
+                                        descriptor_id: data.descriptor || null,
+                                        descriptor: descriptorData,
                                         started_at: data.started_at,
-                                        animation_id: data.animation_id,
                                     };
                                 }
                             } catch (e) { /* ignore */ }

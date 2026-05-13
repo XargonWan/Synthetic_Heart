@@ -2,6 +2,24 @@ import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.m
 import { FBXLoader } from 'https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/loaders/FBXLoader.js';
 import { mixamoVRMRigMap } from '/js/mixamoVRMRigMap.js';
 
+function isQuaternionTrackLike(track, propertyName) {
+	return (
+		track instanceof THREE.QuaternionKeyframeTrack
+		|| track?.ValueTypeName === 'quaternion'
+		|| track?.constructor?.name === 'QuaternionKeyframeTrack'
+		|| (propertyName === 'quaternion' && typeof track?.getValueSize === 'function' && track.getValueSize() === 4)
+	);
+}
+
+function isPositionTrackLike(track, propertyName) {
+	return (
+		track instanceof THREE.VectorKeyframeTrack
+		|| (propertyName === 'position' && track?.ValueTypeName === 'vector')
+		|| (propertyName === 'position' && track?.constructor?.name === 'VectorKeyframeTrack')
+		|| (propertyName === 'position' && typeof track?.getValueSize === 'function' && track.getValueSize() === 3)
+	);
+}
+
 /**
  * Load Mixamo animation, convert for three-vrm use, and return it.
  *
@@ -105,17 +123,18 @@ export function loadMixamoAnimation( url, vrm ) {
 				const vrmNode = vrm.humanoid?.getNormalizedBoneNode( vrmBoneName );
 				const vrmNodeName = vrmNode?.name;
 				const mixamoRigNode = asset.getObjectByName( mixamoRigName );
+				const propertyName = trackSplitted[ 1 ];
 
 				if ( vrmNodeName != null ) {
 					processedBones++;
-
-					const propertyName = trackSplitted[ 1 ];
 
 					// Store rotations of rest-pose.
 					mixamoRigNode.getWorldQuaternion( restRotationInverse ).invert();
 					mixamoRigNode.parent.getWorldQuaternion( parentRestWorldRotation );
 
-					if ( track instanceof THREE.QuaternionKeyframeTrack ) {
+					// Browser module graphs can load track classes from a different THREE module
+					// instance than the one used here, so avoid relying on instanceof alone.
+					if ( isQuaternionTrackLike( track, propertyName ) ) {
 
 						// Retarget rotation of mixamoRig to NormalizedBone.
 						for ( let i = 0; i < track.values.length; i += 4 ) {
@@ -147,10 +166,15 @@ export function loadMixamoAnimation( url, vrm ) {
 							),
 						);
 
-					} else if ( track instanceof THREE.VectorKeyframeTrack ) {
+					} else if ( isPositionTrackLike( track, propertyName ) ) {
 
 						const value = track.values.map( ( v, i ) => ( vrm.meta?.metaVersion === '0' && i % 3 !== 1 ? - v : v ) * hipsPositionScale );
 						tracks.push( new THREE.VectorKeyframeTrack( `${vrmNodeName}.${propertyName}`, track.times, value ) );
+
+					} else {
+						console.warn(
+							`[loadMixamoAnimation] WARNING: Unsupported track type for "${track.name}" (property="${propertyName}", constructor="${track?.constructor?.name}", valueType="${track?.ValueTypeName}")`,
+						);
 
 					}
 
