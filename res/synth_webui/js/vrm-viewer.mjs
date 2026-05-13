@@ -2828,6 +2828,61 @@ class AnimationHandler {
         }
     }
 
+    _playActionWithCrossFade(action, prevAction = null, fadeSec = 0.3) {
+        try {
+            if (!action) return false;
+
+            try {
+                if (action.__synthFadeStopTimer) {
+                    clearTimeout(action.__synthFadeStopTimer);
+                    action.__synthFadeStopTimer = null;
+                }
+            } catch (e) { /* ignore */ }
+
+            try {
+                action.enabled = true;
+                action.paused = false;
+                action.reset();
+            } catch (e) { /* ignore */ }
+
+            const canCrossFade = !!(
+                prevAction
+                && prevAction !== action
+                && typeof action.crossFadeFrom === 'function'
+            );
+
+            if (canCrossFade) {
+                try {
+                    prevAction.enabled = true;
+                    prevAction.paused = false;
+                } catch (e) { /* ignore */ }
+
+                try { action.__synthCrossFadeSource = prevAction; } catch (e) { /* ignore */ }
+
+                action.crossFadeFrom(prevAction, fadeSec, false).play();
+                return true;
+            }
+
+            try { action.__synthCrossFadeSource = null; } catch (e) { /* ignore */ }
+            try {
+                if (typeof action.setEffectiveWeight === 'function') {
+                    action.setEffectiveWeight(1.0);
+                }
+            } catch (e) { /* ignore */ }
+            action.play();
+            return true;
+        } catch (e) {
+            console.warn('[AnimationHandler] Failed to start action with crossfade:', e);
+            try {
+                action.reset().fadeIn(fadeSec).play();
+                return true;
+            } catch (fallbackErr) {
+                console.warn('[AnimationHandler] Fallback fadeIn start failed:', fallbackErr);
+                return false;
+            }
+        }
+    }
+
     _cancelBaseIdleFloorDrop() {
         try {
             if (this._baseIdleDropTimer) {
@@ -2919,8 +2974,10 @@ class AnimationHandler {
         try {
             const baseIdle = this._baseIdleAction;
             const skip = new Set();
+            const crossFadeSource = newAction?.__synthCrossFadeSource || null;
             if (baseIdle) skip.add(baseIdle);
             if (newAction) skip.add(newAction);
+            if (crossFadeSource) skip.add(crossFadeSource);
 
             // Collect all parts of the new structured action if applicable
             if (this.currentStructuredAction) {
@@ -2959,6 +3016,12 @@ class AnimationHandler {
                 }
                 this._activeActions.clear();
             }
+
+            try {
+                if (newAction && Object.prototype.hasOwnProperty.call(newAction, '__synthCrossFadeSource')) {
+                    newAction.__synthCrossFadeSource = null;
+                }
+            } catch (e) { /* ignore */ }
 
             // Lower base idle weight now that the new action is taking over.
             // IMPORTANT: defer this reduction until AFTER the new action's fadeIn()
@@ -4492,21 +4555,14 @@ class AnimationHandler {
 
                             const outroAction = this.currentStructuredAction.outro;
                             try {
-                                outroAction.reset();
                                 outroAction.setLoop(THREE.LoopOnce, 0);
                                 outroAction.clampWhenFinished = true;
-                                outroAction.enabled = true;
-                                outroAction.paused = false;
-                                outroAction.fadeIn(fadeDuration).play();
+                                const prevPhaseAction = (this.currentActionPhase === 'intro')
+                                    ? this.currentStructuredAction.intro
+                                    : this.currentStructuredAction.loop;
+                                this._playActionWithCrossFade(outroAction, prevPhaseAction, fadeDuration);
                             } catch (e) {
-                                outroAction.reset().fadeIn(fadeDuration).play();
-                            }
-
-                            // NOW fade out the current phase (cross-fade overlap).
-                            if (this.currentActionPhase === 'intro' && this.currentStructuredAction.intro) {
-                                this._safeFadeStop(this.currentStructuredAction.intro, fadeDuration);
-                            } else if (this.currentActionPhase === 'loop' && this.currentStructuredAction.loop) {
-                                this._safeFadeStop(this.currentStructuredAction.loop, fadeDuration);
+                                this._playActionWithCrossFade(outroAction, this.currentAction, fadeDuration);
                             }
 
                             this.currentAction = outroAction;
@@ -4528,10 +4584,10 @@ class AnimationHandler {
             // If playSection is specified (intro, loop, or outro), play only that section
             if (playSection === 'intro') {
                 console.log(`[AnimationHandler] Playing only intro section for ${actionName}`);
+                const prevAct = this.currentAction;
                 structured.intro.setLoop(THREE.LoopOnce, 0);
                 structured.intro.clampWhenFinished = true;
-                structured.intro.reset().fadeIn(0.3).play();
-                const prevAct = this.currentAction;
+                this._playActionWithCrossFade(structured.intro, prevAct, 0.3);
                 this.currentAction = structured.intro;
                 this.currentActionName = actionName;
                 this.currentActionPhase = 'intro';
@@ -4540,7 +4596,7 @@ class AnimationHandler {
                 this._currentAnimationFile = animationFile || null;
                 // Fade out previous after new is playing
                 if (prevAct && prevAct !== structured.intro) {
-                    if (_prevStructured && _prevStructured === structured) {
+                    if (_prevStructured && _prevStructured === structured && prevAct !== structured.intro.__synthCrossFadeSource) {
                         // Intra-action transition: just fade the specific previous phase
                         this._safeFadeStop(prevAct, 0.3);
                     } else {
@@ -4555,10 +4611,10 @@ class AnimationHandler {
                     return;
                 }
                 console.log(`[AnimationHandler] Playing only loop section for ${actionName}`);
+                const prevAct = this.currentAction;
                 structured.loop.setLoop(THREE.LoopRepeat);
                 structured.loop.clampWhenFinished = false;
-                structured.loop.reset().fadeIn(0.3).play();
-                const prevAct = this.currentAction;
+                this._playActionWithCrossFade(structured.loop, prevAct, 0.3);
                 this.currentAction = structured.loop;
                 this.currentActionName = actionName;
                 this.currentActionPhase = 'loop';
@@ -4567,7 +4623,7 @@ class AnimationHandler {
                 this._currentAnimationFile = animationFile || null;
                 // Fade out previous after new is playing
                 if (prevAct && prevAct !== structured.loop) {
-                    if (_prevStructured && _prevStructured === structured) {
+                    if (_prevStructured && _prevStructured === structured && prevAct !== structured.loop.__synthCrossFadeSource) {
                         // Intra-action transition: just fade the specific previous phase
                         this._safeFadeStop(prevAct, 0.3);
                     } else {
@@ -4589,10 +4645,10 @@ class AnimationHandler {
                         this._baseIdleAction.play();
                     }
                 } catch (_e) { /* ignore */ }
+                const prevAct = this.currentAction;
                 structured.outro.setLoop(THREE.LoopOnce, 0);
                 structured.outro.clampWhenFinished = true;
-                structured.outro.reset().fadeIn(0.3).play();
-                const prevAct = this.currentAction;
+                this._playActionWithCrossFade(structured.outro, prevAct, 0.3);
                 this.currentAction = structured.outro;
                 this.currentActionName = actionName;
                 this.currentActionPhase = 'outro';
@@ -4601,7 +4657,7 @@ class AnimationHandler {
                 this._currentAnimationFile = animationFile || null;
                 // Fade out previous after new is playing
                 if (prevAct && prevAct !== structured.outro) {
-                    if (_prevStructured && _prevStructured === structured) {
+                    if (_prevStructured && _prevStructured === structured && prevAct !== structured.outro.__synthCrossFadeSource) {
                         // Intra-action transition: just fade the specific previous phase
                         this._safeFadeStop(prevAct, 0.3);
                     } else {
@@ -4629,7 +4685,7 @@ class AnimationHandler {
 
             // Start the intro immediately.
             try {
-                structured.intro.reset().fadeIn(0.3).play();
+                this._playActionWithCrossFade(structured.intro, _prevAction, 0.3);
                 this.currentAction = structured.intro;
                 this.currentActionName = actionName;
                 this.currentActionPhase = 'intro';
@@ -4690,10 +4746,7 @@ class AnimationHandler {
                                                 this._baseIdleAction.play();
                                             }
                                         } catch (_e) { /* ignore */ }
-                                        candidate.outro.reset().fadeIn(0.3).play();
-                                        // Fade out intro so it doesn't keep driving bones at its
-                                        // clamped last-frame pose while outro plays.
-                                        try { this._safeFadeStop(candidate.intro, 0.3); } catch (e) { }
+                                        this._playActionWithCrossFade(candidate.outro, candidate.intro, 0.3);
                                         this.currentAction = candidate.outro;
                                         this.currentActionName = logicalName;
                                         this.currentActionKey = key;
@@ -4706,9 +4759,7 @@ class AnimationHandler {
                                         if (loopClip) loopClip.loop = THREE.LoopRepeat;
                                         try { candidate.loop.setLoop(THREE.LoopRepeat); } catch (e) { }
                                         try { candidate.loop.clampWhenFinished = false; } catch (e) { }
-                                        try { candidate.loop.reset().fadeIn(0.3).play(); } catch (e) { }
-                                        // Fade out intro so it doesn't keep clamping at its last frame.
-                                        try { this._safeFadeStop(candidate.intro, 0.3); } catch (e) { }
+                                        try { this._playActionWithCrossFade(candidate.loop, candidate.intro, 0.3); } catch (e) { }
                                         this.currentAction = candidate.loop;
                                         this.currentActionName = logicalName;
                                         this.currentActionKey = key;
@@ -5129,15 +5180,14 @@ class AnimationHandler {
         // Start the new action first (fade in), THEN cross-fade out previous actions.
         // This guarantees the skeleton is never un-driven during transitions.
         try {
-            action.enabled = true;
-            action.reset().fadeIn(0.5).play();
+            this._playActionWithCrossFade(action, _prevAction, 0.5);
             this.currentAction = action;
             this.currentActionName = actionName;
             this._currentAnimationFile = animationFile || null;
             console.log(`[AnimationHandler] New simple action started (cross-fade in)`);
         } catch (e) {
             console.warn('[AnimationHandler] Failed to start new action:', e);
-            try { action.reset().fadeIn(0.5).play(); this.currentAction = action; } catch (ee) { /* ignore */ }
+            try { this._playActionWithCrossFade(action, _prevAction, 0.5); this.currentAction = action; } catch (ee) { /* ignore */ }
         }
 
         // Now that the new action is playing, fade out all previous actions + orphans.
@@ -5203,8 +5253,7 @@ class AnimationHandler {
                             this._baseIdleAction.play();
                         }
                     } catch (_e) { /* ignore */ }
-                    action.loop.fadeOut(0.3);
-                    action.outro.reset().fadeIn(0.3).play();
+                    this._playActionWithCrossFade(action.outro, action.loop, 0.3);
                     this.currentAction = action.outro;
                     this.currentActionPhase = 'outro';
                     return;
@@ -5221,8 +5270,7 @@ class AnimationHandler {
                             this._baseIdleAction.play();
                         }
                     } catch (_e) { /* ignore */ }
-                    action.intro.fadeOut(0.3);
-                    action.outro.reset().fadeIn(0.3).play();
+                    this._playActionWithCrossFade(action.outro, action.intro, 0.3);
                     this.currentAction = action.outro;
                     this.currentActionPhase = 'outro';
                     return;
