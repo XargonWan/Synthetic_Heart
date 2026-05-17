@@ -810,6 +810,7 @@ class SynthWebUIInterface:
         self.app.put("/api/external-endpoints/{ep_id}/model")(
             self.set_external_endpoint_model
         )
+        self.app.post("/api/database/backup")(self.create_database_backup_endpoint)
 
         # Template sections route for modular loading
         self.app.get("/templates/{section}.html")(self.serve_template_section)
@@ -924,6 +925,32 @@ class SynthWebUIInterface:
             raise
         except Exception as e:
             log_error(f"{LOG_PREFIX} create_agent_task failed: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    async def create_database_backup_endpoint(self):
+        try:
+            from core.db_backup import create_database_backup
+
+            backup_path = await create_database_backup(
+                reason="manual_webui",
+                force=True,
+            )
+            if backup_path is None:
+                raise HTTPException(
+                    status_code=500,
+                    detail="Manual database backup did not produce an output file",
+                )
+            return JSONResponse(
+                {
+                    "success": True,
+                    "path": str(backup_path),
+                    "filename": backup_path.name,
+                }
+            )
+        except HTTPException:
+            raise
+        except Exception as e:
+            log_error(f"{LOG_PREFIX} create_database_backup_endpoint failed: {e}")
             raise HTTPException(status_code=500, detail=str(e))
 
     async def pause_agent_task(self, task_id: int):
@@ -3693,22 +3720,26 @@ class SynthWebUIInterface:
     async def _ensure_session_history_loaded(self, session_id: str) -> None:
         """Load persisted chat history for the given session into self.message_history.
 
-        This uses core.chat_context_manager.load_chat_history to rehydrate memory
-        and then makes sure self.message_history references the same deque.
+        This keeps the LLM context rehydration path intact, but restores the
+        WebUI-visible session history from the persisted cache using the WebUI's
+        own max_history limit instead of the smaller prompt-context deque.
         """
         try:
-            from core.chat_context_manager import (
-                load_chat_history,
-                get_or_create_chat_context,
-            )
+            from core.chat_context_manager import load_chat_history as load_context
+            from core.chat_history_cache import load_chat_history as load_persisted
 
             interface_path = f"{INTERFACE_NAME}/{session_id}"
-            await load_chat_history(interface_path)
-            ctx = get_or_create_chat_context(interface_path)
-            # Ensure local message_history points to the same deque
-            self.message_history[session_id] = ctx
+            await load_context(interface_path)
+            persisted_history = await load_persisted(
+                interface_path,
+                limit=self.max_history,
+            )
+            self.message_history[session_id] = deque(
+                persisted_history,
+                maxlen=self.max_history,
+            )
             log_debug(
-                f"{LOG_PREFIX} Session history for {session_id} loaded, {len(ctx)} messages"
+                f"{LOG_PREFIX} Session history for {session_id} loaded, {len(self.message_history[session_id])} messages"
             )
         except Exception as e:
             log_debug(

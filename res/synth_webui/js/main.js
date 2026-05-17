@@ -2570,7 +2570,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                         }
                     } catch (e) { console.debug('[synth_webui] init: failed to render initial cortex cards', e); }
                     // Bind engineSelect change to switch engine
-                    if (!engineSelect.dataset.bound) {
+                        if (engineSelect && !engineSelect.dataset.bound) {
                         engineSelect.addEventListener('change', async () => {
                             const selected = engineSelect.value;
                             if (!selected) return;
@@ -3796,6 +3796,8 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
             function initSettingsTab() {
                 if (!window.__synth_settings_initialized) {
                     const resetBtn = document.getElementById('reset-window-positions');
+                    const backupBtn = document.getElementById('create-database-backup');
+                    const backupStatus = document.getElementById('database-backup-status');
                     if (resetBtn) {
                         resetBtn.addEventListener('click', () => {
                             try {
@@ -3833,6 +3835,31 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                                     chat.style.height = '';
                                 }
                             } catch (e) { /* ignore */ }
+                        });
+                    }
+                    if (backupBtn) {
+                        backupBtn.addEventListener('click', async () => {
+                            backupBtn.disabled = true;
+                            if (backupStatus) backupStatus.textContent = 'Creating backup…';
+                            try {
+                                const response = await fetch('/api/database/backup', {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                });
+                                const payload = await response.json().catch(() => ({}));
+                                if (!response.ok || !payload.success) {
+                                    throw new Error(payload.detail || payload.error || `HTTP ${response.status}`);
+                                }
+                                const filename = payload.filename || payload.path || 'backup completed';
+                                if (backupStatus) backupStatus.textContent = `Backup created: ${filename}`;
+                                try { if (window.showToast) window.showToast(`Database backup created: ${filename}`, false); } catch (e) { /* ignore */ }
+                            } catch (error) {
+                                const message = error && error.message ? error.message : 'Backup failed';
+                                if (backupStatus) backupStatus.textContent = `Backup failed: ${message}`;
+                                try { if (window.showToast) window.showToast(`Database backup failed: ${message}`, true); } catch (e) { /* ignore */ }
+                            } finally {
+                                backupBtn.disabled = false;
+                            }
                         });
                     }
                     initNotifications();

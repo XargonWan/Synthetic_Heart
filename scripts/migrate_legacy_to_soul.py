@@ -28,8 +28,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-import aiomysql
-
+from core.db import connect_source_db
 from core.soul.models import EmotionalTag, MemCell
 from core.soul.repository import PostgresSoulRepository
 
@@ -153,6 +152,15 @@ def _as_utc(timestamp: datetime | None) -> datetime:
     return timestamp.astimezone(UTC)
 
 
+def _seed_source_db_env(config: MigrationConfig) -> None:
+    os.environ.setdefault("SOURCE_DB_TYPE", "mariadb")
+    os.environ.setdefault("SOURCE_DB_HOST", config.maria_host)
+    os.environ.setdefault("SOURCE_DB_PORT", str(config.maria_port))
+    os.environ.setdefault("SOURCE_DB_USER", config.maria_user)
+    os.environ.setdefault("SOURCE_DB_PASSWORD", config.maria_password)
+    os.environ.setdefault("SOURCE_DB_NAME", config.maria_database)
+
+
 def _text(value: Any) -> str:
     if value is None:
         return ""
@@ -236,16 +244,8 @@ class LegacyToSoulMigrator:
     async def run(self) -> None:
         self._print_header()
 
-        maria_conn = await aiomysql.connect(
-            host=self.config.maria_host,
-            port=self.config.maria_port,
-            user=self.config.maria_user,
-            password=self.config.maria_password,
-            db=self.config.maria_database,
-            charset="utf8mb4",
-            autocommit=True,
-            cursorclass=aiomysql.DictCursor,
-        )
+        _seed_source_db_env(self.config)
+        maria_conn = await connect_source_db()
 
         repo = PostgresSoulRepository(
             dsn=self.config.soul_postgres_dsn,
@@ -276,7 +276,7 @@ class LegacyToSoulMigrator:
                 )
 
     async def _migrate_chat_history_cache(
-        self, maria_conn: aiomysql.Connection, repo: PostgresSoulRepository
+        self, maria_conn: Any, repo: PostgresSoulRepository
     ) -> None:
         print("\n[1/3] Migrating chat_history_cache ...")
         since = datetime.now() - timedelta(days=self.config.days)
@@ -330,7 +330,7 @@ class LegacyToSoulMigrator:
         print(f"  migrated: {self.stats.chat_history_cache}")
 
     async def _migrate_memories(
-        self, maria_conn: aiomysql.Connection, repo: PostgresSoulRepository
+        self, maria_conn: Any, repo: PostgresSoulRepository
     ) -> None:
         print("\n[2/3] Migrating memories ...")
         since = datetime.now() - timedelta(days=self.config.days)
@@ -401,7 +401,7 @@ class LegacyToSoulMigrator:
         print(f"  migrated: {self.stats.memories}")
 
     async def _migrate_ai_diary(
-        self, maria_conn: aiomysql.Connection, repo: PostgresSoulRepository
+        self, maria_conn: Any, repo: PostgresSoulRepository
     ) -> None:
         print("\n[3/3] Migrating ai_diary ...")
         since = datetime.now() - timedelta(days=self.config.days)

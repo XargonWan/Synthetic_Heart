@@ -33,6 +33,7 @@ System & Configuration
 ----------------------
 
 - **POST** `/api/system/restart` – restart the synth process (with confirmation).
+- **POST** `/api/database/backup` – create an immediate runtime database backup and return the generated filename/path.
 - **GET** `/api/config` – dump current configuration values.
 - **POST** `/api/config` – update a configuration entry.
 - **POST** `/api/config/{key}/upload` – upload a file for an exposed config variable.

@@ -319,17 +319,23 @@ class PostgresSoulRepository:
     _pool: Any | None = field(default=None, init=False, repr=False)
     _schema_bootstrapped: bool = field(default=False, init=False, repr=False)
 
+    def _pool_key(self) -> str:
+        return (
+            f"soul:{self.schema}:{self.min_pool_size}:{self.max_pool_size}:"
+            f"{abs(hash(self.dsn))}"
+        )
+
     async def _get_pool(self) -> Any:
         if self._pool is not None:
             return self._pool
 
-        from importlib import import_module
+        from core.db import get_named_postgres_pool
 
-        asyncpg = import_module("asyncpg")
-        self._pool = await asyncpg.create_pool(
+        self._pool = await get_named_postgres_pool(
+            pool_key=self._pool_key(),
             dsn=self.dsn,
-            min_size=self.min_pool_size,
-            max_size=self.max_pool_size,
+            minsize=self.min_pool_size,
+            maxsize=self.max_pool_size,
             server_settings={"search_path": self.schema},
         )
         await self._ensure_schema(self._pool)

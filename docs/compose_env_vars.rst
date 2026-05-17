@@ -18,8 +18,9 @@ What belongs in ``docker-compose`` vs ``.env``
 configuration surface:
 
 - container basics such as ``IMAGE_VERSION``, ``PUID``, ``PGID`` and ``TZ``
-- MariaDB connection and port values (``DB_*``, ``EXT_DB_PORT``)
-- SOUL Postgres settings (``SOUL_*``, ``EXT_SOUL_DB_PORT``)
+- PostgreSQL runtime connection and port values (``DB_*``, ``EXT_DB_PORT``)
+- legacy MySQL source values used only for first-boot migration (``SOURCE_DB_*``)
+- SOUL Postgres override settings (``SOUL_*``) when you intentionally want a separate DSN
 - WebUI port and TLS-related values (``SYNTH_WEBUI_*``)
 - Selkies / desktop credentials such as ``ROOT_PASSWORD``
 
@@ -55,28 +56,46 @@ Provider credentials:
 
 Persistence:
 
-- ``SYNTH_PRIMARY_DB`` (``memory`` -> ``DB_*`` MariaDB, ``soul`` -> ``SOUL_*`` / ``SOUL_POSTGRES_DSN``)
 - ``DB_HOST`` / ``DB_PORT`` / ``DB_USER`` / ``DB_PASS`` / ``DB_NAME``
-- ``SOUL_REPOSITORY_BACKEND``
-- ``SOUL_POSTGRES_DSN``
+- ``LEGACY_SOUL_POSTGRES_DSN`` (optional one-time SOUL migration source)
+- ``SOUL_POSTGRES_DSN`` (legacy alias for the SOUL migration source DSN)
+- ``SOURCE_DB_HOST`` / ``SOURCE_DB_PORT`` / ``SOURCE_DB_USER`` / ``SOURCE_DB_PASSWORD`` / ``SOURCE_DB_NAME``
+- ``SYNTH_DB_BACKUP_ENABLED`` / ``SYNTH_DB_BACKUP_INTERVAL_HOURS`` / ``SYNTH_BACKUPS_DIR``
 
 Primary DB selection
 --------------------
 
-Use ``SYNTH_PRIMARY_DB`` when your deployment keeps both the legacy MariaDB
-settings and the SOUL PostgreSQL settings in the same ``.env`` and you want an
-explicit, exclusive switch for the app's primary runtime database.
+The default deployment now uses a single PostgreSQL runtime database.
+``DB_*`` points at that Postgres service, and SOUL uses the same runtime DB by default.
 
-- ``SYNTH_PRIMARY_DB=memory`` forces the application to use ``DB_*`` as the
-  active MariaDB connection settings and ignores Postgres DSNs for the primary
-  runtime DB.
-- ``SYNTH_PRIMARY_DB=soul`` forces the application to use
-  ``SOUL_POSTGRES_DSN`` and optional ``SOUL_PG_*`` overrides for the active
-  PostgreSQL connection settings.
+- ``DB_*`` points at the active runtime PostgreSQL service; no extra runtime DB selector is needed in the default Docker stack.
+- SOUL persists into that same runtime Postgres automatically.
+- ``LEGACY_SOUL_POSTGRES_DSN`` can point at an older standalone SOUL Postgres so startup can import it into the runtime DB.
+- ``SOUL_POSTGRES_DSN`` remains accepted as a legacy alias for that migration source.
+- ``SOURCE_DB_*`` is only used by the first-boot migration flow that imports a
+  legacy MariaDB/MySQL deployment.
 
-If ``SYNTH_PRIMARY_DB`` is unset, the application falls back to the older
-driver-based behavior using ``SYNTH_DB_TYPE`` / ``DB_TYPE`` plus ``DB_*`` /
-``DATABASE_URL``.
+Automatic cutover and backups
+-----------------------------
+
+- Legacy MySQL → Postgres cutover is enabled by default in the Docker stack and uses ``SOURCE_DB_*`` as the preserved source.
+- Legacy standalone SOUL Postgres → runtime Postgres cutover runs first when ``LEGACY_SOUL_POSTGRES_DSN`` or its legacy alias is set.
+- ``SOURCE_DB_*`` identifies the preserved legacy MariaDB source used only for migration and verification.
+- ``SYNTH_DB_BACKUP_ENABLED=1`` enables the embedded application-owned backup scheduler.
+- ``SYNTH_DB_BACKUP_INTERVAL_HOURS=24`` controls the pg_dump cadence.
+- ``SYNTH_BACKUPS_DIR`` selects where runtime and legacy archival dumps are written inside the synth container. The WebUI Settings tab also exposes a manual backup action that writes to this same directory.
+
+Legacy migration note
+---------------------
+
+For users migrating from older Synthetic Heart installations:
+
+- ``DB_*`` now points at the active runtime PostgreSQL service. All new runtime data is written there.
+- ``SOURCE_DB_*`` is only needed when you still have a legacy MariaDB/MySQL deployment to import from. The Docker stack preserves that source service and uses it only during first-boot migration.
+- ``LEGACY_SOUL_POSTGRES_DSN`` (or legacy alias ``SOUL_POSTGRES_DSN``) is optional and used only when you have an older standalone SOUL PostgreSQL database that should be imported into the new runtime DB.
+- If both legacy sources are configured, the SOUL Postgres import runs first, then the legacy MariaDB migration.
+- After migration, the application continues using the runtime Postgres database from ``DB_*``; the legacy source settings are not used for normal operation.
+- The legacy containers/services are preserved for verification and rollback, but the application no longer writes new runtime state to them.
 
 Observability:
 

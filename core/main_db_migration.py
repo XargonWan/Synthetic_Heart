@@ -9,6 +9,8 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+from core.db import build_runtime_postgres_dsn, connect_postgres_dsn, connect_source_db
+
 
 def _optional_import(module_name: str) -> Any:
     try:  # pragma: no cover - import guard
@@ -131,31 +133,18 @@ def build_default_migration_config() -> MainDbMigrationConfig:
             )
             or "synth"
         )
-        soul_postgres_dsn = (
-            config_registry.get_value(
-                "SOUL_POSTGRES_DSN",
-                "",
-                label="SOUL Postgres DSN",
-                description="PostgreSQL DSN used when the SOUL repository backend is postgres.",
-                value_type=str,
-                group="plugins",
-                component="soul_plugin",
-            )
-            or ""
-        )
     except Exception:
         db_host = "localhost"
         db_port = 3306
         db_user = "synth"
         db_pass = "synth"
         db_name = "synth"
-        soul_postgres_dsn = ""
 
     target_dsn = (
         os.getenv("TARGET_POSTGRES_DSN")
         or os.getenv("DATABASE_URL")
         or os.getenv("APP_POSTGRES_DSN")
-        or soul_postgres_dsn
+        or build_runtime_postgres_dsn()
         or ""
     )
     return MainDbMigrationConfig(
@@ -811,21 +800,26 @@ class MainDbMigrator:
             raise RuntimeError("asyncpg is required to write the PostgreSQL target")
         if requires_target and not self.config.target_dsn:
             raise RuntimeError(
-                "Target PostgreSQL DSN is empty. Set TARGET_POSTGRES_DSN, DATABASE_URL, APP_POSTGRES_DSN, or SOUL_POSTGRES_DSN."
+                "Target PostgreSQL DSN is empty. Set TARGET_POSTGRES_DSN, DATABASE_URL, or APP_POSTGRES_DSN."
             )
 
-        source_conn = await aiomysql.connect(
-            host=self.config.source_host,
-            port=self.config.source_port,
-            user=self.config.source_user,
-            password=self.config.source_password,
-            db=self.config.source_database,
-            charset="utf8mb4",
-            autocommit=True,
-            cursorclass=aiomysql.DictCursor,
-        )
+        source_env = {
+            "SOURCE_DB_TYPE": "mariadb",
+            "SOURCE_DB_HOST": str(self.config.source_host),
+            "SOURCE_DB_PORT": str(self.config.source_port),
+            "SOURCE_DB_USER": str(self.config.source_user),
+            "SOURCE_DB_PASSWORD": str(self.config.source_password),
+            "SOURCE_DB_NAME": str(self.config.source_database),
+        }
+        original_source_env = {key: os.environ.get(key) for key in source_env}
+        for key, value in source_env.items():
+            os.environ[key] = value
+
+        source_conn = await connect_source_db()
         target_conn = (
-            await asyncpg.connect(self.config.target_dsn) if requires_target else None
+            await connect_postgres_dsn(self.config.target_dsn)
+            if requires_target
+            else None
         )
 
         try:
@@ -852,6 +846,11 @@ class MainDbMigrator:
             source_conn.close()
             if target_conn is not None:
                 await target_conn.close()
+            for key, value in original_source_env.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
 
     async def _apply_schema(self, target_conn: Any) -> None:
         schema_sql = load_app_postgres_schema(self.config.schema_path)

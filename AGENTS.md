@@ -807,6 +807,22 @@ docker exec synth-dev tail -f /app/logs/synth.log | grep -E "\[grillo\]|grillo"
 
 ---
 
+### Orphan `synth-soul-db` can block the Postgres-first runtime on port 5432  <!-- 2026-05-11 -->
+**Symptom:** The browser can show `Unsafe attempt to load URL https://localhost:8000/ from frame with URL chrome-error://chromewebdata/`, `curl -kI https://localhost:8000` fails with TLS EOF / broken pipe, and `synth` logs loop on startup with `Legacy DB cutover failed: [Errno -2] Name or service not known`.
+**Location:** Docker Compose runtime state after switching to the Postgres-first stack; stale orphan containers such as `synth-soul-db` and `synth-db-backup` can survive from the older topology.
+**Status:** known / operational workaround.
+**Notes:** In the observed failure, the current `synth-db` service could not bind host port `5432` because orphan `synth-soul-db` still owned it. `docker compose up -d --force-recreate synth-db synth` then left `synth` and `synth-legacy-db` on `synth_network` while `synth-db` never came up correctly, so `synth` could resolve `synth-legacy-db` but not `synth-db`. Safe recovery was: stop the orphan containers without deleting volumes, then rerun `docker compose up -d --force-recreate synth-db synth`. After that, `docker exec synth getent hosts synth-db synth-legacy-db` resolved both hosts and `https://localhost:8000` returned `200 OK` again.
+
+---
+
+### Stale `synth` image after branch switch can keep the old MySQL code path  <!-- 2026-05-11 -->
+**Symptom:** On `feat/postgres-migration`, `synth-db` (Postgres) is healthy and `docker compose config` resolves `DB_HOST=synth-db` / `DB_PORT=5432`, but WebUI still fails with TLS EOF and `synth` logs show `aiomysql` errors such as `OperationalError(2013, 'Lost connection to MySQL server during query')` or `Can't connect to MySQL server on 'synth-db'`.
+**Location:** Docker runtime / rebuilt state of the `synth` application container after changing branches.
+**Status:** known / operational workaround.
+**Notes:** The running `synth` container can still contain code from the previous branch even though the workspace and compose file are already on the Postgres migration branch. In the observed case, `/app/core/db.py` inside the live container still defaulted `_get_db_type()` to `mariadb`, while the workspace version defaulted to `postgres`. Safe recovery was: `docker compose up -d --build synth`, then verify the live container code and recheck `https://localhost:8000`.
+
+---
+
 ### Repo-wide lint still has unrelated failures, but broad pytest is green  <!-- 2026-05-07 -->
 **Symptom:** `uv run ruff check --fix .` can still fail on pre-existing files outside most feature slices (observed in `interface/message_send_utils.py`, `interface_dev/reddit_interface.py`, `interface_dev/telethon_userbot.py`, `interface_dev/x_interface.py`, `plugins/bio_manager.py`), but broad `uv run pytest --ignore=tests/plugins/test_selenium_ttsfree.py -q --disable-warnings` passed on `2026-05-07` with `1185 passed, 15 skipped`.
 **Location:** Mixed pre-existing validation debt across interfaces, plugins, and broad regression suite.
@@ -932,6 +948,22 @@ docker exec synth-dev tail -f /app/logs/synth.log | grep -E "\[grillo\]|grillo"
 **Location:** `interface/telegram_bot.py` throughout.
 **Status:** known, not fixed — all pre-existing before any session modifications.
 **Notes:** These are python-telegram-bot optional-chaining patterns that `ty` doesn't resolve without stub annotations. Any agent editing this file will see the same errors and should confirm via `git diff` that their change is limited to a single line before concluding the errors are pre-existing.
+
+---
+
+### `core/webui.py` has broad pre-existing `ty check` noise  <!-- 2026-05-11 -->
+**Symptom:** `uv run ty check core/webui.py` emits a long list of pre-existing diagnostics such as Starlette middleware callable mismatches, unresolved animation-handler attributes on stub unions, optional persona-manager attribute access, and deprecated `datetime.utcnow()` usage.
+**Location:** `core/webui.py` throughout.
+**Status:** known, not fixed.
+**Notes:** During the manual-backup WebUI work, `get_errors` stayed clean for the touched backup route/button code, but scoped `ty` still reported many unrelated historical issues across the file. Validate local WebUI edits with focused tests plus `get_errors`, and do not assume fresh `ty` noise in this file came from a small endpoint/template change.
+
+---
+
+### WebUI startup history replay could show the oldest prompt-context window instead of the recent chat  <!-- 2026-05-11 -->
+**Symptom:** After a restart, the WebUI could appear to have "lost" chat history even though `chat_history_cache` still contained the messages. Logs showed lines like `[context_manager] Loaded 10 messages for interface_path synth_webui/webui_default` and `[synth_webui] _replay_history: sent 10 messages ...`, but the replayed window reflected the oldest cached rows or only the smaller prompt-context deque.
+**Location:** `core/chat_history_cache.py` (`load_chat_history` ordering/limit), `core/webui.py` (`_ensure_session_history_loaded`), and `core/chat_context_manager.py` (prompt-context deque size).
+**Status:** fixed.
+**Notes:** Two separate issues combined here: `load_chat_history()` fetched `ORDER BY timestamp ASC LIMIT N`, which returned the oldest N rows instead of the most recent N, and WebUI startup bound `self.message_history` to the context-manager deque whose default maxlen is 10 even though the WebUI can hold far more. The fix now fetches the most recent N rows then reorders them chronologically, and WebUI rehydrates its visible history directly from persisted cache with `self.max_history` while still loading the smaller prompt context separately.
 
 ---
 

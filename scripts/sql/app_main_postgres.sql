@@ -304,3 +304,24 @@ CREATE TABLE IF NOT EXISTS archived_memories (
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_archived_memories_created_at ON archived_memories (created_at DESC);
+
+CREATE TABLE IF NOT EXISTS llm_failure_log (
+    id BIGSERIAL PRIMARY KEY,
+    failure_code TEXT NOT NULL,
+    stage TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    interface_path TEXT,
+    chat_id TEXT,
+    thread_id TEXT,
+    engine TEXT,
+    model TEXT,
+    message_id TEXT,
+    content_preview TEXT,
+    metadata TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_failure_created_at ON llm_failure_log (created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_failure_code ON llm_failure_log (failure_code);
+CREATE INDEX IF NOT EXISTS idx_failure_stage ON llm_failure_log (stage);
+CREATE INDEX IF NOT EXISTS idx_failure_interface_path ON llm_failure_log (interface_path);
+CREATE INDEX IF NOT EXISTS idx_failure_engine ON llm_failure_log (engine);

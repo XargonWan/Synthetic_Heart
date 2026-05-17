@@ -15,6 +15,13 @@ from core.soul.models import EmotionalProfile, EmotionalTag, MemCell, MemCellRec
 from core.soul.repository import InMemorySoulRepository, PostgresSoulRepository
 
 
+@pytest.fixture(autouse=True)
+def _default_soul_plugin_tests_to_memory(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("SYNTH_PRIMARY_DB", raising=False)
+    monkeypatch.delenv("SOUL_POSTGRES_DSN", raising=False)
+    monkeypatch.setenv("SYNTH_DB_TYPE", "mariadb")
+
+
 def test_soul_plugin_is_enabled_uses_config_gate() -> None:
     plugin = SoulPlugin.__new__(SoulPlugin)
 
@@ -23,6 +30,45 @@ def test_soul_plugin_is_enabled_uses_config_gate() -> None:
 
     with patch.object(SoulPlugin, "_is_enabled", return_value=True):
         assert plugin.is_enabled() is True
+
+
+@pytest.mark.asyncio
+async def test_postgres_repository_pool_flows_through_core_db(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = PostgresSoulRepository(
+        dsn="postgresql://user:pass@db.example/synth",
+        schema="public",
+        min_pool_size=2,
+        max_pool_size=7,
+    )
+    fake_pool = object()
+    captured: dict[str, Any] = {}
+
+    async def _fake_get_named_postgres_pool(**kwargs: Any) -> Any:
+        captured.update(kwargs)
+        return fake_pool
+
+    monkeypatch.setattr(
+        "core.db.get_named_postgres_pool", _fake_get_named_postgres_pool
+    )
+
+    with patch.object(
+        PostgresSoulRepository,
+        "_ensure_schema",
+        new=AsyncMock(),
+    ) as ensure_schema:
+        pool = await repo._get_pool()
+        cached_pool = await repo._get_pool()
+
+    assert pool is fake_pool
+    assert cached_pool is fake_pool
+    assert captured["dsn"] == repo.dsn
+    assert captured["minsize"] == 2
+    assert captured["maxsize"] == 7
+    assert captured["server_settings"] == {"search_path": "public"}
+    assert captured["pool_key"].startswith("soul:public:2:7:")
+    ensure_schema.assert_awaited_once_with(fake_pool)
 
 
 @pytest.mark.asyncio
@@ -316,6 +362,27 @@ def test_repository_backend_postgres_selected(monkeypatch: pytest.MonkeyPatch) -
     plugin = SoulPlugin()
 
     assert isinstance(plugin._repo, PostgresSoulRepository)
+
+
+def test_build_embedder_uses_runtime_repository_backend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plugin = SoulPlugin.__new__(SoulPlugin)
+
+    class _FakeEmbedder:
+        def __init__(self, *, model_id: str) -> None:
+            self.model_id = model_id
+
+    monkeypatch.setattr(
+        SoulPlugin, "_get_repository_backend", staticmethod(lambda: "postgres")
+    )
+    monkeypatch.setattr("importlib.util.find_spec", lambda name: object())
+    monkeypatch.setattr("plugins.soul_plugin.FastEmbedder", _FakeEmbedder)
+
+    embedder = SoulPlugin._build_embedder(plugin)
+
+    assert isinstance(embedder, _FakeEmbedder)
+    assert embedder.model_id == "BAAI/bge-base-en-v1.5"
 
 
 def test_repository_backend_postgres_falls_back_without_dsn(

@@ -24,7 +24,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates \
       openssl \
       htop net-tools iputils-ping \
-      ffmpeg mariadb-client libmariadb-dev \
+  ffmpeg mariadb-client libmariadb-dev postgresql-client \
       espeak \
       xz-utils \
     && rm -rf /var/lib/apt/lists/* \

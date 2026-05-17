@@ -219,6 +219,16 @@ if __name__ == "__main__":
                     f"[main] Attempting database connection (attempt {attempt + 1}/{max_retries})..."
                 )
 
+                try:
+                    from core.db_cutover import resume_legacy_mysql_cutover_if_needed
+
+                    migrated = await resume_legacy_mysql_cutover_if_needed()
+                    if migrated:
+                        log_info("[main] Legacy MySQL to Postgres cutover completed")
+                except Exception as e:
+                    log_error(f"[main] Legacy DB cutover failed: {e}")
+                    raise
+
                 # Initialize database async
                 if await initialize_database():
                     break
@@ -237,6 +247,14 @@ if __name__ == "__main__":
                         f"[main] Critical error during database initialization after {max_retries} attempts: {e}"
                     )
                     sys.exit(1)
+
+        try:
+            from core.db_backup import start_database_backup_scheduler
+
+            if start_database_backup_scheduler() is not None:
+                log_info("[main] Embedded database backup scheduler started")
+        except Exception as e:
+            log_warning(f"[main] Failed to start database backup scheduler: {e}")
 
         while True:
             _restart_requested = False
