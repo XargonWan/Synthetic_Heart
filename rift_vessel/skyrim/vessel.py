@@ -78,56 +78,32 @@ SKYRIM_ACTIONS: dict[str, dict[str, Any]] = {
             "item": {"type": "string", "description": "Item name or ID"},
         },
     },
-    "game_skyrim_dialog": {
-        "required_fields": ["npc"],
-        "description": "Start or continue dialog with an NPC.",
+    "game_skyrim_follow": {
+        "description": "Follow the player or a target NPC.",
         "parameters": {
-            "npc": {"type": "string", "description": "NPC name or ID"},
-            "topic": {
+            "target": {
                 "type": "string",
-                "description": "Dialog topic or keyword to use",
+                "description": "Who to follow (defaults to player)",
             },
         },
     },
-    "game_skyrim_move": {
+    "game_skyrim_wait": {
+        "description": "Wait at the current location until dismissed.",
+        "parameters": {
+            "hours": {
+                "type": "number",
+                "description": "Approximate hours to wait (1-24)",
+            },
+        },
+    },
+    "game_skyrim_move_to": {
         "required_fields": ["location"],
-        "description": "Move/walk to a specified location or follow an NPC.",
+        "description": "Move to a specified location or follow a target.",
         "parameters": {
             "location": {
                 "type": "string",
                 "description": "Location name or map marker",
             },
-            "sprint": {
-                "type": "boolean",
-                "description": "Sprint if true",
-                "default": False,
-            },
-        },
-    },
-    "game_skyrim_quick_save": {
-        "description": "Create a quicksave.",
-    },
-    "game_skyrim_quick_load": {
-        "description": "Load the most recent quicksave.",
-    },
-    "game_skyrim_wait": {
-        "required_fields": ["hours"],
-        "description": "Wait/skip time.",
-        "parameters": {
-            "hours": {
-                "type": "number",
-                "description": "Hours to wait (1-24)",
-            },
-        },
-    },
-    "game_skyrim_open_map": {
-        "description": "Open the world map.",
-    },
-    "game_skyrim_fast_travel": {
-        "required_fields": ["location"],
-        "description": "Fast travel to a discovered location.",
-        "parameters": {
-            "location": {"type": "string", "description": "Discovered location name"},
         },
     },
 }

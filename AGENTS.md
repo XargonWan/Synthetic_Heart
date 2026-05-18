@@ -143,7 +143,7 @@ SyntH uses **Rift Vessels** to embody itself inside game worlds (Skyrim, VRChat,
 | **Base** | `rift_vessel/rift_vessel_base.py` | `RiftVesselBase(ABC)` — `get_interface_id()`, `execute_game_action()`, `send_world_state()` |
 | **Bridge** | `rift_vessel/bridge.py` | `RiftVesselBridge` — aggregates vessels, routes actions, provides world state |
 | **Package init** | `rift_vessel/__init__.py` | Calls `register_in_interface_registry()` at import time |
-| **Skyrim** | `rift_vessel/skyrim/vessel.py` | `SkyrimVessel(RiftVesselBase)` — 13 `game_skyrim_*` actions |
+| **Skyrim** | `rift_vessel/skyrim/vessel.py` | `SkyrimVessel(RiftVesselBase)` — 9 `game_skyrim_*` actions |
 | **VRChat** | `rift_vessel/vrchat/vessel.py` | `VRChatVessel(RiftVesselBase)` — 10 `game_vrchat_*` actions |
 | **Minecraft** | `rift_vessel/minecraft/vessel.py` | Phase 0 stub — scheletro |
 | **Hytale** | `rift_vessel/hytale/vessel.py` | Phase 0 stub — scheletro |
