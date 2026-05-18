@@ -194,6 +194,13 @@ class CoreInitializer:
             # 2. Load generic plugins (this may load additional plugins)
             self._load_plugins()
 
+            # 2.05. Load Rift Vessel implementations (game-world adapters)
+            try:
+                self._load_vessels()
+                log_debug("[core_initializer] Rift Vessel loading completed")
+            except Exception as e:
+                log_warning(f"[core_initializer] Rift Vessel loading failed: {e}")
+
             # 2.1 Ensure plugin-managed DB tables exist (preflight)
             try:
                 from core.db import ensure_plugin_tables
@@ -743,7 +750,7 @@ class CoreInitializer:
 
         root_dir = Path(__file__).parent.parent
         # Include cortex locations; legacy paths are removed
-        search_dirs = ["plugins", "cortex", "interface"]
+        search_dirs = ["plugins", "cortex", "interface", "rift_vessel"]
 
         # If dev components are enabled, also scan dev directories
         if self._enable_dev_components:
@@ -902,6 +909,63 @@ class CoreInitializer:
                         f"[core_initializer] Failed to start plugin {module_name}: {repr(e)}"
                     )
                     self.startup_errors.append(f"Plugin {module_name}: {e}")
+
+    def _load_vessels(self):
+        """Discover and load Rift Vessel implementations from rift_vessel/*/vessel.py.
+
+        Each vessel module should define ``VESSEL_CLASS`` — a subclass of
+        ``RiftVesselBase``.  The method instantiates it and registers it
+        with the Rift Vessel bridge.
+        """
+        from rift_vessel.bridge import register_vessel
+
+        root_dir = Path(__file__).parent.parent
+        vessels_dir = root_dir / "rift_vessel"
+        if not vessels_dir.exists():
+            return
+
+        for subdir in sorted(vessels_dir.iterdir()):
+            if not subdir.is_dir() or subdir.name.startswith("_"):
+                continue
+            vessel_file = subdir / "vessel.py"
+            if not vessel_file.exists():
+                continue
+
+            module_name = f"rift_vessel.{subdir.name}.vessel"
+            try:
+                module = importlib.import_module(module_name)
+            except Exception as e:
+                log_warning(
+                    f"[core_initializer] Failed to import vessel {module_name}: {e}"
+                )
+                self.startup_errors.append(f"Vessel {module_name}: {e}")
+                continue
+
+            vessel_class = getattr(module, "VESSEL_CLASS", None)
+            if vessel_class is None:
+                log_debug(
+                    f"[core_initializer] No VESSEL_CLASS in {module_name}, skipping"
+                )
+                continue
+
+            try:
+                instance = vessel_class()
+                register_vessel(subdir.name, instance)
+                log_info(
+                    f"[core_initializer] Loaded vessel: {subdir.name} ({vessel_class.__name__})"
+                )
+                self.track_component(
+                    subdir.name,
+                    "vessel",
+                    ComponentStatus.SUCCESS,
+                    actions=list(instance.get_supported_actions().keys()),
+                    details=f"Rift Vessel: {vessel_class.__name__}",
+                )
+            except Exception as e:
+                log_warning(
+                    f"[core_initializer] Failed to instantiate vessel {subdir.name}: {e}"
+                )
+                self.startup_errors.append(f"Vessel {subdir.name}: {e}")
 
     async def _initialize_persona_manager(self):
         """Initialize the core persona manager and await async init."""

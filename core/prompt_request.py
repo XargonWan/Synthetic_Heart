@@ -108,6 +108,7 @@ class PromptRequest:
     runtime_ctx: RuntimeContext = field(default_factory=RuntimeContext)
     attachments: list[Attachment] = field(default_factory=list)
     reply_to: dict[str, Any] | None = None
+    world_state: Any | None = None  # WorldState from rift_vessel.schema
 
     # --- Engine-set flags ---
     supports_tool_calling: bool = False

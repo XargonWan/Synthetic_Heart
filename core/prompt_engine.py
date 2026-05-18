@@ -460,6 +460,10 @@ def _build_context_summary(
     if _time_lines:
         parts.append("[Ambient runtime context]\n" + "\n".join(_time_lines))
 
+    rift_world_state = str(context_section.get("rift_world_state") or "").strip()
+    if rift_world_state:
+        parts.append("[Embodied world state]\n" + rift_world_state)
+
     persona_preferences = str(context_section.get("persona_preferences") or "").strip()
     if persona_preferences:
         parts.append("[Persona background]\n" + persona_preferences)
@@ -851,6 +855,7 @@ def _assemble_prompt_request(  # noqa: PLR0913
     image_data: dict[str, Any] | None,
     attachments: list[Any] | None,
     allowed_action_types: set[str] | None,
+    world_state: Any | None = None,
 ) -> Any:  # -> PromptRequest
     """Build a ``PromptRequest`` from the fully-assembled prompt data.
 
@@ -1010,6 +1015,7 @@ def _assemble_prompt_request(  # noqa: PLR0913
         reply_to=reply_to_dict,
         supports_tool_calling=False,  # engines set this when they opt-in
         mode=mode,
+        world_state=world_state,
     )
 
 
@@ -1329,6 +1335,44 @@ async def build_prompt_request(
         raw_entries = context_section.get(key)
         if isinstance(raw_entries, list):
             context_section[key] = _sanitize_context_entries(raw_entries, kind=kind)
+
+    # === World State (Rift Vessel) — fetch early for memory injection ===
+    _world_state: Any | None = None
+    if interface_path:
+        try:
+            from rift_vessel.bridge import get_world_state
+
+            _world_state = await get_world_state(interface_path)
+        except Exception:
+            pass
+
+    if _world_state is not None:
+        try:
+            world_block = _world_state.to_prompt_block()
+            context_section["rift_world_state"] = world_block
+        except Exception as _ws_exc:
+            log_debug(f"[json_prompt] World state injection failed: {_ws_exc}")
+
+        try:
+            env = getattr(_world_state, "environment", None)
+            if env:
+                from core.synth_core_memory import search_memories
+
+                env_memories = await search_memories(
+                    environment=env, limit=3, include_chat=False
+                )
+                if env_memories:
+                    context_section["memories"] = _merge_memory_entries(
+                        list(context_section.get("memories") or []),
+                        env_memories,
+                    )
+                    log_debug(
+                        f"[json_prompt] Merged {len(env_memories)} environment-tagged memories for '{env}'"
+                    )
+        except Exception as _env_exc:
+            log_debug(
+                f"[json_prompt] Environment-tagged memory merge failed: {_env_exc}"
+            )
 
     # Determine message input source for the LLM ("voice" | "text").
     # Only mark as voice for the *current* message; never stored in chat_history,
@@ -1696,6 +1740,7 @@ async def build_prompt_request(
             image_data=image_data,
             attachments=attachments,
             allowed_action_types=allowed_action_types_for_prompt,
+            world_state=_world_state,
         )
         log_debug("[json_prompt] PromptRequest assembled and attached")
     except Exception as _pr_exc:

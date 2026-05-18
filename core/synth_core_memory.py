@@ -111,8 +111,13 @@ async def search_memories(
     keywords: list[str] | None = None,
     include_chat: bool = True,
     limit: int = 5,
+    environment: str | None = None,
 ) -> list[dict]:
     """Unified memory search across memories, diary, and chat history.
+
+    When *environment* is set (e.g. ``"skyrim"``), an implicit
+    ``environment:<env>`` tag is added to the search so only memories
+    tagged with that game world are returned.
 
     Returns normalized hits:
     {"source", "id", "timestamp", "snippet", "tags"}
@@ -120,6 +125,11 @@ async def search_memories(
 
     tags = [str(t).strip() for t in (tags or []) if str(t).strip()]
     keywords = [str(k).strip() for k in (keywords or []) if str(k).strip()]
+
+    if environment:
+        env_tag = f"environment:{environment}"
+        if env_tag not in tags:
+            tags.append(env_tag)
 
     if not tags and not keywords:
         return []

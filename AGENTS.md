@@ -19,7 +19,7 @@
                   │              core/                    │
                   │  message chain · action parser · DB   │
                   │  validation · dispatcher · notifier   │
-                  └──┬──────────┬──────────────┬─────────┘
+                  └──┬──────────┬──────────────┬─────────┐
                      │          │              │
               ┌──────┴───┐  ┌───┴────┐   ┌─────┴──────┐
               │ plugins/ │  │ cortex/│   │ interface/ │
@@ -28,7 +28,13 @@
               │ agents   │  │        │   │ Discord    │
               │          │  │ Gemini │   │ Matrix     │
               └──────────┘  │ GPT …  │   │ Ollama API │
-                            └────────┘   └────────────┘
+                            └────────┘   └──────┬─────┘
+                                                │
+                                         ┌──────┴──────┐
+                                         │ rift_vessel/│
+                                         │ Skyrim      │
+                                         │ VRChat      │
+                                         └─────────────┘
 ```
 
 | Layer | Location | Purpose |
@@ -37,6 +43,7 @@
 | **Plugins** | `plugins/` | Provide actions via `get_supported_actions()`. Subclass `PluginBase` or `AIPluginBase`. |
 | **LLM Engines** | `cortex/`, `llm_engines/` | Interchangeable reasoning backends. Subclass `AIPluginBase`. |
 | **Interfaces** | `interface/` | I/O adapters (Telegram, Discord, Matrix, Ollama compat). Register actions via `get_supported_actions()`. |
+| **Rift Vessels** | `rift_vessel/` | Game-world embodiment adapters. Subclass `RiftVesselBase`. Auto-discovered at startup. |
 
 **Golden rule:** removing any plugin, engine, or interface must not break the rest of the system.
 
@@ -119,6 +126,60 @@ Engine authors subclass `IrisEngineBase` and set `ENGINE_CLASS = MyEngine` at mo
 from core.iris_registry import register_iris_engine
 register_iris_engine("my_engine", __name__, capabilities={"vision": True}, label="My vision engine")
 ```
+
+---
+
+## 5b. Rift Vessel — Game-World Embodiment
+
+SyntH uses **Rift Vessels** to embody itself inside game worlds (Skyrim, VRChat, Godot). Each vessel is a `RiftVesselBase` adapter that:
+
+- Registers `game_*` action types via `get_supported_actions()` — the action parser routes them through the **RiftVesselBridge** registered in `INTERFACE_REGISTRY` as `rift_vessel_bridge`.
+- Provides structured world state (`WorldState` dataclass) → injected into the prompt context as `rift_world_state`.
+- Filters memory recall by `environment:<name>` tags when world state is active (Phase 2 — memory continuity).
+
+| Component | Location | Purpose |
+|-----------|----------|---------|
+| **Schema** | `rift_vessel/schema.py` | `WorldState`, `WorldEvent`, `EntityRef`, `ActionDef` dataclasses |
+| **Base** | `rift_vessel/rift_vessel_base.py` | `RiftVesselBase(ABC)` — `get_interface_id()`, `execute_game_action()`, `send_world_state()` |
+| **Bridge** | `rift_vessel/bridge.py` | `RiftVesselBridge` — aggregates vessels, routes actions, provides world state |
+| **Package init** | `rift_vessel/__init__.py` | Calls `register_in_interface_registry()` at import time |
+| **Skyrim** | `rift_vessel/skyrim/vessel.py` | `SkyrimVessel(RiftVesselBase)` — 13 `game_skyrim_*` actions |
+| **VRChat** | `rift_vessel/vrchat/vessel.py` | `VRChatVessel(RiftVesselBase)` — 10 `game_vrchat_*` actions |
+| **Minecraft** | `rift_vessel/minecraft/vessel.py` | Phase 0 stub — scheletro |
+| **Hytale** | `rift_vessel/hytale/vessel.py` | Phase 0 stub — scheletro |
+
+### Execution Flow
+
+1. LLM emits `{"type": "game_skyrim_attack", "payload": {"target": "dragon", "interface_path": "skyrim/player"}}`
+2. `action_parser.run_action()` → `_handle_plugin_action()`
+3. `_plugins_for("game_skyrim_attack")` finds `rift_vessel_bridge` in `INTERFACE_REGISTRY`
+4. Bridge's `execute_action()` → `bridge.execute_game_action()` → routes to `SkyrimVessel.execute_game_action()`
+
+### World State → Prompt Pipeline
+
+1. `prompt_engine.build_prompt_request()` fetches `get_world_state(interface_path)` after history/context assembly
+2. Injects `context_section["rift_world_state"]` → rendered by `_build_context_summary()` as `[Embodied world state]`
+3. Also passes `world_state` into `PromptRequest.world_state` for typed engines (Gemini, etc.)
+4. Environment-tagged memories (`environment:skyrim`) are merged into context when world state is active
+
+### Adding a New Vessel
+
+```python
+# rift_vessel/my_game/vessel.py
+from rift_vessel.rift_vessel_base import RiftVesselBase
+
+class MyGameVessel(RiftVesselBase):
+    def get_interface_id(self) -> str:
+        return "my_game"
+    def get_supported_actions(self) -> dict:
+        return {"game_my_action": {"required_fields": ["x"], "description": "..."}}
+    async def execute_game_action(self, action: str, params: dict) -> dict:
+        ...
+
+VESSEL_CLASS = MyGameVessel
+```
+
+The vessel is auto-discovered by `CoreInitializer._load_vessels()` at startup.
 
 ---
 
@@ -972,6 +1033,14 @@ docker exec synth-dev tail -f /app/logs/synth.log | grep -E "\[grillo\]|grillo"
 **Location:** Runtime observability split across `logs/synth*`, `grillo_activity_log`, `chat_history_cache`, `core/external_endpoints/adapters/gemini_adapter.py`, and `core/plugin_instance.py` (`_update_grillo_response`).
 **Status:** fixed.
 **Notes:** After a restart, the current synth logs may no longer cover the user-reported window, so check `grillo_activity_log` plus `chat_history_cache` for the target `interface_path` before assuming the scheduler stalled. Successful outreach leaves a self-authored chat-history row near the activity timestamp. Blank outreach rows were caused by empty external-model replies being dropped twice: `handle_incoming_message()` skipped Grillo write-back for falsey results and `_update_grillo_response()` also returned early on empty text. The Grillo path now persists a diagnostic `[EMPTY LLM RESPONSE] ...` marker with engine / finish / block metadata when the visible reply is empty, so scheduler issues and safety-filtered model silences are distinguishable in the DB.
+
+---
+
+### Python 3.14 dataclass field ordering  <!-- 2026-05-18 -->
+**Symptom:** `TypeError: non-default argument '<field>' follows default argument '<field>'` during import of a module that defines a dataclass with fields out of order.
+**Location:** Any new or modified `@dataclass` — `rift_vessel/schema.py` initially hit this.
+**Status:** by design (Python 3.14+ enforced).
+**Notes:** Python 3.14 enforces that fields without defaults must be declared before fields with defaults in a `@dataclass`. The `WorldState` class in `rift_vessel/schema.py` needed `entity_id: str` moved above `timestamp: datetime = field(...)` to satisfy this. Any agent adding new fields to a dataclass must respect this ordering.
 
 ---
 
