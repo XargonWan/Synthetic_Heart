@@ -89,9 +89,9 @@ async def test_build_json_prompt_includes_recon_contributions(monkeypatch):
 
     # Recon memories should be merged into top-level memories
     memories = ctx.get("memories", [])
-    assert any(
-        isinstance(m, str) and m == "important memory" for m in memories
-    ), "recon memory should appear in top-level memories"
+    assert any(isinstance(m, str) and m == "important memory" for m in memories), (
+        "recon memory should appear in top-level memories"
+    )
 
     # Instructions should include language and tone prefixes
     instr = prompt.get("instructions", "")

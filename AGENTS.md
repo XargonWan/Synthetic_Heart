@@ -181,6 +181,23 @@ VESSEL_CLASS = MyGameVessel
 
 The vessel is auto-discovered by `CoreInitializer._load_vessels()` at startup.
 
+### SKSE Mod Files (`rift_vessel/skyrim/mod/`)
+
+The Skyrim vessel includes a companion SKSE mod that provides the in-game NPC. Files live under `rift_vessel/skyrim/mod/`:
+
+| Path | Purpose |
+|------|---------|
+| `SKSE/src/SynthRiftVessel.cpp` | SKSE plugin entry — named-pipe IPC server, Papyrus bindings |
+| `SKSE/src/IpcServer.h` / `.cpp` | Background IPC thread (Win32 named pipe / Unix socket for Proton) |
+| `SKSE/src/WorldState.h` | Skyrim `WorldState` struct with health, location, nearby actors → JSON |
+| `SKSE/src/Config.h` | IPC protocol constants |
+| `SKSE/CMakeLists.txt` | CMake build (requires `commonlibsse-ng` via vcpkg) |
+| `Scripts/Source/SynthRiftVessel.psc` | Papyrus quest script — polling loop, action dispatch |
+| `README.md` | Full build, install, and test instructions |
+| `Docs/CREATE_NPC_GUIDE.md` | (coming soon) Creation Kit walk-through |
+
+The SKSE DLL opens `\\.\pipe\SynthRiftVessel` (Windows) or `/tmp/synth-rift-vessel.sock` (Proton) and speaks line‑delimited JSON. See `rift_vessel/skyrim/mod/README.md` for build prerequisites and testing steps.
+
 ---
 
 ## 6. Interfaces
