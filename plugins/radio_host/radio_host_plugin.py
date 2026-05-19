@@ -58,50 +58,6 @@ register_exposed_var(
     component="radio_host",
 )
 
-register_exposed_var(
-    "RADIO_HOST_VOX_ENGINE",
-    label="Radio Host TTS Engine",
-    default="",
-    value_type=str,
-    ui_type="string",
-    description="Vox engine for on-air voice (leave empty to inherit default)",
-    scope="plugins",
-    component="radio_host",
-)
-
-register_exposed_var(
-    "RADIO_HOST_POLL_INTERVAL_S",
-    label="Track Poll Interval (s)",
-    default=15,
-    value_type=int,
-    ui_type="number",
-    description="How often to poll AzuraCast for track changes",
-    scope="plugins",
-    component="radio_host",
-)
-
-register_exposed_var(
-    "RADIO_HOST_INTERMISSION",
-    label="Songs Between Comments",
-    default=1,
-    value_type=int,
-    ui_type="number",
-    description="Number of songs to play before Synth speaks (1 = every song)",
-    scope="plugins",
-    component="radio_host",
-)
-
-register_exposed_var(
-    "RADIO_HOST_LISTENER_HISTORY",
-    label="Listener History Count",
-    default=5,
-    value_type=int,
-    ui_type="number",
-    description="How many recent listener messages to include for context",
-    scope="plugins",
-    component="radio_host",
-)
-
 INTERNAL_CHAT_ID = -2
 BEAT_PENDING_FLAG = "_radio_beat_pending"
 
@@ -118,8 +74,6 @@ class RadioHostPlugin:
         self._monitor: TrackMonitor | None = None
         self._running = False
         self._task: asyncio.Task | None = None
-        self._config_listeners: list[str] = []
-
         self._read_config()
 
     def _read_config(self) -> None:
@@ -194,12 +148,6 @@ class RadioHostPlugin:
     def _register_config_listeners(self) -> None:
         def _reload(value: Any) -> None:
             self._read_config()
-            if self._monitor:
-                self._monitor.update_config(
-                    station_id=self._station_id,
-                    poll_interval_s=self._poll_interval,
-                    intermission=self._intermission,
-                )
             if self._enabled and not self._running:
                 asyncio.create_task(self._ensure_running())
             elif not self._enabled and self._running:
@@ -210,12 +158,8 @@ class RadioHostPlugin:
             "AZURACAST_BASE_URL",
             "AZURACAST_API_KEY",
             "AZURACAST_STATION_ID",
-            "RADIO_HOST_POLL_INTERVAL_S",
-            "RADIO_HOST_INTERMISSION",
-            "RADIO_HOST_LISTENER_HISTORY",
         ):
             config_registry.add_listener(key, _reload)
-            self._config_listeners.append(key)
 
     async def start(self) -> None:
         await init_radio_tables()
