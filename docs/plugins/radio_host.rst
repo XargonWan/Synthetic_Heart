@@ -17,36 +17,39 @@ How it works
 
 ::
 
-    Track change
-    (AzuraCast nowplaying API)
+    Track A starts playing
+           │
+           ├─► Pre-generate banter for "A → B"
+           │    (enqueued as low-priority message)
            │
            ▼
-    TrackMonitor detects change
+    Cortex LLM → JSON ``radio_speak``
            │
            ▼
-    Synthetic message enqueued
-    (via message_queue.enqueue_low_priority)
+    Banter text stored in ``_pending_banter``
+           │
+           │   ... time passes, Track A finishes ...
            │
            ▼
-    Full SyntH prompt pipeline:
-      • SYNTH_PROFILE / SYNTH_NAME
-      • Emotion state (arousal/valence)
-      • Recent diary entries
-      • SOUL recalled memories
-      • Recent listener chat history
-      + Radio-specific system instruction
+    Track B starts playing
+           │
+           ├─► Inject stored banter "A → B" immediately
+           │    (avoids the 30-120s LLM+TTS delay)
+           │
+           ├─► Pre-generate banter for "B → C"
            │
            ▼
-    Cortex LLM → JSON action: ``radio_speak``
-           │
-           ▼
-    Vox TTS renders banter to audio
-           │
-           ▼
-    WAV uploaded to AzuraCast → queued between songs
-           │
-           ▼
-    Logged to ``radio_activity_log``
+    JingleInjector:
+      1. TTS renders banter to WAV
+      2. Uploads to AzuraCast ``_banter/`` directory
+      3. Queues for immediate playback
+         (``POST /api/station/{id}/queue``)
+      4. Schedules cleanup after 120s
+         (``DELETE /api/station/{id}/files/{id}``)
+
+    +----+----+----+----+
+    | Logged to ``radio_activity_log`` |
+    +----+----+----+----+
 
 Setup
 -----
@@ -80,6 +83,10 @@ All configuration is done through the WebUI **Config** tab under the
 | ``AZURACAST_STATION_ID``   | string   | Station shortcode from AzuraCast,    |
 |                            |          | visible in the URL when viewing the  |
 |                            |          | station admin page.                  |
++----------------------------+----------+--------------------------------------+
+| ``RADIO_HOST_LANGUAGE``    | string   | Language for DJ comments, e.g.       |
+|                            |          | ``English``, ``Italian``, ``Spanish``|
+|                            |          | (default: ``English``).              |
 +----------------------------+----------+--------------------------------------+
 
 Once the URL, API key, and station ID are filled in, toggle
@@ -187,8 +194,7 @@ Database
     )
 
 The table logs every generated banter segment including the track
-context, the spoken text, the audio file path, and whether the
-injection succeeded.
+context, the spoken text, and whether the injection succeeded.
 
 Troubleshooting
 ---------------
@@ -215,10 +221,11 @@ Troubleshooting
     the full ``build_prompt_request()`` pipeline — if context
     components are missing, verify they are enabled globally.
 
-**Radio host stops after a user message.**
-    The low-priority queue can cancel background tasks when a user
-    message arrives. This is by design — user interactions take
-    priority. The next track change will re-trigger the host.
+**No banter is heard on air even though logs show success.**
+    Check that AzuraCast's AutoDJ is running and not paused. The
+    banter is explicitly queued via the station queue API — if a
+    live DJ is connected or AutoDJ is suspended, queue items are
+    skipped. Monitor the AzuraCast station queue view to verify.
 
 Limitations
 -----------
@@ -228,7 +235,12 @@ Limitations
   the system-wide ``ACTIVE_VOX_ENGINE``. To use a different voice for
   the radio host, set ``ACTIVE_VOX_ENGINE`` before enabling the plugin.
 - Audio is injected as a file upload + queue operation, not as a live
-  Icecast source connection. There may be a short delay between the
-  track change and the banter being audible.
+  Icecast source connection. Because banter is **pre-generated** during
+  the previous song, it is ready the moment a track change fires and
+  injected immediately.
+- Banter files are uploaded to the ``_banter/`` directory (hidden from
+  normal playlist rotation), explicitly queued via AzuraCast's AutoDJ
+  queue API, and automatically deleted 120 seconds after upload. Under
+  normal operation no banter files persist in the media library.
 - The ``RADIO_HOST_INTERMISSION`` setting (songs between comments) is
   not exposed in the WebUI; defaults to every track.

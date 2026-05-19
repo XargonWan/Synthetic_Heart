@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import tempfile
+import time
 from typing import Any
 
 from core.logging_utils import log_error, log_info, log_warning
@@ -19,6 +21,16 @@ class JingleInjector:
     def update_station(self, station_id: str) -> None:
         self._station_id = station_id
 
+    def _extract_media_data(
+        self, upload_result: dict[str, Any]
+    ) -> tuple[int | None, str | None]:
+        data = upload_result
+        if isinstance(data, dict) and "data" in data and isinstance(data["data"], dict):
+            data = data["data"]
+        media_id = data.get("id")
+        unique_id = data.get("unique_id")
+        return media_id, unique_id
+
     async def inject_banter(
         self, text: str, style: str = "transition"
     ) -> dict[str, Any]:
@@ -30,9 +42,26 @@ class JingleInjector:
             log_warning("[radio_host] TTS generation failed for banter")
             return {"status": "error", "reason": "tts_failed"}
 
-        upload_result = await self._client.upload_file(self._station_id, audio_path)
+        ts = int(time.time())
+        dest = f"_banter/synth_{ts}.wav"
+        upload_result = await self._client.upload_file(
+            self._station_id, audio_path, destination=dest
+        )
         if upload_result is None:
             return {"status": "error", "reason": "upload_failed"}
+
+        media_id, unique_id = self._extract_media_data(upload_result)
+
+        if unique_id:
+            queued = await self._client.queue_media(self._station_id, unique_id)
+            if queued:
+                log_info(
+                    f"[radio_host] Banter queued for immediate playback "
+                    f"(media {unique_id})"
+                )
+
+        if media_id is not None:
+            asyncio.create_task(self._delayed_cleanup(media_id))
 
         self._injected_files.append(audio_path)
 
@@ -42,7 +71,15 @@ class JingleInjector:
             "audio_path": audio_path,
             "text": text,
             "style": style,
+            "media_id": media_id,
+            "media_unique_id": unique_id,
         }
+
+    async def _delayed_cleanup(self, media_id: int | str) -> None:
+        await asyncio.sleep(120)
+        ok = await self._client.delete_media(self._station_id, media_id)
+        if ok:
+            log_info(f"[radio_host] Cleaned up banter media {media_id}")
 
     async def _generate_tts(self, text: str) -> str | None:
         try:

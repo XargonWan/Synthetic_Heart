@@ -107,7 +107,10 @@ class AzuraCastClient:
         try:
             with open(file_path, "rb") as f:
                 form = aiohttp.FormData()
-                form.add_field("file", f, filename=dest, content_type="audio/wav")
+                form.add_field(
+                    "file", f, filename=dest.split("/")[-1], content_type="audio/wav"
+                )
+                form.add_field("path", dest)
                 form.add_field("storageLocation", "local")
                 async with session.post(url, data=form) as resp:
                     if resp.status >= 400:
@@ -160,3 +163,30 @@ class AzuraCastClient:
     async def get_requests(self, station_id: str) -> list[dict[str, Any]]:
         data = await self._request("GET", f"/api/station/{station_id}/requests")
         return data.get("data", [data]) if isinstance(data, dict) else data
+
+    async def queue_media(self, station_id: str, media_unique_id: str) -> bool:
+        """Queue a media item for playback in the station's AutoDJ queue."""
+        try:
+            await self._request(
+                "POST",
+                f"/api/station/{station_id}/queue",
+                json={"media": media_unique_id},
+            )
+            log_info(f"[azuracast] Queued media {media_unique_id} for playback")
+            return True
+        except AzuraCastError as e:
+            log_warning(f"[azuracast] Failed to queue media: {e}")
+            return False
+
+    async def delete_media(self, station_id: str, media_id: int | str) -> bool:
+        """Delete a media file from station storage by its ID."""
+        try:
+            await self._request(
+                "DELETE",
+                f"/api/station/{station_id}/files/{media_id}",
+            )
+            log_info(f"[azuracast] Deleted media {media_id}")
+            return True
+        except AzuraCastError as e:
+            log_warning(f"[azuracast] Failed to delete media {media_id}: {e}")
+            return False

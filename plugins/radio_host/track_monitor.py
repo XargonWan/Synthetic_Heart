@@ -120,14 +120,11 @@ class TrackMonitor:
                     f"'{title}' by {artist}"
                 )
 
-                if self._track_count_since_comment >= self._intermission:
+                should_comment = self._track_count_since_comment >= self._intermission
+                if should_comment:
                     self._track_count_since_comment = 0
-                    await self._fire_track_change()
-                else:
-                    log_debug(
-                        f"[radio_host] Skipping comment "
-                        f"({self._track_count_since_comment}/{self._intermission})"
-                    )
+
+                await self._fire_track_change(should_comment=should_comment)
 
             self._last_track_id = track_id
             self._last_change_ts = now
@@ -140,7 +137,7 @@ class TrackMonitor:
             "artist": str(song.get("artist", "")),
         }
 
-    async def _fire_track_change(self) -> None:
+    async def _fire_track_change(self, should_comment: bool = True) -> None:
         if self._on_track_change is None:
             return
         if not self._last_track_title or not self.current_track_title:
@@ -153,6 +150,7 @@ class TrackMonitor:
                 curr_artist=self.current_track_artist,
                 next_title=self.next_track_title,
                 next_artist=self.next_track_artist,
+                should_comment=should_comment,
             )
         except Exception as e:
             log_error(f"[radio_host] Track change handler failed: {e}")
