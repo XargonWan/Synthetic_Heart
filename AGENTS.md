@@ -823,6 +823,14 @@ docker exec synth-dev tail -f /app/logs/synth.log | grep -E "\[grillo\]|grillo"
 
 ---
 
+### Daily diary WebUI used MySQL-only `group_concat_max_len` on Postgres  <!-- 2026-05-19 -->
+**Symptom:** The WebUI diary history endpoint could fail with errors like `Failed to fetch daily diary: unrecognized configuration parameter "group_concat_max_len"` on Postgres-backed runs.
+**Location:** `core/webui.py` (`history_diary`).
+**Status:** fixed.
+**Notes:** The query itself already relied on SQL translation for `GROUP_CONCAT(...)`, but the handler still executed `SET SESSION group_concat_max_len = 1048576` unconditionally. The fix keeps that session setting only on MariaDB/MySQL and skips it on Postgres, where `string_agg(...)` is used after translation.
+
+---
+
 ### Repo-wide lint still has unrelated failures, but broad pytest is green  <!-- 2026-05-07 -->
 **Symptom:** `uv run ruff check --fix .` can still fail on pre-existing files outside most feature slices (observed in `interface/message_send_utils.py`, `interface_dev/reddit_interface.py`, `interface_dev/telethon_userbot.py`, `interface_dev/x_interface.py`, `plugins/bio_manager.py`), but broad `uv run pytest --ignore=tests/plugins/test_selenium_ttsfree.py -q --disable-warnings` passed on `2026-05-07` with `1185 passed, 15 skipped`.
 **Location:** Mixed pre-existing validation debt across interfaces, plugins, and broad regression suite.

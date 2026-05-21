@@ -158,9 +158,7 @@ async def test_soul_cutover_updates_state(
     )
     monkeypatch.setattr(db_cutover, "create_database_backup", runtime_backup)
     soul_backup = AsyncMock(
-        return_value=(
-            tmp_path / "premigration-legacy-soul-postgres-soul_memory.sql.gz"
-        )
+        return_value=(tmp_path / "premigration-legacy-soul-postgres-soul_memory.sql.gz")
     )
     monkeypatch.setattr(
         db_cutover,

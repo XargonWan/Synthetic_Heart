@@ -75,6 +75,8 @@ _INTERFACE_TO_MESSAGE_ACTION: Dict[str, str] = {
     "synth_webui": "message_synth_webui",
     "matrix_chat": "message_matrix_chat",
     "ollama_serve": "message_ollama_serve",
+    # radio_host: speaking on-air is the equivalent of "sending a message"
+    "radio_host": "radio_speak",
 }
 
 _ACTION_TYPE_ALIASES: Dict[str, str] = {
@@ -1392,6 +1394,7 @@ async def handle_incoming_message(
                     _GENERIC_MSG_TYPES = (
                         "message",
                         "send_message",
+                        "message_send",  # some LLMs swap the word order
                         "text",
                         "reply",
                         "response",

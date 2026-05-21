@@ -25,13 +25,21 @@ class AzuraCastClient:
     def update_config(self, base_url: str, api_key: str) -> None:
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key
+        # Close stale session so next request picks up the new credentials
+        if self._session and not self._session.closed:
+            import asyncio
+
+            try:
+                asyncio.get_event_loop().create_task(self._session.close())
+            except RuntimeError:
+                pass
+        self._session = None
 
     async def _ensure_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
             self._session = aiohttp.ClientSession(
                 headers={
-                    "Authorization": f"Bearer {self._api_key}",
-                    "Content-Type": "application/json",
+                    "X-API-Key": self._api_key,
                     "User-Agent": "SyntheticHeart-RadioHost/1.0",
                 },
                 timeout=aiohttp.ClientTimeout(total=30),
@@ -163,6 +171,16 @@ class AzuraCastClient:
     async def get_requests(self, station_id: str) -> list[dict[str, Any]]:
         data = await self._request("GET", f"/api/station/{station_id}/requests")
         return data.get("data", [data]) if isinstance(data, dict) else data
+
+    async def get_station_schedule(self, station_id: str) -> list[dict[str, Any]]:
+        data = await self._request("GET", f"/api/station/{station_id}/schedule")
+        raw = data.get("data", [data]) if isinstance(data, dict) else data
+        return raw if isinstance(raw, list) else []
+
+    async def get_station_name(self, station_id: str) -> str:
+        np = await self.get_nowplaying(station_id)
+        station = np.get("station", {}) or {}
+        return str(station.get("name", "") or "")
 
     async def queue_media(self, station_id: str, media_unique_id: str) -> bool:
         """Queue a media item for playback in the station's AutoDJ queue."""

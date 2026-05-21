@@ -12,14 +12,23 @@ from .azuracast_client import AzuraCastClient
 
 
 class JingleInjector:
-    def __init__(self, client: AzuraCastClient, station_id: str):
+    def __init__(
+        self,
+        client: AzuraCastClient,
+        station_id: str,
+        audio_storage_dir: str | None = None,
+    ):
         self._client = client
         self._station_id = station_id
         self._temp_dir = tempfile.mkdtemp(prefix="radio_host_")
+        self._audio_storage_dir = audio_storage_dir
         self._injected_files: list[str] = []
 
     def update_station(self, station_id: str) -> None:
         self._station_id = station_id
+
+    def update_audio_storage_dir(self, audio_storage_dir: str | None) -> None:
+        self._audio_storage_dir = audio_storage_dir
 
     def _extract_media_data(
         self, upload_result: dict[str, Any]
@@ -43,6 +52,22 @@ class JingleInjector:
             return {"status": "error", "reason": "tts_failed"}
 
         ts = int(time.time())
+
+        # --- Persist a local copy before uploading (keep for replay) --------
+        persistent_path: str | None = None
+        if self._audio_storage_dir:
+            import shutil
+
+            try:
+                os.makedirs(self._audio_storage_dir, exist_ok=True)
+                dest_name = f"banter_{ts}.wav"
+                dest_path = os.path.join(self._audio_storage_dir, dest_name)
+                shutil.copy2(audio_path, dest_path)
+                persistent_path = dest_path
+            except Exception as copy_err:
+                log_warning(f"[radio_host] Could not save persistent audio: {copy_err}")
+        # -----------------------------------------------------------------------
+
         dest = f"_banter/synth_{ts}.wav"
         upload_result = await self._client.upload_file(
             self._station_id, audio_path, destination=dest
@@ -63,12 +88,13 @@ class JingleInjector:
         if media_id is not None:
             asyncio.create_task(self._delayed_cleanup(media_id))
 
+        # Only track the temp file (not persistent copy) for cleanup()
         self._injected_files.append(audio_path)
 
         log_info(f"[radio_host] Banter injected ({style}): {text[:80]}...")
         return {
             "status": "success",
-            "audio_path": audio_path,
+            "audio_path": persistent_path or audio_path,
             "text": text,
             "style": style,
             "media_id": media_id,
@@ -86,7 +112,9 @@ class JingleInjector:
             from core.core_initializer import PLUGIN_REGISTRY
             from core.config_manager import config_registry
 
-            vox = PLUGIN_REGISTRY.get("vox")
+            # VoxPlugin registers itself as "vox_plugin" (see plugins/vox_plugin.py).
+            # Fall back to "vox" for forward compatibility.
+            vox = PLUGIN_REGISTRY.get("vox_plugin") or PLUGIN_REGISTRY.get("vox")
             if vox is None:
                 log_warning("[radio_host] Vox plugin not available")
                 return None

@@ -51,6 +51,12 @@ How it works
     | Logged to ``radio_activity_log`` |
     +----+----+----+----+
 
+  If AzuraCast does not expose ``playing_next`` metadata for the station,
+  the plugin falls back to generating the transition live on the current
+  track change. That path has higher latency than the pre-generated flow,
+  but it avoids silent no-op behavior on stations where the next song is
+  not available through the API.
+
 Setup
 -----
 
@@ -92,6 +98,11 @@ All configuration is done through the WebUI **Config** tab under the
 Once the URL, API key, and station ID are filled in, toggle
 ``RADIO_HOST_ENABLED`` to ``True``. The plugin starts the track monitor
 and begins generating transitions on the next song change.
+
+When AzuraCast exposes station metadata, the plugin also reads the
+station name and current schedule description directly from the
+AzuraCast APIs at runtime. Those values are no longer configured
+manually in Synth.
 
 Actions
 -------
@@ -196,13 +207,30 @@ Database
 The table logs every generated banter segment including the track
 context, the spoken text, and whether the injection succeeded.
 
+WebUI
+-----
+
+When the plugin is loaded, it augments the existing **Activity** page
+with a plugin-owned ``Radio`` sub-tab. This keeps the plugin fully
+removable: if the Radio Host plugin is disabled or removed, the core
+Activity UI goes back to normal with no Radio-specific core changes.
+
 Troubleshooting
 ---------------
 
 **No transitions are generated.**
     Check that ``RADIO_HOST_ENABLED`` is ``True`` and that all three
     AzuraCast settings (URL, API key, station ID) are filled in
-    correctly. Look for ``[radio_host]`` log entries in ``synth.log``.
+  correctly. Look for ``[radio_host]`` log entries in ``synth.log``
+  such as ``RadioHostPlugin initialized``, ``Radio host started``,
+  and ``Track monitor started``. If startup stops at configuration,
+  the plugin now logs explicit warnings when the base URL, API key,
+  or station ID is missing.
+
+**The Radio sub-tab does not appear in Activity.**
+  Refresh the WebUI after enabling the plugin, then check
+  ``synth.log`` for ``[radio_host] Radio Activity integration registered``
+  or warnings about deferred or failed Activity integration.
 
 **Upload succeeds but nothing plays on the stream.**
     The injected jingle file is queued in AzuraCast's AutoDJ. If the
@@ -237,7 +265,9 @@ Limitations
 - Audio is injected as a file upload + queue operation, not as a live
   Icecast source connection. Because banter is **pre-generated** during
   the previous song, it is ready the moment a track change fires and
-  injected immediately.
+  injected immediately. If the station API does not provide the next
+  song, the plugin falls back to generating the comment live when the
+  track actually changes.
 - Banter files are uploaded to the ``_banter/`` directory (hidden from
   normal playlist rotation), explicitly queued via AzuraCast's AutoDJ
   queue API, and automatically deleted 120 seconds after upload. Under
