@@ -255,6 +255,7 @@ class VoxPlugin(AIPluginBase):
         engine_name: str | None = None,
         merged_text: str | None = None,
         allow_fallback: bool = True,
+        generate_only: bool = False,
     ) -> dict[str, Any]:
         """Full TTS pipeline: generate → write → dispatch → lip-sync.
 
@@ -401,16 +402,17 @@ class VoxPlugin(AIPluginBase):
         if audio_duration_s is not None:
             log_debug(f"[vox_plugin] audio duration: {audio_duration_s:.2f}s")
 
-        # --- Dispatch to interface ---
-        await self._dispatch(
-            audio_path=out_path,
-            interface_path=interface_path,
-            caption=merged_text or text,
-            lipsync_data=lipsync_data,
-            context=context,
-            original_message=original_message,
-            audio_duration_s=audio_duration_s,
-        )
+        # --- Dispatch to interface (skip for internal callers like radio host) ---
+        if not generate_only:
+            await self._dispatch(
+                audio_path=out_path,
+                interface_path=interface_path,
+                caption=merged_text or text,
+                lipsync_data=lipsync_data,
+                context=context,
+                original_message=original_message,
+                audio_duration_s=audio_duration_s,
+            )
 
         # --- Schedule facial expression timeline (voice responses) ---
         # For voice responses (allow_fallback=True, no parallel message_*

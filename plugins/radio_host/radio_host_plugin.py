@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import random
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
@@ -10,6 +11,7 @@ from typing import Any
 from core.config_manager import config_registry
 from core.core_initializer import register_plugin
 from core.logging_utils import log_debug, log_error, log_info, log_warning
+from core.persona_manager import get_persona_manager
 from core.variables_engine import register_exposed_var
 
 from pathlib import Path as _Path
@@ -78,6 +80,61 @@ register_exposed_var(
     component="radio_host",
 )
 
+register_exposed_var(
+    "RADIO_HOST_POLL_INTERVAL_S",
+    label="Track Poll Interval (s)",
+    default=15,
+    value_type=int,
+    ui_type="string",
+    description="How often to poll AzuraCast for track changes (default 15s)",
+    scope="plugins",
+    component="radio_host",
+)
+
+register_exposed_var(
+    "RADIO_HOST_INTERMISSION",
+    label="Songs Between Comments",
+    default=1,
+    value_type=int,
+    ui_type="string",
+    description="Number of songs to play before Synth speaks (1 = every song)",
+    scope="plugins",
+    component="radio_host",
+)
+
+register_exposed_var(
+    "RADIO_HOST_LISTENER_HISTORY",
+    label="Listener History Count",
+    default=5,
+    value_type=int,
+    ui_type="string",
+    description="How many recent listener messages to include for prompt context",
+    scope="plugins",
+    component="radio_host",
+)
+
+register_exposed_var(
+    "RADIO_HOST_VOX_ENGINE",
+    label="Radio TTS Engine Override",
+    default="",
+    value_type=str,
+    ui_type="string",
+    description="Override the default TTS engine for radio host (leave blank to use default)",
+    scope="plugins",
+    component="radio_host",
+)
+
+register_exposed_var(
+    "RADIO_HOST_GAIN_DB",
+    label="Audio Gain (dB)",
+    default=4.0,
+    value_type=float,
+    ui_type="string",
+    description="Volume boost for banter audio in dB (e.g. 4.0 for +4dB)",
+    scope="plugins",
+    component="radio_host",
+)
+
 INTERNAL_CHAT_ID = -2
 
 
@@ -90,7 +147,9 @@ class RadioHostPlugin:
 
         self._client = AzuraCastClient()
         self._injector = JingleInjector(
-            self._client, "", audio_storage_dir=str(AUDIO_STORAGE_DIR)
+            self._client,
+            "",
+            audio_storage_dir=str(AUDIO_STORAGE_DIR),
         )
         self._monitor: TrackMonitor | None = None
         self._running = False
@@ -185,10 +244,26 @@ class RadioHostPlugin:
                 component="radio_host",
             )
         )
-
+        self._gain_db = float(
+            config_registry.get_value(
+                "RADIO_HOST_GAIN_DB",
+                4.0,
+                value_type=float,
+                group="plugins",
+                component="radio_host",
+            )
+        )
         self._client.update_config(base_url, api_key)
         if self._injector:
-            self._injector.update_station(self._station_id)
+            self._injector.update_station_shortcode(self._station_id)
+            self._injector.update_gain(self._gain_db)
+        # Update monitor config if it exists
+        if self._monitor:
+            self._monitor.update_config(
+                station_id=self._station_id,
+                poll_interval_s=self._poll_interval,
+                intermission=self._intermission,
+            )
         self._station_info_ts = 0.0
         if not base_url or not api_key or not self._station_id:
             self._station_name = ""
@@ -210,6 +285,11 @@ class RadioHostPlugin:
             "AZURACAST_API_KEY",
             "AZURACAST_STATION_ID",
             "RADIO_HOST_LANGUAGE",
+            "RADIO_HOST_POLL_INTERVAL_S",
+            "RADIO_HOST_INTERMISSION",
+            "RADIO_HOST_LISTENER_HISTORY",
+            "RADIO_HOST_VOX_ENGINE",
+            "RADIO_HOST_GAIN_DB",
         ):
             config_registry.add_listener(key, _reload)
 
@@ -335,6 +415,7 @@ class RadioHostPlugin:
             poll_interval_s=self._poll_interval,
             intermission=self._intermission,
             on_track_change=self._on_track_change,
+            on_winding_down=self._on_winding_down,
         )
         await self._monitor.start()
         await self._update_station_info()
@@ -402,73 +483,326 @@ class RadioHostPlugin:
         next_title: str | None = None,
         next_artist: str | None = None,
         should_comment: bool = True,
+        queue_ahead: list[dict[str, str]] | None = None,
+        prev_is_jingle: bool = False,
     ) -> None:
         if not self._running:
             return
 
         await self._update_station_info()
-        injected_current_transition = False
 
-        # Step 1: Inject any stored pre-generated banter for this transition
-        if should_comment and self._pending_banter:
-            banter = self._pending_banter
-            self._pending_banter = None
+        # NOTE: banter is NOT injected here — we inject toward the END of the
+        # current song (see _on_winding_down) so it plays during the outro,
+        # not over the start of the next track.
 
-            expected_prev = (banter.get("prev_title"), banter.get("prev_artist"))
-            if expected_prev == (prev_title, prev_artist):
-                log_info(
-                    f"[radio_host] Injecting pre-generated banter: "
-                    f"'{prev_title}' -> '{curr_title}'"
-                )
-                result = await self._injector.inject_banter(
-                    banter["text"], banter.get("style", "transition")
-                )
-                await self._log_activity(
-                    prev_title,
-                    prev_artist,
-                    banter["text"],
-                    banter.get("style", "transition"),
-                    result.get("status", "unknown"),
-                    audio_path=result.get("audio_path"),
-                )
-                injected_current_transition = True
-            else:
-                log_debug(
-                    "[radio_host] Stored banter didn't match transition; skipping"
-                )
+        log_info(
+            f"[radio_host] Track change recorded: '{prev_title}' -> '{curr_title}'"
+        )
 
-        # Step 2: If AzuraCast does not expose a next song, fall back to
-        # generating the transition live for the current track change.
-        if not next_title or not next_artist:
-            if should_comment and not injected_current_transition:
-                log_info(
-                    f"[radio_host] No playing_next data; generating live banter for '{prev_title}' -> '{curr_title}'"
-                )
-                await self._enqueue_banter_generation(
-                    prev_title=prev_title,
-                    prev_artist=prev_artist,
-                    curr_title=curr_title,
-                    curr_artist=curr_artist,
-                    pre_generate=False,
-                )
-            elif should_comment:
-                log_debug(
-                    f"[radio_host] No playing_next data; using already-injected banter for '{prev_title}' -> '{curr_title}'"
-                )
-            else:
-                log_debug(
-                    f"[radio_host] No playing_next data; skipping comment for '{prev_title}' -> '{curr_title}' due to intermission"
-                )
+        # Pre-generate for upcoming transitions using queue data.
+        # The queue contains songs lined up to play. We pre-generate for
+        # transitions at positions 0→1, 1→2, and 2→3 (3 songs ahead).
+        if queue_ahead and len(queue_ahead) >= 2:
+            transitions_to_pregen = min(len(queue_ahead) - 1, 3)
+            for i in range(transitions_to_pregen):
+                from_t = queue_ahead[i]
+                to_t = queue_ahead[i + 1]
+                if from_t.get("title") and to_t.get("title"):
+                    self._enqueue_pre_gen_banter(
+                        from_t["title"],
+                        from_t["artist"],
+                        to_t["title"],
+                        to_t["artist"],
+                    )
+            log_info(
+                f"[radio_host] Queued {transitions_to_pregen} pre-generations from "
+                f"queue data"
+            )
+        elif next_title and next_artist:
+            log_info(
+                f"[radio_host] Pre-generating LLM banter: "
+                f"'{curr_title}' -> '{next_title}'"
+            )
+            self._enqueue_pre_gen_banter(
+                curr_title, curr_artist, next_title, next_artist
+            )
+
+    async def _refresh_next_track(self) -> tuple[str, str]:
+        """Fetch the queue and return the next (title, artist) from it.
+
+        Returns the currently stored values if the queue can't be fetched or
+        the queue is empty, so callers always get a usable pair.
+        """
+        if not self._client.configured or not self._station_id:
+            stored = self._monitor
+            if stored:
+                return stored.next_track_title or "", stored.next_track_artist or ""
+            return "", ""
+        try:
+            queue_data = await self._client.get_station_queue(self._station_id)
+            for item in queue_data:
+                song = item.get("song", {}) or {}
+                q_title = str(song.get("title", ""))
+                q_artist = str(song.get("artist", ""))
+                if q_title:
+                    if self._monitor:
+                        self._monitor.next_track_title = q_title
+                        self._monitor.next_track_artist = q_artist
+                    return q_title, q_artist
+        except Exception:
+            log_debug("[radio_host] Queue fetch failed during winding down")
+        stored = self._monitor
+        if stored:
+            return stored.next_track_title or "", stored.next_track_artist or ""
+        return "", ""
+
+    async def _on_winding_down(
+        self,
+        curr_title: str,
+        curr_artist: str,
+        next_title: str | None = None,
+        next_artist: str | None = None,
+    ) -> None:
+        """Called when the current song is near its end (~22s remaining).
+
+        Injects banter NOW so it plays during the song's outro, leaving the
+        next song uninterrupted.
+        """
+        if not self._running:
             return
 
-        # Step 3: Pre-generate banter for the next transition (curr -> next)
-        await self._enqueue_banter_generation(
-            prev_title=curr_title,
-            prev_artist=curr_artist,
-            curr_title=next_title,
-            curr_artist=next_artist,
-            pre_generate=True,
+        await self._update_station_info()
+
+        # Refresh next-track info from the live queue — the value stored at
+        # track-change time may be stale (the queue advances independently).
+        actual_next, actual_next_artist = await self._refresh_next_track()
+
+        # Try pre-generated banter first (stored for "current → next" transition)
+        banter_to_inject = self._pop_matching_banter(curr_title, curr_artist)
+        if banter_to_inject:
+            pre_gen_next = banter_to_inject.get("curr_title", "")
+            pre_gen_next_artist = banter_to_inject.get("curr_artist", "")
+            match = (
+                pre_gen_next == actual_next
+                and pre_gen_next_artist == actual_next_artist
+            )
+            if match:
+                log_info(
+                    f"[radio_host] Winding down with pre-generated banter: "
+                    f"'{curr_title}' -> '{actual_next}'"
+                )
+            else:
+                # Pre-gen has stale track info — discard and re-build with
+                # the correct next track so we don't announce the wrong song.
+                log_info(
+                    f"[radio_host] Pre-generated banter stale "
+                    f"(was '{pre_gen_next}', now '{actual_next}'); "
+                    f"falling back to template"
+                )
+                banter_to_inject = None
+
+        if banter_to_inject is None:
+            banter_text = self._build_winding_down_template(
+                curr_title, curr_artist, actual_next, actual_next_artist
+            )
+            log_info(
+                f"[radio_host] Winding down with template banter: "
+                f"'{curr_title}' -> '{actual_next}'"
+            )
+            banter_to_inject = {"text": banter_text, "style": "transition"}
+
+        self._set_animation("speak")
+        result = await self._injector.inject_banter(
+            banter_to_inject["text"],
+            banter_to_inject.get("style", "transition"),
+            pre_generated_audio_path=banter_to_inject.get("audio_path"),
         )
+        self._set_animation("idle")
+        await self._log_activity(
+            curr_title,
+            curr_artist,
+            banter_to_inject["text"],
+            banter_to_inject.get("style", "transition"),
+            result.get("status", "unknown"),
+            audio_path=result.get("audio_path"),
+        )
+
+    def _pop_matching_banter(self, prev_title: str, prev_artist: str) -> dict | None:
+        if self._pending_banter:
+            expected_prev = (
+                self._pending_banter.get("prev_title"),
+                self._pending_banter.get("prev_artist"),
+            )
+            if expected_prev == (prev_title, prev_artist):
+                b = self._pending_banter
+                self._pending_banter = None
+                return b
+            self._pending_banter = None
+        return None
+
+    def _enqueue_pre_gen_banter(
+        self,
+        prev_title: str,
+        prev_artist: str,
+        curr_title: str,
+        curr_artist: str,
+    ) -> None:
+        asyncio.create_task(
+            self._pre_generate_template_banter(
+                prev_title=prev_title,
+                prev_artist=prev_artist,
+                curr_title=curr_title,
+                curr_artist=curr_artist,
+            )
+        )
+        asyncio.create_task(
+            self._enqueue_banter_generation(
+                prev_title=prev_title,
+                prev_artist=prev_artist,
+                curr_title=curr_title,
+                curr_artist=curr_artist,
+                pre_generate=True,
+            )
+        )
+
+    async def _pre_generate_template_banter(
+        self,
+        prev_title: str,
+        prev_artist: str,
+        curr_title: str,
+        curr_artist: str,
+    ) -> None:
+        text = self._build_banter_template(
+            prev_title, prev_artist, curr_title, curr_artist
+        )
+        audio_path = await self._injector.generate_tts(text)
+        self._pending_banter = {
+            "text": text,
+            "style": "transition",
+            "audio_path": audio_path,
+            "prev_title": prev_title,
+            "prev_artist": prev_artist,
+            "curr_title": curr_title,
+            "curr_artist": curr_artist,
+        }
+
+    def _build_banter_template(
+        self,
+        prev_title: str,
+        prev_artist: str,
+        curr_title: str,
+        curr_artist: str,
+    ) -> str:
+        station = self._station_name.strip()
+
+        args = (prev_title, prev_artist, curr_title, curr_artist)
+        templates = [
+            "That was {0} by {1}. Now playing {2} by {3}.",
+            "You just heard {0} by {1}. Next up, {2} by {3}.",
+            "{0} by {1}, and now {2} by {3}.",
+            "We were listening to {0} by {1}. Here comes {2} by {3}.",
+            "That track was {0} by {1}. Let's keep going with {2} by {3}.",
+            "Great track from {1}. Now here's {2} by {3}.",
+            "I loved that one — {0} by {1}. What's next? {2} by {3}.",
+            "From {0} by {1}, we move on to {2} by {3}.",
+        ]
+        if station:
+            templates.extend(
+                [
+                    "You're listening to {4}. That was {0} by {1}, and now {2} by {3}.",
+                    "On {4}, we just heard {0} by {1}. Next up is {2} by {3}.",
+                    "Welcome back to {4}. That was {0} by {1}, now playing {2} by {3}.",
+                    "You're tuned to {4} — that was {0} by {1}, now {2} by {3}.",
+                ]
+            )
+
+        template = random.choice(templates)
+        text = template.format(*args, station) if station else template.format(*args)
+
+        lang = self._language.strip().lower() if self._language.strip() else "english"
+        if lang != "english":
+            if lang == "italian" or lang == "it":
+                it_templates = [
+                    "Abbiamo ascoltato {0} di {1}. Ora in onda {2} di {3}.",
+                    "Era {0} di {1}. Adesso {2} di {3}.",
+                    "{0} di {1}, e adesso {2} di {3}.",
+                    "Finiva {0} di {1}, parte ora {2} di {3}.",
+                    "Quello era {0} di {1}. Continuiamo con {2} di {3}.",
+                    "Che pezzo, {0} di {1}. Ora arriva {2} di {3}.",
+                    "Da {0} di {1} a {2} di {3}.",
+                    "Bellissimo brano di {1}. Adesso {2} di {3}.",
+                    "Dopo {0} di {1}, ecco {2} di {3}.",
+                ]
+                if station:
+                    it_templates.extend(
+                        [
+                            "Sei su {4}. Quello era {0} di {1}, ora {2} di {3}.",
+                            "Su {4}, abbiamo appena sentito {0} di {1}. Ora {2} di {3}.",
+                            "Benvenuto su {4}. Prima {0} di {1}, ora {2} di {3}.",
+                            "Sei in sintonia con {4} — {0} di {1}, e adesso {2} di {3}.",
+                        ]
+                    )
+                it_template = random.choice(it_templates)
+                text = (
+                    it_template.format(*args, station)
+                    if station
+                    else it_template.format(*args)
+                )
+
+        return text
+
+    def _build_winding_down_template(
+        self,
+        curr_title: str,
+        curr_artist: str,
+        next_title: str,
+        next_artist: str,
+    ) -> str:
+        station = self._station_name.strip()
+        args = (curr_title, curr_artist, next_title, next_artist)
+
+        lang = self._language.strip().lower() if self._language.strip() else "english"
+        if lang == "italian" or lang == "it":
+            templates = [
+                "Avete appena ascoltato {0} di {1}. A seguire: {2} di {3}.",
+                "Era {0} di {1}. Ora in arrivo: {2} di {3}.",
+                "Finisce qui {0} di {1}. Continua con {2} di {3}.",
+                "Avete sentito {0} di {1}. Prossimo: {2} di {3}.",
+                "Si conclude {0} di {1}. Subito dopo: {2} di {3}.",
+                "Ultimo giro per {0} di {1}. Ora tocca a {2} di {3}.",
+            ]
+            if station:
+                templates.extend(
+                    [
+                        "Su {4} avete appena sentito {0} di {1}. Ora arriva {2} di {3}.",
+                        "Su {4} finisce {0} di {1}. Prossimo: {2} di {3}.",
+                    ]
+                )
+        else:
+            templates = [
+                "You just heard {0} by {1}. Up next: {2} by {3}.",
+                "That was {0} by {1}. Coming up: {2} by {3}.",
+                "Just finished: {0} by {1}. Now: {2} by {3}.",
+                "We've been listening to {0} by {1}. Next: {2} by {3}.",
+                "{0} by {1} just ended. Here comes {2} by {3}.",
+                "Last spin for {0} by {1}. Now playing: {2} by {3}.",
+            ]
+            if station:
+                templates.extend(
+                    [
+                        "On {4}, you just heard {0} by {1}. Next up: {2} by {3}.",
+                        "On {4}, that was {0} by {1}. Coming next: {2} by {3}.",
+                    ]
+                )
+
+        template = random.choice(templates)
+        text = template.format(*args, station) if station else template.format(*args)
+        return text
+
+    def _set_animation(self, state: str) -> None:
+        pm = get_persona_manager()
+        if pm:
+            asyncio.create_task(pm.set_animation_state(state, session_id=None))
 
     async def _enqueue_banter_generation(
         self,
@@ -484,8 +818,10 @@ class RadioHostPlugin:
         desc = self._schedule_desc.strip()
         station = self._station_name.strip()
         context_text_parts = [
-            f"Song '{prev_title}' by {prev_artist} just finished.",
-            f"Now playing: '{curr_title}' by {curr_artist}.",
+            f"Song that JUST FINISHED (do NOT say this is playing now): "
+            f"'{prev_title}' by {prev_artist}.",
+            f"Song that is NOW PLAYING (this is the one to announce): "
+            f"'{curr_title}' by {curr_artist}.",
         ]
         if station:
             context_text_parts.append(f"You are on {station}.")
@@ -495,9 +831,16 @@ class RadioHostPlugin:
             [
                 f"Write your response in {lang}.",
                 "Generate a short DJ transition (1-3 sentences). "
+                f"Say something about the song NOW PLAYING ('{curr_title}'), "
+                "not the one that just finished. "
                 "Be yourself — your personality, your mood, your sense of humor. "
-                "Sometimes simple ('That was X by Y, and now...'), "
-                "sometimes playful or clever.",
+                f"NEVER say '{prev_title}' is now playing or coming up next.",
+                "CRITICAL: Mention the now-playing song ('{curr_title}') by name. "
+                "Do NOT mix up which song is which.",
+                "Occasionally (roughly 1 in 3 transitions), add a brief "
+                "fun fact or curiosity about the artist or song — a notable "
+                "achievement, a sample origin, or an interesting tidbit. "
+                "Keep it to one short sentence. Don't force it every time.",
                 "IMPORTANT: Respond using ONLY the 'radio_speak' action type. "
                 "Do NOT use 'message_send', 'send_message', 'message', or any other type.",
             ]
@@ -567,6 +910,17 @@ class RadioHostPlugin:
         status: str,
         audio_path: str | None = None,
     ) -> None:
+        audio_url: str | None = None
+        if audio_path:
+            # TTS files inside the WebUI static dir can be served directly
+            static_prefix = "res/synth_webui/static/"
+            if audio_path.startswith(static_prefix):
+                audio_url = "/" + audio_path[len("res/") :]
+            else:
+                # For paths outside the static dir, serve via the API endpoint
+                # using a path query param (requires _serve_radio_audio to support it)
+                audio_url = f"/api/radio/audio?path={audio_path}"
+
         self._recent_activities.appendleft(
             {
                 "id": None,
@@ -576,7 +930,7 @@ class RadioHostPlugin:
                 "banter_text": banter_text,
                 "style": style or "transition",
                 "status": status,
-                "audio_url": None,
+                "audio_url": audio_url,
             }
         )
 
@@ -707,6 +1061,10 @@ class RadioHostPlugin:
                         ),
                     )
                     await conn.commit()
+            log_info(
+                f"[radio_host] Activity logged: '{track_title}' status={status} "
+                f"audio={audio_path or 'none'}"
+            )
             # Prune old audio files — keep only the last AUDIO_KEEP_COUNT
             asyncio.create_task(self._trim_audio_files())
         except Exception as e:
@@ -761,9 +1119,11 @@ class RadioHostPlugin:
 
             # Pre-generation mode: store for later injection
             if context.get("radio_pre_generating"):
+                audio_path = await self._injector.generate_tts(text)
                 self._pending_banter = {
                     "text": text,
                     "style": style,
+                    "audio_path": audio_path,
                     "prev_title": context.get("radio_pregenerate_prev_title", ""),
                     "prev_artist": context.get("radio_pregenerate_prev_artist", ""),
                     "curr_title": context.get("radio_pregenerate_next_title", ""),
@@ -808,34 +1168,50 @@ class RadioHostPlugin:
         return {"status": "error", "message": f"Unknown action: {action_type}"}
 
     async def _serve_radio_audio(self, request: Any) -> Any:
-        """Serve a banter audio file by DB row id (query param ``id``)."""
+        """Serve a banter audio file by DB row id (``?id=N``) or direct path (``?path=...``)."""
         from starlette.requests import Request
         from starlette.responses import FileResponse, JSONResponse
 
         req: Request = request
         row_id = req.query_params.get("id", "")
-        if not row_id or not row_id.isdigit():
-            return JSONResponse({"error": "missing id"}, status_code=400)
-        try:
-            from core.db import get_conn_ctx
+        direct_path = req.query_params.get("path", "")
 
-            async with get_conn_ctx() as conn:
-                async with conn.cursor() as cur:
-                    await cur.execute(
-                        "SELECT banter_audio_file FROM radio_activity_log WHERE id = %s",
-                        (int(row_id),),
+        audio_path: str | None = None
+
+        if row_id and row_id.isdigit():
+            try:
+                from core.db import get_conn_ctx
+
+                async with get_conn_ctx() as conn:
+                    async with conn.cursor() as cur:
+                        await cur.execute(
+                            "SELECT banter_audio_file FROM radio_activity_log WHERE id = %s",
+                            (int(row_id),),
+                        )
+                        row = await cur.fetchone()
+                if row:
+                    audio_path = (
+                        row[0]
+                        if isinstance(row, (tuple, list))
+                        else row.get("banter_audio_file")
                     )
-                    row = await cur.fetchone()
-        except Exception as e:
-            return JSONResponse({"error": str(e)}, status_code=500)
+            except Exception as e:
+                return JSONResponse({"error": str(e)}, status_code=500)
+        elif direct_path:
+            # Direct path fallback (for in-memory fallback mode, no DB row).
+            # Security: only allow paths within known radio audio directories.
+            import os as _os
 
-        if not row:
-            return JSONResponse({"error": "not found"}, status_code=404)
-        audio_path = (
-            row[0] if isinstance(row, (tuple, list)) else row.get("banter_audio_file")
-        )
+            allowed_prefixes = (
+                _os.path.abspath(str(AUDIO_STORAGE_DIR)),
+                _os.path.abspath("res/synth_webui/static/audio/tts"),
+            )
+            abs_path = _os.path.abspath(direct_path)
+            if any(abs_path.startswith(p) for p in allowed_prefixes if p):
+                audio_path = direct_path
+
         if not audio_path:
-            return JSONResponse({"error": "no audio"}, status_code=404)
+            return JSONResponse({"error": "not found"}, status_code=404)
 
         import os
 

@@ -98,13 +98,18 @@ async def test_build_radio_data_uses_in_memory_activity_fallback(
 async def test_generate_tts_uses_vox_plugin_key(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """_generate_tts must resolve the Vox plugin via 'vox_plugin', not 'vox'."""
+    """generate_tts must resolve the Vox plugin via 'vox_plugin', not 'vox'."""
     from plugins.radio_host.azuracast_client import AzuraCastClient
     import core.core_initializer as ci
 
     speak_called: list[str] = []
 
-    async def fake_speak(text: str, engine_name: str | None = None) -> dict:
+    async def fake_speak(
+        text: str,
+        engine_name: str | None = None,
+        interface_path: str | None = None,
+        **kwargs,
+    ) -> dict:
         speak_called.append(text)
         return {"audio_path": "/tmp/fake.wav"}
 
@@ -123,10 +128,10 @@ async def test_generate_tts_uses_vox_plugin_key(
     )
 
     injector = jingle_module.JingleInjector(AzuraCastClient(), "test_station")
-    result = await injector._generate_tts("Hello radio")
+    result = await injector.generate_tts("Hello radio")
 
     assert result == "/tmp/fake.wav", (
-        "_generate_tts should succeed when VoxPlugin is registered as 'vox_plugin'"
+        "generate_tts should succeed when VoxPlugin is registered as 'vox_plugin'"
     )
     assert speak_called == ["Hello radio"]
 

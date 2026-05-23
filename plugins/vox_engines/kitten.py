@@ -169,7 +169,11 @@ class LocalKittenTTS:
         return self._phonemizer_cache[espeak_lang]
 
     def generate(
-        self, text: str, voice: str = "Bella", language: str | None = None
+        self,
+        text: str,
+        voice: str = "Bella",
+        language: str | None = None,
+        speed: float = 1.3,
     ) -> Any:
         """Synthesise *text* and return audio (bytes or numpy array).
 
@@ -182,6 +186,9 @@ class LocalKittenTTS:
         to match *language* before synthesis, then restored.  kittentts 0.8.x
         hardcodes ``en-us`` in its constructor, so without this swap non-English
         text is mispronounced.
+
+        *speed* is forwarded to the ONNX model ( ``1.0`` = normal, ``>1`` = faster ).
+        The vendored gTTS stub ignores the speed parameter.
         """
         if not self._engine:
             raise RuntimeError(
@@ -197,7 +204,8 @@ class LocalKittenTTS:
         # concurrent TTS calls on the same model instance don't race.
         espeak_lang = _espeak_lang_code(language)
         log_info(
-            f"[vox/kitten] generate: voice={voice!r} lang={language!r} espeak={espeak_lang!r}"
+            f"[vox/kitten] generate: voice={voice!r} lang={language!r} "
+            f"espeak={espeak_lang!r} speed={speed}"
         )
         model = self._engine.model  # KittenTTS_1_Onnx instance
         with self._phonemizer_lock:
@@ -208,7 +216,7 @@ class LocalKittenTTS:
                 f"[vox/kitten] phonemizer swapped to espeak '{espeak_lang}' (id={id(new_phonemizer)})"
             )
             try:
-                result = self._engine.generate(text=text, voice=voice)
+                result = self._engine.generate(text=text, voice=voice, speed=speed)
             finally:
                 model.phonemizer = old_phonemizer
         return result
@@ -313,6 +321,21 @@ register_exposed_var(
     advanced=True,
 )
 
+register_exposed_var(
+    "KITTEN_SPEED",
+    label="Kitten TTS — Speech speed",
+    default=1.3,
+    value_type=float,
+    ui_type="string",
+    description=(
+        "Speaking rate multiplier. 1.0 = normal, >1 = faster, <1 = slower. "
+        "Range 0.5–2.0."
+    ),
+    scope="plugins",
+    component="vox_plugin",
+    advanced=False,
+)
+
 # ---------------------------------------------------------------------------
 # Model cache (one instance per model_id to avoid repeated loads)
 # ---------------------------------------------------------------------------
@@ -407,6 +430,17 @@ class KittenVoxEngine(VoxEngineBase):
             )
         )
 
+    def _active_speed(self) -> float:
+        return float(
+            config_registry.get_value(
+                "KITTEN_SPEED",
+                1.3,
+                value_type=float,
+                group="plugins",
+                component="vox_plugin",
+            )
+        )
+
     # ------------------------------------------------------------------
     # Speaker metadata helpers (used by /api/vox/speakers endpoint)
     # ------------------------------------------------------------------
@@ -446,7 +480,8 @@ class KittenVoxEngine(VoxEngineBase):
             # applies the correct voice model.
             # Samples always use 'en' language; LocalKittenTTS.generate() decides
             # whether to forward it to the underlying engine or not.
-            audio = tts.generate(text=text, voice=speaker, language="en")
+            speed = self._active_speed()
+            audio = tts.generate(text=text, voice=speaker, language="en", speed=speed)
             if isinstance(audio, bytes):
                 return audio
             wav = _audio_to_wav(audio, _SAMPLE_RATE)
@@ -516,6 +551,7 @@ class KittenVoxEngine(VoxEngineBase):
         voice = str(
             kwargs.get("speaker") or kwargs.get("voice") or self._active_voice()
         )
+        speed = float(kwargs.get("speed") or self._active_speed())
 
         tts = _get_model(model_id)
         if tts is None:
@@ -524,11 +560,22 @@ class KittenVoxEngine(VoxEngineBase):
         try:
             # LocalKittenTTS.generate() internally decides whether to pass
             # ``language`` to the underlying engine based on _USING_VENDOR_STUB.
-            audio = tts.generate(text=text, voice=voice, language=language)
+            audio = tts.generate(text=text, voice=voice, language=language, speed=speed)
             # Engine may return raw bytes (WAV/MP3) or a numpy array.
             if isinstance(audio, bytes):
                 return audio
-            return _audio_to_wav(audio, _SAMPLE_RATE)
+            # Peak-normalize to -1 dBFS instead of applying hard gain + clipping.
+            # This ensures consistent loudness without the distortion that
+            # the previous +10dB clip caused.  Radio-specific gain is applied
+            # separately via RADIO_HOST_GAIN_DB in the radio host ffmpeg stage.
+            import numpy as np
+
+            arr = audio.numpy() if hasattr(audio, "numpy") else audio
+            max_val = float(np.max(np.abs(arr)))
+            if max_val > 1e-10:
+                target = 0.891  # -1 dBFS — leaves headroom
+                arr = arr * (target / max_val)
+            return _audio_to_wav(arr, _SAMPLE_RATE)
         except Exception as exc:
             log_error(f"[vox/kitten] TTS generation failed: {exc}")
             return None
