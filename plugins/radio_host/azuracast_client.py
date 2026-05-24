@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time as _time
 from pathlib import Path
 from typing import Any
 
@@ -166,11 +167,8 @@ class AzuraCastClient:
                         )
                     )
 
-                # Allow AzuraCast time to switch from AutoDJ to Live DJ mode.
-                # Without this pause the first ~second of audio is lost because
-                # the stream hasn't transitioned yet.
-                await asyncio.sleep(1.5)
-
+                # Send audio immediately — the caller should have already
+                # waited for the AutoDJ→LiveDJ transition timing.
                 chunk_size = 4096
                 for i in range(0, len(webm_data), chunk_size):
                     await ws.send(webm_data[i : i + chunk_size])
@@ -182,6 +180,84 @@ class AzuraCastClient:
             return {"status": "success"}
         except Exception as e:
             log_warning(f"[azuracast] WebDJ broadcast error: {e}")
+            return {"status": "error", "reason": str(e)}
+
+    async def convert_audio_to_webm(self, audio_path: str) -> bytes | None:
+        """Public wrapper: convert a WAV file to WebM bytes."""
+        return await self._convert_to_webm(audio_path, gain_db=4.0)
+
+    async def broadcast_webm_at(
+        self,
+        webm_data: bytes,
+        station_shortcode: str,
+        song_end_ts: float,
+        username: str = "SyntH",
+        password: str = "synthradio",
+        title: str = "",
+        artist: str = "",
+    ) -> dict[str, Any]:
+        """Connect WebDJ and broadcast pre-converted audio precisely at *song_end_ts*.
+
+        The caller should have already waited until ~2 s before *song_end_ts*.
+        This method connects, then waits the remaining delta so that audio
+        starts flowing **exactly** at song end.  The AutoDJ→LiveDJ transition
+        completes during the last 2 s of the previous song, leaving a clean
+        gap for the announcement with no jingle overlap.
+        """
+        host = self._base_url.split("://", 1)[-1]
+        ws_url = f"ws://{host}/webdj/{station_shortcode}/"
+
+        log_info(
+            f"[azuracast] Timed broadcast: {len(webm_data)}b WebM at song_end"
+        )
+        try:
+            async with websockets.connect(
+                ws_url, subprotocols=["webcast"], close_timeout=30
+            ) as ws:
+                await ws.send(
+                    json.dumps(
+                        {
+                            "type": "hello",
+                            "data": {
+                                "mime": "audio/webm;codecs=opus",
+                                "user": username,
+                                "password": password,
+                            },
+                        }
+                    )
+                )
+
+                if title or artist:
+                    await ws.send(
+                        json.dumps(
+                            {
+                                "type": "metadata",
+                                "data": {
+                                    "title": title or "Synth Radio",
+                                    "artist": artist or "Synthetic Heart",
+                                },
+                            }
+                        )
+                    )
+
+                # Wait until the exact song end time
+                now = _time.time()
+                remaining_delta = song_end_ts - now
+                if remaining_delta > 0:
+                    await asyncio.sleep(remaining_delta)
+
+                # Song just ended — send audio into the clean gap
+                chunk_size = 4096
+                for i in range(0, len(webm_data), chunk_size):
+                    await ws.send(webm_data[i : i + chunk_size])
+                    await asyncio.sleep(0.05)
+
+                await asyncio.sleep(1)
+
+            log_info("[azuracast] Timed WebDJ broadcast finished (AutoDJ resumes)")
+            return {"status": "success"}
+        except Exception as e:
+            log_warning(f"[azuracast] Timed WebDJ broadcast error: {e}")
             return {"status": "error", "reason": str(e)}
 
     async def _convert_to_webm(
@@ -197,7 +273,7 @@ class AzuraCastClient:
                 "-i",
                 input_path,
                 "-af",
-                f"volume={gain_db:+.1f}dB",
+                "dynaudnorm=f=150:g=15:p=0.95",
                 "-f",
                 "webm",
                 "-c:a",

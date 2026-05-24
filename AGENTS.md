@@ -983,6 +983,22 @@ docker exec synth-dev tail -f /app/logs/synth.log | grep -E "\[grillo\]|grillo"
 
 ---
 
+### Radio host KittenTTS volume — hard clipping distortion fixed with ffmpeg dynaudnorm  <!-- 2026-05-24 -->
+**Symptom:** KittenTTS-generated TTS was too quiet. Adding makeup gain caused audible hard-clipping distortion.
+**Location:** `plugins/vox_engines/kitten.py` (`generate_tts`), `plugins/radio_host/azuracast_client.py` (`_convert_to_webm`).
+**Status:** fixed.
+**Notes:** The engine now peak-normalizes cleanly to -1 dBFS (no makeup gain, no clipping). Transparent loudness is handled downstream by ffmpeg's `dynaudnorm` filter (frame=150 ms, max_gain=15×, target_peak=0.95) in `broadcast_banter`. This gives radio-presence volume without distortion.
+
+---
+
+### Radio host injection at track_change was too slow for timely announcements  <!-- 2026-05-24 -->
+**Symptom:** Announcements injected at track_change time arrived ~8 s into the new song (TTS 3 s + ffmpeg 1 s + WebDJ 4 s pre-delay), making them feel "late" relative to the song start.
+**Location:** `plugins/radio_host/radio_host_plugin.py` (`_on_track_change`, `_inject_banter_now`, `_on_winding_down`).
+**Status:** fixed.
+**Notes:** The design was changed to a **hybrid approach**: `_on_winding_down` is the primary injection point (banter plays during song outro, ~13 s remaining — safe from jingle overlap), and `_on_track_change` only acts as fallback when winding-down was skipped for a short/jingle track. A `_inject_at_track_change` boolean flag bridges the two paths.
+
+---
+
 ## 13. Database Quick Reference
 
 > Tables are created inline in `core/db.py` and each plugin — **`init-db.sql` only seeds a subset.** If you need a table's full column list, `grep -A20 "CREATE TABLE IF NOT EXISTS <name>"` in the relevant file.

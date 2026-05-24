@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import random
+import time as _time
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+
+import websockets
 
 from core.config_manager import config_registry
 from core.core_initializer import register_plugin
@@ -155,6 +159,7 @@ class RadioHostPlugin:
         self._running = False
         self._task: asyncio.Task | None = None
         self._pending_banter: dict[str, Any] | None = None
+        self._inject_at_track_change = False
         self._station_info_ts: float = 0.0
         self._STATION_INFO_TTL = 300
         self._station_name = ""
@@ -485,19 +490,28 @@ class RadioHostPlugin:
         should_comment: bool = True,
         queue_ahead: list[dict[str, str]] | None = None,
         prev_is_jingle: bool = False,
+        curr_is_jingle: bool = False,
     ) -> None:
         if not self._running:
             return
 
         await self._update_station_info()
 
-        # NOTE: banter is NOT injected here — we inject toward the END of the
-        # current song (see _on_winding_down) so it plays during the outro,
-        # not over the start of the next track.
-
         log_info(
             f"[radio_host] Track change recorded: '{prev_title}' -> '{curr_title}'"
         )
+
+        # Fallback injection — only fires when winding_down was skipped (e.g.
+        # the previous track was a jingle/bumper so no outro announcement was
+        # made).  The main injection path is _on_winding_down (during the
+        # song's outro) so the banter plays while the song is still on air.
+        if self._inject_at_track_change and should_comment and not curr_is_jingle:
+            self._inject_at_track_change = False
+            asyncio.create_task(
+                self._inject_banter_now(
+                    prev_title, prev_artist, curr_title, curr_artist
+                )
+            )
 
         # Pre-generate for upcoming transitions using queue data.
         # The queue contains songs lined up to play. We pre-generate for
@@ -526,88 +540,48 @@ class RadioHostPlugin:
             self._enqueue_pre_gen_banter(
                 curr_title, curr_artist, next_title, next_artist
             )
+        else:
+            # Clear flag if we can't pre-gen either (nothing upcoming known)
+            self._inject_at_track_change = False
 
-    async def _refresh_next_track(self) -> tuple[str, str]:
-        """Fetch the queue and return the next (title, artist) from it.
-
-        Returns the currently stored values if the queue can't be fetched or
-        the queue is empty, so callers always get a usable pair.
-        """
-        if not self._client.configured or not self._station_id:
-            stored = self._monitor
-            if stored:
-                return stored.next_track_title or "", stored.next_track_artist or ""
-            return "", ""
-        try:
-            queue_data = await self._client.get_station_queue(self._station_id)
-            for item in queue_data:
-                song = item.get("song", {}) or {}
-                q_title = str(song.get("title", ""))
-                q_artist = str(song.get("artist", ""))
-                if q_title:
-                    if self._monitor:
-                        self._monitor.next_track_title = q_title
-                        self._monitor.next_track_artist = q_artist
-                    return q_title, q_artist
-        except Exception:
-            log_debug("[radio_host] Queue fetch failed during winding down")
-        stored = self._monitor
-        if stored:
-            return stored.next_track_title or "", stored.next_track_artist or ""
-        return "", ""
-
-    async def _on_winding_down(
+    async def _inject_banter_now(
         self,
+        prev_title: str,
+        prev_artist: str,
         curr_title: str,
         curr_artist: str,
-        next_title: str | None = None,
-        next_artist: str | None = None,
     ) -> None:
-        """Called when the current song is near its end (~22s remaining).
+        """Generate and broadcast banter for the *prev_title* → *curr_title* transition.
 
-        Injects banter NOW so it plays during the song's outro, leaving the
-        next song uninterrupted.
+        Tries pre-generated audio first (stored at the previous track_change for
+        this exact transition).  Falls back to template text + TTS when no pre-gen
+        is available or the queue changed in between.
         """
-        if not self._running:
-            return
-
-        await self._update_station_info()
-
-        # Refresh next-track info from the live queue — the value stored at
-        # track-change time may be stale (the queue advances independently).
-        actual_next, actual_next_artist = await self._refresh_next_track()
-
-        # Try pre-generated banter first (stored for "current → next" transition)
-        banter_to_inject = self._pop_matching_banter(curr_title, curr_artist)
+        banter_to_inject = self._pop_matching_banter(prev_title, prev_artist)
         if banter_to_inject:
-            pre_gen_next = banter_to_inject.get("curr_title", "")
-            pre_gen_next_artist = banter_to_inject.get("curr_artist", "")
-            match = (
-                pre_gen_next == actual_next
-                and pre_gen_next_artist == actual_next_artist
-            )
+            pre_gen_curr = banter_to_inject.get("curr_title", "")
+            pre_gen_curr_artist = banter_to_inject.get("curr_artist", "")
+            match = pre_gen_curr == curr_title and pre_gen_curr_artist == curr_artist
             if match:
                 log_info(
-                    f"[radio_host] Winding down with pre-generated banter: "
-                    f"'{curr_title}' -> '{actual_next}'"
+                    f"[radio_host] Track change with pre-generated banter: "
+                    f"'{prev_title}' -> '{curr_title}'"
                 )
             else:
-                # Pre-gen has stale track info — discard and re-build with
-                # the correct next track so we don't announce the wrong song.
                 log_info(
                     f"[radio_host] Pre-generated banter stale "
-                    f"(was '{pre_gen_next}', now '{actual_next}'); "
+                    f"(was '{pre_gen_curr}', now '{curr_title}'); "
                     f"falling back to template"
                 )
                 banter_to_inject = None
 
         if banter_to_inject is None:
-            banter_text = self._build_winding_down_template(
-                curr_title, curr_artist, actual_next, actual_next_artist
+            banter_text = self._build_banter_template(
+                prev_title, prev_artist, curr_title, curr_artist
             )
             log_info(
-                f"[radio_host] Winding down with template banter: "
-                f"'{curr_title}' -> '{actual_next}'"
+                f"[radio_host] Track change with template banter: "
+                f"'{prev_title}' -> '{curr_title}'"
             )
             banter_to_inject = {"text": banter_text, "style": "transition"}
 
@@ -626,6 +600,173 @@ class RadioHostPlugin:
             result.get("status", "unknown"),
             audio_path=result.get("audio_path"),
         )
+
+    async def _on_winding_down(
+        self,
+        curr_title: str,
+        curr_artist: str,
+        next_title: str | None = None,
+        next_artist: str | None = None,
+        remaining: float = 0,
+    ) -> None:
+        """Called when the current track is near its end (~45 s remaining).
+
+        Primary injection point — generates banter, then schedules the
+        broadcast to play EXACTLY when the song ends, so the announcement
+        lands in the clean gap between songs (no overlap with AutoDJ
+        jingles or bumpers that would play during the transition).
+
+        Falls back to ``_inject_at_track_change`` when the current track is
+        short / a jingle (no room to inject during the outro).
+
+        Injection is launched as a background task so the track monitor's
+        poll loop is not blocked.
+        """
+        if not self._running:
+            return
+
+        await self._update_station_info()
+
+        # Determine whether we have enough time / content to inject at
+        # winding-down.  If the current track is a jingle/short, skip
+        # and set the flag so the next track_change injects instead.
+        playlist = self._monitor.current_playlist if self._monitor else ""
+        is_jingle_playlist = "jingle" in playlist.lower()
+        is_bumper_playlist = "bumper" in playlist.lower()
+        duration = 0.0
+        try:
+            np = await self._client.get_nowplaying(self._station_id)
+            current = np.get("now_playing", {}) or {}
+            duration = current.get("duration", 0) or 0
+        except Exception:
+            pass
+        is_short = duration < 45 and duration > 0
+
+        if is_short or is_jingle_playlist or is_bumper_playlist:
+            self._inject_at_track_change = True
+            log_info(
+                f"[radio_host] Winding down (short/jingle, deferring to track_change): "
+                f"'{curr_title}' ({duration:.0f}s, playlist='{playlist}')"
+            )
+            return
+
+        # Use next-track info from the monitor (refreshed at each verification).
+        actual_next = (
+            next_title
+            or (self._monitor.next_track_title if self._monitor else "")
+            or ""
+        )
+        actual_next_artist = (
+            next_artist
+            or (self._monitor.next_track_artist if self._monitor else "")
+            or ""
+        )
+
+        # Try pre-generated banter first (stored for "curr → next" transition)
+        banter_to_inject = self._pop_matching_banter(curr_title, curr_artist)
+        if banter_to_inject:
+            pre_gen_next = banter_to_inject.get("curr_title", "")
+            pre_gen_next_artist = banter_to_inject.get("curr_artist", "")
+            match = (
+                pre_gen_next == actual_next
+                and pre_gen_next_artist == actual_next_artist
+            )
+            if match:
+                log_info(
+                    f"[radio_host] Winding down with pre-generated banter: "
+                    f"'{curr_title}' -> '{actual_next}'"
+                )
+            else:
+                log_info(
+                    f"[radio_host] Pre-generated banter stale "
+                    f"(was '{pre_gen_next}', now '{actual_next}'); "
+                    f"falling back to template"
+                )
+                banter_to_inject = None
+
+        if banter_to_inject is None:
+            banter_text = self._build_winding_down_template(
+                curr_title, curr_artist, actual_next, actual_next_artist
+            )
+            log_info(
+                f"[radio_host] Winding down with template banter: "
+                f"'{curr_title}' -> '{actual_next}'"
+            )
+            banter_to_inject = {"text": banter_text, "style": "transition"}
+
+        # Clear the fallback flag — we just injected
+        self._inject_at_track_change = False
+
+        # Compute the absolute timestamp when the song will end
+        song_end_ts = _time.time() + remaining
+
+        # Fire the injection pipeline as a background task.  The pipeline
+        # first generates TTS + ffmpeg, then waits until ~2 s before
+        # *song_end_ts* to connect WebDJ.  The transition completes during
+        # the last 2 s of the song, and the announcement plays in the clean
+        # gap between tracks.
+        asyncio.create_task(
+            self._inject_winding_down_banter(
+                banter_to_inject=banter_to_inject,
+                curr_title=curr_title,
+                curr_artist=curr_artist,
+                song_end_ts=song_end_ts,
+            )
+        )
+
+    async def _inject_winding_down_banter(
+        self,
+        banter_to_inject: dict,
+        curr_title: str,
+        curr_artist: str,
+        song_end_ts: float,
+    ) -> None:
+        """Background task: TTS + ffmpeg, then broadcast precisely at song end."""
+        self._set_animation("speak")
+        try:
+            # Step 1: generate TTS audio immediately
+            audio_path = banter_to_inject.get("audio_path")
+            if not audio_path:
+                audio_path = await self._injector.generate_tts(
+                    banter_to_inject["text"]
+                )
+            if not audio_path:
+                log_error("[radio_host] TTS failed for winding-down banter")
+                return
+
+            # Step 2: pre-convert to WebM
+            webm_data = await self._client.convert_audio_to_webm(audio_path)
+            if webm_data is None:
+                return
+
+            # Step 3: wait until 2 s before song end, then connect WebDJ
+            now = _time.time()
+            connect_at = song_end_ts - 2.0
+            if connect_at > now:
+                await asyncio.sleep(connect_at - now)
+
+            result = await self._client.broadcast_webm_at(
+                webm_data=webm_data,
+                station_shortcode=self._station_id,
+                song_end_ts=song_end_ts,
+                username="SyntH",
+                password="synthradio",
+                title=f"SyntH is speaking",
+                artist="",
+            )
+
+            await self._log_activity(
+                curr_title,
+                curr_artist,
+                banter_to_inject["text"],
+                banter_to_inject.get("style", "transition"),
+                result.get("status", "unknown"),
+                audio_path=result.get("audio_path"),
+            )
+        except Exception as e:
+            log_error(f"[radio_host] Winding-down injection failed: {e}")
+        finally:
+            self._set_animation("idle")
 
     def _pop_matching_banter(self, prev_title: str, prev_artist: str) -> dict | None:
         if self._pending_banter:

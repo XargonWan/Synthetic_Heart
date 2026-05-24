@@ -400,6 +400,47 @@ def _audio_to_wav(audio_array: Any, sample_rate: int) -> bytes | None:
         return None
 
 
+def _normalize_wav_bytes(
+    wav_bytes: bytes,
+    target_level: float = 0.891,
+) -> bytes:
+    """Peak-normalize WAV bytes to *target_level* (default -1 dBFS).
+
+    Uses only Python built-ins + numpy so it works even when pydub/soundfile
+    are not installed.  Handles 8/16/32-bit PCM WAV.
+    """
+    import wave
+
+    import numpy as np
+
+    with wave.open(io.BytesIO(wav_bytes), "rb") as wav:
+        nchannels = wav.getnchannels()
+        sampwidth = wav.getsampwidth()
+        framerate = wav.getframerate()
+        nframes = wav.getnframes()
+        raw = wav.readframes(nframes)
+
+    dtype_map = {1: np.int8, 2: np.int16, 4: np.int32}
+    max_int_map = {1: 127, 2: 32767, 4: 2147483647}
+    dtype = dtype_map.get(sampwidth, np.int16)
+    max_int = max_int_map.get(sampwidth, 32767)
+
+    arr = np.frombuffer(raw, dtype=dtype).astype(np.float64)
+
+    max_val = float(np.max(np.abs(arr)))
+    if max_val > 1e-10:
+        arr = arr * (target_level * max_int / max_val)
+    arr = arr.astype(dtype)
+
+    out = io.BytesIO()
+    with wave.open(out, "wb") as wav:
+        wav.setnchannels(nchannels)
+        wav.setsampwidth(sampwidth)
+        wav.setframerate(framerate)
+        wav.writeframes(arr.tobytes())
+    return out.getvalue()
+
+
 # ---------------------------------------------------------------------------
 # KittenVoxEngine
 # ---------------------------------------------------------------------------
@@ -563,18 +604,17 @@ class KittenVoxEngine(VoxEngineBase):
             audio = tts.generate(text=text, voice=voice, language=language, speed=speed)
             # Engine may return raw bytes (WAV/MP3) or a numpy array.
             if isinstance(audio, bytes):
-                return audio
-            # Peak-normalize to -1 dBFS instead of applying hard gain + clipping.
-            # This ensures consistent loudness without the distortion that
-            # the previous +10dB clip caused.  Radio-specific gain is applied
-            # separately via RADIO_HOST_GAIN_DB in the radio host ffmpeg stage.
+                return _normalize_wav_bytes(audio, target_level=0.891)
+            # Clean peak-normalize to -1 dBFS.  No makeup gain / hard
+            # clipping here — transparent loudness is handled downstream
+            # by ffmpeg dynaudnorm in broadcast_banter.
             import numpy as np
 
             arr = audio.numpy() if hasattr(audio, "numpy") else audio
             max_val = float(np.max(np.abs(arr)))
             if max_val > 1e-10:
-                target = 0.891  # -1 dBFS — leaves headroom
-                arr = arr * (target / max_val)
+                arr = (arr / max_val) * 0.891
+            arr = np.clip(arr, -1.0, 1.0)
             return _audio_to_wav(arr, _SAMPLE_RATE)
         except Exception as exc:
             log_error(f"[vox/kitten] TTS generation failed: {exc}")

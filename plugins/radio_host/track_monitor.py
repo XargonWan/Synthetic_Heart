@@ -10,7 +10,7 @@ from .azuracast_client import AzuraCastClient
 
 _TRACK_CHANGE_COOLDOWN_S = 10
 _VERIFY_DELAY_S = 3
-_END_OF_SONG_THRESHOLD_S = 22
+_END_OF_SONG_THRESHOLD_S = 45
 _JINGLE_MAX_DURATION_S = 45
 
 
@@ -177,24 +177,25 @@ class TrackMonitor:
                 # We have a previous track, check if enough time has passed
                 elapsed = now - self._last_change_ts
                 if elapsed >= _TRACK_CHANGE_COOLDOWN_S:
-                    # This is a valid track change (not too fast)
-                    self._track_count_since_comment += 1
-
                     log_info(
                         f"[radio_host] Track change: "
                         f"'{self._last_track_title}' by {self._last_track_artist} -> "
                         f"'{title}' by {artist}"
                     )
 
+                    # Only count real songs (non-jingles) toward the intermission.
+                    # Jingles play between real songs and should not advance the
+                    # "songs-since-comment" counter, so synth doesn't skip an
+                    # announcement just because a 10 s bumper played in between.
+                    curr_playlist_lower = self.current_playlist.lower()
+                    curr_is_jingle = "jingle" in curr_playlist_lower
+                    if not curr_is_jingle:
+                        self._track_count_since_comment += 1
+
                     should_comment = (
-                        self._track_count_since_comment >= self._intermission
+                        not curr_is_jingle
+                        and self._track_count_since_comment >= self._intermission
                     )
-                    prev_is_jingle = bool(
-                        self._last_playlist and "jingle" in self._last_playlist.lower()
-                    )
-                    if not should_comment and not prev_is_jingle:
-                        should_comment = True
-                        self._track_count_since_comment = 0
                     if should_comment:
                         self._track_count_since_comment = 0
 
@@ -207,6 +208,7 @@ class TrackMonitor:
                     await self._fire_track_change(
                         should_comment=should_comment,
                         queue_ahead=queue_ahead,
+                        curr_is_jingle=curr_is_jingle,
                     )
                 else:
                     if not self.next_track_title and queue_ahead:
@@ -255,7 +257,7 @@ class TrackMonitor:
                         f"'{self.current_track_title}' by {self.current_track_artist} "
                         f"({remaining:.0f}s remaining)"
                     )
-                    await self._fire_winding_down()
+                    await self._fire_winding_down(remaining=remaining)
 
     def _extract_next_song(self, np: dict) -> dict[str, str]:
         playing_next = np.get("playing_next", {}) or {}
@@ -324,6 +326,7 @@ class TrackMonitor:
         self,
         should_comment: bool = True,
         queue_ahead: list[dict[str, str]] | None = None,
+        curr_is_jingle: bool = False,
     ) -> None:
         if self._on_track_change is None:
             return
@@ -343,11 +346,12 @@ class TrackMonitor:
                 should_comment=should_comment,
                 queue_ahead=queue_ahead,
                 prev_is_jingle=prev_is_jingle,
+                curr_is_jingle=curr_is_jingle,
             )
         except Exception as e:
             log_error(f"[radio_host] Track change handler failed: {e}")
 
-    async def _fire_winding_down(self) -> None:
+    async def _fire_winding_down(self, remaining: float = 0) -> None:
         if self._on_winding_down is None:
             return
         if not self.current_track_title:
@@ -358,6 +362,7 @@ class TrackMonitor:
                 curr_artist=self.current_track_artist,
                 next_title=self.next_track_title,
                 next_artist=self.next_track_artist,
+                remaining=remaining,
             )
         except Exception as e:
             log_error(f"[radio_host] Winding down handler failed: {e}")
