@@ -569,6 +569,15 @@ class SynthWebUIInterface:
         # Persona manager will be initialized in start() method after core initialization
         self.persona_manager = None
 
+        # Plugin extension points: JS content and API route handlers registered by plugins.
+        # Plugins call register_plugin_js() / register_plugin_api_route() from their start().
+        # Removing a plugin simply leaves these dicts empty — no core traces remain.
+        self._plugin_scripts: dict[str, str] = {}
+        self._plugin_api_routes: dict[str, Any] = {}
+        # Plugin section tabs: keyed by section name, each entry is a list of
+        # {"tab_id": str, "button_html": str, "panel_html": str} dicts.
+        self._plugin_section_tabs: dict[str, list[dict[str, str]]] = {}
+
         if self.autostart:
             log_info(
                 f"{LOG_PREFIX} Autostart enabled - will start server when event loop is available",
@@ -816,6 +825,107 @@ class SynthWebUIInterface:
         self.app.get("/templates/{section}.html")(self.serve_template_section)
         # Endpoint serving an iframe host page for embedding sections inside an iframe
         self.app.get("/iframe/{section}")(self.iframe_host)
+
+        # Plugin dispatch middleware — handles JS files and API routes registered by
+        # plugins at runtime.  Added last so it runs first in the middleware stack,
+        # intercepting plugin-specific paths before the static-file mounts.
+        try:
+            from starlette.middleware.base import BaseHTTPMiddleware
+
+            class _PluginDispatchMiddleware(BaseHTTPMiddleware):
+                async def dispatch(inner_self, request, call_next):
+                    path = request.url.path
+
+                    # Serve registered plugin JS: GET /js/plugins/<name>.js
+                    if path.startswith("/js/plugins/") and path.endswith(".js"):
+                        plugin_name = path[len("/js/plugins/") : -len(".js")]
+                        content = self._plugin_scripts.get(plugin_name)
+                        if content is not None:
+                            from starlette.responses import Response
+
+                            return Response(
+                                content,
+                                media_type="application/javascript",
+                            )
+
+                    # Dispatch registered plugin API routes
+                    handler = self._plugin_api_routes.get(path)
+                    if handler is not None:
+                        import inspect
+                        from starlette.responses import JSONResponse
+                        from starlette.responses import Response as StarletteResponse
+
+                        sig = inspect.signature(handler)
+                        result = handler(request) if sig.parameters else handler()
+                        if inspect.isawaitable(result):
+                            result = await result
+                        if isinstance(result, StarletteResponse):
+                            return result
+                        return JSONResponse(result)
+
+                    return await call_next(request)
+
+            self.app.add_middleware(_PluginDispatchMiddleware)
+        except Exception as _mw_exc:
+            log_warning(
+                f"{LOG_PREFIX} Failed to add plugin dispatch middleware: {_mw_exc}"
+            )
+
+    # ------------------------------------------------------------------
+    # Plugin extension API
+    # ------------------------------------------------------------------
+
+    def register_plugin_js(self, name: str, js_content: str) -> None:
+        """Register a plugin's JS content to be served at /js/plugins/<name>.js.
+
+        The script tag ``<script src="/js/plugins/<name>.js" defer></script>`` is
+        injected automatically into every rendered index page.  Calling this
+        multiple times for the same *name* replaces the previous content.
+        """
+        self._plugin_scripts[name] = js_content
+        log_info(
+            f"{LOG_PREFIX} Plugin JS registered: '{name}' ({len(js_content)} bytes)",
+            log_file=WEBUI_LOG,
+        )
+
+    def register_plugin_api_route(self, path: str, handler: Any) -> None:
+        """Register an async or sync callable at *path* for GET requests.
+
+        The handler must return a JSON-serialisable value.  Registering the
+        same path again replaces the previous handler.
+        """
+        self._plugin_api_routes[path] = handler
+        log_info(
+            f"{LOG_PREFIX} Plugin API route registered: {path}",
+            log_file=WEBUI_LOG,
+        )
+
+    def register_plugin_section_tab(
+        self,
+        section: str,
+        tab_id: str,
+        button_html: str,
+        panel_html: str,
+    ) -> None:
+        """Register a sub-tab to be injected into a section template.
+
+        When ``/templates/<section>.html`` is served, the *button_html* snippet
+        is appended inside the ``<nav class="sub-nav">`` element and *panel_html*
+        is appended inside the ``.sub-tabs-container`` element.
+
+        Calling this multiple times with the same *tab_id* replaces the previous
+        registration.  Removing a plugin simply leaves the dict empty.
+        """
+        tabs = self._plugin_section_tabs.setdefault(section, [])
+        # Replace existing entry for this tab_id
+        self._plugin_section_tabs[section] = [t for t in tabs if t["tab_id"] != tab_id]
+        self._plugin_section_tabs[section].append(
+            {"tab_id": tab_id, "button_html": button_html, "panel_html": panel_html}
+        )
+        log_info(
+            f"{LOG_PREFIX} Plugin section tab registered: section='{section}' tab_id='{tab_id}'",
+            log_file=WEBUI_LOG,
+        )
 
     def _is_missing_agent_table_error(self, exc: Exception) -> bool:
         """Return True when agent tables are missing so endpoints can degrade gracefully."""
@@ -1351,6 +1461,16 @@ class SynthWebUIInterface:
 
             for placeholder, value in replacements.items():
                 template = template.replace(placeholder, value)
+
+            # Inject script tags for registered plugins right before </body>.
+            # _plugin_scripts is populated lazily when plugins call
+            # register_plugin_js(); re-reading per request is intentional (no cache).
+            if self._plugin_scripts:
+                extra = "".join(
+                    f'<script src="/js/plugins/{name}.js" defer></script>\n'
+                    for name in self._plugin_scripts
+                )
+                template = template.replace("</body>", f"{extra}</body>", 1)
 
             return template
 
@@ -1932,6 +2052,20 @@ class SynthWebUIInterface:
 
             for key, value in replacements.items():
                 template = template.replace(key, str(value))
+
+            # Inject plugin-registered sub-tabs for this section
+            section_tabs = self._plugin_section_tabs.get(section, [])
+            for tab in section_tabs:
+                # Append button inside <nav class="sub-nav">
+                template = template.replace(
+                    "</nav>", tab["button_html"] + "\n</nav>", 1
+                )
+                # Append panel inside .sub-tabs-container (anchored by closing comment)
+                template = template.replace(
+                    "</div><!-- .sub-tabs-container -->",
+                    tab["panel_html"] + "\n      </div><!-- .sub-tabs-container -->",
+                    1,
+                )
 
             return HTMLResponse(content=template)
 
@@ -6389,15 +6523,18 @@ class SynthWebUIInterface:
         sort = params.get("sort", "desc")
 
         try:
-            from core.db import get_conn_ctx
+            from core.db import _get_db_type, get_conn_ctx
 
             offset = (page - 1) * per_page
             order = "DESC" if sort == "desc" else "ASC"
+            is_postgres = _get_db_type() == "postgres"
 
             async with get_conn_ctx() as conn:
                 async with conn.cursor() as cur:
-                    # Increase limit so long diary days aren't truncated
-                    await cur.execute("SET SESSION group_concat_max_len = 1048576")
+                    # MySQL/MariaDB truncates GROUP_CONCAT aggressively by default.
+                    # Postgres uses translated string_agg and does not support this SET.
+                    if not is_postgres:
+                        await cur.execute("SET SESSION group_concat_max_len = 1048576")
 
                     if search:
                         search_term = f"%{search}%"

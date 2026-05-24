@@ -848,35 +848,18 @@ class CoreInitializer:
                     if hasattr(instance, "start"):
                         try:
                             if asyncio.iscoroutinefunction(instance.start):
-                                try:
-                                    loop = asyncio.get_running_loop()
-                                    if loop and loop.is_running():
-                                        task = loop.create_task(instance.start())
-                                        self._background_tasks.add(task)
-                                        task.add_done_callback(
-                                            self._background_tasks.discard
-                                        )
-                                        log_info(
-                                            f"[core_initializer] Started async plugin: {module_name}"
-                                        )
-                                    else:
-                                        log_warning(
-                                            f"[core_initializer] No running loop for async plugin: {module_name}"
-                                        )
-                                        if not hasattr(self, "_pending_async_plugins"):
-                                            self._pending_async_plugins = []
-                                        self._pending_async_plugins.append(
-                                            (module_name, instance)
-                                        )
-                                except RuntimeError:
-                                    log_warning(
-                                        f"[core_initializer] No event loop for async plugin: {module_name}"
-                                    )
-                                    if not hasattr(self, "_pending_async_plugins"):
-                                        self._pending_async_plugins = []
+                                if not hasattr(self, "_pending_async_plugins"):
+                                    self._pending_async_plugins = []
+                                if not any(
+                                    pending_name == module_name
+                                    for pending_name, _ in self._pending_async_plugins
+                                ):
                                     self._pending_async_plugins.append(
                                         (module_name, instance)
                                     )
+                                log_info(
+                                    f"[core_initializer] Queued async plugin for startup: {module_name}"
+                                )
                             else:
                                 instance.start()
                                 log_info(
@@ -1288,7 +1271,9 @@ class CoreInitializer:
     async def start_pending_async_plugins(self):
         """Start async plugins that were pending due to no event loop."""
         if hasattr(self, "_pending_async_plugins"):
-            for plugin_name, instance in self._pending_async_plugins:
+            pending_plugins = list(self._pending_async_plugins)
+            self._pending_async_plugins.clear()
+            for plugin_name, instance in pending_plugins:
                 try:
                     await instance.start()
                     log_info(
@@ -1298,8 +1283,6 @@ class CoreInitializer:
                     log_error(
                         f"[core_initializer] Error starting pending plugin {plugin_name}: {repr(e)}"
                     )
-            # Clear the pending list
-            self._pending_async_plugins.clear()
             log_info("[core_initializer] All pending async plugins processed")
 
     async def _build_actions_block(self):

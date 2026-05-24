@@ -823,6 +823,14 @@ docker exec synth-dev tail -f /app/logs/synth.log | grep -E "\[grillo\]|grillo"
 
 ---
 
+### Daily diary WebUI used MySQL-only `group_concat_max_len` on Postgres  <!-- 2026-05-19 -->
+**Symptom:** The WebUI diary history endpoint could fail with errors like `Failed to fetch daily diary: unrecognized configuration parameter "group_concat_max_len"` on Postgres-backed runs.
+**Location:** `core/webui.py` (`history_diary`).
+**Status:** fixed.
+**Notes:** The query itself already relied on SQL translation for `GROUP_CONCAT(...)`, but the handler still executed `SET SESSION group_concat_max_len = 1048576` unconditionally. The fix keeps that session setting only on MariaDB/MySQL and skips it on Postgres, where `string_agg(...)` is used after translation.
+
+---
+
 ### Repo-wide lint still has unrelated failures, but broad pytest is green  <!-- 2026-05-07 -->
 **Symptom:** `uv run ruff check --fix .` can still fail on pre-existing files outside most feature slices (observed in `interface/message_send_utils.py`, `interface_dev/reddit_interface.py`, `interface_dev/telethon_userbot.py`, `interface_dev/x_interface.py`, `plugins/bio_manager.py`), but broad `uv run pytest --ignore=tests/plugins/test_selenium_ttsfree.py -q --disable-warnings` passed on `2026-05-07` with `1185 passed, 15 skipped`.
 **Location:** Mixed pre-existing validation debt across interfaces, plugins, and broad regression suite.
@@ -972,6 +980,22 @@ docker exec synth-dev tail -f /app/logs/synth.log | grep -E "\[grillo\]|grillo"
 **Location:** Runtime observability split across `logs/synth*`, `grillo_activity_log`, `chat_history_cache`, `core/external_endpoints/adapters/gemini_adapter.py`, and `core/plugin_instance.py` (`_update_grillo_response`).
 **Status:** fixed.
 **Notes:** After a restart, the current synth logs may no longer cover the user-reported window, so check `grillo_activity_log` plus `chat_history_cache` for the target `interface_path` before assuming the scheduler stalled. Successful outreach leaves a self-authored chat-history row near the activity timestamp. Blank outreach rows were caused by empty external-model replies being dropped twice: `handle_incoming_message()` skipped Grillo write-back for falsey results and `_update_grillo_response()` also returned early on empty text. The Grillo path now persists a diagnostic `[EMPTY LLM RESPONSE] ...` marker with engine / finish / block metadata when the visible reply is empty, so scheduler issues and safety-filtered model silences are distinguishable in the DB.
+
+---
+
+### Radio host KittenTTS volume — hard clipping distortion fixed with ffmpeg dynaudnorm  <!-- 2026-05-24 -->
+**Symptom:** KittenTTS-generated TTS was too quiet. Adding makeup gain caused audible hard-clipping distortion.
+**Location:** `plugins/vox_engines/kitten.py` (`generate_tts`), `plugins/radio_host/azuracast_client.py` (`_convert_to_webm`).
+**Status:** fixed.
+**Notes:** The engine now peak-normalizes cleanly to -1 dBFS (no makeup gain, no clipping). Transparent loudness is handled downstream by ffmpeg's `dynaudnorm` filter (frame=150 ms, max_gain=15×, target_peak=0.95) in `broadcast_banter`. This gives radio-presence volume without distortion.
+
+---
+
+### Radio host injection at track_change was too slow for timely announcements  <!-- 2026-05-24 -->
+**Symptom:** Announcements injected at track_change time arrived ~8 s into the new song (TTS 3 s + ffmpeg 1 s + WebDJ 4 s pre-delay), making them feel "late" relative to the song start.
+**Location:** `plugins/radio_host/radio_host_plugin.py` (`_on_track_change`, `_inject_banter_now`, `_on_winding_down`).
+**Status:** fixed.
+**Notes:** The design was changed to a **hybrid approach**: `_on_winding_down` is the primary injection point (banter plays during song outro, ~13 s remaining — safe from jingle overlap), and `_on_track_change` only acts as fallback when winding-down was skipped for a short/jingle track. A `_inject_at_track_change` boolean flag bridges the two paths.
 
 ---
 
