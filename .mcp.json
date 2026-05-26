@@ -8,6 +8,15 @@
         "gemini-docs-mcp"
       ]
     },
+    "grok-api-docs": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["d:/dev/13/synthetic_heart/mcp_servers/grok-api-mcp/dist/index.js"]
+    },
+    "xai-docs-official": {
+      "type": "sse",
+      "url": "https://docs.x.ai/api/mcp"
+    },
     "gitnexus": {
       "type": "stdio",
       "command": "npx",
