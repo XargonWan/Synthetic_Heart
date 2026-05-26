@@ -1023,12 +1023,14 @@ class OllamaCompatServer:
         **kwargs: Any,
     ) -> None:
         payload: dict[str, Any] = {}
+        skip_history = kwargs.pop("skip_history", False)
         if isinstance(payload_or_chat_id, dict):
             payload = payload_or_chat_id
             text = payload.get("text", text)
             chat_id = payload.get("target") or payload.get("chat_id")
             model = payload.get("model")
             conversation_id = payload.get("conversation_id")
+            skip_history = payload.get("skip_history", skip_history)
         else:
             chat_id = payload_or_chat_id or kwargs.get("chat_id")
             model = kwargs.get("model")
@@ -1063,16 +1065,19 @@ class OllamaCompatServer:
             )
 
             # Save SyntH's response via core chat_context_manager
-            try:
-                from core.chat_context_manager import save_response_message
-                from core.interface_path_utils import build_interface_path
+            if not skip_history:
+                try:
+                    from core.chat_context_manager import save_response_message
+                    from core.interface_path_utils import build_interface_path
 
-                msg_interface_path = build_interface_path("ollama_serve", str(chat_id))
-                await save_response_message(msg_interface_path, text)
-            except Exception as e:
-                log_debug(
-                    f"[ollama_serve] Failed to save response via context_manager: {e}"
-                )
+                    msg_interface_path = build_interface_path(
+                        "ollama_serve", str(chat_id)
+                    )
+                    await save_response_message(msg_interface_path, text)
+                except Exception as e:
+                    log_debug(
+                        f"[ollama_serve] Failed to save response via context_manager: {e}"
+                    )
 
         if finalize_flag:
             await self._finalize_stream(

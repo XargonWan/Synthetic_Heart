@@ -207,9 +207,7 @@ class AzuraCastClient:
         host = self._base_url.split("://", 1)[-1]
         ws_url = f"ws://{host}/webdj/{station_shortcode}/"
 
-        log_info(
-            f"[azuracast] Timed broadcast: {len(webm_data)}b WebM at song_end"
-        )
+        log_info(f"[azuracast] Timed broadcast: {len(webm_data)}b WebM at song_end")
         try:
             async with websockets.connect(
                 ws_url, subprotocols=["webcast"], close_timeout=30

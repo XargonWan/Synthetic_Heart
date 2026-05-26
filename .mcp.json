@@ -1,8 +1,12 @@
 {
   "mcpServers": {
     "gemini-api-docs-mcp": {
-      "type": "http",
-      "url": "https://gemini-api-docs-mcp.dev"
+      "command": "uvx",
+      "args": [
+        "--from",
+        "git+https://github.com/philschmid/gemini-api-docs-mcp",
+        "gemini-docs-mcp"
+      ]
     },
     "gitnexus": {
       "type": "stdio",

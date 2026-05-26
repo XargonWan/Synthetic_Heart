@@ -156,6 +156,14 @@ MODEL_CONFIGS = {
         "max_output_tokens": 65536,
         "max_prompt_chars": 1000000,
     },
+    "gemini-3.5-flash": {
+        "label": "Gemini 3.5 Flash",
+        "description": "Gemini 3.5 Flash — fast, high throughput multimodal model optimised for coding and agentic tasks",
+        "thinking": True,
+        "default_thinking_level": "medium",
+        "max_output_tokens": 65536,
+        "max_prompt_chars": 1000000,
+    },
 }
 
 _LEGACY_DICT_PROMPT_WARNED = False
@@ -1203,16 +1211,26 @@ class GeminiAPIPlugin(AIPluginBase):
             )
         user_parts.append({"text": prompt_text})
 
+        gen_config: dict[str, Any] = {
+            "maxOutputTokens": int(max_output_tokens),
+            "responseMimeType": "application/json",
+        }
+        model_config = MODEL_CONFIGS.get(
+            self._current_model, MODEL_CONFIGS.get(DEFAULT_MODEL)
+        )
+        if model_config and model_config.get("thinking"):
+            thinking_level = str(
+                model_config.get("default_thinking_level", "medium")
+            ).upper()
+            gen_config["thinkingConfig"] = {"thinkingLevel": thinking_level}
+
         payload = {
             "contents": [{"role": "user", "parts": user_parts}],
             "systemInstruction": {
                 "role": "system",
                 "parts": [{"text": system_instruction}],
             },
-            "generationConfig": {
-                "maxOutputTokens": int(max_output_tokens),
-                "responseMimeType": "application/json",
-            },
+            "generationConfig": gen_config,
             "safetySettings": [
                 {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "OFF"},
                 {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "OFF"},
@@ -1396,16 +1414,26 @@ class GeminiAPIPlugin(AIPluginBase):
         contents: list[dict[str, Any]] = rendered.get("contents") or []
         tools_list: list[dict[str, Any]] = rendered.get("tools") or []
 
+        gen_config: dict[str, Any] = {
+            "maxOutputTokens": max_output_tokens,
+            "responseMimeType": "application/json",
+        }
+        model_config = MODEL_CONFIGS.get(
+            self._current_model, MODEL_CONFIGS.get(DEFAULT_MODEL)
+        )
+        if model_config and model_config.get("thinking"):
+            thinking_level = str(
+                model_config.get("default_thinking_level", "medium")
+            ).upper()
+            gen_config["thinkingConfig"] = {"thinkingLevel": thinking_level}
+
         payload: dict[str, Any] = {
             "contents": contents,
             "systemInstruction": {
                 "role": "system",
                 "parts": [{"text": system_instruction_text}],
             },
-            "generationConfig": {
-                "maxOutputTokens": max_output_tokens,
-                "responseMimeType": "application/json",
-            },
+            "generationConfig": gen_config,
             "safetySettings": [
                 {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "OFF"},
                 {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "OFF"},

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import random
 import time as _time
 from collections import deque
@@ -10,7 +9,6 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-import websockets
 
 from core.config_manager import config_registry
 from core.core_initializer import register_plugin
@@ -727,9 +725,7 @@ class RadioHostPlugin:
             # Step 1: generate TTS audio immediately
             audio_path = banter_to_inject.get("audio_path")
             if not audio_path:
-                audio_path = await self._injector.generate_tts(
-                    banter_to_inject["text"]
-                )
+                audio_path = await self._injector.generate_tts(banter_to_inject["text"])
             if not audio_path:
                 log_error("[radio_host] TTS failed for winding-down banter")
                 return
@@ -751,7 +747,7 @@ class RadioHostPlugin:
                 song_end_ts=song_end_ts,
                 username="SyntH",
                 password="synthradio",
-                title=f"SyntH is speaking",
+                title="SyntH is speaking",
                 artist="",
             )
 
