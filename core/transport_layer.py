@@ -1603,6 +1603,11 @@ def _get_attempted_action_full_description(
                 "[_get_attempted_action] Could not extract action type from error text"
             )
             return None
+
+        # Strip default_api: prefix if present
+        if action_type.startswith("default_api:"):
+            action_type = action_type.split("default_api:", 1)[1]
+
         log_debug(
             f"[_get_attempted_action] Identified attempted action type: {action_type}"
         )
@@ -1779,6 +1784,29 @@ async def run_corrector_middleware(
             "[corrector_middleware] Text appears to be system message; skipping correction to prevent loops"
         )
         return None
+
+    # Check for LLM safety refusals. If matched, immediately return empty actions to prevent correction loops.
+    if text:
+        text_lower = text.lower()
+        refusal_keywords = [
+            "我无法",
+            "无法提供",
+            "无法给到",
+            "i cannot fulfill",
+            "unable to",
+            "against my safety",
+            "safety policy",
+            "safety guidelines",
+            "violates safety",
+            "harmful or explicit",
+            "not allowed",
+        ]
+        if any(kw in text_lower for kw in refusal_keywords):
+            log_warning(
+                f"[corrector_middleware] Detected potential LLM safety refusal: {text!r}. "
+                f"Returning empty actions list to prevent correction loops."
+            )
+            return '{"actions": []}'
 
     last_error_hint = LAST_JSON_ERROR_INFO or "Invalid or missing JSON"
 

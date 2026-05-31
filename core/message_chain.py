@@ -171,6 +171,12 @@ def _normalize_action_type_aliases(actions: list) -> list:
         if not isinstance(action_type, str):
             continue
 
+        if action_type.startswith("default_api:"):
+            action_type = action_type.split("default_api:", 1)[1]
+            action["type"] = action_type
+            if "action" in action:
+                action["action"] = action_type
+
         canonical_type = _ACTION_TYPE_ALIASES.get(action_type)
         if not canonical_type or canonical_type == action_type:
             continue
@@ -801,6 +807,27 @@ async def handle_incoming_message(
         log_info(
             f"[message_chain] 🔄 LOOP: attempt={attempt} source={source} chat={getattr(message, 'chat_id', None)} text_len={len(text) if text else 0}"
         )
+
+        # Determine interface flags early
+        user_facing_interfaces = [
+            "discord_bot",
+            "telegram_bot",
+            "synth_webui",
+            "matrix_chat",
+            "ollama_serve",
+        ]
+        interface_path = ctx.get("interface_path") or ""
+        chat_id = ctx.get("chat_id")
+
+        is_user_facing = interface_path and any(
+            interface_path.startswith(f"{iface}/") for iface in user_facing_interfaces
+        )
+
+        is_internal_chat = chat_id == -1 or chat_id == "-1" or str(chat_id) == "-1"
+
+        is_grillo_internal = ctx.get("grillo_beat", False) and ctx.get(
+            "beat_type"
+        ) not in ("outreach", None)
 
         actions = None
 
@@ -2190,6 +2217,25 @@ async def handle_incoming_message(
                                     "[message_chain] JSON recovery requires correction despite no execution failures"
                                 )
 
+                            # Check if user response is required but missing.
+                            missing_user_reply = False
+                            if (
+                                is_user_facing
+                                and not is_grillo_internal
+                                and not is_internal_chat
+                                and not has_user_response
+                            ):
+                                missing_user_reply = True
+
+                            errors_list = list(errors)
+                            if missing_user_reply:
+                                errors_list.append(
+                                    "CHAT REPLY REQUIRED: The user is waiting for a reply in this active conversation turn. "
+                                    f"You MUST include a message action targeting the originating interface '{interface_path.split('/')[0]}' "
+                                    "(e.g., 'message_telegram_bot') to reply to the user. Internal actions like diary entries "
+                                    "and emotion updates do NOT substitute for replying."
+                                )
+
                             # Build correction context with info about what succeeded and what failed
                             correction_context = {
                                 "successful_actions": processed,
@@ -2199,7 +2245,7 @@ async def handle_incoming_message(
                                     if isinstance(a, dict)
                                 ],
                                 "failed_actions": failed,
-                                "errors": errors,
+                                "errors": errors_list,
                                 "had_json_errors": metadata.get("recovered", False),
                                 "original_text": text,
                             }
@@ -2210,7 +2256,11 @@ async def handle_incoming_message(
 
                             # Set parsed = None to trigger correction path
                             # But keep the successful actions already executed
-                            if len(failed) > 0 or recovered_with_extra_text:
+                            if (
+                                len(failed) > 0
+                                or recovered_with_extra_text
+                                or missing_user_reply
+                            ):
                                 parsed = (
                                     None  # This will trigger the correction loop below
                                 )
@@ -2221,11 +2271,41 @@ async def handle_incoming_message(
                                 )
                                 return ACTIONS_EXECUTED
                         else:
-                            # All actions succeeded
-                            log_info(
-                                "[message_chain] Actions executed successfully - loop interrupted"
-                            )
-                            return ACTIONS_EXECUTED
+                            # All actions succeeded, but check if user response is required and missing
+                            if (
+                                is_user_facing
+                                and not is_grillo_internal
+                                and not is_internal_chat
+                                and not has_user_response
+                            ):
+                                log_warning(
+                                    f"[message_chain] ⚠️ LLM generated no outbound message action for user-facing interface '{interface_path}' — triggering corrector for missing reply"
+                                )
+                                correction_context = {
+                                    "successful_actions": processed,
+                                    "successful_types": [
+                                        (a.get("type") or a.get("action"))
+                                        for a in processed
+                                        if isinstance(a, dict)
+                                    ],
+                                    "failed_actions": [],
+                                    "errors": [
+                                        "CHAT REPLY REQUIRED: The user is waiting for a reply in this active conversation turn. "
+                                        f"You MUST include a message action targeting the originating interface '{interface_path.split('/')[0]}' "
+                                        "(e.g., 'message_telegram_bot') to reply to the user. Internal actions like diary entries "
+                                        "and emotion updates do NOT substitute for replying."
+                                    ],
+                                    "had_json_errors": False,
+                                    "original_text": text,
+                                }
+                                if hasattr(message, "__dict__"):
+                                    message.correction_context = correction_context
+                                parsed = None
+                            else:
+                                log_info(
+                                    "[message_chain] Actions executed successfully - loop interrupted"
+                                )
+                                return ACTIONS_EXECUTED
 
                     except Exception as e:
                         log_warning(f"[message_chain] Failed to run actions: {e}")
