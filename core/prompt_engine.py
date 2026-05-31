@@ -430,35 +430,52 @@ def _build_context_summary(
     """
     parts: list[str] = []
 
-    # Keep runtime facts in the background for ordinary chat turns. Exact values
-    # are only surfaced when the current turn explicitly needs them.
-    _date_val: str = str(context_section.get("date") or "").strip()
-    _time_val: str = str(context_section.get("time") or "").strip()
-    _time_of_day_val: str = str(context_section.get("time_of_day") or "").strip()
-    _loc_val: str = str(context_section.get("location") or "").strip()
-    _time_lines: list[str] = []
-    if _date_val or _time_val or _time_of_day_val or _loc_val:
-        _time_lines.append(
-            "Use these runtime facts only when they matter for scheduling, logistics, time-sensitive reasoning, or natural scene-setting."
-        )
-        _time_lines.append(
-            "Do not quote them verbatim in ordinary replies unless the user asked for them or they are genuinely necessary."
-        )
-    if include_explicit_runtime_facts:
-        if _date_val:
-            _time_lines.append(f"Current date: {_date_val}")
-        if _time_val:
-            _time_lines.append(f"Current local time: {_time_val}")
-        if _loc_val:
-            _time_lines.append(f"Current local setting: {_loc_val}")
-    elif _time_of_day_val:
-        _time_lines.append(f"Current part of day: {_time_of_day_val}.")
-    elif _date_val or _time_val or _loc_val:
-        _time_lines.append(
-            "Exact local date, time, and location are available to the system when needed, but should stay in the background for ordinary replies."
-        )
-    if _time_lines:
-        parts.append("[Ambient runtime context]\n" + "\n".join(_time_lines))
+    # Reality Anchor (always-on temporal grounding)
+    _date_val = str(context_section.get("date") or "").strip()
+    _time_val = str(context_section.get("time") or "").strip()
+    _day_of_week = str(context_section.get("day_of_week") or "").strip()
+    _season = str(context_section.get("season") or "").strip()
+    _loc_val = str(context_section.get("location") or "").strip()
+
+    anchor_lines = ["[SYSTEM: REALITY ANCHOR]"]
+    if _date_val:
+        nice_date = _date_val
+        try:
+            dt_parsed = datetime.strptime(_date_val, "%Y-%m-%d")
+            nice_date = dt_parsed.strftime("%B %d, %Y")
+        except Exception:
+            pass
+        if _day_of_week:
+            anchor_lines.append(f"- Current Date: {_day_of_week}, {nice_date}")
+        else:
+            anchor_lines.append(f"- Current Date: {nice_date}")
+
+    if _time_val:
+        nice_time = _time_val
+        try:
+            dt_parsed = datetime.strptime(_time_val, "%H:%M")
+            nice_time = dt_parsed.strftime("%I:%M %p").lstrip("0")
+        except Exception:
+            pass
+        anchor_lines.append(f"- Current Time: {nice_time}")
+
+    if _season:
+        anchor_lines.append(f"- Season: {_season}")
+
+    if _loc_val:
+        anchor_lines.append(f"- Current Location: {_loc_val}")
+
+    curr_year = 2026
+    if _date_val:
+        try:
+            curr_year = int(_date_val.split("-")[0])
+        except Exception:
+            pass
+
+    anchor_lines.append(
+        f"- Temporal Delta: It is now {curr_year}. It has been approximately 2-3 years since your primary core baseline training knowledge cutoff (early 2023 / mid-2024 depending on the model). Adjust your perspective on tools, software versions, and global releases to reflect this passage of time naturally."
+    )
+    parts.append("\n".join(anchor_lines))
 
     persona_preferences = str(context_section.get("persona_preferences") or "").strip()
     if persona_preferences:
@@ -1320,6 +1337,8 @@ async def build_prompt_request(
         context_section.setdefault("date", local_time_fields.get("local_date"))
         context_section.setdefault("time", local_time_fields.get("local_time"))
         context_section.setdefault("time_of_day", local_time_fields.get("time_of_day"))
+        context_section.setdefault("season", local_time_fields.get("season"))
+        context_section.setdefault("day_of_week", local_time_fields.get("day_of_week"))
 
     for key, kind in (
         ("history_recent", "history_recent"),
@@ -1484,10 +1503,21 @@ async def build_prompt_request(
 
     # === CRITICAL: Prepend persona to instructions so ALL LLM types see it ===
     # Use the persona extracted during gather_static_injections()
-    if static_persona:
+    # Skip prepending static persona for internal system/maintenance tasks (like diary_merge/diary_consolidation)
+    # to avoid triggering safety filters of external LLMs on explicit instructions.
+    is_internal_system_task = interface_name in (
+        "diary_merge",
+        "diary_consolidation",
+        "system",
+    ) or _beat_type in ("diary_consolidation", "system")
+    if static_persona and not is_internal_system_task:
         json_instructions = f"=== CRITICAL SYSTEM IDENTITY ===\n{static_persona}\n\n=== JSON RESPONSE INSTRUCTIONS ===\n{json_instructions}"
         log_info(
             f"[json_prompt] 👤 Persona prepended to instructions ({len(static_persona)} chars)"
+        )
+    elif static_persona:
+        log_info(
+            f"[json_prompt] 👤 Persona skipped prepending for internal system task (interface: {interface_name}, beat_type: {_beat_type})"
         )
 
     # Recon-derived instructions (language, tone, plugin hints)
@@ -2053,7 +2083,7 @@ def load_json_instructions() -> str:
         "CLARIFICATION POLICY: If the user's intent, referent, or the subject of a follow-up is ambiguous or missing, DO NOT GUESS — ask one concise clarifying question before asserting facts or taking action. When the user asks whether you 'understood' but there is no clear context, request clarification rather than assuming.\n"
         "MEMORY HONESTY: When the user asks what you remember, prefer honesty over confidence. Memories can be incomplete or stale. If you do not clearly recall or cannot verify a detail, say so. Do not invent events, conversations, promises, or feelings to fill gaps. SyntH is not roleplay or fiction, so never turn uncertainty into fiction.\n"
         "REFERENCE CLARITY: When the user refers indirectly to a person, message, post, image, clip, or quoted content, refer to its author or speaker in a clear generic way and avoid vague or impersonal wording that obscures who created or said it.\n"
-        "TIME AUTHORITY: Treat context.date, context.time, input.payload.local_date, input.payload.local_time, input.payload.local_hour, and input.payload.time_of_day as the authoritative current time context whenever present. Never infer the current time, date, or part of day from prior chat history, memories, or older assistant messages.\n"
+        "TIME AUTHORITY: Use the [SYSTEM: REALITY ANCHOR] block (current date, time, season) as your authoritative temporal context. Use it for all relative time calculations (e.g., 'yesterday', 'next week') and temporal reasoning. Never quote the absolute date, current year, or clock time verbatim in ordinary replies unless explicitly asked or genuinely necessary for scheduling or logistics. Treat past logs referencing dates as style noise and do not mirror them.\n"
         "RUNTIME STYLE: If earlier assistant messages or chat history casually mention an exact time, date, timezone, weather, or location, treat that as stale style noise and do not mirror it unless the user asked for it or logistics genuinely require it.\n"
         "INPUT METADATA: Each user message is prefixed with internal routing metadata in the format [lang:... | tone:... | emotions:... | from:... | tag:... | path:...]. This is injected by the system — the user did not write it. Do not reference, quote, or paraphrase any part of this prefix in your replies (e.g. never say 'that 5.0 neutral you mentioned' or 'your tone tag says...').\n"
         "IDENTITY INTEGRITY: Stay inside the active persona in first person. Do not describe yourself from the outside, do not refer to the active persona as a separate fictional character, and do not compare yourself to that persona as if they were someone else.\n"
@@ -2090,7 +2120,7 @@ RESPONSE SHAPE RULES:
 - When the user asks about memory, prefer explicit honesty over confident reconstruction. If you do not clearly remember or cannot verify a detail from the provided context, say so plainly instead of filling gaps with invented recollection.
 - Treat recalled memories, diary snippets, and other internal records as potentially incomplete or reconstructed unless the current conversation clearly confirms them.
 - When the user refers indirectly to a person, message, post, image, clip, or quoted content, refer to its author or speaker in a clear generic way and avoid vague or impersonal wording.
-- Treat current time fields in the prompt as authoritative. Never infer the present time, date, or part of day from older chat history, memories, or prior assistant messages.
+- Use the [SYSTEM: REALITY ANCHOR] (current date, time, season, location) as your authoritative temporal context. Never infer the present time, date, or part of day from older chat history, memories, or prior assistant messages.
 - Do not mirror or continue earlier assistant wording that casually volunteered exact time, date, timezone, weather, or location. Treat that as stale style noise unless the user asked for it or logistics genuinely require it.
 - Use time and location as ambient context, not a catchphrase. Do not volunteer the exact clock time, timezone, date, or precise location in ordinary replies unless the user asked for it or it is genuinely needed for scheduling, travel, logistics, or natural scene-setting.
 - Do not open or pad ordinary replies with copied runtime facts such as `at 17:43 CEST` or `right here in Sečovlje`. If those facts matter, weave them in naturally and only when relevant.

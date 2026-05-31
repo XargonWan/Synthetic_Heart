@@ -326,6 +326,35 @@ GEMINI_MODEL = config_registry.get_var(
     setter=_set_gemini_model,
 )
 
+try:
+    from core.variables_engine import register_exposed_var
+
+    register_exposed_var(
+        "GEMINI_SEARCH_GROUNDING",
+        label="Gemini Search Grounding",
+        default=False,
+        value_type=bool,
+        ui_type="boolean",
+        description="Enable Google Search Grounding for Gemini models. (Zero keys required)",
+        scope="llm",
+        component="gemini_api",
+        tags=["cortex_engine"],
+        needs_component_reload=False,
+    )
+except Exception:
+    pass
+
+GEMINI_SEARCH_GROUNDING = config_registry.get_var(
+    "GEMINI_SEARCH_GROUNDING",
+    False,
+    label="Gemini Search Grounding",
+    description="Enable Google Search Grounding for Gemini models.",
+    value_type=bool,
+    group="llm",
+    component="gemini_api",
+    tags=["cortex_engine"],
+)
+
 # Model limits map for plugin_instance.py compatibility
 # This maps model names to their max character limits
 MODEL_LIMITS_MAP = {
@@ -1224,7 +1253,7 @@ class GeminiAPIPlugin(AIPluginBase):
             ).upper()
             gen_config["thinkingConfig"] = {"thinkingLevel": thinking_level}
 
-        payload = {
+        payload: dict[str, Any] = {
             "contents": [{"role": "user", "parts": user_parts}],
             "systemInstruction": {
                 "role": "system",
@@ -1244,6 +1273,18 @@ class GeminiAPIPlugin(AIPluginBase):
                 },
             ],
         }
+
+        try:
+            search_enabled = bool(
+                config_registry.get_value(
+                    "GEMINI_SEARCH_GROUNDING", False, value_type=bool
+                )
+            )
+        except Exception:
+            search_enabled = False
+
+        if search_enabled:
+            payload["tools"] = [{"googleSearch": {}}]
 
         log_cortex_request(
             "gemini_api", model=self._current_model, url=url, payload=payload
@@ -1447,8 +1488,22 @@ class GeminiAPIPlugin(AIPluginBase):
                 },
             ],
         }
-        if tools_list:
-            payload["tools"] = tools_list
+        try:
+            search_enabled = bool(
+                config_registry.get_value(
+                    "GEMINI_SEARCH_GROUNDING", False, value_type=bool
+                )
+            )
+        except Exception:
+            search_enabled = False
+
+        final_tools = list(tools_list) if tools_list else []
+        if search_enabled:
+            if not any("googleSearch" in t for t in final_tools):
+                final_tools.append({"googleSearch": {}})
+
+        if final_tools:
+            payload["tools"] = final_tools
 
         log_cortex_request(
             "gemini_api", model=self._current_model, url=url, payload=payload

@@ -220,33 +220,39 @@ def test_build_context_summary_keeps_exact_runtime_facts_implicit_by_default() -
     summary = _build_context_summary(
         {
             "date": "2026-04-20",
-            "time": "21:27 CEST",
+            "time": "21:27",
             "time_of_day": "late evening",
             "location": "Sečovlje,Slovenia",
+            "season": "Mid Spring",
+            "day_of_week": "Monday",
         }
     )
 
-    assert "[Ambient runtime context]" in summary
-    assert "Use these runtime facts only when they matter" in summary
-    assert "Do not quote them verbatim in ordinary replies" in summary
-    assert "Current part of day: late evening." in summary
-    assert "Current local time: 21:27 CEST" not in summary
-    assert "Current local setting: Sečovlje,Slovenia" not in summary
+    assert "[SYSTEM: REALITY ANCHOR]" in summary
+    assert "- Current Date: Monday, April 20, 2026" in summary
+    assert "- Current Time: 9:27 PM" in summary
+    assert "- Season: Mid Spring" in summary
+    assert "- Current Location: Sečovlje,Slovenia" in summary
+    assert "Temporal Delta: It is now 2026" in summary
 
 
 def test_build_context_summary_can_surface_exact_runtime_facts_when_requested() -> None:
     summary = _build_context_summary(
         {
             "date": "2026-04-20",
-            "time": "21:27 CEST",
+            "time": "21:27",
             "location": "Sečovlje,Slovenia",
+            "season": "Mid Spring",
+            "day_of_week": "Monday",
         },
         include_explicit_runtime_facts=True,
     )
 
-    assert "Current date: 2026-04-20" in summary
-    assert "Current local time: 21:27 CEST" in summary
-    assert "Current local setting: Sečovlje,Slovenia" in summary
+    assert "[SYSTEM: REALITY ANCHOR]" in summary
+    assert "- Current Date: Monday, April 20, 2026" in summary
+    assert "- Current Time: 9:27 PM" in summary
+    assert "- Season: Mid Spring" in summary
+    assert "- Current Location: Sečovlje,Slovenia" in summary
 
 
 def test_build_json_prompt_gates_exact_runtime_facts_by_current_turn(monkeypatch):
@@ -256,8 +262,10 @@ def test_build_json_prompt_gates_exact_runtime_facts_by_current_turn(monkeypatch
     async def dummy_local_time_fields(message_date, interface_path=None):
         return {
             "local_date": "2026-04-20",
-            "local_time": "21:27 CEST",
+            "local_time": "21:27",
             "time_of_day": "late evening",
+            "season": "Mid Spring",
+            "day_of_week": "Monday",
         }
 
     monkeypatch.setattr("core.action_parser.gather_static_injections", dummy_gather)
@@ -275,17 +283,20 @@ def test_build_json_prompt_gates_exact_runtime_facts_by_current_turn(monkeypatch
 
     result = asyncio.run(build_json_prompt(message, {}, interface_name="telegram_bot"))
     summary = result["__prompt_request"].context_summary
-    assert "Current part of day: late evening." in summary
-    assert "Current local time: 21:27 CEST" not in summary
-    assert "Current local setting: Sečovlje,Slovenia" not in summary
+    assert "[SYSTEM: REALITY ANCHOR]" in summary
+    assert "- Current Date: Monday, April 20, 2026" in summary
+    assert "- Current Time: 9:27 PM" in summary
+    assert "- Current Location: Sečovlje,Slovenia" in summary
 
     message.text = "What time is it there?"
     explicit = asyncio.run(
         build_json_prompt(message, {}, interface_name="telegram_bot")
     )
     explicit_summary = explicit["__prompt_request"].context_summary
-    assert "Current local time: 21:27 CEST" in explicit_summary
-    assert "Current local setting: Sečovlje,Slovenia" in explicit_summary
+    assert "[SYSTEM: REALITY ANCHOR]" in explicit_summary
+    assert "- Current Date: Monday, April 20, 2026" in explicit_summary
+    assert "- Current Time: 9:27 PM" in explicit_summary
+    assert "- Current Location: Sečovlje,Slovenia" in explicit_summary
 
 
 def test_build_live_prompt_request_keeps_runtime_facts_ambient_by_default(monkeypatch):
