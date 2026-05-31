@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 from typing import Optional, Tuple, Dict
 
-from core.db import get_conn_ctx
+from core.db import get_conn_ctx, _get_db_type
 import asyncio
 
 # In-memory fallback mapping used when DB is unavailable or as a short-term cache.
@@ -18,16 +18,31 @@ from core.core_initializer import register_plugin
 
 async def init_message_map_table():
     """Initialize the message_map table if it doesn't exist."""
+    is_postgres = _get_db_type() == "postgres"
     async with get_conn_ctx() as conn:
         try:
             async with conn.cursor() as cur:
-                # Check if table exists and has correct structure
-                await cur.execute("SHOW TABLES LIKE 'message_map'")
-                table_exists = await cur.fetchone()
+                if is_postgres:
+                    # Check if table exists (Postgres)
+                    await cur.execute(
+                        "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'message_map')"
+                    )
+                    table_exists = (await cur.fetchone())[0]
+                else:
+                    # Check if table exists and has correct structure (MySQL/MariaDB)
+                    await cur.execute("SHOW TABLES LIKE 'message_map'")
+                    table_exists = await cur.fetchone()
 
                 if table_exists:
-                    # Check column types
-                    await cur.execute("DESCRIBE message_map")
+                    if is_postgres:
+                        # Check column types (Postgres)
+                        await cur.execute(
+                            "SELECT column_name, data_type FROM information_schema.columns WHERE table_name = 'message_map'"
+                        )
+                    else:
+                        # Check column types (MySQL/MariaDB)
+                        await cur.execute("DESCRIBE message_map")
+
                     columns = await cur.fetchall()
                     chat_id_type = None
                     for col in columns:
@@ -94,14 +109,28 @@ async def store_message_mapping(trainer_message_id: int, chat_id: int, message_i
         try:
             async with get_conn_ctx() as conn:
                 async with conn.cursor() as cur:
-                    await cur.execute(
-                        """
-                        REPLACE INTO message_map 
-                        (trainer_message_id, chat_id, message_id, timestamp)
-                        VALUES (%s, %s, %s, %s)
-                        """,
-                        (trainer_message_id, chat_id, message_id, time.time()),
-                    )
+                    if _get_db_type() == "postgres":
+                        await cur.execute(
+                            """
+                            INSERT INTO message_map 
+                            (trainer_message_id, chat_id, message_id, timestamp)
+                            VALUES (%s, %s, %s, %s)
+                            ON CONFLICT (trainer_message_id) 
+                            DO UPDATE SET chat_id = EXCLUDED.chat_id, 
+                                          message_id = EXCLUDED.message_id, 
+                                          timestamp = EXCLUDED.timestamp
+                            """,
+                            (trainer_message_id, chat_id, message_id, time.time()),
+                        )
+                    else:
+                        await cur.execute(
+                            """
+                            REPLACE INTO message_map 
+                            (trainer_message_id, chat_id, message_id, timestamp)
+                            VALUES (%s, %s, %s, %s)
+                            """,
+                            (trainer_message_id, chat_id, message_id, time.time()),
+                        )
                     await conn.commit()
                     log_debug(
                         f"[message_map] Stored mapping in DB: trainer_msg={trainer_message_id} -> chat={chat_id}, msg={message_id}"
