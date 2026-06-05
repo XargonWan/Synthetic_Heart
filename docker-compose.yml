@@ -84,23 +84,23 @@ services:
 
   # Selenium‑LLM Engine, you can disable this if you want to use a different endpoint
   # such as an API provider or a local LLM running in another container
-  synth-selenium-llm-engine:
-    # image: xargonwan/selenium-llm-engine:latest
-    build: ../selenium-llm-engine
-    container_name: synth-selenium-llm-engine
-    hostname: synth-selenium-llm-engine
-    env_file:
-      - .env
-    environment:
-      - TZ=${TZ:-Asia/Tokyo}
-    ports:
-      - "14848:8000"  # API port
-      - "3001:3001"   # webtop interface
-    volumes:
-      - synth_selenium_data:/app/data
-      - synth_selenium_config:/config
-    networks:
-      - synth_network
+  # synth-selenium-llm-engine:
+  #   # image: xargonwan/selenium-llm-engine:latest
+  #   build: ../selenium-llm-engine
+  #   container_name: synth-selenium-llm-engine
+  #   hostname: synth-selenium-llm-engine
+  #   env_file:
+  #     - .env
+  #   environment:
+  #     - TZ=${TZ:-Asia/Tokyo}
+  #   ports:
+  #     - "14848:8000"  # API port
+  #     - "3001:3001"   # webtop interface
+  #   volumes:
+  #     - synth_selenium_data:/app/data
+  #     - synth_selenium_config:/config
+  #   networks:
+  #     - synth_network
 
 volumes:
   synth_db_data:
@@ -108,8 +108,8 @@ volumes:
   synth_data:
   synth_logs:
   synth_skins:
-  synth_selenium_data:
-  synth_selenium_config:
+  # synth_selenium_data:
+  # synth_selenium_config:
 
 networks:
   synth_network:
