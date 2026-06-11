@@ -76,6 +76,45 @@ async def test_grillo_temporal_reflection_time_delta() -> None:
 
 
 @pytest.mark.asyncio
+async def test_grillo_temporal_reflection_handles_naive_db_timestamps() -> None:
+    """DB drivers return naive datetimes (stored as UTC); the delta must not raise."""
+    plugin = GrilloTemporalReflectionPlugin()
+
+    mock_cursor = MagicMock()
+    # Naive UTC timestamp from 2 hours ago, as returned by aiomysql/MariaDB
+    last_message_time = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(
+        hours=2
+    )
+    mock_cursor.fetchone = AsyncMock(return_value=(last_message_time,))
+    mock_cursor.execute = AsyncMock()
+
+    class MockConnCtx:
+        async def __aenter__(self):
+            conn = MagicMock()
+
+            class MockCursorCtx:
+                async def __aenter__(self):
+                    return mock_cursor
+
+                async def __aexit__(self, exc_type, exc_val, exc_tb):
+                    pass
+
+            conn.cursor = MockCursorCtx
+            return conn
+
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            pass
+
+    with patch(
+        "plugins.grillo.grillo_temporal_reflection.get_conn_ctx",
+        return_value=MockConnCtx(),
+    ):
+        delta = await plugin.get_time_delta()
+        assert delta is not None
+        assert abs(delta - 7200) < 5
+
+
+@pytest.mark.asyncio
 async def test_web_search_tavily() -> None:
     """Test Tavily search query handling and serialization."""
     plugin = WebSearchPlugin()

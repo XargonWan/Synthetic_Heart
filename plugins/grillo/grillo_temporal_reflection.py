@@ -42,22 +42,28 @@ class GrilloTemporalReflectionPlugin(AIPluginBase):
         """Return supported actions (none for this background beat)."""
         return {}
 
+    @staticmethod
+    def _seconds_since(last_time: datetime) -> float:
+        """Return seconds elapsed since ``last_time`` (DB timestamps are naive UTC)."""
+        if last_time.tzinfo is None:
+            last_time = last_time.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - last_time).total_seconds()
+
     async def get_time_delta(self) -> float | None:
         """Query the DB for seconds elapsed since the last user message."""
         try:
             async with get_conn_ctx() as conn:
                 async with conn.cursor() as cur:
-                    # Query chat_history_cache first
+                    # Query chat_history_cache first. The agent's own messages are
+                    # stored with sender_name='self'; sender_id holds the session id.
                     await cur.execute(
                         "SELECT timestamp FROM chat_history_cache "
-                        "WHERE sender_id != 'self' "
+                        "WHERE (sender_name IS NULL OR sender_name != 'self') "
                         "ORDER BY timestamp DESC LIMIT 1"
                     )
                     row = await cur.fetchone()
                     if row and row[0]:
-                        last_time = row[0]
-                        now_utc = datetime.now(timezone.utc)
-                        return (now_utc - last_time).total_seconds()
+                        return self._seconds_since(row[0])
 
                     # Fallback to ai_diary user messages
                     await cur.execute(
@@ -67,9 +73,7 @@ class GrilloTemporalReflectionPlugin(AIPluginBase):
                     )
                     row = await cur.fetchone()
                     if row and row[0]:
-                        last_time = row[0]
-                        now_utc = datetime.now(timezone.utc)
-                        return (now_utc - last_time).total_seconds()
+                        return self._seconds_since(row[0])
         except Exception as e:
             log_error(f"[temporal_reflection] Error querying last active time: {e}")
         return None
