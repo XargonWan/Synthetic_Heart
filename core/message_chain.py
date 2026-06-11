@@ -829,6 +829,18 @@ async def handle_incoming_message(
             "beat_type"
         ) not in ("outreach", None)
 
+        # Prompt-scoped turns (e.g. vision_describe, delivery prompts) restrict the
+        # LLM to specific action types; if no message_* type is allowed, the LLM
+        # cannot reply to the user and we must not demand one.
+        _allowed_types = ctx.get("allowed_action_types")
+        is_scoped_non_message = (
+            isinstance(_allowed_types, (list, tuple, set))
+            and len(_allowed_types) > 0
+            and not any(
+                isinstance(t, str) and t.startswith("message_") for t in _allowed_types
+            )
+        )
+
         actions = None
 
         # Quick JSON extraction with metadata to detect corruption
@@ -1668,7 +1680,10 @@ async def handle_incoming_message(
                                 action_name = action.get("action") or action.get("type")
                             if action_name == "tts_speak":
                                 has_tts = True
-                            if action_name in current_message_action_types:
+                            if action_name in current_message_action_types or (
+                                isinstance(action_name, str)
+                                and action_name.startswith("message_")
+                            ):
                                 has_user_response = True
                                 if not user_message_action:
                                     user_message_action = action
@@ -2223,6 +2238,7 @@ async def handle_incoming_message(
                                 is_user_facing
                                 and not is_grillo_internal
                                 and not is_internal_chat
+                                and not is_scoped_non_message
                                 and not has_user_response
                             ):
                                 missing_user_reply = True
@@ -2276,6 +2292,7 @@ async def handle_incoming_message(
                                 is_user_facing
                                 and not is_grillo_internal
                                 and not is_internal_chat
+                                and not is_scoped_non_message
                                 and not has_user_response
                             ):
                                 log_warning(

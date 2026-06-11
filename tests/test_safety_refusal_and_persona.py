@@ -77,3 +77,17 @@ async def test_corrector_middleware_handles_safety_refusals():
         text="normal invalid json text", context={}
     )
     assert res_normal is None or res_normal != '{"actions": []}'
+
+
+@pytest.mark.asyncio
+async def test_corrector_middleware_does_not_swallow_legit_replies():
+    """Generic phrases like 'unable to' or 'not allowed' in an ordinary reply
+    must not trigger the refusal short-circuit (which would drop the reply)."""
+    legit_texts = [
+        "I was unable to find that song in the library, want me to retry?",
+        "Guests are not allowed in that channel, but I can invite them elsewhere.",
+        "The upload failed because the file format is unable to be parsed.",
+    ]
+    for text in legit_texts:
+        res = await run_corrector_middleware(text=text, context={})
+        assert res != '{"actions": []}', f"Legit reply swallowed as refusal: {text!r}"

@@ -1788,18 +1788,25 @@ async def run_corrector_middleware(
     # Check for LLM safety refusals. If matched, immediately return empty actions to prevent correction loops.
     if text:
         text_lower = text.lower()
+        # Keywords must be anchored refusal phrasings: generic fragments like
+        # "unable to" or "not allowed" match legitimate replies and would
+        # silently swallow them (empty actions = no reply to the user).
         refusal_keywords = [
             "我无法",
             "无法提供",
             "无法给到",
             "i cannot fulfill",
-            "unable to",
+            "unable to assist",
+            "unable to comply",
+            "unable to fulfill",
+            "cannot comply with",
+            "i am not allowed to",
+            "i'm not allowed to",
             "against my safety",
             "safety policy",
             "safety guidelines",
             "violates safety",
             "harmful or explicit",
-            "not allowed",
         ]
         if any(kw in text_lower for kw in refusal_keywords):
             log_warning(
