@@ -351,6 +351,14 @@ docker exec synth-dev tail -f /app/logs/synth.log | grep -E "\[grillo\]|grillo"
 
 ---
 
+### Order-dependent test failures in full pytest runs  <!-- 2026-06-11 -->
+**Symptom:** `test_db_cutover::test_cutover_runs_backup_and_migration`, `test_exposed_variables_static::test_no_direct_getenv_for_exposed_vars`, `test_exposed_variables_style::test_exposed_variable_label_and_description_style`, `test_vox_defaults::test_active_vox_engine_default_is_kitten`, and `test_vox_plugin::test_active_vox_engine_default_is_kitten` fail in a full `uv run pytest` run (e.g. `assert 'disabled' == 'kitten'`) but all pass when their files are run in isolation.
+**Location:** `tests/` (config-registry / exposed-vars global state leaking between test modules)
+**Status:** known — pre-existing, not tied to any single commit.
+**Notes:** The `config_registry` and exposed-variable registry are process-global; earlier tests register or mutate vars (e.g. `ACTIVE_VOX_ENGINE` ends up `'disabled'`) that later default-assertion tests then see. When triaging a full-suite run, re-run the failing file alone before assuming a regression. Also note: local `.env` values (e.g. `SYNTH_PRIMARY_DB=soul`) leak into tests that don't pin them — `tests/test_db_preflight.py` now monkeypatches `core.db._get_db_type` for this reason.
+
+---
+
 ### `ai_diary` — user_message column overflow  <!-- 2026-04-13 -->
 **Symptom:** `(1406, "Data too long for column 'user_message' at row 1")` appearing repeatedly in `synth.log`, originating from `ai_diary.py` `_upsert_diary_impl`.
 **Location:** `plugins/ai_diary.py`, `init-db.sql` (`ai_diary` table, `user_message` column)
@@ -1094,7 +1102,7 @@ All keys stored in the `config` table and accessible via `config_registry.get_va
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **Synthetic_Heart** (9813 symbols, 31532 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **synthetic_heart** (10309 symbols, 33233 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
 
@@ -1110,7 +1118,7 @@ This project is indexed by GitNexus as **Synthetic_Heart** (9813 symbols, 31532 
 
 1. `gitnexus_query({query: "<error or symptom>"})` — find execution flows related to the issue
 2. `gitnexus_context({name: "<suspect function>"})` — see all callers, callees, and process participation
-3. `READ gitnexus://repo/Synthetic_Heart/process/{processName}` — trace the full execution flow step by step
+3. `READ gitnexus://repo/synthetic_heart/process/{processName}` — trace the full execution flow step by step
 4. For regressions: `gitnexus_detect_changes({scope: "compare", base_ref: "main"})` — see what your branch changed
 
 ## When Refactoring
@@ -1149,10 +1157,10 @@ This project is indexed by GitNexus as **Synthetic_Heart** (9813 symbols, 31532 
 
 | Resource | Use for |
 |----------|---------|
-| `gitnexus://repo/Synthetic_Heart/context` | Codebase overview, check index freshness |
-| `gitnexus://repo/Synthetic_Heart/clusters` | All functional areas |
-| `gitnexus://repo/Synthetic_Heart/processes` | All execution flows |
-| `gitnexus://repo/Synthetic_Heart/process/{name}` | Step-by-step execution trace |
+| `gitnexus://repo/synthetic_heart/context` | Codebase overview, check index freshness |
+| `gitnexus://repo/synthetic_heart/clusters` | All functional areas |
+| `gitnexus://repo/synthetic_heart/processes` | All execution flows |
+| `gitnexus://repo/synthetic_heart/process/{name}` | Step-by-step execution trace |
 
 ## Self-Check Before Finishing
 
