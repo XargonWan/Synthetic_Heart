@@ -119,7 +119,6 @@ def _get_db_type() -> str:
     if normalized in {"postgres", "postgresql"}:
         return "postgres"
     return "postgres"
-    return "mariadb"
 
 
 def _get_source_db_type() -> str:
