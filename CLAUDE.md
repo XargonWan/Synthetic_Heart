@@ -181,7 +181,7 @@ See `AGENTS.md` for the full architecture reference, animation system details, p
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **Synthetic_Heart** (9813 symbols, 31532 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **synthetic_heart** (10324 symbols, 33256 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
 
@@ -197,7 +197,7 @@ This project is indexed by GitNexus as **Synthetic_Heart** (9813 symbols, 31532 
 
 1. `gitnexus_query({query: "<error or symptom>"})` — find execution flows related to the issue
 2. `gitnexus_context({name: "<suspect function>"})` — see all callers, callees, and process participation
-3. `READ gitnexus://repo/Synthetic_Heart/process/{processName}` — trace the full execution flow step by step
+3. `READ gitnexus://repo/synthetic_heart/process/{processName}` — trace the full execution flow step by step
 4. For regressions: `gitnexus_detect_changes({scope: "compare", base_ref: "main"})` — see what your branch changed
 
 ## When Refactoring
@@ -236,10 +236,10 @@ This project is indexed by GitNexus as **Synthetic_Heart** (9813 symbols, 31532 
 
 | Resource | Use for |
 |----------|---------|
-| `gitnexus://repo/Synthetic_Heart/context` | Codebase overview, check index freshness |
-| `gitnexus://repo/Synthetic_Heart/clusters` | All functional areas |
-| `gitnexus://repo/Synthetic_Heart/processes` | All execution flows |
-| `gitnexus://repo/Synthetic_Heart/process/{name}` | Step-by-step execution trace |
+| `gitnexus://repo/synthetic_heart/context` | Codebase overview, check index freshness |
+| `gitnexus://repo/synthetic_heart/clusters` | All functional areas |
+| `gitnexus://repo/synthetic_heart/processes` | All execution flows |
+| `gitnexus://repo/synthetic_heart/process/{name}` | Step-by-step execution trace |
 
 ## Self-Check Before Finishing
 
