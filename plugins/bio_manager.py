@@ -346,7 +346,7 @@ def _update_json_field(user_id: str, key: str, update_fn: Callable[[Any], Any]) 
             updated = DEFAULTS.get(key, "")
 
         try:
-            json_value = json.dumps(updated)
+            json.dumps(updated)  # serializability check only
         except (TypeError, ValueError) as e:
             log_error(f"[bio_manager] Failed to serialize updated {key}: {e}")
             return
@@ -533,7 +533,7 @@ def _check_update_limits(user_id: str, updates: dict) -> tuple[bool, str]:
                 last_update = datetime.fromisoformat(
                     last_update_str.replace("Z", "+00:00")
                 )
-            except:
+            except Exception:
                 last_update = datetime.utcnow() - timedelta(
                     hours=2
                 )  # Default to 2 hours ago
@@ -1241,7 +1241,7 @@ class BioPlugin:
                 try:
                     # Special handling for user_name field - check if it's a "call me" request
                     if "user_name" in fields:
-                        update_user_name(uid, fields["user_name"])
+                        self.update_user_name(uid, fields["user_name"])
                         # Remove user_name from fields since it's been handled specially
                         remaining_fields = {
                             k: v for k, v in fields.items() if k != "user_name"
@@ -1272,6 +1272,7 @@ class BioPlugin:
 
         return {"success": False, "message": f"Unsupported action type: {action_type}"}
 
+    @staticmethod
     def update_user_name(user_id: str, new_name: str) -> None:
         """Update user's primary name, moving old name to known_as if it exists."""
         _ensure_user_exists(user_id)
@@ -1285,7 +1286,7 @@ class BioPlugin:
         if isinstance(known_as, str):
             try:
                 known_as = json.loads(known_as)
-            except:
+            except Exception:
                 known_as = []
 
         # If there's an existing name, move it to known_as
@@ -1305,6 +1306,7 @@ class BioPlugin:
             f"[bio_manager] Updated user_name for {user_id}: '{new_name}' (moved '{current_name}' to known_as)"
         )
 
+    @staticmethod
     async def resolve_user_info(user_identifier: str) -> tuple[str, str] | None:
         """Resolve user identifier to (user_id, user_name) tuple.
 
@@ -1320,7 +1322,7 @@ class BioPlugin:
             if bio and bio.get("id"):
                 user_name = bio.get("user_name") or user_identifier
                 return (user_identifier, user_name)
-        except:
+        except Exception:
             pass
 
         # Search through all users for a match in user_name or known_as
@@ -1351,7 +1353,7 @@ class BioPlugin:
                             )
                             if user_identifier in known_as:
                                 return (user_id, user_name)
-                        except:
+                        except Exception:
                             continue
 
                     return None
