@@ -95,9 +95,18 @@ All configuration is done through the WebUI **Config** tab under the
 |                            |          | (default: ``English``).              |
 +----------------------------+----------+--------------------------------------+
 
+The WebDJ streamer account used to broadcast banter is configured with
+``AZURACAST_STREAMER_USERNAME`` (default ``SyntH``) and
+``AZURACAST_STREAMER_PASSWORD`` (masked, default ``synthradio``); they
+must match a streamer account created on the AzuraCast station.
+
 Once the URL, API key, and station ID are filled in, toggle
 ``RADIO_HOST_ENABLED`` to ``True``. The plugin starts the track monitor
 and begins generating transitions on the next song change.
+
+The WebDJ websocket connection follows the base URL's scheme: an
+``https://`` AzuraCast instance is reached over ``wss://``, a plain
+``http://`` instance over ``ws://``.
 
 When AzuraCast exposes station metadata, the plugin also reads the
 station name and current schedule description directly from the

@@ -127,6 +127,28 @@ register_exposed_var(
 )
 
 register_exposed_var(
+    "AZURACAST_STREAMER_USERNAME",
+    label="WebDJ Streamer Username",
+    default="SyntH",
+    value_type=str,
+    ui_type="string",
+    description="AzuraCast streamer (WebDJ) account username used to broadcast banter",
+    scope="plugins",
+    component="radio_host",
+)
+
+register_exposed_var(
+    "AZURACAST_STREAMER_PASSWORD",
+    label="WebDJ Streamer Password",
+    default="synthradio",
+    value_type=str,
+    ui_type="password",
+    description="AzuraCast streamer (WebDJ) account password",
+    scope="plugins",
+    component="radio_host",
+)
+
+register_exposed_var(
     "RADIO_HOST_GAIN_DB",
     label="Audio Gain (dB)",
     default=4.0,
@@ -156,7 +178,11 @@ class RadioHostPlugin:
         self._monitor: TrackMonitor | None = None
         self._running = False
         self._task: asyncio.Task | None = None
-        self._pending_banter: dict[str, Any] | None = None
+        # Pre-generated banter keyed by (prev_title, prev_artist). Multiple
+        # transitions are pre-generated ahead of time (template + LLM per
+        # transition), so a single slot would be overwritten by whichever
+        # writer finishes last and almost never match the next transition.
+        self._pending_banter: dict[tuple[str, str], dict[str, Any]] = {}
         self._inject_at_track_change = False
         self._station_info_ts: float = 0.0
         self._STATION_INFO_TTL = 300
@@ -256,10 +282,38 @@ class RadioHostPlugin:
                 component="radio_host",
             )
         )
+        self._streamer_username = (
+            str(
+                config_registry.get_value(
+                    "AZURACAST_STREAMER_USERNAME",
+                    "SyntH",
+                    value_type=str,
+                    group="plugins",
+                    component="radio_host",
+                )
+            )
+            or "SyntH"
+        )
+        self._streamer_password = (
+            str(
+                config_registry.get_value(
+                    "AZURACAST_STREAMER_PASSWORD",
+                    "synthradio",
+                    value_type=str,
+                    group="plugins",
+                    component="radio_host",
+                )
+            )
+            or "synthradio"
+        )
         self._client.update_config(base_url, api_key)
         if self._injector:
             self._injector.update_station_shortcode(self._station_id)
             self._injector.update_gain(self._gain_db)
+            self._injector.update_streamer_credentials(
+                username=self._streamer_username,
+                password=self._streamer_password,
+            )
         # Update monitor config if it exists
         if self._monitor:
             self._monitor.update_config(
@@ -293,6 +347,8 @@ class RadioHostPlugin:
             "RADIO_HOST_LISTENER_HISTORY",
             "RADIO_HOST_VOX_ENGINE",
             "RADIO_HOST_GAIN_DB",
+            "AZURACAST_STREAMER_USERNAME",
+            "AZURACAST_STREAMER_PASSWORD",
         ):
             config_registry.add_listener(key, _reload)
 
@@ -461,12 +517,27 @@ class RadioHostPlugin:
 
     def _find_active_schedule(self, schedules: list[dict]) -> dict[str, Any] | None:
         now = datetime.now(timezone.utc)
+        now_ts = now.timestamp()
         now_seconds = now.hour * 3600 + now.minute * 60 + now.second
         day = now.isoweekday()
 
         for s in schedules:
             if not s.get("is_enabled", True):
                 continue
+            # AzuraCast's /api/station/{id}/schedule returns calendar entries
+            # with an explicit is_now flag and unix start/end timestamps.
+            if s.get("is_now"):
+                return s
+            start_ts = s.get("start_timestamp")
+            end_ts = s.get("end_timestamp")
+            if start_ts and end_ts:
+                try:
+                    if float(start_ts) <= now_ts < float(end_ts):
+                        return s
+                except (TypeError, ValueError):
+                    pass
+                continue
+            # Legacy shape: days list plus seconds-in-day boundaries.
             s_days = s.get("days", [])
             if day not in s_days:
                 continue
@@ -745,9 +816,9 @@ class RadioHostPlugin:
                 webm_data=webm_data,
                 station_shortcode=self._station_id,
                 song_end_ts=song_end_ts,
-                username="SyntH",
-                password="synthradio",
-                title="SyntH is speaking",
+                username=self._streamer_username,
+                password=self._streamer_password,
+                title=f"{self._streamer_username} is speaking",
                 artist="",
             )
 
@@ -764,18 +835,27 @@ class RadioHostPlugin:
         finally:
             self._set_animation("idle")
 
+    _MAX_PENDING_BANTER = 8
+
+    def _store_pending_banter(self, banter: dict[str, Any], source: str) -> None:
+        """Store pre-generated banter keyed by its transition.
+
+        ``source`` is ``"template"`` or ``"llm"``; a fast template result must
+        not overwrite richer LLM banter already stored for the same transition.
+        Oldest entries are pruned so stale transitions don't accumulate.
+        """
+        key = (banter.get("prev_title") or "", banter.get("prev_artist") or "")
+        existing = self._pending_banter.get(key)
+        if existing and existing.get("source") == "llm" and source == "template":
+            return
+        banter["source"] = source
+        self._pending_banter.pop(key, None)
+        self._pending_banter[key] = banter
+        while len(self._pending_banter) > self._MAX_PENDING_BANTER:
+            self._pending_banter.pop(next(iter(self._pending_banter)))
+
     def _pop_matching_banter(self, prev_title: str, prev_artist: str) -> dict | None:
-        if self._pending_banter:
-            expected_prev = (
-                self._pending_banter.get("prev_title"),
-                self._pending_banter.get("prev_artist"),
-            )
-            if expected_prev == (prev_title, prev_artist):
-                b = self._pending_banter
-                self._pending_banter = None
-                return b
-            self._pending_banter = None
-        return None
+        return self._pending_banter.pop((prev_title, prev_artist), None)
 
     def _enqueue_pre_gen_banter(
         self,
@@ -813,15 +893,18 @@ class RadioHostPlugin:
             prev_title, prev_artist, curr_title, curr_artist
         )
         audio_path = await self._injector.generate_tts(text)
-        self._pending_banter = {
-            "text": text,
-            "style": "transition",
-            "audio_path": audio_path,
-            "prev_title": prev_title,
-            "prev_artist": prev_artist,
-            "curr_title": curr_title,
-            "curr_artist": curr_artist,
-        }
+        self._store_pending_banter(
+            {
+                "text": text,
+                "style": "transition",
+                "audio_path": audio_path,
+                "prev_title": prev_title,
+                "prev_artist": prev_artist,
+                "curr_title": curr_title,
+                "curr_artist": curr_artist,
+            },
+            source="template",
+        )
 
     def _build_banter_template(
         self,
@@ -972,7 +1055,7 @@ class RadioHostPlugin:
                 "not the one that just finished. "
                 "Be yourself — your personality, your mood, your sense of humor. "
                 f"NEVER say '{prev_title}' is now playing or coming up next.",
-                "CRITICAL: Mention the now-playing song ('{curr_title}') by name. "
+                f"CRITICAL: Mention the now-playing song ('{curr_title}') by name. "
                 "Do NOT mix up which song is which.",
                 "Occasionally (roughly 1 in 3 transitions), add a brief "
                 "fun fact or curiosity about the artist or song — a notable "
@@ -1257,7 +1340,7 @@ class RadioHostPlugin:
             # Pre-generation mode: store for later injection
             if context.get("radio_pre_generating"):
                 audio_path = await self._injector.generate_tts(text)
-                self._pending_banter = {
+                banter = {
                     "text": text,
                     "style": style,
                     "audio_path": audio_path,
@@ -1266,10 +1349,10 @@ class RadioHostPlugin:
                     "curr_title": context.get("radio_pregenerate_next_title", ""),
                     "curr_artist": context.get("radio_pregenerate_next_artist", ""),
                 }
+                self._store_pending_banter(banter, source="llm")
                 log_info(
                     f"[radio_host] Stored pre-generated banter for "
-                    f"'{self._pending_banter['prev_title']}' -> "
-                    f"'{self._pending_banter['curr_title']}'"
+                    f"'{banter['prev_title']}' -> '{banter['curr_title']}'"
                 )
                 return {"status": "stored", "output": text}
 
@@ -1344,8 +1427,17 @@ class RadioHostPlugin:
                 _os.path.abspath("res/synth_webui/static/audio/tts"),
             )
             abs_path = _os.path.abspath(direct_path)
-            if any(abs_path.startswith(p) for p in allowed_prefixes if p):
-                audio_path = direct_path
+            for prefix in allowed_prefixes:
+                if not prefix:
+                    continue
+                try:
+                    # commonpath (not startswith) so sibling directories like
+                    # "<prefix>_other" cannot slip through the check.
+                    if _os.path.commonpath([abs_path, prefix]) == prefix:
+                        audio_path = direct_path
+                        break
+                except ValueError:
+                    continue
 
         if not audio_path:
             return JSONResponse({"error": "not found"}, status_code=404)
