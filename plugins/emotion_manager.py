@@ -65,7 +65,7 @@ EMOTION_SYNONYMS = {
     "neutral": "neutral",
     "engaged": "neutral",
     "affection": "love",
-    "adoaration": "love",
+    "adoration": "love",
     "infatuation": "love",
     "lust": "arousal",
     "horny": "arousal",
@@ -807,7 +807,7 @@ class EmotionManager(PluginBase):
                     old_intensity, _ = current[opposite]
                     reduced = max(0.0, old_intensity - (new_intensity * 0.5))
                     await self.set_emotion(opposite, reduced)
-                    current[opposite] = (reduced, datetime.now())
+                    current[opposite] = (reduced, datetime.now(timezone.utc))
 
         state = await self.get_emotion_state()
         try:
@@ -902,7 +902,7 @@ class EmotionManager(PluginBase):
                     rows = await cur.fetchall()
                     existing_emotions = {row[0] for row in rows}
 
-                    now = datetime.now()
+                    now = datetime.now(timezone.utc)
                     to_remove = []
                     to_update = []
 
@@ -941,10 +941,15 @@ class EmotionManager(PluginBase):
                                 f"[emotion_manager] Seeding missing canonical emotion: {canon} = {base}"
                             )
 
-                    # Perform updates
+                    # Perform updates. The timestamp MUST be refreshed alongside
+                    # the decayed intensity: persisting the decayed value while
+                    # keeping the old timestamp makes every later read re-apply
+                    # the full decay-since-original-timestamp to an already
+                    # decayed value, compounding the decay each cycle.
                     if to_update:
                         await cur.executemany(
-                            "UPDATE emotion_state SET intensity = %s WHERE emotion_name = %s",
+                            "UPDATE emotion_state SET intensity = %s, timestamp = NOW() "
+                            "WHERE emotion_name = %s",
                             to_update,
                         )
                         # Log significant decay events? Maybe too verbose if we log every minute.
@@ -991,7 +996,7 @@ class EmotionManager(PluginBase):
             # Source 1: Get emotions from ai_diary (latest N entries with timestamps)
             log_debug("[emotion_manager] Fetching emotions from ai_diary...")
             try:
-                now = datetime.now()
+                now = datetime.now(timezone.utc)
                 async with get_conn_ctx() as conn:
                     cm = conn.cursor()
                     if inspect.iscoroutine(cm):
@@ -1114,7 +1119,6 @@ class EmotionManager(PluginBase):
 
         except Exception as e:
             log_error(f"[emotion_manager] Error syncing emotions: {e}")
-            return {}
             return {}
 
     async def get_static_injection(self, message=None, context_memory=None) -> dict:
