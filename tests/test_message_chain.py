@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from core import message_chain
 
 
-class TestMessageChain(unittest.TestCase):
+class TestMessageChain(unittest.IsolatedAsyncioTestCase):
     @patch("core.transport_layer.run_corrector_middleware")
     async def test_system_json_error_skips_corrector(self, mock_corrector):
         """System messages of type 'error' should be blocked without correction."""
