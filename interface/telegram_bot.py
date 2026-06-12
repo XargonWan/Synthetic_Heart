@@ -1499,7 +1499,7 @@ async def manage_chat_id_command(update: Update, context: ContextTypes.DEFAULT_T
             except ValueError:
                 await update.message.reply_text("Invalid ID")
                 return
-        await recent_chats.reset_chat(cid)
+        await recent_chats.reset_chat(cid, "telegram_bot")
         await update.message.reply_text(
             f"✅ Reset mapping for `{cid}`.", parse_mode="Markdown"
         )
