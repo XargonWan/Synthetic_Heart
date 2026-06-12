@@ -369,7 +369,7 @@ class ModelManager:
         path = self._sample_path(model_id, voice, lang)
         if path and path.exists():
             rel = path.relative_to(_REPO_ROOT / "res" / "synth_webui")
-            return f"/static/{rel.as_posix().lstrip('static/')}"
+            return f"/static/{rel.as_posix().removeprefix('static/')}"
         return None
 
     def _sample_path(
