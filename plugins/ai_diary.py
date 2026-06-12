@@ -983,31 +983,33 @@ async def add_diary_entry_async(
         PLUGIN_ENABLED = False
 
 
-def get_recent_entries(days: int = 2, max_chars: int = None) -> List[Dict[str, Any]]:
-    """Get diary entries from the last N days, optionally limited by character count.
+async def get_recent_entries_async(
+    days: int = 2, max_chars: int | None = None
+) -> List[Dict[str, Any]]:
+    """Get diary entries from the last N days, optionally limited by character count (async version).
     Returns list of dict entries with all database columns, empty list if plugin is disabled.
     Entries are ordered from most recent to oldest, and if max_chars is specified,
     older entries are discarded first to stay within the character limit."""
     global PLUGIN_ENABLED
 
     log_debug(
-        f"[ai_diary] get_recent_entries called with days={days}, max_chars={max_chars}, PLUGIN_ENABLED={PLUGIN_ENABLED}"
+        f"[ai_diary] get_recent_entries_async called with days={days}, max_chars={max_chars}, PLUGIN_ENABLED={PLUGIN_ENABLED}"
     )
 
     # Attempt lazy initialization if plugin was disabled at startup
     if not PLUGIN_ENABLED:
         try:
             log_debug(
-                "[ai_diary] Attempting lazy initialization for get_recent_entries..."
+                "[ai_diary] Attempting lazy initialization for get_recent_entries_async..."
             )
-            _run(_execute("SELECT 1 FROM ai_diary LIMIT 1"))
+            await _execute("SELECT 1 FROM ai_diary LIMIT 1")
             PLUGIN_ENABLED = True
             log_info(
-                "[ai_diary] Plugin lazy-initialized successfully in get_recent_entries"
+                "[ai_diary] Plugin lazy-initialized successfully in get_recent_entries_async"
             )
         except Exception as init_error:
             log_debug(
-                f"[ai_diary] Lazy initialization failed in get_recent_entries: {init_error}"
+                f"[ai_diary] Lazy initialization failed in get_recent_entries_async: {init_error}"
             )
             log_debug("[ai_diary] Plugin disabled, returning empty list")
             return []
@@ -1020,17 +1022,15 @@ def get_recent_entries(days: int = 2, max_chars: int = None) -> List[Dict[str, A
         cutoff_date = datetime.now() - timedelta(days=days)
         log_debug(f"[ai_diary] Looking for entries after {cutoff_date}")
 
-        entries = _run(
-            _fetchall(
-                """
+        entries = await _fetchall(
+            """
             SELECT id, content, personal_thought, timestamp, context_tags, involved_users, 
                    emotions, interface, chat_id, thread_id, interaction_summary, user_message
             FROM ai_diary
             WHERE timestamp >= %s
             ORDER BY timestamp DESC
             """,
-                (cutoff_date,),
-            )
+            (cutoff_date,),
         )
 
         log_debug(f"[ai_diary] Raw query returned {len(entries)} entries")
@@ -1085,10 +1085,17 @@ def get_recent_entries(days: int = 2, max_chars: int = None) -> List[Dict[str, A
         return entries
 
     except Exception as e:
-        log_error(f"[ai_diary] Failed to get recent entries: {e}")
+        log_error(f"[ai_diary] Failed to get recent entries async: {e}")
         # Disable plugin if database is unavailable
         PLUGIN_ENABLED = False
         return []
+
+
+def get_recent_entries(
+    days: int = 2, max_chars: int | None = None
+) -> List[Dict[str, Any]]:
+    """Get diary entries from the last N days, optionally limited by character count (sync wrapper)."""
+    return _run(get_recent_entries_async(days=days, max_chars=max_chars))
 
 
 def get_entries_by_tags(tags: List[str], limit: int = 10) -> List[Dict[str, Any]]:
@@ -1376,7 +1383,7 @@ class DiaryPlugin:
     def get_supported_action_types(self):
         return ["static_inject", "create_personal_diary_entry", "update_diary_entry"]
 
-    def get_history_contributions(self, **kwargs):
+    async def get_history_contributions(self, **kwargs):
         """Provide diary entries as a history contribution for the core HistoryEngine."""
         try:
             from core.history_types import HistoryContribution
@@ -1407,7 +1414,9 @@ class DiaryPlugin:
             # readable without dumping multi-page merged blobs into the prompt.
             per_field_limit = max(300, diary_budget // 4)
 
-            raw_entries = get_recent_entries(days=days, max_chars=diary_budget)
+            raw_entries = await get_recent_entries_async(
+                days=days, max_chars=diary_budget
+            )
 
             # Truncate heavy text fields on each returned entry so the history
             # engine receives compact, LLM-digestible records rather than the

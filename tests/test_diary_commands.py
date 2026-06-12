@@ -8,22 +8,19 @@ import pytest
 from core.abstract_context import AbstractContext
 
 
-def _assert_not_running_on_event_loop(days: int = 2, max_chars=None):
-    del days, max_chars
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return []
-    raise AssertionError("get_recent_entries ran on the active event loop thread")
+async def _mock_get_recent_entries_async(days: int = 2, max_chars=None):
+    # Verify we are on the running event loop
+    asyncio.get_running_loop()
+    return []
 
 
 @pytest.mark.asyncio
-async def test_diary_command_offloads_sync_lookup(monkeypatch):
+async def test_diary_command_uses_async_lookup(monkeypatch):
     from core.command_registry import diary_command
 
     monkeypatch.setattr("plugins.ai_diary.is_plugin_enabled", lambda: True)
     monkeypatch.setattr(
-        "plugins.ai_diary.get_recent_entries", _assert_not_running_on_event_loop
+        "plugins.ai_diary.get_recent_entries_async", _mock_get_recent_entries_async
     )
     monkeypatch.setattr(
         "plugins.ai_diary.format_diary_for_injection", lambda entries: str(entries)
@@ -35,7 +32,7 @@ async def test_diary_command_offloads_sync_lookup(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_generic_diary_command_offloads_sync_lookup(monkeypatch):
+async def test_generic_diary_command_uses_async_lookup(monkeypatch):
     called = {"reply": None}
 
     async def fake_reply(text: str):
@@ -45,7 +42,7 @@ async def test_generic_diary_command_offloads_sync_lookup(monkeypatch):
 
     monkeypatch.setattr("plugins.ai_diary.is_plugin_enabled", lambda: True)
     monkeypatch.setattr(
-        "plugins.ai_diary.get_recent_entries", _assert_not_running_on_event_loop
+        "plugins.ai_diary.get_recent_entries_async", _mock_get_recent_entries_async
     )
     monkeypatch.setattr(
         "plugins.ai_diary.format_diary_for_injection", lambda entries: str(entries)
