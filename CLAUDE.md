@@ -42,8 +42,8 @@ Fix failures before moving on.
 |------|-------|
 | Core engine | `core/` |
 | Plugins | `plugins/` |
-| LLM engines (new) | `cortex/` |
-| LLM engines (legacy) | `llm_engines/` |
+| LLM engines | `engines/external_engines/` |
+| Live audio engines | `engines/live/` |
 | Interfaces | `interface/` |
 | Tests | `tests/` |
 | Docs | `docs/` |

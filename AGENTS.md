@@ -22,12 +22,12 @@
                   └──┬──────────┬──────────────┬─────────┘
                      │          │              │
               ┌──────┴───┐  ┌───┴────┐   ┌─────┴──────┐
-              │ plugins/ │  │ cortex/│   │ interface/ │
-              │          │  │ llm_   │   │            │
-              │ actions  │  │ engines│   │ Telegram   │
-              │ agents   │  │        │   │ Discord    │
-              │          │  │ Gemini │   │ Matrix     │
-              └──────────┘  │ GPT …  │   │ Ollama API │
+              │ plugins/ │  │engines/│   │ interface/ │
+              │          │  │        │   │            │
+              │ actions  │  │external│   │ Telegram   │
+              │ agents   │  │ live   │   │ Discord    │
+              │          │  │ agent  │   │ Matrix     │
+              └──────────┘  │Gemini …│   │ Ollama API │
                             └────────┘   └────────────┘
 ```
 
@@ -35,7 +35,7 @@
 |-------|----------|---------|
 | **Core** | `core/` | Message chain, validation, dispatcher, DB, notifier. Never hardcodes plugin/LLM/interface logic. |
 | **Plugins** | `plugins/` | Provide actions via `get_supported_actions()`. Subclass `PluginBase` or `AIPluginBase`. |
-| **LLM Engines** | `cortex/`, `llm_engines/` | Interchangeable reasoning backends. Subclass `AIPluginBase`. |
+| **LLM Engines** | `engines/` | Interchangeable reasoning backends (`external_engines/`, `live/`, `agent/`). Subclass `AIPluginBase`. |
 | **Interfaces** | `interface/` | I/O adapters (Telegram, Discord, Matrix, Ollama compat). Register actions via `get_supported_actions()`. |
 
 **Golden rule:** removing any plugin, engine, or interface must not break the rest of the system.
@@ -86,7 +86,7 @@ The **Agent plugin** (`plugins/agent_plugin.py`) gives Synth a controlled hand f
 - Subclass `AIPluginBase`.
 - Handle reasoning, output JSON actions.
 - Multiple engines can coexist; hot-swappable.
-- Primary: `cortex/llm_engine/` (newer). Legacy: `llm_engines/`.
+- Location: `engines/external_engines/` (API engines), `engines/live/` (live audio), `engines/agent/` (agentic). The `cortex/` and `llm_engines/` paths referenced in older docs no longer exist.
 
 ---
 
@@ -351,11 +351,19 @@ docker exec synth-dev tail -f /app/logs/synth.log | grep -E "\[grillo\]|grillo"
 
 ---
 
+### Unreferenced fire-and-forget asyncio tasks (RUF006)  <!-- 2026-06-11 -->
+**Symptom:** Fire-and-forget work occasionally never completes, with no error logged. ~80 call sites use bare `asyncio.create_task(...)` / `ensure_future(...)` without keeping a reference (`ruff check --select RUF006` lists them).
+**Location:** Spread across `core/` (webui, transport_layer, message_chain), `plugins/`, `interface/`.
+**Status:** known, not fixed — the event loop holds only weak references, so an un-referenced task *can* be garbage-collected mid-flight. Most of these are short-lived sends and complete before GC, which is why it is rarely observed.
+**Notes:** When touching one of these sites, keep a reference (module-level `set` + `task.add_done_callback(set.discard)`) rather than ignoring the return value. Do not mass-fix; convert opportunistically.
+
+---
+
 ### Order-dependent test failures in full pytest runs  <!-- 2026-06-11 -->
 **Symptom:** `test_db_cutover::test_cutover_runs_backup_and_migration`, `test_exposed_variables_static::test_no_direct_getenv_for_exposed_vars`, `test_exposed_variables_style::test_exposed_variable_label_and_description_style`, `test_vox_defaults::test_active_vox_engine_default_is_kitten`, and `test_vox_plugin::test_active_vox_engine_default_is_kitten` fail in a full `uv run pytest` run (e.g. `assert 'disabled' == 'kitten'`) but all pass when their files are run in isolation.
 **Location:** `tests/` (config-registry / exposed-vars global state leaking between test modules)
 **Status:** known — pre-existing, not tied to any single commit.
-**Notes:** The `config_registry` and exposed-variable registry are process-global; earlier tests register or mutate vars (e.g. `ACTIVE_VOX_ENGINE` ends up `'disabled'`) that later default-assertion tests then see. When triaging a full-suite run, re-run the failing file alone before assuming a regression. Also note: local `.env` values (e.g. `SYNTH_PRIMARY_DB=soul`) leak into tests that don't pin them — `tests/test_db_preflight.py` now monkeypatches `core.db._get_db_type` for this reason.
+**Notes:** The `config_registry` and exposed-variable registry are process-global; earlier tests register or mutate vars (e.g. `ACTIVE_VOX_ENGINE` ends up `'disabled'`) that later default-assertion tests then see. When triaging a full-suite run, re-run the failing file alone before assuming a regression. Also note: local `.env` values (e.g. `SYNTH_PRIMARY_DB=soul`) leak into tests that don't pin them — `tests/test_db_preflight.py` now monkeypatches `core.db._get_db_type` for this reason. The reverse also happens: `tests/test_message_queue.py` `test_enqueue_*` tests hit the live DB configured in `.env` and time out when it is slow/unreachable (they pass standalone only with a responsive DB; verified unrelated to code changes via stash A/B).
 
 ---
 
