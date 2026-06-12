@@ -74,13 +74,20 @@ case "$MODE" in
         log "Sending test notification"
         "$VENV_DIR/bin/python" - <<'PY'
 import asyncio
+import os
 from telegram import Bot
-from core.config import BOT_TOKEN, TELEGRAM_TRAINER_ID
+from core.config import get_trainer_id
 async def main():
-    bot = Bot(token=BOT_TOKEN)
-    trainer_id = TELEGRAM_TRAINER_ID
-    if trainer_id:
-        await bot.send_message(chat_id=trainer_id, text="Test notification")
+    token = os.environ.get("BOTFATHER_TOKEN", "")
+    trainer_id = get_trainer_id("telegram_bot")
+    if not token:
+        print("BOTFATHER_TOKEN not configured")
+        return
+    if not trainer_id:
+        print("No telegram_bot trainer id configured (TRAINER_IDS)")
+        return
+    bot = Bot(token=token)
+    await bot.send_message(chat_id=trainer_id, text="Test notification")
 asyncio.run(main())
 PY
         ;;
