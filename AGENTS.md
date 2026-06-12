@@ -351,6 +351,14 @@ docker exec synth-dev tail -f /app/logs/synth.log | grep -E "\[grillo\]|grillo"
 
 ---
 
+### `core/presence_manager.py` is dead and partially broken  <!-- 2026-06-12 -->
+**Symptom:** None at runtime — nothing imports this module anywhere.
+**Location:** `core/presence_manager.py`
+**Status:** known — candidate for deletion, pending a maintainer decision.
+**Notes:** `presence_loop`/`evaluate_emotions` would work if wired in, but `reflect_on_recent_responses` imports `core.llm_logic` (a module that has never existed), calls `get_recent_responses(limit=10)` against a `(since_timestamp)` signature, and passes `insert_memory(emotion_state=...)` which may not match. Do not wire this module in without fixing those first.
+
+---
+
 ### Unreferenced fire-and-forget asyncio tasks (RUF006)  <!-- 2026-06-11 -->
 **Symptom:** Fire-and-forget work occasionally never completes, with no error logged. ~80 call sites use bare `asyncio.create_task(...)` / `ensure_future(...)` without keeping a reference (`ruff check --select RUF006` lists them).
 **Location:** Spread across `core/` (webui, transport_layer, message_chain), `plugins/`, `interface/`.
