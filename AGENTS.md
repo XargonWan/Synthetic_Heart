@@ -363,6 +363,7 @@ docker exec synth-dev tail -f /app/logs/synth.log | grep -E "\[grillo\]|grillo"
 - *Targeted pattern hunts*: nested `asyncio.run` (all guarded), HTTP calls without timeout (none in prod code), `run_coroutine_threadsafe().result()` deadlocks (none), `unittest.TestCase` classes with `async def` tests (all four affected files fixed).
 - *Known false positives* (don't re-investigate): `grillo_compactor` extract_json tuple overload, Iris/Auris TypedDict capability dicts, discord `disconnect(force)` stub mismatch, `ollama_compat_server` payload value-union subscript, `variables_engine` guarded casts, `models.py` hasattr-guarded isoformat.
 - *Explicitly NOT audited*: `core/webui.py` logic (maintainer decision — "works well enough"), runtime/integration behaviour against a live DB, deep business logic of `radio_host`/`emotion_manager`/memory plugins beyond pattern level, `automation_tools/`, `scripts/`, `webtop/`.
+- *Continuation pass (2026-06-12, HEAD `fd424ef`, code unchanged since `d423162`)*: deep business-logic review of `plugins/radio_host/` (all 5 files), `plugins/emotion_manager.py`, `plugins/memory_search.py`, `core/synth_core_memory.py`, `plugins/ai_diary.py`; review of `automation_tools/`, `webtop/` shell scripts; default + extended ruff sweep of `scripts/` (clean except two accepted-idiom hits: B007/B905 in `windows_setup.py`). All findings recorded as individual 2026-06-12 entries below; on maintainer request the same day, the fixes were applied (see each entry's Status). Still NOT audited: `core/webui.py` logic, live-DB integration behaviour beyond log sampling, `plugins_dev/`, `interface_dev/`.
 - *Open decisions for the maintainer*: delete `core/presence_manager.py` (entry below); add a CI `ruff check` gate (two of the shipped bugs were plain F821s a lint gate would have caught).
 
 ---
@@ -372,6 +373,94 @@ docker exec synth-dev tail -f /app/logs/synth.log | grep -E "\[grillo\]|grillo"
 **Location:** `core/presence_manager.py`
 **Status:** known — candidate for deletion, pending a maintainer decision.
 **Notes:** `presence_loop`/`evaluate_emotions` would work if wired in, but `reflect_on_recent_responses` imports `core.llm_logic` (a module that has never existed), calls `get_recent_responses(limit=10)` against a `(since_timestamp)` signature, and passes `insert_memory(emotion_state=...)` which may not match. Do not wire this module in without fixing those first.
+
+---
+
+### `emotion_manager` decay loop double-applies decay (timestamp never refreshed)  <!-- 2026-06-12 -->
+**Symptom:** Emotions collapse to baseline much faster than `EMOTION_DECAY_TAU` implies; injected emotion intensities look "flat" shortly after being set.
+**Location:** `plugins/emotion_manager.py`, `decay_emotions()`.
+**Status:** fixed.
+**Notes:** The 60 s `_decay_loop` persisted the *decayed* intensity but kept the original timestamp, so every read and every later decay cycle re-applied the full decay-since-original-timestamp to the already-decayed value, compounding each minute. The persist now refreshes `timestamp = NOW()` alongside the decayed intensity (same restart-the-curve convention `set_emotion()` uses). Also fixed in the same pass: `decay_emotions`/`sync_emotions_from_all_sources`/`update_emotion_state` now use timezone-aware `datetime.now(timezone.utc)` instead of naive now (which `_normalize_datetime` mislabelled as UTC), and the `EMOTION_SYNONYMS` typo `"adoaration"` was corrected to `"adoration"`.
+
+---
+
+### `ai_diary.get_recent_entries_async` crashes on Postgres and silently disables the diary  <!-- 2026-06-12 -->
+**Symptom:** `[ai_diary] Failed to get recent entries async: 'asyncpg.protocol.record.Record' object does not support item assignment` in `synth.log` (observed live 2026-06-12), after which `PLUGIN_ENABLED` is set `False` and the diary stops injecting/persisting until a lazy re-init succeeds.
+**Location:** `plugins/ai_diary.py`, `get_recent_entries_async()` (JSON-field mutation loop) and the broad `except` that sets `PLUGIN_ENABLED = False`.
+**Status:** fixed.
+**Notes:** On the Postgres compat path, `_fetchall(..., aiomysql.DictCursor)` returned immutable asyncpg `Record` objects, so `entry["context_tags"] = json.loads(...)` raised and the except handler disabled the plugin. `_fetchall` now copies every row into a plain dict, and all JSON-field parsing goes through the defensive `_parse_json_list()` / `_isoformat_timestamp()` helpers (handles `NULL`, malformed text, and already-decoded lists), so data-shaped rows can no longer trip the `PLUGIN_ENABLED = False` path. The disable-on-exception policy itself remains for genuine DB-connectivity errors.
+
+---
+
+### `ai_diary` sync `_run()` bridge blocks the event loop up to 10 s per call  <!-- 2026-06-12 -->
+**Symptom:** Interaction processing can stall while a diary entry is written; under DB latency the whole loop freezes for up to the 10 s future timeout.
+**Location:** `plugins/ai_diary.py`, `_run()` (ThreadPoolExecutor + `asyncio.run` + `future.result(timeout=10.0)`).
+**Status:** partially fixed.
+**Notes:** `DiaryPlugin.execute_action` is now `async`: the diary-write path awaits `add_diary_entry_async`/`_execute` directly, and the consolidation archive step runs the sync helper via `asyncio.to_thread`, so the action path no longer blocks the event loop. The sync wrappers (`add_diary_entry`, `get_entries_by_tags`, `archive_diary_entries`, ...) still use the `_run` bridge for their remaining sync callers (e.g. `core/webui.py` calls `archive_diary_entries` synchronously from async handlers) — convert those call sites when touching webui.
+
+---
+
+### `radio_host` track verification can store a track *title* as the last track id  <!-- 2026-06-12 -->
+**Symptom:** Spurious duplicate track-change announcements; logs show a track change fire twice for the same song after a nowplaying fetch hiccup.
+**Location:** `plugins/radio_host/track_monitor.py`, `_verify_track_stable()` (the two fallback paths: fetch-exception and incomplete-data).
+**Status:** fixed.
+**Notes:** The function's contract is "return the verified track **id** or None", but the fallback paths returned the *title*; the caller persisted it into `_last_track_id`, so the next poll fired a phantom second track change. `_verify_track_stable(detected_track_id)` now receives the originally detected id and returns it on both fallback paths.
+
+---
+
+### `radio_host` pre-generated banter: six concurrent writers race for one slot  <!-- 2026-06-12 -->
+**Symptom:** Logs frequently show `Pre-generated banter stale (was 'X', now 'Y'); falling back to template` even though pre-generation ran; LLM/TTS work is generated and discarded every transition.
+**Location:** `plugins/radio_host/radio_host_plugin.py` — `_pending_banter`, `_store_pending_banter`, `_pop_matching_banter`.
+**Status:** fixed.
+**Notes:** Up to 3 transitions × 2 generators = 6 async writers all overwrote a single `_pending_banter` slot; last writer won, so most transitions fell back to template text and pre-gen LLM/TTS cycles were wasted. Pending banter is now a dict keyed by `(prev_title, prev_artist)` (pruned to 8 entries, FIFO) via `_store_pending_banter(banter, source)`; a fast `"template"` result can no longer overwrite richer `"llm"` banter already stored for the same transition.
+
+---
+
+### `radio_host` WebDJ: hardcoded credentials and no `wss://` support  <!-- 2026-06-12 -->
+**Symptom:** Banter broadcast fails (or silently can't connect) against HTTPS-only AzuraCast instances; streamer credentials cannot be configured.
+**Location:** `plugins/radio_host/azuracast_client.py`, `plugins/radio_host/radio_host_plugin.py`, `jingle_injector.py`.
+**Status:** fixed.
+**Notes:** The WebDJ URL now maps `https://` base URLs to `wss://` via `AzuraCastClient._build_webdj_url()`. Streamer credentials are configurable through the new exposed vars `AZURACAST_STREAMER_USERNAME` / `AZURACAST_STREAMER_PASSWORD` (defaults unchanged: `SyntH`/`synthradio`), wired through `_read_config` into the injector and used by the winding-down injection path instead of literals. The non-f-string in `_enqueue_banter_generation` (literal `{curr_title}` sent to the model) was also fixed.
+
+---
+
+### `radio_host` `/api/radio/audio?path=` check allows sibling-directory bypass  <!-- 2026-06-12 -->
+**Symptom:** None observed; latent path-validation weakness.
+**Location:** `plugins/radio_host/radio_host_plugin.py`, `_serve_radio_audio` (direct-path branch).
+**Status:** fixed.
+**Notes:** The allow-check was `abs_path.startswith(prefix)`, which let sibling directories like `/app/tmp_tts/radio_host_evil/` through. It now uses `os.path.commonpath([abs_path, prefix]) == prefix`.
+
+---
+
+### `radio_host` `_find_active_schedule` likely never matches AzuraCast's schedule shape  <!-- 2026-06-12 -->
+**Symptom:** `schedule_description` stays empty in `/api/radio/data` and the DJ prompt never includes "Current program: ...", even with active station schedules.
+**Location:** `plugins/radio_host/radio_host_plugin.py`, `_find_active_schedule`.
+**Status:** fixed (not yet verified against a live AzuraCast).
+**Notes:** The code only understood entries with `days` (list) + seconds-in-day boundaries, but AzuraCast's `/api/station/{id}/schedule` returns calendar-style entries (`is_now`, `start_timestamp`/`end_timestamp`). The matcher now checks `is_now` first, then unix start/end timestamps, and keeps the legacy days/seconds shape as a final fallback. Cosmetic impact only (prompt enrichment); verify `schedule_description` populates on the next live run.
+
+---
+
+### `memory_search` plugin is deliberately dormant (`PLUGIN_CLASS = None`) with latent bugs  <!-- 2026-06-12 -->
+**Symptom:** None at runtime — the `memory_search` action is not registered; the file gives no hint it is disabled.
+**Location:** `plugins/memory_search.py` (last line), deactivated in commit `fee51dc` (2026-02-13) when the Recon plugins were introduced; live free-search now goes through `core/prompt_engine.free_memory_search`.
+**Status:** known — dormant by maintainer action, not dead code by accident. Latent bugs fixed 2026-06-12.
+**Notes:** Nothing in production instantiates `MemorySearchPlugin`, and the loader skips `PLUGIN_CLASS = None` modules. The latent bugs were fixed in place so reactivation is safe: empty OR-joins no longer produce invalid `WHERE ()` SQL for time-window-only free searches, and the chat-history sub-query is now restricted to mode='free' (tags mode with a time window no longer floods results with unrelated chat rows). To reactivate, restore `PLUGIN_CLASS = MemorySearchPlugin`.
+
+---
+
+### `automation_tools/container_synth.sh notify` imports symbols that no longer exist  <!-- 2026-06-12 -->
+**Symptom:** `./container_synth.sh notify` dies with `ImportError: cannot import name 'BOT_TOKEN' from 'core.config'`.
+**Location:** `automation_tools/container_synth.sh`, heredoc in the `notify)` case.
+**Status:** fixed.
+**Notes:** The heredoc imported `BOT_TOKEN` / `TELEGRAM_TRAINER_ID`, which no longer exist in `core/config.py`. It now reads the token from the `BOTFATHER_TOKEN` env var (the script sources `/app/.env` with `set -a`) and resolves the trainer via `core.config.get_trainer_id("telegram_bot")`, printing a clear message when either is unconfigured.
+
+---
+
+### pytest runs pollute the live `logs/` directory with test noise  <!-- 2026-06-12 -->
+**Symptom:** `get_recent_errors` MCP output is dominated by bursts like `Recon plugin MagicMock parse failed ...` and synthetic `telegram_bot/1` correction warnings, all stamped within the same second.
+**Location:** Test suite logging through the real `core/logging_utils.py` handlers into `logs/synth.log`.
+**Status:** known, not fixed.
+**Notes:** When triaging runtime errors from the synth-logs MCP, check whether the burst coincides with a `uv run pytest` invocation (MagicMock strings are the giveaway) before treating entries as production failures. Complements the existing "Interface tests can leak into the live `chat_history_cache`" entry.
 
 ---
 
@@ -515,7 +604,7 @@ docker exec synth-dev tail -f /app/logs/synth.log | grep -E "\[grillo\]|grillo"
 **Symptom:** `emotion_diary` appears dominated by zero-intensity rows even while `emotion_state` has non-zero baseline values (e.g. `0.1` for low emotions).
 **Location:** MariaDB table `emotion_diary` (legacy schema), `plugins/emotion_manager.py` (`_log_emotion_diary_entry` / `set_emotion`).
 **Status:** known, not fixed.
-**Notes:** Some deployments still use a legacy `emotion_diary` schema with `id varchar(100)` and `intensity int(11)` (no `timestamp`). The emotion manager writes floats (including baseline `0.1`), but DB coercion stores these as `0`, creating misleading analytics. The plugin's schema-adaptive insert avoids crashes but does not prevent numeric truncation.
+**Notes:** Some deployments still use a legacy `emotion_diary` schema with `id varchar(100)` and `intensity int(11)` (no `timestamp`). The emotion manager writes floats (including baseline `0.1`), but DB coercion stores these as `0`, creating misleading analytics. **Root cause found and fixed 2026-06-12:** the "legacy" schema was not legacy — `plugins/ai_diary.py` `init_diary_table()` created `emotion_diary` with `id VARCHAR(100) PRIMARY KEY`, `intensity INT`, no `timestamp`, while `plugins/emotion_manager.py` created it with auto-increment id and `intensity FLOAT`; whichever plugin initialized first won the `CREATE TABLE IF NOT EXISTS` race (ai_diary runs at module import, so it usually won on fresh DBs). The ai_diary DDL is now identical to the emotion_manager schema, so new databases get the float-capable table. **Existing databases keep the old table** — `CREATE TABLE IF NOT EXISTS` does not migrate it; truncated-to-zero rows on already-deployed DBs need a manual `ALTER TABLE emotion_diary MODIFY intensity FLOAT` (plus id/timestamp migration) if accurate history matters.
 
 ---
 
@@ -546,8 +635,8 @@ docker exec synth-dev tail -f /app/logs/synth.log | grep -E "\[grillo\]|grillo"
 ### `ai_diary` merge query still uses MySQL `GROUP_CONCAT ... SEPARATOR` syntax  <!-- 2026-04-18 -->
 **Symptom:** Runtime logs show `syntax error at or near "SEPARATOR"` during diary merge/debrief paths.
 **Location:** `plugins/ai_diary.py` (`DiaryPlugin.on_debrief`, query around `_get_unmerged_entries`).
-**Status:** known, not fixed.
-**Notes:** PostgreSQL rejects MySQL's `GROUP_CONCAT(... SEPARATOR ...)` form. The current query needs a Postgres equivalent such as `string_agg(...)` on the Postgres path.
+**Status:** fixed.
+**Notes:** Verified 2026-06-12: `on_debrief` now branches on `_get_db_type()` and uses `string_agg(...)` on the Postgres path.
 
 ---
 
@@ -1049,7 +1138,7 @@ docker exec synth-dev tail -f /app/logs/synth.log | grep -E "\[grillo\]|grillo"
 | `chat_history_cache` | `core/chat_history_cache.py` | Message history per `interface_path`; source of truth for prompt context |
 | `chat_session_meta` | `core/session_meta.py` | Per-interface session metadata (JSON blob) |
 | `chat_archives` | `core/chat_archives_db.py` | Long-term archived chat history |
-| `ai_diary` | `plugins/ai_diary.py` | Synth's diary entries (`content LONGTEXT`, no `user_message` column in the canonical schema — see §12 for the recurring overflow issue) |
+| `ai_diary` | `plugins/ai_diary.py` | Synth's diary entries. Two competing CREATEs in the same file: `init_diary_table()` uses `content TEXT` + `user_message TEXT`; the lazy-init fallback uses `content LONGTEXT`. See §12 for the `user_message` overflow issue |
 | `ai_diary_archive` | `plugins/ai_diary.py` | Archived diary entries |
 | `memories` | `plugins/ai_diary.py` | Long-term memory entries (`content`, `author`, `tags`, `scope`, `emotion`) |
 | `emotion_state` | `plugins/emotion_manager.py` | Current emotion intensities with timestamps for decay |
