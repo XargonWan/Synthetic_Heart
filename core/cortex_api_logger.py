@@ -30,6 +30,7 @@ import time
 from importlib import import_module
 from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
+from collections.abc import Sequence
 from typing import Any
 from uuid import uuid4
 
@@ -40,8 +41,10 @@ _LOG_FILE = os.path.join(_LOG_DIR, "cortex_api.log")
 _logger: logging.Logger | None = None
 _runtime_logger: logging.Logger | None = None
 _langfuse_client: Any | None = None
-_langfuse_ctx: contextvars.ContextVar[list[dict[str, Any]]] = contextvars.ContextVar(
-    "cortex_api_langfuse_ctx", default=[]
+# Default is an immutable tuple: a mutable default list would be shared across
+# all contexts that never call set() (call sites copy via list(...get())).
+_langfuse_ctx: contextvars.ContextVar[Sequence[dict[str, Any]]] = (
+    contextvars.ContextVar("cortex_api_langfuse_ctx", default=())
 )
 _langfuse_warning_keys: set[str] = set()
 
