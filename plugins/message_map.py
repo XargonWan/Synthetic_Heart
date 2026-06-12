@@ -8,12 +8,13 @@ from typing import Optional, Tuple, Dict
 from core.db import get_conn_ctx, _get_db_type
 import asyncio
 
+from core.logging_utils import log_debug, log_info, log_warning, log_error
+from core.core_initializer import register_plugin
+
 # In-memory fallback mapping used when DB is unavailable or as a short-term cache.
 # Format: trainer_message_id -> (chat_id, message_id, timestamp)
 _in_memory_map: Dict[int, Tuple[int, int, float]] = {}
 _IN_MEMORY_TTL = 60 * 60 * 24  # 24 hours default TTL
-from core.logging_utils import log_debug, log_info, log_warning, log_error
-from core.core_initializer import register_plugin
 
 
 async def init_message_map_table():
