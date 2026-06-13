@@ -364,7 +364,7 @@ docker exec synth-dev tail -f /app/logs/synth.log | grep -E "\[grillo\]|grillo"
 - *Known false positives* (don't re-investigate): `grillo_compactor` extract_json tuple overload, Iris/Auris TypedDict capability dicts, discord `disconnect(force)` stub mismatch, `ollama_compat_server` payload value-union subscript, `variables_engine` guarded casts, `models.py` hasattr-guarded isoformat.
 - *Explicitly NOT audited*: `core/webui.py` logic (maintainer decision — "works well enough"), runtime/integration behaviour against a live DB, deep business logic of `radio_host`/`emotion_manager`/memory plugins beyond pattern level, `automation_tools/`, `scripts/`, `webtop/`.
 - *Continuation pass (2026-06-12, HEAD `fd424ef`, code unchanged since `d423162`)*: deep business-logic review of `plugins/radio_host/` (all 5 files), `plugins/emotion_manager.py`, `plugins/memory_search.py`, `core/synth_core_memory.py`, `plugins/ai_diary.py`; review of `automation_tools/`, `webtop/` shell scripts; default + extended ruff sweep of `scripts/` (clean except two accepted-idiom hits: B007/B905 in `windows_setup.py`). All findings recorded as individual 2026-06-12 entries below; on maintainer request the same day, the fixes were applied (see each entry's Status). Still NOT audited: `core/webui.py` logic, live-DB integration behaviour beyond log sampling, `plugins_dev/`, `interface_dev/`.
-- *Open decisions for the maintainer*: delete `core/presence_manager.py` (entry below); add a CI `ruff check` gate (two of the shipped bugs were plain F821s a lint gate would have caught).
+- *Open decisions for the maintainer*: delete `core/presence_manager.py` (entry below); add a CI `ruff check` gate (two of the shipped bugs were plain F821s a lint gate would have caught); run the `emotion_diary` schema migration on existing databases (entry below); verify `schedule_description` populates on the next live radio run (entry below).
 
 ---
 
@@ -377,18 +377,14 @@ docker exec synth-dev tail -f /app/logs/synth.log | grep -E "\[grillo\]|grillo"
 ---
 
 ### `emotion_manager` decay loop double-applies decay (timestamp never refreshed)  <!-- 2026-06-12 -->
-**Symptom:** Emotions collapse to baseline much faster than `EMOTION_DECAY_TAU` implies; injected emotion intensities look "flat" shortly after being set.
 **Location:** `plugins/emotion_manager.py`, `decay_emotions()`.
 **Status:** fixed.
-**Notes:** The 60 s `_decay_loop` persisted the *decayed* intensity but kept the original timestamp, so every read and every later decay cycle re-applied the full decay-since-original-timestamp to the already-decayed value, compounding each minute. The persist now refreshes `timestamp = NOW()` alongside the decayed intensity (same restart-the-curve convention `set_emotion()` uses). Also fixed in the same pass: `decay_emotions`/`sync_emotions_from_all_sources`/`update_emotion_state` now use timezone-aware `datetime.now(timezone.utc)` instead of naive now (which `_normalize_datetime` mislabelled as UTC), and the `EMOTION_SYNONYMS` typo `"adoaration"` was corrected to `"adoration"`.
 
 ---
 
 ### `ai_diary.get_recent_entries_async` crashes on Postgres and silently disables the diary  <!-- 2026-06-12 -->
-**Symptom:** `[ai_diary] Failed to get recent entries async: 'asyncpg.protocol.record.Record' object does not support item assignment` in `synth.log` (observed live 2026-06-12), after which `PLUGIN_ENABLED` is set `False` and the diary stops injecting/persisting until a lazy re-init succeeds.
 **Location:** `plugins/ai_diary.py`, `get_recent_entries_async()` (JSON-field mutation loop) and the broad `except` that sets `PLUGIN_ENABLED = False`.
 **Status:** fixed.
-**Notes:** On the Postgres compat path, `_fetchall(..., aiomysql.DictCursor)` returned immutable asyncpg `Record` objects, so `entry["context_tags"] = json.loads(...)` raised and the except handler disabled the plugin. `_fetchall` now copies every row into a plain dict, and all JSON-field parsing goes through the defensive `_parse_json_list()` / `_isoformat_timestamp()` helpers (handles `NULL`, malformed text, and already-decoded lists), so data-shaped rows can no longer trip the `PLUGIN_ENABLED = False` path. The disable-on-exception policy itself remains for genuine DB-connectivity errors.
 
 ---
 
@@ -401,42 +397,32 @@ docker exec synth-dev tail -f /app/logs/synth.log | grep -E "\[grillo\]|grillo"
 ---
 
 ### `radio_host` track verification can store a track *title* as the last track id  <!-- 2026-06-12 -->
-**Symptom:** Spurious duplicate track-change announcements; logs show a track change fire twice for the same song after a nowplaying fetch hiccup.
 **Location:** `plugins/radio_host/track_monitor.py`, `_verify_track_stable()` (the two fallback paths: fetch-exception and incomplete-data).
 **Status:** fixed.
-**Notes:** The function's contract is "return the verified track **id** or None", but the fallback paths returned the *title*; the caller persisted it into `_last_track_id`, so the next poll fired a phantom second track change. `_verify_track_stable(detected_track_id)` now receives the originally detected id and returns it on both fallback paths.
 
 ---
 
 ### `radio_host` pre-generated banter: six concurrent writers race for one slot  <!-- 2026-06-12 -->
-**Symptom:** Logs frequently show `Pre-generated banter stale (was 'X', now 'Y'); falling back to template` even though pre-generation ran; LLM/TTS work is generated and discarded every transition.
 **Location:** `plugins/radio_host/radio_host_plugin.py` — `_pending_banter`, `_store_pending_banter`, `_pop_matching_banter`.
 **Status:** fixed.
-**Notes:** Up to 3 transitions × 2 generators = 6 async writers all overwrote a single `_pending_banter` slot; last writer won, so most transitions fell back to template text and pre-gen LLM/TTS cycles were wasted. Pending banter is now a dict keyed by `(prev_title, prev_artist)` (pruned to 8 entries, FIFO) via `_store_pending_banter(banter, source)`; a fast `"template"` result can no longer overwrite richer `"llm"` banter already stored for the same transition.
 
 ---
 
 ### `radio_host` WebDJ: hardcoded credentials and no `wss://` support  <!-- 2026-06-12 -->
-**Symptom:** Banter broadcast fails (or silently can't connect) against HTTPS-only AzuraCast instances; streamer credentials cannot be configured.
 **Location:** `plugins/radio_host/azuracast_client.py`, `plugins/radio_host/radio_host_plugin.py`, `jingle_injector.py`.
 **Status:** fixed.
-**Notes:** The WebDJ URL now maps `https://` base URLs to `wss://` via `AzuraCastClient._build_webdj_url()`. Streamer credentials are configurable through the new exposed vars `AZURACAST_STREAMER_USERNAME` / `AZURACAST_STREAMER_PASSWORD` (defaults unchanged: `SyntH`/`synthradio`), wired through `_read_config` into the injector and used by the winding-down injection path instead of literals. The non-f-string in `_enqueue_banter_generation` (literal `{curr_title}` sent to the model) was also fixed.
 
 ---
 
 ### `radio_host` `/api/radio/audio?path=` check allows sibling-directory bypass  <!-- 2026-06-12 -->
-**Symptom:** None observed; latent path-validation weakness.
 **Location:** `plugins/radio_host/radio_host_plugin.py`, `_serve_radio_audio` (direct-path branch).
 **Status:** fixed.
-**Notes:** The allow-check was `abs_path.startswith(prefix)`, which let sibling directories like `/app/tmp_tts/radio_host_evil/` through. It now uses `os.path.commonpath([abs_path, prefix]) == prefix`.
 
 ---
 
 ### `radio_host` `_find_active_schedule` likely never matches AzuraCast's schedule shape  <!-- 2026-06-12 -->
-**Symptom:** `schedule_description` stays empty in `/api/radio/data` and the DJ prompt never includes "Current program: ...", even with active station schedules.
 **Location:** `plugins/radio_host/radio_host_plugin.py`, `_find_active_schedule`.
-**Status:** fixed (not yet verified against a live AzuraCast).
-**Notes:** The code only understood entries with `days` (list) + seconds-in-day boundaries, but AzuraCast's `/api/station/{id}/schedule` returns calendar-style entries (`is_now`, `start_timestamp`/`end_timestamp`). The matcher now checks `is_now` first, then unix start/end timestamps, and keeps the legacy days/seconds shape as a final fallback. Cosmetic impact only (prompt enrichment); verify `schedule_description` populates on the next live run.
+**Status:** fixed — pending live verification: confirm `schedule_description` populates on the next radio run against a real AzuraCast.
 
 ---
 
@@ -449,10 +435,8 @@ docker exec synth-dev tail -f /app/logs/synth.log | grep -E "\[grillo\]|grillo"
 ---
 
 ### `automation_tools/container_synth.sh notify` imports symbols that no longer exist  <!-- 2026-06-12 -->
-**Symptom:** `./container_synth.sh notify` dies with `ImportError: cannot import name 'BOT_TOKEN' from 'core.config'`.
 **Location:** `automation_tools/container_synth.sh`, heredoc in the `notify)` case.
 **Status:** fixed.
-**Notes:** The heredoc imported `BOT_TOKEN` / `TELEGRAM_TRAINER_ID`, which no longer exist in `core/config.py`. It now reads the token from the `BOTFATHER_TOKEN` env var (the script sources `/app/.env` with `set -a`) and resolves the trainer via `core.config.get_trainer_id("telegram_bot")`, printing a clear message when either is unconfigured.
 
 ---
 
@@ -513,42 +497,32 @@ docker exec synth-dev tail -f /app/logs/synth.log | grep -E "\[grillo\]|grillo"
 ---
 
 ### `mcp_synth-db_get_recent_diary` still queries a stale `created_at` column  <!-- 2026-05-04 -->
-**Symptom:** The MCP diary helper returns `DB error: (1054, "Unknown column 'created_at' in 'SELECT'")` even though `ai_diary` uses `timestamp`.
 **Location:** `synth-db` MCP diary helper / live `ai_diary` schema mismatch.
 **Status:** fixed.
-**Notes:** `get_recent_diary()` now queries the canonical `timestamp` column and dynamically limits the selected columns to those actually present in the current schema.
 
 ---
 
 ### `grillo_activity_log` inserts could return `None` ids on Postgres  <!-- 2026-05-04 -->
-**Symptom:** Logs showed lines like `[grillo_outreach] Created activity log None`, followed by outreach rows that existed in `grillo_activity_log` but kept `response_text` / `diary_entry_id` as `NULL` because downstream code never learned the inserted row id.
 **Location:** `plugins/grillo/grillo_impl.py`, `GrilloPlugin.create_activity_log`.
 **Status:** fixed.
-**Notes:** MariaDB callers relied on `cursor.lastrowid`, but the Postgres compat cursor only populates `lastrowid` when the statement returns rows. The insert path now uses `RETURNING id` on Postgres and Grillo synthetic messages also carry the activity id in `message_id` for fallback recovery.
 
 ---
 
 ### Automatic diary logging could create internal `diary_consolidation` noise rows  <!-- 2026-05-04 -->
-**Symptom:** `ai_diary` could gain rows whose `content` looked like `Performed update_diary_entry action` and whose `user_message` started with `[DIARY CONSOLIDATION - INTERNAL SYSTEM TASK] ...`.
 **Location:** `core/action_parser.py`, automatic diary hook in `_create_diary_entry_for_actions`.
 **Status:** fixed.
-**Notes:** Internal merge beats execute `update_diary_entry` as maintenance, not as a user-facing interaction. The diary hook now skips auto-entry creation for `beat_type == "diary_consolidation"` / `interface == "diary_merge"` so consolidation work no longer pollutes introspection rows.
 
 ---
 
 ### `diary_merge` upserts could overwrite a real `ai_diary.interface` origin  <!-- 2026-05-04 -->
-**Symptom:** A same-day diary update triggered by internal merge flow could replace a real external interface such as `telegram_bot` with `diary_merge`, making the row look system-generated.
 **Location:** `plugins/ai_diary.py`, `_merge_diary_interface` during same-day upsert merge.
 **Status:** fixed.
-**Notes:** `diary_merge` is an internal maintenance interface and should be treated like `grillo` / `unknown` for origin merge purposes. The merge helper now preserves meaningful external origins instead of promoting `diary_merge`.
 
 ---
 
 ### Corrector returns empty when `successful_actions = []`  <!-- 2026-04-13 -->
-**Symptom:** LLM outputs actions without a `type` field (e.g. `{"arousal": 5}`). The unsupported-action check fires, sets `correction_context` with `successful_actions=[]`, and calls the corrector. The corrector told the LLM "PARTIAL SUCCESS — 0 actions succeeded, do NOT repeat successful ones", which was self-contradictory and caused the LLM to return an empty string all 4 attempts → fallback '😵'.
 **Location:** `core/transport_layer.py` → `run_corrector_middleware`, the `if correction_context:` block that builds `correction_message_text`.
-**Status:** fixed — when `successful_actions` is empty the corrector now uses a `CORRECTION NEEDED` prompt asking the LLM to resend the full response, not the "PARTIAL SUCCESS" / "do not repeat" wording that misled it.
-**Notes:** Also added `"Every action object inside 'actions' MUST have a 'type' field"` to `strict_requirements`. The root trigger is the LLM emitting bare dict actions like `{"arousal": 5}` or `{"feelings": {...}}` without a `type` key; the strict requirement now explicitly prohibits this.
+**Status:** fixed.
 
 ---
 
@@ -569,74 +543,57 @@ docker exec synth-dev tail -f /app/logs/synth.log | grep -E "\[grillo\]|grillo"
 ---
 
 ### `test_openrouter_engine.py` uses stale import patch targets  <!-- 2026-04-17 -->
-**Symptom:** Multiple tests fail with `ModuleNotFoundError: No module named 'cortex'` when patching paths like `cortex.llm_provider.openrouter.*`.
 **Location:** `tests/test_openrouter_engine.py` patch targets; current engine module lives under `engines/external_engines/openrouter.py`.
 **Status:** fixed.
-**Notes:** Patch targets now point to `engines.external_engines.openrouter.*`. Suite also reflects current document-attachment handling (`application/pdf`) in multimodal extraction.
 
 ---
 
 ### `grillo_outreach` may route to invalid chat id `-1`  <!-- 2026-04-17 -->
-**Symptom:** Outreach scheduler starts and enqueues beats, but messages are sent to `interface_path` values like `synth_webui/-1` and do not appear in active WebUI sessions (e.g. `webui_default`).
 **Location:** `plugins/grillo/grillo_outreach.py` target resolution in `_get_target_interface_and_chat`; fallback query over `chat_history_cache` can recover stale interface paths.
 **Status:** fixed.
-**Notes:** Resolution now rejects sentinel chat IDs (`-1`, empty, `none`, `null`) and prefers explicitly configured `GRILLO_OUTREACH_CHAT_IDS` before DB fallback. If outreach appears silent, check for warnings like `no active websocket for session -1` in `synth.log`.
 
 ---
 
 ### google-genai async close can raise `_async_httpx_client` AttributeError  <!-- 2026-04-17 -->
-**Symptom:** Console shows `Task exception was never retrieved` with `BaseApiClient.aclose()` failing: `AttributeError: 'BaseApiClient' object has no attribute '_async_httpx_client'`.
 **Location:** google-genai SDK cleanup path (`google/genai/_api_client.py`) triggered from project client instances in `engines/external_engines/gemini_api.py`, `core/live_session_manager.py`, `plugins/live_engines/gemini.py`, and `core/external_endpoints/adapters/gemini_adapter.py`.
-**Status:** fixed in-project workaround.
-**Notes:** Added `core/genai_client_utils.py` and apply `harden_genai_client_for_async_close(...)` immediately after each `genai.Client(...)` construction. It injects a no-op async close target when missing, preventing unhandled shutdown tasks on affected SDK builds.
+**Status:** fixed.
 
 ---
 
 ### Langfuse response may attach to wrong request when model label drifts  <!-- 2026-04-18 -->
-**Symptom:** Some traces show request metadata only (missing output/error/status/elapsed), while nearby traces can look mismatched during concurrent calls.
 **Location:** `core/cortex_api_logger.py`, `_pop_langfuse_request` fallback behavior.
 **Status:** fixed.
-**Notes:** Previous fallback popped the newest stack item even when `engine/model` did not match, which could orphan the correct request. Matching now uses: (1) exact `engine+model`, (2) same `engine`, and otherwise returns `None` without popping unrelated requests.
 
 ---
 
 ### `emotion_diary` legacy schema truncates low intensities to zero  <!-- 2026-04-18 -->
-**Symptom:** `emotion_diary` appears dominated by zero-intensity rows even while `emotion_state` has non-zero baseline values (e.g. `0.1` for low emotions).
-**Location:** MariaDB table `emotion_diary` (legacy schema), `plugins/emotion_manager.py` (`_log_emotion_diary_entry` / `set_emotion`).
-**Status:** known, not fixed.
-**Notes:** Some deployments still use a legacy `emotion_diary` schema with `id varchar(100)` and `intensity int(11)` (no `timestamp`). The emotion manager writes floats (including baseline `0.1`), but DB coercion stores these as `0`, creating misleading analytics. **Root cause found and fixed 2026-06-12:** the "legacy" schema was not legacy — `plugins/ai_diary.py` `init_diary_table()` created `emotion_diary` with `id VARCHAR(100) PRIMARY KEY`, `intensity INT`, no `timestamp`, while `plugins/emotion_manager.py` created it with auto-increment id and `intensity FLOAT`; whichever plugin initialized first won the `CREATE TABLE IF NOT EXISTS` race (ai_diary runs at module import, so it usually won on fresh DBs). The ai_diary DDL is now identical to the emotion_manager schema, so new databases get the float-capable table. **Existing databases keep the old table** — `CREATE TABLE IF NOT EXISTS` does not migrate it; truncated-to-zero rows on already-deployed DBs need a manual `ALTER TABLE emotion_diary MODIFY intensity FLOAT` (plus id/timestamp migration) if accurate history matters.
+**Location:** MariaDB table `emotion_diary`, `plugins/ai_diary.py` `init_diary_table()`, `plugins/emotion_manager.py`.
+**Status:** partially fixed — code resolved 2026-06-12, existing databases still need a manual migration.
+**Notes:** Root cause was two competing `CREATE TABLE IF NOT EXISTS` definitions (ai_diary's `intensity INT` variant vs emotion_manager's `intensity FLOAT`); the DDLs are now identical, so fresh databases are correct. **Open maintainer action:** already-deployed databases keep the old table — run `ALTER TABLE emotion_diary MODIFY intensity FLOAT` (plus id/timestamp alignment) on the live DB if accurate emotion history matters.
 
 ---
 
 ### `grillo_activity_log.diary_entry_id` may reference missing `ai_diary` rows  <!-- 2026-04-18 -->
-**Symptom:** PostgreSQL staging migration can fail on `grillo_activity_log_diary_entry_id_fkey` with errors like `Key (diary_entry_id)=(1566) is not present in table "ai_diary"`.
 **Location:** MariaDB source data in `grillo_activity_log` vs `ai_diary`; migration handling in `core/main_db_migration.py`.
-**Status:** fixed in-project workaround.
-**Notes:** The real `3306` source contained 24 orphaned `grillo_activity_log.diary_entry_id` values. The migration now preserves those activity rows but writes the broken `diary_entry_id` references as `NULL` in PostgreSQL, matching the target FK policy (`ON DELETE SET NULL`) and allowing the rest of the dataset to load.
+**Status:** fixed.
 
 ---
 
 ### Postgres compat release path can emit unawaited `Pool.release` warnings  <!-- 2026-04-18 -->
-**Symptom:** Runtime smoke against Postgres logs `RuntimeWarning: coroutine 'Pool.release' was never awaited` during connection cleanup.
 **Location:** `core/db_backends.py` (`PostgresCompatConnection.close`), `core/db.py` (`release_conn`, `_ConnProxy.close`).
 **Status:** fixed.
-**Notes:** `asyncpg.Pool.release(...)` is awaitable. The compat close path now returns the release result instead of consuming it synchronously, and `release_conn()` awaits any awaitable close/release result so Postgres cleanup stays warning-free.
 
 ---
 
 ### Proxy cursors can break `async with` via delegated `__aenter__` lookup  <!-- 2026-04-18 -->
-**Symptom:** Startup preflight logs `[db] ensure_plugin_tables failed: '_ProxyCursor' object does not support the asynchronous context manager protocol` even though the inner cursor supports async context methods.
 **Location:** `core/db.py` (`ensure_plugin_tables` local `_cursor_ctx` helper, `_ConnProxy.cursor` proxy wrappers).
 **Status:** fixed.
-**Notes:** Special-method lookup for `async with` bypasses `__getattr__`, so proxy cursors that only delegate `__aenter__`/`__aexit__` cannot be used directly in `async with`. The preflight helper now calls the delegated enter/exit methods explicitly when present.
 
 ---
 
 ### `ai_diary` merge query still uses MySQL `GROUP_CONCAT ... SEPARATOR` syntax  <!-- 2026-04-18 -->
-**Symptom:** Runtime logs show `syntax error at or near "SEPARATOR"` during diary merge/debrief paths.
 **Location:** `plugins/ai_diary.py` (`DiaryPlugin.on_debrief`, query around `_get_unmerged_entries`).
 **Status:** fixed.
-**Notes:** Verified 2026-06-12: `on_debrief` now branches on `_get_db_type()` and uses `string_agg(...)` on the Postgres path.
 
 ---
 
@@ -681,130 +638,98 @@ docker exec synth-dev tail -f /app/logs/synth.log | grep -E "\[grillo\]|grillo"
 ---
 
 ### `send_message` alias rewrite could trigger avoidable correction on `body` payloads  <!-- 2026-04-18 -->
-**Symptom:** Langfuse traces can show an initial LLM reply like `{"type":"send_message","payload":{"body":"..."}}` that is semantically fine, but validation fails after internal normalization rewrites the type to `message_telegram_bot` without a canonical `payload.text` field. The corrector retry then succeeds, making the first correction look unnecessarily "stupid".
 **Location:** `core/message_chain.py`, LLM-originated action normalization before validation.
 **Status:** fixed.
-**Notes:** The message chain now promotes legacy text aliases (`body`, `content`, `message`, `value`) into `payload.text` before validation and reruns `interface_path` injection after rewriting generic `message` / `send_message` actions to concrete `message_*` types.
 
 ---
 
 ### OpenAI-compatible external endpoint probe ignored configured adapter timeout  <!-- 2026-04-19 -->
-**Symptom:** Fresh OpenAI-compatible endpoints (for example OpenRouter) can log `ping_test exception ... Connection timeout` and `list_models HTTP fallback failed ... TimeoutError()` during auto-probe even when the endpoint-level probe timeout is configured much higher, leaving `available_models` empty in the UI.
 **Location:** `core/external_endpoints/adapters/openai_compat.py` (`_list_models_via_http`, `ping_test`), `core/external_endpoints/probe.py` timeout plumbing.
 **Status:** fixed.
-**Notes:** The adapter was built with `endpoint.extra_config.timeout`, but `list_models()` still hardcoded a 40s HTTP timeout and `ping_test()` defaulted to 30s with a 10s connect timeout unless a caller overrode it manually. The adapter now uses its configured timeout for both model discovery and ping probes by default.
 
 ---
 
 ### `external_endpoints.updated_at` string writes can fail on Postgres-backed endpoint registry paths  <!-- 2026-04-19 -->
-**Symptom:** Runtime warnings like `ext endpoint model DB persist failed: invalid input for query argument $2: '2026-04-18 22:08:45' (expected a datetime.date or datetime.datetime instance, got 'str')` can appear when saving endpoint state such as default model selection.
 **Location:** `core/external_endpoints/registry.py` (`update_endpoint`, `set_subsystem_map`, `_auto_set_default_model`, `set_default_model`).
 **Status:** fixed.
-**Notes:** Several registry writes formatted `updated_at` as a string while other paths already passed real timezone-aware `datetime` objects. The registry now binds real UTC datetimes consistently, matching the Postgres-compatible probe result path.
 
 ---
 
 ### Queued trainer notifications could lose `skip_history` and pollute prompt context  <!-- 2026-04-19 -->
-**Symptom:** Engine-switch notifications like `✅ Cortex engine dynamically updated to ...` could appear in `chat_history_cache` / `history_recent`, especially during startup or interface registration races.
 **Location:** `core/notifier.py` (`flush_pending_for_interface`), `core/history_engine.py`.
 **Status:** fixed.
-**Notes:** The direct `notify_trainer()` path already sent `skip_history=True`, but queued trainer notifications were flushed later without that flag. The flush path now preserves `skip_history`, and the history builder ignores these legacy self-notification rows so old DB pollution stops affecting prompt context.
 
 ---
 
 ### `ai_diary` consolidation could recursively re-merge whole days and bloat Gemini prompts  <!-- 2026-04-19 -->
-**Symptom:** Langfuse shows very large `@diary_merge` prompts with repeated diary fragments, and Gemini generations can stretch into ~100s while prompt reduction still fails to get under the size cap.
 **Location:** `plugins/ai_diary.py` (`DiaryPlugin.on_debrief`, `DiaryPlugin.execute_action` for `update_diary_entry`).
 **Status:** fixed.
-**Notes:** The consolidation beat grouped all rows for a day, updated only one row, and left the source rows in place; subsequent merges could concatenate the already-merged blob plus the originals again. The merge beat now carries exact source row IDs and the original merge timestamp through context, and `update_diary_entry` archives the merged source fragments after writing the consolidated row.
 
 ---
 
 ### OpenAI-compatible image turns could be silently downgraded to text after a stale probe  <!-- 2026-04-19 -->
-**Symptom:** Image-only or image-plus-text turns reach prompt construction with attachments present, but the external endpoint request contains only text parts, so OpenRouter-compatible models appear to ignore the image.
 **Location:** `core/external_endpoints/bridges/cortex_bridge.py`, `core/external_endpoints/adapters/openai_compat.py`, `core/external_endpoints/probe.py`.
 **Status:** fixed.
-**Notes:** Fresh probes could persist `capabilities["vision"] = false` and `capabilities["cortex"] = false` when `ping_test()` / `_probe_vision_support()` fell back to the invalid model name `"default"`. The Cortex bridge then trusted the stale endpoint-level `vision` flag and silently stripped `image_url` parts even after the user selected a real model. Probes now resolve a concrete model before sending test requests, and the bridge forwards image parts when a vision mapping or explicit model selection exists so multimodal turns are not silently flattened.
 
 ---
 
 ### OpenAI-compatible image-only turns could hallucinate non-visible details  <!-- 2026-04-19 -->
-**Symptom:** Requests with a real `image_url` attachment can still produce invented details (for example a nonexistent blindfold) when the user sends only an image and no caption.
 **Location:** `core/prompt_renderers.py` (`OpenAIRenderer.render_with_multimodal`).
 **Status:** fixed.
-**Notes:** The multipart current-turn text companion previously contained only the runtime prefix when `current_text` was empty, leaving the model free to fill gaps from prior chat context. The OpenAI renderer now adds an explicit grounding instruction for image attachments, telling the model to describe only clearly visible details and to admit uncertainty for ambiguous content.
 
 ---
 
 ### SOUL `async_consolidate` ran on every idle compile  <!-- 2026-04-19 -->
-**Symptom:** Langfuse shows frequent `async_consolidate` traces that look like diary-consolidation churn, often on every idle transcript flush.
 **Location:** `plugins/soul_plugin.py` (`SoulPlugin._compile_interface`).
 **Status:** fixed.
-**Notes:** The SOUL plugin called `self._compiler.async_consolidate()` after every `post_session_compile()`, so routine idle compiles emitted consolidation work and traces far too often. The plugin now throttles background consolidation with a cooldown while `soul_force_compile` still bypasses the cooldown for explicit manual compiles.
 
 ---
 
 ### SOUL Postgres recall could full-scan memcells and trip static injection timeouts  <!-- 2026-04-19 -->
-**Symptom:** Runtime logs show `get_static_injection() on SoulPlugin timed out after 5s` even though memcells and embeddings are present in Postgres; direct profiling shows `PostgresSoulRepository.recall_memories()` taking about 5.2 seconds on warm calls.
 **Location:** `core/soul/repository.py` (`PostgresSoulRepository.recall_memories`), SOUL Postgres tables `mem_cells` / `mem_cell_vectors`.
 **Status:** fixed.
-**Notes:** The lexical fallback query used unindexed `atomic_facts::text` trigram checks plus a composite `to_tsvector(episodic_trace || atomic_facts::text)` expression, forcing a sequential scan over `mem_cells`. Candidate selection now stays on indexed `episodic_trace` trigram/tsvector expressions and computes richer episodic-trace-plus-atomic-facts lexical overlap in Python after fetch. Live probe on `2026-04-19` dropped warm repo recall from about `5.2s` to about `3.3s` end-to-end static injection. The `synth-db` MCP now supports explicit `target` selection (`runtime`, `source`, `soul`, `process_env`) so SOUL-state inspection no longer requires a separate ad hoc query path.
 
 ---
 
 ### SOUL recall could inject diary-merge housekeeping into live prompts  <!-- 2026-04-19 -->
-**Symptom:** User-facing prompt context could include `soul_recalled_memories` entries such as `[DIARY CONSOLIDATION - INTERNAL SYSTEM TASK] ...` or `Performed update_diary_entry action`, leaking maintenance-only traces into normal chat turns.
 **Location:** `plugins/soul_plugin.py` (`SoulPlugin._recall_memories`).
 **Status:** fixed.
-**Notes:** SOUL memcells do not carry an explicit internal-task flag, so the live prompt path now filters diary-merge and nightly housekeeping traces before formatting recalled memories. This keeps normal same-chat recall intact while excluding consolidation-only prompt noise.
 
 ---
 
 ### Selective correction context could store counts instead of action lists  <!-- 2026-04-19 -->
-**Symptom:** `corrector_middleware` could log `object of type 'int' has no len()` or `'int' object is not iterable` immediately after `Using payload_thread_id=...`, then exhaust retries without returning corrected JSON.
 **Location:** `core/action_parser.py` (`_request_selective_correction`), `core/transport_layer.py` (`run_corrector_middleware`).
 **Status:** fixed.
-**Notes:** `_request_selective_correction` stored integer counts in `correction_context.successful_actions` / `failed_actions`, but the transport-layer corrector expects iterable action/error records when building the selective-correction prompt. The producer now stores the real action lists plus explicit `successful_count` / `failed_count` fields, and the consumer defensively normalizes legacy malformed contexts.
 
 ---
 
 ### Telegram multimodal extraction assumed every optional media attribute exists  <!-- 2026-04-19 -->
-**Symptom:** Runtime logs could show `Error extracting Telegram attachments: 'types.SimpleNamespace' object has no attribute 'photo'`, and attachment extraction aborted before reaching later media fields.
 **Location:** `core/multimodal_attachment.py` (`extract_multimodal_from_telegram`).
 **Status:** fixed.
-**Notes:** The Telegram extractor read `message.photo`, `message.document`, `message.audio`, `message.voice`, `message.video`, `message.video_note`, and `message.sticker` directly. Partial PTB message objects and test doubles do not guarantee those attributes exist. The extractor now uses `getattr(..., None)` for every optional field and treats missing sticker flags as false.
 
 ---
 
 ### Async diary commands called sync diary retrieval on the event-loop thread  <!-- 2026-04-19 -->
-**Symptom:** Trainer diary commands could trip sync/async bridge errors while fetching diary entries from an async context, and `core/generic_commands.py` also imported a stale helper name (`last_chats_command_generic`) that no longer existed in `core.recent_chats`.
 **Location:** `core/command_registry.py` (`diary_command`, `context_command`), `core/generic_commands.py` (`generic_diary_command`, import of `last_chats_command_generic`).
 **Status:** fixed.
-**Notes:** The async command handlers now offload `get_recent_entries(...)` via `asyncio.to_thread(...)` instead of calling the sync diary bridge directly on the active loop thread. `generic_commands` now imports `last_chats_command` under the expected alias, and `command_registry.context_command` was aligned with the actual `core.context` API (`set_context_state` / `get_context_state`).
 
 ---
 
 ### Recovered JSON with extra trailing content could drop later actions silently  <!-- 2026-04-20 -->
-**Symptom:** Runtime logs could show `JSON recovered after ... parsing errors`, followed by a successful `message_*` action execution and `All actions executed successfully despite JSON recovery`, even though the raw LLM response still contained additional malformed actions later in the payload. The recovered first action would run, but later diary/emotion/animation actions could be lost without a correction pass.
 **Location:** `core/message_chain.py` (`handle_incoming_message` recovery/correction branch), `core/transport_layer.py` (`extract_json_from_text`).
 **Status:** fixed.
-**Notes:** The message chain now treats `recovered=True` plus retained extra text as a selective-correction case, even when the salvaged actions themselves executed successfully. This preserves already-run actions while asking the corrector for the dropped remainder instead of silently terminating the loop.
 
 ---
 
 ### External cortex bridge dropped PromptRequest and fell back to legacy JSON flattening  <!-- 2026-04-20 -->
-**Symptom:** External endpoint-backed cortex engines (for example OpenRouter via `ExternalCortexEngine`) could log classic `system + giant user blob` requests even when `build_prompt_request()` had attached a `__prompt_request`. MCP traces showed large serialized prompt dicts in the last user turn instead of the renderer's structured messages.
 **Location:** `core/plugin_instance.py` (`prompt.pop("__prompt_request", None)` handoff), `core/external_endpoints/bridges/cortex_bridge.py` (`ExternalCortexEngine`).
 **Status:** fixed.
-**Notes:** `plugin_instance` only forwards the typed prompt object when the resolved engine advertises `supports_prompt_request`. The bridge already knew how to render `PromptRequest`, but did not set the flag, so the typed object was stripped and the bridge always fell back to the legacy dict path. `ExternalCortexEngine.supports_prompt_request = True` now keeps the typed prompt alive end-to-end.
 
 ---
 
 ### External OpenAI-compatible PDF attachments were serialized as image parts  <!-- 2026-04-20 -->
-**Symptom:** Uploading a PDF manual through an external OpenAI-compatible cortex endpoint (for example OpenRouter → xAI Grok) could fail with `Invalid request content: Invalid base64-encoded image.` MCP traces showed the last user turn containing `{"type":"image_url","image_url":{"url":"data:application/pdf;base64,..."}}`.
 **Location:** `core/external_endpoints/bridges/cortex_bridge.py` (`ExternalCortexEngine._format_mm_part`, `_build_mm_parts_from_prompt_request`), `core/prompt_renderers.py` (`_build_multimodal_turn_text`, `OpenAIRenderer.render_with_multimodal`).
 **Status:** fixed.
-**Notes:** The external bridge treated every non-Gemini binary attachment as an OpenAI `image_url` data URI, so PDFs were mislabeled as images and rejected by providers that validate image content. OpenAI-compatible document attachments are now converted into document-aware prompt context: extracted document text is injected into the final user turn when available, and image-only/scanned PDFs fall back to attached page images plus explicit prompt guidance so vision-capable models can read visible text from the document pages. Gemini endpoints still receive native inline document data.
 
 ---
 
@@ -817,114 +742,86 @@ docker exec synth-dev tail -f /app/logs/synth.log | grep -E "\[grillo\]|grillo"
 ---
 
 ### Gemini tool manifests could lose normalized action parameters and yield empty payloads  <!-- 2026-05-07 -->
-**Symptom:** `cortex_api.log` could show Gemini requests with native `tools` present, yet each `function_declaration.parameters.properties` object was empty. The resulting response then normalized into actions like `{"type":"message_telegram_bot","payload":{}}`, causing downstream validation errors such as missing `payload.text` and empty diary payloads.
 **Location:** `core/live_tool_registry.py` (`build_manifests_from_actions`, plus shared manifest extraction for action definitions built from normalized `schema` blocks).
 **Status:** fixed.
-**Notes:** The prompt action registry largely stores normalized actions in `{"schema": {"properties": ...}, "brief": ...}` form, but the manifest builder only read a legacy `payload` dict. Gemini tool declarations now fall back to `schema.properties` and `schema.required`, so native tool calls retain required arguments like `text` and `interface_path`.
 
 ---
 
 ### Selective correction retried safety-blocked actions and wasted an extra LLM call  <!-- 2026-04-20 -->
-**Symptom:** After a user-visible `message_*` action succeeded, logs could still show a second OpenRouter call from `corrector_middleware` that returned `{"actions":[]}` because the only remaining failed action was already marked `unfixable` (for example `update_emotion_state` blocked by safety policy / whitelist).
 **Location:** `core/action_parser.py` (`_request_selective_correction`).
 **Status:** fixed.
-**Notes:** `_request_selective_correction()` now filters out failed actions marked `unfixable` before building the correction prompt. If every failed action is unfixable, the helper skips the corrector entirely instead of burning an extra round-trip that can only return an empty action list.
 
 ---
 
 ### Literal newlines inside JSON strings could trigger a spurious corrector round-trip  <!-- 2026-04-20 -->
-**Symptom:** Runtime logs could show a raw LLM reply that already looks like `{"actions":[...]}`, followed by repeated `Invalid control character` parse errors and `LLM returned non-JSON output; activating corrector to request JSON format`. A second LLM call then re-emits the same message with properly escaped newlines.
 **Location:** `core/transport_layer.py` (`extract_json_from_text`).
 **Status:** fixed.
-**Notes:** Some external OpenAI-compatible models can emit literal newline, carriage-return, or tab characters inside quoted `payload.message` / `payload.text` strings instead of escaped JSON sequences. `extract_json_from_text()` now tries an additional variant that escapes control characters only while inside JSON string literals, so otherwise-valid action payloads recover locally without falling into the corrector loop.
 
 ---
 
 ### Legacy `diary_entry` action alias could trigger an avoidable correction hop  <!-- 2026-04-20 -->
-**Symptom:** OpenRouter-backed manual turns could return a mostly valid action list such as `send_message` + `update_emotion_state` + `diary_entry`, then log `Detected unsupported action types from LLM: ['diary_entry']` and spend one extra corrector request only to rename the diary action to `create_personal_diary_entry`.
 **Location:** `core/message_chain.py` (`handle_incoming_message` normalization path before unsupported-action validation).
 **Status:** fixed.
-**Notes:** The message chain already normalized generic message aliases, but it did not rewrite the legacy diary action name before checking supported action types. `diary_entry` is now normalized in-place to `create_personal_diary_entry`, so mixed manual replies can execute directly without a correction round-trip.
 
 ---
 
 ### Legacy `diary` action and diary payload aliases could still force correction or drop diary metadata  <!-- 2026-04-20 -->
-**Symptom:** OpenRouter-backed manual turns could recover into a valid action list such as `send_message` + `update_emotion_state` + `diary`, then still log `Detected unsupported action types from LLM: ['diary']` and make one avoidable correction call. Even when the corrector renamed the action to `create_personal_diary_entry`, payload keys like `entry`, `summary`, and `thought` could bypass the diary plugin's canonical `interaction_summary` / `personal_thought` fields.
 **Location:** `core/message_chain.py` normalization helpers before unsupported-action validation and action execution.
 **Status:** fixed.
-**Notes:** The message chain now normalizes both legacy diary action names (`diary`, `diary_entry`) and legacy diary payload keys (`entry`, `summary`, `thought`) into the canonical diary action schema before validation. This lets recovered manual replies execute without a corrector hop and preserves diary metadata for downstream diary creation.
 
 ---
 
 ### Standalone `thought` action could still force correction instead of populating diary metadata  <!-- 2026-04-20 -->
-**Symptom:** OpenRouter-backed manual turns could return `send_message` + `diary` + `thought`, log `Detected unsupported action types from LLM: ['thought']`, and spend a correction round-trip only to drop the reflective thought from the final action list.
 **Location:** `core/message_chain.py` diary normalization helpers before unsupported-action validation.
 **Status:** fixed.
-**Notes:** Some replies emitted `thought` as a separate legacy action object instead of a `create_personal_diary_entry.payload.personal_thought` field. The message chain now folds a standalone `thought` action into the paired diary action before validation, preserving `personal_thought` metadata and avoiding the correction hop.
 
 ---
 
 ### `chat_history_cache` deduplication query still used MySQL `DATE_SUB(... INTERVAL ...)` syntax  <!-- 2026-04-20 -->
-**Symptom:** Live manual turns could log `Deduplication check failed: syntax error at or near "5"` from `chat_history_cache`, then continue after skipping the duplicate check.
 **Location:** `core/chat_history_cache.py` (`save_chat_message`, duplicate-message guard query).
 **Status:** fixed.
-**Notes:** The Postgres SQL translator already rewrote `UTC_TIMESTAMP()` but not MySQL's `DATE_SUB(..., INTERVAL 5 SECOND)` form. The deduplication check now computes the 5-second cutoff in Python and passes it as a normal query parameter, keeping the save path dialect-neutral.
 
 ---
 
 ### `chat_update_checker` DB polling still used MySQL `UNIX_TIMESTAMP(...)` syntax  <!-- 2026-04-20 -->
-**Symptom:** Runtime logs could show `DB query failed, falling back to in-memory check: function unix_timestamp(timestamp with time zone) does not exist` while polling for new non-self chat activity.
 **Location:** `core/chat_update_checker.py` (`ChatUpdateChecker._check_once`).
 **Status:** fixed.
-**Notes:** The checker used `MAX(UNIX_TIMESTAMP(timestamp))` and `WHERE UNIX_TIMESTAMP(timestamp) > %s`, which works on MySQL but fails on Postgres. The polling path now queries raw timestamps, converts DB values to epoch seconds in Python, and passes a timezone-aware `datetime` cutoff back into the follow-up query so both backends stay compatible.
 
 ---
 
 ### `grillo_chat_observer` direct DB probe still uses MySQL `UNIX_TIMESTAMP(...)` syntax  <!-- 2026-05-05 -->
-**Symptom:** Runtime logs can show `Error executing query: SELECT COUNT(*) as cnt, MAX(UNIX_TIMESTAMP(timestamp)) ...` followed by `[grillo_chat_observer] Direct DB check failed; falling back to checker: function unix_timestamp(timestamp with time zone) does not exist` on Postgres-backed runs.
 **Location:** `plugins/grillo/grillo_chat_observer.py` (`GrilloChatObserverPlugin._run_observer`).
 **Status:** fixed.
-**Notes:** The observer fast-path now queries raw timestamps from `chat_history_cache`, passes a timezone-aware `datetime` cutoff into the DB layer, and normalizes the returned `MAX(timestamp)` value back to epoch seconds before advancing `GRILLO_OBSERVER_LAST_RUN_TS`. This removes the Postgres error log while preserving the observer's non-consuming update check.
 
 ---
 
 ### `memory_consolidation` beats were using a stale plugin prompt override  <!-- 2026-05-05 -->
-**Symptom:** Runtime `memory_consolidation` beats could bypass the richer built-in prompt in `GrilloPlugin._create_memory_consolidation_prompt()` and instead use the older `plugins/grillo/grillo_memory.py` prompt, which lagged the current diary schema and omitted the newer first-person diary fields.
 **Location:** `plugins/grillo/grillo_impl.py` (`GrilloPlugin._create_beat_prompt`) with the stale override in `plugins/grillo/grillo_memory.py`.
 **Status:** fixed.
-**Notes:** `_create_beat_prompt()` now routes `memory_consolidation` through the built-in prompt before consulting beat-plugin `build_prompt()` overrides. This makes the runtime path match the tested rewrite-safe prompt that includes history-derived context and the current `create_personal_diary_entry` payload shape.
 
 ---
 
 ### Tagged memory recall helpers still used MariaDB-only JSON predicates on Postgres  <!-- 2026-05-06 -->
-**Symptom:** Internal prompt/memory recall paths could log warnings like `[search_memories] query failed: function json_contains(text, unknown) does not exist`, then fall back to zero tag-based memory hits on Postgres-backed runs. Related memory search/diary utilities also still relied on MariaDB-only `JSON_CONTAINS(...)`, `DATE_SUB(...)`, or `RAND()` forms.
 **Location:** `core/synth_core_memory.py` (`search_memories`), `core/prompt_engine.py` (`search_memories`), `plugins/memory_search.py`, `plugins/ai_diary.py` tag/person lookups, and `plugins/grillo/grillo_compactor.py` marker filtering.
 **Status:** fixed.
-**Notes:** The active recall/search helpers now branch on the runtime DB backend: MariaDB keeps `JSON_CONTAINS(...)`, while Postgres uses `::jsonb ? %s` against text-backed JSON arrays. The prompt-layer helper now deduplicates in Python instead of relying on a MariaDB-tolerated `SELECT DISTINCT ... ORDER BY timestamp` shape that Postgres rejects. The memory search plugin also switches `RAND()` to `RANDOM()` on Postgres, and the Grillo compactor uses Postgres-safe timestamp cutoffs instead of `DATE_SUB(...)` when filtering old diary rows by marker. Live Postgres verification returned tag-based `environment` hits from both recall paths after the fix.
 
 ---
 
 ### SOUL static injection could time out on internal `grillo/-1` turns  <!-- 2026-04-20 -->
-**Symptom:** Runtime logs could show `get_static_injection() on SoulPlugin timed out after 5s` during internal Grillo memory-consolidation prompt assembly, even though the prompt later completed without any `soul_*` injections.
 **Location:** `plugins/soul_plugin.py` (`SoulPlugin.get_static_injection`).
 **Status:** fixed.
-**Notes:** SOUL runtime recall is useful for real user/session interfaces, but not for internal Grillo control turns like `grillo/-1`. The plugin now short-circuits static injection for internal Grillo interfaces before session bookkeeping or repository recall, avoiding wasted recall work and eliminating this fresh timeout path.
 
 ---
 
 ### Grillo outreach synthetic message ids could skip PromptRequest assembly  <!-- 2026-04-20 -->
-**Symptom:** Grillo outreach turns could log `PromptRequest assembly skipped: invalid literal for int() with base 10: 'grillo_outreach_0'`, then fall back to the legacy flattened prompt path even though normal manual turns were already using `__prompt_request`.
 **Location:** `core/prompt_engine.py` (`_assemble_prompt_request`, `RuntimeContext.message_id` assignment).
 **Status:** fixed.
-**Notes:** Outreach beats synthesize string message ids like `grillo_outreach_0`. `_assemble_prompt_request()` previously coerced every `message_id` through `int(...)`, so typed prompt assembly aborted for those turns. The runtime now tolerates non-numeric message ids by leaving `RuntimeContext.message_id` unset instead of crashing, which keeps structured prompt rendering enabled for outreach beats.
 
 ---
 
 ### Exact runtime timestamps could make trainer replies over-mention time and location  <!-- 2026-04-20 -->
-**Symptom:** Ordinary trainer replies could keep volunteering lines like `at 17:43 CEST right here in ...` even when the user did not ask for the time or location, making every response feel overly anchored to prompt metadata.
 **Location:** `core/prompt_renderers.py` (`_build_runtime_prefix`), `core/prompt_engine.py` (`load_unminified_chat_instruction`).
 **Status:** fixed.
-**Notes:** The current-turn runtime prefix injected the exact timestamp into every rendered user message, while the shared chat instruction only said to treat time fields as authoritative and did not tell the model to keep them in the background. The prompt stack now omits the exact timestamp from the per-turn prefix and explicitly tells the model to use time and location as ambient context unless precise details are actually needed.
 
 ---
 
@@ -953,10 +850,8 @@ docker exec synth-dev tail -f /app/logs/synth.log | grep -E "\[grillo\]|grillo"
 ---
 
 ### Daily diary WebUI used MySQL-only `group_concat_max_len` on Postgres  <!-- 2026-05-19 -->
-**Symptom:** The WebUI diary history endpoint could fail with errors like `Failed to fetch daily diary: unrecognized configuration parameter "group_concat_max_len"` on Postgres-backed runs.
 **Location:** `core/webui.py` (`history_diary`).
 **Status:** fixed.
-**Notes:** The query itself already relied on SQL translation for `GROUP_CONCAT(...)`, but the handler still executed `SET SESSION group_concat_max_len = 1048576` unconditionally. The fix keeps that session setting only on MariaDB/MySQL and skips it on Postgres, where `string_agg(...)` is used after translation.
 
 ---
 
@@ -977,26 +872,20 @@ docker exec synth-dev tail -f /app/logs/synth.log | grep -E "\[grillo\]|grillo"
 ---
 
 ### PromptRequest history could replay autonomous outreach as assistant-only monologues  <!-- 2026-05-07 -->
-**Symptom:** Manual Telegram prompts could reach Gemini with a `contents` history containing long runs of consecutive `model` turns such as multiple prior outreach messages, making the assembled conversation look malformed or oddly anchored even when the wire schema was valid.
 **Location:** `core/prompt_engine.py` (`_history_to_turns`) fed by same-chat `history_current_chat` from `core/history_engine.py` / `chat_history_cache`.
 **Status:** fixed.
-**Notes:** Outreach messages are valid visible chat history and were not persisted with a special marker, so the safest fix was at turn normalization: drop unmatched leading assistant turns when a user turn appears later in the visible window, and coalesce consecutive same-role turns into one `Turn`. This keeps normal alternating conversations intact while preventing autonomous assistant streaks from poisoning the next manual prompt.
 
 ---
 
 ### External Gemini 503 overloads were not considered retryable  <!-- 2026-05-07 -->
-**Symptom:** A single upstream error like `503 UNAVAILABLE ... high demand ... Please try again later` could immediately bubble out of `ExternalCortexEngine.generate_response()`, causing the queue fallback response instead of a retry even when the endpoint already allowed retries.
 **Location:** `core/external_endpoints/bridges/cortex_bridge.py` (`ExternalCortexEngine._is_retryable_exception`).
 **Status:** fixed.
-**Notes:** The retry classifier only matched connection/timeouts and a narrow `temporarily unavailable` phrase, so Gemini overload errors with `status: UNAVAILABLE` were treated as fatal. The bridge now treats common transient API overload markers (`429`, `502/503/504`, `UNAVAILABLE`, `high demand`, `rate limit`, `try again later`, etc.) as retryable.
 
 ---
 
 ### WebUI phase logs could hide valid THINKING/WRITING transitions  <!-- 2026-04-22 -->
-**Symptom:** During debugging it could look like WebUI never entered `THINKING` / `WRITING`, because the browser console only logged `vrm_animation` messages and the backend phase-promotion log could misleadingly print `WRITING -> WRITING` even when the real transition was `THINKING -> WRITING`.
 **Location:** `core/action_state_manager.py`, `res/synth_webui/js/chat-window.mjs`
 **Status:** fixed.
-**Notes:** `ActionStateManager.update_phase()` now snapshots the old phase before mutation, and the chat window now logs incoming `action_state` WebSocket events so frontend and backend traces can be correlated directly.
 
 ---
 
@@ -1009,66 +898,50 @@ docker exec synth-dev tail -f /app/logs/synth.log | grep -E "\[grillo\]|grillo"
 ---
 
 ### `universal_send skip_history=True` was ignored and polluted `chat_history_cache`  <!-- 2026-05-05 -->
-**Symptom:** Fallback/test sends could still appear in prompt history as rows like `fake / fallback / 😵`, even when the caller explicitly passed `skip_history=True`.
 **Location:** `core/transport_layer.py` (`universal_send` history-save path), plus tests calling `send_llm_fallback_message()` / `universal_send()` with synthetic interface paths.
 **Status:** fixed.
-**Notes:** The transport layer now checks `skip_history` before calling `add_message_to_context()`. This prevents fallback deliveries and similar synthetic sends from polluting `history_recent`.
 
 ---
 
 ### Telegram send failures could mask the real error with undefined `correction_payload`  <!-- 2026-05-05 -->
-**Symptom:** Logs could show a real Telegram delivery failure such as `Chat not found`, followed by `[message_plugin] Failed to send message via telegram_bot: cannot access local variable 'correction_payload' where it is not associated with a value`.
 **Location:** `interface/telegram_bot.py`, `TelegramInterface.send_message` exception handling.
 **Status:** fixed.
-**Notes:** The send path now initializes a default correction payload before resolution/sending, and overrides it with more specific messaging when chat-name resolution fails. Delivery errors now surface consistently instead of raising a secondary `UnboundLocalError`.
 
 ---
 
 ### Telegram startup timeout could leave the interface permanently half-initialized  <!-- 2026-05-06 -->
-**Symptom:** Logs could show `Error during Telegram bot startup: TimedOut('Timed out')`, followed by outbound attempts logging `Bot not initialized, cannot send message` while `message_plugin` still logged `Message successfully sent ...` for the same action.
 **Location:** `interface/telegram_bot.py` (`start_bot`, `TelegramInterface.send_message`, `shutdown_interface`) and `plugins/message_plugin.py`.
 **Status:** fixed.
-**Notes:** `start_bot()` previously set `_bot_started = True` before initialization succeeded, so one transient timeout could brick Telegram for the rest of the process. Startup now tracks `starting` separately, retries transient timeout/network failures inline before disabling the interface, resets the state on failure, marks the interface disabled with the failure reason, and still schedules a delayed retry if all inline attempts fail. `TelegramInterface.send_message()` / `add_reaction()` now attempt recovery when the bot is missing, and `MessagePlugin` treats an explicit `False` return from `send_message()` as a real delivery failure instead of logging false success.
 
 ---
 
 ### Langfuse Gemini generations could keep token summaries empty  <!-- 2026-05-06 -->
-**Symptom:** Langfuse trace and observation summaries could show zero/empty token usage for Gemini calls even though the stored observation still contained full `input` and `output` bodies.
 **Location:** `core/cortex_api_logger.py` generation logging, `engines/external_engines/gemini_api.py` usageMetadata mapping, and `core/external_endpoints/adapters/gemini_adapter.py` SDK usage-metadata logging.
 **Status:** fixed.
-**Notes:** Langfuse SDK `2.60.10` accepts canonical generation `usage` in `{input, output, total}` form. The logger previously forwarded only provider-style `usage_details`, which preserved raw metadata but did not populate the summary token columns. `log_cortex_response()` now normalizes provider usage into both canonical `usage` and detailed `usage_details`, Gemini HTTP responses now forward `totalTokenCount` / cached-token counts from `usageMetadata`, and the Google SDK-backed external Gemini adapter now extracts `usage_metadata` so live `engine=gemini:...` calls in `cortex_api.log` include token tags too.
 
 ---
 
 ### External cortex bridge could misreport adapter timeouts as 300s and keep retrying them  <!-- 2026-05-06 -->
-**Symptom:** Runtime logs could show warnings like `[cortex_bridge:gemini] generate_response timed out after 300.0s (attempt 1/3)` even when the underlying adapter request had already timed out much earlier (for example a `status=504` in `cortex_api.log`). Interactive chats and Grillo beats could then sit through repeated full-request timeout retries.
 **Location:** `core/external_endpoints/bridges/cortex_bridge.py` (`_get_request_timeout`, `generate_response`).
 **Status:** fixed.
-**Notes:** The bridge timeout default (`300s`) had drifted from adapter-level defaults (for example Gemini's `120s`), so nested `asyncio.TimeoutError` exceptions were logged against the bridge timeout instead of the adapter timeout. The bridge now defaults to `120s`, forwards that timeout into `chat_completion(...)` so bridge and adapter stay aligned, and does not retry full request timeouts unless the endpoint explicitly opts in with `extra_config.retry_on_timeout=true`.
 
 ---
 
 ### Langfuse request traces could remain invisible until the response finished  <!-- 2026-05-06 -->
-**Symptom:** Operators could see a request hit `cortex_api.log` or the console, but the matching Langfuse trace would only appear after the response finished because the request-side trace was created without an immediate flush.
 **Location:** `core/cortex_api_logger.py` (`log_cortex_request`).
 **Status:** fixed.
-**Notes:** When `LANGFUSE_FLUSH_EACH_CALL=true`, `log_cortex_request()` now flushes the client right after pushing the request trace. This makes in-flight requests visible earlier in Langfuse. The response path still performs its own flush, and both request/response flush warnings are deduplicated.
 
 ---
 
 ### Langfuse API-error traces could look half-empty and mislabel Gemini provider failures  <!-- 2026-05-06 -->
-**Symptom:** Langfuse could show a Gemini trace row with `metadata.error`, but the trace/generation output itself stayed empty and the status could appear as generic `500` even when the upstream provider error was really `429 RESOURCE_EXHAUSTED` or another API status.
 **Location:** `core/cortex_api_logger.py` (`log_cortex_response` error-output handling) and `core/external_endpoints/adapters/gemini_adapter.py` exception logging.
 **Status:** fixed.
-**Notes:** `log_cortex_response()` now emits a structured Langfuse output payload for error paths instead of leaving `output=None`, so failed API calls carry visible error details in the trace. The Google SDK-backed Gemini adapter also preserves provider-side status/body details when exceptions expose them, so Langfuse metadata no longer collapses quota/API failures into a misleading local `500` by default.
 
 ---
 
 ### Same-chat user activity could cancel an in-flight Grillo outreach  <!-- 2026-05-06 -->
-**Symptom:** Logs could show `Cancelled LOW_PRIORITY background task for telegram_bot/... (superseded by incoming user message)`, followed by Gemini `HTTP499` / `request cancelled`, and the expected outreach never reached Telegram even though the beat had already been enqueued and started prompt generation.
 **Location:** `core/message_queue.py` low-priority background task tracking and cancellation.
 **Status:** fixed.
-**Notes:** The queue previously tracked low-priority work only by `interface_path` and always cancelled any same-chat background task when a user message arrived. That is fine for disposable background work, but it could abort an already-running outreach beat mid-generation. Background task tracking now carries per-task cancellation policy so `beat_type="outreach"` can finish while other low-priority tasks remain cancellable.
 
 ---
 
@@ -1097,34 +970,26 @@ docker exec synth-dev tail -f /app/logs/synth.log | grep -E "\[grillo\]|grillo"
 ---
 
 ### WebUI startup history replay could show the oldest prompt-context window instead of the recent chat  <!-- 2026-05-11 -->
-**Symptom:** After a restart, the WebUI could appear to have "lost" chat history even though `chat_history_cache` still contained the messages. Logs showed lines like `[context_manager] Loaded 10 messages for interface_path synth_webui/webui_default` and `[synth_webui] _replay_history: sent 10 messages ...`, but the replayed window reflected the oldest cached rows or only the smaller prompt-context deque.
 **Location:** `core/chat_history_cache.py` (`load_chat_history` ordering/limit), `core/webui.py` (`_ensure_session_history_loaded`), and `core/chat_context_manager.py` (prompt-context deque size).
 **Status:** fixed.
-**Notes:** Two separate issues combined here: `load_chat_history()` fetched `ORDER BY timestamp ASC LIMIT N`, which returned the oldest N rows instead of the most recent N, and WebUI startup bound `self.message_history` to the context-manager deque whose default maxlen is 10 even though the WebUI can hold far more. The fix now fetches the most recent N rows then reorders them chronologically, and WebUI rehydrates its visible history directly from persisted cache with `self.max_history` while still loading the smaller prompt context separately.
 
 ---
 
 ### `grillo_activity_log` can show silent blank outreach rows after log rotation  <!-- 2026-05-07 -->
-**Symptom:** A user reports "no outreach fired," but `logs/synth*` only start at the most recent restart time while `grillo_activity_log` still contains hourly `outreach` rows. Some of those rows have `response_text = ''` and `diary_entry_id = NULL`, so they look like missing beats with no obvious runtime trace left in the rotated logs.
 **Location:** Runtime observability split across `logs/synth*`, `grillo_activity_log`, `chat_history_cache`, `core/external_endpoints/adapters/gemini_adapter.py`, and `core/plugin_instance.py` (`_update_grillo_response`).
 **Status:** fixed.
-**Notes:** After a restart, the current synth logs may no longer cover the user-reported window, so check `grillo_activity_log` plus `chat_history_cache` for the target `interface_path` before assuming the scheduler stalled. Successful outreach leaves a self-authored chat-history row near the activity timestamp. Blank outreach rows were caused by empty external-model replies being dropped twice: `handle_incoming_message()` skipped Grillo write-back for falsey results and `_update_grillo_response()` also returned early on empty text. The Grillo path now persists a diagnostic `[EMPTY LLM RESPONSE] ...` marker with engine / finish / block metadata when the visible reply is empty, so scheduler issues and safety-filtered model silences are distinguishable in the DB.
 
 ---
 
 ### Radio host KittenTTS volume — hard clipping distortion fixed with ffmpeg dynaudnorm  <!-- 2026-05-24 -->
-**Symptom:** KittenTTS-generated TTS was too quiet. Adding makeup gain caused audible hard-clipping distortion.
 **Location:** `plugins/vox_engines/kitten.py` (`generate_tts`), `plugins/radio_host/azuracast_client.py` (`_convert_to_webm`).
 **Status:** fixed.
-**Notes:** The engine now peak-normalizes cleanly to -1 dBFS (no makeup gain, no clipping). Transparent loudness is handled downstream by ffmpeg's `dynaudnorm` filter (frame=150 ms, max_gain=15×, target_peak=0.95) in `broadcast_banter`. This gives radio-presence volume without distortion.
 
 ---
 
 ### Radio host injection at track_change was too slow for timely announcements  <!-- 2026-05-24 -->
-**Symptom:** Announcements injected at track_change time arrived ~8 s into the new song (TTS 3 s + ffmpeg 1 s + WebDJ 4 s pre-delay), making them feel "late" relative to the song start.
 **Location:** `plugins/radio_host/radio_host_plugin.py` (`_on_track_change`, `_inject_banter_now`, `_on_winding_down`).
 **Status:** fixed.
-**Notes:** The design was changed to a **hybrid approach**: `_on_winding_down` is the primary injection point (banter plays during song outro, ~13 s remaining — safe from jingle overlap), and `_on_track_change` only acts as fallback when winding-down was skipped for a short/jingle track. A `_inject_at_track_change` boolean flag bridges the two paths.
 
 ---
 
