@@ -19,10 +19,10 @@
                 _flushFaceNow: function () { /* no-op until module loads */ },
                 preloadAnimation: function (name, descriptor) { window.__synth_pending_preloads[name] = descriptor || null; },
                 // Queue a startAction so it will be executed once the real handler is available
-                startAction: function (state, animation, playOnce, playSection, descriptor) {
+                startAction: function (state, animation, playOnce, playSection, descriptor, frameRange, phaseAuthoritative) {
                     try {
                         window.__synth_pending_actions = window.__synth_pending_actions || [];
-                        window.__synth_pending_actions.push({ type: 'startAction', args: [state, animation, playOnce, playSection, descriptor] });
+                        window.__synth_pending_actions.push({ type: 'startAction', args: [state, animation, playOnce, playSection, descriptor, frameRange, phaseAuthoritative] });
                         console.warn('[synth_webui] animationHandler not ready — queued startAction');
                     } catch (e) { /* ignore */ }
                 },

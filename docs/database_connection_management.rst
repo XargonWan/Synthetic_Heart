@@ -4,7 +4,10 @@ Database Connection Management
 Overview
 --------
 
-The Synthetic Heart project uses an **aiomysql connection pool** for managing asynchronous database connections. The pool is carefully sized to avoid exhausting database resources while maintaining performance.
+The Synthetic Heart project now uses a **shared database handler in** ``core/db.py``
+for all runtime database access. The default runtime backend is PostgreSQL,
+while a preserved legacy MariaDB source may still be consulted only during the
+first-boot migration flow.
 
 Connection Pool Configuration
 ------------------------------
@@ -17,7 +20,9 @@ The connection pool is configured through environment variables in `.env-dev`:
     DB_POOL_MAXSIZE=5          # Maximum concurrent connections (reduced from 8 to prevent bio_manager timeouts)
     DB_CONNECTION_TIMEOUT=10   # Timeout for acquiring a connection (seconds)
 
-**Database Limit**: MariaDB/MySQL has a system-wide connection limit (default 151 on standard deployments). The pool is sized to stay well below this limit.
+**Runtime Database**: PostgreSQL is the primary runtime backend. The shared
+handler can also manage named Postgres pools for subsystems such as SOUL, so
+runtime code does not own driver calls directly.
 
 **Bio Manager Timeout Fix**: The pool size was reduced from 8 to 5 connections to prevent ``TimeoutError`` in the bio_manager plugin. The bio_manager performs synchronous database operations from async contexts, and a smaller pool size ensures connections are always available without blocking.
 
@@ -55,6 +60,17 @@ All database access must follow the async context manager pattern:
 - Use ``get_conn_ctx()`` context manager for automatic cleanup
 - Connections are **automatically released** to the pool when the context exits
 - This pattern prevents connection leaks
+- Runtime code must not call ``aiomysql.connect()``, ``asyncpg.connect()``, or
+    ``asyncpg.create_pool()`` directly; those flows belong in ``core/db.py``.
+
+Named Postgres Pools
+--------------------
+
+Some subsystems need a dedicated Postgres target while still respecting the
+shared DB ownership rule. For that case, use the named-pool helpers in
+``core/db.py`` rather than creating driver pools locally.
+
+This is how the SOUL repository now acquires its Postgres pool.
 
 Connection Release Mechanism
 -----------------------------

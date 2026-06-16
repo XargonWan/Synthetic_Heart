@@ -98,7 +98,7 @@ async def test_skip_leading_untagged_candidates(monkeypatch):
     )
     monkeypatch.setattr(
         "core.config.get_active_cortex_engine",
-        lambda: asyncio.sleep(0, result="dummy"),
+        lambda *args, **kwargs: asyncio.sleep(0, result="dummy"),
     )
 
     # Capture logs to ensure skip was logged

@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 
 # Some test environments (local dev) may not have DB deps like aiomysql installed.
@@ -26,15 +28,19 @@ async def test_grillo_dream_autostarts(monkeypatch):
         return
 
     monkeypatch.setattr(gd.GrilloDreamPlugin, "_dream_loop", fake_dream_loop)
+    monkeypatch.setattr(core_initializer, "_pending_async_plugins", [], raising=False)
 
-    # (Re)load plugins - should register grillo_dream in PLUGIN_REGISTRY
-    await core_initializer._load_plugins()
+    plugin = gd.GrilloDreamPlugin()
+    core_initializer._pending_async_plugins.append(
+        ("plugins.grillo.grillo_dream", plugin)
+    )
 
-    # Start any pending async plugins (this should start GrilloDreamPlugin.start())
+    # Start the pending async plugin and yield once so its scheduler task can run.
     await core_initializer.start_pending_async_plugins()
+    await asyncio.sleep(0)
 
     assert "grillo_dream" in PLUGIN_REGISTRY
-    plugin = PLUGIN_REGISTRY["grillo_dream"]
+    assert isinstance(PLUGIN_REGISTRY["grillo_dream"], gd.GrilloDreamPlugin)
 
     # The plugin should have a scheduler task attribute (may be None if it finished quickly)
     assert hasattr(plugin, "_scheduler_task")

@@ -21,8 +21,9 @@ class GrilloSelfReflectionPlugin(AIPluginBase):
         return (
             "[G.R.I.L.L.O. Self-Reflection]\n\n"
             "Check in with yourself: how are you feeling emotionally? What concerns or curiosities do you have?\n\n"
-            "End with a JSON action to create a diary entry with your self-reflection."
-            '{"actions": [{"type": "create_personal_diary_entry", "payload": {"content": "your reflection"}}]}'
+            "End with a JSON action to create a diary entry with your self-reflection. "
+            "Include `interaction_summary`, `personal_thought`, and `emotions` as well as the diary `content`."
+            '{"actions": [{"type": "create_personal_diary_entry", "payload": {"interaction_summary": "brief summary", "personal_thought": "private first-person reflection", "emotions": [{"type": "calm", "intensity": 0.6}], "content": "your reflection"}}]}'
         )
 
 

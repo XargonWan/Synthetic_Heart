@@ -378,6 +378,29 @@ def setup_logging() -> logging.Logger:
                 )
 
     _logger = logger
+
+    # Suppress the recurring CryptoError noise from discord-ext-voice-recv.
+    # Discord periodically sends RTCP Payload-Specific Feedback (PSFB) packets
+    # (second byte 0xcd = 205) that the library tries to decrypt but can't —
+    # it's a known upstream limitation.  The library already drops these packets
+    # silently (returns on line 151 of reader.py), so the ERROR log is false
+    # noise.  Downgrade it to DEBUG so the main log stays clean.
+    try:
+        _voice_recv_reader_logger = logging.getLogger("discord.ext.voice_recv.reader")
+
+        class _CryptoErrorFilter(logging.Filter):
+            def filter(self, record: logging.LogRecord) -> bool:
+                # Drop the ERROR "CryptoError decoding packet data" line and its
+                # accompanying DEBUG detail line — both are noise from RTCP PSFB.
+                msg = record.getMessage()
+                if "CryptoError" in msg:
+                    return False
+                return True
+
+        _voice_recv_reader_logger.addFilter(_CryptoErrorFilter())
+    except Exception:
+        pass  # Never block startup over a log filter
+
     # Log effective logging configuration at startup
     try:
         logger.log(

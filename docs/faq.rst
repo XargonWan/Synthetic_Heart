@@ -19,7 +19,7 @@ From testing, swapping LLMs (e.g., ChatGPT to Gemini) didn't drastically change 
 Does the LLM lie or hallucinate?
 --------------------------------
 
-SyntH instructs LLMs not to lie, with partial success. Some models like certain versions of ChatGPT may still produce inaccurate information—don't expect miracles.
+SyntH instructs LLMs not to lie and now explicitly prefers honest uncertainty over fabricated recollection when memory is weak or unclear. This improves trust, but some models like certain versions of ChatGPT may still produce inaccurate information—don't expect miracles.
 
 Can I integrate the synth into video games to play together?
 -----------------------------------------------------------

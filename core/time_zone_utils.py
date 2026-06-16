@@ -1,5 +1,4 @@
 from zoneinfo import ZoneInfo, available_timezones
-import os
 from datetime import datetime
 
 from core.logging_utils import log_warning
@@ -36,11 +35,7 @@ def get_local_timezone() -> ZoneInfo:
     Logs a warning and falls back to UTC if the variable is missing or
     points to an invalid timezone.
     """
-    tz_name = str(_TZ)
-    env_tz = os.getenv("TZ")
-    if (not tz_name or tz_name == "UTC") and env_tz:
-        tz_name = env_tz
-    tz_name = tz_name or "UTC"
+    tz_name = str(_TZ) or "UTC"
     try:
         return ZoneInfo(tz_name)
     except Exception:

@@ -109,7 +109,7 @@ async def test_multiple_clusters_and_preserve_non_sources(monkeypatch):
     )
     monkeypatch.setattr(
         "core.config.get_active_cortex_engine",
-        lambda: asyncio.sleep(0, result="dummy"),
+        lambda *args, **kwargs: asyncio.sleep(0, result="dummy"),
     )
 
     # Run one cycle
@@ -198,7 +198,7 @@ async def test_dry_run_returns_proposed_clusters(monkeypatch):
     )
     monkeypatch.setattr(
         "core.config.get_active_cortex_engine",
-        lambda: asyncio.sleep(0, result="dummy"),
+        lambda *args, **kwargs: asyncio.sleep(0, result="dummy"),
     )
 
     result = await p._run_one_compaction_cycle(dry_run=True)

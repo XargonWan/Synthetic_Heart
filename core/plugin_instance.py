@@ -1,6 +1,6 @@
 # core/plugin_instance.py
 
-from core.prompt_engine import build_json_prompt
+from core.prompt_engine import build_prompt_request
 from core.cortex_registry import get_cortex_registry
 import asyncio
 import contextvars
@@ -8,9 +8,17 @@ from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from datetime import datetime
 import json
+import base64
 import os
+import tempfile
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
 from core.logging_utils import log_debug, log_info, log_warning, log_error
-from core.json_utils import dumps as json_dumps, sanitize_for_json
+from core.json_utils import (
+    dumps as json_dumps,
+    redact_multimodal_for_logging,
+    sanitize_for_json,
+)
 from core.image_processor import get_image_processor, process_image_message
 from core.abstract_context import AbstractContext, AbstractUser, AbstractMessage
 from core.mention_utils import is_message_for_bot
@@ -18,10 +26,66 @@ from core.config_manager import config_registry
 from core.multimodal_attachment import (
     extract_multimodal_from_telegram,
     extract_multimodal_from_discord,
+    get_mime_type,
+    is_supported_type,
 )
 
 # Plugin managed centrally in initialize_core_components
 plugin = None
+
+if TYPE_CHECKING:
+    from plugins.iris_base import IrisResult
+
+
+def _get_grillo_engine_label(plugin_obj: Any) -> str | None:
+    """Return a short engine label for Grillo activity diagnostics."""
+    endpoint = getattr(plugin_obj, "_endpoint", None)
+    for candidate in (
+        getattr(endpoint, "name", None),
+        getattr(plugin_obj, "display_name", None),
+        getattr(plugin_obj, "_engine_label", None),
+    ):
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
+
+    if plugin_obj is None:
+        return None
+    return plugin_obj.__class__.__name__
+
+
+def _build_empty_grillo_response_text(
+    response_metadata: dict[str, Any] | None,
+    engine_label: str | None,
+) -> str:
+    """Render a diagnostic placeholder for empty Grillo LLM replies."""
+    details: list[str] = []
+    if isinstance(engine_label, str) and engine_label.strip():
+        details.append(f"engine={engine_label.strip()}")
+
+    metadata = response_metadata if isinstance(response_metadata, dict) else {}
+    for key in ("model", "finish_reason", "block_reason", "error"):
+        value = metadata.get(key)
+        if value in (None, ""):
+            continue
+        if key == "model" and isinstance(value, str) and value == engine_label:
+            continue
+        details.append(f"{key}={value}")
+
+    if details:
+        return "[EMPTY LLM RESPONSE] " + " ".join(details)
+    return "[EMPTY LLM RESPONSE]"
+
+
+def _restore_plugin_instance(instance: object) -> None:
+    """Directly restore the module-level plugin reference from a saved instance."""
+    global plugin  # noqa: PLW0603
+    plugin = instance
+    from core.logging_utils import log_info as _log_info
+
+    _log_info(
+        f"[plugin_instance] Restored cortex instance directly: {instance.__class__.__name__}"
+    )
+
 
 # Global lease to serialize LLM chains (Recon + prompt + actions) across tasks
 _llm_chain_lock = asyncio.Lock()
@@ -33,12 +97,13 @@ try:
     register_exposed_var(
         "LLM_CHAIN_LEASE_TIMEOUT_SEC",
         label="LLM chain lease timeout (s)",
-        default=300,
+        default=600,
         value_type=int,
         ui_type="number",
         description=(
             "Force-release the global LLM chain lease after this many seconds to "
-            "avoid deadlocks. Set to 0 to disable."
+            "avoid deadlocks. Set to 0 to disable. Recommended: 600s (10 min) for "
+            "slow engines like selenium-llm-engine with Gemini."
         ),
         scope="agent",
         component="agent",
@@ -63,12 +128,12 @@ async def _llm_chain_lease():
     try:
         timeout = int(
             config_registry.get_value(
-                "LLM_CHAIN_LEASE_TIMEOUT_SEC", 300, value_type=int
+                "LLM_CHAIN_LEASE_TIMEOUT_SEC", 600, value_type=int
             )
-            or 300
+            or 600
         )
     except Exception:
-        timeout = 300
+        timeout = 600
 
     acquired = False
     try:
@@ -129,6 +194,28 @@ async def load_plugin(
     # 🔁 If already loaded but different, replace it or update notify_fn
     if plugin is not None:
         current_plugin_name = plugin.__class__.__module__.split(".")[-1]
+        # For engines registered as direct instances (e.g. ExternalCortexEngine),
+        # the module name ("cortex_bridge") differs from the registry key
+        # ("ext_xyz").  If the registry already holds this exact instance under
+        # the requested name, there is nothing to reload.
+        try:
+            _reg = get_cortex_registry()
+            if _reg.get_engine(name) is plugin:
+                # Same instance already in registry under the requested name.
+                if notify_fn and hasattr(plugin, "set_notify_fn"):
+                    try:
+                        plugin.set_notify_fn(notify_fn)
+                        log_debug("[plugin] ✅ notify_fn updated dynamically")
+                    except Exception as e:
+                        log_error(f"[plugin] ❌ Unable to update notify_fn: {e}", e)
+                else:
+                    log_debug(
+                        f"[plugin] ⚠️ Plugin already loaded: {plugin.__class__.__name__}"
+                    )
+                return
+        except Exception:
+            pass
+
         if current_plugin_name != name:
             log_debug(
                 f"[plugin] 🔄 Changing plugin from {current_plugin_name} to {name}"
@@ -312,8 +399,11 @@ async def load_plugin(
 
 
 async def handle_incoming_message(
-    bot, message, context_memory_or_prompt, interface: str | None = None
-):
+    bot: Any,
+    message: Any,
+    context_memory_or_prompt: Any,
+    interface: str | None = None,
+) -> Any:
     """Process incoming messages or pre-built prompts."""
 
     async with _llm_chain_lease():
@@ -348,9 +438,25 @@ async def handle_incoming_message(
         except Exception:
             pass
 
-        original_plugin_name = (
-            plugin.__class__.__module__.split(".")[-1] if plugin is not None else None
-        )
+        # Save both the instance and its registry name so we can restore cleanly.
+        # The module-path tail (e.g. "cortex_bridge") is NOT a registry key and
+        # cannot be passed back to load_plugin — keep the instance as a fallback.
+        original_plugin_instance = plugin  # may be None
+        original_plugin_name: str | None = None
+        if plugin is not None:
+            try:
+                reg = get_cortex_registry()
+                # Prefer the registered name (reverse-lookup by identity)
+                for _k, _v in reg._engines.items():
+                    if _v is plugin:
+                        original_plugin_name = _k
+                        break
+            except Exception:
+                pass
+            # Last resort: derive from module path (may be wrong for bridge engines)
+            if not original_plugin_name:
+                original_plugin_name = plugin.__class__.__module__.split(".")[-1]
+
         desired_plugin_name = original_plugin_name
         should_restore_plugin = False
 
@@ -378,10 +484,11 @@ async def handle_incoming_message(
 
         if message is None and isinstance(context_memory_or_prompt, dict):
             prompt = context_memory_or_prompt
+            payload = prompt.get("input", {}).get("payload", {})
             message = SimpleNamespace(
                 chat_id="TARDIS / system / events",
                 message_id=int(datetime.utcnow().timestamp() * 1000) % 1_000_000,
-                text=prompt.get("input", {}).get("payload", {}).get("description", ""),
+                text=payload.get("text") or payload.get("description") or "",
                 date=datetime.utcnow(),
                 from_user=SimpleNamespace(id=0, full_name="system", username="system"),
                 reply_to_message=None,
@@ -526,6 +633,57 @@ async def handle_incoming_message(
             log_info(
                 f"[plugin_instance] Message contains {len(attachments)} attachments from user {user_id}"
             )
+            # Do NOT pass the user's text as the Iris prompt — Iris must
+            # receive a neutral plain-text instruction so the vision engine
+            # returns a description rather than formatted/structured output.
+            # The user's actual question is answered by the main LLM after the
+            # Iris description is injected into the context.
+            _IRIS_PLAIN_TEXT_PROMPT = (
+                "IMPORTANT: Respond in plain conversational text only. "
+                "Do NOT use JSON, XML or any structured format. "
+                "Simply describe what you see in the image."
+            )
+            iris_result = await _describe_attachment_images_with_iris(
+                attachments, prompt=_IRIS_PLAIN_TEXT_PROMPT
+            )
+            if iris_result is not None:
+                try:
+                    original_text = getattr(message, "text", "") or ""
+                    # Build a structured block with all available metadata.
+                    parts: list[str] = [iris_result.description]
+                    if iris_result.language:
+                        parts.append(f"language: {iris_result.language}")
+                    if iris_result.confidence is not None:
+                        parts.append(f"confidence: {iris_result.confidence:.2f}")
+                    description_block = "[Iris vision: " + " | ".join(parts) + "]"
+                    if original_text:
+                        setattr(
+                            message, "text", f"{original_text}\n\n{description_block}"
+                        )
+                    else:
+                        setattr(message, "text", description_block)
+                    log_info(
+                        "[plugin_instance] Appended Iris vision analysis to prompt text"
+                    )
+                except Exception as exc:
+                    log_warning(
+                        f"[plugin_instance] Could not append Iris description to message text: {exc}"
+                    )
+
+            # Strip image/video base64 data from attachments so the Cortex
+            # engine does not receive raw vision bytes.  Iris already provided
+            # a textual description (or a placeholder).  Audio and document
+            # attachments are kept intact for engines that support them natively.
+            attachments = [
+                att
+                for att in attachments
+                if not (
+                    att.get("mime_type")
+                    or att.get("content_type")
+                    or att.get("type")
+                    or ""
+                ).startswith(("image/", "video/"))
+            ]
 
         if isinstance(context_memory_or_prompt, str):
             try:
@@ -566,7 +724,7 @@ async def handle_incoming_message(
                         )
 
                 log_debug(f"[plugin_instance] Exception path - max_chars={max_chars}")
-                prompt = await build_json_prompt(
+                prompt = await build_prompt_request(
                     message,
                     {},
                     interface_name,
@@ -616,9 +774,9 @@ async def handle_incoming_message(
                 )
 
             log_debug(
-                f"[plugin_instance] Passing max_chars={max_chars} to build_json_prompt()"
+                f"[plugin_instance] Passing max_chars={max_chars} to build_prompt_request()"
             )
-            prompt = await build_json_prompt(
+            prompt = await build_prompt_request(
                 message,
                 context_memory_or_prompt,
                 interface_name,
@@ -627,11 +785,18 @@ async def handle_incoming_message(
                 max_chars=max_chars,
             )
 
-    # Multimodal attachments already extracted and passed to build_json_prompt above
+    # Multimodal attachments already extracted and passed to build_prompt_request above
     if attachments:
         log_info(
             f"[plugin_instance] Processing {len(attachments)} multimodal attachment(s)"
         )
+
+    # Pull typed PromptRequest out of the transport dict before sanitization.
+    # Only PromptRequest-aware engines receive this object directly; legacy
+    # engines keep the sanitized transport dict until they opt in.
+    prompt_request_obj: object | None = None
+    if isinstance(prompt, dict):
+        prompt_request_obj = prompt.pop("__prompt_request", None)
 
     prompt = sanitize_for_json(prompt)
     log_debug("🌐 JSON PROMPT built for the plugin:")
@@ -648,7 +813,7 @@ async def handle_incoming_message(
         pre_size = None
         try:
             if isinstance(prompt, dict):
-                # Prefer explicit pre_reduction_size if provided by build_json_prompt
+                # Prefer explicit pre_reduction_size if provided by build_prompt_request
                 pre_size = prompt.get("__pre_reduction_size", None)
                 # If not present, compute a fallback (note: this is post-reduction size)
                 if pre_size is None:
@@ -667,7 +832,10 @@ async def handle_incoming_message(
         )
         # debug log of the full prompt content for reconstruction
         try:
-            log_debug(f"[flow] prompt content: {json_dumps(prompt)}")
+            log_debug(
+                "[flow] prompt content: "
+                + json_dumps(redact_multimodal_for_logging(prompt))
+            )
         except Exception:
             pass
     except Exception:
@@ -676,16 +844,19 @@ async def handle_incoming_message(
         )
 
     # ── Scope-based engine resolution ───────────────────────────────
-    # Determine whether this request should be routed to a different
-    # cortex engine than the globally-loaded one (e.g. TRAINER_CORTEX).
+    # Always resolve the active engine via the registry so that the main LLM
+    # call, Recon, and Debrief all use the same engine for a given request.
+    # derive_cortex_scope() is the single authoritative mapping from context
+    # flags (is_trainer, grillo_beat) to scope strings.
     effective_plugin = plugin
     try:
-        _scope: str | None = None
-        if isinstance(context_memory_or_prompt, dict):
-            if context_memory_or_prompt.get("is_trainer"):
-                _scope = "trainer"
-            elif context_memory_or_prompt.get("grillo_beat"):
-                _scope = "grillo"
+        from core.config import derive_cortex_scope, get_active_cortex_engine
+
+        _scope = derive_cortex_scope(
+            context_memory_or_prompt
+            if isinstance(context_memory_or_prompt, dict)
+            else None
+        )
 
         log_debug(
             f"[plugin_instance] Scope routing: _scope={_scope}, "
@@ -693,24 +864,17 @@ async def handle_incoming_message(
             f"global_plugin={plugin.__class__.__name__ if plugin else None}"
         )
 
-        if _scope is not None:
-            from core.config import get_active_cortex_engine
-
-            scope_engine_name = await get_active_cortex_engine(scope=_scope)
-            global_engine_name = (
-                plugin.__class__.__module__.split(".")[-1] if plugin is not None else ""
+        active_engine_name = await get_active_cortex_engine(scope=_scope)
+        reg = get_cortex_registry()
+        resolved = reg.get_engine(active_engine_name)
+        if resolved is None:
+            resolved = reg.load_engine(active_engine_name)
+        if resolved is not None and resolved is not plugin:
+            effective_plugin = resolved
+            log_info(
+                f"[plugin_instance] Engine resolved from registry: '{active_engine_name}' "
+                f"(scope={_scope!r})"
             )
-            if scope_engine_name and scope_engine_name != global_engine_name:
-                reg = get_cortex_registry()
-                scope_engine = reg.get_engine(scope_engine_name)
-                if scope_engine is None:
-                    scope_engine = reg.load_engine(scope_engine_name)
-                if scope_engine is not None:
-                    effective_plugin = scope_engine
-                    log_info(
-                        f"[plugin_instance] Scope override: using '{scope_engine_name}' "
-                        f"for scope='{_scope}' instead of global '{global_engine_name}'"
-                    )
     except Exception as scope_exc:
         log_warning(
             f"[plugin_instance] Scope routing failed, falling back to global plugin: {scope_exc}"
@@ -721,14 +885,25 @@ async def handle_incoming_message(
             log_error("[plugin_instance] No LLM plugin loaded, cannot process message")
             raise ValueError("No LLM plugin loaded")
 
-        result = await effective_plugin.handle_incoming_message(bot, message, prompt)
+        prompt_for_engine = prompt
+        if prompt_request_obj is not None and bool(
+            getattr(effective_plugin, "supports_prompt_request", False)
+        ):
+            prompt_for_engine = prompt_request_obj
+        result = await effective_plugin.handle_incoming_message(
+            bot, message, prompt_for_engine
+        )
         try:
             _log_llm_traffic(prompt, result, interface)
         except Exception as e:
             log_error(f"[plugin_instance] Failed to log LLM traffic: {e}")
         # debug log response for full transaction replay
         try:
-            log_debug(f"[flow] LLM raw response: {result}")
+            redacted_result = redact_multimodal_for_logging(result)
+            if isinstance(redacted_result, (dict, list)):
+                log_debug("[flow] LLM raw response: " + json_dumps(redacted_result))
+            else:
+                log_debug(f"[flow] LLM raw response: {redacted_result}")
         except Exception:
             pass
 
@@ -739,8 +914,23 @@ async def handle_incoming_message(
             if isinstance(context_memory_or_prompt, dict):
                 activity_log_id = context_memory_or_prompt.get("activity_log_id")
 
-            if activity_log_id and result:
-                await _update_grillo_response(activity_log_id, result)
+            if activity_log_id is not None:
+                response_metadata = getattr(
+                    effective_plugin,
+                    "_last_response_metadata",
+                    None,
+                )
+                if not result:
+                    log_warning(
+                        "[plugin_instance] Empty LLM response for Grillo activity "
+                        f"{activity_log_id}; persisting diagnostic marker"
+                    )
+                await _update_grillo_response(
+                    activity_log_id,
+                    result,
+                    response_metadata=response_metadata,
+                    engine_label=_get_grillo_engine_label(effective_plugin),
+                )
         except Exception as e:
             log_warning(f"[plugin_instance] Failed to update Grillo log: {e}")
         # Log that plugin finished processing
@@ -902,8 +1092,13 @@ async def handle_incoming_message(
                 )
             except Exception as e:
                 log_warning(
-                    f"[plugin_instance] Failed to restore cortex {original_plugin_name}: {e}"
+                    f"[plugin_instance] Failed to restore cortex via name '{original_plugin_name}': {e}"
+                    " — restoring saved instance directly"
                 )
+                # Restore the saved instance directly; the registry name was wrong
+                # (e.g. bridge engines register under a key different from their module).
+                if original_plugin_instance is not None:
+                    _restore_plugin_instance(original_plugin_instance)
 
 
 def get_supported_models():
@@ -973,12 +1168,17 @@ def _log_llm_traffic(prompt, response, interface_name):
             log_prompt.pop("actions", None)
         except Exception:
             pass
+    try:
+        log_prompt = redact_multimodal_for_logging(log_prompt)
+        log_response = redact_multimodal_for_logging(response)
+    except Exception:
+        log_response = response
 
     entry = {
         "timestamp": datetime.utcnow().isoformat(),
         "interface": interface_name,
         "input_context": log_prompt,
-        "response": response,
+        "response": log_response,
     }
 
     try:
@@ -1120,23 +1320,238 @@ async def _extract_image_data_from_message(message, interface_name: str):
     elif hasattr(message, "attachments"):
         # Handle generic attachments
         for attachment in message.attachments:
-            if (
-                hasattr(attachment, "content_type")
-                and attachment.content_type
-                and attachment.content_type.startswith("image/")
-            ):
+            mime_type = ""
+            filename = ""
+            size = 0
+            url = None
+            if isinstance(attachment, dict):
+                mime_type = str(
+                    attachment.get("content_type")
+                    or attachment.get("mime_type")
+                    or attachment.get("type")
+                    or ""
+                )
+                filename = attachment.get("filename") or attachment.get("name") or ""
+                size = attachment.get("size", 0)
+                url = attachment.get("url") or attachment.get("path")
+            elif hasattr(attachment, "content_type") and attachment.content_type:
+                mime_type = attachment.content_type
+                filename = getattr(attachment, "filename", "") or getattr(
+                    attachment, "name", ""
+                )
+                size = getattr(attachment, "size", 0)
+                url = getattr(attachment, "url", None) or getattr(
+                    attachment, "path", None
+                )
+            else:
+                continue
+
+            if not mime_type and isinstance(attachment, dict):
+                mime_type = get_mime_type(attachment.get("path"), filename)
+
+            if mime_type.startswith("image/"):
                 image_data = {
                     "type": "attachment",
-                    "url": attachment.url,
-                    "filename": attachment.filename,
-                    "content_type": attachment.content_type,
-                    "size": getattr(attachment, "size", 0),
-                    "caption": getattr(message, "content", ""),
+                    "url": url,
+                    "filename": filename,
+                    "content_type": mime_type,
+                    "size": size,
+                    "caption": getattr(message, "caption", "")
+                    or getattr(message, "text", "")
+                    or "",
                 }
                 has_trigger = True
                 break
 
     return image_data, has_trigger
+
+
+def _build_unviewable_media_placeholder(
+    mime_type: str | None,
+    reason: str = "unavailable",
+) -> str:
+    """Build a text placeholder informing the Cortex that media was received but not analysed.
+
+    Args:
+        mime_type: MIME type of the attachment (e.g. ``"image/png"``).
+        reason:    Why the vision analysis could not run.
+                   Typical values: ``"disabled"``, ``"unavailable"``, ``"error"``.
+    """
+    media_label = mime_type or "media file"
+    return (
+        f"The user sent a {media_label} attachment. "
+        f"The Iris vision subsystem is currently {reason}, so the image content "
+        "cannot be analysed. Acknowledge the attachment and let the user know "
+        "that vision capabilities are not available right now."
+    )
+
+
+async def _describe_attachment_images_with_iris(
+    attachments: list[dict],
+    prompt: str | None = None,
+) -> "IrisResult | None":  # noqa: F821
+    """Use the configured Iris engine to describe the first image/video attachment.
+
+    Returns the full :class:`IrisResult` (including *language* and *confidence*
+    metadata) rather than a bare description string.  When the engine is
+    disabled or the analysis fails, a synthetic ``IrisResult`` is returned
+    whose *description* contains an informative placeholder for the Cortex.
+    """
+    from plugins.iris_base import IrisResult
+
+    if not attachments:
+        return None
+
+    first_media_mime_type = None
+    for attachment in attachments:
+        mime_type = str(
+            attachment.get("mime_type")
+            or attachment.get("content_type")
+            or attachment.get("type")
+            or ""
+        )
+        if mime_type.startswith(("image/", "video/")):
+            first_media_mime_type = mime_type
+            break
+
+    if first_media_mime_type is None:
+        return None
+
+    try:
+        from core.core_initializer import PLUGIN_REGISTRY
+
+        iris = PLUGIN_REGISTRY.get("iris_plugin")
+        if iris is None:
+            log_info(
+                "[plugin_instance] Iris skip: iris_plugin not found in PLUGIN_REGISTRY"
+            )
+            return IrisResult(
+                description=_build_unviewable_media_placeholder(
+                    first_media_mime_type, reason="unavailable"
+                )
+            )
+        # Refresh config before reading _active_engine_name so we get the
+        # DB-loaded value rather than the hard-coded startup default ("disabled").
+        try:
+            iris.refresh_config()
+        except Exception:
+            pass
+        active_engine = getattr(iris, "_active_engine_name", "disabled")
+        if active_engine == "disabled":
+            log_info("[plugin_instance] Iris skip: active engine is 'disabled'")
+            return IrisResult(
+                description=_build_unviewable_media_placeholder(
+                    first_media_mime_type, reason="disabled"
+                )
+            )
+        log_info(
+            f"[plugin_instance] Iris active engine: '{active_engine}', processing {len(attachments)} attachment(s)"
+        )
+    except Exception as exc:
+        log_debug(f"[plugin_instance] Iris plugin lookup failed: {exc}")
+        return IrisResult(
+            description=_build_unviewable_media_placeholder(
+                first_media_mime_type, reason="unavailable"
+            )
+        )
+
+    for attachment in attachments:
+        mime_type = str(
+            attachment.get("mime_type")
+            or attachment.get("content_type")
+            or attachment.get("type")
+            or ""
+        )
+        if not mime_type.startswith(("image/", "video/")):
+            log_debug(
+                f"[plugin_instance] Iris skip attachment: mime_type={mime_type!r} not image/video"
+            )
+            continue
+
+        data_b64 = attachment.get("data")
+        if not data_b64 or not isinstance(data_b64, str):
+            # Try to read from path if data is missing
+            file_path = attachment.get("path") or attachment.get("file_path")
+            if file_path:
+                try:
+                    p = Path(file_path)
+                    if p.exists() and p.is_file():
+                        data_b64 = base64.b64encode(p.read_bytes()).decode("utf-8")
+                        log_info(
+                            f"[plugin_instance] Iris: read file from path for attachment ({mime_type})"
+                        )
+                    else:
+                        log_warning(
+                            f"[plugin_instance] Iris skip: no data and file not found at {file_path!r}"
+                        )
+                        continue
+                except Exception as exc:
+                    log_warning(
+                        f"[plugin_instance] Iris skip: failed to read {file_path!r}: {exc}"
+                    )
+                    continue
+            else:
+                log_warning(
+                    f"[plugin_instance] Iris skip: attachment has no data and no path (mime={mime_type!r})"
+                )
+                continue
+
+        try:
+            image_bytes = base64.b64decode(data_b64)
+        except Exception as exc:
+            log_warning(
+                f"[plugin_instance] Failed to decode attachment data for Iris: {exc}"
+            )
+            continue
+
+        if not image_bytes:
+            continue
+
+        suffix = ""
+        if "/" in mime_type:
+            suffix = f".{mime_type.split('/', 1)[1].split(';')[0]}"
+
+        tmp_path = None
+        try:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                tmp.write(image_bytes)
+                tmp_path = tmp.name
+
+            log_info(
+                f"[plugin_instance] Iris: calling describe_media for {mime_type} ({len(image_bytes)} bytes)"
+            )
+            try:
+                result = await asyncio.wait_for(
+                    iris.describe_media(tmp_path, mime_type, prompt),
+                    timeout=120.0,
+                )
+            except asyncio.TimeoutError:
+                log_warning(
+                    f"[plugin_instance] Iris: describe_media timed out after 120s for {mime_type}"
+                )
+                result = None
+            if result and result.description:
+                log_info(
+                    f"[plugin_instance] Iris: got description ({len(result.description)} chars)"
+                )
+                return result
+            log_info(
+                f"[plugin_instance] Iris: describe_media returned empty result={result!r}"
+            )
+        except Exception as exc:
+            log_warning(f"[plugin_instance] Iris description failed: {exc}")
+        finally:
+            if tmp_path:
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
+
+    return IrisResult(
+        description=_build_unviewable_media_placeholder(
+            first_media_mime_type, reason="error"
+        )
+    )
 
 
 async def _extract_multimodal_attachments(
@@ -1167,38 +1582,97 @@ async def _extract_multimodal_attachments(
             log_debug(
                 f"[plugin_instance] No multimodal extractor for interface: {interface_name}"
             )
-            return []
+
+            attachments = []
+            if hasattr(message, "attachments"):
+                for attachment in getattr(message, "attachments") or []:
+                    if not isinstance(attachment, dict):
+                        continue
+
+                    mime_type = str(
+                        attachment.get("content_type")
+                        or attachment.get("mime_type")
+                        or ""
+                    )
+                    filename = (
+                        attachment.get("filename") or attachment.get("name") or ""
+                    )
+                    if not mime_type:
+                        mime_type = get_mime_type(attachment.get("path"), filename)
+                    if not mime_type or not is_supported_type(mime_type):
+                        continue
+
+                    normalized = dict(attachment)
+                    normalized["mime_type"] = mime_type
+
+                    if "data" not in normalized and normalized.get("path"):
+                        try:
+                            path = Path(str(normalized["path"]))
+                            if path.exists() and path.is_file():
+                                normalized["data"] = base64.b64encode(
+                                    path.read_bytes()
+                                ).decode("utf-8")
+                        except Exception as exc:
+                            log_warning(
+                                f"[plugin_instance] Failed to inline attachment data: {exc}"
+                            )
+
+                    attachments.append(normalized)
+            return attachments
     except Exception as e:
         log_warning(f"[plugin_instance] Failed to extract multimodal attachments: {e}")
         return []
 
 
-async def _update_grillo_response(activity_log_id, response_text):
+async def _update_grillo_response(
+    activity_log_id: Any,
+    response_text: Any,
+    *,
+    response_metadata: dict[str, Any] | None = None,
+    engine_label: str | None = None,
+) -> None:
     """Update the grillo_activity_log with the raw response text."""
-    if not activity_log_id or not response_text:
+    if not activity_log_id:
         return
 
     try:
-        from core.db import get_conn_ctx
+        from core.db import _get_db_type, get_conn_ctx
+        from plugins.grillo.grillo_response_recorder import (
+            build_grillo_response_append_expression,
+            extract_response_text_from_cortex_response,
+        )
+
+        normalized_response_text = await extract_response_text_from_cortex_response(
+            response_text
+        )
+        if not normalized_response_text.strip():
+            normalized_response_text = _build_empty_grillo_response_text(
+                response_metadata,
+                engine_label,
+            )
+
+        append_expression = build_grillo_response_append_expression(_get_db_type())
 
         async with get_conn_ctx() as conn:
             async with conn.cursor() as cur:
                 # Logic similar to GrilloPlugin.set_activity_response_text: append if exists
                 # We use append because sometimes multiple messages/chunks might be associated
                 await cur.execute(
-                    """
+                    f"""
                     UPDATE grillo_activity_log
-                    SET response_text = CASE
-                        WHEN response_text IS NULL OR response_text = '' THEN %s
-                        ELSE CONCAT(response_text, '\n\n', %s)
-                    END
+                    SET response_text = {append_expression}
                     WHERE id=%s
                     """,
-                    (response_text, response_text, activity_log_id),
+                    (
+                        normalized_response_text,
+                        normalized_response_text,
+                        activity_log_id,
+                    ),
                 )
                 await conn.commit()
         log_debug(
-            f"[plugin_instance] Updated grillo_activity_log {activity_log_id} with response ({len(response_text)} chars)"
+            "[plugin_instance] Updated grillo_activity_log "
+            f"{activity_log_id} with response ({len(normalized_response_text)} chars)"
         )
     except Exception as e:
         log_error(f"[plugin_instance] Failed to update Grillo log: {e}")

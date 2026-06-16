@@ -22,6 +22,10 @@ class PluginBase:
         """Optional teardown logic."""
         pass
 
+    def is_enabled(self) -> bool:
+        """Return True when this plugin should expose actions in the prompt."""
+        return True
+
     def get_metadata(self) -> dict:
         """Return plugin metadata such as name, description and version."""
         raise NotImplementedError("get_metadata must be implemented by the plugin")

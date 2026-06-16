@@ -1,0 +1,17 @@
+{
+  "provider_id": "ollama",
+  "display_name": "Ollama (local)",
+  "description": "Run open-source LLMs locally on your own machine",
+  "icon": "ollama",
+  "protocol": "openai",
+  "base_url": "http://localhost:11434",
+  "base_url_locked": false,
+  "requires_api_key": false,
+  "api_key_placeholder": "",
+  "api_key_hint": "No API key required. Make sure Ollama is running: https://ollama.com",
+  "default_capabilities": { "cortex": true, "vox": false, "auris": false, "live": false, "vision": false },
+  "suggested_name": "ollama",
+  "suggested_label": "Ollama",
+  "extra_config": {},
+  "sort_order": 50
+}

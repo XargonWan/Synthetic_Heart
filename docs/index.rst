@@ -42,6 +42,11 @@ getting started.
    :maxdepth: 2
    :caption: Developer guide:
 
+   architecture
+   prompt_pipeline
+   auto_response
+   chat_instructions
+   compose_env_vars
    COMPONENT_DEVELOPMENT_GUIDE
    dev_components
    api_endpoints
@@ -50,6 +55,7 @@ getting started.
    config_management
    prompt_engine_json_prompt
    memory_search_and_management
+   CHANGELOG
    contributing
 
 Building the Documentation

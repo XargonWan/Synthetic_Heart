@@ -29,7 +29,9 @@ async def test_whitelisted_mode_enforces_allowed_list(monkeypatch):
             return ["create_personal_diary_entry"]
 
     ap._ACTION_PLUGINS = [FakeDiary()]
-    ap.get_supported_action_types = lambda: set(["create_personal_diary_entry"])
+    monkeypatch.setattr(
+        ap, "get_supported_action_types", lambda: {"create_personal_diary_entry"}
+    )
 
     action = {
         "type": "create_personal_diary_entry",
@@ -46,8 +48,10 @@ async def test_whitelisted_mode_enforces_allowed_list(monkeypatch):
     executed.clear()
     action2 = {"type": "message_telegram_bot", "payload": {"text": "hi"}, "safe": True}
     # Ensure system knows this action type exists
-    ap.get_supported_action_types = lambda: set(
-        ["create_personal_diary_entry", "message_telegram_bot"]
+    monkeypatch.setattr(
+        ap,
+        "get_supported_action_types",
+        lambda: {"create_personal_diary_entry", "message_telegram_bot"},
     )
     # No plugin for message_telegram_bot in our fake plugin list -> will be blocked as unsupported
     res2 = await ap.run_actions(
@@ -77,7 +81,9 @@ async def test_autonomous_mode_ignores_whitelist(monkeypatch):
             return ["create_personal_diary_entry"]
 
     ap._ACTION_PLUGINS = [FakeDiary()]
-    ap.get_supported_action_types = lambda: set(["create_personal_diary_entry"])
+    monkeypatch.setattr(
+        ap, "get_supported_action_types", lambda: {"create_personal_diary_entry"}
+    )
 
     action = {
         "type": "create_personal_diary_entry",

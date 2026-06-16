@@ -17,6 +17,14 @@ from datetime import datetime, timedelta, timezone
 import re
 import time
 
+from core.auto_response import request_llm_delivery
+from core.config_manager import config_registry
+from core.core_initializer import register_plugin
+from core.db import _get_db_type
+from core.db import get_conn_ctx
+from core.logging_utils import log_info, log_debug, log_error, log_warning
+from core.variables_engine import register_exposed_var
+
 
 # Helper: map human-friendly keywords to sensible durations (some include slack already)
 _SPECIAL_TIME_MAP = {
@@ -72,6 +80,21 @@ _SYNONYM_MAP: Dict[str, List[str]] = {
     "recent": ["lately", "just", "earlier", "today", "yesterday"],
     "last night": ["yesterday", "earlier", "before bed", "tonight"],
 }
+
+
+def _build_json_array_membership(
+    column: str, values: List[str]
+) -> Tuple[List[str], List[Any]]:
+    if _get_db_type() == "postgres":
+        return (
+            [f"COALESCE(NULLIF(BTRIM({column}), ''), '[]')::jsonb ? %s"] * len(values),
+            list(values),
+        )
+
+    return (
+        [f"JSON_CONTAINS({column}, %s)"] * len(values),
+        [json.dumps(value) for value in values],
+    )
 
 
 def _expand_tokens_with_synonyms(tokens: List[str]) -> List[str]:
@@ -193,13 +216,6 @@ def _parse_time_window_spec(spec: Any) -> Optional[Tuple[datetime, datetime]]:
     return None
 
 
-from core.core_initializer import register_plugin
-from core.logging_utils import log_info, log_debug, log_error, log_warning
-from core.config_manager import config_registry
-from core.db import get_conn_ctx
-from core.variables_engine import register_exposed_var
-from core.auto_response import request_llm_delivery
-
 # Exposed variables
 register_exposed_var(
     "ENABLE_MEMORY_SEARCH",
@@ -229,6 +245,11 @@ class MemorySearchPlugin:
 
     def __init__(self):
         register_plugin("memory_search", self)
+
+    def is_enabled(self) -> bool:
+        return bool(
+            config_registry.get_value("ENABLE_MEMORY_SEARCH", True, value_type=bool)
+        )
 
     def get_supported_actions(self):
         return {
@@ -310,23 +331,21 @@ class MemorySearchPlugin:
         where_clauses_chat: List[str] = []
 
         mode = payload.get("mode")
-        # Option to randomize results instead of ordering by timestamp (uses MySQL RAND()).
+        # Option to randomize results instead of ordering by timestamp.
         randomize = bool(payload.get("random", False))
+        random_order_by = "RANDOM()" if _get_db_type() == "postgres" else "RAND()"
 
         if mode == "tags":
             tags = payload.get("tags", [])
-            # JSON_CONTAINS for memories.tags and ai_diary.context_tags
-            tag_conditions: List[str] = []
-            for t in tags:
-                tag_conditions.append("JSON_CONTAINS(tags, %s)")
-                params.append(json.dumps(t))
+            tag_conditions, tag_params = _build_json_array_membership("tags", tags)
+            params.extend(tag_params)
             if tag_conditions:
                 where_clauses_mem.append("(" + " OR ".join(tag_conditions) + ")")
 
-            diary_tag_conditions: List[str] = []
-            for t in tags:
-                diary_tag_conditions.append("JSON_CONTAINS(context_tags, %s)")
-                params.append(json.dumps(t))
+            diary_tag_conditions, diary_tag_params = _build_json_array_membership(
+                "context_tags", tags
+            )
+            params.extend(diary_tag_params)
             if diary_tag_conditions:
                 where_clauses_diary.append(
                     "(" + " OR ".join(diary_tag_conditions) + ")"
@@ -425,7 +444,7 @@ class MemorySearchPlugin:
                 q = f"{select_expr} WHERE {where}"
                 if group_by:
                     q += f" GROUP BY {group_by}"
-                order_by = "RAND()" if randomize else "timestamp DESC"
+                order_by = random_order_by if randomize else "timestamp DESC"
                 queries.append(f"({q} ORDER BY {order_by} LIMIT %s)")
                 # Params must match placeholder order: content/keyword params FIRST, then time params, then per-source limit
                 final_params.extend(table_content_params)
@@ -520,9 +539,9 @@ class MemorySearchPlugin:
         if not queries:
             return "", []
 
-        # If randomize: order by RAND(), otherwise order by timestamp desc
+        # If randomize: use the backend's random order function, otherwise order by timestamp desc
         order_clause = (
-            " ORDER BY RAND() LIMIT %s"
+            f" ORDER BY {random_order_by} LIMIT %s"
             if randomize
             else " ORDER BY timestamp DESC LIMIT %s"
         )
@@ -607,6 +626,16 @@ class MemorySearchPlugin:
         # The caller will inject the results into the main prompt context.
         is_preflight = bool((context or {}).get("preflight"))
 
+        # If this memory_search is being executed while processing an existing
+        # action result delivery, do not spawn another follow-up prompt.
+        # This avoids preparing a new prompt when we are still evaluating the
+        # response to the current LLM prompt (multi-part evaluation flows).
+        system_message = (context or {}).get("system_message") or {}
+        is_action_result_delivery = bool(
+            system_message.get("is_action_result_delivery")
+            or (context or {}).get("is_action_result_delivery")
+        )
+
         # the new async live search path
         interface_path = getattr(original_message, "interface_path", "")
         if isinstance(interface_path, str) and interface_path.startswith(
@@ -690,8 +719,9 @@ class MemorySearchPlugin:
             log_info(f"[memory_search] Retrieved {len(results)} results")
 
             delivered = False
-            # Send results back to LLM via auto_response so the model can continue (skip in preflight)
-            if not is_preflight:
+            # Send results back to LLM via auto_response so the model can continue
+            # (skip in preflight or when already processing an action-result delivery).
+            if not is_preflight and not is_action_result_delivery:
                 original_context = {
                     "interface_name": context.get("interface"),
                     "interface_path": getattr(original_message, "interface_path", None),
@@ -727,6 +757,10 @@ class MemorySearchPlugin:
                     )
                 except Exception as e:
                     log_warning(f"[memory_search] Failed to request LLM delivery: {e}")
+            elif is_action_result_delivery:
+                log_debug(
+                    "[memory_search] Skipping LLM delivery because memory_search is part of an action-result delivery evaluation"
+                )
 
             return {
                 "processed": True,

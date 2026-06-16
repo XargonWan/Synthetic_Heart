@@ -11,13 +11,12 @@ historical diary noise even if users don't interact frequently.
 
 from __future__ import annotations
 
+from datetime import date, timedelta
 from typing import Optional
-
-import aiomysql  # type: ignore
 
 from core.core_initializer import register_plugin
 from core.config_manager import config_registry
-from core.db import get_conn_ctx
+from core.db import DictCursor, get_conn_ctx
 from core.logging_utils import log_debug, log_info, log_error
 
 
@@ -96,25 +95,28 @@ class GrilloDiaryConsolidatorPlugin:
         if not self.enabled:
             return None
 
+        cutoff = date.today() - timedelta(days=self.lookback_days)
         try:
             async with get_conn_ctx() as conn:
-                async with conn.cursor(aiomysql.DictCursor) as cur:
+                async with conn.cursor(DictCursor) as cur:
                     await cur.execute(
                         """
-                        SELECT
-                            DATE(timestamp) AS day,
-                            MAX(id) AS entry_id,
-                            GROUP_CONCAT(content ORDER BY id ASC SEPARATOR '\n\n---\n\n') AS combined,
-                            COUNT(*) AS row_count
-                        FROM ai_diary
-                        WHERE DATE(timestamp) < CURDATE()
-                          AND timestamp >= DATE_SUB(CURDATE(), INTERVAL %s DAY)
-                        GROUP BY DATE(timestamp)
-                        HAVING row_count > 1 OR combined LIKE '%%---%%'
+                        SELECT day, entry_id, combined, row_count FROM (
+                            SELECT
+                                DATE(timestamp) AS day,
+                                MAX(id) AS entry_id,
+                                GROUP_CONCAT(content ORDER BY id ASC SEPARATOR '\n\n---\n\n') AS combined,
+                                COUNT(*) AS row_count
+                            FROM ai_diary
+                            WHERE DATE(timestamp) < CURDATE()
+                              AND timestamp >= %s
+                            GROUP BY DATE(timestamp)
+                        ) t
+                        WHERE row_count > 1 OR combined LIKE '%%---%%'
                         ORDER BY day DESC
                         LIMIT 1
                         """,
-                        (self.lookback_days,),
+                        (cutoff,),
                     )
                     row = await cur.fetchone()
         except Exception as e:
@@ -166,6 +168,9 @@ class GrilloDiaryConsolidatorPlugin:
             "Respond with ONLY valid JSON (no additional text):\n"
             f"{json.dumps(action_payload)}"
         )
+
+    def get_supported_actions(self) -> dict:
+        return {}
 
 
 PLUGIN_CLASS = GrilloDiaryConsolidatorPlugin

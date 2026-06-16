@@ -21,6 +21,7 @@ without configuration changes.
 from __future__ import annotations
 
 import asyncio
+import importlib
 import re
 import threading
 import time
@@ -107,7 +108,7 @@ def _detect_language(text: str) -> str | None:
 register_exposed_var(
     "ACTIVE_VOX_ENGINE",
     label="Active Vox Engine",
-    default="disabled",
+    default="kitten",
     value_type=str,
     ui_type="string",
     description=(
@@ -254,6 +255,7 @@ class VoxPlugin(AIPluginBase):
         engine_name: str | None = None,
         merged_text: str | None = None,
         allow_fallback: bool = True,
+        generate_only: bool = False,
     ) -> dict[str, Any]:
         """Full TTS pipeline: generate → write → dispatch → lip-sync.
 
@@ -400,16 +402,17 @@ class VoxPlugin(AIPluginBase):
         if audio_duration_s is not None:
             log_debug(f"[vox_plugin] audio duration: {audio_duration_s:.2f}s")
 
-        # --- Dispatch to interface ---
-        await self._dispatch(
-            audio_path=out_path,
-            interface_path=interface_path,
-            caption=merged_text or text,
-            lipsync_data=lipsync_data,
-            context=context,
-            original_message=original_message,
-            audio_duration_s=audio_duration_s,
-        )
+        # --- Dispatch to interface (skip for internal callers like radio host) ---
+        if not generate_only:
+            await self._dispatch(
+                audio_path=out_path,
+                interface_path=interface_path,
+                caption=merged_text or text,
+                lipsync_data=lipsync_data,
+                context=context,
+                original_message=original_message,
+                audio_duration_s=audio_duration_s,
+            )
 
         # --- Schedule facial expression timeline (voice responses) ---
         # For voice responses (allow_fallback=True, no parallel message_*
@@ -479,6 +482,10 @@ class VoxPlugin(AIPluginBase):
             }
         }
 
+    def is_enabled(self) -> bool:
+        self.refresh_config()
+        return self._active_engine_name != "disabled"
+
     def get_prompt_instructions(self, action_name: str) -> dict:
         if action_name == "tts_speak":
             return {
@@ -531,9 +538,9 @@ class VoxPlugin(AIPluginBase):
             context=context,
             original_message=original_message,
             merged_text=payload.get("__merged_text"),
-            # Suppress text fallback for auto-injected TTS: text was already
-            # dispatched by message_*_bot and a duplicate would confuse the user.
-            allow_fallback=not payload.get("__auto_injected", False),
+            # Fallback to text if TTS fails, even if auto-injected, because
+            # the original message action might have been removed to merge text.
+            allow_fallback=True,
         )
 
     # ------------------------------------------------------------------
@@ -625,9 +632,10 @@ class VoxPlugin(AIPluginBase):
 
             persona_json: dict[str, Any] | None = None
             pm = get_persona_manager()
-            if pm and getattr(pm, "_current_persona", None):
+            current_persona = getattr(pm, "_current_persona", None) if pm else None
+            if pm and current_persona:
                 try:
-                    persona_json = pm._load_persona_json(pm._current_persona.name)
+                    persona_json = pm._load_persona_json(current_persona.name)
                 except Exception:
                     persona_json = None
 
@@ -703,13 +711,24 @@ class VoxPlugin(AIPluginBase):
             if iface_name == "synth_webui" and hasattr(target_iface, "send_tts_audio"):
                 session_id = levels[0] if levels else None
                 if session_id:
-                    await target_iface.send_tts_audio(
-                        session_id=session_id,
-                        audio_path=str(audio_path),
-                        text=caption,
-                        lipsync_data=lipsync_data,
-                        audio_duration_s=audio_duration_s,
-                    )
+                    send_kwargs: dict[str, Any] = {
+                        "session_id": session_id,
+                        "audio_path": str(audio_path),
+                        "text": caption,
+                        "lipsync_data": lipsync_data,
+                    }
+                    if audio_duration_s is not None:
+                        send_kwargs["audio_duration_s"] = audio_duration_s
+                    try:
+                        await target_iface.send_tts_audio(**send_kwargs)
+                    except TypeError as exc:
+                        if (
+                            "audio_duration_s" not in send_kwargs
+                            or "audio_duration_s" not in str(exc)
+                        ):
+                            raise
+                        send_kwargs.pop("audio_duration_s", None)
+                        await target_iface.send_tts_audio(**send_kwargs)
 
             elif iface_name == "discord_bot" and hasattr(target_iface, "send_message"):
                 await target_iface.send_message(
@@ -787,13 +806,35 @@ class VoxPlugin(AIPluginBase):
     def _import_builtin_engines() -> None:
         """Import built-in Vox engine modules so they self-register."""
         builtins = [
-            "plugins.vox_engines.http",
             # chatterbox moved to _dev; not imported by default
             "plugins.vox_engines.kitten",
         ]
+
+        try:
+            tts_endpoints = config_registry.get_value(
+                "TTS_ENDPOINTS",
+                "",
+                value_type=str,
+                group="plugins",
+                component="tts_lipsync",
+            )
+            definition = getattr(config_registry, "_definitions", {}).get(
+                "TTS_ENDPOINTS"
+            )
+            if definition is not None:
+                config_registry._load_definition_sync(definition)
+                tts_endpoints = definition.value
+            if tts_endpoints and str(tts_endpoints).strip():
+                builtins.insert(0, "plugins.vox_engines.http")
+        except Exception:
+            pass
+
         for mod in builtins:
             try:
-                __import__(mod)
+                module = importlib.import_module(mod)
+                engine_name = mod.rsplit(".", 1)[-1]
+                if engine_name not in VOX_REGISTRY.get_available_engines():
+                    importlib.reload(module)
             except Exception as exc:
                 log_warning(
                     f"[vox_plugin] Could not import engine module '{mod}': {exc}"

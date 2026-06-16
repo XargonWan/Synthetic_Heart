@@ -22,6 +22,15 @@ function injectChatStyles() {
         #send { flex:0 0 auto; border-radius:50%; height:2.6rem; width:2.6rem; cursor:pointer; transition: background 0.2s, transform 0.15s; }
         #send.send-mode { /* text ready */ }
         #send.mic-mode  { background: var(--accent, #6bfefe); color: #111; }
+        .attach-btn { flex:0 0 auto; border-radius:50%; height:2.6rem; width:2.6rem; cursor:pointer; background: rgba(255,255,255,0.06); color: var(--text); border: 1px solid rgba(255,255,255,0.1); }
+        .attach-btn:hover { background: rgba(255,255,255,0.12); }
+        .attach-btn:disabled { cursor: not-allowed; opacity: 0.45; background: rgba(255,255,255,0.04); color: rgba(255,255,255,0.6); border-color: rgba(255,255,255,0.06); }
+        .attachment-preview { margin: 0.5rem 1rem 0.4rem; padding: 0.55rem 0.75rem; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08); border-radius: 12px; display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+        .attachment-chip { display: inline-flex; align-items: center; gap: 0.45rem; padding: 0.35rem 0.65rem; border-radius: 999px; background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.12); font-size: 0.9rem; }
+        .attachment-chip button { background: transparent; border: none; color: var(--text); cursor: pointer; padding: 0; margin: 0; font-size: 1rem; line-height: 1; }
+        .attachment-image-preview { max-width: 120px; max-height: 80px; border-radius: 10px; object-fit: cover; cursor: pointer; border: 1px solid rgba(255,255,255,0.12); }
+        .attachment-audio { width: 100%; max-width: 240px; margin-top: 0.4rem; }
+        .attachment-link { color: var(--text); text-decoration: underline; }
         #send.mic-mode.ambient-speaking { animation: synth-mic-pulse-ambient 1.2s ease-in-out infinite; }
         #send.recording { background: #d94; color: #fff; animation: synth-mic-pulse 0.9s ease-in-out infinite; }
         /* Brighter pulse while voice is actively detected (toggle mode) */
@@ -143,9 +152,12 @@ function createChatTemplate() {
 
                 <div class="synth-chat-footer synth-chat-toolbar">
                     <form id="composer" class="synth-chat-composer" autocomplete="off">
+                        <button id="attach-file" type="button" class="attach-btn" title="Attach file">📎</button>
                         <textarea id="input" placeholder="Type a message…" rows="2"></textarea>
                         <button id="send" type="button">➤</button>
+                        <input id="file-input" type="file" accept="image/*,audio/*,video/*,.pdf,.txt,.doc,.docx,.ppt,.pptx,.xlsx" style="display:none" />
                     </form>
+                    <div id="attachment-preview" class="attachment-preview" style="display:none"></div>
                 </div>
             </div>
         `;
@@ -409,10 +421,12 @@ function removeTypingIndicator() {
         try { localStorage.removeItem(TYPING_INDICATOR_KEY); } catch (e) { /* ignore */ }
         try { localStorage.removeItem(TYPING_INDICATOR_TS_KEY); } catch (e) { /* ignore */ }
         try { _clearTypingTimeout(); } catch (e) { /* ignore */ }
+        try { _clearTypingIndicatorProcessingTimer(); } catch (e) { /* ignore */ }
+        _pendingSynthResponse = false;
     } catch (e) { /* ignore */ }
 }
 
-function appendMessage(container, sender, text, ts) {
+function appendMessage(container, sender, text, ts, attachments) {
     if (!container) return;
 
     // Determine timestamp (fallback to now)
@@ -458,7 +472,32 @@ function appendMessage(container, sender, text, ts) {
 
     // Use safe-escaped content and preserve newlines
     const escaped = safeEscapeHtml(text).replace(/\n/g, '<br>');
-    bubble.innerHTML = `<div class="bubble-sender">${senderLabel}</div><div class="bubble-content">${escaped}</div><div class="bubble-time">${timeText}</div>`;
+    let attachmentHtml = '';
+    if (attachments && attachments.length) {
+        const parts = [];
+        for (const file of attachments) {
+            if (!file || !file.url) continue;
+            const filename = safeEscapeHtml(file.filename || file.url.split('/').pop() || 'attachment');
+            const mime = String(file.mime_type || '').toLowerCase();
+            if (mime.startsWith('image/')) {
+                parts.push(
+                    `<a href="${safeEscapeHtml(file.url)}" target="_blank" rel="noreferrer"><img class="attachment-image-preview" src="${safeEscapeHtml(file.url)}" alt="${filename}" /></a>`
+                );
+            } else if (mime.startsWith('audio/')) {
+                parts.push(
+                    `<audio class="attachment-audio" controls src="${safeEscapeHtml(file.url)}"></audio>`
+                );
+            } else {
+                parts.push(
+                    `<a class="attachment-link" href="${safeEscapeHtml(file.url)}" target="_blank" rel="noreferrer">${filename}</a>`
+                );
+            }
+        }
+        if (parts.length) {
+            attachmentHtml = `<div class="bubble-attachments">${parts.join('')}</div>`;
+        }
+    }
+    bubble.innerHTML = `<div class="bubble-sender">${senderLabel}</div><div class="bubble-content">${escaped}</div>${attachmentHtml}<div class="bubble-time">${timeText}</div>`;
     wrapper.appendChild(bubble);
     container.appendChild(wrapper);
     // Scroll the actual scrollable ancestor (.synth-chat-body) to the bottom.
@@ -466,6 +505,8 @@ function appendMessage(container, sender, text, ts) {
     _scrollToBottom(container);
 
     if (sender === 'synth') {
+        _pendingSynthResponse = false;
+        _clearTypingIndicatorProcessingTimer();
         try { if (window.SynthChat && typeof window.SynthChat.maybeNotify === 'function') window.SynthChat.maybeNotify(text); } catch (e) { /* ignore */ }
         try { removeTypingIndicator(); } catch (e) { /* ignore */ }
     }
@@ -524,6 +565,10 @@ function _setUserAudioError(container, msg) {
 
 export function initChatUI() {
     try {
+        const IRIS_ENABLED = (typeof window !== 'undefined' && window.__SYNTH_CONFIG && window.__SYNTH_CONFIG.IRIS_ENABLED !== undefined)
+            ? !!window.__SYNTH_CONFIG.IRIS_ENABLED
+            : true;
+
         if (window.__synth_chat_initialized) {
             const existingMessages = document.getElementById('messages');
             const existingInput = document.getElementById('input');
@@ -545,10 +590,142 @@ export function initChatUI() {
         try { bindArchiveButton(); } catch (e) { /* ignore */ }
 
         const getMessagesEl = () => document.getElementById('messages') || messages;
+        const attachBtn = document.getElementById('attach-file');
+        const fileInput = document.getElementById('file-input');
+        const attachmentPreview = document.getElementById('attachment-preview');
+        let pendingAttachment = null;
+        let pendingAttachmentMeta = null;
         let ws = window.chatWs || null;
         let _typingAnimActive = false; // true when user is typing; reset after submit
+        let _pendingSynthResponse = false; // wait for a final synth response before hiding typing dots
+        let _typingIndicatorProcessingTimer = null;
 
-        // ── Mic recording state ────────────────────────────────────────────
+        function _clearTypingIndicatorProcessingTimer() {
+            if (_typingIndicatorProcessingTimer) {
+                clearTimeout(_typingIndicatorProcessingTimer);
+                _typingIndicatorProcessingTimer = null;
+            }
+        }
+
+        async function _checkProcessingMetaAndMaybeRemoveTypingIndicator() {
+            _clearTypingIndicatorProcessingTimer();
+            const sid = window.sessionId || (typeof sessionId !== 'undefined' ? sessionId : null);
+            if (!sid) return;
+
+            try {
+                const base = _getApiBase();
+                const res = await fetch(
+                    (base || '') + '/api/chat/session_meta?session_id=' +
+                    encodeURIComponent(sid)
+                );
+                if (!res.ok) return;
+                const out = await res.json().catch(() => null);
+                const meta = out && out.meta ? out.meta : {};
+                if (!meta.processing) {
+                    _pendingSynthResponse = false;
+                    removeTypingIndicator();
+                } else {
+                    _typingIndicatorProcessingTimer = setTimeout(
+                        _checkProcessingMetaAndMaybeRemoveTypingIndicator,
+                        1000
+                    );
+                }
+            } catch (e) {
+                _typingIndicatorProcessingTimer = setTimeout(
+                    _checkProcessingMetaAndMaybeRemoveTypingIndicator,
+                    1000
+                );
+            }
+        }
+
+        function renderAttachmentPreview() {
+            if (!attachmentPreview) return;
+            if (!pendingAttachmentMeta) {
+                attachmentPreview.style.display = 'none';
+                attachmentPreview.innerHTML = '';
+                return;
+            }
+            attachmentPreview.style.display = 'flex';
+            const safeName = SynthUtils ? SynthUtils.escapeHtml(pendingAttachmentMeta.filename) : pendingAttachmentMeta.filename;
+            attachmentPreview.innerHTML = `
+                <div class="attachment-chip">
+                    <span>${safeName}</span>
+                    <button type="button" id="clear-attachment" title="Remove attached file">✕</button>
+                </div>
+            `;
+            const clearBtn = attachmentPreview.querySelector('#clear-attachment');
+            if (clearBtn) {
+                clearBtn.addEventListener('click', () => {
+                    pendingAttachment = null;
+                    pendingAttachmentMeta = null;
+                    fileInput.value = '';
+                    renderAttachmentPreview();
+                    updateButtonMode();
+                });
+            }
+        }
+
+        async function uploadAttachment(file) {
+            if (!file) return null;
+            try {
+                const fd = new FormData();
+                fd.append('file', file, file.name);
+                const resp = await fetch('/api/chat/attachments', {
+                    method: 'POST',
+                    body: fd,
+                });
+                if (!resp.ok) {
+                    const err = await resp.json().catch(() => null);
+                    throw new Error((err && err.detail) || resp.statusText || 'Upload failed');
+                }
+                return await resp.json();
+            } catch (e) {
+                console.warn('[chat-window] attachment upload failed:', e);
+                return null;
+            }
+        }
+
+        function updateAttachmentControls() {
+            if (!attachBtn || !fileInput) return;
+            attachBtn.disabled = !IRIS_ENABLED;
+            fileInput.disabled = !IRIS_ENABLED;
+            attachBtn.title = IRIS_ENABLED ? 'Attach file' : 'Attachments disabled while Iris is off';
+        }
+
+        if (attachBtn && fileInput) {
+            updateAttachmentControls();
+            attachBtn.addEventListener('click', () => {
+                if (attachBtn.disabled) return;
+                try { fileInput.click(); } catch (e) { console.warn('[chat-window] attach click failed', e); }
+            });
+            fileInput.addEventListener('change', async (e) => {
+                try {
+                    const file = e.target.files && e.target.files[0];
+                    if (!file) return;
+                    const wasDisabled = attachBtn.disabled;
+                    if (!wasDisabled) {
+                        attachBtn.disabled = true;
+                    }
+                    pendingAttachment = file;
+                    pendingAttachmentMeta = await uploadAttachment(file);
+                    if (!wasDisabled) {
+                        attachBtn.disabled = false;
+                    }
+                    if (!pendingAttachmentMeta) {
+                        pendingAttachment = null;
+                        fileInput.value = '';
+                        attachmentPreview.style.display = 'none';
+                        return;
+                    }
+                    renderAttachmentPreview();
+                    updateButtonMode();
+                } catch (err) {
+                    console.warn('[chat-window] file input change failed', err);
+                }
+            });
+        }
+
+        // ── Button mode (➤ send / 🎤 mic / ⏹ recording / ⏳ processing) ──
         let micMediaRecorder = null;
         let micAudioChunks   = [];
         let micStream        = null;   // shared: ambient VAD + recording
@@ -573,6 +750,7 @@ export function initChatUI() {
         function updateButtonMode() {
             if (!sendBtn || !input) return;
             const hasText = input.value.trim().length > 0;
+            const hasAttachment = !!pendingAttachmentMeta;
             const wsReady = ws && ws.readyState === WebSocket.OPEN;
             if (_sttAbortController) {
                 // STT in progress: spin + click = cancel
@@ -587,12 +765,12 @@ export function initChatUI() {
                 sendBtn.disabled    = false;
                 sendBtn.className   = 'recording';
                 sendBtn.title       = micRecordingMode === 'ptt' ? 'Release to send (PTT)' : 'Tap to stop & send';
-            } else if (hasText) {
+            } else if (hasText || hasAttachment) {
                 sendBtn.type        = 'submit';
                 sendBtn.textContent = '➤';
                 sendBtn.disabled    = !wsReady;
                 sendBtn.className   = 'send-mode';
-                sendBtn.title       = 'Send message (Enter)';
+                sendBtn.title       = hasText ? 'Send message (Enter)' : 'Send attached file';
             } else {
                 sendBtn.type        = 'button';
                 sendBtn.textContent = '🎤';
@@ -1058,9 +1236,14 @@ export function initChatUI() {
                             return;
                         }
 
+                        if (data && data.type === 'message_ack') {
+                            _pendingSynthResponse = true;
+                            return;
+                        }
                         if (data && data.type === 'message') {
                             const ts = data.ts || data.timestamp || Date.now();
-                            appendMessage(getMessagesEl(), data.sender === 'synth' ? 'synth' : 'user', data.text || '', ts);
+                            const attachments = data.attachments || (data.data && data.data.attachments) || [];
+                            appendMessage(getMessagesEl(), data.sender === 'synth' ? 'synth' : 'user', data.text || '', ts, attachments);
                             // Restore click-to-replay audio metadata when replaying history.
                             const ttsUrl = data.tts_url || (data.data && data.data.tts_url);
                             if (ttsUrl && data.sender === 'synth') {
@@ -1078,6 +1261,7 @@ export function initChatUI() {
                             }
                         } else if (data && data.type === 'action_state') {
                             const phase = String(data.phase || '').toUpperCase();
+                            console.log('[chat-window] action_state received:', phase, data.action_id || null, data.component || null);
                             if (phase === 'THINKING' || phase === 'WRITING' || phase === 'TALKING') {
                                 // Cancel any pending debounced IDLE removal
                                 if (window.__synth_idle_removal_timer) {
@@ -1095,7 +1279,11 @@ export function initChatUI() {
                                 clearTimeout(window.__synth_idle_removal_timer);
                                 window.__synth_idle_removal_timer = setTimeout(() => {
                                     window.__synth_idle_removal_timer = null;
-                                    removeTypingIndicator();
+                                    if (_pendingSynthResponse) {
+                                        _checkProcessingMetaAndMaybeRemoveTypingIndicator();
+                                    } else {
+                                        removeTypingIndicator();
+                                    }
                                 }, 600);
                             }
                         } else if (data && (data.type === 'vrm_animation' || data.type === 'animation')) {
@@ -1116,7 +1304,9 @@ export function initChatUI() {
                                             animation: animFile,
                                             playOnce: data.loop === false,
                                             playSection: data.play_section,
-                                            descriptor: data.descriptor
+                                            descriptor: data.descriptor,
+                                            frameRange: data.frame_range,
+                                            phaseAuthoritative: !!data.phase_authoritative
                                         });
                                     }
                                 } catch (e) { /* ignore */ }
@@ -1133,7 +1323,14 @@ export function initChatUI() {
                             // Cache animation state for VRM reload recovery
                             try {
                                 if (data.state) {
-                                    window.__synth_current_animation_state = { state: data.state, animation: animFile, descriptor: data.descriptor || null };
+                                    window.__synth_current_animation_state = {
+                                        state: data.state,
+                                        animation: animFile,
+                                        descriptor: data.descriptor || null,
+                                        play_section: data.play_section || null,
+                                        frame_range: data.frame_range || null,
+                                        phase_authoritative: !!data.phase_authoritative,
+                                    };
                                 }
                                 if (data.animation_state) {
                                     window.__synth_last_rich_animation_state = data.animation_state;
@@ -1296,12 +1493,22 @@ export function initChatUI() {
                     return;
                 }
                 const text = input.value.trim();
-                if (!text) return;
+                const hasAttachment = !!pendingAttachmentMeta;
+                if (!text && !hasAttachment) return;
+
+                const payload = { text };
+                if (hasAttachment) {
+                    payload.attachments = [pendingAttachmentMeta];
+                }
                 try {
-                    console.log('[chat-window] sending message via WS, len=', text.length);
-                    ws.send(JSON.stringify({ text }));
-                    appendMessage(getMessagesEl(), 'user', text, Date.now());
+                    console.log('[chat-window] sending message via WS, len=', text.length, 'attachments=', payload.attachments ? payload.attachments.length : 0);
+                    ws.send(JSON.stringify(payload));
+                    appendMessage(getMessagesEl(), 'user', text, Date.now(), payload.attachments);
                     input.value = '';
+                    pendingAttachment = null;
+                    pendingAttachmentMeta = null;
+                    if (fileInput) fileInput.value = '';
+                    renderAttachmentPreview();
                     _typingAnimActive = false; // backend takes over think→write→idle from here
                     updateButtonMode();
                     // keep focus on input

@@ -1,106 +1,137 @@
-Compose / Environment variables
-=================================
+Compose / Environment Variables
+================================
 
-This document lists environment variables that can be provided to the
-`docker-compose` file to customize runtime behaviour. All variables below
-have safe defaults (either defined by the Compose file itself or by code)
-so the container can start without an explicit `.env` file. Override any
-value in your own `.env` when necessary.
+Synthetic Heart accepts configuration from three places, in this order:
 
-Note: most variables are documented in `.env.example` as well. This file
-focuses on the variables that are referenced in `docker-compose.yml`.
+1. Environment variables
+2. Persisted values in the ``config`` table / WebUI settings
+3. Hard-coded defaults in code
 
-Variables
----------
+The project now ships a trimmed ``.env.example`` focused on the overrides most
+operators actually touch during setup. Advanced and low-frequency variables are
+documented here instead of being dumped into the example file.
 
-ROOT_PASSWORD
-~~~~~~~~~~~~~
-- **Purpose**: Root password used by the Web Desktop (Selkies/VNC) process.
-- **Default**: "password" (compose fallback)
-- **Recommendation**: Change in production deployments; safe to omit in dev.
- 
-.. note::
+What belongs in ``docker-compose`` vs ``.env``
+----------------------------------------------
 
-	This project keeps `ROOT_PASSWORD` explicitly present in the `environment:`
-	block of `docker-compose.yml` to make it obvious for operators that the
-	Web Desktop root credential exists and should be set in production. Even
-	if you omit it, the compose fallback will apply the default value.
+``docker-compose.yml`` only references a small subset of the full runtime
+configuration surface:
 
-DISPLAY_WIDTH, DISPLAY_HEIGHT
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-- **Purpose**: Virtual display resolution for Selkies / Web Desktop.
-- **Default**: 1280x720
-- **Recommendation**: Leave defaults for local dev; set to higher values if you need a larger remote desktop.
+- container basics such as ``IMAGE_VERSION``, ``PUID``, ``PGID`` and ``TZ``
+- PostgreSQL runtime connection and port values (``DB_*``, ``EXT_DB_PORT``)
+- legacy MySQL source values used only for first-boot migration (``SOURCE_DB_*``)
+- SOUL Postgres override settings (``SOUL_*``) when you intentionally want a separate DSN
+- WebUI port and TLS-related values (``SYNTH_WEBUI_*``)
+- Selkies / desktop credentials such as ``ROOT_PASSWORD``
 
-SYNTH_X11_WAIT_SECONDS
-~~~~~~~~~~~~~~~~~~~~~~
-- **Purpose**: Number of seconds the container will wait for the X11 socket (`/tmp/.X11-unix/X1`) before continuing startup.
-- **Default**: 30
-- **Recommendation**: Leave at default for most setups. Lower to `0` for headless-only deployments or increase if your host X server takes longer to appear.
+Most other variables are still valid in ``.env`` because the config registry
+loads environment overrides for registered settings at startup.
 
-SYNTH_CREATE_X11_PLACEHOLDER
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-- **Purpose**: When set to `1` (default) the container will create a placeholder file at `/tmp/.X11-unix/X1` after the timeout so startup can continue even if the host X socket isn't mounted. Set to `0` to make the container proceed without creating the placeholder (fail-fast behavior).
-- **Default**: `1`
-- **Recommendation**: Keep `1` to avoid the container blocking in environments where a host X socket isn't present; set to `0` if you require the container to fail early when X is missing.
+High-value variables most operators actually set
+------------------------------------------------
 
-SYNTH_WEBUI_HTTP_PORT, SYNTH_WEBUI_HTTPS_PORT
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-- **Purpose**: Ports used by the Synthetic Heart Web UI (HTTP/HTTPS).
-- **Default**: HTTP 8001, HTTPS 8000 (compose fallback); web UI has additional internal defaults in code.
-- **Recommendation**: Keep defaults locally; set explicit values in multi-service hosts or when port conflicts exist.
+Core runtime:
 
-SYNTH_WEBUI_HOST
-~~~~~~~~~~~~~~~~
-- **Purpose**: Host binding for the web UI server (e.g. 0.0.0.0).
-- **Default**: 0.0.0.0
-- **Recommendation**: Keep default unless you want to restrict listening to localhost.
+- ``BASE_CORTEX``
+- ``GRILLO_CORTEX``
+- ``TRAINER_CORTEX``
+- ``LIVE_CORTEX``
+- ``SYNTH_NAME``
+- ``SYNTH_PROFILE``
+- ``TRAINER_IDS``
+- ``TRAINER_CHAT_ID``
 
-SECURE_CONNECTION / SYNTH_WEBUI_TLS
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-- **Purpose**: Toggle TLS/HTTPS for Selkies and/or the Web UI.
-- **Default**: TLS enabled in dev for the Web UI (see `.env.example`).
-- **Recommendation**: Keep TLS enabled in production; for local development a self-signed certificate is generated if no cert is provided.
+Provider credentials:
 
-**Default behaviour details**
+- ``GEMINI_API_KEY``
+- ``OPENAI_API_KEY``
+- ``BOTFATHER_TOKEN``
+- ``DISCORD_BOT_TOKEN``
+- ``MATRIX_*``
 
 - **SYNTH_WEBUI_TLS**: If not set, the application falls back to enabling TLS by default (value `1`) to provide a secure developer experience. You only need to set this to `0` when you explicitly want to disable HTTPS.
 - **SYNTH_WEBUI_CERT_DIR**: If no certificate/key are provided, the Web UI will look for certificates in `/config/ssl` and, if missing, will attempt to generate a self-signed certificate there at startup.
 - **SYNTH_ATTACHMENTS_ROOT**: Optional root directory for Web UI attachments. If set, uploaded files are stored there. If unset, the application will use `$XDG_DATA_HOME/attachments` when `XDG_DATA_HOME` is defined, otherwise `/config/uploads`.
 - **Image seed**: The container image ships a default self-signed certificate and key in `/config/ssl` (copied from `/app/res/default_ssl`) so HTTPS works out-of-the-box unless a volume overwrites that path.
 
-DB_HOST
-~~~~~~~
-- **Purpose**: Hostname of the MariaDB service used by the application.
-- **Default**: `synth-db` (compose fallback)
-- **Recommendation**: For multi-container setups keep `synth-db` or set this to an external host if you run the DB elsewhere.
+Persistence:
 
-DB_AUTO_HEAL
-~~~~~~~~~~~~
-- **Purpose**: When enabled, the DB layer will attempt an automatic, idempotent "schema heal" if a query fails with a missing table/column error (e.g. error 1146 / 1054). The heal runs core/plugin table-ensurers and retries the failed statement once.
-- **Default**: `1` (enabled)
-- **Recommendation**: Leave enabled for development and restore/upgrade resilience; set to `0` to disable automatic repairs in locked-down production environments where implicit schema changes are undesired.
+- ``DB_HOST`` / ``DB_PORT`` / ``DB_USER`` / ``DB_PASS`` / ``DB_NAME``
+- ``LEGACY_SOUL_POSTGRES_DSN`` (optional one-time SOUL migration source)
+- ``SOUL_POSTGRES_DSN`` (legacy alias for the SOUL migration source DSN)
+- ``SOURCE_DB_HOST`` / ``SOURCE_DB_PORT`` / ``SOURCE_DB_USER`` / ``SOURCE_DB_PASSWORD`` / ``SOURCE_DB_NAME``
+- ``SYNTH_DB_BACKUP_ENABLED`` / ``SYNTH_DB_BACKUP_INTERVAL_HOURS`` / ``SYNTH_BACKUPS_DIR``
 
-CLI_SERVER_PORT
-~~~~~~~~~~~~~~~
-- **Purpose**: Port mapping for an internal CLI server used by tooling and integrations.
-- **Default**: 5555 (compose fallback; can be overridden in `.env`)
-- **Recommendation**: Typically safe to leave at default for local dev.
+Primary DB selection
+--------------------
 
-Why these were removed from explicit compose environment list
------------------------------------------------------------
-Each variable above has been removed from the `environment:` block in
-`docker-compose.yml` to avoid duplicating values that already have sensible
-fallbacks in Compose (`${VAR:-fallback}`) or in the application code.
-Keeping them documented here ensures maintainers know what can be set if
-customisation is required.
+The default deployment now uses a single PostgreSQL runtime database.
+``DB_*`` points at that Postgres service, and SOUL uses the same runtime DB by default.
 
-Best Practices
+- ``DB_*`` points at the active runtime PostgreSQL service; no extra runtime DB selector is needed in the default Docker stack.
+- SOUL persists into that same runtime Postgres automatically.
+- ``LEGACY_SOUL_POSTGRES_DSN`` can point at an older standalone SOUL Postgres so startup can import it into the runtime DB.
+- ``SOUL_POSTGRES_DSN`` remains accepted as a legacy alias for that migration source.
+- ``SOURCE_DB_*`` is only used by the first-boot migration flow that imports a
+  legacy MariaDB/MySQL deployment.
+
+Automatic cutover and backups
+-----------------------------
+
+- Legacy MySQL → Postgres cutover is enabled by default in the Docker stack and uses ``SOURCE_DB_*`` as the preserved source.
+- Legacy standalone SOUL Postgres → runtime Postgres cutover runs first when ``LEGACY_SOUL_POSTGRES_DSN`` or its legacy alias is set.
+- ``SOURCE_DB_*`` identifies the preserved legacy MariaDB source used only for migration and verification.
+- ``SYNTH_DB_BACKUP_ENABLED=1`` enables the embedded application-owned backup scheduler.
+- ``SYNTH_DB_BACKUP_INTERVAL_HOURS=24`` controls the pg_dump cadence.
+- ``SYNTH_BACKUPS_DIR`` selects where runtime and legacy archival dumps are written inside the synth container. The WebUI Settings tab also exposes a manual backup action that writes to this same directory.
+
+Legacy migration note
+---------------------
+
+For users migrating from older Synthetic Heart installations:
+
+- ``DB_*`` now points at the active runtime PostgreSQL service. All new runtime data is written there.
+- ``SOURCE_DB_*`` is only needed when you still have a legacy MariaDB/MySQL deployment to import from. The Docker stack preserves that source service and uses it only during first-boot migration.
+- ``LEGACY_SOUL_POSTGRES_DSN`` (or legacy alias ``SOUL_POSTGRES_DSN``) is optional and used only when you have an older standalone SOUL PostgreSQL database that should be imported into the new runtime DB.
+- If both legacy sources are configured, the SOUL Postgres import runs first, then the legacy MariaDB migration.
+- After migration, the application continues using the runtime Postgres database from ``DB_*``; the legacy source settings are not used for normal operation.
+- The legacy containers/services are preserved for verification and rollback, but the application no longer writes new runtime state to them.
+
+Observability:
+
+- ``LANGFUSE_ENABLED``
+- ``LANGFUSE_HOST`` / ``LANGFUSE_BASE_URL``
+- ``LANGFUSE_PUBLIC_KEY`` / ``LANGFUSE_SECRET_KEY``
+- ``CORTEX_API_LOG_ENABLED``
+
+Prompt / runtime behavior:
+
+- ``PROJECT_DEFAULT_LANGUAGE`` / ``PROJECT_DEFAULT_TONE``
+- ``PROMPT_LITE_MODE``
+- ``UNIFIED_HISTORY``
+- ``ENABLE_RECON`` / ``ENABLE_DEBRIEF``
+- ``EXTERNAL_ENDPOINT_PROBE_TIMEOUT_SECONDS``
+
+Why the example file is now smaller
+-----------------------------------
+
+``.env.example`` is now intentionally opinionated. It keeps the day-one,
+operator-facing settings close at hand and leaves the rarer knobs to this
+document.
+
+Use this page for:
+
+- advanced prompt / history / recon settings
+- live-session tuning knobs
+- Grillo, agent, memory, and weather internals
+- path, storage, migration, and debugging overrides
+- interface-specific flags beyond the basic credentials
+
+Best practices
 --------------
-- Keep a `.env` (not checked into git) for environment-specific overrides.
-- Use `.env.example` to show recommended/default values for contributors.
-- Lock down passwords and TLS certs in production and avoid using defaults.
 
-If you want, I can move these entries back into `docker-compose.yml` with
-clear comments and a link to this document, or add CI checks that validate
-expected ports are reachable after a compose up.
+- Keep your real ``.env`` out of version control.
+- Uncomment only the values you want to override.
+- Prefer the WebUI for day-to-day tuning once the system is running.
+- Reserve rarely used path and internal overrides for debugging or container
+  customization.

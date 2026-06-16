@@ -1,8 +1,11 @@
 # plugins/agent_plugin.py
 
 import asyncio
+import importlib
 import json
 import os
+import sys
+from collections.abc import Callable
 from typing import Optional, Dict, Any
 
 from core.ai_plugin_base import AIPluginBase
@@ -82,7 +85,7 @@ def _in_container() -> bool:
 class AgentPlugin(AIPluginBase):
     display_name = "Agent Plugin"
 
-    def __init__(self, notify_fn: Optional[callable] = None):
+    def __init__(self, notify_fn: Optional[Callable[[str], None]] = None):
         # Prefer core.notifier.notify_trainer when available
         if notify_fn:
             self._notify_fn = notify_fn
@@ -119,12 +122,74 @@ class AgentPlugin(AIPluginBase):
         if not self._in_container and self._container_required:
             self._enabled = False
 
+        self._engine: Any | None = None
+        self._attached_engine: str | None = None
+        self._attach_task: asyncio.Task[Any] | None = None
+
         log_info(
             f"[agent] Initialized. in_container={self._in_container} enabled={self._enabled} approval_mode={self._approval_mode}"
         )
 
-    @staticmethod
-    def get_supported_action_types() -> list[str]:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop is not None:
+            self._attach_task = loop.create_task(self._attach_to_active_engine())
+
+    async def _attach_to_active_engine(self) -> None:
+        try:
+            from core.config import get_active_cortex_engine
+            from core.cortex_registry import get_cortex_registry
+
+            engine_name = await get_active_cortex_engine()
+            if not engine_name:
+                return
+
+            registry = get_cortex_registry()
+            engine = None
+            if hasattr(registry, "get_engine"):
+                engine = registry.get_engine(engine_name)
+            elif hasattr(registry, "load_engine"):
+                engine = registry.load_engine(engine_name)
+
+            if engine is None:
+                log_debug(f"[agent] Active engine '{engine_name}' not loaded")
+                return
+
+            attach_fn = getattr(engine, "attach_agent", None)
+            if callable(attach_fn):
+                attach_fn(self)
+            else:
+                setattr(engine, "_agent_plugin", self)
+
+            self._engine = engine
+            self._attached_engine = str(engine_name)
+            log_debug(f"[agent] Attached to engine '{self._attached_engine}'")
+        except Exception as e:
+            log_warning(f"[agent] Failed to attach to active engine: {e}")
+
+    async def _get_conn_ctx(self) -> Any:
+        try:
+            import core as core_package
+
+            db_module = getattr(core_package, "db", None)
+        except Exception:
+            db_module = None
+
+        if db_module is None:
+            db_module = sys.modules.get("core.db")
+        if db_module is None:
+            db_module = importlib.import_module("core.db")
+
+        get_conn_ctx = getattr(db_module, "get_conn_ctx")
+        conn_ctx = get_conn_ctx()
+        if asyncio.iscoroutine(conn_ctx):
+            conn_ctx = await conn_ctx
+        return conn_ctx
+
+    def get_supported_action_types(self) -> list[str]:
         return ["agent_execute", "propose_action", "approve_action", "start_task"]
 
     def get_supported_actions(self) -> Dict[str, Any]:
@@ -211,9 +276,9 @@ class AgentPlugin(AIPluginBase):
     ) -> Optional[int]:
         try:
             import json
-            from core.db import get_conn_ctx
 
-            async with get_conn_ctx() as conn:
+            conn_ctx = await self._get_conn_ctx()
+            async with conn_ctx as conn:
                 async with conn.cursor() as cur:
                     await cur.execute(
                         """
@@ -244,9 +309,8 @@ class AgentPlugin(AIPluginBase):
         if not activity_id:
             return
         try:
-            from core.db import get_conn_ctx
-
-            async with get_conn_ctx() as conn:
+            conn_ctx = await self._get_conn_ctx()
+            async with conn_ctx as conn:
                 async with conn.cursor() as cur:
                     updates = []
                     params = []
@@ -284,9 +348,9 @@ class AgentPlugin(AIPluginBase):
     ) -> Optional[int]:
         try:
             import json
-            from core.db import get_conn_ctx
 
-            async with get_conn_ctx() as conn:
+            conn_ctx = await self._get_conn_ctx()
+            async with conn_ctx as conn:
                 async with conn.cursor() as cur:
                     await cur.execute(
                         """
@@ -342,12 +406,64 @@ class AgentPlugin(AIPluginBase):
                             command, proposer="system", metadata=None
                         )
                         # Mark it approved/executed immediately
-                        await self._update_activity_log(activity_id, status="executed")
-                    await self._insert_action_exec(
-                        activity_id, command, status="executed", result={"output": res}
-                    )
+                        if activity_id is not None:
+                            await self._update_activity_log(
+                                activity_id, status="executed"
+                            )
+                    if activity_id is not None:
+                        await self._insert_action_exec(
+                            activity_id,
+                            command,
+                            status="executed",
+                            result={"output": res},
+                        )
                 except Exception as e:
                     log_warning(f"[agent] Failed to persist execution record: {e}")
+
+                try:
+                    self._notify_fn(f"Agent executed command: {command}\nOutput: {res}")
+                except Exception:
+                    pass
+
+                interface_name = context.get("interface") or context.get(
+                    "interface_name"
+                )
+                if interface_name:
+                    if isinstance(original_message, dict):
+                        chat_id = original_message.get("chat_id")
+                        message_id = original_message.get("message_id")
+                        interface_path = original_message.get("interface_path")
+                    else:
+                        chat_id = getattr(original_message, "chat_id", None)
+                        message_id = getattr(original_message, "message_id", None)
+                        interface_path = getattr(
+                            original_message, "interface_path", None
+                        )
+
+                    try:
+                        from core.auto_response import request_llm_delivery
+
+                        await request_llm_delivery(
+                            action_outputs=[
+                                {
+                                    "type": "agent_execute",
+                                    "command": command,
+                                    "output": str(res),
+                                }
+                            ],
+                            original_context={
+                                "chat_id": chat_id,
+                                "message_id": message_id,
+                                "interface_name": interface_name,
+                                "interface_path": interface_path,
+                            },
+                            action_type="agent_execute",
+                        )
+                    except Exception as e:
+                        log_warning(
+                            f"[agent] Failed to deliver execution output to interface: {e}"
+                        )
+
                 return res
 
             if mode == "always_approve":
@@ -426,9 +542,8 @@ class AgentPlugin(AIPluginBase):
             if proposal_id and not cmd:
                 # Lookup the proposal in DB to find the command
                 try:
-                    from core.db import get_conn_ctx
-
-                    async with get_conn_ctx() as conn:
+                    conn_ctx = await self._get_conn_ctx()
+                    async with conn_ctx as conn:
                         async with conn.cursor() as cur:
                             await cur.execute(
                                 "SELECT command, status FROM agent_activity_log WHERE id=%s",
@@ -465,9 +580,10 @@ class AgentPlugin(AIPluginBase):
                     proposal_id = await self._create_activity_log(
                         cmd, proposer="trainer"
                     )
-                    await self._update_activity_log(
-                        proposal_id, status="approved", trainer_id=trainer_id
-                    )
+                    if proposal_id is not None:
+                        await self._update_activity_log(
+                            proposal_id, status="approved", trainer_id=trainer_id
+                        )
             except Exception as e:
                 log_warning(f"[agent] Failed to update proposal status: {e}")
 
@@ -476,16 +592,33 @@ class AgentPlugin(AIPluginBase):
 
             # Persist execution details and mark executed
             try:
-                await self._insert_action_exec(
-                    proposal_id, cmd, status="executed", result={"output": res}
-                )
-                await self._update_activity_log(
-                    proposal_id, status="executed", result=res
-                )
+                if proposal_id is not None:
+                    await self._insert_action_exec(
+                        proposal_id, cmd, status="executed", result={"output": res}
+                    )
+                    await self._update_activity_log(
+                        proposal_id, status="executed", result=res
+                    )
             except Exception as e:
                 log_warning(f"[agent] Failed to persist approval execution: {e}")
 
             return {"status": "executed", "proposal_id": proposal_id, "output": res}
+
+        if action_type == "start_task":
+            from core.agent_core import get_agent_loop_manager
+
+            engine_name = payload.get("engine") or "manual"
+            input_payload = payload.get("input") or payload.get("input_payload") or {}
+            max_iterations = payload.get("max_iterations")
+
+            manager = get_agent_loop_manager()
+            task_id = await manager.run_loop(
+                engine=engine_name,
+                input_payload=input_payload,
+                context=context or {},
+                max_iterations=max_iterations,
+            )
+            return {"status": "started", "task_id": task_id}
 
         log_warning(f"[agent] Unknown action type: {action_type}")
         return None

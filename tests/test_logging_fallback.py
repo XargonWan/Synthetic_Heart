@@ -4,11 +4,8 @@ import logging
 
 
 def test_logging_fallback_to_stdout(tmp_path, monkeypatch, capsys):
-    # Create a directory that is not writable to simulate bind-mount owned by root
     log_dir = tmp_path / "logs_no_write"
     log_dir.mkdir()
-    # Remove write permissions for current user
-    log_dir.chmod(0o500)
 
     monkeypatch.setenv("LOG_DIR", str(log_dir))
 
@@ -24,6 +21,13 @@ def test_logging_fallback_to_stdout(tmp_path, monkeypatch, capsys):
 
     # Reset logger state to force re-creation
     logging_utils._logger = None
+    synth_logger = logging.getLogger("synth")
+    synth_logger.handlers.clear()
+    monkeypatch.setattr(
+        logging_utils,
+        "TimestampedRotatingFileHandler",
+        lambda *args, **kwargs: (_ for _ in ()).throw(PermissionError("no write")),
+    )
 
     # Call setup_logging; it should not raise even if file handler can't be created
     logger = logging_utils.setup_logging()

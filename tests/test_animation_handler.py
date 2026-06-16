@@ -5,6 +5,7 @@ and coordinate with the WebUI.
 """
 
 import pytest
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 from core.animation_handler import (
     KaradaStateServer,
@@ -85,8 +86,44 @@ async def test_animation_with_multiple_files(animation_handler, mock_webui):
 
     # Should have used at least one of the idle animations
     # (actual animations may vary based on skins available)
-    expected_animations = {"Idle.fbx", "Idle2.fbx", "Happy Idle.fbx", "Look Around.fbx"}
+    expected_animations = {"Idle.fbx", "Idle2.fbx"}
     assert animations_used.issubset(expected_animations)
+
+
+@pytest.mark.asyncio
+async def test_play_animation_fallback_to_idle_reports_actual_state(
+    animation_handler, mock_webui, monkeypatch
+):
+    """If a requested state has no variants, the broadcasted state must match the
+    actual fallback animation folder rather than the original requested state."""
+    session_id = "test_session"
+    mock_ws = AsyncMock()
+    mock_webui.connections[session_id] = mock_ws
+
+    original_get_variants = animation_handler.get_animation_variants
+
+    def fake_get_variants(state_name: str):
+        if state_name == AnimationState.SKIN_CHANGE.value:
+            return {"loop": [], "post": [], "other": []}
+        return original_get_variants(state_name)
+
+    monkeypatch.setattr(animation_handler, "get_animation_variants", fake_get_variants)
+
+    await animation_handler.play_animation(
+        AnimationState.SKIN_CHANGE,
+        session_id=session_id,
+        loop=False,
+    )
+
+    assert animation_handler.current_state == AnimationState.IDLE
+    assert animation_handler.current_animation in {"Idle.fbx", "Idle2.fbx"}
+
+    sent = [c[0][0] for c in mock_ws.send_json.call_args_list]
+    anim_msgs = [m for m in sent if m.get("type") == "vrm_animation"]
+    assert anim_msgs
+    msg = anim_msgs[-1]
+    assert msg["state"] == "idle"
+    assert "/animations/idle/" in msg["file"]
 
 
 @pytest.mark.asyncio
@@ -143,6 +180,53 @@ async def test_stop_animation_multiple_contexts(animation_handler, mock_webui):
 
     # Now should return to Idle
     assert animation_handler.current_state == AnimationState.IDLE
+
+
+@pytest.mark.asyncio
+async def test_stop_current_context_restores_highest_remaining_context(
+    animation_handler, mock_webui, monkeypatch
+):
+    """Stopping the current dominant context should resume the best remaining one."""
+    session_id = "test_session"
+    mock_ws = AsyncMock()
+    mock_webui.connections[session_id] = mock_ws
+
+    def _resolve_without_descriptor(animation_file: str):
+        return animation_file, None
+
+    monkeypatch.setattr(
+        animation_handler,
+        "_resolve_animation_descriptor",
+        _resolve_without_descriptor,
+    )
+    monkeypatch.setattr(
+        animation_handler,
+        "_resolve_animation_descriptor_for_state",
+        lambda animation_file, state_name: _resolve_without_descriptor(animation_file),
+    )
+
+    await animation_handler.play_animation(
+        AnimationState.WRITE,
+        session_id=session_id,
+        context_id="context_write",
+    )
+    await animation_handler.play_animation(
+        AnimationState.THINK,
+        session_id=session_id,
+        context_id="context_think",
+    )
+
+    assert animation_handler.current_state == AnimationState.THINK
+
+    await animation_handler.stop_animation("context_think", session_id)
+
+    assert animation_handler.current_state == AnimationState.WRITE
+    assert animation_handler._current_context_id == "context_write"
+
+    sent = [call.args[0] for call in mock_ws.send_json.call_args_list if call.args]
+    anim_msgs = [payload for payload in sent if payload.get("type") == "vrm_animation"]
+    assert anim_msgs
+    assert anim_msgs[-1]["state"] == "write"
 
 
 @pytest.mark.asyncio
@@ -221,7 +305,7 @@ async def test_get_current_animation(animation_handler, mock_webui):
 
         ah = KaradaStateServer()
         # Ensure search paths include the skins/Rei animations directory
-        ah.set_animation_search_paths([str(ah.SKIN_DEFAULT_ANIMATIONS_DIR)])
+        ah.set_animation_search_paths([ah.SKIN_DEFAULT_ANIMATIONS_DIR])
         variants = ah.get_animation_variants("think")
         # Our Thinking.fbx should be discovered and classified as loop variant
         found = any("Thinking.fbx" == a for a in variants.get("loop", []))
@@ -234,19 +318,19 @@ async def test_vrm_animation_broadcast_on_play():
     connected WebSocket clients (KaradaStateServer architecture)."""
     handler = KaradaStateServer()
 
-    sent_messages: list = []
+    sent_messages: list[dict[str, Any]] = []
 
     class FakeWs:
-        async def send_json(self, data):
+        async def send_json(self, data: dict[str, Any]) -> None:
             sent_messages.append(data)
 
     class FakeWebUI:
-        def __init__(self):
+        def __init__(self) -> None:
             self.connections = {"sess-1": FakeWs()}
 
     fake = FakeWebUI()
-    handler.set_webui(fake)
-    ws_transport = WebSocketTransport(fake.connections)
+    handler.set_webui(cast(Any, fake))
+    ws_transport = WebSocketTransport(cast(Any, fake.connections))
     handler.add_transport(ws_transport)
 
     # Trigger an animation change
@@ -321,5 +405,12 @@ async def test_websocket_message_format(animation_handler, mock_webui):
     assert isinstance(msg["file"], str)
     assert msg["file"].endswith("Thinking.fbx")
     assert "animations/" in msg["file"]
-    assert msg["loop"] is True
+    assert msg["loop"] is False
     assert msg["state"] == "think"
+    assert msg["play_section"] == "intro"
+    assert msg["phase_authoritative"] is True
+    assert msg["frame_range"] == {"start_frame": 0, "end_frame": 70}
+    assert isinstance(msg.get("descriptor"), dict)
+    assert "intro" in msg["descriptor"]
+    assert "loop" in msg["descriptor"]
+    assert "outro" in msg["descriptor"]

@@ -26,12 +26,13 @@ from __future__ import annotations
 import asyncio
 import os
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Iterable, List, Optional, Union
+from typing import Any, Callable, Dict, Iterable, List, Optional, Union, cast
 
 from core.logging_utils import log_debug, log_info, log_warning, log_error
 
 
 ValueType = Union[type, Callable[[str], Any], str]
+PERSONA_CONFIG_KEYS = frozenset({"SYNTH_NAME", "SYNTH_PROFILE", "SYNTH_ALIASES"})
 
 
 class ConfigVar:
@@ -122,6 +123,8 @@ class ConfigDefinition:
     hidden: bool = False
     # If True, the config is read-only in the UI (no edits allowed)
     readonly: bool = False
+    # If False, ignore environment variables for this key and load from DB/default.
+    allow_env_override: bool = True
 
     value: Any = None
     raw_value: Optional[str] = None
@@ -175,6 +178,7 @@ class ConfigRegistry:
         needs_component_reload: bool = False,
         readonly: bool = False,
         hidden: bool = False,
+        allow_env_override: bool = True,
     ) -> Any:
         """Return the typed value for ``key`` or register it if unknown."""
 
@@ -192,6 +196,7 @@ class ConfigRegistry:
             needs_component_reload=needs_component_reload,
             readonly=readonly,
             hidden=hidden,
+            allow_env_override=allow_env_override,
             constraints=constraints,
             getter=getter,
             setter=setter,
@@ -219,6 +224,7 @@ class ConfigRegistry:
         needs_component_reload: bool = False,
         readonly: bool = False,
         hidden: bool = False,
+        allow_env_override: bool = True,
     ) -> ConfigVar:
         """
         Return a ConfigVar that auto-updates when the config changes.
@@ -249,6 +255,7 @@ class ConfigRegistry:
             needs_component_reload=needs_component_reload,
             hidden=hidden,
             readonly=readonly,
+            allow_env_override=allow_env_override,
             constraints=constraints,
             getter=getter,
             setter=setter,
@@ -257,8 +264,26 @@ class ConfigRegistry:
         # Return a ConfigVar that will always fetch the latest value
         return ConfigVar(key, registry=self)
 
-    async def set_value(self, key: str, new_value: Any) -> None:
-        """Persist a new value for ``key`` and notify listeners."""
+    def _queue_pending_persona_update(self, key: str, value: Any) -> None:
+        """Buffer a persona update for best-effort retry when DB writes fail."""
+
+        if key not in PERSONA_CONFIG_KEYS:
+            return
+
+        self._pending_persona_updates[key] = value
+        self._start_pending_persona_worker()
+        log_warning(
+            f"[config] Queued pending persona update for '{key}' after DB persist failure"
+        )
+
+    async def set_value(
+        self, key: str, new_value: Any, *, require_persist: bool = False
+    ) -> None:
+        """Persist a new value for ``key`` and notify listeners.
+
+        When ``require_persist`` is True, DB write failures are surfaced to the
+        caller and the in-memory value is left unchanged.
+        """
 
         definition = self._definitions.get(key)
         if definition is None:
@@ -278,19 +303,29 @@ class ConfigRegistry:
                     f"Invalid value for '{key}': {new_value!r}. Allowed values: {choices}"
                 )
 
-        # If definition has a setter, use it instead of persisting to DB
+        serialized = self._serialize_value(definition, new_value)
+        typed_value = self._convert_value(definition, serialized)
+
+        # If definition has a setter, use it to update runtime state after the
+        # DB write succeeds (or after we explicitly accept a best-effort write).
         if definition.setter is not None:
+            persisted = await self._persist_to_db(definition.key, serialized)
+            if not persisted:
+                if require_persist:
+                    raise RuntimeError(f"Failed to persist configuration '{key}' to DB")
+                self._queue_pending_persona_update(definition.key, typed_value)
+
             try:
-                definition.setter(new_value)
-                definition.value = new_value
-                definition.raw_value = self._serialize_value(definition, new_value)
+                definition.setter(typed_value)
+                definition.value = typed_value
+                definition.raw_value = serialized
                 definition.loaded = True
 
                 log_debug(f"[config] Updated '{key}' via setter")
 
                 for callback in list(definition.listeners):
                     try:
-                        callback(new_value)
+                        callback(typed_value)
                     except Exception as exc:  # pragma: no cover - listener safety
                         log_warning(f"[config] Listener for '{key}' failed: {exc}")
 
@@ -303,10 +338,11 @@ class ConfigRegistry:
                 )
                 raise
 
-        serialized = self._serialize_value(definition, new_value)
-        typed_value = self._convert_value(definition, serialized)
-
-        await self._persist_to_db(definition.key, serialized)
+        persisted = await self._persist_to_db(definition.key, serialized)
+        if not persisted:
+            if require_persist:
+                raise RuntimeError(f"Failed to persist configuration '{key}' to DB")
+            self._queue_pending_persona_update(definition.key, typed_value)
 
         definition.value = typed_value
         definition.raw_value = serialized
@@ -411,7 +447,7 @@ class ConfigRegistry:
     def export_definitions(self) -> List[Dict[str, Any]]:
         """Return all registered definitions with current state for the API."""
         exported: List[Dict[str, Any]] = []
-        for defn in self._definitions.values():
+        for defn in list(self._definitions.values()):
             if not defn.loaded:
                 try:
                     self._load_definition_sync(defn)
@@ -433,7 +469,7 @@ class ConfigRegistry:
                 {
                     "key": defn.key,
                     "label": defn.label,
-                    "description": defn.description,
+                    "description": self._normalize_export_description(defn.description),
                     "value": self._export_value(defn),
                     "default": self._export_default(defn),
                     "group": defn.group,
@@ -455,6 +491,14 @@ class ConfigRegistry:
             exported, key=lambda item: (item["group"], item["component"], item["label"])
         )
 
+    def _normalize_export_description(self, description: Any) -> str:
+        text = " ".join(str(description or "").split())
+        if not text:
+            return ""
+        if not text.endswith("."):
+            text += "."
+        return text
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
@@ -474,12 +518,59 @@ class ConfigRegistry:
         needs_component_reload: bool = False,
         hidden: bool = False,
         readonly: bool = False,
+        allow_env_override: bool = True,
         constraints: Optional[Dict[str, Any]],
         getter: Optional[Callable[[], Any]] = None,
         setter: Optional[Callable[[Any], None]] = None,
     ) -> ConfigDefinition:
         existing = self._definitions.get(key)
         if existing:
+            # Allow later, richer registrations to backfill placeholder metadata
+            # from earlier get_value/get_var calls that used defaults only.
+            can_backfill_placeholder_metadata = (
+                not existing.component
+                or existing.component == "exposed"
+                or (
+                    existing.component == "core"
+                    and (not existing.label or existing.label == key)
+                    and not str(existing.description or "").strip()
+                )
+            )
+            if label and (not existing.label or existing.label == key):
+                existing.label = label
+            if description and not str(existing.description or "").strip():
+                existing.description = description
+            if component and can_backfill_placeholder_metadata:
+                existing.component = component
+            if group and (
+                not existing.group
+                or (existing.group == "core" and can_backfill_placeholder_metadata)
+            ):
+                existing.group = group
+            if value_type is not str and existing.value_type is str:
+                existing.value_type = value_type
+            if default not in (None, "") and existing.default in (None, ""):
+                existing.default = default
+            if advanced:
+                existing.advanced = True
+            if sensitive:
+                existing.sensitive = True
+            if needs_component_reload:
+                existing.needs_component_reload = True
+            if hidden:
+                existing.hidden = True
+            if readonly:
+                existing.readonly = True
+            if constraints and not existing.constraints:
+                existing.constraints = constraints
+            if getter is not None and existing.getter is None:
+                existing.getter = getter
+            if setter is not None and existing.setter is None:
+                existing.setter = setter
+            if tags:
+                merged_tags = set(existing.tags)
+                merged_tags.update(tags)
+                existing.tags = list(merged_tags)
             return existing
 
         definition = ConfigDefinition(
@@ -499,6 +590,7 @@ class ConfigRegistry:
             needs_component_reload=needs_component_reload,
             hidden=hidden,
             readonly=readonly,
+            allow_env_override=allow_env_override,
         )
         self._definitions[key] = definition
         log_debug(f"[config] Registered setting '{key}' (component={component})")
@@ -536,7 +628,11 @@ class ConfigRegistry:
         env_value = os.getenv(definition.key)
         # Treat empty env values as "not set" so DB can take precedence.
         # This is important when env files contain placeholders like KEY=.
-        if env_value is not None and str(env_value).strip() != "":
+        if (
+            definition.allow_env_override
+            and env_value is not None
+            and str(env_value).strip() != ""
+        ):
             definition.env_override = True
             definition.env_value = env_value
             definition.raw_value = env_value
@@ -679,7 +775,7 @@ class ConfigRegistry:
         else:
             loop.create_task(self._persist_to_db(key, value))
 
-    async def _persist_to_db(self, key: str, value: str) -> None:
+    async def _persist_to_db(self, key: str, value: str) -> bool:
         # Persisting config values is best-effort. Failures (DB unavailable,
         # pool exhausted, timeouts) should not raise to callers — instead we
         # log a warning and continue so the Web UI/API remains responsive.
@@ -690,6 +786,8 @@ class ConfigRegistry:
         """
         try:
             try:
+                import core.db as db_module
+
                 from core.db import get_conn_ctx, ensure_core_tables
             except ImportError as e:
                 # Circular import during initialization - skip DB persist
@@ -701,6 +799,7 @@ class ConfigRegistry:
 
             log_debug(f"[config] Ensuring core tables before persisting '{key}'")
             await ensure_core_tables()
+            setattr(db_module, "_db_initialized", True)
 
             log_debug(
                 f"[config] Attempting to acquire DB connection to persist '{key}'"
@@ -772,7 +871,9 @@ class ConfigRegistry:
                             log_debug(
                                 f"[config] Schema error persisting '{key}': {msg}; running ensure_core_tables() and retrying persist"
                             )
-                            await ensure_core_tables()
+                            if not getattr(db_module, "_db_initialized", False):
+                                await ensure_core_tables()
+                                setattr(db_module, "_db_initialized", True)
                             # retry the same persist steps once
                             recreated = False
                             async with conn.cursor() as cur:
@@ -856,9 +957,10 @@ class ConfigRegistry:
                 while self._pending_persona_updates:
                     for k, v in list(self._pending_persona_updates.items()):
                         try:
+                            definition = self._definitions.get(k)
                             serialized = (
-                                self._serialize_value(self._definitions.get(k), v)
-                                if self._definitions.get(k)
+                                self._serialize_value(definition, v)
+                                if definition is not None
                                 else str(v)
                             )
                             ok = await self._persist_to_db(k, serialized)
@@ -905,7 +1007,8 @@ class ConfigRegistry:
             float,
             str,
         ):
-            converted = definition.value_type(value)
+            converter = cast(Callable[[Any], Any], definition.value_type)
+            converted = converter(value)
             return str(converted)
         return str(value)
 
@@ -937,7 +1040,8 @@ class ConfigRegistry:
                 float,
                 str,
             ):
-                return definition.value_type(raw_value)
+                converter = cast(Callable[[str], Any], definition.value_type)
+                return converter(raw_value)
         except Exception as exc:
             # Use print to avoid circular import with logging_utils during initialization
             print(
@@ -1025,6 +1129,7 @@ class ConfigRegistry:
                 "bootstrap" in definition.tags
                 and definition.env_override
                 and definition.loaded
+                and definition.raw_value is not None
             ):
                 try:
                     await self._persist_to_db(definition.key, definition.raw_value)

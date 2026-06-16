@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 
 import pytest
 
@@ -11,7 +11,7 @@ class FakeMessage:
         self.text = text
         self.interface_path = interface_path
         self.message_id = "msg-1"
-        self.date = datetime.utcnow()
+        self.date = datetime.now(timezone.utc)
         self.from_user = type("U", (), {"username": "tester", "full_name": "Test User"})
 
 
@@ -89,9 +89,9 @@ async def test_build_json_prompt_includes_recon_contributions(monkeypatch):
 
     # Recon memories should be merged into top-level memories
     memories = ctx.get("memories", [])
-    assert any(
-        isinstance(m, dict) and m.get("snippet") == "important memory" for m in memories
-    ), "recon memory should appear in top-level memories"
+    assert any(isinstance(m, str) and m == "important memory" for m in memories), (
+        "recon memory should appear in top-level memories"
+    )
 
     # Instructions should include language and tone prefixes
     instr = prompt.get("instructions", "")
@@ -123,10 +123,31 @@ async def test_recon_keyword_normalization(monkeypatch):
 
     PLUGIN_REGISTRY["kw_plugin_test"] = KWPlugin()
 
+    class FakeEngine:
+        async def generate_response(self, messages):
+            return "🕰️ Waiting for manual input."
+
+    class FakeRegistry:
+        def get_engine(self, name):
+            return FakeEngine()
+
+        def load_engine(self, name):
+            return FakeEngine()
+
+    async def fake_get_active_cortex_engine(scope=None):
+        return "fake"
+
+    monkeypatch.setattr(
+        "core.config.get_active_cortex_engine", fake_get_active_cortex_engine
+    )
+    monkeypatch.setattr(
+        "core.cortex_registry.get_cortex_registry", lambda: FakeRegistry()
+    )
+
     import core.recon as recon_mod
 
     # Call gather_recon_contributions with compound keywords
-    contribs = await recon_mod.gather_recon_contributions(
+    await recon_mod.gather_recon_contributions(
         message=None,
         context_memory=None,
         text="test",

@@ -11,7 +11,7 @@ message for LLM processing using the same pattern as other Grillo beats.
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 from typing import List, Optional
 
@@ -225,7 +225,7 @@ class GrilloChatObserverPlugin:
                     f"[grillo_chat_observer] Loaded last_run_ts={self._last_run_ts} from config"
                 )
             else:
-                self._last_run_ts = float(datetime.utcnow().timestamp())
+                self._last_run_ts = float(datetime.now(timezone.utc).timestamp())
                 log_debug(
                     f"[grillo_chat_observer] Initialized last_run_ts={self._last_run_ts}"
                 )
@@ -278,21 +278,23 @@ class GrilloChatObserverPlugin:
 
                 # Ensure last_run_ts initialized
                 if not getattr(self, "_last_run_ts", 0.0):
-                    self._last_run_ts = float(datetime.utcnow().timestamp())
+                    self._last_run_ts = float(datetime.now(timezone.utc).timestamp())
                     log_debug(
                         "[grillo_chat_observer] last_run_ts uninitialized – initializing and skipping first run"
                     )
                     return
 
+                since_dt = datetime.fromtimestamp(self._last_run_ts, tz=timezone.utc)
+
                 rows = await execute_query(
                     """
-                    SELECT COUNT(*) as cnt, MAX(UNIX_TIMESTAMP(timestamp)) as max_ts
+                    SELECT COUNT(*) as cnt, MAX(timestamp) as max_ts
                     FROM chat_history_cache
-                    WHERE UNIX_TIMESTAMP(timestamp) > %s
+                    WHERE timestamp > %s
                       AND COALESCE(sender_id, '') NOT IN (%s, %s)
                       AND COALESCE(sender_name, '') NOT IN (%s, %s)
                     """,
-                    (self._last_run_ts, "self", "synth", "self", "synth"),
+                    (since_dt, "self", "synth", "self", "synth"),
                 )
 
                 cnt = 0
@@ -305,6 +307,18 @@ class GrilloChatObserverPlugin:
                     else:
                         cnt = int(r[0] or 0)
                         max_ts = r[1]
+
+                max_ts_epoch = None
+                if isinstance(max_ts, datetime):
+                    if max_ts.tzinfo is None:
+                        max_ts_epoch = max_ts.replace(tzinfo=timezone.utc).timestamp()
+                    else:
+                        max_ts_epoch = max_ts.astimezone(timezone.utc).timestamp()
+                elif max_ts is not None:
+                    try:
+                        max_ts_epoch = float(max_ts)
+                    except (TypeError, ValueError):
+                        max_ts_epoch = None
 
                 if cnt == 0:
                     log_debug(
@@ -378,7 +392,7 @@ class GrilloChatObserverPlugin:
                     id=-1, username="grillo", full_name="G.R.I.L.L.O."
                 )
                 message.chat = SimpleNamespace(id=-1, type="internal")
-                message.date = datetime.utcnow()
+                message.date = datetime.now(timezone.utc)
 
                 context = {
                     "grillo_beat": True,
@@ -402,10 +416,12 @@ class GrilloChatObserverPlugin:
 
                 # Advance observer last-run to avoid reprocessing the same messages
                 try:
-                    if max_ts:
-                        self._last_run_ts = float(max_ts)
+                    if max_ts_epoch is not None:
+                        self._last_run_ts = max_ts_epoch
                     else:
-                        self._last_run_ts = float(datetime.utcnow().timestamp())
+                        self._last_run_ts = float(
+                            datetime.now(timezone.utc).timestamp()
+                        )
                     log_debug(
                         f"[grillo_chat_observer] Updated last_run_ts to {self._last_run_ts}"
                     )
@@ -459,8 +475,14 @@ class GrilloChatObserverPlugin:
                                 ts_str = last_msg.get("timestamp") or ""
                                 if sender in ("self", "synth") and ts_str:
                                     try:
-                                        ts = datetime.fromisoformat(ts_str)
-                                        age = (datetime.utcnow() - ts).total_seconds()
+                                        ts = datetime.fromisoformat(
+                                            ts_str.replace("Z", "+00:00")
+                                        )
+                                        if ts.tzinfo is None:
+                                            ts = ts.replace(tzinfo=timezone.utc)
+                                        age = (
+                                            datetime.now(timezone.utc) - ts
+                                        ).total_seconds()
                                         if age < self.self_skip_window:
                                             # skip this chat
                                             continue
@@ -542,6 +564,7 @@ class GrilloChatObserverPlugin:
         # Ask the LLM to think like a helpful participant: choose which recent message(s) you'd naturally reply to and propose short, human replies.
         propose_clause = (
             "Think like a helpful human reading these snippets: which message(s) would you naturally reply to, and what would you say? "
+            "Do NOT propose messages that are conceptually duplicate of what already appears in the snippets. "
             "Do NOT address or mention the WebUI or any system/internal labels (for example: 'webui' or 'system'); write as if speaking directly to the human participant(s) in the conversation."
         )
         if self.propose_only:

@@ -20,6 +20,24 @@ def test_ui_helpers_has_no_export():
     )
 
 
+def test_chat_window_typing_indicator_does_not_clear_before_response():
+    p = Path("res/synth_webui/js/chat-window.mjs")
+    assert p.exists(), "chat-window.mjs missing"
+    text = p.read_text(encoding="utf-8")
+    assert "let _pendingSynthResponse = false" in text, (
+        "chat-window.mjs should track pending synth responses before clearing typing indicators"
+    )
+    assert "data && data.type === 'message_ack'" in text, (
+        "chat-window.mjs should handle message_ack events to track pending responses"
+    )
+    assert "if (_pendingSynthResponse) {" in text, (
+        "chat-window.mjs should defer typing indicator removal while a synth response is pending"
+    )
+    assert "_checkProcessingMetaAndMaybeRemoveTypingIndicator" in text, (
+        "chat-window.mjs should verify processing state before removing the typing indicator"
+    )
+
+
 def test_phase_priorities_terminated():
     p = Path("res/synth_webui/js/main.js")
     assert p.exists(), "main.js missing"

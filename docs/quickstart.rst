@@ -16,11 +16,10 @@ This guide outlines the typical steps to run **Synthetic Heart** using Docker. s
 
 
 2. **[OPTIONAL] Environment file setup**
-   Copy ``.env.example`` to ``.env`` and adjust values as needed. Important
-   variables include database credentials for persistent features and
-   ``TRAINER_IDS`` for security. The optional ``NOTIFY_ERRORS_TO_INTERFACES``
-   mapping (e.g. ``telegram_bot:123456``) defines where error notifications
-   are sent.
+   Copy ``.env.example`` to ``.env`` and uncomment only the values you want to
+   override. The example file is intentionally trimmed to the settings most
+   people need on day one. If you need rarer runtime knobs, use
+   ``docs/compose_env_vars.rst`` as the full reference.
    This step is optional as now everything can be done via WebUI later.
 
 
@@ -42,7 +41,8 @@ This guide outlines the typical steps to run **Synthetic Heart** using Docker. s
 
 5. **Configure a Cortex (engine)**
    In the WebUI navigate to **Components** and select the desired Cortex
-   engine (for example: `selenium_gemini` or `gemini_api`).
+   engine (for example: ``selenium_gemini`` or ``gemini_api``).
+
    -  If using a Selenium-driven Cortex (browser adapter), press the
       **Login** button for that engine and complete the provider login flow in
       the browser window that opens.

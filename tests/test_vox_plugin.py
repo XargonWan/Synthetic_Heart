@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import types
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
@@ -35,6 +36,34 @@ def test_vox_registry_unknown_engine_raises() -> None:
     reg = VoxRegistry()
     with pytest.raises(ValueError, match="Unknown engine"):
         reg.load_engine("does_not_exist")
+
+
+def test_active_vox_engine_default_is_kitten() -> None:
+    from core.config_manager import config_registry
+    import plugins.vox_plugin  # noqa: F401
+
+    assert config_registry.get_value("ACTIVE_VOX_ENGINE", None) == "kitten"
+
+
+def test_vox_plugin_is_enabled_tracks_active_engine() -> None:
+    from plugins.vox_plugin import VoxPlugin
+
+    plugin = VoxPlugin.__new__(VoxPlugin)
+    plugin._active_engine_name = "http"
+
+    with patch.object(
+        plugin,
+        "refresh_config",
+        side_effect=lambda: setattr(plugin, "_active_engine_name", "disabled"),
+    ):
+        assert plugin.is_enabled() is False
+
+    with patch.object(
+        plugin,
+        "refresh_config",
+        side_effect=lambda: setattr(plugin, "_active_engine_name", "kitten"),
+    ):
+        assert plugin.is_enabled() is True
 
 
 def test_vox_registry_load_engine_missing_engine_class() -> None:
@@ -323,7 +352,7 @@ async def test_vox_plugin_dispatch_to_various_interfaces(monkeypatch, tmp_path):
     plugin = VoxPlugin.__new__(VoxPlugin)
     # we don't need a real config here; _dispatch doesn't inspect plugin state
 
-    calls: dict[str, dict] = {}
+    calls: dict[str, Any] = {}
 
     class DummyUI:
         async def send_tts_audio(self, session_id, audio_path, text, lipsync_data=None):

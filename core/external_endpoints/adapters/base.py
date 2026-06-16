@@ -31,6 +31,9 @@ class ChatResponse:
 class BaseProtocolAdapter(ABC):
     """Common interface every external endpoint adapter must implement."""
 
+    # Set by bridges to the endpoint name for log tags.
+    _engine_label: str = ""
+
     # ------------------------------------------------------------------
     # Chat / LLM
     # ------------------------------------------------------------------
@@ -88,6 +91,23 @@ class BaseProtocolAdapter(ABC):
         """Transcribe audio bytes to text.
 
         Returns ``None`` if STT is not supported by this adapter.
+        """
+        return None
+
+    # ------------------------------------------------------------------
+    # Vision (Iris)
+    # ------------------------------------------------------------------
+
+    async def describe_image(
+        self,
+        image_bytes: bytes,
+        mime_type: str | None = None,
+        prompt: str | None = None,
+        **kwargs: Any,
+    ) -> str | None:
+        """Analyse image bytes and return a textual description.
+
+        Returns ``None`` if vision analysis is not supported by this adapter.
         """
         return None
 

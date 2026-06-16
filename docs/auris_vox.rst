@@ -244,7 +244,7 @@ Configuration (all WebUI-configurable):
      - Default
      - Description
    * - ``ACTIVE_VOX_ENGINE``
-     - ``http``
+     - ``kitten``
      - Name of the active TTS engine.  Set to ``disabled`` to disable the Vox subsystem.
    * - ``VOX_ENGINE_SETTINGS``
      - ``{}``
@@ -261,7 +261,7 @@ Configuration (all WebUI-configurable):
 
 .. note::
 
-   Legacy ``TTS_*`` config keys (``TTS_ENABLED``, ``TTS_ENDPOINTS``, ``TTS_TIMEOUT_SECONDS``, ``TTS_OUTPUT_DIR``) are still supported by the built-in ``http`` Vox engine for backward compatibility, but the preferred configuration path for new deployments is to register external HTTP TTS servers through the External Endpoints system and map them to ``vox``.
+   A fresh installation uses ``kitten`` as the default ``ACTIVE_VOX_ENGINE``.
 
 WebUI helper endpoints
 ~~~~~~~~~~~~~~~~~~~~~~

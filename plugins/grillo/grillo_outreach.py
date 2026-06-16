@@ -141,18 +141,18 @@ class GrilloOutreachPlugin:
 
     async def _has_recent_activity(self, hours: int = 24) -> bool:
         """Check if there's been user activity in the last N hours."""
+        from datetime import datetime, timedelta, timezone
+
         try:
             from core.db import get_conn_ctx
 
+            cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
             async with get_conn_ctx() as conn:
                 async with conn.cursor() as cur:
                     await cur.execute(
-                        """
-                        SELECT COUNT(*) FROM ai_diary 
-                        WHERE timestamp > DATE_SUB(NOW(), INTERVAL %s HOUR)
-                        AND user_message IS NOT NULL
-                        """,
-                        (hours,),
+                        "SELECT COUNT(*) FROM ai_diary"
+                        " WHERE timestamp > %s AND user_message IS NOT NULL",
+                        (cutoff,),
                     )
                     row = await cur.fetchone()
                     return bool(row and row[0] > 0)
@@ -211,7 +211,7 @@ class GrilloOutreachPlugin:
         """Determine which interface and chat to target for outreach.
 
         Prefers the last active interface/chat the user interacted with.
-        Falls back to configured interfaces if no recent activity found.
+        Falls back to chat_history_cache DB query, then configured IDs.
         """
         allowed_interfaces = [
             i.strip() for i in self.target_interfaces.split(",") if i.strip()
@@ -219,7 +219,13 @@ class GrilloOutreachPlugin:
         if not allowed_interfaces:
             return None, None
 
-        # Try to get the last active chat and its interface
+        def _is_valid_chat_id(value: Optional[str]) -> bool:
+            if value is None:
+                return False
+            normalized = str(value).strip().lower()
+            return normalized not in {"", "-1", "none", "null"}
+
+        # Try to get the last active chat and its interface via chat_path_map
         try:
             import core.recent_chats as recent_chats
 
@@ -240,27 +246,66 @@ class GrilloOutreachPlugin:
                     if len(parts) >= 2:
                         interface_name = parts[0]
                         # Check if this interface is in our allowed list
-                        if interface_name in allowed_interfaces:
+                        chat_id_str = str(chat_id).strip()
+                        if interface_name in allowed_interfaces and _is_valid_chat_id(
+                            chat_id_str
+                        ):
                             log_info(
                                 f"[grillo_outreach] Using last active interface: {interface_name}, chat: {chat_id}"
                             )
-                            return interface_name, str(chat_id)
+                            return interface_name, chat_id_str
 
             log_debug(
-                "[grillo_outreach] No recent chat matched allowed interfaces, using fallback"
+                "[grillo_outreach] No recent chat matched via chat_path_map, trying chat_history_cache"
             )
         except Exception as e:
             log_warning(f"[grillo_outreach] Error getting last active chat: {e}")
 
-        # Fallback: use configured target or trainer's chat
+        # If explicit target chat IDs are configured, prefer them before DB fallback.
+        if self.target_chat_ids:
+            chat_ids = [c.strip() for c in self.target_chat_ids.split(",") if c.strip()]
+            for configured_chat_id in chat_ids:
+                if _is_valid_chat_id(configured_chat_id):
+                    return allowed_interfaces[0], configured_chat_id
+
+        # Fallback A: query chat_history_cache directly for a recent interface_path
+        try:
+            from core.db import get_conn_ctx
+
+            for interface in allowed_interfaces:
+                if "_live_" in interface:
+                    continue
+                async with get_conn_ctx() as conn:
+                    async with conn.cursor() as cur:
+                        await cur.execute(
+                            """
+                            SELECT interface_path FROM chat_history_cache
+                            WHERE interface_path LIKE %s
+                            ORDER BY id DESC LIMIT 1
+                            """,
+                            (f"{interface}/%",),
+                        )
+                        row = await cur.fetchone()
+                        if row:
+                            interface_path: str = row[0]
+                            parts = interface_path.split("/")
+                            if len(parts) >= 2:
+                                resolved_chat_id = parts[1]
+                                if _is_valid_chat_id(resolved_chat_id):
+                                    log_info(
+                                        f"[grillo_outreach] Recovered target from chat_history_cache: {interface_path}"
+                                    )
+                                    return interface, resolved_chat_id
+        except Exception as e:
+            log_warning(
+                f"[grillo_outreach] Error querying chat_history_cache for target: {e}"
+            )
+
+        # Fallback B: use configured target or trainer's chat
         interface = allowed_interfaces[0]  # Use first configured interface
         chat_id: Optional[str] = None
 
-        if self.target_chat_ids:
-            chat_ids = [c.strip() for c in self.target_chat_ids.split(",") if c.strip()]
-            if chat_ids:
-                chat_id = chat_ids[0]  # Use first configured chat
-        else:
+        if not self.target_chat_ids:
             # Try to get trainer's chat ID from config
             try:
                 if "telegram" in interface.lower():
@@ -271,6 +316,9 @@ class GrilloOutreachPlugin:
                     )
             except Exception:
                 pass
+
+        if not _is_valid_chat_id(chat_id):
+            chat_id = None
 
         return interface, chat_id
 
@@ -285,6 +333,7 @@ class GrilloOutreachPlugin:
         # Determine action type based on interface
         action_type = f"message_{interface}"
 
+        interface_path_example = f"{interface}/{chat_id}" if chat_id else interface
         prompt = f"""[G.R.I.L.L.O. OUTREACH]
 
 You feel like reaching out. Based on your recent experiences and thoughts,
@@ -301,10 +350,14 @@ Consider:
 IMPORTANT: Generate a warm, natural message to start a conversation.
 Do NOT be overly formal or robotic. Be genuine and personable.
 
+Return TWO actions:
+- a `{action_type}` message action with the outreach text
+- a `create_personal_diary_entry` action that records why you reached out, with `interaction_summary`, `personal_thought`, and `emotions`
+
 {GRILLO_INSTRUCTIONS}
 
 RESPOND ONLY WITH VALID JSON:
-{{"actions": [{{"type": "{action_type}", "payload": {{"text": "your message here", "chat_id": "{chat_id or "TRAINER_CHAT"}"}}}}], "meta": {{"autonomous": true, "rationale": "Grillo outreach"}}}}
+{{"actions": [{{"type": "{action_type}", "payload": {{"text": "your message here", "interface_path": "{interface_path_example}"}}}}, {{"type": "create_personal_diary_entry", "payload": {{"interaction_summary": "brief summary of this outreach", "personal_thought": "private first-person thought behind the outreach", "emotions": [{{"type": "longing", "intensity": 0.6}}]}}}}], "meta": {{"autonomous": true, "rationale": "Grillo outreach"}}}}
 """
         return prompt
 
@@ -313,6 +366,12 @@ RESPOND ONLY WITH VALID JSON:
         interface, chat_id = await self._get_target_interface_and_chat()
         if not interface:
             log_warning("[grillo_outreach] No target interface configured")
+            return
+        if not chat_id:
+            log_warning(
+                "[grillo_outreach] Could not resolve a target chat_id; "
+                "set GRILLO_OUTREACH_CHAT_IDS or TRAINER_CHAT_ID to enable outreach"
+            )
             return
 
         context = await self._get_context_snippets()
@@ -326,6 +385,12 @@ RESPOND ONLY WITH VALID JSON:
             activity_id = await GrilloPlugin.create_activity_log(
                 beat_type="outreach",
                 prompt_text=prompt,
+                metadata={
+                    "origin": "grillo_outreach",
+                    "target_interface": interface,
+                    "target_chat_id": str(chat_id),
+                    "context_count": len(context),
+                },
             )
             log_info(f"[grillo_outreach] Created activity log {activity_id}")
         except Exception as e:

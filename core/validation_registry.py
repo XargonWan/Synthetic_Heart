@@ -62,9 +62,20 @@ class ValidationRegistry:
         # ignored rather than treated as actions (e.g. "meta", "message").
         self._response_metadata_keys: Set[str] = {
             "meta",
+            "meta.autonomous",
             "metadata",
             "rationale",
             "thoughtSignature",
+            # Model introspection / chain-of-thought keys — never actions
+            "thoughts",
+            "thought",
+            "thinking",
+            "reasoning",
+            "internal_thoughts",
+            "chain_of_thought",
+            # Extra structural keys some models emit alongside actions
+            "brief",
+            "source",
         }
         self._response_metadata_by_component: Dict[str, Set[str]] = {}
         # Alias mapping: alias_name -> resolver(payload) -> Optional[canonical_action_type]

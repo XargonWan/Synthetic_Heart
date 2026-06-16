@@ -1,0 +1,17 @@
+{
+  "provider_id": "custom",
+  "display_name": "Custom Endpoint",
+  "description": "Connect any OpenAI-compatible API: self-hosted vLLM, LM Studio, LocalAI, or any other custom service",
+  "icon": "custom",
+  "protocol": "openai",
+  "base_url": "http://localhost:8000",
+  "base_url_locked": false,
+  "requires_api_key": false,
+  "api_key_placeholder": "(optional)",
+  "api_key_hint": "Provide an API key if your service requires one.",
+  "default_capabilities": { "cortex": true, "vox": false, "auris": false, "live": false, "vision": false },
+  "suggested_name": "",
+  "suggested_label": "",
+  "extra_config": {},
+  "sort_order": 999
+}

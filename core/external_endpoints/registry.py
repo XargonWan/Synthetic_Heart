@@ -27,7 +27,7 @@ CREATE TABLE IF NOT EXISTS external_endpoints (
     protocol VARCHAR(50) NOT NULL DEFAULT 'openai',
     base_url VARCHAR(1024) NOT NULL DEFAULT '',
     api_key_enc TEXT,
-    enabled BOOLEAN NOT NULL DEFAULT 1,
+    enabled BOOLEAN NOT NULL DEFAULT TRUE,
     capabilities JSON,
     subsystem_map JSON,
     available_models JSON,
@@ -55,8 +55,21 @@ async def _ensure_table() -> None:
             pass
 
 
-def _row_to_endpoint(row: tuple, description: Any) -> ExternalEndpoint:
-    """Convert a DB row tuple + cursor description to ExternalEndpoint."""
+def _row_to_endpoint(row: Any, description: Any | None = None) -> ExternalEndpoint:
+    """Convert tuple, record, or dict DB rows to ExternalEndpoint."""
+    if isinstance(row, dict):
+        return ExternalEndpoint.from_row(row)
+
+    try:
+        row_dict = dict(row)
+        if row_dict:
+            return ExternalEndpoint.from_row(row_dict)
+    except Exception:
+        pass
+
+    if description is None:
+        raise ValueError("Cursor description is required for tuple endpoint rows")
+
     columns = [d[0] for d in description]
     row_dict = dict(zip(columns, row))
     return ExternalEndpoint.from_row(row_dict)
@@ -85,6 +98,7 @@ class ExternalEndpointRegistry:
         api_key: str = "",
         display_label: str = "",
         extra_config: dict[str, Any] | None = None,
+        subsystem_map: dict[str, bool] | None = None,
     ) -> ExternalEndpoint:
         """Create a new external endpoint and persist it to the DB."""
         from core.db import get_conn_ctx
@@ -99,6 +113,7 @@ class ExternalEndpointRegistry:
         api_key_enc = encrypt_api_key(api_key) if api_key else None
         label = display_label or name
         extra = json.dumps(extra_config or {})
+        smap = json.dumps({k: bool(v) for k, v in (subsystem_map or {}).items()})
 
         async with get_conn_ctx() as conn:
             async with conn.cursor() as cur:
@@ -108,24 +123,24 @@ class ExternalEndpointRegistry:
                       (name, display_label, protocol, base_url, api_key_enc,
                        enabled, capabilities, subsystem_map, available_models,
                        probe_status, extra_config)
-                    VALUES (%s, %s, %s, %s, %s, 1,
-                            '{}', '{}', '[]', 'never', %s)
+                    VALUES (%s, %s, %s, %s, %s, TRUE,
+                            '{}', %s, '[]', 'never', %s)
                     """,
-                    (name, label, proto.value, base_url, api_key_enc, extra),
+                    (name, label, proto.value, base_url, api_key_enc, smap, extra),
                 )
-                row_id = cur.lastrowid
             try:
                 await conn.commit()
             except Exception:
                 pass
 
-        ep = await self.get_endpoint(row_id)
+        # Fetch by name (UNIQUE) — lastrowid is unreliable on asyncpg/Postgres
+        ep = await self.get_endpoint(name)
         if ep is None:
             raise RuntimeError(
                 f"[ext_endpoints] Failed to retrieve inserted endpoint '{name}'"
             )
 
-        log_info(f"[ext_endpoints] Added endpoint '{name}' (id={row_id})")
+        log_info(f"[ext_endpoints] Added endpoint '{name}' (id={ep.id})")
         return ep
 
     async def update_endpoint(
@@ -146,6 +161,7 @@ class ExternalEndpointRegistry:
             "api_key",
             "enabled",
             "extra_config",
+            "subsystem_map",
         }
         set_clauses: list[str] = []
         params: list[Any] = []
@@ -156,9 +172,12 @@ class ExternalEndpointRegistry:
             if key == "api_key":
                 set_clauses.append("api_key_enc = %s")
                 params.append(encrypt_api_key(value) if value else None)
-            elif key == "extra_config":
-                set_clauses.append("extra_config = %s")
-                params.append(json.dumps(value))
+            elif key in ("extra_config", "subsystem_map"):
+                set_clauses.append(f"{key} = %s")
+                if isinstance(value, dict):
+                    params.append(json.dumps(value))
+                else:
+                    params.append(json.dumps({}))
             elif key == "protocol":
                 try:
                     proto = EndpointProtocol(value).value
@@ -174,7 +193,7 @@ class ExternalEndpointRegistry:
             return await self.get_endpoint(endpoint_id)
 
         set_clauses.append("updated_at = %s")
-        params.append(datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"))
+        params.append(datetime.now(timezone.utc))
         params.append(endpoint_id)
 
         sql = f"UPDATE external_endpoints SET {', '.join(set_clauses)} WHERE id = %s"
@@ -236,7 +255,7 @@ class ExternalEndpointRegistry:
                 row = await cur.fetchone()
                 if row is None:
                     return None
-                return _row_to_endpoint(row, cur.description)
+                return _row_to_endpoint(row, getattr(cur, "description", None))
 
     async def get_endpoint_by_name(self, name: str) -> ExternalEndpoint | None:
         """Fetch a single endpoint by its unique name string."""
@@ -250,7 +269,7 @@ class ExternalEndpointRegistry:
 
         await self._ensure()
 
-        where = "WHERE enabled = 1" if enabled_only else ""
+        where = "WHERE enabled" if enabled_only else ""
         async with get_conn_ctx() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
@@ -259,7 +278,7 @@ class ExternalEndpointRegistry:
                 rows = await cur.fetchall()
                 if not rows:
                     return []
-                desc = cur.description
+                desc = getattr(cur, "description", None)
                 return [_row_to_endpoint(r, desc) for r in rows]
 
     async def set_subsystem_map(
@@ -277,7 +296,7 @@ class ExternalEndpointRegistry:
                     "updated_at = %s WHERE id = %s",
                     (
                         json.dumps(mapping),
-                        datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+                        datetime.now(timezone.utc),
                         endpoint_id,
                     ),
                 )
@@ -303,7 +322,7 @@ class ExternalEndpointRegistry:
 
         await self._ensure()
 
-        now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        now = datetime.now(timezone.utc)
         async with get_conn_ctx() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
@@ -329,7 +348,77 @@ class ExternalEndpointRegistry:
 
         ep = await self.get_endpoint(endpoint_id)
         if ep is not None:
+            # Auto-select the first available model when none has been set yet
+            if status == "success" and models and ep.default_model is None:
+                await self._auto_set_default_model(endpoint_id, models[0])
+                ep = await self.get_endpoint(endpoint_id)
+                if ep is None:
+                    return
             await self._sync_registries(ep)
+
+            # Auto-activate as cortex engine when still on the default "manual"
+            if status == "success" and ep.effective_subsystem_map().get("cortex"):
+                await self._maybe_auto_activate_cortex(ep.engine_name())
+
+    async def _auto_set_default_model(self, endpoint_id: int, model: str) -> None:
+        """Persist an automatically selected default model (probe post-processing)."""
+        from core.db import get_conn_ctx
+
+        async with get_conn_ctx() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "UPDATE external_endpoints SET default_model = %s, "
+                    "updated_at = %s WHERE id = %s AND default_model IS NULL",
+                    (
+                        model,
+                        datetime.now(timezone.utc),
+                        endpoint_id,
+                    ),
+                )
+            try:
+                await conn.commit()
+            except Exception:
+                pass
+        log_info(
+            f"[ext_endpoints] Auto-selected default_model='{model}' for id={endpoint_id}"
+        )
+
+    async def _maybe_auto_activate_cortex(self, engine_name: str) -> None:
+        """Auto-switch ``BASE_CORTEX`` to *engine_name* after a successful probe.
+
+        Switches when the current cortex engine is a built-in engine (not an
+        external endpoint).  If the user already selected a *different* external
+        endpoint, their choice is respected and no switch happens.
+        """
+        from core.config import config_registry
+
+        current = config_registry.get_value("BASE_CORTEX", "")
+        if current == engine_name:
+            return  # already active
+
+        # If current BASE_CORTEX is another external endpoint, respect that choice.
+        if current:
+            try:
+                endpoints = await self.list_endpoints(enabled_only=True)
+                external_names = {ep.engine_name() for ep in endpoints}
+                if current in external_names:
+                    return
+            except Exception:
+                pass
+
+        try:
+            from core.config import switch_active_cortex_engine
+
+            await switch_active_cortex_engine(engine_name, use_hot_swap=True)
+            log_info(
+                f"[ext_endpoints] Auto-activated '{engine_name}' as cortex engine "
+                f"(was '{current or '<empty>'}')"
+            )
+        except Exception as exc:
+            log_warning(
+                f"[ext_endpoints] Failed to auto-activate '{engine_name}' "
+                f"as cortex: {exc}"
+            )
 
     async def set_default_model(self, endpoint_id: int, model: str) -> None:
         """Set the active model for an endpoint."""
@@ -344,7 +433,7 @@ class ExternalEndpointRegistry:
                     "updated_at = %s WHERE id = %s",
                     (
                         model or None,
-                        datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+                        datetime.now(timezone.utc),
                         endpoint_id,
                     ),
                 )
@@ -471,12 +560,36 @@ class ExternalEndpointRegistry:
                     f"[ext_endpoints] Live registration failed for '{ep.name}': {exc}"
                 )
 
+        if effective.get("vision"):
+            try:
+                from core.external_endpoints.bridges.iris_bridge import (
+                    ExternalIrisEngine,
+                )
+                from core.iris_registry import IRIS_REGISTRY
+
+                iris_bridge = ExternalIrisEngine(ep, adapter)
+                iris_caps = {
+                    "vision": bool(effective.get("vision")),
+                }
+                IRIS_REGISTRY.register_instance(
+                    engine_name,
+                    iris_bridge,
+                    label=label,
+                    capabilities=iris_caps,
+                )
+                log_info(f"[ext_endpoints] '{ep.name}' registered as Iris engine")
+            except Exception as exc:
+                log_warning(
+                    f"[ext_endpoints] Iris registration failed for '{ep.name}': {exc}"
+                )
+
     def _unregister_from_all(self, engine_name: str) -> None:
         """Remove an engine from all subsystem registries."""
         _remove_from_cortex(engine_name)
         _remove_from_vox(engine_name)
         _remove_from_auris(engine_name)
         _remove_from_live(engine_name)
+        _remove_from_iris(engine_name)
 
 
 def _remove_from_cortex(name: str) -> None:
@@ -511,6 +624,15 @@ def _remove_from_live(name: str) -> None:
         from core.live_registry import LIVE_REGISTRY
 
         LIVE_REGISTRY.unregister_engine(name)
+    except Exception:
+        pass
+
+
+def _remove_from_iris(name: str) -> None:
+    try:
+        from core.iris_registry import IRIS_REGISTRY
+
+        IRIS_REGISTRY.unregister_engine(name)
     except Exception:
         pass
 

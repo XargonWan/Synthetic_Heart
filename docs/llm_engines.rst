@@ -179,7 +179,7 @@ The ``selenium_chatgpt`` engine controls a real ChatGPT browser session using th
 
 - **Robust Response Extraction**: Multiple CSS selectors with fallback logic
 - **Automatic Choice Selection**: Handles ChatGPT's multiple response options
-- **Large Prompt Support**: Complete JSON prompts up to 128,000 characters
+- **Large Prompt Support**: Large renderer-built prompts and compatibility fallback payloads up to 128,000 characters
 - **Error Recovery**: Graceful handling of network issues and browser problems
 
 Setup Steps:

@@ -10,9 +10,9 @@ def _assemble_for_skin(pm, skin_name):
     return pj, profile
 
 
-def test_rekku_profile_contains_parts():
+def test_riko_profile_contains_parts():
     pm = persona_manager.PersonaManager(config={})
-    pj, profile = _assemble_for_skin(pm, "Rekku")
+    pj, profile = _assemble_for_skin(pm, "Riko")
     # Base template must be present
     base = persona_manager.SYNTH_BASE_PROFILE_TEMPLATE.format(
         name=pj.get("name", "SyntH")
@@ -37,7 +37,7 @@ def test_other_skins_profile_contains_parts(skin):
 
 def test_profile_mentions_agency():
     pm = persona_manager.PersonaManager(config={})
-    pj, profile = _assemble_for_skin(pm, "Rekku")
+    pj, profile = _assemble_for_skin(pm, "Riko")
     assert ("agency" in profile.lower()) or ("autonom" in profile.lower())
 
 
@@ -51,5 +51,5 @@ def test_profile_prohibits_canned_assistant_phrases():
     assert "Do NOT use canned" in persona_manager.SYNTH_BASE_PROFILE_TEMPLATE
     # Assembled profile should therefore include the prohibition when using the base template
     pm = persona_manager.PersonaManager(config={})
-    pj, profile = _assemble_for_skin(pm, "Rekku")
+    pj, profile = _assemble_for_skin(pm, "Riko")
     assert "canned" in profile.lower()

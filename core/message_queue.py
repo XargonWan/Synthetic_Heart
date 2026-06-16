@@ -1,9 +1,12 @@
 import asyncio
+from dataclasses import dataclass
 import inspect
 import time
 import queue as _thread_queue
 import heapq
+import re
 from datetime import datetime
+from typing import cast
 import traceback
 from types import SimpleNamespace
 
@@ -29,16 +32,109 @@ LOW_PRIORITY = (
     2  # For autonomous beats (G.R.I.L.L.O.) - processed only when queue is idle
 )
 
-_queue: asyncio.PriorityQueue = asyncio.PriorityQueue()
-_lock = asyncio.Lock()
+_queue: asyncio.PriorityQueue | None = None
+_queue_loop: asyncio.AbstractEventLoop | None = None
+_lock: asyncio.Lock | None = None
+_lock_loop: asyncio.AbstractEventLoop | None = None
 _consumer_task: asyncio.Task | None = None
 _counter = 0  # Monotonic counter to prevent dict comparison when priorities are equal
+
+
+@dataclass(slots=True)
+class _BackgroundTaskEntry:
+    task: asyncio.Task
+    cancel_on_user_message: bool = True
+
 
 # Track running LOW_PRIORITY background tasks by interface_path so they can be
 # cancelled when a higher-priority (user) message arrives for the same chat.
 # This prevents duplicate responses when a grillo outreach beat and a user
 # message target the same interface_path concurrently.
-_bg_tasks: dict[str, asyncio.Task] = {}
+_bg_tasks: dict[str, _BackgroundTaskEntry] = {}
+
+_GRILLO_ACTIVITY_MESSAGE_ID_RE = re.compile(r"^grillo_[a-z_]+_(\d+)$")
+
+
+def _should_cancel_low_priority_on_user_message(context: object) -> bool:
+    if not isinstance(context, dict):
+        return True
+    context_dict = cast(dict[str, object], context)
+    return not (
+        bool(context_dict.get("grillo_beat"))
+        and context_dict.get("beat_type") == "outreach"
+    )
+
+
+def _extract_grillo_activity_log_id(message: object) -> int | None:
+    """Recover a Grillo activity id from a synthetic message id when needed."""
+    message_id = getattr(message, "message_id", None)
+    if not isinstance(message_id, str):
+        return None
+    match = _GRILLO_ACTIVITY_MESSAGE_ID_RE.match(message_id.strip())
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except (TypeError, ValueError):
+        return None
+
+
+def _get_queue() -> asyncio.PriorityQueue:
+    global _queue, _queue_loop
+    try:
+        current_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        if _queue is None:
+            raise RuntimeError(
+                "[QUEUE] Cannot create message queue without a running event loop"
+            )
+        return _queue
+
+    if _queue is None:
+        _queue = asyncio.PriorityQueue()
+        _queue_loop = current_loop
+        return _queue
+
+    if _queue_loop is not current_loop:
+        old_items = list(_queue._queue)
+        log_warning(
+            "[QUEUE] Existing queue is bound to a different event loop; "
+            "recreating queue on the current loop"
+        )
+        _queue = asyncio.PriorityQueue()
+        _queue_loop = current_loop
+        if old_items:
+            _queue._queue.extend(old_items)
+            heapq.heapify(_queue._queue)
+
+    return _queue
+
+
+def _get_lock() -> asyncio.Lock:
+    global _lock, _lock_loop
+    try:
+        current_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        if _lock is None:
+            raise RuntimeError(
+                "[QUEUE] Cannot create lock without a running event loop"
+            )
+        return _lock
+
+    if _lock is None:
+        _lock = asyncio.Lock()
+        _lock_loop = current_loop
+        return _lock
+
+    if _lock_loop is not current_loop:
+        log_warning(
+            "[QUEUE] Existing lock is bound to a different event loop; "
+            "recreating lock on the current loop"
+        )
+        _lock = asyncio.Lock()
+        _lock_loop = current_loop
+
+    return _lock
 
 
 class MessageQueue:
@@ -59,7 +155,7 @@ async def _delayed_put(item: dict, delay: float) -> None:
     await asyncio.sleep(delay)
     priority = HIGH_PRIORITY if item.get("priority") else NORMAL_PRIORITY
     _counter += 1
-    await _queue.put((priority, _counter, item))
+    await _get_queue().put((priority, _counter, item))
 
 
 async def enqueue(
@@ -71,6 +167,8 @@ async def enqueue(
     interface_id: str = None,
     skip_mention_check: bool = False,
     original_message=None,
+    response_future: asyncio.Future | None = None,
+    media_future: asyncio.Future | None = None,
 ) -> None:
     """Enqueue a message for serialized processing with rate limiting.
 
@@ -83,6 +181,7 @@ async def enqueue(
         interface_id: The interface identifier (e.g., 'webui', 'interface_name')
         skip_mention_check: If True, skip is_message_for_bot check (for 1:1 interfaces like ollama, webui)
         original_message: The original message object from the interface (for reactions)
+        response_future: Optional Future that will be completed with the processing result or exception.
     """
     # Use centralized context manager if context_memory not provided
     if context_memory is None:
@@ -192,6 +291,8 @@ async def enqueue(
                 log_debug("[QUEUE] DEBUG: Reason: multiple_humans")
             else:
                 log_debug(f"[QUEUE] DEBUG: Reason: {reason or 'not directed to bot'}")
+            if response_future is not None and not response_future.done():
+                response_future.set_result(None)
             return
 
         log_debug("[QUEUE] DEBUG: Message is directed to bot - continuing processing")
@@ -238,6 +339,8 @@ async def enqueue(
 
     if not is_trainer and await is_user_blocked(user_id):
         log_debug(f"[QUEUE] DEBUG: User {user_id} is blocked - ignoring message")
+        if response_future is not None and not response_future.done():
+            response_future.set_result(None)
         return
 
     log_debug(
@@ -247,6 +350,8 @@ async def enqueue(
     plugin = plugin_instance.get_plugin()
     if not plugin:
         log_error("[QUEUE] No active plugin")
+        if response_future is not None and not response_future.done():
+            response_future.set_result(None)
         return
 
     try:
@@ -427,18 +532,21 @@ async def enqueue(
         "chat_id": chat_id,
         "thread_id": thread_id,
         "interface": interface,
+        "interface_path": getattr(message, "interface_path", None),
         "chat_name": chat_name,
         "message_thread_name": message_thread_name,
         "timestamp": time.time(),
         "context": context_memory,
         "priority": priority,
         "history_scope": history_scope,
+        "response_future": response_future,
+        "media_future": media_future,
     }
 
     global _counter
     priority_val = HIGH_PRIORITY if priority else NORMAL_PRIORITY
     _counter += 1
-    await _queue.put((priority_val, _counter, item))
+    await _get_queue().put((priority_val, _counter, item))
     log_debug(f"[QUEUE] Message successfully put in queue with priority {priority_val}")
 
     if priority:
@@ -451,6 +559,40 @@ async def enqueue(
             f"[QUEUE] Regular message enqueued from {interface} chat {chat_id}"
             f" thread {thread_id} by user {user_id}"
         )
+
+
+async def enqueue_and_wait(
+    bot,
+    message,
+    context_memory=None,
+    history_scope: str | None = None,
+    priority: bool = False,
+    interface_id: str = None,
+    skip_mention_check: bool = False,
+    original_message=None,
+    timeout: float | None = None,
+):
+    """Enqueue a message and wait for its processing result.
+
+    This is useful for HTTP-like interfaces that need an immediate response
+    from the core pipeline instead of purely asynchronous queue delivery.
+    """
+    loop = asyncio.get_running_loop()
+    response_future = loop.create_future()
+    await enqueue(
+        bot=bot,
+        message=message,
+        context_memory=context_memory,
+        history_scope=history_scope,
+        priority=priority,
+        interface_id=interface_id,
+        skip_mention_check=skip_mention_check,
+        original_message=original_message,
+        response_future=response_future,
+    )
+    if timeout is not None:
+        return await asyncio.wait_for(response_future, timeout=timeout)
+    return await response_future
 
 
 async def enqueue_low_priority(
@@ -529,7 +671,7 @@ async def enqueue_low_priority(
     global _counter
     _counter += 1
     # Use explicit LOW_PRIORITY value
-    await _queue.put((LOW_PRIORITY, _counter, item))
+    await _get_queue().put((LOW_PRIORITY, _counter, item))
     log_debug(
         f"[QUEUE] Low-priority message enqueued from {item['interface']} chat {chat_id} thread {thread_id}"
     )
@@ -550,7 +692,7 @@ async def compact_similar_messages(first: dict, limit: int = 5) -> list:
         if mid:
             seen_ids.add(mid)
 
-    queue_items = list(_queue._queue)
+    queue_items = list(_get_queue()._queue)
     dirty = False
     for item_tuple in queue_items:
         if len(batch) >= limit:
@@ -570,7 +712,7 @@ async def compact_similar_messages(first: dict, limit: int = 5) -> list:
                 mid = getattr(msg, "message_id", None)
                 if mid and mid in seen_ids:
                     try:
-                        _queue._queue.remove(item_tuple)
+                        _get_queue()._queue.remove(item_tuple)
                         dirty = True
                     except ValueError:
                         pass
@@ -579,14 +721,14 @@ async def compact_similar_messages(first: dict, limit: int = 5) -> list:
                 if mid:
                     seen_ids.add(mid)
             try:
-                _queue._queue.remove(item_tuple)
+                _get_queue()._queue.remove(item_tuple)
                 dirty = True
                 batch.append(item)
             except ValueError:
                 pass
 
     if dirty:
-        heapq.heapify(_queue._queue)
+        heapq.heapify(_get_queue()._queue)
 
     batch.sort(key=lambda x: x["timestamp"])
 
@@ -601,12 +743,37 @@ async def _consumer_loop() -> None:
     log_info("[QUEUE] Consumer loop started")
     while True:
         try:
-            priority, counter, item = await _queue.get()
+            priority, counter, item = await _get_queue().get()
             log_debug(
                 f"[QUEUE] Dequeued message from chat {item.get('chat_id')} (priority={priority}, counter={counter})"
             )
 
-            async with _lock:
+            # If this item carries a media_future, media processing (Auris/Iris/download)
+            # is still in progress in handle_media_live. Block here until it resolves so
+            # the consumer slot is occupied at NORMAL_PRIORITY and no LOW_PRIORITY
+            # (Grillo) item can be extracted and started concurrently.
+            _media_future: asyncio.Future | None = item.get("media_future")
+            if _media_future is not None:
+                try:
+                    _resolved_msg = await asyncio.wait_for(_media_future, timeout=120.0)
+                    item["message"] = _resolved_msg
+                except asyncio.TimeoutError:
+                    log_warning(
+                        f"[QUEUE] media_future timed out (120 s) for chat {item.get('chat_id')}; discarding item"
+                    )
+                    continue
+                except asyncio.CancelledError:
+                    log_warning(
+                        f"[QUEUE] media_future was cancelled for chat {item.get('chat_id')}; discarding item"
+                    )
+                    continue
+                except Exception as _mf_exc:
+                    log_warning(
+                        f"[QUEUE] media_future raised {_mf_exc!r} for chat {item.get('chat_id')}; discarding item"
+                    )
+                    continue
+
+            async with _get_lock():
                 batch = await compact_similar_messages(item)
                 final = batch[0]
                 if len(batch) > 1 and final.get("message"):
@@ -672,8 +839,30 @@ async def _consumer_loop() -> None:
 
             plugin = plugin_instance.get_plugin()
             if not plugin:
-                log_error("[QUEUE] No active plugin when dispatching")
-                continue
+                # For grillo internal beats, attempt a one-time auto-load from config
+                # before giving up — beats fire on a timer and must not be silently dropped.
+                _is_grillo = final.get("interface") == "grillo" or (
+                    isinstance(final.get("context"), dict)
+                    and final["context"].get("grillo_beat")
+                )
+                if _is_grillo:
+                    try:
+                        from core.config import get_active_cortex_engine as _gace
+
+                        _engine_name = await _gace(scope="base")
+                        await plugin_instance.load_plugin(
+                            _engine_name, ensure_started=True
+                        )
+                        plugin = plugin_instance.get_plugin()
+                        if plugin:
+                            log_info(
+                                f"[QUEUE] Auto-loaded engine '{_engine_name}' for grillo beat"
+                            )
+                    except Exception as _e:
+                        log_warning(f"[QUEUE] Auto-load for grillo beat failed: {_e}")
+                if not plugin:
+                    log_error("[QUEUE] No active plugin when dispatching")
+                    continue
 
             try:
                 max_messages, window_seconds, trainer_fraction = plugin.get_rate_limit()
@@ -773,15 +962,28 @@ async def _consumer_loop() -> None:
                     # Create interface_path and add to context
                     from core.interface_path_utils import build_interface_path
 
-                    interface_path = build_interface_path(
-                        interface_id,
-                        str(chat_id),
-                        str(thread_id) if thread_id else None,
+                    interface_path = final.get("interface_path") or getattr(
+                        final.get("message"), "interface_path", None
                     )
+                    if not interface_path:
+                        interface_path = build_interface_path(
+                            interface_id,
+                            str(chat_id),
+                            str(thread_id) if thread_id else None,
+                        )
 
                     # Add interface_path to context dict so prompt_engine can access it
                     context = final.get("context", {})
                     if isinstance(context, dict):
+                        if not context.get("activity_log_id"):
+                            recovered_activity_log_id = _extract_grillo_activity_log_id(
+                                final.get("message")
+                            )
+                            if recovered_activity_log_id is not None:
+                                context["activity_log_id"] = recovered_activity_log_id
+                                context["grillo_activity_log_id"] = (
+                                    recovered_activity_log_id
+                                )
                         context["interface_path"] = interface_path
                         context["thread_id"] = thread_id
                         # Propagate trainer flag so plugin_instance can route
@@ -809,6 +1011,15 @@ async def _consumer_loop() -> None:
                             context["request_tts"] = True
                         else:
                             context.pop("request_tts", None)
+
+                        # Propagate voice channel presence so the prompt engine can
+                        # inform the LLM that the sender is in a voice channel — this
+                        # lets the model decide to issue join_voice_discord.
+                        _vc_id = getattr(_queued_msg, "voice_channel_id", None)
+                        if _vc_id:
+                            context["voice_channel_id"] = str(_vc_id)
+                        else:
+                            context.pop("voice_channel_id", None)
 
                         # Propagate trainer flag so plugin_instance can route
                         # to TRAINER_CORTEX when a scope override is configured.
@@ -1010,6 +1221,48 @@ async def _consumer_loop() -> None:
                             )
 
                     try:
+                        # Cancel any running LOW_PRIORITY background task for the
+                        # same interface_path IMMEDIATELY — before any event-loop
+                        # yields — so the Grillo task cannot make further progress
+                        # (e.g. write to chat history) between now and when we
+                        # actually start processing the user message.
+                        _existing_bg = _bg_tasks.get(interface_path)
+                        if _existing_bg is not None and _existing_bg.task.done():
+                            _bg_tasks.pop(interface_path, None)
+                            _existing_bg = None
+                        if (
+                            _existing_bg is not None
+                            and _existing_bg.cancel_on_user_message
+                            and not _existing_bg.task.done()
+                        ):
+                            _bg_tasks.pop(interface_path, None)
+                            _existing_bg.task.cancel()
+                            log_info(
+                                f"[QUEUE] Cancelled LOW_PRIORITY background task for {interface_path} "
+                                f"(superseded by incoming user message)"
+                            )
+
+                        # Also cancel any Grillo-internal background beats (keyed as
+                        # "grillo/…"). These run under a different interface_path but
+                        # share the event loop and can interleave between Iris/Auris
+                        # analysis and LLM prompt construction inside
+                        # handle_incoming_message. Direct user requests always
+                        # take priority over background Grillo beats.
+                        for _gk in [
+                            k for k in list(_bg_tasks) if k.startswith("grillo/")
+                        ]:
+                            _gt = _bg_tasks.get(_gk)
+                            if _gt is not None and _gt.task.done():
+                                _bg_tasks.pop(_gk, None)
+                                _gt = None
+                            if _gt is not None and not _gt.task.done():
+                                _bg_tasks.pop(_gk, None)
+                                _gt.task.cancel()
+                                log_info(
+                                    f"[QUEUE] Cancelled Grillo internal beat {_gk} "
+                                    f"(user message arrived for {interface_path})"
+                                )
+
                         # Ensure the message object has normalized user fields and date
                         try:
                             ensure_message_user_fields(final.get("message"))
@@ -1028,21 +1281,6 @@ async def _consumer_loop() -> None:
                             _resolve_generation_animation_state("start")
                         )
 
-                        # Cancel any running LOW_PRIORITY background task for the
-                        # same interface_path.  This prevents duplicate responses
-                        # when a grillo outreach beat races against a user message
-                        # for the same chat — the outreach prompt includes chat
-                        # history and the LLM would otherwise respond to the user's
-                        # message, producing a duplicate alongside the trainer
-                        # engine's proper reply.
-                        _existing_bg = _bg_tasks.pop(interface_path, None)
-                        if _existing_bg is not None and not _existing_bg.done():
-                            _existing_bg.cancel()
-                            log_info(
-                                f"[QUEUE] Cancelled LOW_PRIORITY background task for {interface_path} "
-                                f"(superseded by incoming user message)"
-                            )
-
                         # Selenium-based LLMs manage browser state and cannot be safely
                         # cancelled mid-flight. All other engines (HTTP-based Gemini, OpenAI, …)
                         # support asyncio cancellation and should be stopped on timeout so they
@@ -1060,6 +1298,7 @@ async def _consumer_loop() -> None:
                                 final.get("interface"),
                             )
                         )
+                        response_future = final.get("response_future")
                         log_debug(
                             f"[QUEUE] Dispatched handle_incoming_message task for interface_path={interface_path}, interface={final.get('interface')} cancellable={task_is_cancellable}"
                         )
@@ -1072,9 +1311,25 @@ async def _consumer_loop() -> None:
                                 f"[QUEUE] Low-priority task scheduled as background for interface_path={interface_path}; not awaiting"
                             )
 
+                            if (
+                                response_future is not None
+                                and not response_future.done()
+                            ):
+                                response_future.set_exception(
+                                    RuntimeError(
+                                        "enqueue_and_wait cannot wait for low-priority background tasks"
+                                    )
+                                )
+
                             # Track this background task so it can be cancelled if a
                             # user message arrives for the same interface_path.
-                            _bg_tasks[interface_path] = processing_task
+                            _bg_entry = _BackgroundTaskEntry(
+                                task=processing_task,
+                                cancel_on_user_message=_should_cancel_low_priority_on_user_message(
+                                    context
+                                ),
+                            )
+                            _bg_tasks[interface_path] = _bg_entry
 
                             # Ensure generation_end hook is called when background task completes
                             processing_task.add_done_callback(
@@ -1089,9 +1344,12 @@ async def _consumer_loop() -> None:
                             def _bg_done_cb(
                                 t: asyncio.Task,
                                 _ipath: str = _captured_ipath,
+                                _entry: _BackgroundTaskEntry = _bg_entry,
                             ) -> None:
                                 # Remove from tracking dict
-                                _bg_tasks.pop(_ipath, None)
+                                current_entry = _bg_tasks.get(_ipath)
+                                if current_entry is _entry:
+                                    _bg_tasks.pop(_ipath, None)
                                 try:
                                     exc = t.exception()
                                     if exc is not None:
@@ -1195,7 +1453,9 @@ async def _consumer_loop() -> None:
                                             pass
 
                                         still_pending = False
-                                        for prio, _, queued_item in list(_queue._queue):
+                                        for prio, _, queued_item in list(
+                                            _get_queue()._queue
+                                        ):
                                             item_chat = (
                                                 queued_item.get("chat_id")
                                                 if isinstance(queued_item, dict)
@@ -1243,6 +1503,24 @@ async def _consumer_loop() -> None:
                                         f"[QUEUE] Failed to attach background completion callback: {cb_e}"
                                     )
                         finally:
+                            if (
+                                response_future is not None
+                                and not response_future.done()
+                            ):
+                                if processing_task.done():
+                                    try:
+                                        response_future.set_result(
+                                            processing_task.result()
+                                        )
+                                    except Exception as exc:
+                                        response_future.set_exception(exc)
+                                elif timed_out:
+                                    response_future.set_exception(
+                                        asyncio.TimeoutError(
+                                            f"Message processing timed out after {timeout_seconds}s"
+                                        )
+                                    )
+
                             # If we completed within the timeout (success or error), notify generation end now.
                             if not timed_out:
                                 try:
@@ -1262,7 +1540,7 @@ async def _consumer_loop() -> None:
                             else:
                                 # Check for any remaining queued messages for the same chat
                                 still_pending = False
-                                for prio, _, queued_item in list(_queue._queue):
+                                for prio, _, queued_item in list(_get_queue()._queue):
                                     item_chat = (
                                         queued_item.get("chat_id")
                                         if isinstance(queued_item, dict)
@@ -1317,7 +1595,7 @@ async def _consumer_loop() -> None:
                     log_warning(f"[QUEUE] Failed to send fallback message: {send_err}")
             finally:
                 for _ in batch:
-                    _queue.task_done()
+                    _get_queue().task_done()
         except asyncio.CancelledError:
             log_info("[QUEUE] Consumer loop cancelled")
             break
@@ -1325,6 +1603,15 @@ async def _consumer_loop() -> None:
             log_error(
                 f"[QUEUE] Unexpected error in consumer loop: {repr(e)}\n{traceback.format_exc()}"
             )
+            # A stale-loop error means every subsequent iteration will fail the
+            # same way.  Break immediately rather than spinning and spamming logs.
+            if isinstance(e, RuntimeError) and "bound to a different event loop" in str(
+                e
+            ):
+                log_error(
+                    "[QUEUE] Consumer stopping: queue bound to wrong event loop. Call run() to reinitialize."
+                )
+                break
 
 
 async def enqueue_event(bot, prompt_data, event_id: int = None) -> None:
@@ -1353,25 +1640,29 @@ async def enqueue_event(bot, prompt_data, event_id: int = None) -> None:
     }
 
     # Check to avoid duplicates in the queue
-    for prio, cnt, queued_item in list(_queue._queue):
+    for prio, cnt, queued_item in list(_get_queue()._queue):
         if queued_item.get("event_prompt") == prompt_data:
             log_warning("[QUEUE] Duplicate event detected, not added to the queue")
             return
 
     global _counter
     _counter += 1
-    await _queue.put((HIGH_PRIORITY, _counter, item))
+    await _get_queue().put((HIGH_PRIORITY, _counter, item))
     log_debug(f"[QUEUE] Event added to the queue with priority: {prompt_data}")
-    log_debug(f"[QUEUE] Current queue state: {list(_queue._queue)}")
+    log_debug(f"[QUEUE] Current queue state: {list(_get_queue()._queue)}")
 
 
 async def run() -> None:
     """Convenience wrapper to launch the consumer task if not running."""
-    global _consumer_task
+    global _consumer_task, _queue, _lock
 
     if _consumer_task and not _consumer_task.done():
         log_debug("[QUEUE] Consumer already running")
         return
+
+    # Ensure the queue primitives are initialized on the active event loop.
+    _get_queue()
+    _get_lock()
 
     _consumer_task = asyncio.create_task(_consumer_loop())
     log_info("[QUEUE] Consumer task started")

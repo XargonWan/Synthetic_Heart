@@ -1,8 +1,9 @@
 import asyncio
+from typing import Any, cast
 
 import pytest
 
-from core.animation_handler import get_karada_state_server, AnimationState
+from core.animation_handler import AnimationState, KaradaStateServer
 from core.karada_ws_transport import WebSocketTransport
 
 
@@ -30,7 +31,7 @@ async def test_non_loop_fallback_duration_sum_and_buffer(monkeypatch):
     Uses a descriptor with intro + outro (no loop section) so that
     effective_loop is False and the fallback logic fires.
     """
-    handler = get_karada_state_server()
+    handler = KaradaStateServer()
 
     # Descriptor with intro + outro only (no loop) → effective_loop=False
     # Duration computation still sums all present sections.
@@ -44,19 +45,24 @@ async def test_non_loop_fallback_duration_sum_and_buffer(monkeypatch):
         return anim, desc
 
     handler._resolve_animation_descriptor = fake_resolver  # type: ignore
+    handler._resolve_animation_descriptor_for_state = (  # type: ignore
+        lambda anim, state: fake_resolver(anim)
+    )
 
     # Register a dummy transport so the transport guard is satisfied
 
     class _FakeWs:
-        async def send_json(self, data):
+        async def send_json(self, data: dict[str, Any]) -> None:
             pass
 
-    _conns: dict = {"sess": _FakeWs()}
-    handler.add_transport(WebSocketTransport(_conns))
+    _conns: dict[str, _FakeWs] = {"sess": _FakeWs()}
+    handler.add_transport(WebSocketTransport(cast(Any, _conns)))
 
     captured: list[float] = []
 
-    async def fake_fallback(session_id, state, animation_file, duration):
+    async def fake_fallback(
+        session_id, state, animation_file, duration, context_id=None
+    ):
         captured.append(duration)
         # do nothing else
 
@@ -83,25 +89,30 @@ async def test_non_loop_fallback_duration_sum_and_buffer(monkeypatch):
 @pytest.mark.asyncio
 async def test_non_loop_fallback_default_when_no_descriptor(monkeypatch):
     """When no descriptor is returned, a conservative default of 3s + buffer is used."""
-    handler = get_karada_state_server()
+    handler = KaradaStateServer()
 
     def fake_resolver(anim: str):
         return anim, None
 
     handler._resolve_animation_descriptor = fake_resolver  # type: ignore
+    handler._resolve_animation_descriptor_for_state = (  # type: ignore
+        lambda anim, state: fake_resolver(anim)
+    )
 
     # Register a dummy transport so the transport guard is satisfied
 
     class _FakeWs2:
-        async def send_json(self, data):
+        async def send_json(self, data: dict[str, Any]) -> None:
             pass
 
-    _conns2: dict = {"sess": _FakeWs2()}
-    handler.add_transport(WebSocketTransport(_conns2))
+    _conns2: dict[str, _FakeWs2] = {"sess": _FakeWs2()}
+    handler.add_transport(WebSocketTransport(cast(Any, _conns2)))
 
     captured: list[float] = []
 
-    async def fake_fallback(session_id, state, animation_file, duration):
+    async def fake_fallback(
+        session_id, state, animation_file, duration, context_id=None
+    ):
         captured.append(duration)
 
     handler._non_loop_fallback = fake_fallback  # type: ignore

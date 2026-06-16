@@ -9,6 +9,25 @@ from typing import Any, Dict, List, Optional
 from core.logging_utils import log_debug, log_error, log_info
 
 
+def build_grillo_response_append_expression(db_type: str) -> str:
+    """Return a backend-safe SQL expression for appending response text."""
+
+    if str(db_type).strip().lower() == "postgres":
+        return (
+            "CASE "
+            "WHEN response_text IS NULL OR response_text = '' THEN %s::text "
+            "ELSE response_text || E'\\n\\n' || %s::text "
+            "END"
+        )
+
+    return (
+        "CASE "
+        "WHEN response_text IS NULL OR response_text = '' THEN %s "
+        "ELSE CONCAT(response_text, '\n\n', %s) "
+        "END"
+    )
+
+
 async def update_grillo_activity_response(
     activity_log_id: Optional[int],
     response_text: str,

@@ -640,6 +640,10 @@ class CoreInitializer:
                     log_warning(
                         "[core_initializer] Exposed variables migration skipped: missing migrate_all_registered_configs"
                     )
+            except ModuleNotFoundError:
+                log_debug(
+                    "[core_initializer] core.exposed_migration not found — skipping"
+                )
             except Exception as _e:
                 log_warning(
                     f"[core_initializer] Exposed variables migration failed: {_e}"
@@ -844,35 +848,18 @@ class CoreInitializer:
                     if hasattr(instance, "start"):
                         try:
                             if asyncio.iscoroutinefunction(instance.start):
-                                try:
-                                    loop = asyncio.get_running_loop()
-                                    if loop and loop.is_running():
-                                        task = loop.create_task(instance.start())
-                                        self._background_tasks.add(task)
-                                        task.add_done_callback(
-                                            self._background_tasks.discard
-                                        )
-                                        log_info(
-                                            f"[core_initializer] Started async plugin: {module_name}"
-                                        )
-                                    else:
-                                        log_warning(
-                                            f"[core_initializer] No running loop for async plugin: {module_name}"
-                                        )
-                                        if not hasattr(self, "_pending_async_plugins"):
-                                            self._pending_async_plugins = []
-                                        self._pending_async_plugins.append(
-                                            (module_name, instance)
-                                        )
-                                except RuntimeError:
-                                    log_warning(
-                                        f"[core_initializer] No event loop for async plugin: {module_name}"
-                                    )
-                                    if not hasattr(self, "_pending_async_plugins"):
-                                        self._pending_async_plugins = []
+                                if not hasattr(self, "_pending_async_plugins"):
+                                    self._pending_async_plugins = []
+                                if not any(
+                                    pending_name == module_name
+                                    for pending_name, _ in self._pending_async_plugins
+                                ):
                                     self._pending_async_plugins.append(
                                         (module_name, instance)
                                     )
+                                log_info(
+                                    f"[core_initializer] Queued async plugin for startup: {module_name}"
+                                )
                             else:
                                 instance.start()
                                 log_info(
@@ -1284,7 +1271,9 @@ class CoreInitializer:
     async def start_pending_async_plugins(self):
         """Start async plugins that were pending due to no event loop."""
         if hasattr(self, "_pending_async_plugins"):
-            for plugin_name, instance in self._pending_async_plugins:
+            pending_plugins = list(self._pending_async_plugins)
+            self._pending_async_plugins.clear()
+            for plugin_name, instance in pending_plugins:
                 try:
                     await instance.start()
                     log_info(
@@ -1294,8 +1283,6 @@ class CoreInitializer:
                     log_error(
                         f"[core_initializer] Error starting pending plugin {plugin_name}: {repr(e)}"
                     )
-            # Clear the pending list
-            self._pending_async_plugins.clear()
             log_info("[core_initializer] All pending async plugins processed")
 
     async def _build_actions_block(self):
@@ -1405,10 +1392,28 @@ class CoreInitializer:
         log_debug("[core_initializer] Starting plugin loop")
         for name, plugin in PLUGIN_REGISTRY.items():
             log_debug(f"[core_initializer] Processing plugin: {name}")
-            # Skip plugins that expose an `enabled` attribute and are currently disabled
-            if hasattr(plugin, "enabled") and not getattr(plugin, "enabled"):
+            plugin_enabled = True
+            if hasattr(plugin, "is_enabled"):
+                try:
+                    plugin_enabled = bool(plugin.is_enabled())
+                    log_debug(
+                        f"[core_initializer] Plugin {name} is_enabled={plugin_enabled}"
+                    )
+                except Exception as e:
+                    log_warning(
+                        f"[core_initializer] Error checking is_enabled for {name}: {e}"
+                    )
+
+            if (
+                plugin_enabled
+                and hasattr(plugin, "enabled")
+                and not getattr(plugin, "enabled")
+            ):
+                plugin_enabled = False
+
+            if not plugin_enabled:
                 log_debug(
-                    f"[core_initializer] Plugin {name} has `enabled=False`, skipping action registration"
+                    f"[core_initializer] Plugin {name} is disabled, skipping action registration"
                 )
                 continue
             if not hasattr(plugin, "get_supported_actions"):
@@ -1455,7 +1460,7 @@ class CoreInitializer:
 
         # --- Collect static context from registry members ---
         log_debug("[core_initializer] Starting static context collection")
-        static_context = {}
+        static_context: dict[str, Any] = {}
         log_debug("[core_initializer] Starting static injection from plugins")
         for plugin in PLUGIN_REGISTRY.values():
             log_debug(
@@ -1486,8 +1491,13 @@ class CoreInitializer:
                             f"[core_initializer] Error awaiting static injection from {plugin.__class__.__name__}: {e}"
                         )
                         continue
-                if data:
-                    static_context.update(data)
+                if isinstance(data, dict) and data:
+                    for key, value in data.items():
+                        static_context[str(key)] = value
+                elif data:
+                    log_warning(
+                        f"[core_initializer] Static injection from {plugin.__class__.__name__} must be a dict, got {type(data)}"
+                    )
         for iface in INTERFACE_REGISTRY.values():
             if hasattr(iface, "get_static_injection"):
                 try:
@@ -1506,8 +1516,13 @@ class CoreInitializer:
                                 f"[core_initializer] Error awaiting static injection from {iface.__class__.__name__}: {e}"
                             )
                             continue
-                    if data:
-                        static_context.update(data)
+                    if isinstance(data, dict) and data:
+                        for key, value in data.items():
+                            static_context[str(key)] = value
+                    elif data:
+                        log_warning(
+                            f"[core_initializer] Static injection from {iface.__class__.__name__} must be a dict, got {type(data)}"
+                        )
                 except Exception as e:
                     log_warning(
                         f"[core_initializer] Errore static injection da interfaccia {iface}: {e}"
@@ -1684,13 +1699,15 @@ class CoreInitializer:
 
             # Check if the plugin exposes action schemas and log them
             plugin_obj = PLUGIN_REGISTRY.get(plugin_name)
-            actions = []
+            actions: list[str] = []
 
             try:
                 if plugin_obj and hasattr(plugin_obj, "get_supported_actions"):
                     supported_actions = plugin_obj.get_supported_actions()
                     if isinstance(supported_actions, dict):
-                        actions = list(supported_actions.keys())
+                        actions = [
+                            str(action_name) for action_name in supported_actions.keys()
+                        ]
 
                 # Track successful plugin loading
                 self.track_component(

@@ -3,11 +3,12 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import Any, Dict, List
 
 from core.config_manager import config_registry
-from core.logging_utils import log_info, log_warning
-from core.transport_layer import extract_json_from_text
+from core.logging_utils import log_debug, log_info, log_warning
+from core.transport_layer import extract_json_from_text, run_corrector_middleware
 
 
 display_name = "Debrief Action Intent"
@@ -69,6 +70,165 @@ class DebriefActionIntentPlugin:
 
     def get_supported_actions(self) -> dict:
         return {}
+
+    @staticmethod
+    def _extract_action_candidates(parsed: Any) -> List[Dict[str, Any]]:
+        if isinstance(parsed, list):
+            return [item for item in parsed if isinstance(item, dict)]
+
+        if not isinstance(parsed, dict):
+            return []
+
+        if isinstance(parsed.get("actions"), list):
+            return [item for item in parsed["actions"] if isinstance(item, dict)]
+
+        if isinstance(parsed.get("recovery_actions"), list):
+            normalized: List[Dict[str, Any]] = []
+            for item in parsed["recovery_actions"]:
+                if not isinstance(item, dict):
+                    continue
+                action_type = item.get("action_type") or item.get("type")
+                payload = item.get("payload")
+                if not action_type or not isinstance(payload, dict):
+                    continue
+                normalized.append(
+                    {
+                        "type": action_type,
+                        "payload": payload,
+                        "reason": item.get("reason"),
+                        "confidence": item.get("confidence"),
+                    }
+                )
+            return normalized
+
+        action_type = parsed.get("type") or parsed.get("action_type")
+        payload = parsed.get("payload")
+        if action_type and isinstance(payload, dict):
+            return [parsed]
+
+        return []
+
+    @staticmethod
+    def _build_correction_context(
+        *,
+        context: Dict[str, Any],
+        original_message: Any,
+        user_message: str,
+        allowed_action_types: List[str],
+    ) -> Dict[str, Any]:
+        correction_message = SimpleNamespace()
+        correction_message.chat_id = getattr(original_message, "chat_id", None)
+        correction_message.thread_id = getattr(original_message, "thread_id", None)
+        correction_message.text = user_message
+        correction_message.interface_path = getattr(
+            original_message, "interface_path", None
+        ) or context.get("interface_path")
+
+        corrected_context = dict(context or {})
+        corrected_context["message"] = correction_message
+        corrected_context["from_cortex"] = True
+        corrected_context["original_user_message"] = user_message
+        corrected_context["allowed_action_types"] = list(allowed_action_types)
+        return corrected_context
+
+    async def _parse_recovery_output(
+        self,
+        *,
+        llm_text: str,
+        context: Dict[str, Any],
+        original_message: Any,
+        user_message: str,
+        allowed_action_types: List[str],
+    ) -> List[Dict[str, Any]]:
+        parsed: Any = None
+        metadata: Dict[str, Any] = {}
+
+        try:
+            parsed, metadata = extract_json_from_text(llm_text, return_metadata=True)
+        except Exception as exc:
+            log_debug(
+                f"[debrief_action_intent] Initial JSON extraction failed, will ask corrector: {exc}"
+            )
+
+        candidates = self._extract_action_candidates(parsed)
+        if candidates:
+            return candidates
+
+        corrected_context = self._build_correction_context(
+            context=context,
+            original_message=original_message,
+            user_message=user_message,
+            allowed_action_types=allowed_action_types,
+        )
+        corrected_text = await run_corrector_middleware(
+            text=llm_text,
+            bot=None,
+            context=corrected_context,
+            chat_id=getattr(original_message, "chat_id", None),
+            thread_id=getattr(original_message, "thread_id", None),
+        )
+        if not isinstance(corrected_text, str) or not corrected_text.strip():
+            if metadata.get("had_errors") or metadata.get("had_extra_text"):
+                log_info(
+                    "[debrief_action_intent] Corrector did not recover valid JSON for debrief output"
+                )
+            return []
+
+        try:
+            corrected_json = extract_json_from_text(
+                corrected_text, return_metadata=False
+            )
+        except Exception as exc:
+            log_warning(
+                f"[debrief_action_intent] Corrected debrief output still failed JSON extraction: {exc}"
+            )
+            return []
+
+        return self._extract_action_candidates(corrected_json)
+
+    @staticmethod
+    def _normalize_recovery_actions(
+        *,
+        candidates: List[Dict[str, Any]],
+        allowed_action_types: set[str],
+        processed_types: set[str],
+        failed_types: set[str],
+        max_actions: int,
+    ) -> List[Dict[str, Any]]:
+        recovered: List[Dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+
+        for item in candidates:
+            action_type = item.get("action_type") or item.get("type")
+            if (
+                not isinstance(action_type, str)
+                or action_type not in allowed_action_types
+            ):
+                continue
+            if action_type in processed_types or action_type in failed_types:
+                continue
+
+            payload = item.get("payload")
+            if not isinstance(payload, dict):
+                payload = {}
+
+            dedup_key = (action_type, json.dumps(payload, sort_keys=True))
+            if dedup_key in seen:
+                continue
+            seen.add(dedup_key)
+
+            recovered.append(
+                {
+                    "action_type": action_type,
+                    "payload": payload,
+                    "reason": item.get("reason") or "debrief_intent",
+                    "confidence": item.get("confidence") or "medium",
+                }
+            )
+            if len(recovered) >= max_actions:
+                break
+
+        return recovered
 
     def _is_enabled(self) -> bool:
         try:
@@ -239,7 +399,7 @@ class DebriefActionIntentPlugin:
             "  missing details.\n"
             "- Output ONLY valid JSON with the exact schema below.\n\n"
             "Schema:\n"
-            '{"recovery_actions":[{"action_type":str,"payload":object,"reason":str,"confidence":"low|medium|high"}]}'
+            '{"actions":[{"type":str,"payload":object,"reason":str,"confidence":"low|medium|high"}]}'
         )
 
         user_prompt = json.dumps(
@@ -259,10 +419,11 @@ class DebriefActionIntentPlugin:
 
         engine = None
         try:
-            from core.config import get_active_cortex_engine
+            from core.config import derive_cortex_scope, get_active_cortex_engine
             from core.cortex_registry import get_cortex_registry
 
-            active_cortex = await get_active_cortex_engine()
+            scope = derive_cortex_scope(context if isinstance(context, dict) else None)
+            active_cortex = await get_active_cortex_engine(scope=scope)
             registry = get_cortex_registry()
             engine = registry.get_engine(active_cortex) or registry.load_engine(
                 active_cortex
@@ -284,52 +445,28 @@ class DebriefActionIntentPlugin:
                         {"role": "user", "content": user_prompt},
                     ]
                 ),
-                timeout=10,
+                timeout=120,
             )
         except Exception as e:
             log_warning(f"[debrief_action_intent] LLM generation failed: {e}")
             return None
 
-        parsed = None
-        try:
-            parsed = extract_json_from_text(llm_text, return_metadata=False)
-        except Exception:
-            parsed = None
-
-        if not isinstance(parsed, dict):
-            return None
-
-        raw_actions = parsed.get("recovery_actions")
-        if not isinstance(raw_actions, list) or not raw_actions:
-            return None
-
         action_types = set(minified_actions.keys())
-        recovered: List[Dict[str, Any]] = []
-        seen = set()
+        candidates = await self._parse_recovery_output(
+            llm_text=llm_text,
+            context=context,
+            original_message=original_message,
+            user_message=user_message.strip(),
+            allowed_action_types=sorted(action_types),
+        )
 
-        for item in raw_actions:
-            if not isinstance(item, dict):
-                continue
-            action_type = item.get("action_type") or item.get("type")
-            if not action_type or action_type not in action_types:
-                continue
-            payload = item.get("payload")
-            if not isinstance(payload, dict):
-                payload = {}
-            dedup_key = (action_type, json.dumps(payload, sort_keys=True))
-            if dedup_key in seen:
-                continue
-            seen.add(dedup_key)
-            recovered.append(
-                {
-                    "action_type": action_type,
-                    "payload": payload,
-                    "reason": item.get("reason") or "debrief_intent",
-                    "confidence": item.get("confidence") or "medium",
-                }
-            )
-            if len(recovered) >= max_actions:
-                break
+        recovered = self._normalize_recovery_actions(
+            candidates=candidates,
+            allowed_action_types=action_types,
+            processed_types={t for t in processed_types if isinstance(t, str)},
+            failed_types={t for t in failed_types if isinstance(t, str)},
+            max_actions=max_actions,
+        )
 
         if not recovered:
             return None

@@ -2,6 +2,7 @@
 """Tests for multimodal attachment extraction."""
 
 import base64
+from types import SimpleNamespace
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 
@@ -175,6 +176,34 @@ class TestTelegramExtraction:
         mock_message.video_note = None
         mock_message.sticker = None
         mock_message.chat = MagicMock(id=123, type="private")
+
+        attachments = await extract_multimodal_from_telegram(mock_bot, mock_message)
+
+        assert len(attachments) == 1
+        assert attachments[0]["mime_type"] == "application/pdf"
+        assert attachments[0]["filename"] == "document.pdf"
+
+    @pytest.mark.asyncio
+    async def test_extract_document_from_partial_telegram_message(self):
+        """Partial Telegram message objects should not require every media attribute."""
+        mock_bot = AsyncMock()
+        mock_file = AsyncMock()
+        mock_file.download_as_bytearray = AsyncMock(
+            return_value=bytearray(b"fake_pdf_data")
+        )
+        mock_bot.get_file = AsyncMock(return_value=mock_file)
+
+        mock_doc = SimpleNamespace(
+            file_id="test_doc_id",
+            file_unique_id="test_unique_doc_id",
+            file_name="document.pdf",
+            mime_type="application/pdf",
+        )
+
+        mock_message = SimpleNamespace(
+            document=mock_doc,
+            chat=SimpleNamespace(id=123, type="private"),
+        )
 
         attachments = await extract_multimodal_from_telegram(mock_bot, mock_message)
 

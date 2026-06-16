@@ -4,9 +4,11 @@
 Generic commands that work with any interface through AbstractContext.
 """
 
+import asyncio
+
 from core.abstract_context import AbstractContext
 from core.context import context_command
-from core.recent_chats import last_chats_command_generic
+from core.recent_chats import last_chats_command as last_chats_command_generic
 from core.logging_utils import log_warning
 from typing import Optional, Callable
 
@@ -78,7 +80,7 @@ async def generic_diary_command(
             days_arg = int(days)
         except Exception:
             days_arg = 2
-        entries = get_recent_entries(days=days_arg, max_chars=None)
+        entries = await asyncio.to_thread(lambda: get_recent_entries(days=days_arg))
 
         if not entries:
             response = f"📔 No diary entries found in the last {days} days."

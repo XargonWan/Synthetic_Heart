@@ -98,7 +98,7 @@ async def test_run_one_compaction_cycle_basic(monkeypatch):
     # Ensure active Cortex name resolves without DB access
     monkeypatch.setattr(
         "core.config.get_active_cortex_engine",
-        lambda: asyncio.sleep(0, result="selenium_chatgpt"),
+        lambda *args, **kwargs: asyncio.sleep(0, result="selenium_chatgpt"),
     )
 
     # Run one cycle
@@ -191,7 +191,7 @@ async def test_tag_selection_fallback(monkeypatch):
     )
     monkeypatch.setattr(
         "core.config.get_active_cortex_engine",
-        lambda: asyncio.sleep(0, result="selenium_chatgpt"),
+        lambda *args, **kwargs: asyncio.sleep(0, result="selenium_chatgpt"),
     )
 
     res = await p._run_one_compaction_cycle()

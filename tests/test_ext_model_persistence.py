@@ -1,11 +1,18 @@
-"""Tests that setting a model on an ext_* Cortex engine persists to the DB."""
+"""Tests that setting a model on an external Cortex engine persists to the DB."""
 
+import asyncio
+from types import SimpleNamespace
+from typing import cast
+
+import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from fastapi.testclient import TestClient
+from starlette.requests import Request
 
 from core.external_endpoints.bridges.cortex_bridge import ExternalCortexEngine
 from core.external_endpoints.models import EndpointProtocol, ExternalEndpoint
+from core.prompt_request import Attachment, PromptRequest, RuntimeContext, Turn
 from core.webui import SynthWebUIInterface
 
 
@@ -31,7 +38,7 @@ def _make_endpoint(
 
 
 def test_set_model_persists_to_db(monkeypatch):
-    """POST /api/components/cortex/model for an ext_* engine must call
+    """POST /api/components/cortex/model for an external endpoint engine must call
     ExternalEndpointRegistry.set_default_model so the selection survives restart."""
 
     endpoint = _make_endpoint()
@@ -61,7 +68,7 @@ def test_set_model_persists_to_db(monkeypatch):
     ):
         resp = client.post(
             "/api/components/cortex/model",
-            json={"engine": "ext_my_ep", "model": "model-b"},
+            json={"engine": "my_ep", "model": "model-b"},
         )
 
     assert resp.status_code == 200
@@ -71,6 +78,141 @@ def test_set_model_persists_to_db(monkeypatch):
 
     # The DB persist must have been called exactly once with the right args
     set_default_model_mock.assert_awaited_once_with(1, "model-b")
+
+
+def test_generate_response_retries_on_connection_error(monkeypatch):
+    """ExternalCortexEngine.generate_response should retry connection failures."""
+
+    endpoint = _make_endpoint()
+    endpoint.extra_config = {"retry_attempts": 2, "retry_backoff": 0.0}
+    adapter_mock = MagicMock()
+    adapter_mock.chat_completion = AsyncMock(
+        side_effect=[ConnectionError("Connection error"), MagicMock(content="retry-ok")]
+    )
+    bridge = ExternalCortexEngine(endpoint, adapter_mock)
+
+    with patch(
+        "core.external_endpoints.bridges.cortex_bridge.asyncio.sleep", return_value=None
+    ):
+        result = asyncio.run(
+            bridge.generate_response([{"role": "user", "content": "hi"}])
+        )
+
+    assert result == "retry-ok"
+    assert adapter_mock.chat_completion.call_count == 2
+
+
+def test_generate_response_retries_on_unavailable_api_error(monkeypatch):
+    """ExternalCortexEngine.generate_response should retry transient provider overloads."""
+
+    endpoint = _make_endpoint()
+    endpoint.extra_config = {"retry_attempts": 2, "retry_backoff": 0.0}
+    adapter_mock = MagicMock()
+    adapter_mock.chat_completion = AsyncMock(
+        side_effect=[
+            Exception(
+                "503 UNAVAILABLE. {'error': {'code': 503, 'message': 'This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.', 'status': 'UNAVAILABLE'}}"
+            ),
+            MagicMock(content="retry-ok"),
+        ]
+    )
+    bridge = ExternalCortexEngine(endpoint, adapter_mock)
+
+    with patch(
+        "core.external_endpoints.bridges.cortex_bridge.asyncio.sleep", return_value=None
+    ):
+        result = asyncio.run(
+            bridge.generate_response([{"role": "user", "content": "hi"}])
+        )
+
+    assert result == "retry-ok"
+    assert adapter_mock.chat_completion.call_count == 2
+
+
+def test_generate_response_does_not_retry_timeout_by_default(monkeypatch):
+    """Timeouts should fail fast unless the endpoint explicitly opts into retrying them."""
+
+    endpoint = _make_endpoint()
+    endpoint.extra_config = {"retry_attempts": 3, "retry_backoff": 0.0}
+    adapter_mock = MagicMock()
+    adapter_mock.chat_completion = AsyncMock(side_effect=asyncio.TimeoutError())
+    bridge = ExternalCortexEngine(endpoint, adapter_mock)
+
+    with patch(
+        "core.external_endpoints.bridges.cortex_bridge.asyncio.sleep", return_value=None
+    ) as sleep_mock:
+        with pytest.raises(TimeoutError):
+            asyncio.run(bridge.generate_response([{"role": "user", "content": "hi"}]))
+
+    assert adapter_mock.chat_completion.call_count == 1
+    sleep_mock.assert_not_called()
+
+
+def test_generate_response_passes_bridge_timeout_to_adapter(monkeypatch):
+    """The bridge timeout and adapter timeout should stay aligned."""
+
+    endpoint = _make_endpoint()
+    endpoint.extra_config = {"timeout": 42.0}
+    captured: dict[str, object] = {}
+
+    async def _chat_completion(*_args, **kwargs):
+        captured["timeout"] = kwargs.get("timeout")
+        return MagicMock(content="ok")
+
+    adapter_mock = MagicMock()
+    adapter_mock.chat_completion = AsyncMock(side_effect=_chat_completion)
+    bridge = ExternalCortexEngine(endpoint, adapter_mock)
+
+    result = asyncio.run(bridge.generate_response([{"role": "user", "content": "hi"}]))
+
+    assert result == "ok"
+    assert captured["timeout"] == 42.0
+
+
+def test_generate_response_tracks_empty_response_metadata() -> None:
+    endpoint = _make_endpoint(default_model="model-a")
+    adapter_mock = MagicMock()
+    adapter_mock._last_completion_metadata = {
+        "block_reason": "PROHIBITED_CONTENT",
+        "prompt_blocked": True,
+    }
+    adapter_mock.chat_completion = AsyncMock(
+        return_value=MagicMock(
+            content="",
+            model="model-a",
+            finish_reason="safety",
+        )
+    )
+    bridge = ExternalCortexEngine(endpoint, adapter_mock)
+
+    result = asyncio.run(bridge.generate_response([{"role": "user", "content": "hi"}]))
+
+    assert result == ""
+    assert bridge._last_response_metadata == {
+        "model": "model-a",
+        "finish_reason": "safety",
+        "empty_response": True,
+        "block_reason": "PROHIBITED_CONTENT",
+        "prompt_blocked": True,
+    }
+
+
+def test_handle_incoming_message_propagates_after_retry_exhaustion(monkeypatch):
+    """If retries are exhausted, ExternalCortexEngine.handle_incoming_message should raise."""
+
+    endpoint = _make_endpoint()
+    endpoint.extra_config = {"retry_attempts": 2, "retry_backoff": 0.0}
+    adapter_mock = MagicMock()
+    adapter_mock.chat_completion = AsyncMock(
+        side_effect=ConnectionError("Connection error")
+    )
+    bridge = ExternalCortexEngine(endpoint, adapter_mock)
+
+    with patch(
+        "core.external_endpoints.bridges.cortex_bridge.asyncio.sleep", return_value=None
+    ):
+        with pytest.raises(ConnectionError, match="Connection error"):
+            asyncio.run(bridge.handle_incoming_message(None, None, {"foo": "bar"}))
 
 
 def test_set_model_persist_failure_does_not_break_response(monkeypatch):
@@ -101,8 +243,230 @@ def test_set_model_persist_failure_does_not_break_response(monkeypatch):
     ):
         resp = client.post(
             "/api/components/cortex/model",
-            json={"engine": "ext_my_ep", "model": "model-a"},
+            json={"engine": "my_ep", "model": "model-a"},
         )
 
     assert resp.status_code == 200
     assert resp.json()["status"] == "ok"
+
+
+def test_handle_incoming_message_prefers_prompt_request_rendering(monkeypatch):
+    """PromptRequest should be rendered as messages instead of flattened legacy JSON."""
+
+    endpoint = _make_endpoint()
+    adapter_mock = MagicMock()
+    adapter_mock.chat_completion = AsyncMock(return_value=MagicMock(content="ok"))
+    bridge = ExternalCortexEngine(endpoint, adapter_mock)
+
+    req = PromptRequest(
+        system_instruction="SYSTEM RULES",
+        context_summary="CONTEXT BLOCK",
+        conversation_history=[
+            Turn(role="user", content="old-user"),
+            Turn(role="assistant", content="old-assistant"),
+        ],
+        current_text="latest turn",
+        runtime_ctx=RuntimeContext(username="scarlet"),
+        mode="chat",
+    )
+
+    legacy_prompt = {
+        "instructions": "legacy-instructions",
+        "input": {"text": "legacy-input"},
+        "__prompt_request": req,
+    }
+
+    result = asyncio.run(bridge.handle_incoming_message(None, None, legacy_prompt))
+    assert result == "ok"
+
+    await_args = adapter_mock.chat_completion.await_args
+    assert await_args is not None
+    sent_messages = await_args.args[0]
+    assert sent_messages[0]["role"] == "system"
+    assert "SYSTEM RULES" in sent_messages[0]["content"]
+    assert "CONTEXT BLOCK" in sent_messages[0]["content"]
+
+    assert sent_messages[-1]["role"] == "user"
+    assert "latest turn" in sent_messages[-1]["content"]
+    # If legacy flattening was used, this would include serialized keys like "input".
+    assert "legacy-input" not in str(sent_messages[-1]["content"])
+
+
+def test_handle_incoming_message_forwards_image_parts_with_selected_model() -> None:
+    endpoint = _make_endpoint(default_model="x-ai/grok-4.1-fast")
+    endpoint.capabilities = {"vision": False}
+    adapter_mock = MagicMock()
+    adapter_mock.chat_completion = AsyncMock(return_value=MagicMock(content="ok"))
+    bridge = ExternalCortexEngine(endpoint, adapter_mock)
+
+    req = PromptRequest(
+        system_instruction="SYSTEM RULES",
+        current_text="",
+        runtime_ctx=RuntimeContext(username="scarlet"),
+        attachments=[Attachment(mime_type="image/png", data="AAAA")],
+        mode="chat",
+    )
+
+    result = asyncio.run(bridge.handle_incoming_message(None, None, req))
+
+    assert result == "ok"
+    await_args = adapter_mock.chat_completion.await_args
+    assert await_args is not None
+    sent_messages = await_args.args[0]
+    last_content = sent_messages[-1]["content"]
+    assert isinstance(last_content, list)
+    assert any(part.get("type") == "image_url" for part in last_content)
+
+
+def test_handle_incoming_message_downgrades_pdf_to_document_note() -> None:
+    endpoint = _make_endpoint(default_model="x-ai/grok-4.1-fast")
+    adapter_mock = MagicMock()
+    adapter_mock.chat_completion = AsyncMock(return_value=MagicMock(content="ok"))
+    bridge = ExternalCortexEngine(endpoint, adapter_mock)
+
+    req = PromptRequest(
+        system_instruction="SYSTEM RULES",
+        current_text="Can you read this manual?",
+        runtime_ctx=RuntimeContext(username="scarlet"),
+        attachments=[
+            Attachment(
+                mime_type="application/pdf",
+                data="AAAA",
+                filename="manual.pdf",
+                media_metadata={"extracted_text": "[Page 1]\nMotor spec page"},
+            )
+        ],
+        mode="chat",
+    )
+
+    result = asyncio.run(bridge.handle_incoming_message(None, None, req))
+
+    assert result == "ok"
+    await_args = adapter_mock.chat_completion.await_args
+    assert await_args is not None
+    sent_messages = await_args.args[0]
+    last_content = sent_messages[-1]["content"]
+    assert isinstance(last_content, list)
+    assert not any(part.get("type") == "image_url" for part in last_content)
+    text_part = next(part for part in last_content if part.get("type") == "text")
+    assert "manual.pdf" in text_part["text"]
+    assert "extracted text from the attachment" in text_part["text"]
+    assert "Motor spec page" in text_part["text"]
+
+
+def test_handle_incoming_message_forwards_scanned_pdf_page_images() -> None:
+    endpoint = _make_endpoint(default_model="x-ai/grok-4.1-fast")
+    adapter_mock = MagicMock()
+    adapter_mock.chat_completion = AsyncMock(return_value=MagicMock(content="ok"))
+    bridge = ExternalCortexEngine(endpoint, adapter_mock)
+
+    req = PromptRequest(
+        system_instruction="SYSTEM RULES",
+        current_text="Can you read this scanned manual?",
+        runtime_ctx=RuntimeContext(username="scarlet"),
+        attachments=[
+            Attachment(
+                mime_type="application/pdf",
+                data="AAAA",
+                filename="manual.pdf",
+                media_metadata={
+                    "page_images": [
+                        {
+                            "mime_type": "image/png",
+                            "data": "BBBB",
+                            "filename": "manual_page_1.png",
+                        }
+                    ]
+                },
+            )
+        ],
+        mode="chat",
+    )
+
+    result = asyncio.run(bridge.handle_incoming_message(None, None, req))
+
+    assert result == "ok"
+    await_args = adapter_mock.chat_completion.await_args
+    assert await_args is not None
+    sent_messages = await_args.args[0]
+    last_content = sent_messages[-1]["content"]
+    assert isinstance(last_content, list)
+    assert any(part.get("type") == "image_url" for part in last_content)
+    text_part = next(part for part in last_content if part.get("type") == "text")
+    assert "manual.pdf" in text_part["text"]
+    assert "page images extracted from the document" in text_part["text"]
+
+
+@pytest.mark.asyncio
+async def test_run_auto_probe_uses_300_second_default(monkeypatch):
+    webui = SynthWebUIInterface(autostart=False)
+    endpoint = _make_endpoint()
+    registry = SimpleNamespace(
+        get_endpoint=AsyncMock(return_value=endpoint),
+        set_probe_result=AsyncMock(),
+    )
+    probe_result = SimpleNamespace(
+        status="success",
+        capabilities={"cortex": True},
+        models=["gemini-3-flash-preview"],
+        ping_echo="pong",
+        error_message="",
+    )
+    captured: dict[str, object] = {}
+
+    async def fake_wait_for(awaitable, timeout):
+        captured["timeout"] = timeout
+        return await awaitable
+
+    monkeypatch.delenv("EXTERNAL_ENDPOINT_PROBE_TIMEOUT_SECONDS", raising=False)
+    monkeypatch.setattr("asyncio.wait_for", fake_wait_for)
+
+    with patch(
+        "core.external_endpoints.probe.probe_endpoint",
+        AsyncMock(return_value=probe_result),
+    ):
+        result = await webui._run_auto_probe(1, "secret", registry)
+
+    assert captured["timeout"] == 300.0
+    assert result["models"] == ["gemini-3-flash-preview"]
+    registry.set_probe_result.assert_awaited_once_with(
+        1,
+        status="success",
+        capabilities={"cortex": True},
+        models=["gemini-3-flash-preview"],
+    )
+
+
+@pytest.mark.asyncio
+async def test_ping_external_endpoint_uses_300_second_timeout(monkeypatch):
+    webui = SynthWebUIInterface(autostart=False)
+    endpoint = _make_endpoint()
+    ping_test = AsyncMock(return_value=(True, "pong"))
+    adapter = SimpleNamespace(ping_test=ping_test)
+    registry = SimpleNamespace(get_endpoint=AsyncMock(return_value=endpoint))
+
+    class DummyRequest:
+        async def json(self):
+            return {"model": "gemini-3-flash-preview"}
+
+    with (
+        patch(
+            "core.external_endpoints.registry.get_external_endpoint_registry",
+            return_value=registry,
+        ),
+        patch(
+            "core.external_endpoints.crypto.decrypt_api_key",
+            return_value="secret",
+        ),
+        patch(
+            "core.external_endpoints.probe.get_adapter_for_endpoint",
+            return_value=adapter,
+        ),
+    ):
+        response = await webui.ping_external_endpoint(1, cast(Request, DummyRequest()))
+
+    assert response.status_code == 200
+    ping_test.assert_awaited_once_with(
+        model="gemini-3-flash-preview",
+        timeout=300.0,
+    )

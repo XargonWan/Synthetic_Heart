@@ -11,6 +11,9 @@ from core.ai_plugin_base import AIPluginBase
 from core.logging_utils import log_debug, log_info
 import json
 import asyncio
+import importlib
+import sys
+from typing import Any
 
 try:
     from core.variables_engine import register_exposed_var
@@ -55,6 +58,16 @@ try:
         scope="agent",
         component="agent_core",
     )
+    register_exposed_var(
+        "AGENT_NOTIFY_TRAINER",
+        label="Agent Notify Trainer",
+        default=True,
+        value_type=bool,
+        ui_type="boolean",
+        description="Notify the trainer when the agent creates a proposal.",
+        scope="agent",
+        component="agent_core",
+    )
 except Exception:
     # tests may run before variables engine is available
     pass
@@ -71,11 +84,29 @@ class AgentCorePlugin(AIPluginBase):
     def get_supported_actions(self):
         return {}
 
+    async def _get_conn_ctx(self) -> Any:
+        try:
+            import core as core_package
+
+            db_module = getattr(core_package, "db", None)
+        except Exception:
+            db_module = None
+
+        if db_module is None:
+            db_module = sys.modules.get("core.db")
+        if db_module is None:
+            db_module = importlib.import_module("core.db")
+
+        get_conn_ctx = getattr(db_module, "get_conn_ctx")
+        conn_ctx = get_conn_ctx()
+        if asyncio.iscoroutine(conn_ctx):
+            conn_ctx = await conn_ctx
+        return conn_ctx
+
     async def _ensure_agent_tables(self) -> bool:
         try:
-            from core.db import get_conn_ctx
-
-            async with get_conn_ctx() as conn:
+            conn_ctx = await self._get_conn_ctx()
+            async with conn_ctx as conn:
                 async with conn.cursor() as cur:
                     await cur.execute(
                         """
@@ -115,9 +146,8 @@ class AgentCorePlugin(AIPluginBase):
         self, proposer: str | None, command: dict, metadata: dict | None = None
     ) -> int | None:
         try:
-            from core.db import get_conn_ctx
-
-            async with get_conn_ctx() as conn:
+            conn_ctx = await self._get_conn_ctx()
+            async with conn_ctx as conn:
                 async with conn.cursor() as cur:
                     await cur.execute(
                         "INSERT INTO agent_activity_log (proposer, status, command, metadata) VALUES (%s,%s,%s,%s)",
@@ -153,9 +183,8 @@ class AgentCorePlugin(AIPluginBase):
         error_text: str | None = None,
     ) -> int | None:
         try:
-            from core.db import get_conn_ctx
-
-            async with get_conn_ctx() as conn:
+            conn_ctx = await self._get_conn_ctx()
+            async with conn_ctx as conn:
                 async with conn.cursor() as cur:
                     await cur.execute(
                         "INSERT INTO agent_action_execs (activity_log_id, action_index, action_type, payload, status, error_text, result) VALUES (%s,%s,%s,%s,%s,%s,%s)",
@@ -197,10 +226,10 @@ class AgentCorePlugin(AIPluginBase):
         # Notify trainer if configured. Default to True if the variables engine is missing or errors.
         notify = True
         try:
-            from core.variables_engine import get_exposed_var
+            from core.variables_engine import exposed_vars
 
             try:
-                notify = bool(get_exposed_var("AGENT_NOTIFY_TRAINER", True))
+                notify = bool(exposed_vars.get_value("AGENT_NOTIFY_TRAINER", True))
             except Exception:
                 notify = True
         except Exception:
@@ -225,9 +254,8 @@ class AgentCorePlugin(AIPluginBase):
         """Approve and optionally execute a proposal. If command provided it will be executed immediately."""
         # Mark approved
         try:
-            from core.db import get_conn_ctx
-
-            async with get_conn_ctx() as conn:
+            conn_ctx = await self._get_conn_ctx()
+            async with conn_ctx as conn:
                 async with conn.cursor() as cur:
                     await cur.execute(
                         "UPDATE agent_activity_log SET status=%s WHERE id=%s",
@@ -318,11 +346,11 @@ class AgentCorePlugin(AIPluginBase):
         """Handle agent-specific custom actions invoked via execute_action."""
         try:
             if action_type == "approve_action":
-                proposal_id = (
-                    int(payload.get("proposal_id"))
-                    if payload.get("proposal_id") is not None
-                    else None
-                )
+                proposal_value = payload.get("proposal_id")
+                if proposal_value is None:
+                    return {"status": "error", "reason": "missing proposal_id"}
+
+                proposal_id = int(proposal_value)
                 approver = payload.get("approver")
                 command = payload.get("command")
                 return await self.approve_action(
@@ -331,6 +359,8 @@ class AgentCorePlugin(AIPluginBase):
             if action_type == "propose_action":
                 proposer = payload.get("proposer")
                 command = payload.get("command")
+                if not isinstance(command, dict):
+                    return {"status": "error", "reason": "missing command"}
                 metadata = payload.get("metadata")
                 return await self.propose_action(
                     proposer=proposer, command=command, metadata=metadata

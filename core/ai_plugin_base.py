@@ -15,6 +15,8 @@ class AIPluginBase:
     Each plugin (OpenAI, Claude, Manual, etc.) may implement the desired methods.
     """
 
+    supports_prompt_request = False
+
     async def handle_incoming_message(self, bot, message, prompt):
         """Process a message using a pre-built prompt."""
         raise NotImplementedError("handle_incoming_message not implemented")
@@ -45,6 +47,10 @@ class AIPluginBase:
     def get_supported_action_types(self) -> list[str]:
         """Return custom action types handled by this plugin."""
         return []
+
+    def is_enabled(self) -> bool:
+        """Return True when this plugin should expose actions in the prompt."""
+        return True
 
     # --- Agent hooks (optional) ---
     def supports_agent(self) -> bool:
@@ -96,7 +102,11 @@ class AIPluginBase:
         Default implementation extracts action type and payload.
         """
         action_type = action.get("type")
+        if not isinstance(action_type, str):
+            action_type = ""
         payload = action.get("payload", {})
+        if not isinstance(payload, dict):
+            payload = {}
         return await self.handle_custom_action(action_type, payload)
 
     @staticmethod

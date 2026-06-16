@@ -42,7 +42,7 @@ async def test_get_context_snippets_pulls_memories(monkeypatch):
         def cursor(self):
             return DummyCursor()
 
-    async def mock_get_conn_ctx():
+    def mock_get_conn_ctx():
         return DummyConn()
 
     import core.db as cdb
@@ -57,3 +57,45 @@ async def test_get_context_snippets_pulls_memories(monkeypatch):
         s.startswith("[telegram_bot]") or s.startswith("[unknown]") or "diary" in s
         for s in snippets
     )
+
+
+@pytest.mark.asyncio
+async def test_generate_outreach_beat_records_target_metadata(monkeypatch):
+    p = GrilloOutreachPlugin()
+    captured = {}
+
+    async def fake_get_target_interface_and_chat():
+        return "telegram_bot", "12345"
+
+    async def fake_get_context_snippets(limit: int = 5):
+        return ["one", "two"]
+
+    async def fake_create_activity_log(*args, **kwargs):
+        captured["kwargs"] = kwargs
+        return 77
+
+    async def fake_enqueue_low_priority(
+        bot, message, context_memory=None, interface_id=None, original_message=None
+    ):
+        captured["context_memory"] = context_memory
+        return None
+
+    monkeypatch.setattr(
+        p, "_get_target_interface_and_chat", fake_get_target_interface_and_chat
+    )
+    monkeypatch.setattr(p, "_get_context_snippets", fake_get_context_snippets)
+    monkeypatch.setattr(
+        "plugins.grillo.grillo_impl.GrilloPlugin.create_activity_log",
+        fake_create_activity_log,
+    )
+    monkeypatch.setattr(
+        "core.message_queue.enqueue_low_priority",
+        fake_enqueue_low_priority,
+    )
+
+    await p._generate_outreach_beat()
+
+    assert captured["kwargs"]["metadata"]["origin"] == "grillo_outreach"
+    assert captured["kwargs"]["metadata"]["target_interface"] == "telegram_bot"
+    assert captured["kwargs"]["metadata"]["target_chat_id"] == "12345"
+    assert captured["kwargs"]["metadata"]["context_count"] == 2

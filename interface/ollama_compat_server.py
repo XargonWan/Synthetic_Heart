@@ -429,6 +429,12 @@ class OllamaCompatServer:
             self._populate_history(chat_id, history_messages)
             message_obj = self._build_message(chat_id, last_message)
 
+            attachments = last_message.get("attachments")
+            if isinstance(attachments, list):
+                message_obj.attachments = attachments
+            else:
+                message_obj.attachments = []
+
             # Add interface_path to message object
             message_obj.interface_path = interface_path
 
@@ -444,11 +450,20 @@ class OllamaCompatServer:
             )
 
             try:
-                response = await plugin_instance.handle_incoming_message(
-                    self,
-                    message_obj,
-                    self.context_memory,
-                    self.interface_id,
+                from core import message_queue
+
+                response = await message_queue.enqueue_and_wait(
+                    bot=self,
+                    message=message_obj,
+                    context_memory=self.context_memory,
+                    history_scope="local",
+                    priority=False,
+                    interface_id=self.interface_id,
+                    skip_mention_check=True,
+                    original_message=message_obj,
+                    timeout=self.completion_timeout
+                    if self.completion_timeout > 0
+                    else None,
                 )
             except Exception as exc:
                 log_error(f"[ollama_serve] Error while processing message: {exc}")
@@ -462,6 +477,18 @@ class OllamaCompatServer:
                     model=model,
                     conversation_id=conversation_id,
                     text=response,
+                )
+                await self._finalize_stream(
+                    chat_id=chat_id,
+                    model=model,
+                    conversation_id=conversation_id,
+                )
+            elif response is None:
+                # The message chain may have executed actions instead of producing
+                # a text response (e.g. ACTIONS_EXECUTED). Ensure the Ollama request
+                # completes cleanly by sending a final empty completion.
+                log_debug(
+                    f"[ollama_serve] No text response for chat_id={chat_id}; finalizing stream."
                 )
                 await self._finalize_stream(
                     chat_id=chat_id,
@@ -608,7 +635,14 @@ class OllamaCompatServer:
                 first_name="Ollama",
                 full_name="Ollama Client",
             ),
-            chat=SimpleNamespace(id=chat_id, type="ollama"),
+            chat=SimpleNamespace(
+                id=chat_id,
+                type="ollama",
+                title="Ollama Session",
+                username="ollama_chat",
+                first_name="Ollama",
+                full_name="Ollama Session",
+            ),
             reply_to_message=None,
         )
 

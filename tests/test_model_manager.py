@@ -1,15 +1,21 @@
 import shutil
-from pathlib import Path
 
 import pytest
 
-from core.model_manager import MODEL_MANAGER, ModelSpec
+import core.model_manager as model_manager_module
+from core.model_manager import MODEL_MANAGER, ModelSpec, SAMPLE_TEXT_BY_LANG
 
 
 @pytest.fixture(autouse=True)
 def isolate_models_dir(tmp_path, monkeypatch):
     """Ensure the models directory is isolated per-test via env var."""
     monkeypatch.setenv("SYNTH_MODELS_DIR", str(tmp_path))
+    monkeypatch.setattr(model_manager_module, "_REPO_ROOT", tmp_path)
+    monkeypatch.setattr(
+        model_manager_module,
+        "_SAMPLES_STATIC_DIR",
+        tmp_path / "res" / "synth_webui" / "static" / "audio" / "model_samples",
+    )
     # Clear any previously registered test models to avoid leakage
     orig = dict(MODEL_MANAGER._models)
     yield
@@ -51,20 +57,11 @@ def test_ensure_sample_generates(tmp_path):
     dest.mkdir(parents=True, exist_ok=True)
     MODEL_MANAGER._write_manifest("bar-model")
 
-    # remove any stale static sample file that may have been left over from
-    # previous test runs or manual operations.  This ensures the generator is
-    # actually called on first invocation.
-    stale = Path("res/synth_webui/static/audio/model_samples/bar-model/v1.mp3")
-    try:
-        stale.unlink()
-    except Exception:
-        pass
-
     called = {"count": 0}
 
     def generator(text, voice):
         called["count"] += 1
-        assert text == "hello world"
+        assert text == SAMPLE_TEXT_BY_LANG["en"]
         assert voice == "v1"
         return b"fake-mp3"
 
@@ -111,10 +108,10 @@ def test_list_samples_direct_file(tmp_path):
     dest.mkdir(parents=True, exist_ok=True)
     MODEL_MANAGER._write_manifest("qux-model")
     # create a dummy sample for v1
-    sample_dir = Path("res/synth_webui/static/audio/model_samples/qux-model")
+    sample_dir = model_manager_module._SAMPLES_STATIC_DIR / "qux-model"
     sample_dir.mkdir(parents=True, exist_ok=True)
-    sample_path = sample_dir / "v1.mp3"
-    sample_path.write_bytes(b"dummy")
+    legacy_sample_path = sample_dir / "v1.mp3"
+    legacy_sample_path.write_bytes(b"dummy")
     entries = MODEL_MANAGER.list_samples("qux-model")
     assert any(e["voice"] == "v1" for e in entries)
     # ensure ensure_sample does not regenerate when file exists
@@ -126,7 +123,8 @@ def test_list_samples_direct_file(tmp_path):
 
     p = MODEL_MANAGER.ensure_sample("qux-model", "v1", gen)
     assert p is not None
-    assert p.resolve() == sample_path.resolve()
+    assert p.resolve() == (sample_dir / "v1_en.mp3").resolve()
+    assert not legacy_sample_path.exists()
     assert not called["x"]
 
 
