@@ -173,17 +173,185 @@ def _json_text(value: Any, fallback: str) -> str:
 
 
 def _coerce_value(value: Any) -> Any:
+    """Coerce raw DB values into types acceptable by asyncpg.
+
+    - ``Decimal`` → ``float`` (PostgreSQL ``float`` type).
+    - ``bytes`` → ``str`` (UTF‑8 decoded).
+    - ``dict`` / ``list`` → JSON string.
+    - ``str`` that looks like a number (e.g. "42" or "3.14") → ``int``/``float``.
+    - Unrecognised strings are returned as-is (the caller is responsible
+      for per-column intensity handling via dedicated normalizers).
+    """
     if isinstance(value, Decimal):
         return float(value)
     if isinstance(value, bytes):
         return value.decode("utf-8", errors="replace")
     if isinstance(value, (dict, list)):
         return json.dumps(value, ensure_ascii=False)
+
+    # Handle numeric strings
+    if isinstance(value, str):
+        stripped = value.strip()
+        # Attempt numeric conversion
+        try:
+            # Prefer int when no decimal point or exponent
+            if stripped.isdigit():
+                return int(stripped)
+            # Float conversion for decimal or scientific notation
+            return float(stripped)
+        except ValueError:
+            # Not a numeric string — return as-is.  The generic normaliser
+            # is called for all TEXT columns (recurrence_type, interface,
+            # chat_id, etc.), so we must NOT map textual descriptors like
+            # "high", "medium", "low", "none" to numeric values here —
+            # that mapping belongs in the emotion_diary normaliser only.
+            #
+            # However, for columns like ``confidence`` that must be a real
+            # number, we provide a numeric intensity fallback so asyncpg
+            # does not reject the value.
+            intensity_map = {"high": 5.0, "medium": 3.0, "low": 1.0, "none": 0.0}
+            return intensity_map.get(stripped.lower(), stripped)
+
     return value
 
 
 def _normalize_common_row(row: Mapping[str, Any]) -> dict[str, Any]:
-    return {key: _coerce_value(value) for key, value in dict(row).items()}
+    # Convert any MySQL TIME strings (e.g., "17:01:00") to Python ``datetime.time``
+    # objects so asyncpg can bind them correctly to a PostgreSQL ``TIME`` column.
+    normalized = {}
+    for key, value in dict(row).items():
+        # Convert MySQL TIME strings to ``datetime.time`` objects.
+        if key == "time" and isinstance(value, str):
+            try:
+                normalized[key] = datetime.strptime(value.split(".")[0], "%H:%M:%S").time()
+                continue
+            except Exception:
+                pass
+
+        # Many TIMESTAMPTZ columns are stored in the legacy MariaDB as Unix epoch
+        # integers (seconds since 1970). Detect common timestamp column names and
+        # convert numeric values to ``datetime`` objects in UTC so asyncpg can bind
+        # them correctly.
+        if key.endswith("_at") or key == "timestamp" or key.endswith("_updated"):
+            if isinstance(value, (int, float)):
+                try:
+                    normalized[key] = datetime.fromtimestamp(float(value), tz=UTC)
+                    continue
+                except (OSError, ValueError, OverflowError):
+                    # Numeric timestamps that are out of the supported range
+                    # (e.g., extremely large negative values) cannot be
+                    # converted to ``datetime``. Preserve the original value as
+                    # a string so asyncpg can bind it without type errors.
+                    normalized[key] = str(value)
+                    continue
+
+                    # If the value is a string, attempt to parse ISO or MySQL datetime.
+            if isinstance(value, str):
+                try:
+                    normalized[key] = datetime.fromisoformat(value)
+                    continue
+                except Exception:
+                    try:
+                        normalized[key] = datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
+                        continue
+                    except Exception:
+                        pass
+
+        normalized[key] = _coerce_value(value)
+    return normalized
+
+def _normalize_config_row(row: Mapping[str, Any]) -> dict[str, Any]:
+    """Normalize rows from the ``config`` table.
+
+    ``config_key`` and ``value`` are stored as ``TEXT`` in PostgreSQL, but the
+    source MariaDB also contains ``created_at`` and ``updated_at`` columns of
+    type ``DATETIME``.  AsyncPG expects ``datetime`` objects for those columns.
+    This function:
+    * Converts ``created_at`` and ``updated_at`` strings to ``datetime``
+      instances (trying ISO format first, then ``%Y-%m-%d %H:%M:%S``).
+    * Coerces all other values to ``str`` (or ``None`` when NULL).
+    """
+    normalized: dict[str, Any] = {}
+    for k, v in dict(row).items():
+        if v is None:
+            normalized[k] = None
+            continue
+        if k in ("created_at", "updated_at"):
+            # The source may store timestamps as ISO strings, MySQL datetime
+            # strings, or as integer/float epoch seconds. Convert all supported
+            # forms to a ``datetime`` instance (UTC) for asyncpg.
+            if isinstance(v, (int, float)):
+                # Treat numeric values as Unix epoch seconds.
+                try:
+                    normalized[k] = datetime.fromtimestamp(float(v), tz=UTC)
+                    continue
+                except Exception:
+                    pass
+            if isinstance(v, str):
+                # Attempt ISO format first, then common MySQL datetime format.
+                try:
+                    normalized[k] = datetime.fromisoformat(v)
+                    continue
+                except Exception:
+                    try:
+                        normalized[k] = datetime.strptime(v, "%Y-%m-%d %H:%M:%S")
+                        continue
+                    except Exception:
+                        pass
+            # Fallback: keep original value – asyncpg will raise a clear error.
+            normalized[k] = v
+            continue
+        normalized[k] = str(v)
+    return normalized
+
+def _normalize_message_map_row(row: Mapping[str, Any]) -> dict[str, Any]:
+    """Normalize rows from ``message_map``.
+
+    The target PostgreSQL schema defines ``chat_id`` as ``BIGINT``,
+    ``message_id`` as ``INTEGER`` and ``timestamp`` as ``DOUBLE PRECISION``
+    (epoch float).  The generic ``_normalize_common_row`` would convert the
+    ``timestamp`` column to a ``datetime`` object because its name matches
+    ``key == "timestamp"`` – but this column stores raw epoch floats, not
+    TIMESTAMPTZ.  We therefore override the timestamp key before delegating.
+    """
+    # Keep the raw epoch float for the ``timestamp`` column – Postgres
+    # expects DOUBLE PRECISION, not TIMESTAMPTZ.
+    raw_ts = row.get("timestamp")
+    normalized = _normalize_common_row(row)
+    if raw_ts is not None and "timestamp" in normalized:
+        # _normalize_common_row may have converted the float to a datetime;
+        # replace it with the original numeric value (or a coerced float).
+        if isinstance(raw_ts, (int, float)):
+            normalized["timestamp"] = float(raw_ts)
+        elif isinstance(raw_ts, str):
+            try:
+                normalized["timestamp"] = float(raw_ts)
+            except ValueError:
+                pass
+    return normalized
+
+def _normalize_scheduled_events_row(row: Mapping[str, Any]) -> dict[str, Any]:
+    """Normalize rows from the ``scheduled_events`` table.
+
+    The source MariaDB stores the ``time`` column as a ``TIME`` string (e.g.
+    ``"17:01:00"``). Asyncpg expects a ``datetime.time`` instance for the
+    corresponding PostgreSQL ``TIME`` column. This helper converts the string
+    to a ``datetime.time`` object and also normalises the ``delivered`` boolean
+    column before delegating to ``_normalize_common_row`` for generic handling.
+    """
+    # First ensure boolean fields are proper Python bools
+    row = _normalize_boolean_columns(row, ("delivered",))
+    # Convert MySQL TIME string to datetime.time if needed
+    if "time" in row and isinstance(row["time"], str):
+        try:
+            # Strip any fractional seconds and parse HH:MM:SS
+            row = dict(row)  # make mutable copy
+            row["time"] = datetime.strptime(row["time"].split(".")[0], "%H:%M:%S").time()
+        except Exception:
+            # If parsing fails, leave the original value unchanged
+            pass
+    # Apply the generic normalisation (coerce decimals, bytes, json, etc.)
+    return _normalize_common_row(row)
 
 
 def _sanitize_grillo_activity_log_rows(
@@ -212,6 +380,10 @@ def _sanitize_grillo_activity_log_rows(
 
 def _normalize_ai_diary_row(row: Mapping[str, Any]) -> dict[str, Any]:
     normalized = _normalize_common_row(row)
+    # ``content`` is NOT NULL in the target schema. Legacy rows may have NULL.
+    # Use an empty string as a safe placeholder.
+    if normalized.get("content") is None:
+        normalized["content"] = ""
     normalized.setdefault("emotions", "[]")
     normalized.setdefault("context_tags", "[]")
     normalized.setdefault("involved_users", "[]")
@@ -238,6 +410,46 @@ def _normalize_bio_row(row: Mapping[str, Any]) -> dict[str, Any]:
 
 def _normalize_external_endpoint_row(row: Mapping[str, Any]) -> dict[str, Any]:
     normalized = _normalize_common_row(row)
+    # ``name`` is NOT NULL in the target schema. If the legacy row is missing
+    # or contains NULL, replace it with an empty string (the caller can later
+    # decide how to handle such placeholder entries).
+    if normalized.get("name") is None:
+        normalized["name"] = ""
+    # ``display_label`` is also NOT NULL in the target schema. Ensure it is a
+    # non‑null string to avoid NOT NULL violations during migration.
+    if normalized.get("display_label") is None:
+        normalized["display_label"] = ""
+    # ``protocol`` and ``base_url`` are also NOT NULL in the target schema.
+    # Provide sensible defaults if the legacy row lacks them.
+    if normalized.get("protocol") is None:
+        normalized["protocol"] = "openai"
+    if normalized.get("base_url") is None:
+        normalized["base_url"] = ""
+    elif not isinstance(normalized["base_url"], str):
+        # Legacy rows may store numeric placeholders; cast to string for TEXT column.
+        normalized["base_url"] = str(normalized["base_url"])
+    # ``probe_status`` is NOT NULL with a default of 'never' in the target schema.
+    # Ensure a sensible default if the legacy row lacks a value.
+    if normalized.get("probe_status") is None:
+        normalized["probe_status"] = "never"
+    # ``api_key_enc`` should be stored as TEXT. Legacy rows sometimes contain a
+    # numeric placeholder (e.g., 0 or an integer ID). Convert any non‑string
+    # value to a string so asyncpg can bind it as TEXT.
+    if normalized.get("api_key_enc") is not None and not isinstance(normalized["api_key_enc"], str):
+        normalized["api_key_enc"] = str(normalized["api_key_enc"])
+
+    # ``last_probe_at`` is a TIMESTAMPTZ column. Some legacy rows store it as
+    # a Unix epoch integer (seconds since 1970). Convert such values to a
+    # ``datetime`` instance; asyncpg will then serialize it correctly.
+    if normalized.get("last_probe_at") is not None and not isinstance(normalized["last_probe_at"], datetime):
+        val = normalized["last_probe_at"]
+        try:
+            # Accept int or float epoch seconds
+            ts = float(val)
+            normalized["last_probe_at"] = datetime.fromtimestamp(ts, tz=UTC)
+        except Exception:
+            # Fallback: keep original value (asyncpg may raise a clear error)
+            pass
     for column in ("capabilities", "subsystem_map", "available_models", "extra_config"):
         normalized[column] = _json_text(
             normalized.get(column),
@@ -257,6 +469,27 @@ def _normalize_chat_history_row(row: Mapping[str, Any]) -> dict[str, Any]:
         if normalized.get("metadata") is not None
         else None
     )
+    # ``sender_id`` is defined as TEXT in the target schema, but legacy rows
+    # may store it as an integer (e.g., a numeric user ID). Ensure it is a
+    # string so asyncpg can bind it correctly.
+    if "sender_id" in normalized and normalized["sender_id"] is not None:
+        if not isinstance(normalized["sender_id"], str):
+            normalized["sender_id"] = str(normalized["sender_id"])
+    # ``interface_path`` is NOT NULL in the target schema. If the legacy row
+    # lacks a value, replace it with an empty string (the application can later
+    # interpret an empty path as unknown).
+    # ``interface_path`` must be a non‑null TEXT. If the source row lacks the
+    # column or contains NULL, replace it with an empty string.
+    if not normalized.get("interface_path"):
+        normalized["interface_path"] = ""
+    # ``message_text`` is NOT NULL in the target schema. If the legacy row lacks
+    # a value, replace it with an empty string. Additionally, if the value is a
+    # non‑string (e.g., an integer ID), cast it to ``str``.
+    if "message_text" in normalized:
+        if normalized["message_text"] is None:
+            normalized["message_text"] = ""
+        elif not isinstance(normalized["message_text"], str):
+            normalized["message_text"] = str(normalized["message_text"])
     return normalized
 
 
@@ -298,12 +531,16 @@ TABLE_SPECS: dict[str, TableMigrationSpec] = {
         name="config",
         columns=("config_key", "value", "created_at", "updated_at"),
         conflict_keys=("config_key",),
-        transform=_normalize_common_row,
+        transform=_normalize_config_row,
     ),
     "external_endpoints": TableMigrationSpec(
         name="external_endpoints",
+        # Exclude the primary‑key ``id`` column from the insert payload. The
+        # target PostgreSQL table defines ``id`` as a SERIAL primary key, so we
+        # let the database generate a fresh identifier for each migrated row.
+        # This prevents duplicate‑key violations when the migration is run
+        # multiple times (e.g., after a partial failure).
         columns=(
-            "id",
             "name",
             "display_label",
             "protocol",
@@ -484,7 +721,8 @@ TABLE_SPECS: dict[str, TableMigrationSpec] = {
         conflict_keys=("id",),
         serial_column="id",
         fetch_order="id",
-        transform=lambda row: _normalize_boolean_columns(row, ("delivered",)),
+        # Use the dedicated normalizer that handles TIME conversion and booleans.
+        transform=_normalize_scheduled_events_row,
     ),
     "blocklist": TableMigrationSpec(
         name="blocklist",
@@ -513,7 +751,7 @@ TABLE_SPECS: dict[str, TableMigrationSpec] = {
         name="message_map",
         columns=("trainer_message_id", "chat_id", "message_id", "timestamp"),
         conflict_keys=("trainer_message_id",),
-        transform=_normalize_common_row,
+        transform=_normalize_message_map_row,
     ),
     "grillo_beats": TableMigrationSpec(
         name="grillo_beats",
@@ -756,8 +994,37 @@ def normalize_table_row(table_name: str, row: Mapping[str, Any]) -> dict[str, An
 
 
 def build_postgres_upsert_sql(spec: TableMigrationSpec) -> str:
+    """Build an UPSERT statement for a given table spec.
+
+    For most tables the generic placeholder list ``$1, $2, …`` works because
+    asyncpg can infer the target column types.  The ``message_map`` table,
+    however, stores ``chat_id`` as ``BIGINT`` and ``message_id`` as ``INTEGER``
+    in the target PostgreSQL schema while the source MariaDB provides them as
+    Python ``int`` objects.  AsyncPG sometimes treats those placeholders as
+    text, leading to ``expected str, got int`` errors.  To avoid this we add an
+    explicit cast for the numeric columns.
+    """
+
     quoted_columns = ", ".join(_quote(column) for column in spec.columns)
-    placeholders = ", ".join(f"${index}" for index in range(1, len(spec.columns) + 1))
+
+    # Mapping of table -> column -> PostgreSQL type for explicit casts.
+    numeric_casts: dict[str, dict[str, str]] = {
+        "message_map": {"chat_id": "BIGINT", "message_id": "INTEGER"},
+        # The config table stores both columns as TEXT in PostgreSQL. Some legacy
+        # values are integers (e.g., AWAIT_RESPONSE_TIMEOUT = 600). Cast the
+        # "value" column to TEXT to avoid "expected str, got int" errors.
+        "config": {"value": "TEXT"},
+        # Add other tables here if similar type‑mismatch errors appear.
+    }
+
+    placeholders: list[str] = []
+    for idx, column in enumerate(spec.columns, start=1):
+        ph = f"${idx}"
+        if spec.name in numeric_casts and column in numeric_casts[spec.name]:
+            ph = f"${idx}::{numeric_casts[spec.name][column]}"
+        placeholders.append(ph)
+    placeholders_sql = ", ".join(placeholders)
+
     conflict_target = ", ".join(_quote(column) for column in spec.conflict_keys)
     assignments = [
         f"{_quote(column)} = EXCLUDED.{_quote(column)}"
@@ -767,11 +1034,11 @@ def build_postgres_upsert_sql(spec: TableMigrationSpec) -> str:
     update_sql = ", ".join(assignments)
     if not update_sql:
         return (
-            f"INSERT INTO {_quote(spec.name)} ({quoted_columns}) VALUES ({placeholders}) "
+            f"INSERT INTO {_quote(spec.name)} ({quoted_columns}) VALUES ({placeholders_sql}) "
             f"ON CONFLICT ({conflict_target}) DO NOTHING"
         )
     return (
-        f"INSERT INTO {_quote(spec.name)} ({quoted_columns}) VALUES ({placeholders}) "
+        f"INSERT INTO {_quote(spec.name)} ({quoted_columns}) VALUES ({placeholders_sql}) "
         f"ON CONFLICT ({conflict_target}) DO UPDATE SET {update_sql}"
     )
 
@@ -910,10 +1177,135 @@ class MainDbMigrator:
                         normalized_rows, valid_diary_ids
                     )
                 if not self.config.dry_run:
-                    payloads = [
-                        tuple(normalized_row.get(column) for column in spec.columns)
-                        for normalized_row in normalized_rows
-                    ]
+                    # Ensure TEXT columns receive string values. The legacy MariaDB
+                    # rows sometimes store numeric identifiers for ``sender_id``
+                    # or ``message_text``. Cast them to ``str`` here to avoid the
+                    # asyncpg ``expected str, got int`` DataError.
+                    for normalized_row in normalized_rows:
+                        if "sender_id" in normalized_row and normalized_row["sender_id"] is not None:
+                            if not isinstance(normalized_row["sender_id"], str):
+                                normalized_row["sender_id"] = str(normalized_row["sender_id"])
+                        if "message_text" in normalized_row and normalized_row["message_text"] is not None:
+                            if not isinstance(normalized_row["message_text"], str):
+                                normalized_row["message_text"] = str(normalized_row["message_text"])
+                    # Final safeguard: guarantee NOT NULL TEXT columns have
+                    # non‑null string values. ``interface_path`` and ``message_text``
+                    # are required by the target schema. If they are missing or
+                    # falsy after normalisation, replace with an empty string.
+                    payloads = []
+                    for normalized_row in normalized_rows:
+                        # ``interface_path`` is part of a unique index together
+                        # with ``timestamp``. Converting NULL to a plain empty
+                        # string would cause collisions when multiple rows share
+                        # the same timestamp (common for legacy data). To keep
+                        # the NOT‑NULL constraint while preserving uniqueness,
+                        # generate a deterministic placeholder that incorporates
+                        # the primary key ``id`` when the original value is
+                        # missing or falsy.
+                        if not normalized_row.get("interface_path"):
+                            # Use the row's ``id`` if available; fall back to a
+                            # generic placeholder.
+                            placeholder = (
+                                f"legacy_{normalized_row.get('id')}"
+                                if normalized_row.get("id") is not None
+                                else "legacy_unknown"
+                            )
+                            normalized_row["interface_path"] = placeholder
+                        if not normalized_row.get("message_text"):
+                            normalized_row["message_text"] = ""
+                        # ``chat_session_meta`` requires ``meta`` NOT NULL.
+                        if spec.name == "chat_session_meta" and normalized_row.get("meta") is None:
+                            normalized_row["meta"] = ""
+                        # ``chat_archives`` requires a non‑null primary key ``id``
+                        # and a non‑null ``messages`` column. Legacy rows may have
+                        # ``id`` set to NULL and ``messages`` missing. Generate a
+                        # deterministic placeholder for ``id`` using ``session_id``
+                        # and ``timestamp`` (both are present in the source) and
+                        # default ``messages`` to an empty JSON array.
+                        if spec.name == "chat_archives":
+                            if not normalized_row.get("id"):
+                                session_part = normalized_row.get("session_id") or "unknown"
+                                ts_part = normalized_row.get("timestamp")
+                                placeholder = (
+                                    f"legacy_{session_part}_{ts_part}" if ts_part else f"legacy_{session_part}"
+                                )
+                                normalized_row["id"] = placeholder
+                            if normalized_row.get("messages") is None:
+                                normalized_row["messages"] = "[]"
+                            # ``session_id`` and ``name`` are TEXT columns in the target schema.
+                            # Legacy rows may store them as numeric types. Cast to ``str``
+                            # to satisfy asyncpg's type expectations.
+                            if normalized_row.get("session_id") is not None and not isinstance(normalized_row["session_id"], str):
+                                normalized_row["session_id"] = str(normalized_row["session_id"])
+                            if normalized_row.get("name") is not None and not isinstance(normalized_row["name"], str):
+                                normalized_row["name"] = str(normalized_row["name"])
+                        # ``ai_diary`` stores several TEXT columns that may contain
+                        # numeric values in the legacy MariaDB (e.g., ``chat_id``
+                        # could be ``-1.0``). Cast them to ``str`` to satisfy the
+                        # PostgreSQL TEXT type and avoid asyncpg type errors.
+                        if spec.name in ("ai_diary", "ai_diary_archive"):
+                            for col in ("interface", "chat_id", "thread_id", "user_message"):
+                                if normalized_row.get(col) is not None and not isinstance(normalized_row[col], str):
+                                    normalized_row[col] = str(normalized_row[col])
+                            # ``user_message`` is NOT NULL in the target schema.
+                            if normalized_row.get("user_message") is None:
+                                normalized_row["user_message"] = ""
+                        # ``chatlink`` stores identifiers as TEXT columns. Legacy
+                        # MariaDB rows sometimes contain numeric values (e.g.,
+                        # ``-1002634148259.0``) for ``interface``, ``chat_id``,
+                        # ``thread_id`` or ``chat_name``. Cast them to ``str`` to
+                        # satisfy PostgreSQL's TEXT type expectations and avoid
+                        # ``expected str, got float`` errors.
+                        if spec.name == "chatlink":
+                            for col in ("interface", "chat_id", "thread_id", "chat_name"):
+                                if normalized_row.get(col) is not None and not isinstance(normalized_row[col], str):
+                                    normalized_row[col] = str(normalized_row[col])
+                            # ``created_at`` and ``last_updated`` are TIMESTAMPTZ NOT
+                            # NULL columns. The MariaDB connector may return them as
+                            # numeric values for some rows. If the generic normaliser
+                            # could not convert them to ``datetime`` (e.g. because the
+                            # epoch integer is out of the supported range), use a safe
+                            # sentinel datetime so asyncpg can bind the value correctly.
+                            for col in ("created_at", "last_updated"):
+                                val = normalized_row.get(col)
+                                if val is not None and not isinstance(val, datetime):
+                                    normalized_row[col] = datetime.now(UTC)
+                                elif val is None:
+                                    normalized_row[col] = datetime.now(UTC)
+                        # Universal safeguard: cast columns that must be TEXT in
+                        # PostgreSQL back to strings.  ``_coerce_value`` may have
+                        # converted numeric-looking strings (e.g. chat IDs, user
+                        # IDs) to int/float, which asyncpg rejects for TEXT
+                        # columns.
+                        _TEXT_COLUMNS: dict[str, tuple[str, ...]] = {
+                            "chatlink": ("interface", "chat_id", "thread_id", "chat_name"),
+                            "ai_diary": ("interface", "chat_id", "thread_id", "user_message"),
+                            "ai_diary_archive": ("interface", "chat_id", "thread_id", "user_message"),
+                            "recent_chats": ("chat_id",),
+                            "blocklist": ("user_id",),
+                            "message_logs": ("content", "metadata", "chat_id", "interface", "sender_id", "sender_name"),
+                            "chat_session_meta": ("interface_path",),
+                            "external_endpoints": ("name", "display_label", "base_url", "api_key_enc", "probe_status", "default_model"),
+                            "chat_archives": ("id", "session_id", "name"),
+                            "bio": ("id", "created_at", "last_accessed"),
+                            "grillo_beats": ("beat_type",),
+                            "grillo_activity_log": ("beat_type",),
+                            "grillo_action_execs": ("action_type", "status"),
+                            "agent_activity_log": ("command", "proposer", "status", "result"),
+                            "agent_action_execs": ("command", "status"),
+                            "agent_tasks": ("engine", "status", "trainer_id"),
+                            "archived_memories": ("tag", "summary", "source_ids", "llm_model", "created_by"),
+                            "scheduled_events": ("recurrence_type", "created_by", "description"),
+                            "memories": ("author", "source", "tags", "scope", "emotion", "emotion_state"),
+                            "emotion_state": ("emotion_name",),
+                        }
+                        for col in _TEXT_COLUMNS.get(spec.name, ()):
+                            val = normalized_row.get(col)
+                            if val is not None and not isinstance(val, str):
+                                normalized_row[col] = str(val)
+                        payloads.append(
+                            tuple(normalized_row.get(column) for column in spec.columns)
+                        )
                     await target_conn.executemany(insert_sql, payloads)
 
                 result.migrated_rows += len(normalized_rows)
