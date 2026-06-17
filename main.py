@@ -219,15 +219,19 @@ if __name__ == "__main__":
                     f"[main] Attempting database connection (attempt {attempt + 1}/{max_retries})..."
                 )
 
-                try:
-                    from core.db_cutover import resume_legacy_mysql_cutover_if_needed
+                # Conditional execution of legacy MariaDB→Postgres migration
+                if os.getenv("EXECUTE_MARIADB_POSTGRES_MIGRATION", "false").lower() in ("1", "true", "yes", "on"):
+                    try:
+                        from core.db_cutover import resume_legacy_mysql_cutover_if_needed
 
-                    migrated = await resume_legacy_mysql_cutover_if_needed()
-                    if migrated:
-                        log_info("[main] Legacy MySQL to Postgres cutover completed")
-                except Exception as e:
-                    log_error(f"[main] Legacy DB cutover failed: {e}")
-                    raise
+                        migrated = await resume_legacy_mysql_cutover_if_needed()
+                        if migrated:
+                            log_info("[main] Legacy MySQL to Postgres cutover completed")
+                    except Exception as e:
+                        log_error(f"[main] Legacy DB cutover failed: {e}")
+                        raise
+                else:
+                    log_info("[main] Skipping legacy MariaDB→Postgres migration (set EXECUTE_MARIADB_POSTGRES_MIGRATION=true to enable)")
 
                 # Initialize database async
                 if await initialize_database():
