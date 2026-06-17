@@ -145,19 +145,23 @@ The legacy database is preserved for verification and archival purposes, but the
 
 Manual runtime backups are available from the WebUI Settings tab and write compressed dumps into the mounted `backups/` directory.
 
-#### Optional: Migrate Existing MariaDB memories into SOUL
+#### Optional: Migrate Existing MariaDB to POSTGRESQL
+If you already used Synthetic Heart in the past you might want to migrate the old MariaDB, in order to do so:
 
-If your Synth already has months of history, you can import legacy data into SOUL `mem_cells`.
+1. **Ensure the legacy MariaDB container is running** (if you need to migrate data).
+2. **Set the environment variable** in your `docker-compose.yml` or `.env` file:
 
-1. Ensure SOUL Postgres is running and schema is applied:
-   - Linux/macOS: `bash scripts/bootstrap_soul_postgres.sh`
-   - Windows PowerShell: `./scripts/bootstrap_soul_postgres.ps1`
-2. Run a dry-run first:
-   - `uv run python scripts/migrate_legacy_to_soul.py --dry-run --days 180`
-3. Run the real migration:
-   - `uv run python scripts/migrate_legacy_to_soul.py --days 180`
-4. Verify results in Postgres:
-   - `SELECT COUNT(*) FROM mem_cells;`
+   ```yaml
+   environment:
+     - EXECUTE_MARIADB_POSTGRES_MIGRATION=true
+   ```
+
+   or in `.env`:
+
+   ```env
+   EXECUTE_MARIADB_POSTGRES_MIGRATION=true
+   ```
+
 
 Migration notes:
 - Sources migrated: `chat_history_cache`, `memories`, `ai_diary`
