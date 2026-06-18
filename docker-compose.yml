@@ -63,23 +63,24 @@ services:
     networks:
       - synth_network
 
-  synth-legacy-db:
-    container_name: synth-legacy-db
-    hostname: synth-legacy-db
-    image: mariadb:11
-    environment:
-      MYSQL_ROOT_PASSWORD: ${SOURCE_DB_ROOT_PASS:-root}
-      MYSQL_DATABASE: ${SOURCE_DB_NAME:-synth}
-      MYSQL_USER: ${SOURCE_DB_USER:-synth}
-      MYSQL_PASSWORD: ${SOURCE_DB_PASSWORD:-synth}
-      MARIADB_AUTO_UPGRADE: 1
-    command: --max-connections=100
-    volumes:
-      - synth_db_data:/var/lib/mysql
-      - ./init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro
-    restart: unless-stopped
-    networks:
-      - synth_network
+# Enable this only if you want to migrate from a legacy MariaDB database. Otherwise, you can disable it to save resources.
+  # synth-legacy-db:
+  #   container_name: synth-legacy-db
+  #   hostname: synth-legacy-db
+  #   image: mariadb:11
+  #   environment:
+  #     MYSQL_ROOT_PASSWORD: ${SOURCE_DB_ROOT_PASS:-root}
+  #     MYSQL_DATABASE: ${SOURCE_DB_NAME:-synth}
+  #     MYSQL_USER: ${SOURCE_DB_USER:-synth}
+  #     MYSQL_PASSWORD: ${SOURCE_DB_PASSWORD:-synth}
+  #     MARIADB_AUTO_UPGRADE: 1
+  #   command: --max-connections=100
+  #   volumes:
+  #     - synth_db_data:/var/lib/mysql
+  #     - ./init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro
+  #   restart: unless-stopped
+  #   networks:
+  #     - synth_network
 
   # Selenium‑LLM Engine, you can disable this if you want to use a different endpoint
   # such as an API provider or a local LLM running in another container
