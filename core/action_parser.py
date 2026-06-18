@@ -674,6 +674,14 @@ def validate_action(
     supported_types.update(_get_core_declared_action_types())
     supported_types.update(_get_builtin_interface_message_action_types())
     action_type = action.get("type")
+    if (
+        action_type
+        and isinstance(action_type, str)
+        and action_type.startswith("default_api:")
+    ):
+        action_type = action_type.split("default_api:", 1)[1]
+        action["type"] = action_type
+
     if not action_type:
         errors.append("Missing 'type'")
     elif action_type not in supported_types:

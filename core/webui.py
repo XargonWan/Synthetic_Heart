@@ -3666,6 +3666,7 @@ class SynthWebUIInterface:
         sender: str,
         text: str,
         metadata: dict[str, Any] | None = None,
+        skip_history: bool = False,
     ) -> None:
         history = self.message_history.setdefault(
             session_id, deque(maxlen=self.max_history)
@@ -3703,35 +3704,36 @@ class SynthWebUIInterface:
         history.append(msg)
 
         # Persist to chat_history_cache for long-term storage
-        try:
-            from core.chat_history_cache import save_chat_message
-
-            # Normalize sender_name for DB storage: we want to store "self" as the
-            # canonical name for the SyntH agent so that restore/replay can map
-            # it back to "synth" for WS payloads. This avoids misattribution
-            # where stored value "synth" would be considered a user on replay.
-            db_sender_name = sender
+        if not skip_history:
             try:
-                if isinstance(sender, str) and sender.lower() in (
-                    "synth",
-                    "bot",
-                    "synth_webui",
-                ):
-                    db_sender_name = "self"
-            except Exception:
-                db_sender_name = sender
+                from core.chat_history_cache import save_chat_message
 
-            await save_chat_message(
-                interface_path,
-                text,
-                sender_name=db_sender_name,
-                sender_id=session_id,
-                timestamp=datetime.now(timezone.utc).isoformat(),
-            )
-        except Exception as e:
-            log_debug(
-                f"{LOG_PREFIX} Failed to persist chat message for {session_id}: {e}"
-            )
+                # Normalize sender_name for DB storage: we want to store "self" as the
+                # canonical name for the SyntH agent so that restore/replay can map
+                # it back to "synth" for WS payloads. This avoids misattribution
+                # where stored value "synth" would be considered a user on replay.
+                db_sender_name = sender
+                try:
+                    if isinstance(sender, str) and sender.lower() in (
+                        "synth",
+                        "bot",
+                        "synth_webui",
+                    ):
+                        db_sender_name = "self"
+                except Exception:
+                    db_sender_name = sender
+
+                await save_chat_message(
+                    interface_path,
+                    text,
+                    sender_name=db_sender_name,
+                    sender_id=session_id,
+                    timestamp=datetime.now(timezone.utc).isoformat(),
+                )
+            except Exception as e:
+                log_debug(
+                    f"{LOG_PREFIX} Failed to persist chat message for {session_id}: {e}"
+                )
 
     def _multi_session_enabled(self) -> bool:
         """Return True if the experimental multi-session flag is active.
@@ -4028,7 +4030,9 @@ class SynthWebUIInterface:
                 )
 
         # Append to in-memory history so reconnect will replay it
-        await self._append_history(session_id, "synth", text, metadata=safe_metadata)
+        await self._append_history(
+            session_id, "synth", text, metadata=safe_metadata, skip_history=skip_history
+        )
 
         # Save SyntH's response via core chat_context_manager
         if not skip_history:

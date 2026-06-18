@@ -60,6 +60,62 @@ def test_primary_db_selector_forces_soul_connection_settings(monkeypatch) -> Non
     )
 
 
+def test_primary_db_selector_falls_back_to_general_db_settings_when_soul_settings_are_empty(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("SYNTH_PRIMARY_DB", "soul")
+    monkeypatch.setenv("DB_HOST", "fallback-db")
+    monkeypatch.setenv("DB_PORT", "5432")
+    monkeypatch.setenv("DB_USER", "fallback-user")
+    monkeypatch.setenv("DB_PASS", "fallback-pass")
+    monkeypatch.setenv("DB_NAME", "fallback-db")
+    monkeypatch.delenv("SOUL_POSTGRES_DSN", raising=False)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.delenv("DB_DSN", raising=False)
+    monkeypatch.delenv("SOUL_PG_HOST", raising=False)
+    monkeypatch.delenv("SOUL_PG_PORT", raising=False)
+    monkeypatch.delenv("SOUL_PG_USER", raising=False)
+    monkeypatch.delenv("SOUL_PG_PASSWORD", raising=False)
+    monkeypatch.delenv("SOUL_PG_DB", raising=False)
+
+    assert db_module._get_db_type() == "postgres"
+    assert db_module._read_db_config() == (
+        "fallback-db",
+        5432,
+        "fallback-user",
+        "fallback-pass",
+        "fallback-db",
+    )
+
+
+def test_primary_db_selector_falls_back_to_postgres_default_port_when_db_port_is_mysql(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("SYNTH_PRIMARY_DB", "soul")
+    monkeypatch.setenv("DB_HOST", "fallback-db")
+    monkeypatch.setenv("DB_PORT", "3306")
+    monkeypatch.setenv("DB_USER", "fallback-user")
+    monkeypatch.setenv("DB_PASS", "fallback-pass")
+    monkeypatch.setenv("DB_NAME", "fallback-db")
+    monkeypatch.delenv("SOUL_POSTGRES_DSN", raising=False)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.delenv("DB_DSN", raising=False)
+    monkeypatch.delenv("SOUL_PG_HOST", raising=False)
+    monkeypatch.delenv("SOUL_PG_PORT", raising=False)
+    monkeypatch.delenv("SOUL_PG_USER", raising=False)
+    monkeypatch.delenv("SOUL_PG_PASSWORD", raising=False)
+    monkeypatch.delenv("SOUL_PG_DB", raising=False)
+
+    assert db_module._get_db_type() == "postgres"
+    assert db_module._read_db_config() == (
+        "fallback-db",
+        5432,
+        "fallback-user",
+        "fallback-pass",
+        "fallback-db",
+    )
+
+
 def test_primary_db_selector_forces_memory_connection_settings(monkeypatch) -> None:
     monkeypatch.setenv("SYNTH_PRIMARY_DB", "memory")
     monkeypatch.setenv("DB_HOST", "memory-db")

@@ -375,7 +375,8 @@ class MemorySearchPlugin:
                 like = "%" + tok + "%"
                 token_clauses.append("content LIKE %s")
                 params.append(like)
-            where_clauses_mem.append("(" + " OR ".join(token_clauses) + ")")
+            if token_clauses:
+                where_clauses_mem.append("(" + " OR ".join(token_clauses) + ")")
 
             # For ai_diary search personal_thought/interaction_summary/user_message only.
             # NOTE: ai_diary.content holds Rekku's own response text, NOT user memories —
@@ -390,7 +391,8 @@ class MemorySearchPlugin:
                 params.append(like)
                 diary_token_clauses.append("user_message LIKE %s")
                 params.append(like)
-            where_clauses_diary.append("(" + " OR ".join(diary_token_clauses) + ")")
+            if diary_token_clauses:
+                where_clauses_diary.append("(" + " OR ".join(diary_token_clauses) + ")")
 
             # Also search recent chat history (chat_history_cache.message_text) so
             # user-sent messages (like reporting a dream) are included in results.
@@ -528,7 +530,9 @@ class MemorySearchPlugin:
                 "ai_diary",
                 "SELECT 'ai_diary' AS source, id, timestamp, content FROM ai_diary",
             )
-        if where_clauses_chat or time_clause_parts:
+        # Chat history is only searched in free mode; in tags mode a bare time
+        # window would otherwise pull in every chat message of the window.
+        if mode == "free" and (where_clauses_chat or time_clause_parts):
             _maybe_add_table(
                 chat_content_params,
                 where_clauses_chat,

@@ -150,7 +150,7 @@ async def diary_command(days: str = "7") -> str:
     """Get diary entries for the specified number of days."""
     try:
         from plugins.ai_diary import (
-            get_recent_entries,
+            get_recent_entries_async,
             format_diary_for_injection,
             is_plugin_enabled,
         )
@@ -171,7 +171,7 @@ async def diary_command(days: str = "7") -> str:
             days_arg = int(num_days)
         except Exception:
             days_arg = 2
-        entries = await asyncio.to_thread(lambda: get_recent_entries(days=days_arg))
+        entries = await get_recent_entries_async(days=days_arg)
 
         if not entries:
             return f"📔 No diary entries found in the last {num_days} days."

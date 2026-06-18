@@ -616,17 +616,20 @@ class MatrixInterface:
                 "[matrix_interface] Cannot send message - interface is disabled"
             )
             return
+        skip_history = False
         if isinstance(room_id, dict):
             payload = room_id
             text = payload.get("text", text)
             room_id = payload.get("target") or payload.get("room_id")
             reply_to_event_id = payload.get("reply_to_event_id")
             thread_event_id = payload.get("thread_event_id") or payload.get("thread_id")
+            skip_history = payload.get("skip_history", False)
         else:
             payload = kwargs
             room_id = room_id or payload.get("target") or payload.get("room_id")
             reply_to_event_id = payload.get("reply_to_event_id")
             thread_event_id = payload.get("thread_event_id") or payload.get("thread_id")
+            skip_history = payload.get("skip_history", False)
 
         if not self.client:
             log_warning(
@@ -660,20 +663,21 @@ class MatrixInterface:
         )
 
         # Save SyntH's response via core chat_context_manager
-        try:
-            from core.chat_context_manager import save_response_message
-            from core.interface_path_utils import build_interface_path
+        if not skip_history:
+            try:
+                from core.chat_context_manager import save_response_message
+                from core.interface_path_utils import build_interface_path
 
-            interface_path = build_interface_path(
-                "matrix",
-                str(room_id),
-                str(thread_event_id) if thread_event_id else None,
-            )
-            await save_response_message(interface_path, text)
-        except Exception as e:
-            log_debug(
-                f"[matrix_interface] Failed to save response via context_manager: {e}"
-            )
+                interface_path = build_interface_path(
+                    "matrix",
+                    str(room_id),
+                    str(thread_event_id) if thread_event_id else None,
+                )
+                await save_response_message(interface_path, text)
+            except Exception as e:
+                log_debug(
+                    f"[matrix_interface] Failed to save response via context_manager: {e}"
+                )
 
     async def _send_matrix_message(
         self,

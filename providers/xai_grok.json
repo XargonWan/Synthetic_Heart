@@ -1,0 +1,23 @@
+{
+  "provider_id": "xai_grok",
+  "display_name": "xAI Grok",
+  "description": "xAI Grok models via the OpenAI-compatible Chat Completions API",
+  "icon": "custom",
+  "protocol": "openai",
+  "base_url": "https://api.x.ai/v1",
+  "base_url_locked": true,
+  "requires_api_key": true,
+  "api_key_placeholder": "xai-…",
+  "api_key_hint": "Get your API key at https://console.x.ai/",
+  "default_capabilities": {
+    "cortex": true,
+    "vox": false,
+    "auris": false,
+    "live": false,
+    "vision": true
+  },
+  "suggested_name": "xai-grok",
+  "suggested_label": "xAI Grok",
+  "extra_config": {},
+  "sort_order": 15
+}

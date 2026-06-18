@@ -29,6 +29,7 @@ class GrilloPlugin(AIPluginBase):
         "self_reflection": 0.2,
         "curiosity": 0.15,
         "relationship": 0.1,
+        "temporal_reflection": 0.1,
     }
 
     _scheduler_running = False
@@ -361,6 +362,7 @@ class GrilloPlugin(AIPluginBase):
             "self_reflection",
             "curiosity",
             "relationship",
+            "temporal_reflection",
         }:
             return ["create_personal_diary_entry"]
         return None

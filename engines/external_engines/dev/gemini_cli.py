@@ -1,5 +1,6 @@
 # cortex/external_engines/dev/gemini_cli.py
 
+import asyncio
 import subprocess
 from core.ai_plugin_base import AIPluginBase
 from core.logging_utils import log_debug, log_info, log_error
@@ -101,12 +102,17 @@ class GeminiCLIPlugin(AIPluginBase):
         prompt = messages[-1]["content"] if messages else ""
         log_debug(f"[gemini] Sent prompt: {prompt}")
         try:
-            result = subprocess.run(
-                ["gemini", "--token", GEMINI_API_KEY, prompt],
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
+            # Run in a worker thread: a blocking subprocess.run here would
+            # freeze the entire event loop for up to the 30s timeout.
+            def _run_cli() -> subprocess.CompletedProcess[str]:
+                return subprocess.run(
+                    ["gemini", "--token", GEMINI_API_KEY, prompt],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+
+            result = await asyncio.to_thread(_run_cli)
             log_debug(f"[gemini] stdout: {result.stdout.strip()}")
             log_debug(f"[gemini] stderr: {result.stderr.strip()}")
             if result.returncode != 0:

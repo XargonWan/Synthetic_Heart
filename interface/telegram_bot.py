@@ -1499,7 +1499,7 @@ async def manage_chat_id_command(update: Update, context: ContextTypes.DEFAULT_T
             except ValueError:
                 await update.message.reply_text("Invalid ID")
                 return
-        await recent_chats.reset_chat(cid)
+        await recent_chats.reset_chat(cid, "telegram_bot")
         await update.message.reply_text(
             f"✅ Reset mapping for `{cid}`.", parse_mode="Markdown"
         )
@@ -2653,18 +2653,21 @@ class TelegramInterface:
             )
 
             # Save SyntH's response via core chat_context_manager
-            try:
-                from core.chat_context_manager import save_response_message
-                from core.interface_path_utils import build_interface_path
+            if not payload.get("skip_history", False):
+                try:
+                    from core.chat_context_manager import save_response_message
+                    from core.interface_path_utils import build_interface_path
 
-                msg_interface_path = build_interface_path(
-                    "telegram_bot", str(chat_id), str(thread_id) if thread_id else None
-                )
-                await save_response_message(msg_interface_path, text)
-            except Exception as e:
-                log_debug(
-                    f"[telegram_interface] Failed to save response via context_manager: {e}"
-                )
+                    msg_interface_path = build_interface_path(
+                        "telegram_bot",
+                        str(chat_id),
+                        str(thread_id) if thread_id else None,
+                    )
+                    await save_response_message(msg_interface_path, text)
+                except Exception as e:
+                    log_debug(
+                        f"[telegram_interface] Failed to save response via context_manager: {e}"
+                    )
 
         except BadRequest as e:
             if "chat not found" in str(e).lower():

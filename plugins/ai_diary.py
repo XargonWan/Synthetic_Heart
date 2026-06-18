@@ -349,19 +349,25 @@ async def init_diary_table():
             )
         """)
 
-        # Legacy emotion_diary table (moved from core)
+        # emotion_diary is owned by plugins/emotion_manager.py. This bootstrap
+        # DDL must stay identical to EmotionManager._ensure_table_exists so
+        # whichever plugin initializes first creates the same schema — the old
+        # variant here (id VARCHAR, intensity INT, no timestamp) truncated
+        # float intensities to zero (see AGENTS.md §12).
         await cursor.execute("""
             CREATE TABLE IF NOT EXISTS emotion_diary (
-                id VARCHAR(100) PRIMARY KEY,
+                id INT AUTO_INCREMENT PRIMARY KEY,
                 source VARCHAR(100),
-                event TEXT,
-                emotion VARCHAR(50),
-                intensity INT,
-                state VARCHAR(50),
-                trigger_condition TEXT,
+                event VARCHAR(100),
+                emotion VARCHAR(100),
+                intensity FLOAT,
+                state VARCHAR(100),
+                trigger_condition VARCHAR(255),
                 decision_logic TEXT,
-                next_check DATETIME
-            )
+                next_check DATETIME,
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                INDEX idx_timestamp (timestamp)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
         """)
 
         # Archive table for archived diary entries
@@ -458,11 +464,37 @@ async def _execute(query: str, params: tuple = ()):
 
 
 async def _fetchall(query: str, params: tuple = ()) -> List[Dict]:
-    """Fetch all results from a database query."""
+    """Fetch all results from a database query as plain mutable dicts.
+
+    The Postgres compat cursor yields immutable asyncpg ``Record`` rows even
+    when a DictCursor is requested; callers mutate JSON fields in place, so
+    every row is copied into a real dict here.
+    """
     async with get_db() as conn:
         cursor = await conn.cursor(aiomysql.DictCursor)
         await cursor.execute(query, params)
-        return await cursor.fetchall()
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+
+def _parse_json_list(value: Any) -> list:
+    """Parse a JSON-list column value defensively (handles None, str, list)."""
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    try:
+        parsed = json.loads(value)
+        return parsed if isinstance(parsed, list) else []
+    except Exception:
+        return []
+
+
+def _isoformat_timestamp(value: Any) -> Any:
+    """Convert a datetime column value to ISO text, passing through others."""
+    if value is None:
+        return None
+    return value.isoformat() if hasattr(value, "isoformat") else value
 
 
 def _merge_json_list(existing_json: str | None, new_items: list) -> list:
@@ -983,31 +1015,33 @@ async def add_diary_entry_async(
         PLUGIN_ENABLED = False
 
 
-def get_recent_entries(days: int = 2, max_chars: int = None) -> List[Dict[str, Any]]:
-    """Get diary entries from the last N days, optionally limited by character count.
+async def get_recent_entries_async(
+    days: int = 2, max_chars: int | None = None
+) -> List[Dict[str, Any]]:
+    """Get diary entries from the last N days, optionally limited by character count (async version).
     Returns list of dict entries with all database columns, empty list if plugin is disabled.
     Entries are ordered from most recent to oldest, and if max_chars is specified,
     older entries are discarded first to stay within the character limit."""
     global PLUGIN_ENABLED
 
     log_debug(
-        f"[ai_diary] get_recent_entries called with days={days}, max_chars={max_chars}, PLUGIN_ENABLED={PLUGIN_ENABLED}"
+        f"[ai_diary] get_recent_entries_async called with days={days}, max_chars={max_chars}, PLUGIN_ENABLED={PLUGIN_ENABLED}"
     )
 
     # Attempt lazy initialization if plugin was disabled at startup
     if not PLUGIN_ENABLED:
         try:
             log_debug(
-                "[ai_diary] Attempting lazy initialization for get_recent_entries..."
+                "[ai_diary] Attempting lazy initialization for get_recent_entries_async..."
             )
-            _run(_execute("SELECT 1 FROM ai_diary LIMIT 1"))
+            await _execute("SELECT 1 FROM ai_diary LIMIT 1")
             PLUGIN_ENABLED = True
             log_info(
-                "[ai_diary] Plugin lazy-initialized successfully in get_recent_entries"
+                "[ai_diary] Plugin lazy-initialized successfully in get_recent_entries_async"
             )
         except Exception as init_error:
             log_debug(
-                f"[ai_diary] Lazy initialization failed in get_recent_entries: {init_error}"
+                f"[ai_diary] Lazy initialization failed in get_recent_entries_async: {init_error}"
             )
             log_debug("[ai_diary] Plugin disabled, returning empty list")
             return []
@@ -1020,29 +1054,26 @@ def get_recent_entries(days: int = 2, max_chars: int = None) -> List[Dict[str, A
         cutoff_date = datetime.now() - timedelta(days=days)
         log_debug(f"[ai_diary] Looking for entries after {cutoff_date}")
 
-        entries = _run(
-            _fetchall(
-                """
+        entries = await _fetchall(
+            """
             SELECT id, content, personal_thought, timestamp, context_tags, involved_users, 
                    emotions, interface, chat_id, thread_id, interaction_summary, user_message
             FROM ai_diary
             WHERE timestamp >= %s
             ORDER BY timestamp DESC
             """,
-                (cutoff_date,),
-            )
+            (cutoff_date,),
         )
 
         log_debug(f"[ai_diary] Raw query returned {len(entries)} entries")
 
-        # Convert JSON fields back to objects
+        # Convert JSON fields back to objects (defensively: columns may hold
+        # NULL, malformed text, or already-decoded lists on JSON-typed schemas)
         for entry in entries:
-            entry["context_tags"] = json.loads(entry.get("context_tags", "[]"))
-            entry["involved_users"] = json.loads(entry.get("involved_users", "[]"))
-            entry["emotions"] = json.loads(entry.get("emotions", "[]"))
-            entry["timestamp"] = (
-                entry["timestamp"].isoformat() if entry["timestamp"] else None
-            )
+            entry["context_tags"] = _parse_json_list(entry.get("context_tags"))
+            entry["involved_users"] = _parse_json_list(entry.get("involved_users"))
+            entry["emotions"] = _parse_json_list(entry.get("emotions"))
+            entry["timestamp"] = _isoformat_timestamp(entry.get("timestamp"))
 
         log_debug(f"[ai_diary] After JSON parsing: {len(entries)} entries")
 
@@ -1085,10 +1116,17 @@ def get_recent_entries(days: int = 2, max_chars: int = None) -> List[Dict[str, A
         return entries
 
     except Exception as e:
-        log_error(f"[ai_diary] Failed to get recent entries: {e}")
+        log_error(f"[ai_diary] Failed to get recent entries async: {e}")
         # Disable plugin if database is unavailable
         PLUGIN_ENABLED = False
         return []
+
+
+def get_recent_entries(
+    days: int = 2, max_chars: int | None = None
+) -> List[Dict[str, Any]]:
+    """Get diary entries from the last N days, optionally limited by character count (sync wrapper)."""
+    return _run(get_recent_entries_async(days=days, max_chars=max_chars))
 
 
 def get_entries_by_tags(tags: List[str], limit: int = 10) -> List[Dict[str, Any]]:
@@ -1114,14 +1152,13 @@ def get_entries_by_tags(tags: List[str], limit: int = 10) -> List[Dict[str, Any]
 
         entries = _run(_fetchall(query, tuple(params)))
 
-        # Convert JSON fields back to objects
+        # Convert JSON fields back to objects (defensively: columns may hold
+        # NULL, malformed text, or already-decoded lists on JSON-typed schemas)
         for entry in entries:
-            entry["context_tags"] = json.loads(entry.get("context_tags", "[]"))
-            entry["involved_users"] = json.loads(entry.get("involved_users", "[]"))
-            entry["emotions"] = json.loads(entry.get("emotions", "[]"))
-            entry["timestamp"] = (
-                entry["timestamp"].isoformat() if entry["timestamp"] else None
-            )
+            entry["context_tags"] = _parse_json_list(entry.get("context_tags"))
+            entry["involved_users"] = _parse_json_list(entry.get("involved_users"))
+            entry["emotions"] = _parse_json_list(entry.get("emotions"))
+            entry["timestamp"] = _isoformat_timestamp(entry.get("timestamp"))
 
         return entries
 
@@ -1152,14 +1189,13 @@ def get_entries_with_person(person: str, limit: int = 10) -> List[Dict[str, Any]
             )
         )
 
-        # Convert JSON fields back to objects
+        # Convert JSON fields back to objects (defensively: columns may hold
+        # NULL, malformed text, or already-decoded lists on JSON-typed schemas)
         for entry in entries:
-            entry["context_tags"] = json.loads(entry.get("context_tags", "[]"))
-            entry["involved_users"] = json.loads(entry.get("involved_users", "[]"))
-            entry["emotions"] = json.loads(entry.get("emotions", "[]"))
-            entry["timestamp"] = (
-                entry["timestamp"].isoformat() if entry["timestamp"] else None
-            )
+            entry["context_tags"] = _parse_json_list(entry.get("context_tags"))
+            entry["involved_users"] = _parse_json_list(entry.get("involved_users"))
+            entry["emotions"] = _parse_json_list(entry.get("emotions"))
+            entry["timestamp"] = _isoformat_timestamp(entry.get("timestamp"))
 
         return entries
 
@@ -1376,7 +1412,7 @@ class DiaryPlugin:
     def get_supported_action_types(self):
         return ["static_inject", "create_personal_diary_entry", "update_diary_entry"]
 
-    def get_history_contributions(self, **kwargs):
+    async def get_history_contributions(self, **kwargs):
         """Provide diary entries as a history contribution for the core HistoryEngine."""
         try:
             from core.history_types import HistoryContribution
@@ -1407,7 +1443,9 @@ class DiaryPlugin:
             # readable without dumping multi-page merged blobs into the prompt.
             per_field_limit = max(300, diary_budget // 4)
 
-            raw_entries = get_recent_entries(days=days, max_chars=diary_budget)
+            raw_entries = await get_recent_entries_async(
+                days=days, max_chars=diary_budget
+            )
 
             # Truncate heavy text fields on each returned entry so the history
             # engine receives compact, LLM-digestible records rather than the
@@ -1592,16 +1630,10 @@ class DiaryPlugin:
 
             # Process entries
             for entry in recent_entries:
-                if isinstance(entry.get("context_tags"), str):
-                    entry["context_tags"] = json.loads(entry["context_tags"] or "[]")
-                if isinstance(entry.get("involved_users"), str):
-                    entry["involved_users"] = json.loads(
-                        entry["involved_users"] or "[]"
-                    )
-                if isinstance(entry.get("emotions"), str):
-                    entry["emotions"] = json.loads(entry["emotions"] or "[]")
-                if entry.get("timestamp") and hasattr(entry["timestamp"], "isoformat"):
-                    entry["timestamp"] = entry["timestamp"].isoformat()
+                entry["context_tags"] = _parse_json_list(entry.get("context_tags"))
+                entry["involved_users"] = _parse_json_list(entry.get("involved_users"))
+                entry["emotions"] = _parse_json_list(entry.get("emotions"))
+                entry["timestamp"] = _isoformat_timestamp(entry.get("timestamp"))
 
             duration = time.time() - start
             if duration > 0.1:
@@ -1622,8 +1654,14 @@ class DiaryPlugin:
             # Return empty list, not empty dict - so the key is present
             return {"latest_diary_entries": []}
 
-    def execute_action(self, action: dict, context: dict, bot, original_message):
-        """Execute diary-related actions."""
+    async def execute_action(
+        self, action: dict, context: dict, bot: Any, original_message: Any
+    ) -> dict:
+        """Execute diary-related actions.
+
+        Async on purpose: the previous sync version bridged into the DB via
+        `_run()`, blocking the event loop for up to 10 s per diary write.
+        """
         action_type = action.get("type")
         payload = action.get("payload", {})
 
@@ -1696,7 +1734,7 @@ class DiaryPlugin:
                     }
 
                 # Create diary entry with provided information
-                add_diary_entry(
+                await add_diary_entry_async(
                     content=content,
                     personal_thought=personal_thought,
                     emotions=emotions,
@@ -1742,18 +1780,14 @@ class DiaryPlugin:
                         merge_timestamp = None
 
                 if merge_timestamp is not None:
-                    _run(
-                        _execute(
-                            "UPDATE ai_diary SET content=%s, timestamp=%s WHERE id=%s",
-                            (new_content, merge_timestamp, int(entry_id)),
-                        )
+                    await _execute(
+                        "UPDATE ai_diary SET content=%s, timestamp=%s WHERE id=%s",
+                        (new_content, merge_timestamp, int(entry_id)),
                     )
                 else:
-                    _run(
-                        _execute(
-                            "UPDATE ai_diary SET content=%s WHERE id=%s",
-                            (new_content, int(entry_id)),
-                        )
+                    await _execute(
+                        "UPDATE ai_diary SET content=%s WHERE id=%s",
+                        (new_content, int(entry_id)),
                     )
 
                 merged_source_ids = (
@@ -1772,7 +1806,11 @@ class DiaryPlugin:
                     stale_entry_ids.append(parsed_id)
 
                 if stale_entry_ids:
-                    archive_result = archive_diary_entries(stale_entry_ids)
+                    # archive_diary_entries is a sync helper (also used by the
+                    # WebUI); run it off-loop so its `_run` bridge cannot block.
+                    archive_result = await asyncio.to_thread(
+                        archive_diary_entries, stale_entry_ids
+                    )
                     if not archive_result.get("success"):
                         log_warning(
                             "[ai_diary] Consolidation archived row cleanup failed for "
@@ -2146,11 +2184,9 @@ def get_all_diary_entries(include_archived: bool = False) -> List[Dict[str, Any]
 
         # Convert JSON fields back to objects
         for entry in entries:
-            entry["context_tags"] = json.loads(entry.get("context_tags", "[]"))
-            entry["emotions"] = json.loads(entry.get("emotions", "[]"))
-            entry["timestamp"] = (
-                entry["timestamp"].isoformat() if entry["timestamp"] else None
-            )
+            entry["context_tags"] = _parse_json_list(entry.get("context_tags"))
+            entry["emotions"] = _parse_json_list(entry.get("emotions"))
+            entry["timestamp"] = _isoformat_timestamp(entry.get("timestamp"))
 
         return entries
 

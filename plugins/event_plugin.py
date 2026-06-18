@@ -509,7 +509,7 @@ class EventPlugin(AIPluginBase):
             # Priority: send_at (absolute time) over send_in (delay)
             if send_at:
                 log_info(f"[event_plugin] Processing send_at: {send_at}")
-                from core.time_zone_utils import get_local_tz
+                from core.time_zone_utils import get_local_timezone
 
                 # Try Unix timestamp first
                 try:
@@ -529,7 +529,7 @@ class EventPlugin(AIPluginBase):
                         # Try YYYY-MM-DD HH:MM format
                         try:
                             dt_local = datetime.strptime(send_at, "%Y-%m-%d %H:%M")
-                            local_tz = get_local_tz()
+                            local_tz = get_local_timezone()
                             dt_local = dt_local.replace(tzinfo=local_tz)
                             future_time = dt_local.astimezone(timezone.utc)
                             log_info(
@@ -538,10 +538,12 @@ class EventPlugin(AIPluginBase):
                         except ValueError:
                             # Try HH:MM format (today in local timezone)
                             try:
-                                now_local = datetime.now(tz=get_local_tz())
+                                now_local = datetime.now(tz=get_local_timezone())
                                 time_part = datetime.strptime(send_at, "%H:%M").time()
                                 dt_local = datetime.combine(
-                                    now_local.date(), time_part, tzinfo=get_local_tz()
+                                    now_local.date(),
+                                    time_part,
+                                    tzinfo=get_local_timezone(),
                                 )
                                 future_time = dt_local.astimezone(timezone.utc)
                                 log_info(
@@ -1342,12 +1344,16 @@ class EventPlugin(AIPluginBase):
                 from_cortex=False,  # This is from the system, not the LLM
             )
 
+            # Route to the interface named in the path (telegram_bot/...,
+            # synth_webui/..., ...) instead of assuming Telegram.
+            interface_name = interface_path.split("/")[0]
             action = {
-                "type": "message_telegram_bot",
+                "type": f"message_{interface_name}",
                 "payload": payload,
             }
 
-            await run_action(action, message)
+            context = {"interface_path": interface_path}
+            await run_action(action, context, None, message)
             log_info(
                 f"[event_plugin] ✅ Message sent via interface_path {interface_path} (event {event_id})"
             )

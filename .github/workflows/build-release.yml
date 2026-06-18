@@ -21,7 +21,7 @@ jobs:
     permissions:
       contents: read
     outputs:
-      semver: ${{ steps.gitversion.outputs.semVer }}
+      semver: ${{ steps.gitversion.outputs.majorMinorPatch }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -32,17 +32,9 @@ jobs:
           versionSpec: '5.x'
       - name: Determine version with GitVersion
         id: gitversion
-        run: |
-          output=$(dotnet-gitversion /config GitVersion.yml /output json 2>&1)
-          echo "$output"
-          json=$(echo "$output" | awk 'BEGIN{found=0} /^\s*{/ {found=1} {if (found) print} /^\s*}/ {exit}')
-          if echo "$json" | jq empty >/dev/null 2>&1; then
-            semver=$(echo "$json" | jq -r '.MajorMinorPatch')
-            echo "semVer=${semver}" >> "$GITHUB_OUTPUT"
-          else
-            echo "::error::dotnet-gitversion did not produce valid JSON"
-            exit 1
-          fi
+        uses: gittools/actions/gitversion/execute@v0.9.14
+        with:
+          useConfigFile: true
 
   build-images:
     needs: prepare

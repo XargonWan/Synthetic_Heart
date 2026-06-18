@@ -76,6 +76,13 @@ class AzuraCastClient:
         except aiohttp.ClientError as e:
             raise AzuraCastError(f"Connection error: {e}") from e
 
+    def _build_webdj_url(self, station_shortcode: str) -> str:
+        """Build the WebDJ websocket URL, preserving the base URL's TLS scheme."""
+        base = self._base_url
+        host = base.split("://", 1)[-1]
+        scheme = "wss" if base.lower().startswith("https://") else "ws"
+        return f"{scheme}://{host}/webdj/{station_shortcode}/"
+
     async def get_nowplaying(self, station_id: str | None = None) -> dict[str, Any]:
         if station_id:
             return await self._request("GET", f"/api/nowplaying/{station_id}")
@@ -131,8 +138,7 @@ class AzuraCastClient:
         if webm_data is None:
             return {"status": "error", "reason": "conversion_failed"}
 
-        host = self._base_url.split("://", 1)[-1]
-        ws_url = f"ws://{host}/webdj/{station_shortcode}/"
+        ws_url = self._build_webdj_url(station_shortcode)
 
         log_info(
             f"[azuracast] Broadcasting {len(webm_data)}b WebM via WebDJ ({username})"
@@ -204,12 +210,9 @@ class AzuraCastClient:
         completes during the last 2 s of the previous song, leaving a clean
         gap for the announcement with no jingle overlap.
         """
-        host = self._base_url.split("://", 1)[-1]
-        ws_url = f"ws://{host}/webdj/{station_shortcode}/"
+        ws_url = self._build_webdj_url(station_shortcode)
 
-        log_info(
-            f"[azuracast] Timed broadcast: {len(webm_data)}b WebM at song_end"
-        )
+        log_info(f"[azuracast] Timed broadcast: {len(webm_data)}b WebM at song_end")
         try:
             async with websockets.connect(
                 ws_url, subprotocols=["webcast"], close_timeout=30

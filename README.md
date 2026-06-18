@@ -180,7 +180,7 @@ For the fastest development experience on Windows, we recommend using **uv**. It
     ```powershell
     pip install uv
     ```
-2.  **Clone the repository** and enter the folder:
+2.  **Clone the repository** (preserves LF line endings on Windows to avoid script issues in Docker) and enter the folder:
     ```powershell
     git clone -c core.autocrlf=false https://github.com/XargonWan/Synthetic_Heart.git
     cd Synthetic_Heart
