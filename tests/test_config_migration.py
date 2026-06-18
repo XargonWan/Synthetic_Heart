@@ -15,7 +15,9 @@ class _FakeConfigCursor:
             key = params[0]
             self._row = (1,) if key in self._state else None
             return None
-        if normalized.startswith("REPLACE INTO CONFIG"):
+        if normalized.startswith("REPLACE INTO CONFIG") or (
+            normalized.startswith("INSERT INTO CONFIG") and "ON CONFLICT" in normalized
+        ):
             key, value = params
             self._state[key] = value
             self._row = None
