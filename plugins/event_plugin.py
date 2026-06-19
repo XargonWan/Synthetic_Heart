@@ -1008,8 +1008,9 @@ class EventPlugin(AIPluginBase):
         """Create a structured prompt for the event delivery."""
 
         def make_json_serializable(obj):
-            """Recursively convert datetime objects to strings for JSON serialization."""
+            """Recursively convert datetime objects and dataclasses to JSON-serializable types."""
             from datetime import datetime, date, timedelta
+            from dataclasses import is_dataclass, asdict
 
             if isinstance(obj, (datetime, date)):
                 return obj.isoformat() if hasattr(obj, "isoformat") else str(obj)
@@ -1019,6 +1020,8 @@ class EventPlugin(AIPluginBase):
                 return {k: make_json_serializable(v) for k, v in obj.items()}
             elif isinstance(obj, (list, tuple)):
                 return [make_json_serializable(item) for item in obj]
+            elif is_dataclass(obj):
+                return make_json_serializable(asdict(obj))
             return obj
 
         # Extract event details
