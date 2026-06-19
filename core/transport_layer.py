@@ -1603,6 +1603,11 @@ def _get_attempted_action_full_description(
                 "[_get_attempted_action] Could not extract action type from error text"
             )
             return None
+
+        # Strip default_api: prefix if present
+        if action_type.startswith("default_api:"):
+            action_type = action_type.split("default_api:", 1)[1]
+
         log_debug(
             f"[_get_attempted_action] Identified attempted action type: {action_type}"
         )

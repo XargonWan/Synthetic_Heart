@@ -141,7 +141,7 @@ class TrackMonitor:
             # AzuraCast nowplaying metadata can briefly show a wrong song during
             # transitions/crossfades.  Wait briefly and re-verify so we don't
             # announce a phantom track.
-            verified_id = await self._verify_track_stable()
+            verified_id = await self._verify_track_stable(track_id)
             if verified_id is None:
                 # Verification failed / re-verify the old track — false alarm
                 log_info(
@@ -267,7 +267,7 @@ class TrackMonitor:
             "artist": str(song.get("artist", "")),
         }
 
-    async def _verify_track_stable(self) -> str | None:
+    async def _verify_track_stable(self, detected_track_id: str) -> str | None:
         """Wait briefly and re-check the nowplaying metadata.
 
         AzuraCast's ``/api/nowplaying`` can briefly report the wrong track
@@ -279,13 +279,15 @@ class TrackMonitor:
 
         Returns the verified track id (which may differ from the original
         detection), or ``None`` if the metadata glitched back to the
-        previous song (false alarm).
+        previous song (false alarm).  When verification cannot complete,
+        returns *detected_track_id* — never a title, since the caller
+        stores the return value as the new ``_last_track_id``.
         """
         await asyncio.sleep(_VERIFY_DELAY_S)
         try:
             np = await self._client.get_nowplaying(self._station_id)
         except Exception:
-            return self.current_track_title  # proceed with what we have
+            return detected_track_id  # proceed with what we have
 
         vfy_current = np.get("now_playing", {}) or {}
         vfy_track = vfy_current.get("song", {}) or {}
@@ -299,7 +301,7 @@ class TrackMonitor:
         self.next_track_artist = next_song.get("artist")
 
         if not vfy_id or not vfy_title or not vfy_artist:
-            return self.current_track_title  # incomplete data, proceed anyway
+            return detected_track_id  # incomplete data, proceed anyway
 
         # Skip if the metadata settled back to the previous real song
         if vfy_id == self._last_track_id:

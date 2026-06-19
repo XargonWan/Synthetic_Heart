@@ -1,8 +1,21 @@
 {
   "mcpServers": {
     "gemini-api-docs-mcp": {
-      "type": "http",
-      "url": "https://gemini-api-docs-mcp.dev"
+      "command": "uvx",
+      "args": [
+        "--from",
+        "git+https://github.com/philschmid/gemini-api-docs-mcp",
+        "gemini-docs-mcp"
+      ]
+    },
+    "grok-api-docs": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["d:/dev/13/synthetic_heart/mcp_servers/grok-api-mcp/dist/index.js"]
+    },
+    "xai-docs-official": {
+      "type": "sse",
+      "url": "https://docs.x.ai/api/mcp"
     },
     "gitnexus": {
       "type": "stdio",

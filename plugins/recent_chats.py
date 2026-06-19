@@ -87,7 +87,7 @@ async def get_recent_chats(limit: int = 10) -> List[Dict]:
                     if row["metadata"]:
                         try:
                             metadata = json.loads(row["metadata"])
-                        except:
+                        except Exception:
                             pass
                     result.append(
                         {

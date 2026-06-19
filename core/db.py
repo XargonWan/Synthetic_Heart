@@ -119,7 +119,6 @@ def _get_db_type() -> str:
     if normalized in {"postgres", "postgresql"}:
         return "postgres"
     return "postgres"
-    return "mariadb"
 
 
 def _get_source_db_type() -> str:
@@ -150,14 +149,33 @@ def _read_db_config():
         env_pass = os.getenv("SOUL_PG_PASSWORD") or os.getenv("SOUL_PG_PASS")
         env_name = os.getenv("SOUL_PG_DB")
 
-        host = env_host or dsn_host or "localhost"
+        # Fallback to general DB_* config when SOUL specifics are not provided/empty
+        default_db_host = os.getenv("DB_HOST") or "localhost"
+        default_db_user = os.getenv("DB_USER") or "soul"
+        default_db_pass = os.getenv("DB_PASS") or "soul"
+        default_db_name = os.getenv("DB_NAME") or "soul"
+
+        host = env_host or dsn_host or default_db_host
         try:
-            port = int(env_port) if env_port is not None else (dsn_port or default_port)
+            env_db_port = os.getenv("DB_PORT")
+            if env_db_port and env_db_port.strip() not in {"3306", "3307"}:
+                default_db_port = int(env_db_port)
+            else:
+                default_db_port = default_port
         except Exception:
-            port = dsn_port or default_port
-        user = env_user or dsn_user or "soul"
-        passwd = env_pass or dsn_pass or "soul"
-        dbname = env_name or dsn_name or "soul"
+            default_db_port = default_port
+
+        try:
+            port = (
+                int(env_port)
+                if (env_port is not None and str(env_port).strip() != "")
+                else (dsn_port or default_db_port)
+            )
+        except Exception:
+            port = dsn_port or default_db_port
+        user = env_user or dsn_user or default_db_user
+        passwd = env_pass or dsn_pass or default_db_pass
+        dbname = env_name or dsn_name or default_db_name
         return host, port, user, passwd, dbname
 
     # DB connection settings must be environment-driven.
@@ -409,6 +427,58 @@ _pool: Any = None
 _pool_lock = asyncio.Lock()
 _named_postgres_pools_by_loop: dict[int, dict[str, Any]] = {}
 _named_postgres_pool_lock = asyncio.Lock()
+_active_loops: dict[int, asyncio.AbstractEventLoop] = {}
+
+
+async def _garbage_collect_pools() -> None:
+    """Close and remove connection pools associated with closed event loops."""
+    closed_loop_ids = []
+    for loop_id, loop in list(_active_loops.items()):
+        if loop.is_closed():
+            closed_loop_ids.append(loop_id)
+
+    for loop_id in closed_loop_ids:
+        _active_loops.pop(loop_id, None)
+
+        pool = _pools_by_loop.pop(loop_id, None)
+        if pool is not None:
+            log_info(
+                f"[db] Garbage collecting connection pool for closed loop id={loop_id}"
+            )
+            try:
+                if hasattr(pool, "close"):
+                    close_res = pool.close()
+                    if asyncio.iscoroutine(close_res):
+                        await close_res
+                    elif hasattr(pool, "wait_closed"):
+                        wait_res = pool.wait_closed()
+                        if asyncio.iscoroutine(wait_res):
+                            await wait_res
+            except Exception as e:
+                log_debug(
+                    f"[db] Error closing main pool for closed loop id={loop_id}: {e}"
+                )
+
+        named_pools = _named_postgres_pools_by_loop.pop(loop_id, None)
+        if named_pools is not None:
+            for pool_key, pool in named_pools.items():
+                log_info(
+                    f"[db] Garbage collecting named postgres pool '{pool_key}' for closed loop id={loop_id}"
+                )
+                try:
+                    if hasattr(pool, "close"):
+                        close_res = pool.close()
+                        if asyncio.iscoroutine(close_res):
+                            await close_res
+                        elif hasattr(pool, "wait_closed"):
+                            wait_res = pool.wait_closed()
+                            if asyncio.iscoroutine(wait_res):
+                                await wait_res
+                except Exception as e:
+                    log_debug(
+                        f"[db] Error closing named pool '{pool_key}' for closed loop id={loop_id}: {e}"
+                    )
+
 
 # Track active connections for leak detection and monitoring
 _active_conn_count = 0
@@ -446,17 +516,29 @@ async def get_named_postgres_pool(
         raise RuntimeError("asyncpg is not installed")
 
     loop_id = _get_current_loop_id()
+
+    # If the loop associated with this cached pool is closed (reused loop_id), discard it.
+    cached_loop = _active_loops.get(loop_id)
+    if cached_loop is not None and cached_loop.is_closed():
+        _named_postgres_pools_by_loop.pop(loop_id, None)
+        _active_loops.pop(loop_id, None)
+
     loop_pools = _named_postgres_pools_by_loop.get(loop_id)
     if loop_pools is not None and pool_key in loop_pools:
         return loop_pools[pool_key]
 
     async with _named_postgres_pool_lock:
+        await _garbage_collect_pools()
         loop_pools = _named_postgres_pools_by_loop.setdefault(loop_id, {})
         pool = loop_pools.get(pool_key)
         if pool is None:
             log_info(
                 f"[db] Creating named postgres pool '{pool_key}' for loop id={loop_id}"
             )
+            try:
+                _active_loops[loop_id] = asyncio.get_running_loop()
+            except Exception:
+                pass
             pool = await create_postgres_pool(
                 host="",
                 port=0,
@@ -478,12 +560,19 @@ async def get_pool():
     # Determine current event loop and use/create a pool bound to it.
     loop_id = _get_current_loop_id()
 
+    # If the loop associated with this cached pool is closed (reused loop_id), discard it.
+    cached_loop = _active_loops.get(loop_id)
+    if cached_loop is not None and cached_loop.is_closed():
+        _pools_by_loop.pop(loop_id, None)
+        _active_loops.pop(loop_id, None)
+
     pool = _pools_by_loop.get(loop_id)
     if pool is None:
         async with _pool_lock:
             # Double-check under lock
             pool = _pools_by_loop.get(loop_id)
             if pool is None:
+                await _garbage_collect_pools()
                 log_info("[db] Creating connection pool for loop id=%s" % loop_id)
                 # Allow pool size to be configured via config_registry or environment
                 try:
@@ -563,6 +652,10 @@ async def get_pool():
                 # Store the pool keyed by the loop id so concurrent event loops
                 # get a pool bound to their loop (avoids cross-loop use errors).
                 _pools_by_loop[loop_id] = new_pool
+                try:
+                    _active_loops[loop_id] = asyncio.get_running_loop()
+                except Exception:
+                    pass
                 pool = new_pool
 
     return pool

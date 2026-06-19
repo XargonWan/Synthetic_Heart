@@ -105,7 +105,11 @@ async def test_kitten_engine_uses_language_model_map() -> None:
             model = FakeModel()
 
             def generate(
-                self, text: str, voice: str = "Bella", language: str = "en"
+                self,
+                text: str,
+                voice: str = "Bella",
+                language: str = "en",
+                speed: float = 1.3,
             ) -> bytes:
                 import io
                 import wave
@@ -156,7 +160,11 @@ def test_kitten_engine_defaults_to_english_when_no_language() -> None:
         model = FakeModel()
 
         def generate(
-            self, text: str, voice: str = "Bella", language: str = "en"
+            self,
+            text: str,
+            voice: str = "Bella",
+            language: str = "en",
+            speed: float = 1.3,
         ) -> bytes:
             import io
             import wave

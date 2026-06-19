@@ -4,7 +4,7 @@
 import unittest
 import sys
 import os
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, AsyncMock, MagicMock
 
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -14,7 +14,7 @@ os.environ.setdefault("BOTFATHER_TOKEN", "test_token")
 os.environ.setdefault("OPENAI_API_KEY", "test_key")
 
 
-class TestPromptGeneration(unittest.TestCase):
+class TestPromptGeneration(unittest.IsolatedAsyncioTestCase):
     """Test that prompts are generated correctly with proper JSON structure."""
 
     def setUp(self):
@@ -44,8 +44,8 @@ class TestPromptGeneration(unittest.TestCase):
         prompt = await build_prompt(
             user_text="Hello",
             identity_prompt="",
-            extract_tags_fn=MagicMock(),
-            search_memories_fn=MagicMock(),
+            extract_tags_fn=MagicMock(return_value=[]),
+            search_memories_fn=AsyncMock(return_value=[]),
         )
 
         # Verify prompt contains actions (mocked)
@@ -90,8 +90,8 @@ class TestPromptGeneration(unittest.TestCase):
         prompt = await build_prompt(
             user_text=user_text,
             identity_prompt="Test context",
-            extract_tags_fn=MagicMock(),
-            search_memories_fn=MagicMock(),
+            extract_tags_fn=MagicMock(return_value=[]),
+            search_memories_fn=AsyncMock(return_value=[]),
         )
 
         # Should not crash and should contain the content
@@ -108,8 +108,8 @@ class TestPromptGeneration(unittest.TestCase):
             prompt = await build_prompt(
                 user_text="Hello",
                 identity_prompt="",
-                extract_tags_fn=MagicMock(),
-                search_memories_fn=MagicMock(),
+                extract_tags_fn=MagicMock(return_value=[]),
+                search_memories_fn=AsyncMock(return_value=[]),
             )
 
             # Should still generate a valid prompt
@@ -125,8 +125,8 @@ class TestPromptGeneration(unittest.TestCase):
         prompt = await build_prompt(
             user_text=large_text,
             identity_prompt="",
-            extract_tags_fn=MagicMock(),
-            search_memories_fn=MagicMock(),
+            extract_tags_fn=MagicMock(return_value=[]),
+            search_memories_fn=AsyncMock(return_value=[]),
         )
 
         # Should still work (implementation should handle large inputs)

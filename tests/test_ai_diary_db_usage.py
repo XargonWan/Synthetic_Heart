@@ -442,7 +442,7 @@ async def test_on_debrief_enqueues_merge_source_ids(monkeypatch):
     )
 
 
-def test_update_diary_entry_archives_merged_source_rows(monkeypatch):
+async def test_update_diary_entry_archives_merged_source_rows(monkeypatch):
     executed: list[tuple[str, tuple]] = []
     archived: dict[str, object] = {}
 
@@ -451,7 +451,6 @@ def test_update_diary_entry_archives_merged_source_rows(monkeypatch):
         return None
 
     monkeypatch.setattr(ai_diary, "_execute", fake_execute)
-    monkeypatch.setattr(ai_diary, "_run", lambda coro: asyncio.run(coro))
 
     def fake_archive_diary_entries(entry_ids):
         archived["ids"] = list(entry_ids)
@@ -460,7 +459,7 @@ def test_update_diary_entry_archives_merged_source_rows(monkeypatch):
     monkeypatch.setattr(ai_diary, "archive_diary_entries", fake_archive_diary_entries)
 
     plugin = object.__new__(ai_diary.DiaryPlugin)
-    result = plugin.execute_action(
+    result = await plugin.execute_action(
         {
             "type": "update_diary_entry",
             "payload": {"id": 42, "content": "merged prose"},
