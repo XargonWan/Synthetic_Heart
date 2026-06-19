@@ -968,8 +968,9 @@ class SynthWebUIInterface:
                     f"{LOG_PREFIX} list_agent_tasks: agent_tasks table missing, returning empty list"
                 )
                 return JSONResponse({"tasks": []})
-            log_error(f"{LOG_PREFIX} list_agent_tasks failed: {e}")
-            raise HTTPException(status_code=500, detail=str(e))
+            error_msg = str(e)
+            log_error(f"{LOG_PREFIX} list_agent_tasks failed: {error_msg}")
+            raise HTTPException(status_code=500, detail=error_msg)
 
     async def get_agent_task(self, task_id: int):
         try:
@@ -1001,8 +1002,9 @@ class SynthWebUIInterface:
         except HTTPException:
             raise
         except Exception as e:
-            log_error(f"{LOG_PREFIX} get_agent_task failed: {e}")
-            raise HTTPException(status_code=500, detail=str(e))
+            error_msg = str(e)
+            log_error(f"{LOG_PREFIX} get_agent_task failed: {error_msg}")
+            raise HTTPException(status_code=500, detail=error_msg)
 
     async def create_agent_task(self, request: Request):
         try:
@@ -1034,8 +1036,9 @@ class SynthWebUIInterface:
         except HTTPException:
             raise
         except Exception as e:
-            log_error(f"{LOG_PREFIX} create_agent_task failed: {e}")
-            raise HTTPException(status_code=500, detail=str(e))
+            error_msg = str(e)
+            log_error(f"{LOG_PREFIX} create_agent_task failed: {error_msg}")
+            raise HTTPException(status_code=500, detail=error_msg)
 
     async def create_database_backup_endpoint(self):
         try:
@@ -1060,8 +1063,9 @@ class SynthWebUIInterface:
         except HTTPException:
             raise
         except Exception as e:
-            log_error(f"{LOG_PREFIX} create_database_backup_endpoint failed: {e}")
-            raise HTTPException(status_code=500, detail=str(e))
+            error_msg = str(e)
+            log_error(f"{LOG_PREFIX} create_database_backup_endpoint failed: {error_msg}")
+            raise HTTPException(status_code=500, detail=error_msg)
 
     async def pause_agent_task(self, task_id: int):
         try:
@@ -1081,8 +1085,9 @@ class SynthWebUIInterface:
                     await conn.commit()
             return JSONResponse({"status": "paused"})
         except Exception as e:
-            log_error(f"{LOG_PREFIX} pause_agent_task failed: {e}")
-            raise HTTPException(status_code=500, detail=str(e))
+            error_msg = str(e)
+            log_error(f"{LOG_PREFIX} pause_agent_task failed: {error_msg}")
+            raise HTTPException(status_code=500, detail=error_msg)
 
     async def resume_agent_task(self, task_id: int):
         try:
@@ -1101,8 +1106,9 @@ class SynthWebUIInterface:
                     await conn.commit()
             return JSONResponse({"status": "running"})
         except Exception as e:
-            log_error(f"{LOG_PREFIX} resume_agent_task failed: {e}")
-            raise HTTPException(status_code=500, detail=str(e))
+            error_msg = str(e)
+            log_error(f"{LOG_PREFIX} resume_agent_task failed: {error_msg}")
+            raise HTTPException(status_code=500, detail=error_msg)
 
     async def cancel_agent_task(self, task_id: int):
         try:
@@ -1121,8 +1127,9 @@ class SynthWebUIInterface:
                     await conn.commit()
             return JSONResponse({"status": "cancelled"})
         except Exception as e:
-            log_error(f"{LOG_PREFIX} cancel_agent_task failed: {e}")
-            raise HTTPException(status_code=500, detail=str(e))
+            error_msg = str(e)
+            log_error(f"{LOG_PREFIX} cancel_agent_task failed: {error_msg}")
+            raise HTTPException(status_code=500, detail=error_msg)
 
     async def approve_agent_proposal(self, proposal_id: int, request: Request):
         try:
@@ -1149,8 +1156,9 @@ class SynthWebUIInterface:
         except HTTPException:
             raise
         except Exception as e:
-            log_error(f"{LOG_PREFIX} approve_agent_proposal failed: {e}")
-            raise HTTPException(status_code=500, detail=str(e))
+            error_msg = str(e)
+            log_error(f"{LOG_PREFIX} approve_agent_proposal failed: {error_msg}")
+            raise HTTPException(status_code=500, detail=error_msg)
 
     async def list_agent_proposals(self, limit: int = 50):
         try:
@@ -1181,8 +1189,9 @@ class SynthWebUIInterface:
                     f"{LOG_PREFIX} list_agent_proposals: agent_activity_log table missing, returning empty list"
                 )
                 return JSONResponse({"proposals": []})
-            log_error(f"{LOG_PREFIX} list_agent_proposals failed: {e}")
-            raise HTTPException(status_code=500, detail=str(e))
+            error_msg = str(e)
+            log_error(f"{LOG_PREFIX} list_agent_proposals failed: {error_msg}")
+            raise HTTPException(status_code=500, detail=error_msg)
 
     async def set_animation_state(self, request: Request):
         """Set the centralized animation state. Expected JSON:
