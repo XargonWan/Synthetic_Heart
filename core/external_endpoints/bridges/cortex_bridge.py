@@ -380,8 +380,6 @@ class ExternalCortexEngine(AIPluginBase):
         tools, so nothing is lost — it is just delivered as text.
         """
         try:
-            import json as _json
-
             from core.core_initializer import core_initializer
             from core.prompt_engine import minify_actions_block
 
@@ -399,11 +397,34 @@ class ExternalCortexEngine(AIPluginBase):
                 return
 
             catalog = minify_actions_block(scoped, lite=False)
+            # Render as a flat, unambiguous list — NOT a nested JSON dict. The
+            # nested ``{name: {brief, schema}}`` shape made small models emit
+            # sub-keys like "brief" as action types.
+            lines: list[str] = []
+            for name, spec in catalog.items():
+                if not isinstance(spec, dict):
+                    lines.append(f"- {name}")
+                    continue
+                brief = str(spec.get("brief", "") or "").strip()
+                schema = spec.get("schema")
+                props = (
+                    list((schema.get("properties") or {}).keys())
+                    if isinstance(schema, dict)
+                    else []
+                )
+                line = f"- {name}"
+                if brief:
+                    line += f": {brief}"
+                if props:
+                    line += f" (payload keys: {', '.join(str(p) for p in props)})"
+                lines.append(line)
+
             block = (
                 "\n\n=== AVAILABLE ACTIONS ===\n"
-                "Use ONLY these action types in the 'actions' array. Each entry must be "
-                '{"type": "<action_name>", "payload": { ... }}:\n'
-                + _json.dumps(catalog, ensure_ascii=False)
+                'Reply ONLY as {"actions":[{"type":"<action_name>","payload":{...}}]}. '
+                'Each "type" MUST be exactly one of the action names below — do not '
+                "invent, combine, or abbreviate names, and never use a payload key as "
+                "a type:\n" + "\n".join(lines)
             )
             prompt_request.system_instruction = (
                 getattr(prompt_request, "system_instruction", "") or ""
