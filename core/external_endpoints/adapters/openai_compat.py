@@ -129,10 +129,10 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
         tool_calls_raw: Any = None
 
         if isinstance(message, dict):
-            content = str(message.get("content") or "")
+            content = _strip_thinking(str(message.get("content") or ""))
             tool_calls_raw = message.get("tool_calls")
         else:
-            content = str(getattr(message, "content", "") or "")
+            content = _strip_thinking(str(getattr(message, "content", "") or ""))
             tool_calls_raw = getattr(message, "tool_calls", None)
 
         tool_calls: list[dict[str, Any]] = []

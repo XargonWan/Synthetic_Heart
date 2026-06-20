@@ -391,7 +391,24 @@ class OpenAIRenderer:
             if name:
                 actions.append({"type": name, "payload": args})
 
-        return json.dumps({"actions": actions}, ensure_ascii=False)
+        result: dict[str, Any] = {"actions": actions}
+
+        # Preserve any natural-language reply the model emitted alongside its
+        # tool calls.  Tool-trained local models (Qwen3.5, Gemma) routinely put
+        # the user-facing reply in ``content`` while using ``tool_calls`` only
+        # for side-effects (diary, emotion updates).  Dropping ``content`` here
+        # leaves the turn with no ``message_*`` action, so the message chain
+        # fires a "missing reply" correction loop.  Surfacing it under the
+        # top-level ``message`` key lets the chain map it to the interface's
+        # ``message_*`` action (deduped against an existing message action).
+        # Only do this when the tool calls did not already carry a message.
+        content_text = str(message.get("content") or "").strip()
+        if content_text and not any(
+            str(a.get("type", "")).startswith("message_") for a in actions
+        ):
+            result["message"] = content_text
+
+        return json.dumps(result, ensure_ascii=False)
 
 
 # ---------------------------------------------------------------------------

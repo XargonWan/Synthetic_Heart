@@ -274,6 +274,61 @@ class TestOpenAIRenderer:
         result = OpenAIRenderer.parse_tool_call_response(data)
         assert result == "Just a text reply"
 
+    def test_parse_tool_call_response_preserves_reply_alongside_tool_calls(
+        self,
+    ) -> None:
+        """A reply in ``content`` must survive when the model also emits a
+        side-effect tool call (regression: reply was silently dropped, which
+        triggered the missing-reply correction loop on local tool-calling
+        models like Qwen3.5 / Gemma)."""
+        data = {
+            "choices": [
+                {
+                    "message": {
+                        "content": "Morning babe, feeling great!",
+                        "tool_calls": [
+                            {
+                                "function": {
+                                    "name": "create_personal_diary_entry",
+                                    "arguments": '{"interaction_summary": "chat"}',
+                                }
+                            }
+                        ],
+                    }
+                }
+            ]
+        }
+        parsed = json.loads(OpenAIRenderer.parse_tool_call_response(data))
+        assert parsed["actions"][0]["type"] == "create_personal_diary_entry"
+        assert parsed["message"] == "Morning babe, feeling great!"
+
+    def test_parse_tool_call_response_no_duplicate_when_message_tool_call(
+        self,
+    ) -> None:
+        """When the model already routes the reply through a ``message_*`` tool
+        call, the leftover ``content`` must NOT be surfaced again as a
+        top-level message (avoids a duplicate reply)."""
+        data = {
+            "choices": [
+                {
+                    "message": {
+                        "content": "some thinking residue",
+                        "tool_calls": [
+                            {
+                                "function": {
+                                    "name": "message_telegram_bot",
+                                    "arguments": '{"text": "Hi there"}',
+                                }
+                            }
+                        ],
+                    }
+                }
+            ]
+        }
+        parsed = json.loads(OpenAIRenderer.parse_tool_call_response(data))
+        assert parsed["actions"][0]["type"] == "message_telegram_bot"
+        assert "message" not in parsed
+
     def test_no_history_renders_only_system_and_current(self) -> None:
         req = _basic_request()
         req.conversation_history = []
