@@ -367,6 +367,10 @@ class RadioHostPlugin:
             log_info("[radio_host] Radio host disabled in config")
         log_info("[radio_host] RadioHostPlugin initialized")
 
+    def is_enabled(self) -> bool:
+        """Return True when the radio host plugin is enabled in config."""
+        return self._enabled
+
     def _has_runtime_config(self) -> bool:
         return bool(self._station_id) and self._client.configured
 

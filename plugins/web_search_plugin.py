@@ -12,7 +12,7 @@ from bs4 import BeautifulSoup
 
 from core.config_manager import config_registry
 from core.core_initializer import register_plugin
-from core.logging_utils import log_error, log_info, log_warning
+from core.logging_utils import log_debug, log_error, log_info, log_warning
 
 # Register exposed variable for WebUI / env loading
 try:
@@ -77,6 +77,36 @@ class WebSearchPlugin:
             }
         }
 
+    def get_prompt_instructions(self, action_name: str) -> dict:
+        """Provide detailed instructions for when to use the web search action."""
+        if action_name == "search_current_knowledge":
+            return {
+                "usage": (
+                    "Use ONLY for factual queries about external real-time information "
+                    "(news, weather, current events, people, places, technology, etc.). "
+                    "Do NOT use this action to answer questions about Synthetic Heart's "
+                    "own capabilities, features, tools, or plugins. Those should be "
+                    "answered from the 'available_actions' section in your system prompt."
+                ),
+                "examples": [
+                    {
+                        "query": "latest artificial intelligence news",
+                        "when": "user asks about recent external events",
+                    },
+                    {
+                        "query": "weather in Tokyo",
+                        "when": "user asks about current weather",
+                    },
+                ],
+                "avoid": (
+                    "Avoid using this action when the user asks about what you can do "
+                    "or what tools you have. Answer capability questions directly from "
+                    "the 'available_actions' block in your system prompt — you already "
+                    "know your own capabilities."
+                ),
+            }
+        return {}
+
     async def execute_action(
         self,
         action: dict[str, Any],
@@ -137,6 +167,7 @@ class WebSearchPlugin:
             ]
 
         if not is_action_result_delivery:
+            delivery_ok = False
             try:
                 from core.auto_response import request_llm_delivery
 
@@ -145,13 +176,121 @@ class WebSearchPlugin:
                     original_context=context,
                     action_type="search_current_knowledge",
                 )
+                # delivered is None in the legacy path, so treat non-exception as success
+                delivery_ok = True
                 log_info(
                     f"[web_search] Requested LLM delivery; success={bool(delivered)}"
                 )
             except Exception as e:
                 log_warning(f"[web_search] Failed to request LLM delivery: {e}")
 
+            # Fallback: if LLM delivery was not attempted or failed, send results
+            # directly to the user so they get useful information instead of "😵"
+            if not delivery_ok and results:
+                await self._send_results_directly(
+                    results, query, context, original_message
+                )
+
         return {"status": "ok", "results_count": len(results)}
+
+    async def _send_results_directly(
+        self,
+        results: list[dict[str, str]],
+        query: str,
+        context: dict[str, Any],
+        original_message: Any,
+    ) -> None:
+        """Send search results directly as a text message when LLM delivery fails."""
+        try:
+            from core.core_initializer import INTERFACE_REGISTRY
+
+            interface_name = context.get("interface_name") if context else None
+            interface_path = (
+                context.get("interface_path")
+                if context
+                else getattr(original_message, "interface_path", None)
+            )
+            chat_id = (
+                context.get("chat_id")
+                if context
+                else getattr(original_message, "chat_id", None)
+            )
+            thread_id = (
+                context.get("thread_id")
+                if context
+                else getattr(original_message, "thread_id", None)
+            )
+
+            if not interface_name or not interface_path or not chat_id:
+                log_debug(
+                    "[web_search] Cannot send direct fallback — missing "
+                    "interface_name/interface_path/chat_id in context"
+                )
+                return
+
+            iface = INTERFACE_REGISTRY.get(interface_name)
+            if not iface:
+                log_debug(
+                    f"[web_search] Cannot send direct fallback — interface "
+                    f"'{interface_name}' not in registry"
+                )
+                return
+
+            # Build a concise text summary of results
+            lines = [f"🔍 Search results for: {query}"]
+            for i, r in enumerate(results[:5], 1):
+                title = r.get("title", "")
+                snippet = r.get("snippet", "")
+                url = r.get("url", "")
+                # Truncate snippet to stay within message limits
+                if len(snippet) > 200:
+                    snippet = snippet[:200] + "..."
+                lines.append(f"\n{i}. {title}")
+                if snippet:
+                    lines.append(f"   {snippet}")
+                if url:
+                    lines.append(f"   {url}")
+
+            fallback_text = "\n".join(lines)
+
+            # Try universal_send first (handles thread_id, etc.)
+            try:
+                from core.transport_layer import universal_send
+
+                await universal_send(
+                    iface,
+                    chat_id=chat_id,
+                    text=fallback_text,
+                    interface_path=interface_path,
+                    thread_id=thread_id,
+                    is_llm_response=True,
+                    skip_history=True,
+                )
+                log_info(
+                    "[web_search] Direct fallback sent via universal_send "
+                    f"({len(results)} results, {len(fallback_text)} chars)"
+                )
+                return
+            except Exception as ue:
+                log_debug(
+                    f"[web_search] universal_send fallback failed, "
+                    f"trying direct send: {ue}"
+                )
+
+            # Fallback to send_message on the interface
+            if hasattr(iface, "send_message"):
+                try:
+                    kwargs = {"chat_id": chat_id, "text": fallback_text}
+                    if thread_id is not None:
+                        kwargs["message_thread_id"] = thread_id
+                    await iface.send_message(**kwargs)
+                    log_info(
+                        "[web_search] Direct fallback sent via interface.send_message"
+                    )
+                except Exception as se:
+                    log_warning(f"[web_search] Failed to send direct fallback: {se}")
+        except Exception as e:
+            log_warning(f"[web_search] Direct fallback error: {e}")
 
     async def _search_tavily(self, api_key: str, query: str) -> list[dict[str, str]]:
         """Perform search using the Tavily API."""
