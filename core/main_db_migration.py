@@ -223,7 +223,9 @@ def _normalize_common_row(row: Mapping[str, Any]) -> dict[str, Any]:
         # Convert MySQL TIME strings to ``datetime.time`` objects.
         if key == "time" and isinstance(value, str):
             try:
-                normalized[key] = datetime.strptime(value.split(".")[0], "%H:%M:%S").time()
+                normalized[key] = datetime.strptime(
+                    value.split(".")[0], "%H:%M:%S"
+                ).time()
                 continue
             except Exception:
                 pass
@@ -259,6 +261,7 @@ def _normalize_common_row(row: Mapping[str, Any]) -> dict[str, Any]:
 
         normalized[key] = _coerce_value(value)
     return normalized
+
 
 def _normalize_config_row(row: Mapping[str, Any]) -> dict[str, Any]:
     """Normalize rows from the ``config`` table.
@@ -304,6 +307,7 @@ def _normalize_config_row(row: Mapping[str, Any]) -> dict[str, Any]:
         normalized[k] = str(v)
     return normalized
 
+
 def _normalize_message_map_row(row: Mapping[str, Any]) -> dict[str, Any]:
     """Normalize rows from ``message_map``.
 
@@ -330,6 +334,7 @@ def _normalize_message_map_row(row: Mapping[str, Any]) -> dict[str, Any]:
                 pass
     return normalized
 
+
 def _normalize_scheduled_events_row(row: Mapping[str, Any]) -> dict[str, Any]:
     """Normalize rows from the ``scheduled_events`` table.
 
@@ -346,7 +351,9 @@ def _normalize_scheduled_events_row(row: Mapping[str, Any]) -> dict[str, Any]:
         try:
             # Strip any fractional seconds and parse HH:MM:SS
             row = dict(row)  # make mutable copy
-            row["time"] = datetime.strptime(row["time"].split(".")[0], "%H:%M:%S").time()
+            row["time"] = datetime.strptime(
+                row["time"].split(".")[0], "%H:%M:%S"
+            ).time()
         except Exception:
             # If parsing fails, leave the original value unchanged
             pass
@@ -435,13 +442,17 @@ def _normalize_external_endpoint_row(row: Mapping[str, Any]) -> dict[str, Any]:
     # ``api_key_enc`` should be stored as TEXT. Legacy rows sometimes contain a
     # numeric placeholder (e.g., 0 or an integer ID). Convert any non‑string
     # value to a string so asyncpg can bind it as TEXT.
-    if normalized.get("api_key_enc") is not None and not isinstance(normalized["api_key_enc"], str):
+    if normalized.get("api_key_enc") is not None and not isinstance(
+        normalized["api_key_enc"], str
+    ):
         normalized["api_key_enc"] = str(normalized["api_key_enc"])
 
     # ``last_probe_at`` is a TIMESTAMPTZ column. Some legacy rows store it as
     # a Unix epoch integer (seconds since 1970). Convert such values to a
     # ``datetime`` instance; asyncpg will then serialize it correctly.
-    if normalized.get("last_probe_at") is not None and not isinstance(normalized["last_probe_at"], datetime):
+    if normalized.get("last_probe_at") is not None and not isinstance(
+        normalized["last_probe_at"], datetime
+    ):
         val = normalized["last_probe_at"]
         try:
             # Accept int or float epoch seconds
@@ -1182,12 +1193,22 @@ class MainDbMigrator:
                     # or ``message_text``. Cast them to ``str`` here to avoid the
                     # asyncpg ``expected str, got int`` DataError.
                     for normalized_row in normalized_rows:
-                        if "sender_id" in normalized_row and normalized_row["sender_id"] is not None:
+                        if (
+                            "sender_id" in normalized_row
+                            and normalized_row["sender_id"] is not None
+                        ):
                             if not isinstance(normalized_row["sender_id"], str):
-                                normalized_row["sender_id"] = str(normalized_row["sender_id"])
-                        if "message_text" in normalized_row and normalized_row["message_text"] is not None:
+                                normalized_row["sender_id"] = str(
+                                    normalized_row["sender_id"]
+                                )
+                        if (
+                            "message_text" in normalized_row
+                            and normalized_row["message_text"] is not None
+                        ):
                             if not isinstance(normalized_row["message_text"], str):
-                                normalized_row["message_text"] = str(normalized_row["message_text"])
+                                normalized_row["message_text"] = str(
+                                    normalized_row["message_text"]
+                                )
                     # Final safeguard: guarantee NOT NULL TEXT columns have
                     # non‑null string values. ``interface_path`` and ``message_text``
                     # are required by the target schema. If they are missing or
@@ -1214,7 +1235,10 @@ class MainDbMigrator:
                         if not normalized_row.get("message_text"):
                             normalized_row["message_text"] = ""
                         # ``chat_session_meta`` requires ``meta`` NOT NULL.
-                        if spec.name == "chat_session_meta" and normalized_row.get("meta") is None:
+                        if (
+                            spec.name == "chat_session_meta"
+                            and normalized_row.get("meta") is None
+                        ):
                             normalized_row["meta"] = ""
                         # ``chat_archives`` requires a non‑null primary key ``id``
                         # and a non‑null ``messages`` column. Legacy rows may have
@@ -1224,10 +1248,14 @@ class MainDbMigrator:
                         # default ``messages`` to an empty JSON array.
                         if spec.name == "chat_archives":
                             if not normalized_row.get("id"):
-                                session_part = normalized_row.get("session_id") or "unknown"
+                                session_part = (
+                                    normalized_row.get("session_id") or "unknown"
+                                )
                                 ts_part = normalized_row.get("timestamp")
                                 placeholder = (
-                                    f"legacy_{session_part}_{ts_part}" if ts_part else f"legacy_{session_part}"
+                                    f"legacy_{session_part}_{ts_part}"
+                                    if ts_part
+                                    else f"legacy_{session_part}"
                                 )
                                 normalized_row["id"] = placeholder
                             if normalized_row.get("messages") is None:
@@ -1235,17 +1263,36 @@ class MainDbMigrator:
                             # ``session_id`` and ``name`` are TEXT columns in the target schema.
                             # Legacy rows may store them as numeric types. Cast to ``str``
                             # to satisfy asyncpg's type expectations.
-                            if normalized_row.get("session_id") is not None and not isinstance(normalized_row["session_id"], str):
-                                normalized_row["session_id"] = str(normalized_row["session_id"])
-                            if normalized_row.get("name") is not None and not isinstance(normalized_row["name"], str):
+                            if normalized_row.get(
+                                "session_id"
+                            ) is not None and not isinstance(
+                                normalized_row["session_id"], str
+                            ):
+                                normalized_row["session_id"] = str(
+                                    normalized_row["session_id"]
+                                )
+                            if normalized_row.get(
+                                "name"
+                            ) is not None and not isinstance(
+                                normalized_row["name"], str
+                            ):
                                 normalized_row["name"] = str(normalized_row["name"])
                         # ``ai_diary`` stores several TEXT columns that may contain
                         # numeric values in the legacy MariaDB (e.g., ``chat_id``
                         # could be ``-1.0``). Cast them to ``str`` to satisfy the
                         # PostgreSQL TEXT type and avoid asyncpg type errors.
                         if spec.name in ("ai_diary", "ai_diary_archive"):
-                            for col in ("interface", "chat_id", "thread_id", "user_message"):
-                                if normalized_row.get(col) is not None and not isinstance(normalized_row[col], str):
+                            for col in (
+                                "interface",
+                                "chat_id",
+                                "thread_id",
+                                "user_message",
+                            ):
+                                if normalized_row.get(
+                                    col
+                                ) is not None and not isinstance(
+                                    normalized_row[col], str
+                                ):
                                     normalized_row[col] = str(normalized_row[col])
                             # ``user_message`` is NOT NULL in the target schema.
                             if normalized_row.get("user_message") is None:
@@ -1257,8 +1304,17 @@ class MainDbMigrator:
                         # satisfy PostgreSQL's TEXT type expectations and avoid
                         # ``expected str, got float`` errors.
                         if spec.name == "chatlink":
-                            for col in ("interface", "chat_id", "thread_id", "chat_name"):
-                                if normalized_row.get(col) is not None and not isinstance(normalized_row[col], str):
+                            for col in (
+                                "interface",
+                                "chat_id",
+                                "thread_id",
+                                "chat_name",
+                            ):
+                                if normalized_row.get(
+                                    col
+                                ) is not None and not isinstance(
+                                    normalized_row[col], str
+                                ):
                                     normalized_row[col] = str(normalized_row[col])
                             # ``created_at`` and ``last_updated`` are TIMESTAMPTZ NOT
                             # NULL columns. The MariaDB connector may return them as
@@ -1278,25 +1334,76 @@ class MainDbMigrator:
                         # IDs) to int/float, which asyncpg rejects for TEXT
                         # columns.
                         _TEXT_COLUMNS: dict[str, tuple[str, ...]] = {
-                            "chatlink": ("interface", "chat_id", "thread_id", "chat_name"),
-                            "ai_diary": ("interface", "chat_id", "thread_id", "user_message"),
-                            "ai_diary_archive": ("interface", "chat_id", "thread_id", "user_message"),
+                            "chatlink": (
+                                "interface",
+                                "chat_id",
+                                "thread_id",
+                                "chat_name",
+                            ),
+                            "ai_diary": (
+                                "interface",
+                                "chat_id",
+                                "thread_id",
+                                "user_message",
+                            ),
+                            "ai_diary_archive": (
+                                "interface",
+                                "chat_id",
+                                "thread_id",
+                                "user_message",
+                            ),
                             "recent_chats": ("chat_id",),
                             "blocklist": ("user_id",),
-                            "message_logs": ("content", "metadata", "chat_id", "interface", "sender_id", "sender_name"),
+                            "message_logs": (
+                                "content",
+                                "metadata",
+                                "chat_id",
+                                "interface",
+                                "sender_id",
+                                "sender_name",
+                            ),
                             "chat_session_meta": ("interface_path",),
-                            "external_endpoints": ("name", "display_label", "base_url", "api_key_enc", "probe_status", "default_model"),
+                            "external_endpoints": (
+                                "name",
+                                "display_label",
+                                "base_url",
+                                "api_key_enc",
+                                "probe_status",
+                                "default_model",
+                            ),
                             "chat_archives": ("id", "session_id", "name"),
                             "bio": ("id", "created_at", "last_accessed"),
                             "grillo_beats": ("beat_type",),
                             "grillo_activity_log": ("beat_type",),
                             "grillo_action_execs": ("action_type", "status"),
-                            "agent_activity_log": ("command", "proposer", "status", "result"),
+                            "agent_activity_log": (
+                                "command",
+                                "proposer",
+                                "status",
+                                "result",
+                            ),
                             "agent_action_execs": ("command", "status"),
                             "agent_tasks": ("engine", "status", "trainer_id"),
-                            "archived_memories": ("tag", "summary", "source_ids", "llm_model", "created_by"),
-                            "scheduled_events": ("recurrence_type", "created_by", "description"),
-                            "memories": ("author", "source", "tags", "scope", "emotion", "emotion_state"),
+                            "archived_memories": (
+                                "tag",
+                                "summary",
+                                "source_ids",
+                                "llm_model",
+                                "created_by",
+                            ),
+                            "scheduled_events": (
+                                "recurrence_type",
+                                "created_by",
+                                "description",
+                            ),
+                            "memories": (
+                                "author",
+                                "source",
+                                "tags",
+                                "scope",
+                                "emotion",
+                                "emotion_state",
+                            ),
                             "emotion_state": ("emotion_name",),
                         }
                         for col in _TEXT_COLUMNS.get(spec.name, ()):

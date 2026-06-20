@@ -1,7 +1,6 @@
 import pytest
 from types import SimpleNamespace
 from core.prompt_engine import build_prompt_request
-from core.transport_layer import run_corrector_middleware
 
 
 @pytest.mark.asyncio

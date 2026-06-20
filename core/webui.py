@@ -1064,7 +1064,9 @@ class SynthWebUIInterface:
             raise
         except Exception as e:
             error_msg = str(e)
-            log_error(f"{LOG_PREFIX} create_database_backup_endpoint failed: {error_msg}")
+            log_error(
+                f"{LOG_PREFIX} create_database_backup_endpoint failed: {error_msg}"
+            )
             raise HTTPException(status_code=500, detail=error_msg)
 
     async def pause_agent_task(self, task_id: int):
