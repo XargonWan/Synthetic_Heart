@@ -162,6 +162,27 @@ LIVE_CORTEX = config_registry.get_var(
     allow_env_override=False,
 )
 
+# LLM generation request timeout. Caps how long the synth waits for a single
+# cortex generation before aborting. On slow hardware a long reply can exceed a
+# short timeout, which aborts the HTTP request and makes llama.cpp cancel the
+# in-flight task ("should_stop"). The default is intentionally generous so weak
+# hardware does not hit an invisible cap; override per host via the
+# LLM_GENERATION_TIMEOUT_SEC env var (.env) or the WebUI. A per-endpoint
+# extra_config["timeout"] still takes precedence when set.
+LLM_GENERATION_TIMEOUT_SEC = config_registry.get_var(
+    "LLM_GENERATION_TIMEOUT_SEC",
+    1800,
+    label="LLM Generation Timeout (s)",
+    description=(
+        "Maximum time in seconds to wait for a single LLM cortex generation "
+        "before aborting. Raise this on slow hardware so long replies are not "
+        "cut off mid-generation. Settable via the .env file."
+    ),
+    value_type=int,
+    group="core",
+    component="cortex",
+)
+
 # ----------------------------------------------------------------------
 # Live session synchronization settings
 # ----------------------------------------------------------------------

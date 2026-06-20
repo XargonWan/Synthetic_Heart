@@ -1100,7 +1100,7 @@ async def test_external_cortex_engine_forwards_gemini_tool_declarations():
     assert response == '{"actions": []}'
     assert prompt.supports_tool_calling is True
     assert captured["model"] == "gemini-3.1-flash-lite-preview"
-    assert captured["kwargs"]["timeout"] == 120.0
+    assert captured["kwargs"]["timeout"] == 1800.0
     tools = captured["kwargs"]["tools"]
     assert len(tools) == 1
     declarations = tools[0]["function_declarations"]

@@ -25,9 +25,9 @@ _EXPECTING_SYSTEM_REPLY: dict = {}
 # Register the timeout used when waiting for a system reply to a correction prompt.
 AWAIT_RESPONSE_TIMEOUT = config_registry.get_var(
     "AWAIT_RESPONSE_TIMEOUT",
-    600,
+    2400,
     label="Await Response Timeout",
-    description="Maximum time in seconds to wait for a system reply after requesting a correction before the expectation expires.",
+    description="Maximum time in seconds to wait for a system reply after requesting a correction before the expectation expires. Kept above LLM_GENERATION_TIMEOUT_SEC so a slow corrected generation is not abandoned early.",
     value_type=int,
     group="core",
     component="core",

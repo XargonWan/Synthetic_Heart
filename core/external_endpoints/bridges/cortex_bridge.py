@@ -369,7 +369,14 @@ class ExternalCortexEngine(AIPluginBase):
         )
 
     def _get_request_timeout(self) -> float:
-        """Get the request timeout from endpoint extra_config or use a safe default."""
+        """Get the request timeout from endpoint extra_config or the configured default.
+
+        Precedence: per-endpoint ``extra_config["timeout"]`` → the global
+        ``LLM_GENERATION_TIMEOUT_SEC`` config var (env/.env/WebUI tunable) →
+        a generous hard fallback. The default is intentionally large so slow
+        hardware is not silently cut off mid-generation (which closes the socket
+        and makes llama.cpp cancel the task).
+        """
         extra = self._endpoint.extra_config or {}
         timeout = extra.get("timeout")
         if timeout is not None:
@@ -377,7 +384,16 @@ class ExternalCortexEngine(AIPluginBase):
                 return float(timeout)
             except (ValueError, TypeError):
                 pass
-        return 120.0
+        try:
+            from core.config_manager import config_registry
+
+            return float(
+                config_registry.get_value(
+                    "LLM_GENERATION_TIMEOUT_SEC", 1800, value_type=int
+                )
+            )
+        except Exception:
+            return 1800.0
 
     def _tool_api_kwargs(self, prompt: Any) -> dict[str, Any]:
         """Build adapter kwargs derived from a typed PromptRequest.
