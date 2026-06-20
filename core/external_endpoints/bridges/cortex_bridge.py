@@ -316,11 +316,37 @@ class ExternalCortexEngine(AIPluginBase):
           the entire context window on chain-of-thought tokens before generating
           a response.  Drastically reduces latency on models that default to
           extended thinking mode.
+        * ``force_json_object`` (bool) — request ``response_format={"type":
+          "json_object"}`` so the server constrains decoding to syntactically
+          valid JSON.  Recommended for small local quants (llama.cpp / LM Studio)
+          that otherwise emit malformed action JSON (unescaped quotes, missing
+          delimiters) on long replies and trigger corrector retries.
+        * ``response_format`` (dict) — forwarded verbatim; use for an explicit
+          ``{"type": "json_schema", ...}`` constraint. Takes precedence over
+          ``force_json_object``.
+        * ``grammar`` (str) — llama.cpp GBNF grammar string, sent via
+          ``extra_body`` for the strictest, schema-level constraint.
+
+        Note: ``response_format`` / ``grammar`` are dropped when native
+        tool-calling is active (see ``generate_response``) because tool-calling
+        already constrains output and most servers reject the combination.
         """
         extra = self._endpoint.extra_config or {}
         kwargs: dict[str, Any] = {}
         if extra.get("disable_thinking"):
             kwargs["enable_thinking"] = False
+
+        response_format = extra.get("response_format")
+        if response_format is None and extra.get("force_json_object"):
+            response_format = {"type": "json_object"}
+        if response_format is not None:
+            kwargs["response_format"] = response_format
+
+        grammar = extra.get("grammar")
+        if grammar:
+            extra_body = kwargs.setdefault("extra_body", {})
+            extra_body["grammar"] = grammar
+
         return kwargs
 
     def _get_retry_settings(self) -> tuple[int, float]:
@@ -478,6 +504,16 @@ class ExternalCortexEngine(AIPluginBase):
             try:
                 extra_kwargs = self._extra_api_kwargs()
                 extra_kwargs.update(prompt_extra_kwargs)
+                # Native tool-calling already constrains output, and most
+                # OpenAI-compatible servers reject response_format alongside
+                # tools — so let tool-calling win when both are present.
+                if "tools" in extra_kwargs:
+                    extra_kwargs.pop("response_format", None)
+                    grammar_body = extra_kwargs.get("extra_body")
+                    if isinstance(grammar_body, dict):
+                        grammar_body.pop("grammar", None)
+                        if not grammar_body:
+                            extra_kwargs.pop("extra_body", None)
                 extra_kwargs.setdefault("timeout", request_timeout)
                 chat_resp = await asyncio.wait_for(
                     self._adapter.chat_completion(

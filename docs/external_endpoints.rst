@@ -108,6 +108,43 @@ Each endpoint may be mapped to one or more subsystems:
 The endpoint card shows the current effective mapping. To change mapping,
 open the endpoint with the **Edit** button and update the capability checkboxes.
 
+Cortex extra config (advanced)
+------------------------------
+
+The ``Extra Config`` JSON field on a cortex endpoint accepts optional tuning
+keys. Common ones:
+
+- ``timeout`` (number): per-endpoint request timeout in seconds. Overrides the
+  global ``LLM_GENERATION_TIMEOUT_SEC`` for this endpoint.
+- ``disable_thinking`` (bool): send ``enable_thinking=False`` (Qwen3 / LM Studio)
+  to stop the model from spending the context window on chain-of-thought.
+- ``retry_attempts`` / ``retry_backoff`` / ``retry_on_timeout``: transient-error
+  retry behavior.
+
+Constrained JSON output (recommended for small local models)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Small local quants (llama.cpp / LM Studio Q4 models) frequently emit malformed
+action JSON — unescaped quotes or missing delimiters on long replies — which
+fails parsing and triggers corrector retries. Force the server to constrain
+decoding to valid JSON:
+
+- ``force_json_object`` (bool): adds ``response_format={"type": "json_object"}``.
+  The simplest, broadly-supported option; guarantees syntactically valid JSON.
+- ``response_format`` (object): forwarded verbatim, e.g. an explicit
+  ``{"type": "json_schema", ...}`` constraint. Takes precedence over
+  ``force_json_object``.
+- ``grammar`` (string): a llama.cpp GBNF grammar, sent via ``extra_body`` for the
+  strictest, schema-level constraint.
+
+Example for a local llama.cpp endpoint::
+
+   {"disable_thinking": true, "force_json_object": true}
+
+These are automatically dropped when native tool-calling is active for the
+request (tool-calling already constrains output and most servers reject the
+combination).
+
 Use cases
 ---------
 

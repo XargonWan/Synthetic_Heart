@@ -1109,6 +1109,91 @@ async def test_external_cortex_engine_forwards_gemini_tool_declarations():
     assert captured["messages"][-1]["role"] == "user"
 
 
+def _openai_endpoint(extra_config: dict) -> "ExternalEndpoint":
+    return ExternalEndpoint(
+        id=7,
+        name="local-llama",
+        display_label="Local llama.cpp",
+        protocol=EndpointProtocol.OPENAI,
+        base_url="http://127.0.0.1:8081/v1",
+        api_key_enc=None,
+        enabled=True,
+        capabilities={"cortex": True},
+        subsystem_map={"cortex": True},
+        available_models=["local-model"],
+        default_model="local-model",
+        probe_status="success",
+        last_probe_at=None,
+        extra_config=extra_config,
+    )
+
+
+@pytest.mark.asyncio
+async def test_force_json_object_sets_response_format():
+    """force_json_object in extra_config asks the server for valid-JSON output."""
+    from core.external_endpoints.bridges.cortex_bridge import ExternalCortexEngine
+    from core.prompt_request import PromptRequest
+
+    endpoint = _openai_endpoint({"force_json_object": True})
+    captured: dict[str, Any] = {}
+
+    class FakeAdapter:
+        async def chat_completion(self, messages, model=None, **kwargs):
+            captured["kwargs"] = kwargs
+            return SimpleNamespace(content='{"actions": []}', model=model)
+
+    # No tool declarations -> JSON-content path, response_format applies.
+    prompt = PromptRequest(
+        system_instruction="Use valid JSON.",
+        current_text="ping",
+        mode="chat",
+    )
+    engine = ExternalCortexEngine(endpoint, cast(Any, FakeAdapter()))
+    await engine.handle_incoming_message(None, None, prompt)
+
+    assert captured["kwargs"]["response_format"] == {"type": "json_object"}
+
+
+@pytest.mark.asyncio
+async def test_response_format_dropped_when_tools_active():
+    """response_format must not be sent alongside native tool-calling."""
+    from core.external_endpoints.bridges.cortex_bridge import ExternalCortexEngine
+    from core.prompt_request import PromptRequest
+
+    endpoint = _openai_endpoint({"force_json_object": True})
+    captured: dict[str, Any] = {}
+
+    class FakeAdapter:
+        async def chat_completion(self, messages, model=None, **kwargs):
+            captured["kwargs"] = kwargs
+            return SimpleNamespace(content='{"actions": []}', model=model)
+
+    manifest = SimpleNamespace(
+        name="send_message",
+        description="Send a reply",
+        parameters=[
+            SimpleNamespace(
+                name="text",
+                type="string",
+                description="Reply text",
+                enum=None,
+                required=True,
+            )
+        ],
+    )
+    prompt = PromptRequest(
+        system_instruction="Use valid JSON.",
+        current_text="ping",
+        tool_declarations=[manifest],
+        mode="chat",
+    )
+    engine = ExternalCortexEngine(endpoint, cast(Any, FakeAdapter()))
+    await engine.handle_incoming_message(None, None, prompt)
+
+    assert "tools" in captured["kwargs"]
+    assert "response_format" not in captured["kwargs"]
+
+
 @pytest.mark.asyncio
 async def test_openai_compat_ping_test_http_error(monkeypatch):
     adapter = OpenAICompatAdapter(base_url="http://fake-host", api_key="x")
