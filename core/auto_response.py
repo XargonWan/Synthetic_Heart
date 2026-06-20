@@ -114,7 +114,7 @@ class AutoResponseSystem:
                     "message": message_block,
                     "full_json_instructions": json_rules,
                     "is_action_result_delivery": True,  # Flag for downstream loop prevention
-                    "max_correction_attempts": 1,  # Limit corrections for action result responses
+                    "max_correction_attempts": int(CORRECTOR_RETRIES),  # Use configurable corrector retries
                 }
             }
 
