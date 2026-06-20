@@ -368,6 +368,20 @@ docker exec synth-dev tail -f /app/logs/synth.log | grep -E "\[grillo\]|grillo"
 
 ---
 
+### Local tool-calling models drop the chat reply → "missing reply" correction loop  <!-- 2026-06-20 -->
+**Symptom:** With native tool-calling models on llama.cpp (Qwen3.5, Gemma) the chat works for a turn or two, then every turn gets caught by the corrector (`⚠️ LLM generated no outbound message action … triggering corrector for missing reply`, `message_chain.py:2298`) and sometimes echoes the user's own message / ends in the 😵 fallback. Cloud models and non-tool-calling local quants are unaffected.
+**Location:** `core/prompt_renderers.py` (`OpenAIRenderer.parse_tool_call_response`), `core/external_endpoints/adapters/openai_compat.py` (`_extract_tool_call_actions`), `core/prompt_engine.py` (`_derive_default_prompt_action_types`).
+**Status:** fixed (2026-06-20).
+**Notes:** Root cause — `parse_tool_call_response` discarded the model's natural-language `content` whenever any `tool_calls` were present, keeping only the structured calls. Tool-trained local models write the reply in `content` and use tool_calls for side-effects (and `create_personal_diary_entry` is prompted as *"REQUIRED in every response"*, so they almost always emit at least one non-message tool call), so the reply was lost → no `message_*` action → corrector storm; the corrector embeds the original user message, which small quants then parrot back (the "echo"). Fix: when tool_calls are present, surface leftover `content` under the top-level `message` key (the message chain already maps that to `message_<interface>` and dedupes), unless a `message_*` tool call already carries the reply; `<think>` blocks are stripped first.
+
+**Related — disabled plugins still injected their tools (token bloat for small LLMs):** `core_initializer` skips action registration for plugins reporting `is_enabled() == False`, but `radio_host` and `agent_plugin` stored their toggle in `self._enabled` (`RADIO_HOST_ENABLED` / `AGENT_ENABLED`) **without overriding `is_enabled()`** — and `RadioHostPlugin` isn't even an `AIPluginBase` subclass — so they always counted as enabled and dumped `radio_speak`/`radio_update_metadata` and `agent_execute`/`propose_action`/`approve_action` into *every* prompt. Fix: both now override `is_enabled()` to return `bool(self._enabled)`. General rule for new plugins: gate tool exposure with `is_enabled()`, not a private flag. (Note: actions are scoped at registration/startup, so a runtime toggle flip needs a component reload to take effect.)
+
+**Related — corrector dropped the persona (model improvised likes/dislikes on corrected turns):** `run_corrector_middleware` (`core/transport_layer.py`) sends a fresh single-message correction prompt with no `system` role and no history, so the persona (identity + `persona_preferences` likes/dislikes) was absent and the model improvised off-character on every corrected turn. Because corrections were firing constantly (the tool-call bug above), it looked like likes/dislikes were never injected — but on *normal* turns they are (`_build_context_summary` → `[Persona background]`). Fix: the corrector now prepends the active persona (`get_static_identity_content()` + `get_static_preference_content()`) to `correction_message_text`. Note: likes/dislikes are read from the **Postgres `runtime` DB only** (`SYNTH_LIKES`/`SYNTH_DISLIKES`), never from `skins/*/persona.json`; the MariaDB `source` DB is not read for config and can diverge. Latent wipe risk: `save_persona`/`_update_persona_configs` write `persona.likes` back to config, so a persona that loads with empty likes (config DB not ready at startup) could overwrite the stored list with `[]`.
+
+The diary_merge `Exhausted 4 attempts … chat_id=-1` errors are a *separate* issue: `BASE_CORTEX=anthropic` with an empty `ANTHROPIC_API_KEY`.
+
+---
+
 ### Codebase audit completed — do not re-sweep  <!-- 2026-06-12 -->
 **Symptom:** N/A — this is an audit record, not a bug.
 **Location:** Whole repo; detailed ledger = the 24 commits ending at `d423162` (2026-06-11/12).
