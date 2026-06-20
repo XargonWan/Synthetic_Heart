@@ -1991,6 +1991,31 @@ async def run_corrector_middleware(
                 context.get("interface") if context else None
             )
 
+            # Carry the active persona (identity + likes/dislikes) into the
+            # correction prompt. The corrector sends a fresh single-message
+            # prompt with no system/history, so without this the model loses its
+            # persona and improvises off-character replies (e.g. inventing its
+            # likes/dislikes) on every corrected turn.
+            try:
+                from core.persona_manager import get_persona_manager
+
+                _pm = get_persona_manager()
+                if _pm is not None:
+                    _identity = _pm.get_static_identity_content() or ""
+                    _prefs = _pm.get_static_preference_content() or ""
+                    _persona_block = "\n\n".join(
+                        p.strip() for p in (_identity, _prefs) if p and p.strip()
+                    )
+                    if _persona_block:
+                        correction_message_text = (
+                            "=== PERSONA (stay in character) ===\n"
+                            f"{_persona_block}\n\n"
+                            "=== CORRECTION ===\n"
+                            f"{correction_message_text}"
+                        )
+            except Exception as _pe:
+                log_debug(f"[corrector_middleware] persona prepend skipped: {_pe}")
+
             correction_payload = {
                 "system_message": {
                     "type": "error",
