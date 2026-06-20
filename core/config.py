@@ -468,7 +468,13 @@ def derive_cortex_scope(context: dict | None) -> str | None:
         return None
     if context.get("is_trainer"):
         return "trainer"
-    if context.get("grillo_beat"):
+    # Diary consolidation ("diary_merge") is a grillo-family background task, but
+    # it is re-dispatched as its own interface without the ``grillo_beat`` flag.
+    # Route it explicitly to the grillo scope so it follows GRILLO_CORTEX. Without
+    # this it falls through to BASE_CORTEX and silently breaks whenever the base
+    # engine is not usable (e.g. a keyless Anthropic base) — a near-undebuggable
+    # failure for end users.
+    if context.get("grillo_beat") or context.get("diary_merge_beat"):
         return "grillo"
     return None
 
