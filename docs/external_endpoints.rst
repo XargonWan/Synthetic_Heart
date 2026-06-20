@@ -118,6 +118,14 @@ keys. Common ones:
   global ``LLM_GENERATION_TIMEOUT_SEC`` for this endpoint.
 - ``disable_thinking`` (bool): send ``enable_thinking=False`` (Qwen3 / LM Studio)
   to stop the model from spending the context window on chain-of-thought.
+- ``disable_tools`` (bool): stop advertising native function/tool-calling to this
+  endpoint and use the legacy in-prompt JSON-action protocol instead. The full
+  action catalog is folded into the system prompt, so nothing is lost — only the
+  delivery changes. Recommended for small local quants that ignore native
+  tool-calling and emit the action JSON in plain content anyway (advertising 49
+  tools tends to confuse them into replies with no ``message_*`` action). Pairs
+  well with ``force_json_object`` (with tools off, ``response_format`` is no
+  longer suppressed, so it actually applies to chat turns).
 - ``retry_attempts`` / ``retry_backoff`` / ``retry_on_timeout``: transient-error
   retry behavior.
 
@@ -139,7 +147,12 @@ decoding to valid JSON:
 
 Example for a local llama.cpp endpoint::
 
-   {"disable_thinking": true, "force_json_object": true}
+   {"disable_thinking": true, "disable_tools": true, "force_json_object": true}
+
+``disable_tools`` is usually the most impactful setting for small local quants:
+it removes the native-tool confusion (the common cause of replies that contain
+only a diary entry and no ``message_*`` action) and lets ``force_json_object``
+take effect on chat turns.
 
 These are automatically dropped when native tool-calling is active for the
 request (tool-calling already constrains output and most servers reject the

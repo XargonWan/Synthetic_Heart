@@ -1195,6 +1195,51 @@ async def test_response_format_dropped_when_tools_active():
 
 
 @pytest.mark.asyncio
+async def test_disable_tools_uses_in_prompt_protocol():
+    """disable_tools suppresses native tools and keeps the JSON-content protocol."""
+    from core.external_endpoints.bridges.cortex_bridge import ExternalCortexEngine
+    from core.prompt_request import PromptRequest
+
+    endpoint = _openai_endpoint({"disable_tools": True, "force_json_object": True})
+    captured: dict[str, Any] = {}
+
+    class FakeAdapter:
+        async def chat_completion(self, messages, model=None, **kwargs):
+            captured["kwargs"] = kwargs
+            return SimpleNamespace(content='{"actions": []}', model=model)
+
+    manifest = SimpleNamespace(
+        name="send_message",
+        description="Send a reply",
+        parameters=[
+            SimpleNamespace(
+                name="text",
+                type="string",
+                description="Reply text",
+                enum=None,
+                required=True,
+            )
+        ],
+    )
+    prompt = PromptRequest(
+        system_instruction="Use valid JSON.",
+        current_text="ping",
+        tool_declarations=[manifest],
+        mode="chat",
+    )
+    engine = ExternalCortexEngine(endpoint, cast(Any, FakeAdapter()))
+    await engine.handle_incoming_message(None, None, prompt)
+
+    # Native tools must be suppressed entirely…
+    assert "tools" not in captured["kwargs"]
+    assert "tool_choice" not in captured["kwargs"]
+    # …and the renderer must stay on the content-JSON protocol (no tool_calls).
+    assert prompt.supports_tool_calling is False
+    # response_format survives because no tools are present to clash with it.
+    assert captured["kwargs"]["response_format"] == {"type": "json_object"}
+
+
+@pytest.mark.asyncio
 async def test_openai_compat_ping_test_http_error(monkeypatch):
     adapter = OpenAICompatAdapter(base_url="http://fake-host", api_key="x")
 

@@ -359,6 +359,60 @@ class ExternalCortexEngine(AIPluginBase):
         extra = self._endpoint.extra_config or {}
         return bool(extra.get("retry_on_timeout", False))
 
+    def _disable_tools(self) -> bool:
+        """True when this endpoint opts out of native tool-calling.
+
+        Small local models often ignore native function-calling and emit the
+        action JSON in plain content; advertising 49 tools then just confuses
+        them. Setting ``disable_tools`` in extra_config forces the legacy
+        in-prompt JSON-action protocol instead (the action catalog is folded
+        into the system prompt by ``_inject_actions_into_prompt``).
+        """
+        return bool((self._endpoint.extra_config or {}).get("disable_tools"))
+
+    def _inject_actions_into_prompt(self, prompt_request: Any) -> None:
+        """Fold the scoped action catalog into the system prompt.
+
+        Needed when native tools are disabled: the PromptRequest path otherwise
+        delivers the available actions *only* as native tool declarations, so
+        without this the model would lose its action catalog entirely. The
+        catalog is built from the same actions that would have been offered as
+        tools, so nothing is lost — it is just delivered as text.
+        """
+        try:
+            import json as _json
+
+            from core.core_initializer import core_initializer
+            from core.prompt_engine import minify_actions_block
+
+            names = {
+                getattr(m, "name", None)
+                for m in (getattr(prompt_request, "tool_declarations", None) or [])
+            }
+            names.discard(None)
+            if not names:
+                return
+
+            raw = core_initializer.actions_block.get("available_actions", {}) or {}
+            scoped = {k: v for k, v in raw.items() if k in names}
+            if not scoped:
+                return
+
+            catalog = minify_actions_block(scoped, lite=False)
+            block = (
+                "\n\n=== AVAILABLE ACTIONS ===\n"
+                "Use ONLY these action types in the 'actions' array. Each entry must be "
+                '{"type": "<action_name>", "payload": { ... }}:\n'
+                + _json.dumps(catalog, ensure_ascii=False)
+            )
+            prompt_request.system_instruction = (
+                getattr(prompt_request, "system_instruction", "") or ""
+            ) + block
+        except Exception as exc:
+            log_warning(
+                f"[cortex_bridge:{self._endpoint.name}] action-catalog injection failed: {exc}"
+            )
+
     @staticmethod
     def _is_retryable_exception(exc: Exception) -> bool:
         if isinstance(exc, (ConnectionError, TimeoutError, OSError)):
@@ -444,6 +498,15 @@ class ExternalCortexEngine(AIPluginBase):
                     prompt_request = candidate
 
             if prompt_request is None or not prompt_request.tool_declarations:
+                return {}
+
+            if self._disable_tools():
+                # Force the legacy in-prompt JSON-action protocol: keep native
+                # tools off, fold the action catalog into the system prompt, and
+                # leave supports_tool_calling False so the renderer expects a
+                # JSON-in-content reply rather than tool_calls.
+                prompt_request.supports_tool_calling = False
+                self._inject_actions_into_prompt(prompt_request)
                 return {}
 
             prompt_request.supports_tool_calling = True
