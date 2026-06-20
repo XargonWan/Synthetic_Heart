@@ -1476,6 +1476,16 @@ class DiaryPlugin:
             return []
 
     def get_supported_actions(self):
+        # Trainer name is resolved dynamically (config-driven, never hardcoded) so
+        # the diary examples model first-person, named prose instead of detached
+        # "the user" framing that small local models otherwise copy verbatim.
+        try:
+            from core.config import get_trainer_display_name
+
+            trainer_name = get_trainer_display_name()
+        except Exception:
+            trainer_name = ""
+        example_person = trainer_name or "my trainer"
         return {
             "static_inject": {
                 "schema": {"type": "object", "properties": {}, "required": []},
@@ -1492,7 +1502,7 @@ class DiaryPlugin:
                     "properties": {
                         "interaction_summary": {
                             "type": "string",
-                            "description": "Summary of what happened in this interaction. Do NOT include weather, temperature, or location data — that context is provided separately.",
+                            "description": "Summary of what happened in this interaction, written in YOUR OWN first-person voice as yourself and referring to people by name (never 'the user'). Do NOT include weather, temperature, or location data — that context is provided separately.",
                         },
                         "content": {
                             "type": "string",
@@ -1500,7 +1510,7 @@ class DiaryPlugin:
                         },
                         "personal_thought": {
                             "type": "string",
-                            "description": "Personal reflection on the interaction (optional). Focus on emotions and relationship dynamics, not environmental conditions.",
+                            "description": "Personal reflection on the interaction (optional), written in first person as yourself. Focus on your emotions and the relationship dynamics, naming people directly rather than calling them 'the user'. Leave out environmental conditions.",
                         },
                         "emotions": {
                             "type": "array",
@@ -1537,27 +1547,28 @@ class DiaryPlugin:
                     "when_to_use": "Use this action in every single response to record the interaction in synth's personal memory",
                     "examples": [
                         {
-                            "scenario": "User asks about weather",
+                            "scenario": "A question about the weather",
                             "payload": {
-                                "interaction_summary": "User asked about weather conditions and I provided current forecast"
+                                "interaction_summary": f"{example_person} asked me about the weather, so I shared the current forecast."
                             },
                         },
                         {
-                            "scenario": "User has technical problem",
+                            "scenario": "Helping with a technical problem",
                             "payload": {
-                                "interaction_summary": "User reported technical issues with their system and I provided troubleshooting steps"
+                                "interaction_summary": f"{example_person} hit a technical snag and I walked them through fixing it."
                             },
                         },
                         {
                             "scenario": "Casual conversation",
                             "payload": {
-                                "interaction_summary": "Had a friendly chat about user's interests and daily activities"
+                                "interaction_summary": f"{example_person} and I had a relaxed chat about how their day was going."
                             },
                         },
                     ],
                     "notes": [
                         "interaction_summary is REQUIRED and must describe what happened in this conversation",
-                        "Be specific about what the user asked and what you provided",
+                        "Write it in YOUR OWN first-person voice as yourself, referring to people by name (never 'the user')",
+                        "Be specific about what was said and what you did, thought, or felt",
                         "Use clear, descriptive language that would help remember this interaction later",
                         "Other fields are optional and will be generated automatically if not provided",
                         "This action MUST be included in every response without exception",

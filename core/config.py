@@ -96,6 +96,26 @@ TRAINER_NAME = config_registry.get_var(
     component="core",
 )
 
+
+def get_trainer_display_name() -> str:
+    """Resolve the configured trainer name(s) for use in prompt text.
+
+    Read live from the config registry so runtime edits take effect without a
+    restart, falling back to the module-level ``TRAINER_NAME``. Returns an empty
+    string when no real name is configured (still the ``"Trainer"`` placeholder)
+    so callers can omit the reference instead of leaking a default. A
+    comma-separated multi-trainer value is preserved verbatim.
+    """
+    try:
+        raw = config_registry.get_value("TRAINER_NAME", "Trainer")
+    except Exception:
+        raw = TRAINER_NAME
+    name = str(raw or "").strip()
+    if not name or name == "Trainer":
+        return ""
+    return name
+
+
 BASE_CORTEX = config_registry.get_var(
     "BASE_CORTEX",
     "manual",

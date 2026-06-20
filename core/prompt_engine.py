@@ -2075,10 +2075,26 @@ def load_json_instructions() -> str:
     # Compact instructions for LLM prompts (minified to save tokens).
     # Keep this small but authoritative: the LLM must reply using only valid JSON
     # following the exact actions / payload structure.
+
+    # Resolve the trainer name dynamically (config-driven, never hardcoded) so the
+    # autonomy rationale is written in-voice and names people instead of writing
+    # detached "the user" prose — small local models in particular parrot whatever
+    # framing the instructions use.
+    try:
+        from core.config import get_trainer_display_name
+
+        trainer_name = get_trainer_display_name()
+    except Exception:
+        trainer_name = ""
+    if trainer_name:
+        naming_hint = f" Name people, not 'the user' (your trainer: {trainer_name})."
+    else:
+        naming_hint = " Name people, not 'the user'."
+
     instructions = (
         "MASTER INSTRUCTION: Use ONLY actions from the 'actions' block. Never fabricate.\n"
         "If an action you need is not available, reply with JSON explaining why.\n"
-        "AUTONOMY GUIDELINES: You MAY proactively propose or execute allowed actions when beneficial. When acting autonomously include a brief `meta` object with `autonomous: true` and a short `rationale` explaining why the action is taken. If an action is disallowed, return a JSON proposal describing the need.\n"
+        f"AUTONOMY GUIDELINES: You MAY proactively propose or execute allowed actions when beneficial. When acting autonomously include a brief `meta` object with `autonomous: true` and a short first-person `rationale` (your own voice) for why you are acting.{naming_hint} If an action is disallowed, return a JSON proposal describing the need.\n"
         "RESPOND ONLY WITH VALID JSON. No text before or after.\n"
         "Use input.interface and input.payload.source.interface_path to route replies.\n"
         "NEVER use 'target' — always use 'interface_path' in message actions.\n"
