@@ -21,6 +21,21 @@ def _patch_radio_config(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+def test_is_enabled_reflects_toggle(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The plugin must report its RADIO_HOST_ENABLED toggle via is_enabled() so
+    core_initializer skips registering radio_speak / radio_update_metadata (and
+    therefore stops injecting them into prompts) when the radio host is off."""
+    _patch_radio_config(
+        monkeypatch
+    )  # get_value returns default -> RADIO_HOST_ENABLED False
+
+    plugin = radio_module.RadioHostPlugin()
+    assert plugin.is_enabled() is False
+
+    plugin._enabled = True
+    assert plugin.is_enabled() is True
+
+
 @pytest.mark.asyncio
 async def test_start_continues_when_radio_table_init_fails(
     monkeypatch: pytest.MonkeyPatch,

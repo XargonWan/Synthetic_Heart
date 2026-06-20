@@ -3,6 +3,18 @@ import pytest
 from plugins.agent_plugin import AgentPlugin
 
 
+def test_is_enabled_reflects_toggle():
+    """The plugin must report its enabled state via is_enabled() so
+    core_initializer skips registering agent_execute / propose_action /
+    approve_action (and stops injecting them into prompts) when the agent is off.
+    """
+    p = AgentPlugin()
+    p._enabled = False
+    assert p.is_enabled() is False
+    p._enabled = True
+    assert p.is_enabled() is True
+
+
 @pytest.mark.asyncio
 async def test_whitelist_mode_executes_whitelisted_command(monkeypatch):
     p = AgentPlugin()
