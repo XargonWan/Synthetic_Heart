@@ -375,6 +375,12 @@
         setField('ext-ep-form-protocol', preset.protocol || 'openai');
         setField('ext-ep-form-url', preset.base_url || '');
         setField('ext-ep-form-key', '');
+        setField(
+            'ext-ep-form-extra-config',
+            preset.extra_config && Object.keys(preset.extra_config).length
+                ? JSON.stringify(preset.extra_config, null, 2)
+                : ''
+        );
 
         // URL lock / unlock
         const urlInput = document.getElementById('ext-ep-form-url');
@@ -470,6 +476,14 @@
             if (cb) cb.checked = !!smap[k];
         }
 
+        // Extra config (advanced JSON) — pretty-print existing values
+        setField(
+            'ext-ep-form-extra-config',
+            ep.extra_config && Object.keys(ep.extra_config).length
+                ? JSON.stringify(ep.extra_config, null, 2)
+                : ''
+        );
+
         // Hide back button / provider name header in edit mode
         const header = document.getElementById('ext-ep-form-provider-header');
         if (header) header.style.display = 'none';
@@ -548,9 +562,32 @@
             if (cb) subsystem_map[k] = cb.checked;
         }
 
+        // Parse the optional Extra Config JSON object
+        const extraRaw = (document.getElementById('ext-ep-form-extra-config')?.value || '').trim();
+        let extra_config;
+        if (extraRaw) {
+            try {
+                extra_config = JSON.parse(extraRaw);
+            } catch (err) {
+                setModalError('Extra Config must be valid JSON: ' + err.message);
+                return;
+            }
+            if (typeof extra_config !== 'object' || Array.isArray(extra_config) || extra_config === null) {
+                setModalError('Extra Config must be a JSON object (e.g. {"force_json_object": true}).');
+                return;
+            }
+        }
+
         const payload = { display_label, protocol, base_url, subsystem_map };
         if (!id) payload.name = name;
         if (key) payload.api_key = key;
+        // Send the parsed object; when editing and the field was cleared, send {}
+        // so the stored config is reset rather than silently kept.
+        if (extra_config !== undefined) {
+            payload.extra_config = extra_config;
+        } else if (id) {
+            payload.extra_config = {};
+        }
 
         try {
             setStatus('Saving and probing…', '');

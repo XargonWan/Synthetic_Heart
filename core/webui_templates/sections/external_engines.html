@@ -121,6 +121,15 @@
                                 <option value="anthropic">Anthropic Claude</option>
                                 <option value="custom">Custom</option>
                             </select>
+
+                            <label style="display:block; margin:16px 0 4px; font-weight:600;">Extra Config <span style="color:var(--muted); font-weight:400; font-size:0.85rem;">(JSON — per-endpoint tuning)</span></label>
+                            <textarea id="ext-ep-form-extra-config" rows="4" spellcheck="false" placeholder='{"disable_thinking": true, "force_json_object": true}'
+                                style="width:100%; padding:9px 12px; background:var(--background); color:var(--text); border:1px solid var(--border,#444); border-radius:8px; font-family:monospace; font-size:0.85rem; resize:vertical;"></textarea>
+                            <div style="margin-top:5px; font-size:0.8rem; color:var(--muted);">
+                                Optional. Cortex keys: <code>timeout</code> (request seconds), <code>disable_thinking</code>,
+                                and <code>force_json_object</code> / <code>grammar</code> to constrain small local models to valid JSON.
+                                Must be a JSON object; leave blank for defaults.
+                            </div>
                         </div>
                     </details>
 
