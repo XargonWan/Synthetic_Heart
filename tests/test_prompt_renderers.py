@@ -200,6 +200,10 @@ class TestOpenAIRenderer:
             "Do not infer hidden, obscured, or non-visible features"
             in text_part["text"]
         )
+        # The persona must reply in character, not emit a bare image description
+        # (inline images now reach the chat model directly — see iris inline mode).
+        assert "Describe only" not in text_part["text"]
+        assert "in character" in text_part["text"]
 
     def test_multimodal_document_turn_adds_note_without_forwarding_binary(self) -> None:
         req = _basic_request(current_text="Can you inspect this manual?")
