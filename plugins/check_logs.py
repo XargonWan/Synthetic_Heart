@@ -21,7 +21,7 @@ import re
 from typing import List
 
 from core.core_initializer import register_plugin
-from core.logging_utils import log_info, log_error
+from core.logging_utils import log_info, log_error, log_warning
 
 
 LOG_DIR = os.getenv("SYNTH_LOG_DIR", "/app/logs")
@@ -169,11 +169,9 @@ class CheckLogsPlugin:
             path = _resolve_log_path(file)
         except Exception as e:
             log_error(f"[check_logs] invalid file: {e}")
-            try:
-                bot.send_message(original_message.chat_id, f"Invalid log file: {file}")
-            except Exception:
-                pass
-            return
+            return self._build_message_action(
+                f"Invalid log file: {file}", context, original_message
+            )
 
         if action_type == "get_logs":
             try:
@@ -187,26 +185,19 @@ class CheckLogsPlugin:
                     body = body[-19000:]
                     body = "... (truncated)\n" + body
                 msg = f"Last {lines} lines from {file}:\n```\n{body}\n```"
-                bot.send_message(original_message.chat_id, msg)
+                return self._build_message_action(msg, context, original_message)
             except Exception as e:
                 log_error(f"[check_logs] failed to read file {path}: {e}")
-                try:
-                    bot.send_message(
-                        original_message.chat_id, f"Failed to read log file: {e}"
-                    )
-                except Exception:
-                    pass
+                return self._build_message_action(
+                    f"Failed to read log file: {e}", context, original_message
+                )
 
         elif action_type == "search_logs":
             queries = payload.get("queries")
             if not queries:
-                try:
-                    bot.send_message(
-                        original_message.chat_id, "No queries provided for search_logs"
-                    )
-                except Exception:
-                    pass
-                return
+                return self._build_message_action(
+                    "No queries provided for search_logs", context, original_message
+                )
             if isinstance(queries, str):
                 queries = [queries]
             regex = bool(payload.get("regex", False))
@@ -217,24 +208,51 @@ class CheckLogsPlugin:
                 raw = _tail_lines(path, max(lines, 1000))
                 matches = _search_in_lines(raw, queries, regex, context_lines)
                 if not matches:
-                    bot.send_message(original_message.chat_id, "No matches found")
-                    return
+                    return self._build_message_action(
+                        "No matches found", context, original_message
+                    )
                 body = "\n".join(matches)
                 if len(body) > 19000:
                     body = body[:19000]
                     body = body + "\n... (truncated)"
                 msg = f"Search results in {file} for {queries}:\n```\n{body}\n```"
-                bot.send_message(original_message.chat_id, msg)
+                return self._build_message_action(msg, context, original_message)
             except re.error as e:
-                bot.send_message(
-                    original_message.chat_id, f"Invalid regular expression: {e}"
+                return self._build_message_action(
+                    f"Invalid regular expression: {e}", context, original_message
                 )
             except Exception as e:
                 log_error(f"[check_logs] search failed: {e}")
-                try:
-                    bot.send_message(original_message.chat_id, f"Search failed: {e}")
-                except Exception:
-                    pass
+                return self._build_message_action(
+                    f"Search failed: {e}", context, original_message
+                )
+
+        return None
+
+    @staticmethod
+    def _build_message_action(text: str, context: dict, original_message) -> dict:
+        """Build a message action dict for interface-agnostic delivery."""
+        interface_path = None
+        if context and isinstance(context, dict):
+            interface_path = context.get("interface_path")
+        if not interface_path and original_message:
+            interface_path = getattr(original_message, "interface_path", None)
+        if not interface_path:
+            log_warning("[check_logs] Cannot build message action: no interface_path available")
+            return None
+
+        interface_name = interface_path.split("/")[0] if interface_path else None
+        if not interface_name:
+            return None
+
+        action_type = f"message_{interface_name}"
+        return {
+            "type": action_type,
+            "payload": {
+                "text": text,
+                "interface_path": interface_path,
+            },
+        }
 
 
 PLUGIN_CLASS = None

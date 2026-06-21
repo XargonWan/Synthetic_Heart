@@ -352,6 +352,7 @@ class MessageMapPlugin:
                 asyncio.create_task(
                     store_message_mapping(trainer_message_id, chat_id, message_id)
                 )
+            return None
 
         elif action_type == "get_original_message":
             trainer_message_id = payload.get("trainer_message_id")
@@ -360,43 +361,76 @@ class MessageMapPlugin:
 
                 asyncio.create_task(
                     self._send_original_message(
-                        bot, original_message, trainer_message_id
+                        context, original_message, trainer_message_id
                     )
                 )
+            return None
 
         elif action_type == "cleanup_old_mappings":
             older_than_hours = payload.get("older_than_hours", 24)
             import asyncio
 
             asyncio.create_task(cleanup_old_mappings(older_than_hours))
+            return None
 
         elif action_type == "get_mapping_stats":
             import asyncio
 
-            asyncio.create_task(self._send_mapping_stats(bot, original_message))
+            asyncio.create_task(
+                self._send_mapping_stats(context, original_message)
+            )
+            return None
 
-    async def _send_original_message(self, bot, original_message, trainer_message_id):
-        """Send the original message info to the user."""
+        return None
+
+    async def _send_original_message(self, context, original_message, trainer_message_id):
+        """Return the original message info as a message action."""
         try:
             result = await get_original_message(trainer_message_id)
             if result:
                 chat_id, message_id = result
-                response = f"Original message: Chat {chat_id}, Message {message_id}"
+                text = f"Original message: Chat {chat_id}, Message {message_id}"
             else:
-                response = f"No mapping found for trainer message {trainer_message_id}"
-
-            await bot.send_message(original_message.chat_id, response)
+                text = f"No mapping found for trainer message {trainer_message_id}"
         except Exception as e:
             log_error(f"[message_map] Failed to send original message info: {e}")
+            text = f"❌ Failed to get original message: {e}"
+        return self._build_message_action(text, context, original_message)
 
-    async def _send_mapping_stats(self, bot, original_message):
-        """Send message mapping statistics."""
+    async def _send_mapping_stats(self, context, original_message):
+        """Return message mapping statistics as a message action."""
         try:
             stats = await get_mapping_stats()
-            response = f"Message Mapping Stats:\n• Total mappings: {stats['total_mappings']}\n• Recent (24h): {stats['recent_mappings']}"
-            await bot.send_message(original_message.chat_id, response)
+            text = f"Message Mapping Stats:\n• Total mappings: {stats['total_mappings']}\n• Recent (24h): {stats['recent_mappings']}"
         except Exception as e:
             log_error(f"[message_map] Failed to send mapping stats: {e}")
+            text = f"❌ Failed to get mapping stats: {e}"
+        return self._build_message_action(text, context, original_message)
+
+    @staticmethod
+    def _build_message_action(text: str, context: dict, original_message) -> dict:
+        """Build a message action dict for interface-agnostic delivery."""
+        interface_path = None
+        if context and isinstance(context, dict):
+            interface_path = context.get("interface_path")
+        if not interface_path and original_message:
+            interface_path = getattr(original_message, "interface_path", None)
+        if not interface_path:
+            log_warning("[message_map] Cannot build message action: no interface_path available")
+            return None
+
+        interface_name = interface_path.split("/")[0] if interface_path else None
+        if not interface_name:
+            return None
+
+        action_type = f"message_{interface_name}"
+        return {
+            "type": action_type,
+            "payload": {
+                "text": text,
+                "interface_path": interface_path,
+            },
+        }
 
 
 PLUGIN_CLASS = MessageMapPlugin
