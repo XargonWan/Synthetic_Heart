@@ -490,6 +490,53 @@ def _parse_json_list(value: Any) -> list:
         return []
 
 
+def _normalize_emotions(emotions: Any) -> list[dict[str, Any]]:
+    """Coerce assorted emotion shapes into ``[{"type": str, "intensity": num}]``.
+
+    Small local models emit emotions inconsistently — as a ``{name: intensity}``
+    map (the ``update_emotion_state`` shape), a list of names, or the canonical
+    list of dicts. Normalise them all so diary entries actually capture emotions
+    instead of dropping them with an "Invalid emotion format" warning.
+    """
+    if not emotions:
+        return []
+
+    def _intensity(value: Any) -> Any:
+        return (
+            value
+            if isinstance(value, (int, float)) and not isinstance(value, bool)
+            else None
+        )
+
+    normalized: list[dict[str, Any]] = []
+
+    if isinstance(emotions, dict):
+        for name, intensity in emotions.items():
+            if not name:
+                continue
+            entry: dict[str, Any] = {"type": str(name)}
+            if _intensity(intensity) is not None:
+                entry["intensity"] = intensity
+            normalized.append(entry)
+        return normalized
+
+    if isinstance(emotions, (list, tuple)):
+        for item in emotions:
+            if isinstance(item, dict):
+                etype = item.get("type") or item.get("emotion") or item.get("name")
+                if not etype:
+                    continue
+                entry = {"type": str(etype)}
+                if _intensity(item.get("intensity")) is not None:
+                    entry["intensity"] = item["intensity"]
+                normalized.append(entry)
+            elif isinstance(item, str) and item.strip():
+                normalized.append({"type": item.strip()})
+        return normalized
+
+    return []
+
+
 def _isoformat_timestamp(value: Any) -> Any:
     """Convert a datetime column value to ISO text, passing through others."""
     if value is None:
@@ -832,18 +879,12 @@ def add_diary_entry(
     if not content.strip():
         return
 
-    emotions = emotions or []
+    emotions = _normalize_emotions(emotions)
     context_tags = context_tags or []
     involved_users = involved_users or []
 
     # Normalize interface name for consistency
     interface = normalize_interface_name(interface)
-
-    # Validate emotions format
-    for emotion in emotions:
-        if not isinstance(emotion, dict) or "type" not in emotion:
-            log_warning(f"[ai_diary] Invalid emotion format: {emotion}")
-            continue
 
     try:
         diary_entry_id = _run(
@@ -960,18 +1001,12 @@ async def add_diary_entry_async(
     if not content.strip():
         return
 
-    emotions = emotions or []
+    emotions = _normalize_emotions(emotions)
     context_tags = context_tags or []
     involved_users = involved_users or []
 
     # Normalize interface name for consistency
     interface = normalize_interface_name(interface)
-
-    # Validate emotions format
-    for emotion in emotions:
-        if not isinstance(emotion, dict) or "type" not in emotion:
-            log_warning(f"[ai_diary] Invalid emotion format: {emotion}")
-            continue
 
     try:
         diary_entry_id = await _upsert_diary_impl(
