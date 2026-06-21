@@ -1096,6 +1096,19 @@ To add another fetch-only action: return `deliver_to_llm: True` from its `execut
 
 ---
 
+### Memory-consolidation diary beat read detached/clinical (analyst voice, not journaling)  <!-- 2026-06-21 -->
+**Symptom:** The big recurring `update_diary_entry` (canonical day-entry, e.g. id 4311) narrated SyntH in a clinical, self-observing register — "running diagnostics on our recent exchanges", and an `interaction_summary` of *"I responded by providing a structural framework for the memory consolidation process."* This is the "main vs introspection core feels detached" complaint, distinct from (and surfaced while fixing) the outreach detachment above.
+**Location:** `plugins/grillo/grillo_impl.py` `_create_memory_consolidation_prompt` (the active builder — `_create_beat_prompt` intercepts `beat_type == "memory_consolidation"` at the top and calls this, **shadowing** `plugins/grillo/grillo_memory.py::GrilloMemoryPlugin.build_prompt`, which is dead for this beat). Amplified by `plugins/grillo/grillo_diary_consolidator.py::build_prompt` (day-merge).
+**Status:** fixed (2026-06-21).
+**Notes:** Root causes:
+1. **Analyst framing.** The prompt asked to *"Synthesize your recent memories and identify recurring patterns"* and to summarise *"the topic, who raised it, and **the assistant's concrete answer**"* (third-person self-reference) with a meeting-minutes example ("We talked about Power Rangers — Jay asked…"). Ask for a pattern-synthesis summary, get clinical note-taking.
+2. **No grounding spiral.** Its history lead-in often comes back as the placeholder `[History Evaluator] No recent messages available to evaluate`; with nothing concrete to synthesise, SyntH fell back to abstract self-analysis about her own architecture.
+3. **Consolidator preserved the detached tone.** `grillo_diary_consolidator.build_prompt` faithfully *"preserve[s] all fragments"*, re-narrating the already-detached fragments into the canonical entry.
+**Fix:** Rewrote `_create_memory_consolidation_prompt` to first-person felt journaling — dropped "synthesize/identify patterns/the assistant's answer" and the Power-Rangers example; added an explicit *"stay in first person, never refer to yourself in the third person, do not describe this as a task/'synthesis'/'process'"* rule; added a `has_history` gate that, when the lead-in is the no-data placeholder, pivots to "just check in with how you're feeling right now" instead of synthesising from nothing. JSON action shape (`create_personal_diary_entry` + `context_tags` + `interaction_summary`) unchanged. Added the same anti-summary rule to `grillo_diary_consolidator.build_prompt`. **Retired the shadow**: deleted the vestigial `plugins/grillo/grillo_memory.py` (no actions, dead `build_prompt` — auto-discovered as `beat_plugins["memory_consolidation"]` but always bypassed by `_create_beat_prompt`'s interception); removed its now-dead reference from `tests/test_grillo_beat_system.py::test_grillo_reflection_prompts_request_introspection_fields`. Plugin removal is safe by the PluginBase contract; `memory_consolidation` is selected from the hardcoded `BEAT_TYPES` dict, not the plugin registry. Tests: `tests/test_grillo_select_active_chats.py::test_memory_consolidation_prompt_is_first_person_journaling` (replaces the old `_instructions_are_specific`).
+**Open (not fixed):** entry 4311's `emotions` array is malformed — mixed scales and bare strings (`{"type":"arousal","intensity":7}` alongside `{"type":"love","intensity":0.7}` and bare `"arousal"`). Separate emotion-parsing/data-hygiene bug in the diary write path, not the prompt voice.
+
+---
+
 ## 13. Database Quick Reference
 
 > Tables are created inline in `core/db.py` and each plugin — **`init-db.sql` only seeds a subset.** If you need a table's full column list, `grep -A20 "CREATE TABLE IF NOT EXISTS <name>"` in the relevant file.

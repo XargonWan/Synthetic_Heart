@@ -180,14 +180,16 @@ async def test_grillo_outreach_prompt_generation() -> None:
 async def test_grillo_reflection_prompts_request_introspection_fields() -> None:
     from plugins.grillo.grillo_self_reflection import GrilloSelfReflectionPlugin
     from plugins.grillo.grillo_curiosity import GrilloCuriosityPlugin
-    from plugins.grillo.grillo_memory import GrilloMemoryPlugin
     from plugins.grillo.grillo_tag import GrilloTagPlugin
     from plugins.grillo.grillo_relationship import GrilloRelationshipPlugin
 
+    # NOTE: memory_consolidation is intentionally absent — its prompt is built by
+    # GrilloPlugin._create_memory_consolidation_prompt (see _create_beat_prompt's
+    # interception), covered by test_grillo_select_active_chats.py. The vestigial
+    # grillo_memory.py plugin that used to shadow it has been retired.
     prompts = [
         await GrilloSelfReflectionPlugin().build_prompt(),
         await GrilloCuriosityPlugin().build_prompt(),
-        await GrilloMemoryPlugin().build_prompt(),
         await GrilloTagPlugin().build_prompt(),
         await GrilloRelationshipPlugin().build_prompt(),
     ]
