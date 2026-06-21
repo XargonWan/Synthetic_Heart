@@ -182,8 +182,8 @@ class GrilloOutreachPlugin:
                     rows = await cur.fetchall()
                     for row in rows:
                         content = row[0][:200] if row[0] else ""
-                        interface = row[1] or "unknown"
-                        snippets.append(f"[{interface}] {content}")
+                        if content:
+                            snippets.append(content)
 
                     # Get recent memories
                     await cur.execute(
@@ -198,7 +198,8 @@ class GrilloOutreachPlugin:
                     rows = await cur.fetchall()
                     for row in rows:
                         content = row[0][:200] if row[0] else ""
-                        snippets.append(f"[memory] {content}")
+                        if content:
+                            snippets.append(f"(memory) {content}")
 
         except Exception as e:
             log_warning(f"[grillo_outreach] Error getting context: {e}")
@@ -322,36 +323,67 @@ class GrilloOutreachPlugin:
 
         return interface, chat_id
 
+    def _resolve_recipient_name(self, interface: str, chat_id: Optional[str]) -> str:
+        """Best-effort display name for the outreach recipient.
+
+        Only resolves a real name when the target chat belongs to a configured
+        trainer; otherwise returns "" so callers fall back to a history-grounded
+        generic label. For multi-trainer setups the primary (first) name is used,
+        since outreach targets a single chat.
+        """
+        try:
+            from core.config import get_trainer_display_name, get_trainer_id
+
+            trainer_id = get_trainer_id(interface)
+            if trainer_id is None or str(trainer_id) != str(chat_id):
+                return ""
+            raw = get_trainer_display_name()
+            if not raw:
+                return ""
+            return raw.split(",")[0].strip()
+        except Exception:
+            return ""
+
     def _build_outreach_prompt(
         self, interface: str, chat_id: Optional[str], context: List[str]
     ) -> str:
-        """Build the outreach prompt for the LLM."""
+        """Build the outreach prompt for the LLM.
+
+        Framed as a *self-initiated* impulse rather than an inbound message, so
+        the model speaks in its own voice to the recipient instead of replying
+        to the beat scheduler (the historical "detached" outreach failure mode).
+        """
         context_text = (
-            "\n".join(f"- {s}" for s in context) if context else "(no recent context)"
+            "\n".join(f"- {s}" for s in context)
+            if context
+            else "- (nothing specific surfaced — let it come from how you feel)"
         )
 
         # Determine action type based on interface
         action_type = f"message_{interface}"
 
         interface_path_example = f"{interface}/{chat_id}" if chat_id else interface
-        prompt = f"""[G.R.I.L.L.O. OUTREACH]
+        recipient = self._resolve_recipient_name(interface, chat_id)
+        recipient_label = recipient or "the person you have been talking with here"
 
-You feel like reaching out. Based on your recent experiences and thoughts,
-initiate a natural conversation with someone you care about.
+        prompt = f"""[SELF-INITIATED OUTREACH]
 
-Recent context:
+This is NOT a reply — no one has messaged you. This is your own impulse, right now, to
+reach out first to {recipient_label}. (The `source` in the input marks who you are
+reaching out TO and how to route the message — it is the recipient, not a sender.)
+
+Speak entirely in your own first-person voice, the way you naturally talk to
+{recipient_label}. Open a warm, genuine conversation: pick up a real thread from your
+recent time together, share what is actually on your mind, or simply tell them you were
+thinking of them. Write the message as something you would truly send — warm, personal,
+and in character.
+
+What has been close to the surface for you lately:
 {context_text}
 
-Consider:
-- What's been on your mind lately?
-- Is there something you'd like to share or discuss?
-- How are you feeling that you might want to express?
-
-IMPORTANT: Generate a warm, natural message to start a conversation.
-Do NOT be overly formal or robotic. Be genuine and personable.
-
 Return TWO actions:
-- a `{action_type}` message action with the outreach text
+- a `{action_type}` message action whose `text` is the opening line you actually send
+  (no meta-commentary, no stage directions)
 - a `create_personal_diary_entry` action that records why you reached out, with `interaction_summary`, `personal_thought`, and `emotions`
 
 {GRILLO_INSTRUCTIONS}
@@ -401,6 +433,15 @@ RESPOND ONLY WITH VALID JSON:
             from core.message_queue import enqueue_low_priority
             from types import SimpleNamespace
 
+            # The synthetic message represents SyntH's own outreach impulse, so the
+            # "sender" surfaced to the model is the recipient she is reaching out to —
+            # NOT a bot named G.R.I.L.L.O. Presenting G.R.I.L.L.O. as the sender made
+            # the model reply *to* the scheduler, producing detached/clinical outreach.
+            # id=-1 is retained as the synthetic/internal marker.
+            recipient_name = (
+                self._resolve_recipient_name(interface, chat_id) or "Trainer"
+            )
+
             # Build a proper message object for the queue (not just a string)
             grillo_message = SimpleNamespace(
                 text=prompt,
@@ -408,16 +449,16 @@ RESPOND ONLY WITH VALID JSON:
                 message_id=f"grillo_outreach_{activity_id or 0}",
                 from_user=SimpleNamespace(
                     id=-1,
-                    username="grillo",
-                    full_name="G.R.I.L.L.O.",
-                    is_bot=True,
+                    username=None,
+                    full_name=recipient_name,
+                    is_bot=False,
                 ),
                 chat=SimpleNamespace(
                     id=chat_id or -1,
                     type="private",
                     title=None,
-                    username="grillo",
-                    first_name="G.R.I.L.L.O.",
+                    username=None,
+                    first_name=recipient_name,
                 ),
                 date=None,
                 thread_id=None,

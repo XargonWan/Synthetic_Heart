@@ -166,7 +166,9 @@ async def test_grillo_outreach_prompt_generation() -> None:
         context=["Test context 1", "Test context 2"],
     )
 
-    assert "G.R.I.L.L.O. OUTREACH" in prompt
+    assert "SELF-INITIATED OUTREACH" in prompt
+    # Outreach must be framed as a self-initiated impulse, not an inbound reply.
+    assert "NOT a reply" in prompt
     assert "message_telegram_bot" in prompt
     assert "create_personal_diary_entry" in prompt
     assert "personal_thought" in prompt
