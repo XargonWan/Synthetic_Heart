@@ -295,11 +295,17 @@ Before validation, the action parser automatically normalizes payloads to make t
 
 **Normalization Rules** (``_normalize_payload`` in ``core/action_parser.py``):
 
-- String numbers are converted to integers for numeric ID fields
-- Supported fields: ``thread_id``, ``chat_id``, ``user_id``, ``message_id``, ``animation_state``, and any field ending with ``_id``
-- Applies to both top-level fields and nested dictionaries
-- Non-numeric strings are left unchanged
-- Already-integer values remain unchanged
+- **ID fields** → ``int``: ``chat_id``, ``user_id``, ``message_id``, ``animation_state``, and any field ending with ``_id`` (e.g. ``thread_id``).
+- **Numeric parameter fields** → ``int`` when integral, ``float`` otherwise: ``limit``, ``offset``, ``count``, ``older_than_days``, ``older_than_hours``, ``intensity``, and the rest of ``_NUMERIC_PARAM_FIELDS``. This catches grammar-constrained local models that quote numbers (``"limit": "5"``) — valid JSON, but the string would otherwise break downstream int math and SQL ``LIMIT`` clauses.
+- Applies recursively through nested dictionaries **and lists**, at any depth.
+- Non-numeric strings, already-numeric values, and string-typed fields (e.g. the Telegram ``target`` id) are left unchanged.
+
+.. note::
+
+   The GBNF action grammar (``force_action_grammar``) constrains the JSON
+   *shape* and the action ``type`` enum, but not payload value *types* — per-action
+   payload schemas are intentionally not encoded. A model is therefore free to
+   emit ``"limit": "5"``. Coercion here is what closes that gap.
 
 **Example:**
 
@@ -314,14 +320,14 @@ Before validation, the action parser automatically normalizes payloads to make t
             "thread_id": "2"        # String!
         }
     }
-    
+
     # After normalization
     {
         "type": "message_telegram_bot",
         "payload": {
             "text": "Hello",
-            "target": "-1003098886330",
-            "thread_id": 2          # Converted to int
+            "target": "-1003098886330",   # String-typed id — left unchanged
+            "thread_id": 2                # Converted to int
         }
     }
 
