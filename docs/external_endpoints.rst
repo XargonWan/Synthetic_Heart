@@ -161,6 +161,14 @@ decoding to valid JSON:
   ``grammar`` takes precedence. If a turn ever fails after enabling it, remove the
   key to fall back to the unconstrained path.
 
+  The grammar also covers callers that don't pass a typed prompt request — most
+  importantly the corrector's JSON-correction retries, which arrive as a raw
+  string prompt. For those the ``type`` enum falls back to the **full registered
+  action catalog** (rather than the per-turn scoped set), so correction retries
+  stay grammar-constrained instead of regressing to unconstrained JSON that a
+  small model cannot recover from. This fallback is gated on this flag, so other
+  engines' correctors are never affected.
+
 Example for a local llama.cpp endpoint::
 
    {"disable_thinking": true, "disable_tools": true, "force_json_object": true}

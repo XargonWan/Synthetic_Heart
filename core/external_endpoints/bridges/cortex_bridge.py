@@ -432,6 +432,36 @@ class ExternalCortexEngine(AIPluginBase):
             )
             return None
 
+    def _build_fallback_action_grammar(self) -> str | None:
+        """Build a catalog-wide action grammar for prompts without a PromptRequest.
+
+        Opt-in via ``extra_config.force_action_grammar`` (a manual ``grammar``
+        in extra_config still wins, handled in ``_extra_api_kwargs``). Used when
+        a caller sends a raw string/dict prompt — notably the corrector's
+        JSON-correction retries — so the strict action-JSON shape is still
+        enforced even though no scoped ``tool_declarations`` are available. The
+        ``type`` enum is the full set of action types from the core actions
+        block. Returns ``None`` when the endpoint hasn't opted in or no action
+        names are available, so callers simply skip attaching a grammar.
+        """
+        extra = self._endpoint.extra_config or {}
+        if not extra.get("force_action_grammar") or extra.get("grammar"):
+            return None
+        try:
+            from core.core_initializer import core_initializer
+            from core.external_endpoints.action_grammar import build_actions_gbnf
+
+            available = (
+                core_initializer.actions_block.get("available_actions", {}) or {}
+            )
+            names = sorted(n for n in available.keys() if isinstance(n, str))
+            return build_actions_gbnf(names)
+        except Exception as exc:
+            log_debug(
+                f"[cortex_bridge:{self._endpoint.name}] fallback action grammar build failed: {exc}"
+            )
+            return None
+
     def _inject_actions_into_prompt(self, prompt_request: Any) -> None:
         """Fold the scoped action catalog into the system prompt.
 
@@ -581,7 +611,16 @@ class ExternalCortexEngine(AIPluginBase):
                     prompt_request = candidate
 
             if prompt_request is None or not prompt_request.tool_declarations:
-                return {}
+                # No typed PromptRequest — e.g. the corrector's JSON-correction
+                # retries pass a raw string prompt (and recon may pass a plain
+                # dict). On force_action_grammar endpoints, still constrain the
+                # output by falling back to a grammar built from the full
+                # registered action catalog, so these retries don't regress to
+                # unconstrained JSON that a small local model can't recover from
+                # (which otherwise exhausts the corrector). Gated on the
+                # endpoint's extra_config, so other engines are never affected.
+                fallback = self._build_fallback_action_grammar()
+                return {"extra_body": {"grammar": fallback}} if fallback else {}
 
             if self._disable_tools():
                 # Force the legacy in-prompt JSON-action protocol: keep native
