@@ -326,6 +326,9 @@ class ExternalCortexEngine(AIPluginBase):
           ``force_json_object``.
         * ``grammar`` (str) — llama.cpp GBNF grammar string, sent via
           ``extra_body`` for the strictest, schema-level constraint.
+        * ``max_tokens`` (int) — cap on completion length. openai_compat applies
+          a safe default when unset; set this to override. Prevents repetition
+          loops from filling the whole context window.
 
         Note: ``response_format`` / ``grammar`` are dropped when native
         tool-calling is active (see ``generate_response``) because tool-calling
@@ -335,6 +338,14 @@ class ExternalCortexEngine(AIPluginBase):
         kwargs: dict[str, Any] = {}
         if extra.get("disable_thinking"):
             kwargs["enable_thinking"] = False
+
+        # Cap completion length (openai_compat applies a safe default when unset).
+        max_tokens = extra.get("max_tokens")
+        if max_tokens is not None:
+            try:
+                kwargs["max_tokens"] = int(max_tokens)
+            except (TypeError, ValueError):
+                pass
 
         response_format = extra.get("response_format")
         if response_format is None and extra.get("force_json_object"):

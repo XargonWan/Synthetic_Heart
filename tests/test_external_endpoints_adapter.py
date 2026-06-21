@@ -1194,6 +1194,60 @@ async def test_response_format_dropped_when_tools_active():
     assert "response_format" not in captured["kwargs"]
 
 
+def test_strip_thinking_handles_thought_and_dangling_close():
+    """Reasoning leaks must be stripped: full blocks, <thought>, and a dangling
+    closing tag (open tag dropped by the server)."""
+    from core.external_endpoints.adapters.openai_compat import _strip_thinking
+
+    assert _strip_thinking('<thought>reasoning</thought>{"a":1}') == '{"a":1}'
+    assert _strip_thinking("<think>x</think>hi") == "hi"
+    # open tag dropped: "reasoning … </thought>{json}"
+    assert (
+        _strip_thinking('reasoning here </thought>\n{"actions":[]}') == '{"actions":[]}'
+    )
+    # plain content is untouched
+    assert _strip_thinking('{"actions":[]}') == '{"actions":[]}'
+
+
+@pytest.mark.asyncio
+async def test_extra_config_max_tokens_forwarded():
+    """max_tokens in extra_config reaches the adapter (caps runaway generations)."""
+    from core.external_endpoints.bridges.cortex_bridge import ExternalCortexEngine
+    from core.prompt_request import PromptRequest
+
+    endpoint = _openai_endpoint({"max_tokens": 1234})
+    captured: dict[str, Any] = {}
+
+    class FakeAdapter:
+        async def chat_completion(self, messages, model=None, **kwargs):
+            captured["kwargs"] = kwargs
+            return SimpleNamespace(content='{"actions": []}', model=model)
+
+    manifest = SimpleNamespace(
+        name="send_message",
+        description="Send a reply",
+        parameters=[
+            SimpleNamespace(
+                name="text",
+                type="string",
+                description="Reply text",
+                enum=None,
+                required=True,
+            )
+        ],
+    )
+    prompt = PromptRequest(
+        system_instruction="Use valid JSON.",
+        current_text="ping",
+        tool_declarations=[manifest],
+        mode="chat",
+    )
+    engine = ExternalCortexEngine(endpoint, cast(Any, FakeAdapter()))
+    await engine.handle_incoming_message(None, None, prompt)
+
+    assert captured["kwargs"]["max_tokens"] == 1234
+
+
 @pytest.mark.asyncio
 async def test_disable_tools_uses_in_prompt_protocol():
     """disable_tools suppresses native tools and keeps the JSON-content protocol."""

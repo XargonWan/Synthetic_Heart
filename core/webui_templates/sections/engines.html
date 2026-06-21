@@ -70,9 +70,9 @@
                     <textarea id="cortex-engine-config" rows="5" spellcheck="false" placeholder='{"disable_thinking": true, "force_json_object": true}'
                         style="width:100%; padding:9px 12px; background:var(--background); color:var(--text); border:1px solid var(--border,#444); border-radius:8px; font-family:monospace; font-size:0.85rem; resize:vertical;"></textarea>
                     <div style="margin-top:5px; font-size:0.8rem; color:var(--muted);">
-                        Cortex keys: <code>timeout</code> (request seconds), <code>disable_thinking</code>,
-                        <code>disable_tools</code> (use in-prompt JSON instead of native tools — best for small local models), and
-                        <code>force_json_object</code> / <code>grammar</code> to constrain output to valid JSON.
+                        Cortex keys: <code>timeout</code> (request seconds), <code>max_tokens</code> (caps reply length),
+                        <code>disable_thinking</code>, <code>disable_tools</code> (use in-prompt JSON instead of native tools — best for small local models),
+                        and <code>force_json_object</code> / <code>grammar</code> to constrain output to valid JSON.
                         Must be a JSON object; leave blank for defaults.
                     </div>
                     <div style="display:flex; gap:10px; align-items:center; margin-top:8px;">

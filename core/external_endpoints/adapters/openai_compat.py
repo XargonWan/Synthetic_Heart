@@ -33,15 +33,32 @@ from core.external_endpoints.adapters.base import (
 _KNOWN_TTS_PATHS = ["/audio/speech", "/v1/audio/speech"]
 _KNOWN_STT_PATHS = ["/audio/transcriptions", "/v1/audio/transcriptions"]
 
-# Matches <think>…</think> and <thinking>…</thinking> blocks produced by
-# reasoning models (Qwen3.5, DeepSeek-R1, etc.) when thinking leaks into content.
+# Matches <think>…</think>, <thinking>…</thinking>, and <thought>…</thought>
+# blocks produced by reasoning models (Qwen3.5, DeepSeek-R1, etc.) when thinking
+# leaks into content despite enable_thinking=False.
 _THINKING_RE = re.compile(
-    r"<think(?:ing)?>.*?</think(?:ing)?>", re.DOTALL | re.IGNORECASE
+    r"<(?:think(?:ing)?|thought)>.*?</(?:think(?:ing)?|thought)>",
+    re.DOTALL | re.IGNORECASE,
 )
+# Some models drop the opening tag and emit a reasoning preamble terminated by a
+# lone closing tag (e.g. "reasoning… </thought>{json}"). Strip everything up to
+# and including the first such closing tag.
+_THINKING_LEADING_CLOSE_RE = re.compile(
+    r"^.*?</(?:think(?:ing)?|thought)>\s*", re.DOTALL | re.IGNORECASE
+)
+
+# Default cap on completion length for OpenAI-compatible endpoints. Without it a
+# small local model stuck in a repetition loop generates until it fills the whole
+# context window (observed: 27,881 tokens / ~20 min). Generous enough for a
+# multi-paragraph reply + diary + emotions and for multimodal descriptions;
+# override per endpoint via extra_config["max_tokens"].
+_DEFAULT_MAX_TOKENS = 4096
 
 
 def _strip_thinking(text: str) -> str:
-    return _THINKING_RE.sub("", text).strip()
+    cleaned = _THINKING_RE.sub("", text)
+    cleaned = _THINKING_LEADING_CLOSE_RE.sub("", cleaned, count=1)
+    return cleaned.strip()
 
 
 class OpenAICompatAdapter(BaseProtocolAdapter):
@@ -209,6 +226,10 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
         filtered = {
             k: v for k, v in kwargs.items() if k not in ("model", "messages", "stream")
         }
+        # Cap output length so a repetition loop can't fill the whole context
+        # window (small local models otherwise run for minutes). Callers /
+        # extra_config can override by passing max_tokens explicitly.
+        filtered.setdefault("max_tokens", _DEFAULT_MAX_TOKENS)
         logged_payload: dict[str, Any] = {"messages": messages}
         logged_payload.update(filtered)
         if extra_body:
