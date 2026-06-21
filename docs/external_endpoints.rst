@@ -148,6 +148,16 @@ decoding to valid JSON:
   ``force_json_object``.
 - ``grammar`` (string): a llama.cpp GBNF grammar, sent via ``extra_body`` for the
   strictest, schema-level constraint.
+- ``force_action_grammar`` (bool): auto-build and send a GBNF grammar for the
+  action-JSON shape (the ``type`` field is constrained to the exact set of
+  available action names). This is the **strongest** option for local models — the
+  model is physically forced to emit one well-formed
+  ``{"actions":[{"type":<known name>,"payload":{...}}]}`` object: no ``<think>``/
+  ``<thought>`` preamble, no malformed JSON, no invented/duplicated types, and no
+  repeated trailing objects (generation stops after the first object). Implies
+  ``disable_tools`` (a grammar constrains plain-content output). A manual
+  ``grammar`` takes precedence. If a turn ever fails after enabling it, remove the
+  key to fall back to the unconstrained path.
 
 Example for a local llama.cpp endpoint::
 
@@ -156,7 +166,11 @@ Example for a local llama.cpp endpoint::
 ``disable_tools`` is usually the most impactful setting for small local quants:
 it removes the native-tool confusion (the common cause of replies that contain
 only a diary entry and no ``message_*`` action) and lets ``force_json_object``
-take effect on chat turns.
+take effect on chat turns. For the hardest guarantee on a llama.cpp backend,
+prefer ``force_action_grammar`` over ``force_json_object`` (which many local
+servers silently ignore)::
+
+   {"disable_thinking": true, "force_action_grammar": true, "max_tokens": 4096}
 
 These are automatically dropped when native tool-calling is active for the
 request (tool-calling already constrains output and most servers reject the

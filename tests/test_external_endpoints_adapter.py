@@ -1248,6 +1248,56 @@ async def test_extra_config_max_tokens_forwarded():
     assert captured["kwargs"]["max_tokens"] == 1234
 
 
+def test_build_actions_gbnf_structure():
+    """The grammar enumerates the exact action names and dedupes/drops falsy."""
+    from core.external_endpoints.action_grammar import build_actions_gbnf
+
+    assert build_actions_gbnf([]) is None
+
+    g = build_actions_gbnf(["message_telegram_bot", "create_personal_diary_entry"])
+    assert g is not None
+    assert "root" in g and "actiontype" in g
+    # action names appear as JSON-quoted literals in the type enum
+    assert '\\"message_telegram_bot\\"' in g
+    assert '\\"create_personal_diary_entry\\"' in g
+
+    g2 = build_actions_gbnf(["a", "a", "", None])  # type: ignore[list-item]
+    assert g2 is not None and g2.count('\\"a\\"') == 1
+
+
+@pytest.mark.asyncio
+async def test_force_action_grammar_attaches_grammar_without_tools():
+    """force_action_grammar sends a GBNF grammar via extra_body and no tools."""
+    from core.external_endpoints.bridges.cortex_bridge import ExternalCortexEngine
+    from core.prompt_request import PromptRequest
+
+    endpoint = _openai_endpoint({"force_action_grammar": True})
+    captured: dict[str, Any] = {}
+
+    class FakeAdapter:
+        async def chat_completion(self, messages, model=None, **kwargs):
+            captured["kwargs"] = kwargs
+            return SimpleNamespace(content='{"actions": []}', model=model)
+
+    manifest = SimpleNamespace(
+        name="send_message", description="Send a reply", parameters=[]
+    )
+    prompt = PromptRequest(
+        system_instruction="Use valid JSON.",
+        current_text="ping",
+        tool_declarations=[manifest],
+        mode="chat",
+    )
+    engine = ExternalCortexEngine(endpoint, cast(Any, FakeAdapter()))
+    await engine.handle_incoming_message(None, None, prompt)
+
+    assert "tools" not in captured["kwargs"]
+    extra_body = captured["kwargs"].get("extra_body") or {}
+    assert "grammar" in extra_body
+    assert "send_message" in extra_body["grammar"]
+    assert prompt.supports_tool_calling is False
+
+
 @pytest.mark.asyncio
 async def test_disable_tools_uses_in_prompt_protocol():
     """disable_tools suppresses native tools and keeps the JSON-content protocol."""

@@ -72,7 +72,8 @@
                     <div style="margin-top:5px; font-size:0.8rem; color:var(--muted);">
                         Cortex keys: <code>timeout</code> (request seconds), <code>max_tokens</code> (caps reply length),
                         <code>disable_thinking</code>, <code>disable_tools</code> (use in-prompt JSON instead of native tools — best for small local models),
-                        and <code>force_json_object</code> / <code>grammar</code> to constrain output to valid JSON.
+                        and <code>force_action_grammar</code> (strongest — GBNF-constrains output to the action schema) /
+                        <code>force_json_object</code> / <code>grammar</code> to constrain output to valid JSON.
                         Must be a JSON object; leave blank for defaults.
                     </div>
                     <div style="display:flex; gap:10px; align-items:center; margin-top:8px;">

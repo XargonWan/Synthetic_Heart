@@ -326,6 +326,12 @@ class ExternalCortexEngine(AIPluginBase):
           ``force_json_object``.
         * ``grammar`` (str) — llama.cpp GBNF grammar string, sent via
           ``extra_body`` for the strictest, schema-level constraint.
+        * ``force_action_grammar`` (bool) — auto-build a GBNF grammar for the
+          action-JSON shape (type enum from the request's actions) and send it
+          via ``extra_body``. Implies the in-prompt protocol (no native tools).
+          The hardest constraint: the model must emit exactly one well-formed
+          ``{"actions":[...]}`` object — no thinking preamble, malformed JSON,
+          invented types, or repeated objects. A manual ``grammar`` wins over it.
         * ``max_tokens`` (int) — cap on completion length. openai_compat applies
           a safe default when unset; set this to override. Prevents repetition
           loops from filling the whole context window.
@@ -378,8 +384,41 @@ class ExternalCortexEngine(AIPluginBase):
         them. Setting ``disable_tools`` in extra_config forces the legacy
         in-prompt JSON-action protocol instead (the action catalog is folded
         into the system prompt by ``_inject_actions_into_prompt``).
+
+        ``force_action_grammar`` also implies this: a GBNF grammar constrains the
+        *content* output, which only makes sense without native tool-calling.
         """
-        return bool((self._endpoint.extra_config or {}).get("disable_tools"))
+        extra = self._endpoint.extra_config or {}
+        return bool(extra.get("disable_tools") or extra.get("force_action_grammar"))
+
+    def _build_action_grammar(self, prompt_request: Any) -> str | None:
+        """Build a GBNF grammar for the action JSON, or ``None``.
+
+        Opt-in via ``extra_config.force_action_grammar``. A manual ``grammar`` in
+        extra_config takes precedence (handled in ``_extra_api_kwargs``), so this
+        returns ``None`` when one is set. The grammar's ``type`` enum is the exact
+        set of action names offered for this request, so the model cannot invent
+        or duplicate types and must emit a single well-formed object.
+        """
+        extra = self._endpoint.extra_config or {}
+        if not extra.get("force_action_grammar") or extra.get("grammar"):
+            return None
+        try:
+            from core.external_endpoints.action_grammar import build_actions_gbnf
+
+            names = sorted(
+                {
+                    getattr(m, "name", None)
+                    for m in (getattr(prompt_request, "tool_declarations", None) or [])
+                }
+                - {None}
+            )
+            return build_actions_gbnf(names)
+        except Exception as exc:
+            log_warning(
+                f"[cortex_bridge:{self._endpoint.name}] action grammar build failed: {exc}"
+            )
+            return None
 
     def _inject_actions_into_prompt(self, prompt_request: Any) -> None:
         """Fold the scoped action catalog into the system prompt.
@@ -539,6 +578,9 @@ class ExternalCortexEngine(AIPluginBase):
                 # JSON-in-content reply rather than tool_calls.
                 prompt_request.supports_tool_calling = False
                 self._inject_actions_into_prompt(prompt_request)
+                grammar = self._build_action_grammar(prompt_request)
+                if grammar:
+                    return {"extra_body": {"grammar": grammar}}
                 return {}
 
             prompt_request.supports_tool_calling = True
@@ -609,6 +651,11 @@ class ExternalCortexEngine(AIPluginBase):
                         grammar_body.pop("grammar", None)
                         if not grammar_body:
                             extra_kwargs.pop("extra_body", None)
+                # A grammar is the strongest constraint; response_format is then
+                # redundant and can conflict on some servers, so drop it.
+                _eb = extra_kwargs.get("extra_body")
+                if isinstance(_eb, dict) and _eb.get("grammar"):
+                    extra_kwargs.pop("response_format", None)
                 extra_kwargs.setdefault("timeout", request_timeout)
                 chat_resp = await asyncio.wait_for(
                     self._adapter.chat_completion(
