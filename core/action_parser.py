@@ -1837,6 +1837,24 @@ async def run_actions(actions: Any, context: Dict[str, Any], bot, original_messa
     }
 
 
+def _llm_already_provided_diary_content(processed_actions: list) -> bool:
+    """Return True if any action is create_personal_diary_entry with explicit content.
+
+    When the LLM already provides a full diary entry with its own ``content``
+    field, the automatic summary hook would duplicate it.  All Grillo beats
+    (self_reflection, curiosity, memory_consolidation, …) send ``content`` in
+    their diary payload, so this catches all of them.
+    """
+    for action in processed_actions:
+        if action.get("type") != "create_personal_diary_entry":
+            continue
+        payload = action.get("payload") or {}
+        content = (payload.get("content") or "").strip()
+        if content:
+            return True
+    return False
+
+
 async def _create_diary_entry_for_actions(processed_actions, context, original_message):
     """Create a diary entry summarizing the actions performed during this interaction."""
     if not processed_actions:
@@ -1855,6 +1873,14 @@ async def _create_diary_entry_for_actions(processed_actions, context, original_m
         ):
             log_debug(
                 "[action_parser] Skipping automatic diary entry for internal diary consolidation"
+            )
+            return
+
+        # If the LLM already provided a diary entry with explicit content,
+        # skip the automatic summary — it would just append a duplicate fragment.
+        if _llm_already_provided_diary_content(processed_actions):
+            log_debug(
+                "[action_parser] LLM provided explicit diary content — skipping automatic summary"
             )
             return
 

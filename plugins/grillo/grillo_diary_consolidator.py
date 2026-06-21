@@ -1,16 +1,18 @@
 """Grillo beat plugin: daily diary consolidation.
 
 This plugin is intended to be called from the G.R.I.L.L.O. beat scheduler.
-It checks recent diary days (yesterday and backwards) for entries that still
-contain fragments ("---") or that consist of multiple rows, and asks the LLM
-to consolidate them into a single coherent daily diary entry.
+It checks recent diary days (including today) for entries that still contain
+fragments ("---") or that consist of multiple rows, and asks the LLM to
+consolidate them into a single coherent daily diary entry.
 
-The beat is designed to run in the background, so the system can clean up
-historical diary noise even if users don't interact frequently.
+Each invocation processes up to 3 days: today + the 2 most recent
+unconsolidated days going backward.  Over successive runs every historical
+day is eventually cleaned up.
 """
 
 from __future__ import annotations
 
+import json
 from datetime import date, timedelta
 from typing import Optional
 
@@ -25,6 +27,9 @@ class GrilloDiaryConsolidatorPlugin:
 
     # This must match the beat type used by the main Grillo scheduler.
     BEAT_TYPE = "diary_consolidation"
+
+    # Max days to consolidate per invocation (today + 2 older = 3)
+    MAX_DAYS_PER_RUN = 3
 
     def __init__(self):
         self.enabled = config_registry.get_value(
@@ -87,14 +92,29 @@ class GrilloDiaryConsolidatorPlugin:
         )
 
     async def build_prompt(self) -> Optional[str]:
-        """Build the consolidation prompt for the most recent unmerged diary day.
+        """Build a consolidation prompt for the most recent unmerged diary day(s).
 
-        This is called by the Grillo scheduler when selecting a beat of type
-        ``diary_consolidation``.
+        Scans up to ``MAX_DAYS_PER_RUN`` days from newest to oldest (including
+        today) and produces a single prompt asking the LLM to consolidate all
+        of them.  Each day gets its own ``update_diary_entry`` action in the
+        response JSON.
         """
         if not self.enabled:
             return None
 
+        days = await self._find_unmerged_days(self.MAX_DAYS_PER_RUN)
+        if not days:
+            return None
+
+        return self._build_multi_day_prompt(days)
+
+    async def _find_unmerged_days(self, max_days: int) -> list:
+        """Return up to *max_days* unconsolidated diary days (newest first).
+
+        Each element is a tuple ``(day, entry_id, combined, row_count)``.
+        Includes today.  Only returns days whose content still contains the
+        ``---`` fragment separator OR have more than one row.
+        """
         cutoff = date.today() - timedelta(days=self.lookback_days)
         try:
             async with get_conn_ctx() as conn:
@@ -108,66 +128,88 @@ class GrilloDiaryConsolidatorPlugin:
                                 GROUP_CONCAT(content ORDER BY id ASC SEPARATOR '\n\n---\n\n') AS combined,
                                 COUNT(*) AS row_count
                             FROM ai_diary
-                            WHERE DATE(timestamp) < CURDATE()
-                              AND timestamp >= %s
+                            WHERE DATE(timestamp) >= %s
+                              AND DATE(timestamp) <= CURDATE()
                             GROUP BY DATE(timestamp)
                         ) t
                         WHERE row_count > 1 OR combined LIKE '%%---%%'
                         ORDER BY day DESC
-                        LIMIT 1
+                        LIMIT %s
                         """,
-                        (cutoff,),
+                        (cutoff, max_days),
                     )
-                    row = await cur.fetchone()
+                    rows = await cur.fetchall()
         except Exception as e:
-            log_error(f"[grillo_diary_consolidator] DB error fetching diary day: {e}")
-            return None
+            log_error(f"[grillo_diary_consolidator] DB error fetching diary days: {e}")
+            return []
 
-        if not row:
-            log_debug("[grillo_diary_consolidator] No diary days needing consolidation")
-            return None
+        results = []
+        for row in rows:
+            day = row.get("day")
+            entry_id = row.get("entry_id")
+            combined = row.get("combined") or ""
+            row_count = int(row.get("row_count") or 0)
 
-        day = row.get("day")
-        entry_id = row.get("entry_id")
-        combined = row.get("combined") or ""
-        row_count = int(row.get("row_count") or 0)
+            if not combined or ("---" not in combined and row_count <= 1):
+                continue
 
-        if not combined or ("---" not in combined and row_count <= 1):
-            log_debug(
-                "[grillo_diary_consolidator] Found diary day but no fragmentation detected"
+            results.append((day, entry_id, combined, row_count))
+
+        if results:
+            log_info(
+                f"[grillo_diary_consolidator] Found {len(results)} unmerged day(s): "
+                + ", ".join(str(d[0]) for d in results)
             )
-            return None
+        else:
+            log_debug("[grillo_diary_consolidator] No diary days needing consolidation")
 
-        log_info(
-            f"[grillo_diary_consolidator] Scheduling consolidation for diary day {day} (entry_id={entry_id}, rows={row_count})"
-        )
+        return results
 
-        import json
+    def _build_multi_day_prompt(self, days: list) -> str:
+        """Build a single prompt asking the LLM to consolidate multiple days.
 
-        action_payload = {
-            "actions": [
+        Each day gets its own ``update_diary_entry`` action in the response.
+        """
+        actions = []
+        sections = []
+        for day, entry_id, combined, row_count in days:
+            log_info(
+                f"[grillo_diary_consolidator] Including day {day} "
+                f"(entry_id={entry_id}, {row_count} rows)"
+            )
+            actions.append(
                 {
                     "type": "update_diary_entry",
-                    "payload": {"id": entry_id, "content": "<your merged prose here>"},
+                    "payload": {
+                        "id": entry_id,
+                        "content": "<your merged prose here>",
+                    },
                 }
-            ]
-        }
+            )
+            sections.append(f"--- Day: {day} (entry id: {entry_id}) ---\n\n{combined}")
 
-        return (
+        prompt = (
             "[DIARY CONSOLIDATION — INTERNAL SYSTEM TASK]\n\n"
-            "Your personal diary has accumulated multiple entries for the same day. "
-            "Rewrite them as a single, coherent first-person diary entry that flows naturally.\n\n"
+            "Below are diary fragments from multiple days. For EACH day, "
+            "transform the fragments into a single flowing diary page. "
+            "Eliminate duplicates, group related topics together, and write in "
+            "natural first-person diary style. Preserve important events, "
+            "conversations, and reflections while making the text read like "
+            "something written at the end of the day.\n\n"
             "Rules:\n"
-            "- Write in first person, as if you are writing in a personal journal.\n"
-            "- Remove the '---' separators; only include natural prose.\n"
-            "- Preserve the meaning of all fragments, including feelings and details.\n"
-            f"- The entry id to update is: {entry_id}\n"
-            f"- The diary day is: {day}\n\n"
+            "- Write flowing first-person prose (no bullet lists, no '---' separators).\n"
+            "- Preserve every meaningful detail from all fragments.\n"
+            "- Remove exact duplicates; keep nuance and emotional context.\n"
+            "- Group related topics together into coherent paragraphs.\n"
+            "- End each day with an emotional reflection or thought.\n"
+            "- You MUST produce ONE update_diary_entry action per day.\n\n"
             "Diary fragments:\n\n"
-            f"{combined}\n\n"
+            f"{chr(10).join(sections)}\n\n"
             "Respond with ONLY valid JSON (no additional text):\n"
-            f"{json.dumps(action_payload)}"
+            f"{json.dumps({'actions': actions})}"
         )
+
+        return prompt
 
     def get_supported_actions(self) -> dict:
         return {}

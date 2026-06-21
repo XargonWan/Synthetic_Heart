@@ -379,67 +379,22 @@ async def test_upsert_does_not_replace_real_interface_with_diary_merge(monkeypat
 
 
 @pytest.mark.asyncio
-async def test_on_debrief_uses_postgres_string_agg(monkeypatch):
-    captured: dict[str, object] = {}
+async def test_on_debrief_is_now_noop(monkeypatch):
+    """on_debrief is now a no-op — consolidation is handled by GrilloDiaryConsolidatorPlugin.
 
-    async def fake_fetchall(query, params=None):
-        captured["query"] = query
-        captured["params"] = params
-        return []
-
+    The only remaining logic is the ``diary_merge_beat`` guard which prevents
+    recursive loops when the consolidation beat's own response goes through debrief.
+    """
     ai_diary.PLUGIN_ENABLED = True
-    monkeypatch.setattr(ai_diary, "_get_db_type", lambda: "postgres")
-    monkeypatch.setattr(ai_diary, "_fetchall", fake_fetchall)
 
+    # Verify normal calls do nothing (no query executed, no beat enqueued)
     plugin = object.__new__(ai_diary.DiaryPlugin)
-    await plugin.on_debrief([], [], [], {}, object())
+    result = await plugin.on_debrief([], [], [], {}, object())
+    assert result is None  # no-op returns None
 
-    assert "string_agg" in str(captured["query"])
-    assert "GROUP_CONCAT" not in str(captured["query"])
-
-
-@pytest.mark.asyncio
-async def test_on_debrief_enqueues_merge_source_ids(monkeypatch):
-    captured: dict[str, object] = {}
-
-    async def fake_fetchall(query, params=None):
-        return [
-            {
-                "id": 42,
-                "combined": "one\n\n---\n\ntwo",
-                "row_count": 2,
-                "source_ids": "41,42",
-                "first_timestamp": "2026-04-18T21:00:00+00:00",
-            }
-        ]
-
-    async def fake_enqueue_low_priority(
-        _priority,
-        _message,
-        context_memory=None,
-        interface_id=None,
-        original_message=None,
-    ):
-        captured["context_memory"] = context_memory
-        captured["interface_id"] = interface_id
-
-    ai_diary.PLUGIN_ENABLED = True
-    monkeypatch.setattr(ai_diary, "_get_db_type", lambda: "postgres")
-    monkeypatch.setattr(ai_diary, "_fetchall", fake_fetchall)
-    monkeypatch.setattr(
-        "core.message_queue.enqueue_low_priority",
-        fake_enqueue_low_priority,
-    )
-
-    plugin = object.__new__(ai_diary.DiaryPlugin)
-    await plugin.on_debrief([], [], [], {}, object())
-
-    assert captured["interface_id"] == "diary_merge"
-    assert captured["context_memory"]["diary_merge_source_ids"] == [41, 42]
-    assert (
-        captured["context_memory"]["diary_merge_timestamp"]
-        == "2026-04-18T21:00:00+00:00"
-    )
+    # Verify the diary_merge_beat guard still works
+    result = await plugin.on_debrief([], [], [], {"diary_merge_beat": True}, object())
+    assert result is None  # short-circuits on merge beat
 
 
 async def test_update_diary_entry_archives_merged_source_rows(monkeypatch):

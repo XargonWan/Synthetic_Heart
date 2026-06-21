@@ -240,9 +240,7 @@ class BlocklistPlugin:
         elif action_type == "get_blocked_users":
             import asyncio
 
-            asyncio.create_task(
-                self._send_blocked_users(context, original_message)
-            )
+            asyncio.create_task(self._send_blocked_users(context, original_message))
             return None
 
         return None
@@ -301,7 +299,9 @@ class BlocklistPlugin:
         if not interface_path and original_message:
             interface_path = getattr(original_message, "interface_path", None)
         if not interface_path:
-            log_warning("[blocklist] Cannot build message action: no interface_path available")
+            log_warning(
+                "[blocklist] Cannot build message action: no interface_path available"
+            )
             return None
 
         interface_name = interface_path.split("/")[0] if interface_path else None
