@@ -131,12 +131,13 @@ def _build_multimodal_turn_text(
         else:
             segments.append(
                 f"The user attached {image_count} image(s) with no accompanying "
-                "text. Reply naturally and in character as you normally would, "
-                "grounding your response only in clearly visible details from the "
-                "attached image(s). Do not infer hidden, obscured, or non-visible "
-                "features. If something is ambiguous, say that you are unsure. This "
-                "is a normal conversational turn, not a request for a bare image "
-                "description."
+                "text. React the way you naturally would if someone showed you "
+                "this in person: a short, in-character reply — not a description "
+                "or a list of what you see. You may briefly mention something from "
+                "the image when it is relevant to your reply, but base any visual "
+                "claim only on clearly visible details. Do not infer hidden, "
+                "obscured, or non-visible features. If something is ambiguous, say "
+                "that you are unsure."
             )
 
     if document_descriptions:
