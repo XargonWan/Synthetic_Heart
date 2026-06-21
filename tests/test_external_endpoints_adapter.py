@@ -1248,6 +1248,70 @@ async def test_extra_config_max_tokens_forwarded():
     assert captured["kwargs"]["max_tokens"] == 1234
 
 
+def test_max_tokens_default_only_for_local_flagged_endpoints():
+    """The default cap applies only to local-flagged endpoints; cloud stays uncapped."""
+    from core.external_endpoints.bridges.cortex_bridge import (
+        _LOCAL_MAX_TOKENS_DEFAULT,
+        ExternalCortexEngine,
+    )
+
+    flagged = ExternalCortexEngine(
+        _openai_endpoint({"disable_tools": True}), cast(Any, SimpleNamespace())
+    )
+    assert flagged._extra_api_kwargs()["max_tokens"] == _LOCAL_MAX_TOKENS_DEFAULT
+
+    grammar = ExternalCortexEngine(
+        _openai_endpoint({"force_action_grammar": True}), cast(Any, SimpleNamespace())
+    )
+    assert grammar._extra_api_kwargs()["max_tokens"] == _LOCAL_MAX_TOKENS_DEFAULT
+
+    # A plain (cloud) openai endpoint gets no default cap…
+    plain = ExternalCortexEngine(_openai_endpoint({}), cast(Any, SimpleNamespace()))
+    assert "max_tokens" not in plain._extra_api_kwargs()
+
+    # …but an explicit value is always honored.
+    explicit = ExternalCortexEngine(
+        _openai_endpoint({"max_tokens": 1234}), cast(Any, SimpleNamespace())
+    )
+    assert explicit._extra_api_kwargs()["max_tokens"] == 1234
+
+
+@pytest.mark.asyncio
+async def test_mirror_gated_on_local_flags(monkeypatch):
+    """Origin mirror runs only for local-flagged openai endpoints, not cloud ones."""
+    import core.config as cfg
+    import core.cortex_registry as creg
+    from core.external_endpoints.bridges.cortex_bridge import ExternalCortexEngine
+    from plugins.message_plugin import MessagePlugin
+
+    async def fake_active(scope=None):
+        return "engine"
+
+    monkeypatch.setattr(cfg, "get_active_cortex_engine", fake_active)
+
+    plugin = MessagePlugin()
+    msg = SimpleNamespace(chat_id=5208932647)
+
+    flagged = ExternalCortexEngine(
+        _openai_endpoint({"disable_tools": True}), cast(Any, SimpleNamespace())
+    )
+    monkeypatch.setattr(
+        creg,
+        "get_cortex_registry",
+        lambda: SimpleNamespace(get_engine=lambda _n: flagged),
+    )
+    assert await plugin._should_mirror_origin_path({}, msg) is True
+
+    # A plain (cloud) openai endpoint must NOT be mirrored.
+    plain = ExternalCortexEngine(_openai_endpoint({}), cast(Any, SimpleNamespace()))
+    monkeypatch.setattr(
+        creg,
+        "get_cortex_registry",
+        lambda: SimpleNamespace(get_engine=lambda _n: plain),
+    )
+    assert await plugin._should_mirror_origin_path({}, msg) is False
+
+
 def test_build_actions_gbnf_structure():
     """The grammar enumerates the exact action names and dedupes/drops falsy."""
     from core.external_endpoints.action_grammar import build_actions_gbnf

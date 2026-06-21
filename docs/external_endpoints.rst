@@ -126,10 +126,12 @@ keys. Common ones:
   tools tends to confuse them into replies with no ``message_*`` action). Pairs
   well with ``force_json_object`` (with tools off, ``response_format`` is no
   longer suppressed, so it actually applies to chat turns).
-- ``max_tokens`` (number): cap on completion length. openai_compat endpoints
-  apply a safe default (4096) when unset; raise or lower it here. This prevents a
-  small model stuck in a repetition loop from generating until it fills the whole
-  context window (observed: ~28k tokens / 20 minutes for a single reply).
+- ``max_tokens`` (number): cap on completion length. An explicit value always
+  applies. When unset, a safe default (4096) is applied **only** to local-model
+  endpoints — those with ``disable_tools`` or ``force_action_grammar`` set; cloud
+  openai endpoints (xAI, OpenRouter, …) stay uncapped unless you set this. The cap
+  prevents a small local model stuck in a repetition loop from generating until it
+  fills the whole context window (observed: ~28k tokens / 20 minutes).
 - ``retry_attempts`` / ``retry_backoff`` / ``retry_on_timeout``: transient-error
   retry behavior.
 

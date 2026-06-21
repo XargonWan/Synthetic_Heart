@@ -47,13 +47,6 @@ _THINKING_LEADING_CLOSE_RE = re.compile(
     r"^.*?</(?:think(?:ing)?|thought)>\s*", re.DOTALL | re.IGNORECASE
 )
 
-# Default cap on completion length for OpenAI-compatible endpoints. Without it a
-# small local model stuck in a repetition loop generates until it fills the whole
-# context window (observed: 27,881 tokens / ~20 min). Generous enough for a
-# multi-paragraph reply + diary + emotions and for multimodal descriptions;
-# override per endpoint via extra_config["max_tokens"].
-_DEFAULT_MAX_TOKENS = 4096
-
 
 def _strip_thinking(text: str) -> str:
     cleaned = _THINKING_RE.sub("", text)
@@ -226,10 +219,6 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
         filtered = {
             k: v for k, v in kwargs.items() if k not in ("model", "messages", "stream")
         }
-        # Cap output length so a repetition loop can't fill the whole context
-        # window (small local models otherwise run for minutes). Callers /
-        # extra_config can override by passing max_tokens explicitly.
-        filtered.setdefault("max_tokens", _DEFAULT_MAX_TOKENS)
         logged_payload: dict[str, Any] = {"messages": messages}
         logged_payload.update(filtered)
         if extra_body:

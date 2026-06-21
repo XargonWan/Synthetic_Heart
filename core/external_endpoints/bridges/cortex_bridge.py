@@ -22,6 +22,12 @@ if TYPE_CHECKING:
     from core.external_endpoints.adapters.base import BaseProtocolAdapter
     from core.external_endpoints.models import ExternalEndpoint
 
+# Default completion cap applied ONLY to local-model endpoints (those opting into
+# disable_tools / force_action_grammar). Stops a repetition loop from filling the
+# whole context window. Cloud openai endpoints (xai, openrouter) are left uncapped
+# unless they set max_tokens explicitly.
+_LOCAL_MAX_TOKENS_DEFAULT = 4096
+
 
 # ---------------------------------------------------------------------------
 # Multimodal extraction helper
@@ -332,9 +338,11 @@ class ExternalCortexEngine(AIPluginBase):
           The hardest constraint: the model must emit exactly one well-formed
           ``{"actions":[...]}`` object — no thinking preamble, malformed JSON,
           invented types, or repeated objects. A manual ``grammar`` wins over it.
-        * ``max_tokens`` (int) — cap on completion length. openai_compat applies
-          a safe default when unset; set this to override. Prevents repetition
-          loops from filling the whole context window.
+        * ``max_tokens`` (int) — cap on completion length. An explicit value
+          always applies; otherwise a safe default is applied only when this is a
+          local-model endpoint (``disable_tools`` / ``force_action_grammar``).
+          Cloud openai endpoints stay uncapped unless they set this. Prevents
+          repetition loops from filling the whole context window.
 
         Note: ``response_format`` / ``grammar`` are dropped when native
         tool-calling is active (see ``generate_response``) because tool-calling
@@ -345,13 +353,17 @@ class ExternalCortexEngine(AIPluginBase):
         if extra.get("disable_thinking"):
             kwargs["enable_thinking"] = False
 
-        # Cap completion length (openai_compat applies a safe default when unset).
+        # Cap completion length. An explicit value always wins; otherwise apply a
+        # safe default ONLY for local-model endpoints (disable_tools /
+        # force_action_grammar) so cloud openai endpoints stay uncapped.
         max_tokens = extra.get("max_tokens")
         if max_tokens is not None:
             try:
                 kwargs["max_tokens"] = int(max_tokens)
             except (TypeError, ValueError):
                 pass
+        elif self._disable_tools():
+            kwargs["max_tokens"] = _LOCAL_MAX_TOKENS_DEFAULT
 
         response_format = extra.get("response_format")
         if response_format is None and extra.get("force_json_object"):

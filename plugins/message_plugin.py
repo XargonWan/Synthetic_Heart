@@ -85,12 +85,12 @@ class MessagePlugin:
     async def _should_mirror_origin_path(self, context, original_message) -> bool:
         """Whether a reply's route should be forced to the originating chat.
 
-        Scoped to openai_compat cortex engines: small local models frequently
-        hallucinate ``interface_path`` (e.g. ``/channels/main``), so a direct
-        reply silently fails to deliver ("Chat not found"). Cloud/other engines
-        route reliably and are left untouched. Grillo/outreach turns are excluded
-        because their target chat is chosen by the system, not echoed from an
-        incoming user message.
+        Scoped to **local-model** openai endpoints — those with ``disable_tools``
+        or ``force_action_grammar`` set. Such models frequently hallucinate
+        ``interface_path`` (e.g. ``/channels/main``), so a direct reply silently
+        fails to deliver ("Chat not found"). Cloud openai endpoints (xai,
+        openrouter) route reliably and are left untouched, as are non-openai and
+        grillo/outreach/internal turns (the latter target a system-chosen chat).
         """
         try:
             if isinstance(context, dict) and (
@@ -119,11 +119,18 @@ class MessagePlugin:
             if not engine_name:
                 return False
             instance = get_cortex_registry().get_engine(engine_name)
-            return (
+            if not (
                 isinstance(instance, ExternalCortexEngine)
                 and getattr(instance._endpoint, "protocol", None)
                 is EndpointProtocol.OPENAI
-            )
+            ):
+                return False
+            # All endpoints here are openai-protocol, so gate on the local-model
+            # marker (the same flags as disable_tools / force_action_grammar).
+            # Cloud openai endpoints (xai, openrouter) route reliably and must NOT
+            # be mirrored.
+            extra = getattr(instance._endpoint, "extra_config", None) or {}
+            return bool(extra.get("disable_tools") or extra.get("force_action_grammar"))
         except Exception:
             return False
 
