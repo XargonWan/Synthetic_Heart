@@ -166,6 +166,57 @@ def test_iris_plugin_is_enabled_tracks_active_engine() -> None:
 
 
 @pytest.mark.asyncio
+async def test_iris_plugin_inline_returns_none() -> None:
+    """'inline' has no description engine, so describe_media returns None."""
+    with patch("core.core_initializer.register_plugin"):
+        from plugins.iris_plugin import IrisPlugin
+
+        plugin = IrisPlugin.__new__(IrisPlugin)
+        plugin._active_engine_name = "inline"
+        plugin._engine_settings = {}
+        plugin._default_prompt = "Describe this image."
+        plugin._default_model = ""
+
+        result = await plugin.describe_media("/tmp/fake.jpg")
+        assert result is None
+
+
+def test_iris_plugin_inline_is_not_enabled() -> None:
+    """'inline' must not expose the vision_describe action (is_enabled False)."""
+    from plugins.iris_plugin import IrisPlugin
+
+    plugin = IrisPlugin.__new__(IrisPlugin)
+    plugin._active_engine_name = "inline"
+    plugin._engine_settings = {}
+    plugin._default_prompt = "Describe this image."
+    plugin._default_model = ""
+
+    with patch.object(
+        plugin,
+        "refresh_config",
+        side_effect=lambda: setattr(plugin, "_active_engine_name", "inline"),
+    ):
+        assert plugin.is_enabled() is False
+
+
+def test_get_active_iris_engine_reflects_pseudo_engine() -> None:
+    """_get_active_iris_engine reports the configured engine, including 'inline'."""
+    import core.plugin_instance as pi
+
+    class _FakeIris:
+        def __init__(self, name: str) -> None:
+            self._active_engine_name = name
+
+        def refresh_config(self) -> None:  # no-op
+            pass
+
+    for engine_name in ("inline", "disabled", "selenium-llm-engine"):
+        registry = {"iris_plugin": _FakeIris(engine_name)}
+        with patch("core.core_initializer.PLUGIN_REGISTRY", registry):
+            assert pi._get_active_iris_engine() == engine_name
+
+
+@pytest.mark.asyncio
 async def test_iris_plugin_file_not_found_returns_none() -> None:
     """When the file does not exist the plugin returns None."""
     with patch("core.core_initializer.register_plugin"):

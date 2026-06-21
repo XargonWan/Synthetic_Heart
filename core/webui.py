@@ -8654,6 +8654,26 @@ class SynthWebUIInterface:
                     "active": active_auris == "disabled",
                 }
             )
+            # Hardcoded pseudo-engine: bypass Auris transcription entirely and
+            # forward the raw audio bytes inline to the Cortex engine so an
+            # audio-capable multimodal model can hear the audio directly.  Only
+            # useful when the active Cortex endpoint accepts inline audio.
+            auris_data.append(
+                {
+                    "name": "inline",
+                    "display_name": "Inline (send to LLM)",
+                    "label": "Forward audio inline to a multimodal Cortex engine",
+                    "capabilities": {"audio": True},
+                    "description": (
+                        "Bypass Auris transcription and send the audio directly "
+                        "to the LLM (requires an audio-capable Cortex endpoint)"
+                    ),
+                    "status": "success",
+                    "details": "Active" if active_auris == "inline" else "",
+                    "error": None,
+                    "active": active_auris == "inline",
+                }
+            )
             for _name in AURIS_REGISTRY.get_available_engines():
                 _meta = AURIS_REGISTRY.get_engine_meta(_name)
                 _caps = _meta.get("capabilities") or {}
@@ -8753,6 +8773,26 @@ class SynthWebUIInterface:
                     "details": "Active" if active_iris == "disabled" else "",
                     "error": None,
                     "active": active_iris == "disabled",
+                }
+            )
+            # Hardcoded pseudo-engine: bypass Iris entirely and forward image /
+            # video bytes inline to the Cortex engine so a vision-capable LLM can
+            # see the media directly (no separate description step).  Only takes
+            # effect when the active Cortex endpoint is marked vision-capable.
+            iris_data.append(
+                {
+                    "name": "inline",
+                    "display_name": "Inline (send to LLM)",
+                    "label": "Forward images inline to a multimodal Cortex engine",
+                    "capabilities": {"vision": True},
+                    "description": (
+                        "Bypass Iris descriptions and send the image directly to "
+                        "the LLM (requires a vision-capable Cortex endpoint)"
+                    ),
+                    "status": "success",
+                    "details": "Active" if active_iris == "inline" else "",
+                    "error": None,
+                    "active": active_iris == "inline",
                 }
             )
             for _name in IRIS_REGISTRY.get_available_engines():

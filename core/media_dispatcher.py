@@ -66,6 +66,12 @@ async def dispatch_media(
     # Step 1 — Auris STT (primary path, audio/* only)
     # ------------------------------------------------------------------
     if mime_type and mime_type.startswith("audio"):
+        if _is_subsystem_inline("auris_plugin", "ACTIVE_AURIS_ENGINE"):
+            log_debug(
+                "[media_dispatcher] Auris inline mode: skipping transcription so "
+                "raw audio is forwarded to the LLM."
+            )
+            return None
         result = await _try_auris(file_path, mime_type)
         if result:
             log_info(
@@ -78,6 +84,12 @@ async def dispatch_media(
     # Step 2 — Iris vision (image/* and video/*)
     # ------------------------------------------------------------------
     if mime_type and mime_type.startswith(("image/", "video/")):
+        if _is_subsystem_inline("iris_plugin", "ACTIVE_IRIS_ENGINE"):
+            log_debug(
+                "[media_dispatcher] Iris inline mode: skipping description so "
+                "raw media is forwarded to the LLM."
+            )
+            return None
         result = await _try_iris(file_path, mime_type)
         if result:
             log_info(
@@ -105,6 +117,36 @@ async def dispatch_media(
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+
+def _is_subsystem_inline(plugin_key: str, config_key: str) -> bool:
+    """Return ``True`` when the given input subsystem is set to ``"inline"``.
+
+    In ``inline`` mode the subsystem (Auris STT / Iris vision) is bypassed and
+    the raw media bytes are forwarded to the Cortex engine, so the dispatcher
+    must not transcribe/describe — including via the Live fallback.  Best-effort:
+    reads the live plugin instance first, then the config registry.
+    """
+    try:
+        from core.core_initializer import PLUGIN_REGISTRY
+
+        plug = PLUGIN_REGISTRY.get(plugin_key)
+        if plug is not None:
+            try:
+                plug.refresh_config()
+            except Exception:
+                pass
+            return str(getattr(plug, "_active_engine_name", "")) == "inline"
+    except Exception:
+        pass
+    try:
+        from core.config_manager import config_registry
+
+        return (
+            str(config_registry.get_value(config_key, "", value_type=str)) == "inline"
+        )
+    except Exception:
+        return False
 
 
 async def _try_auris(file_path: str, mime_type: str | None) -> str | None:
