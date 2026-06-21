@@ -1591,6 +1591,11 @@ async def handle_incoming_message(
                 if source == "llm" or getattr(message, "from_cortex", False):
                     has_user_response = False
                     has_tts = False
+                    # Set when the LLM emits an action that delivers user-visible
+                    # output on its own (a self-replying plugin action). Tracked
+                    # separately from has_user_response so it suppresses the
+                    # missing-reply corrector without affecting message/TTS handling.
+                    has_user_output_action = False
                     user_message_action = None
                     # Determine current set of message action types from config (dynamic)
                     current_message_action_types = []
@@ -1631,6 +1636,41 @@ async def handle_incoming_message(
                             ]
                         except Exception:
                             current_message_action_types = []
+
+                    # Action types that deliver user-visible output on their own
+                    # (self-replying plugin actions, e.g. a plugin that calls
+                    # bot.send_message inside execute_action). They satisfy the
+                    # "did the user get a reply this turn?" check so the missing-reply
+                    # corrector does not fire when the LLM responds with only such an
+                    # action. Engine-agnostic and unrelated to any endpoint grammar —
+                    # purely about whether the user receives output. Contributors add
+                    # their own self-replying actions here via config; fetch-only
+                    # actions that need a follow-up reply (e.g. recall_last_dream) must
+                    # NOT be listed.
+                    current_user_output_action_types = []
+                    try:
+                        from core.config_manager import config_registry
+
+                        USER_OUTPUT_ACTION_TYPES = config_registry.get_var(
+                            "USER_OUTPUT_ACTION_TYPES",
+                            ["get_recent_chats"],
+                            label="User-output action types",
+                            description=(
+                                "Action types that deliver user-visible output on their own "
+                                "(self-replying plugin actions). Counted as a user reply so the "
+                                "missing-reply corrector does not fire when the LLM responds with "
+                                "only such an action."
+                            ),
+                            group="core",
+                            component="message_chain",
+                        )
+                        current_user_output_action_types = (
+                            list(USER_OUTPUT_ACTION_TYPES.value)
+                            if hasattr(USER_OUTPUT_ACTION_TYPES, "value")
+                            else list(USER_OUTPUT_ACTION_TYPES)
+                        )
+                    except Exception:
+                        current_user_output_action_types = []
 
                     if isinstance(actions, list):
                         actions = cast(list[dict[str, Any]], actions)
@@ -1692,6 +1732,8 @@ async def handle_incoming_message(
                                 if not user_message_action:
                                     user_message_action = action
                                 # break
+                            if action_name in current_user_output_action_types:
+                                has_user_output_action = True
 
                     # Auto-inject TTS if there's a user response but no tts_speak
                     # Only for actual user-facing interfaces (not internal like grillo)
@@ -2244,6 +2286,7 @@ async def handle_incoming_message(
                                 and not is_internal_chat
                                 and not is_scoped_non_message
                                 and not has_user_response
+                                and not has_user_output_action
                             ):
                                 missing_user_reply = True
 
@@ -2298,6 +2341,7 @@ async def handle_incoming_message(
                                 and not is_internal_chat
                                 and not is_scoped_non_message
                                 and not has_user_response
+                                and not has_user_output_action
                             ):
                                 log_warning(
                                     f"[message_chain] ⚠️ LLM generated no outbound message action for user-facing interface '{interface_path}' — triggering corrector for missing reply"

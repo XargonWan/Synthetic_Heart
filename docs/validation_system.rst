@@ -162,6 +162,22 @@ Updated Behavior
    - The heuristic is intentionally narrow to avoid guessing about meaning; it
      can be extended in the future if additional common 'typos' are discovered.
 
+6. **Missing-reply corrector** (new)
+   - On a user-facing turn the core checks whether the LLM actually replied to the
+     user. A reply is recognised when the response contains a ``message_*`` action
+     (or a type listed in the ``MESSAGE_ACTION_TYPES`` config). If none is present,
+     the corrector fires to remind the model to answer.
+   - Some plugin actions deliver user-visible output **themselves** (they call
+     ``bot.send_message`` inside ``execute_action``), so a turn containing only such
+     an action is not actually a silent turn. List these action types in the
+     ``USER_OUTPUT_ACTION_TYPES`` config to exempt them from the missing-reply
+     corrector (default: ``get_recent_chats``). This is engine-agnostic and
+     unrelated to any endpoint output grammar.
+   - **Do not** list fetch-only actions whose result must still be voiced by a
+     follow-up reply (e.g. ``recall_last_dream``, which returns its content as an
+     action result rather than messaging the user) — those legitimately require the
+     corrector's follow-up pass.
+
 No Hardcoding
 ~~~~~~~~~~~~~
 
