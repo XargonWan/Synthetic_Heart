@@ -159,6 +159,17 @@ register_exposed_var(
     component="radio_host",
 )
 
+register_exposed_var(
+    "RADIO_HOST_NEXT_SONG_ANNOUNCEMENT",
+    label="Next Song Announcement (EXPERIMENTAL)",
+    default=False,
+    value_type=bool,
+    ui_type="toggle",
+    description="(EXPERIMENTAL) When enabled, Synth announces the next song ('Avete ascoltato X, ora Y'). When disabled, Synth only de-announces the song that just finished ('Avete ascoltato X') without mentioning what's coming next.",
+    scope="plugins",
+    component="radio_host",
+)
+
 INTERNAL_CHAT_ID = -2
 
 
@@ -282,6 +293,15 @@ class RadioHostPlugin:
                 component="radio_host",
             )
         )
+        self._next_song_announcement = bool(
+            config_registry.get_value(
+                "RADIO_HOST_NEXT_SONG_ANNOUNCEMENT",
+                False,
+                value_type=bool,
+                group="plugins",
+                component="radio_host",
+            )
+        )
         self._streamer_username = (
             str(
                 config_registry.get_value(
@@ -347,6 +367,7 @@ class RadioHostPlugin:
             "RADIO_HOST_LISTENER_HISTORY",
             "RADIO_HOST_VOX_ENGINE",
             "RADIO_HOST_GAIN_DB",
+            "RADIO_HOST_NEXT_SONG_ANNOUNCEMENT",
             "AZURACAST_STREAMER_USERNAME",
             "AZURACAST_STREAMER_PASSWORD",
         ):
@@ -574,6 +595,21 @@ class RadioHostPlugin:
             f"[radio_host] Track change recorded: '{prev_title}' -> '{curr_title}'"
         )
 
+        # If next-song announcement is disabled, inject de-announce only
+        # ("Avete ascoltato X") without mentioning the next track.
+        if not self._next_song_announcement:
+            self._inject_at_track_change = False
+            asyncio.create_task(
+                self._inject_banter_now(
+                    prev_title,
+                    prev_artist,
+                    prev_title,
+                    prev_artist,
+                    deannounce_only=True,
+                )
+            )
+            return
+
         # Fallback injection — only fires when winding_down was skipped (e.g.
         # the previous track was a jingle/bumper so no outro announcement was
         # made).  The main injection path is _on_winding_down (during the
@@ -589,15 +625,24 @@ class RadioHostPlugin:
         # Pre-generate for upcoming transitions using queue data.
         # The queue contains songs lined up to play. We pre-generate for
         # transitions at positions 0→1, 1→2, and 2→3 (3 songs ahead).
+        # NOTE: queue_ahead[0] is the NEXT track, not the current one.
+        # The "from" side of each transition is the track that will be
+        # playing when the banter is used (current for first, queue[i] for rest).
         if queue_ahead and len(queue_ahead) >= 2:
-            transitions_to_pregen = min(len(queue_ahead) - 1, 3)
+            transitions_to_pregen = min(len(queue_ahead), 3)
             for i in range(transitions_to_pregen):
-                from_t = queue_ahead[i]
-                to_t = queue_ahead[i + 1]
-                if from_t.get("title") and to_t.get("title"):
+                if i == 0:
+                    from_title = curr_title
+                    from_artist = curr_artist
+                else:
+                    from_t = queue_ahead[i - 1]
+                    from_title = from_t.get("title", "")
+                    from_artist = from_t.get("artist", "")
+                to_t = queue_ahead[i]
+                if from_title and to_t.get("title"):
                     self._enqueue_pre_gen_banter(
-                        from_t["title"],
-                        from_t["artist"],
+                        from_title,
+                        from_artist,
                         to_t["title"],
                         to_t["artist"],
                     )
@@ -623,8 +668,13 @@ class RadioHostPlugin:
         prev_artist: str,
         curr_title: str,
         curr_artist: str,
+        deannounce_only: bool = False,
     ) -> None:
         """Generate and broadcast banter for the *prev_title* → *curr_title* transition.
+
+        When *deannounce_only* is True, only the previous track is mentioned
+        (no reference to the next/current track).  This is used when
+        ``RADIO_HOST_NEXT_SONG_ANNOUNCEMENT`` is disabled.
 
         Tries pre-generated audio first (stored at the previous track_change for
         this exact transition).  Falls back to template text + TTS when no pre-gen
@@ -649,13 +699,20 @@ class RadioHostPlugin:
                 banter_to_inject = None
 
         if banter_to_inject is None:
-            banter_text = self._build_banter_template(
-                prev_title, prev_artist, curr_title, curr_artist
-            )
-            log_info(
-                f"[radio_host] Track change with template banter: "
-                f"'{prev_title}' -> '{curr_title}'"
-            )
+            if deannounce_only:
+                banter_text = self._build_deannounce_template(prev_title, prev_artist)
+                log_info(
+                    f"[radio_host] Track change with de-announce template: "
+                    f"'{prev_title}'"
+                )
+            else:
+                banter_text = self._build_banter_template(
+                    prev_title, prev_artist, curr_title, curr_artist
+                )
+                log_info(
+                    f"[radio_host] Track change with template banter: "
+                    f"'{prev_title}' -> '{curr_title}'"
+                )
             banter_to_inject = {"text": banter_text, "style": "transition"}
 
         self._set_animation("speak")
@@ -696,6 +753,11 @@ class RadioHostPlugin:
         poll loop is not blocked.
         """
         if not self._running:
+            return
+
+        # If next-song announcement is disabled, skip winding-down injection
+        # entirely (de-announce already happened in _on_track_change).
+        if not self._next_song_announcement:
             return
 
         await self._update_station_info()
@@ -805,8 +867,10 @@ class RadioHostPlugin:
                 log_error("[radio_host] TTS failed for winding-down banter")
                 return
 
-            # Step 2: pre-convert to WebM
-            webm_data = await self._client.convert_audio_to_webm(audio_path)
+            # Step 2: pre-convert to WebM with configured gain
+            webm_data = await self._client.convert_audio_to_webm(
+                audio_path, gain_db=self._gain_db
+            )
             if webm_data is None:
                 return
 
@@ -909,6 +973,68 @@ class RadioHostPlugin:
             },
             source="template",
         )
+
+    def _build_deannounce_template(
+        self,
+        prev_title: str,
+        prev_artist: str,
+    ) -> str:
+        """Template for de-announce only: mentions the song that just finished,
+        but NOT the next track. Used when RADIO_HOST_NEXT_SONG_ANNOUNCEMENT is off."""
+        station = self._station_name.strip()
+        args = (prev_title, prev_artist)
+
+        templates = [
+            "That was {0} by {1}.",
+            "You just heard {0} by {1}.",
+            "{0} by {1}.",
+            "We were listening to {0} by {1}.",
+            "That track was {0} by {1}.",
+            "Great track from {1} — that was {0}.",
+            "I loved that one — {0} by {1}.",
+            "From {0} by {1}.",
+        ]
+        if station:
+            templates.extend(
+                [
+                    "You're listening to {2}. That was {0} by {1}.",
+                    "On {2}, we just heard {0} by {1}.",
+                    "Welcome back to {2}. That was {0} by {1}.",
+                    "You're tuned to {2} — that was {0} by {1}.",
+                ]
+            )
+
+        template = random.choice(templates)
+        text = template.format(*args, station) if station else template.format(*args)
+
+        lang = self._language.strip().lower() if self._language.strip() else "english"
+        if lang != "english":
+            if lang == "italian" or lang == "it":
+                it_templates = [
+                    "Abbiamo ascoltato {0} di {1}.",
+                    "Era {0} di {1}.",
+                    "{0} di {1}.",
+                    "Quello era {0} di {1}.",
+                    "Che pezzo, {0} di {1}.",
+                    "Bellissimo brano di {1} — {0}.",
+                ]
+                if station:
+                    it_templates.extend(
+                        [
+                            "Sei su {2}. Quello era {0} di {1}.",
+                            "Su {2}, abbiamo appena sentito {0} di {1}.",
+                            "Benvenuto su {2}. Prima {0} di {1}.",
+                            "Sei in sintonia con {2} — {0} di {1}.",
+                        ]
+                    )
+                it_template = random.choice(it_templates)
+                text = (
+                    it_template.format(*args, station)
+                    if station
+                    else it_template.format(*args)
+                )
+
+        return text
 
     def _build_banter_template(
         self,

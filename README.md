@@ -78,6 +78,7 @@ Because Synthetic Heart system are inspired on how humans are, SyntHs are not un
 - Open AI API compatible: whatever is designed to call Open API can interface with Synthetic Heart, and Synthetic Heart can call any Open API endpoint.
 - Docker deployment with automatic database backups
 - Mobile support
+- [Azuracast integration](https://synthetic-heart.readthedocs.io/en/latest/radio_azuracast.html): with radio plugin, SyntH can interact with [Azuracast](https://www.azuracast.com/) radio station and speak between songs
 
 <div align="center">
    <img src="docs/res/screenshots/mobile_home.jpg" alt="SyntH Mobile Home Screenshot" style="max-width: 120px; border-radius: 8px; margin: 4px; display: inline-block;" />
