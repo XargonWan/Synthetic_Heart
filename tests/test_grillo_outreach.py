@@ -98,3 +98,66 @@ async def test_generate_outreach_beat_records_target_metadata(monkeypatch):
     assert captured["kwargs"]["metadata"]["target_interface"] == "telegram_bot"
     assert captured["kwargs"]["metadata"]["target_chat_id"] == "12345"
     assert captured["kwargs"]["metadata"]["context_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_outreach_skips_during_live_conversation(monkeypatch):
+    """A live conversation (recent user message) must suppress outreach so it
+    does not race the user's own turn and double-text."""
+    p = GrilloOutreachPlugin()
+    p.enabled = True
+    p._last_outreach = None
+    p.quiet_minutes = 15
+    generated = {"called": False}
+
+    async def fake_has_recent_activity(hours: int = 24):
+        return True  # passes the anti-dead-chat gate
+
+    async def fake_has_live_activity(minutes: int):
+        return True  # user is mid-conversation
+
+    async def fake_generate():
+        generated["called"] = True
+
+    monkeypatch.setattr(p, "_has_recent_activity", fake_has_recent_activity)
+    monkeypatch.setattr(p, "_has_live_activity", fake_has_live_activity)
+    monkeypatch.setattr(p, "_generate_outreach_beat", fake_generate)
+
+    await p._maybe_generate_outreach()
+
+    assert generated["called"] is False
+    assert p._last_outreach is None  # not advanced when skipped
+
+
+@pytest.mark.asyncio
+async def test_outreach_proceeds_when_conversation_quiet(monkeypatch):
+    """When the quiet window has elapsed, outreach should generate normally."""
+    p = GrilloOutreachPlugin()
+    p.enabled = True
+    p._last_outreach = None
+    p.quiet_minutes = 15
+    generated = {"called": False}
+
+    async def fake_has_recent_activity(hours: int = 24):
+        return True
+
+    async def fake_has_live_activity(minutes: int):
+        return False  # quiet — no recent user message
+
+    async def fake_generate():
+        generated["called"] = True
+
+    monkeypatch.setattr(p, "_has_recent_activity", fake_has_recent_activity)
+    monkeypatch.setattr(p, "_has_live_activity", fake_has_live_activity)
+    monkeypatch.setattr(p, "_generate_outreach_beat", fake_generate)
+
+    await p._maybe_generate_outreach()
+
+    assert generated["called"] is True
+
+
+@pytest.mark.asyncio
+async def test_has_live_activity_disabled_window_short_circuits():
+    """A non-positive quiet window disables the guard without touching the DB."""
+    p = GrilloOutreachPlugin()
+    assert await p._has_live_activity(0) is False

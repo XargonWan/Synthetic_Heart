@@ -65,6 +65,16 @@ class GrilloOutreachPlugin:
             component="grillo_outreach",
         )
 
+        self.quiet_minutes: int = config_registry.get_value(
+            "GRILLO_OUTREACH_QUIET_MINUTES",
+            15,
+            label="Outreach Quiet Window (minutes)",
+            description="Suppress outreach if the user sent a message within this many minutes (avoid barging into a live conversation and double-texting)",
+            value_type=int,
+            group="grillo",
+            component="grillo_outreach",
+        )
+
         self._last_outreach: Optional[datetime] = None
 
     def get_supported_actions(self) -> Dict[str, Any]:
@@ -135,6 +145,17 @@ class GrilloOutreachPlugin:
             log_debug("[grillo_outreach] Skipping - no recent user activity")
             return
 
+        # Don't barge into a live conversation. If the user has spoken within the
+        # quiet window, an outreach beat would race the user's own turn and land
+        # as a double-text (two SyntH messages back-to-back). Skip this cycle and
+        # let the next tick re-evaluate once the conversation has gone quiet.
+        if await self._has_live_activity(self.quiet_minutes):
+            log_debug(
+                f"[grillo_outreach] Skipping - user active within last "
+                f"{self.quiet_minutes}m (live conversation in progress)"
+            )
+            return
+
         # Generate outreach
         await self._generate_outreach_beat()
         self._last_outreach = now
@@ -159,6 +180,36 @@ class GrilloOutreachPlugin:
         except Exception as e:
             log_warning(f"[grillo_outreach] Error checking activity: {e}")
             return False
+
+    async def _has_live_activity(self, minutes: int) -> bool:
+        """Return True if the user spoke within the last N minutes.
+
+        Used to detect an in-progress live conversation so outreach yields
+        instead of barging in. Mirrors :meth:`_has_recent_activity` but on a
+        short minute-scale window. Fails safe: on DB error returns True so we
+        prefer staying quiet over risking a double-text.
+        """
+        from datetime import datetime, timedelta, timezone
+
+        if minutes <= 0:
+            return False
+
+        try:
+            from core.db import get_conn_ctx
+
+            cutoff = datetime.now(timezone.utc) - timedelta(minutes=minutes)
+            async with get_conn_ctx() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "SELECT COUNT(*) FROM ai_diary"
+                        " WHERE timestamp > %s AND user_message IS NOT NULL",
+                        (cutoff,),
+                    )
+                    row = await cur.fetchone()
+                    return bool(row and row[0] > 0)
+        except Exception as e:
+            log_warning(f"[grillo_outreach] Error checking live activity: {e}")
+            return True
 
     async def _get_context_snippets(self, limit: int = 5) -> List[str]:
         """Get recent conversation snippets for context."""
