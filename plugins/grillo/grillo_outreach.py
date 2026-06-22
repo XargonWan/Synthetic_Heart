@@ -15,6 +15,11 @@ from core.config_manager import config_registry
 from core.logging_utils import log_debug, log_error, log_info, log_warning
 from plugins.grillo.common_instructions import GRILLO_INSTRUCTIONS
 
+# How often the loop wakes to check whether a scheduled outreach is due. The
+# cadence between outreaches is governed by GRILLO_OUTREACH_INTERVAL_HOURS; this
+# is only the polling granularity for detecting a due slot.
+_POLL_SECONDS = 1800
+
 
 class GrilloOutreachPlugin:
     """Plugin that generates outreach beats for external interface messaging."""
@@ -122,16 +127,24 @@ class GrilloOutreachPlugin:
             except Exception as e:
                 log_error(f"[grillo_outreach] Error in outreach loop: {e}")
 
-            # Check every 30 minutes
-            await asyncio.sleep(1800)
+            await asyncio.sleep(_POLL_SECONDS)
 
     async def _maybe_generate_outreach(self) -> None:
-        """Check if it's time to generate an outreach beat."""
+        """Generate an outreach beat when a scheduled slot is due and the chat is quiet.
+
+        Outreach fires on the ``GRILLO_OUTREACH_INTERVAL_HOURS`` schedule. If a
+        scheduled slot lands while a live conversation is in progress (a human
+        spoke within the quiet window), the slot is *consumed* rather than
+        retried: the timer advances so the next attempt is the next scheduled
+        slot, not right after the quiet window expires. This prevents texting
+        the user again shortly after they stop talking.
+        """
         if not self.enabled:
             return
 
-        # Check interval
         now = datetime.now()
+
+        # Respect the configured interval between outreaches.
         if self._last_outreach:
             elapsed = (now - self._last_outreach).total_seconds() / 3600
             if elapsed < self.interval_hours:
@@ -140,76 +153,83 @@ class GrilloOutreachPlugin:
                 )
                 return
 
-        # Check if there's been recent user activity (don't spam inactive chats)
+        # Anti-dead-chat: only reach out to chats with genuine recent activity.
         if not await self._has_recent_activity():
             log_debug("[grillo_outreach] Skipping - no recent user activity")
             return
 
-        # Don't barge into a live conversation. If the user has spoken within the
-        # quiet window, an outreach beat would race the user's own turn and land
-        # as a double-text (two SyntH messages back-to-back). Skip this cycle and
-        # let the next tick re-evaluate once the conversation has gone quiet.
+        # A scheduled slot is due. If a live conversation is in progress, do not
+        # barge in (that lands as a double-text). Consume this slot by advancing
+        # the timer so the next attempt is the next scheduled slot — NOT right
+        # after the quiet window expires.
         if await self._has_live_activity(self.quiet_minutes):
             log_debug(
-                f"[grillo_outreach] Skipping - user active within last "
-                f"{self.quiet_minutes}m (live conversation in progress)"
+                f"[grillo_outreach] Suppressed - human active within last "
+                f"{self.quiet_minutes}m; deferring to next scheduled slot"
             )
+            self._last_outreach = now
             return
 
         # Generate outreach
         await self._generate_outreach_beat()
         self._last_outreach = now
 
-    async def _has_recent_activity(self, hours: int = 24) -> bool:
-        """Check if there's been user activity in the last N hours."""
-        from datetime import datetime, timedelta, timezone
+    async def _human_messages_since(self, cutoff: datetime) -> Optional[bool]:
+        """Return True if a genuine human message exists at/after ``cutoff``.
 
+        Sourced from ``chat_history_cache`` (real conversation turns), NOT
+        ``ai_diary``. ``ai_diary.user_message`` is also written by Grillo's own
+        internal beats (self-reflection, memory consolidation, tag elaboration,
+        curiosity, ...), so using it makes outreach think a human is active when
+        it is only Grillo's own pulse — which permanently defers outreach.
+
+        ``self`` is SyntH's own turns; ``-1`` is the synthetic outreach sender.
+        Returns ``None`` on DB error so callers pick their own fail-safe.
+        """
         try:
             from core.db import get_conn_ctx
 
-            cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
             async with get_conn_ctx() as conn:
                 async with conn.cursor() as cur:
                     await cur.execute(
-                        "SELECT COUNT(*) FROM ai_diary"
-                        " WHERE timestamp > %s AND user_message IS NOT NULL",
+                        "SELECT COUNT(*) FROM chat_history_cache"
+                        " WHERE timestamp > %s"
+                        " AND sender_id IS NOT NULL"
+                        " AND sender_id NOT IN ('self', '-1')",
                         (cutoff,),
                     )
                     row = await cur.fetchone()
                     return bool(row and row[0] > 0)
         except Exception as e:
-            log_warning(f"[grillo_outreach] Error checking activity: {e}")
-            return False
+            log_warning(f"[grillo_outreach] Error querying human activity: {e}")
+            return None
+
+    async def _has_recent_activity(self, hours: int = 24) -> bool:
+        """Whether a human has spoken in the last N hours (anti-dead-chat gate)."""
+        from datetime import datetime, timedelta, timezone
+
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+        result = await self._human_messages_since(cutoff)
+        # Fail-safe: treat unknown (DB error) as "no activity" so we do not
+        # message a chat we cannot confirm is alive.
+        return bool(result)
 
     async def _has_live_activity(self, minutes: int) -> bool:
-        """Return True if the user spoke within the last N minutes.
+        """Return True if a human spoke within the last N minutes.
 
-        Used to detect an in-progress live conversation so outreach yields
-        instead of barging in. Mirrors :meth:`_has_recent_activity` but on a
-        short minute-scale window. Fails safe: on DB error returns True so we
-        prefer staying quiet over risking a double-text.
+        Detects an in-progress live conversation so outreach yields instead of
+        barging in (which would land as a double-text). Fails safe: on DB error
+        returns True so we prefer staying quiet over risking a double-text.
         """
         from datetime import datetime, timedelta, timezone
 
         if minutes <= 0:
             return False
 
-        try:
-            from core.db import get_conn_ctx
-
-            cutoff = datetime.now(timezone.utc) - timedelta(minutes=minutes)
-            async with get_conn_ctx() as conn:
-                async with conn.cursor() as cur:
-                    await cur.execute(
-                        "SELECT COUNT(*) FROM ai_diary"
-                        " WHERE timestamp > %s AND user_message IS NOT NULL",
-                        (cutoff,),
-                    )
-                    row = await cur.fetchone()
-                    return bool(row and row[0] > 0)
-        except Exception as e:
-            log_warning(f"[grillo_outreach] Error checking live activity: {e}")
-            return True
+        cutoff = datetime.now(timezone.utc) - timedelta(minutes=minutes)
+        result = await self._human_messages_since(cutoff)
+        # Fail-safe: on unknown (DB error), stay quiet.
+        return True if result is None else result
 
     async def _get_context_snippets(self, limit: int = 5) -> List[str]:
         """Get recent conversation snippets for context."""
