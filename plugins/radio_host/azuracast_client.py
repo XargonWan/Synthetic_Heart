@@ -188,9 +188,11 @@ class AzuraCastClient:
             log_warning(f"[azuracast] WebDJ broadcast error: {e}")
             return {"status": "error", "reason": str(e)}
 
-    async def convert_audio_to_webm(self, audio_path: str) -> bytes | None:
+    async def convert_audio_to_webm(
+        self, audio_path: str, gain_db: float = 4.0
+    ) -> bytes | None:
         """Public wrapper: convert a WAV file to WebM bytes."""
-        return await self._convert_to_webm(audio_path, gain_db=4.0)
+        return await self._convert_to_webm(audio_path, gain_db=gain_db)
 
     async def broadcast_webm_at(
         self,
@@ -271,12 +273,15 @@ class AzuraCastClient:
             log_warning(f"[azuracast] Audio file not found: {input_path}")
             return None
         try:
+            # Apply dynamic normalization + explicit gain boost.
+            # dynaudnorm handles overall loudness, volume applies the user-configured dB gain.
+            audio_filter = f"dynaudnorm=f=150:g=15:p=0.95,volume={gain_db}dB"
             proc = await asyncio.create_subprocess_exec(
                 "ffmpeg",
                 "-i",
                 input_path,
                 "-af",
-                "dynaudnorm=f=150:g=15:p=0.95",
+                audio_filter,
                 "-f",
                 "webm",
                 "-c:a",

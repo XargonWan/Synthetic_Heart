@@ -1,3 +1,4 @@
+import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -253,3 +254,170 @@ async def test_init_radio_tables_uses_mariadb_schema(
     assert "DATETIME" in create_sql, "MariaDB schema must use DATETIME"
     assert "SERIAL" not in create_sql
     assert "TIMESTAMPTZ" not in create_sql
+
+
+# ---------------------------------------------------------------------------
+# RADIO_HOST_ANNOUNCE_ENABLED gating
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_announce_disabled_injects_deannounce_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When RADIO_HOST_NEXT_SONG_ANNOUNCEMENT is False, _on_track_change must
+    inject a de-announce (no next-track mention) and skip pre-generation."""
+    _patch_radio_config(monkeypatch)
+
+    plugin = radio_module.RadioHostPlugin()
+    plugin._enabled = True
+    plugin._running = True
+    plugin._next_song_announcement = False  # next-song announcement disabled
+
+    # Patch _inject_banter_now FIRST (before create_task captures the coroutine)
+    inject_calls = []
+
+    async def capturing_inject(*args, **kwargs):
+        inject_calls.append((args, kwargs))
+
+    monkeypatch.setattr(plugin, "_inject_banter_now", capturing_inject)
+
+    # Capture the coroutine passed to asyncio.create_task
+    captured_coro = []
+
+    original_create_task = asyncio.create_task
+
+    def capture_task(coro):
+        captured_coro.append(coro)
+        return original_create_task(coro)
+
+    monkeypatch.setattr(asyncio, "create_task", capture_task)
+
+    # Simulate a track change with queue data
+    await plugin._on_track_change(
+        prev_title="Old Song",
+        prev_artist="Old Artist",
+        curr_title="New Song",
+        curr_artist="New Artist",
+        next_title="Next Song",
+        next_artist="Next Artist",
+        should_comment=True,
+        queue_ahead=[
+            {"title": "Next Song", "artist": "Next Artist"},
+            {"title": "After That", "artist": "After Artist"},
+        ],
+    )
+
+    # Verify a task was created for the de-announce injection
+    assert len(captured_coro) == 1, f"Expected 1 task, got {len(captured_coro)}"
+
+    # Run the captured coroutine (it will call our capturing_inject)
+    await captured_coro[0]
+
+    # Verify the de-announce call
+    assert len(inject_calls) == 1
+    args, kwargs = inject_calls[0]
+    assert kwargs.get("deannounce_only") is True
+    assert args[0] == "Old Song"  # prev_title
+    assert args[2] == "Old Song"  # curr_title (same as prev for de-announce)
+
+    # _inject_at_track_change must be cleared so no fallback fires later
+    assert plugin._inject_at_track_change is False
+
+
+# ---------------------------------------------------------------------------
+# Queue pre-generation off-by-one fix
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_pregen_queue_uses_correct_from_track(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pre-generation from queue_ahead must use curr_title as 'from' for the
+    first transition (queue[0] is the NEXT track, not the current one)."""
+    _patch_radio_config(monkeypatch)
+
+    plugin = radio_module.RadioHostPlugin()
+    plugin._enabled = True
+    plugin._running = True
+    plugin._next_song_announcement = True
+
+    # Patch _enqueue_pre_gen_banter to capture arguments synchronously.
+    # The real method schedules background tasks via asyncio.create_task,
+    # which won't complete within the test. We replace it with a sync
+    # function that directly stores the banter for inspection.
+    enqueue_calls: list[tuple[str, str, str, str]] = []
+
+    def capture_enqueue(prev_title, prev_artist, curr_title, curr_artist):
+        enqueue_calls.append((prev_title, prev_artist, curr_title, curr_artist))
+        # Also store so we can verify the full banter object if needed
+        plugin._store_pending_banter(
+            {
+                "prev_title": prev_title,
+                "prev_artist": prev_artist,
+                "curr_title": curr_title,
+                "curr_artist": curr_artist,
+                "text": f"Template: {prev_title} -> {curr_title}",
+                "style": "transition",
+                "audio_path": None,
+            },
+            source="template",
+        )
+
+    monkeypatch.setattr(plugin, "_enqueue_pre_gen_banter", capture_enqueue)
+
+    await plugin._on_track_change(
+        prev_title="Song A",
+        prev_artist="Artist A",
+        curr_title="Song B",
+        curr_artist="Artist B",
+        next_title="Song C",
+        next_artist="Artist C",
+        should_comment=True,
+        queue_ahead=[
+            {"title": "Song C", "artist": "Artist C"},
+            {"title": "Song D", "artist": "Artist D"},
+            {"title": "Song E", "artist": "Artist E"},
+        ],
+    )
+
+    # We expect 3 pre-generations queued: B->C, C->D, D->E
+    assert len(enqueue_calls) == 3, f"Expected 3 calls, got {len(enqueue_calls)}"
+
+    # First transition: from=curr (Song B), to=queue[0] (Song C)
+    assert enqueue_calls[0] == ("Song B", "Artist B", "Song C", "Artist C")
+
+    # Second transition: from=queue[0] (Song C), to=queue[1] (Song D)
+    assert enqueue_calls[1] == ("Song C", "Artist C", "Song D", "Artist D")
+
+    # Third transition: from=queue[1] (Song D), to=queue[2] (Song E)
+    assert enqueue_calls[2] == ("Song D", "Artist D", "Song E", "Artist E")
+
+
+# ---------------------------------------------------------------------------
+# Gain propagation to ffmpeg
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_convert_audio_to_webm_applies_gain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """convert_audio_to_webm must pass gain_db to _convert_to_webm."""
+    from plugins.radio_host.azuracast_client import AzuraCastClient
+
+    client = AzuraCastClient(base_url="http://localhost", api_key="k")
+
+    captured: dict = {}
+
+    async def fake_convert(input_path: str, gain_db: float = 4.0) -> bytes:
+        captured["gain_db"] = gain_db
+        return b"fake-webm"
+
+    monkeypatch.setattr(client, "_convert_to_webm", fake_convert)
+
+    result = await client.convert_audio_to_webm("/tmp/fake.wav", gain_db=6.5)
+
+    assert result == b"fake-webm"
+    assert captured["gain_db"] == 6.5
