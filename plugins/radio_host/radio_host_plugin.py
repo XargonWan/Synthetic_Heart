@@ -39,6 +39,17 @@ register_exposed_var(
 )
 
 register_exposed_var(
+    "RADIO_HOST_ANNOUNCE_IF_NO_LISTENERS",
+    label="Announce Only With Listeners",
+    default=True,
+    value_type=bool,
+    ui_type="toggle",
+    description="When enabled, Synth only speaks on air if there is at least one listener. When disabled, announcements always play regardless of listener count.",
+    scope="plugins",
+    component="radio_host",
+)
+
+register_exposed_var(
     "AZURACAST_BASE_URL",
     label="AzuraCast Base URL",
     default="",
@@ -302,6 +313,15 @@ class RadioHostPlugin:
                 component="radio_host",
             )
         )
+        self._announce_if_no_listeners = bool(
+            config_registry.get_value(
+                "RADIO_HOST_ANNOUNCE_IF_NO_LISTENERS",
+                True,
+                value_type=bool,
+                group="plugins",
+                component="radio_host",
+            )
+        )
         self._streamer_username = (
             str(
                 config_registry.get_value(
@@ -368,6 +388,7 @@ class RadioHostPlugin:
             "RADIO_HOST_VOX_ENGINE",
             "RADIO_HOST_GAIN_DB",
             "RADIO_HOST_NEXT_SONG_ANNOUNCEMENT",
+            "RADIO_HOST_ANNOUNCE_IF_NO_LISTENERS",
             "AZURACAST_STREAMER_USERNAME",
             "AZURACAST_STREAMER_PASSWORD",
         ):
@@ -595,6 +616,33 @@ class RadioHostPlugin:
             f"[radio_host] Track change recorded: '{prev_title}' -> '{curr_title}'"
         )
 
+        # Detect first listener arrival: reset intermission counter so the
+        # announcement series starts fresh as soon as someone tunes in.
+        if (
+            self._announce_if_no_listeners
+            and self._monitor
+            and self._monitor.listener_data_available
+            and self._monitor.last_listeners == 0
+            and self._monitor.current_listeners > 0
+        ):
+            log_info(
+                "[radio_host] First listener detected, resetting intermission counter"
+            )
+            self._track_count_since_comment = 0
+
+        # Suppress announcements when there are no listeners and the feature
+        # is enabled.  When listener data is not yet available, fall back to
+        # the normal path so the plugin still works with older AzuraCast
+        # instances that do not expose listener counts.
+        if (
+            self._announce_if_no_listeners
+            and self._monitor
+            and self._monitor.listener_data_available
+            and self._monitor.current_listeners <= 0
+        ):
+            log_info("[radio_host] No listeners detected, skipping announcement")
+            return
+
         # If next-song announcement is disabled, inject de-announce only
         # ("Avete ascoltato X") without mentioning the next track.
         if not self._next_song_announcement:
@@ -753,6 +801,21 @@ class RadioHostPlugin:
         poll loop is not blocked.
         """
         if not self._running:
+            return
+
+        # Suppress announcements when there are no listeners and the feature
+        # is enabled.  When listener data is not yet available, fall back to
+        # the normal path so the plugin still works with older AzuraCast
+        # instances that do not expose listener counts.
+        if (
+            self._announce_if_no_listeners
+            and self._monitor
+            and self._monitor.listener_data_available
+            and self._monitor.current_listeners <= 0
+        ):
+            log_info(
+                "[radio_host] No listeners detected, skipping winding-down announcement"
+            )
             return
 
         # If next-song announcement is disabled, skip winding-down injection

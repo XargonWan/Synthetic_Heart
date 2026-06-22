@@ -47,6 +47,18 @@ class TrackMonitor:
         self.next_track_artist: str | None = None
         self._end_announced_for_id: str | None = None
 
+        self._current_listeners: int = 0
+        self._last_listeners: int = 0
+        self.listener_data_available: bool = False
+
+    @property
+    def current_listeners(self) -> int:
+        return self._current_listeners
+
+    @property
+    def last_listeners(self) -> int:
+        return self._last_listeners
+
     def update_config(
         self,
         station_id: str | None = None,
@@ -104,6 +116,15 @@ class TrackMonitor:
         title: str | None = track.get("title")
         artist: str | None = track.get("artist")
         playlist: str | None = current.get("playlist")
+
+        # Extract listener count from AzuraCast response.
+        listeners_obj = np.get("listeners", {}) or {}
+        self._last_listeners = self._current_listeners
+        try:
+            self._current_listeners = int(listeners_obj.get("total", 0) or 0)
+        except (TypeError, ValueError):
+            self._current_listeners = 0
+        self.listener_data_available = True
 
         if not track_id or not title or not artist:
             return
