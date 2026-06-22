@@ -1790,24 +1790,47 @@ class DiaryPlugin:
                         (new_content, int(entry_id)),
                     )
 
+                # Collect stale entry ids: prefer context-provided source ids,
+                # but also auto-discover any other rows sharing the same day
+                # so the consolidator works even without merge_source_ids.
+                stale_entry_ids: List[int] = []
+                seen_ids: set[int] = {int(entry_id)}
                 merged_source_ids = (
                     context.get("diary_merge_source_ids") if context else []
                 )
-                stale_entry_ids: List[int] = []
-                seen_ids: set[int] = set()
                 for raw_id in merged_source_ids or []:
                     try:
                         parsed_id = int(raw_id)
                     except Exception:
                         continue
-                    if parsed_id == int(entry_id) or parsed_id in seen_ids:
+                    if parsed_id in seen_ids:
                         continue
                     seen_ids.add(parsed_id)
                     stale_entry_ids.append(parsed_id)
 
+                # Auto-discover additional stale rows for the same calendar day
+                # (they are not referenced in merge_source_ids but linger as
+                # separate fragments from the upsert-or-dedupe era).
+                try:
+                    extra_stale = await _fetchall(
+                        """
+                        SELECT id FROM ai_diary
+                        WHERE DATE(timestamp) = (
+                            SELECT DATE(timestamp) FROM ai_diary WHERE id = %s
+                        )
+                        AND id != %s
+                        """,
+                        (int(entry_id), int(entry_id)),
+                    )
+                    for row in extra_stale:
+                        rid = row.get("id")
+                        if rid is not None and rid not in seen_ids:
+                            seen_ids.add(rid)
+                            stale_entry_ids.append(rid)
+                except Exception as e:
+                    log_debug(f"[ai_diary] Auto-discovery of stale rows failed: {e}")
+
                 if stale_entry_ids:
-                    # archive_diary_entries is a sync helper (also used by the
-                    # WebUI); run it off-loop so its `_run` bridge cannot block.
                     archive_result = await asyncio.to_thread(
                         archive_diary_entries, stale_entry_ids
                     )
@@ -1819,7 +1842,7 @@ class DiaryPlugin:
 
                 log_info(
                     f"[ai_diary] Diary entry {entry_id} consolidated to clean prose"
-                    f" (archived {len(stale_entry_ids)} source fragments)"
+                    f" (archived {len(stale_entry_ids)} stale rows)"
                 )
                 return {"success": True, "message": f"Diary entry {entry_id} updated"}
             except Exception as e:
@@ -1838,161 +1861,13 @@ class DiaryPlugin:
         context: dict,
         original_message: object,
     ) -> None:
-        """After each interaction, find the oldest unmerged diary day (last 7 days) and enqueue a consolidation beat.
+        """No-op: diary consolidation is now handled by GrilloDiaryConsolidatorPlugin.
 
-        Looks for diary rows whose ``content`` contains the ``---`` fragment separator,
-        meaning the LLM has not yet synthesised them into coherent prose.  Only ONE beat is
-        enqueued per debrief call (the oldest unmerged day) so that the queue is not flooded.
-        Each successive interaction will process the next oldest day until all are clean.
-
-        The ``diary_merge_beat`` context flag prevents recursive triggering when the merge
-        beat's own response goes through debrief.
+        The ``diary_merge_beat`` guard is kept here to prevent recursive loops
+        when the consolidation beat's own response goes through debrief.
         """
-        if not PLUGIN_ENABLED:
-            return
-        # Prevent recursive loop: the merge beat itself triggers on_debrief again
         if (context or {}).get("diary_merge_beat"):
             return
-
-        try:
-            # Find the oldest day in the last 7 days that still has '---' in its content.
-            # Because historical days may have multiple rows (pre-upsert data), we use
-            # GROUP_CONCAT so a day with many separate rows still shows up here if any
-            # row contains '---' OR if there is more than one row for that day.
-            if _get_db_type() == "postgres":
-                rows = await _fetchall(
-                    """
-                    SELECT id, combined, row_count, source_ids, first_timestamp
-                    FROM (
-                        SELECT
-                            MAX(id) AS id,
-                            string_agg(content, E'\n\n---\n\n' ORDER BY id ASC) AS combined,
-                            string_agg(id::text, ',' ORDER BY id ASC) AS source_ids,
-                            COUNT(*) AS row_count,
-                            MIN(timestamp) AS first_timestamp
-                        FROM ai_diary
-                        WHERE timestamp >= CURRENT_DATE - INTERVAL '7 days'
-                        GROUP BY DATE(timestamp)
-                    ) daily_entries
-                    WHERE row_count > 1 OR combined LIKE %s
-                    ORDER BY first_timestamp ASC
-                    LIMIT 1
-                    """,
-                    ("%---%",),
-                )
-            else:
-                rows = await _fetchall(
-                    """
-                    SELECT
-                        id,
-                        combined,
-                        row_count,
-                        source_ids,
-                        first_timestamp
-                    FROM (
-                        SELECT
-                            MAX(id) AS id,
-                            GROUP_CONCAT(content ORDER BY id ASC SEPARATOR '\n\n---\n\n') AS combined,
-                            GROUP_CONCAT(id ORDER BY id ASC SEPARATOR ',') AS source_ids,
-                            COUNT(*) AS row_count,
-                            MIN(timestamp) AS first_timestamp
-                        FROM ai_diary
-                        WHERE timestamp >= DATE_SUB(CURDATE(), INTERVAL 7 DAY)
-                        GROUP BY DATE(timestamp)
-                    ) daily_entries
-                    WHERE row_count > 1 OR combined LIKE %s
-                    ORDER BY first_timestamp ASC
-                    LIMIT 1
-                    """,
-                    ("%---%",),
-                )
-        except Exception as e:
-            log_debug(f"[ai_diary] on_debrief: DB error fetching unmerged entries: {e}")
-            return
-
-        if not rows:
-            return
-
-        row = rows[0]
-        entry_id: int = row["id"]
-        content: str = row["combined"] or ""
-        row_count: int = row["row_count"]
-        source_ids_raw = row.get("source_ids") or ""
-        source_entry_ids: List[int] = []
-        for raw_id in str(source_ids_raw).split(","):
-            raw_id = raw_id.strip()
-            if not raw_id:
-                continue
-            try:
-                source_entry_ids.append(int(raw_id))
-            except Exception:
-                continue
-        if not source_entry_ids:
-            source_entry_ids = [int(entry_id)]
-        first_timestamp = row.get("first_timestamp")
-
-        if "---" not in content and row_count <= 1:
-            return
-
-        log_info(
-            f"[ai_diary] on_debrief: oldest unmerged day has entry id={entry_id} "
-            f"({row_count} rows, {content.count('---')} separators) — enqueueing merge beat"
-        )
-
-        prompt = (
-            "[DIARY CONSOLIDATION — INTERNAL SYSTEM TASK]\n\n"
-            "Your personal diary has accumulated multiple entries from the same day "
-            "(separated by '---'). Rewrite them as a single, coherent first-person diary entry "
-            "that weaves all the information together naturally.\n\n"
-            "Rules:\n"
-            "- Write flowing first-person prose (no bullet lists, no '---' separators).\n"
-            "- Preserve every meaningful detail from all fragments.\n"
-            "- Remove exact duplicates; keep nuance and emotional context.\n"
-            f"- The entry id to UPDATE is: {entry_id}\n\n"
-            "Diary fragments:\n\n"
-            f"{content}\n\n"
-            "Respond with ONLY valid JSON — no other text:\n"
-            '{"actions": [{"type": "update_diary_entry", "payload": {"id": '
-            f'{entry_id}, "content": "<your merged prose here>"'
-            "}}]}"
-        )
-
-        try:
-            from types import SimpleNamespace
-            from core import message_queue
-
-            message = SimpleNamespace()
-            message.chat_id = -1
-            message.message_id = 0
-            message.text = prompt
-            message.from_user = SimpleNamespace(
-                id=-1,
-                username="diary_merge",
-                full_name="Diary Merge",
-                first_name="Diary",
-            )
-            message.chat = SimpleNamespace(id=-1, type="internal")
-            message.date = datetime.utcnow()
-
-            await message_queue.enqueue_low_priority(
-                None,
-                message,
-                context_memory={
-                    "diary_merge_beat": True,
-                    "diary_entry_id": entry_id,
-                    "diary_merge_source_ids": source_entry_ids,
-                    "diary_merge_timestamp": first_timestamp,
-                    "allowed_action_types": ["update_diary_entry"],
-                    "skip_history": True,
-                },
-                interface_id="diary_merge",
-                original_message=None,
-            )
-            log_info(
-                f"[ai_diary] on_debrief: diary consolidation beat enqueued for entry id={entry_id}"
-            )
-        except Exception as e:
-            log_error(f"[ai_diary] on_debrief: failed to enqueue merge beat: {e}")
 
 
 def archive_diary_entries(entry_ids: List[int]) -> Dict[str, Any]:

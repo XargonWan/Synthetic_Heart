@@ -225,7 +225,9 @@ class RecentChatsPlugin:
         if not interface_path and original_message:
             interface_path = getattr(original_message, "interface_path", None)
         if not interface_path:
-            log_warning("[recent_chats] Cannot build message action: no interface_path available")
+            log_warning(
+                "[recent_chats] Cannot build message action: no interface_path available"
+            )
             return None
 
         interface_name = interface_path.split("/")[0] if interface_path else None

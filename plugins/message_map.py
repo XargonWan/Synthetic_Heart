@@ -376,14 +376,14 @@ class MessageMapPlugin:
         elif action_type == "get_mapping_stats":
             import asyncio
 
-            asyncio.create_task(
-                self._send_mapping_stats(context, original_message)
-            )
+            asyncio.create_task(self._send_mapping_stats(context, original_message))
             return None
 
         return None
 
-    async def _send_original_message(self, context, original_message, trainer_message_id):
+    async def _send_original_message(
+        self, context, original_message, trainer_message_id
+    ):
         """Return the original message info as a message action."""
         try:
             result = await get_original_message(trainer_message_id)
@@ -416,7 +416,9 @@ class MessageMapPlugin:
         if not interface_path and original_message:
             interface_path = getattr(original_message, "interface_path", None)
         if not interface_path:
-            log_warning("[message_map] Cannot build message action: no interface_path available")
+            log_warning(
+                "[message_map] Cannot build message action: no interface_path available"
+            )
             return None
 
         interface_name = interface_path.split("/")[0] if interface_path else None
