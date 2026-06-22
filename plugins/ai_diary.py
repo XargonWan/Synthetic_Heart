@@ -1790,24 +1790,47 @@ class DiaryPlugin:
                         (new_content, int(entry_id)),
                     )
 
+                # Collect stale entry ids: prefer context-provided source ids,
+                # but also auto-discover any other rows sharing the same day
+                # so the consolidator works even without merge_source_ids.
+                stale_entry_ids: List[int] = []
+                seen_ids: set[int] = {int(entry_id)}
                 merged_source_ids = (
                     context.get("diary_merge_source_ids") if context else []
                 )
-                stale_entry_ids: List[int] = []
-                seen_ids: set[int] = set()
                 for raw_id in merged_source_ids or []:
                     try:
                         parsed_id = int(raw_id)
                     except Exception:
                         continue
-                    if parsed_id == int(entry_id) or parsed_id in seen_ids:
+                    if parsed_id in seen_ids:
                         continue
                     seen_ids.add(parsed_id)
                     stale_entry_ids.append(parsed_id)
 
+                # Auto-discover additional stale rows for the same calendar day
+                # (they are not referenced in merge_source_ids but linger as
+                # separate fragments from the upsert-or-dedupe era).
+                try:
+                    extra_stale = await _fetchall(
+                        """
+                        SELECT id FROM ai_diary
+                        WHERE DATE(timestamp) = (
+                            SELECT DATE(timestamp) FROM ai_diary WHERE id = %s
+                        )
+                        AND id != %s
+                        """,
+                        (int(entry_id), int(entry_id)),
+                    )
+                    for row in extra_stale:
+                        rid = row.get("id")
+                        if rid is not None and rid not in seen_ids:
+                            seen_ids.add(rid)
+                            stale_entry_ids.append(rid)
+                except Exception as e:
+                    log_debug(f"[ai_diary] Auto-discovery of stale rows failed: {e}")
+
                 if stale_entry_ids:
-                    # archive_diary_entries is a sync helper (also used by the
-                    # WebUI); run it off-loop so its `_run` bridge cannot block.
                     archive_result = await asyncio.to_thread(
                         archive_diary_entries, stale_entry_ids
                     )
@@ -1819,7 +1842,7 @@ class DiaryPlugin:
 
                 log_info(
                     f"[ai_diary] Diary entry {entry_id} consolidated to clean prose"
-                    f" (archived {len(stale_entry_ids)} source fragments)"
+                    f" (archived {len(stale_entry_ids)} stale rows)"
                 )
                 return {"success": True, "message": f"Diary entry {entry_id} updated"}
             except Exception as e:
