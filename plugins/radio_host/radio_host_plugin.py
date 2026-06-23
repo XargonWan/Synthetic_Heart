@@ -508,6 +508,10 @@ class RadioHostPlugin:
         await self._injector.cleanup()
         log_info("[radio_host] RadioHostPlugin stopped")
 
+    def _get_synth_name(self) -> str:
+        """Return the configured synth name (e.g. 'SyntH', 'Rekku')."""
+        return str(config_registry.get_value("SYNTH_NAME", "SyntH") or "SyntH")
+
     async def _ensure_running(self) -> None:
         if self._running:
             return
@@ -651,18 +655,15 @@ class RadioHostPlugin:
             log_info("[radio_host] No listeners detected, skipping announcement")
             return
 
-        # If next-song announcement is disabled, inject de-announce only
-        # ("Avete ascoltato X") without mentioning the next track.
+        # If next-song announcement is disabled, do NOT inject here.
+        # The de-announce was already scheduled by _on_winding_down (during
+        # the song's final seconds) and will broadcast in the clean gap
+        # between tracks (after any bumper/jingle finishes).
         if not self._next_song_announcement:
             self._inject_at_track_change = False
-            asyncio.create_task(
-                self._inject_banter_now(
-                    prev_title,
-                    prev_artist,
-                    prev_title,
-                    prev_artist,
-                    deannounce_only=True,
-                )
+            # Still pre-generate for upcoming transitions if queue data available
+            self._pre_generate_from_queue(
+                curr_title, curr_artist, next_title, next_artist, queue_ahead
             )
             return
 
@@ -820,6 +821,7 @@ class RadioHostPlugin:
             banter_to_inject["text"],
             banter_to_inject.get("style", "transition"),
             pre_generated_audio_path=banter_to_inject.get("audio_path"),
+            synth_name=self._get_synth_name(),
         )
         self._set_animation("idle")
         await self._log_activity(
@@ -846,6 +848,11 @@ class RadioHostPlugin:
         lands in the clean gap between songs (no overlap with AutoDJ
         jingles or bumpers that would play during the transition).
 
+        When ``RADIO_HOST_NEXT_SONG_ANNOUNCEMENT`` is disabled, generates
+        a de-announce (only mentions the song that just finished) but still
+        uses the same timed injection pipeline so the broadcast lands in
+        the clean gap, never over the start of the next song.
+
         Falls back to ``_inject_at_track_change`` when the current track is
         short / a jingle (no room to inject during the outro).
 
@@ -868,11 +875,6 @@ class RadioHostPlugin:
             log_info(
                 "[radio_host] No listeners detected, skipping winding-down announcement"
             )
-            return
-
-        # If next-song announcement is disabled, skip winding-down injection
-        # entirely (de-announce already happened in _on_track_change).
-        if not self._next_song_announcement:
             return
 
         await self._update_station_info()
@@ -900,51 +902,60 @@ class RadioHostPlugin:
             )
             return
 
-        # Fetch fresh nowplaying data to get the most up-to-date next-track
-        # info.  The monitor's next_track_* may be up to 45 s stale.
-        fresh_next = await self._fetch_next_track_info()
-        actual_next = (
-            fresh_next.get("title")
-            or next_title
-            or (self._monitor.next_track_title if self._monitor else "")
-            or ""
-        )
-        actual_next_artist = (
-            fresh_next.get("artist")
-            or next_artist
-            or (self._monitor.next_track_artist if self._monitor else "")
-            or ""
-        )
-
-        # Try pre-generated banter first (stored for "curr → next" transition)
-        banter_to_inject = self._pop_matching_banter(curr_title, curr_artist)
-        if banter_to_inject:
-            pre_gen_next = banter_to_inject.get("curr_title", "")
-            pre_gen_next_artist = banter_to_inject.get("curr_artist", "")
-            match = (
-                pre_gen_next == actual_next
-                and pre_gen_next_artist == actual_next_artist
+        # Generate banter text
+        if self._next_song_announcement:
+            # Full transition announcement: mentions both previous and next song.
+            fresh_next = await self._fetch_next_track_info()
+            actual_next = (
+                fresh_next.get("title")
+                or next_title
+                or (self._monitor.next_track_title if self._monitor else "")
+                or ""
             )
-            if match:
+            actual_next_artist = (
+                fresh_next.get("artist")
+                or next_artist
+                or (self._monitor.next_track_artist if self._monitor else "")
+                or ""
+            )
+
+            banter_to_inject = self._pop_matching_banter(curr_title, curr_artist)
+            if banter_to_inject:
+                pre_gen_next = banter_to_inject.get("curr_title", "")
+                pre_gen_next_artist = banter_to_inject.get("curr_artist", "")
+                match = (
+                    pre_gen_next == actual_next
+                    and pre_gen_next_artist == actual_next_artist
+                )
+                if match:
+                    log_info(
+                        f"[radio_host] Winding down with pre-generated banter: "
+                        f"'{curr_title}' -> '{actual_next}'"
+                    )
+                else:
+                    log_info(
+                        f"[radio_host] Pre-generated banter stale "
+                        f"(was '{pre_gen_next}', now '{actual_next}'); "
+                        f"falling back to template"
+                    )
+                    banter_to_inject = None
+
+            if banter_to_inject is None:
+                banter_text = self._build_winding_down_template(
+                    curr_title, curr_artist, actual_next, actual_next_artist
+                )
                 log_info(
-                    f"[radio_host] Winding down with pre-generated banter: "
+                    f"[radio_host] Winding down with template banter: "
                     f"'{curr_title}' -> '{actual_next}'"
                 )
-            else:
-                log_info(
-                    f"[radio_host] Pre-generated banter stale "
-                    f"(was '{pre_gen_next}', now '{actual_next}'); "
-                    f"falling back to template"
-                )
-                banter_to_inject = None
-
-        if banter_to_inject is None:
-            banter_text = self._build_winding_down_template(
-                curr_title, curr_artist, actual_next, actual_next_artist
-            )
+                banter_to_inject = {"text": banter_text, "style": "transition"}
+        else:
+            # De-announce only: mention the song that just finished,
+            # without mentioning what's coming next.  Still uses the
+            # timed injection pipeline so it lands in the gap.
+            banter_text = self._build_deannounce_template(curr_title, curr_artist)
             log_info(
-                f"[radio_host] Winding down with template banter: "
-                f"'{curr_title}' -> '{actual_next}'"
+                f"[radio_host] Winding down with de-announce template: '{curr_title}'"
             )
             banter_to_inject = {"text": banter_text, "style": "transition"}
 
@@ -955,10 +966,8 @@ class RadioHostPlugin:
         song_end_ts = _time.time() + remaining
 
         # Fire the injection pipeline as a background task.  The pipeline
-        # first generates TTS + ffmpeg, then waits until ~2 s before
-        # *song_end_ts* to connect WebDJ.  The transition completes during
-        # the last 2 s of the song, and the announcement plays in the clean
-        # gap between tracks.
+        # generates TTS, then waits for the song to end + any bumper/jingle
+        # in the transition gap, then broadcasts in the clean gap.
         asyncio.create_task(
             self._inject_winding_down_banter(
                 banter_to_inject=banter_to_inject,
@@ -1057,12 +1066,13 @@ class RadioHostPlugin:
 
             # Step 3: now broadcast into the clean gap.
             # broadcast_banter handles ffmpeg conversion internally.
+            synth_name = self._get_synth_name()
             result = await self._client.broadcast_banter(
                 station_shortcode=self._station_id,
                 audio_path=audio_path,
                 username=self._streamer_username,
                 password=self._streamer_password,
-                title=f"{self._streamer_username} is speaking",
+                title=f"{synth_name} is speaking",
                 artist="",
                 gain_db=self._gain_db,
             )
@@ -1354,6 +1364,12 @@ class RadioHostPlugin:
             context_text_parts.append(f"You are on {station}.")
         if desc:
             context_text_parts.append(f"Current program: {desc}.")
+        # Include synth personality so the radio DJ voice stays in character
+        synth_profile = str(
+            config_registry.get_value("SYNTH_PROFILE", "") or ""
+        ).strip()
+        if synth_profile:
+            context_text_parts.append(f"Your personality: {synth_profile}")
         context_text_parts.extend(
             [
                 f"Write your response in {lang}.",
