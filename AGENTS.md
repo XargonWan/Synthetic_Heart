@@ -317,15 +317,24 @@ Monitor: `docker exec synth-dev tail -f /app/logs/synth.log | grep -E "run_actio
 ---
 
 ## 10. Documentation
+After any substatnial code change or feature addition evaluate a documentation update.
 
-- Location: `docs/` (Sphinx, ReadTheDocs format, English).
+- Location of Wiki/Documentation: `docs/` (Sphinx, ReadTheDocs format, English).
+- README.md is located in the project root
 - Evaluate whether your changes require a docs update. If they do, update docs as part of the task.
+- At the same time update this file, AGENTS.md if something critical is missing for the future iterations or if the information need to be updated
 
 ---
 
 ## 11. Container & Infrastructure Notes
 
+**Container restart:**
+```bash
+docker compose up -d --build
+```
+
 **Dev container restart:**
+Some devs might want to have a developemnt deploy, usually called `docker-compose-dev.yml`
 ```bash
 docker compose -f docker-compose-dev.yml --env-file .env-dev up -d --build && rm -rf logs/dev/*
 ```
