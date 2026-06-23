@@ -206,6 +206,12 @@ class RadioHostPlugin:
         # writer finishes last and almost never match the next transition.
         self._pending_banter: dict[tuple[str, str], dict[str, Any]] = {}
         self._inject_at_track_change = False
+        # Tracks the ID of the last track for which _inject_at_track_change
+        # was set to True.  Used to distinguish deferred injections that come
+        # from a bumper/jingle (where actual injection should happen when the
+        # next real song starts) from stale flags inherited from a previous
+        # winding-down that already completed.
+        self._inject_at_track_change_for_id: str | None = None
         self._station_info_ts: float = 0.0
         self._STATION_INFO_TTL = 300
         self._station_name = ""
@@ -606,6 +612,8 @@ class RadioHostPlugin:
         queue_ahead: list[dict[str, str]] | None = None,
         prev_is_jingle: bool = False,
         curr_is_jingle: bool = False,
+        winding_down_already_injected: bool = False,
+        winding_down_deferred_for_prev: bool = False,
     ) -> None:
         if not self._running:
             return
@@ -658,6 +666,42 @@ class RadioHostPlugin:
             )
             return
 
+        # Skip injection if winding-down already completed for the previous
+        # track.  This prevents double announcements when a bumper/jingle
+        # plays between two real songs: the winding-down already injected
+        # banter for the transition, so _on_track_change must not inject again.
+        if winding_down_already_injected:
+            log_info(
+                "[radio_host] Winding-down already injected for previous track; "
+                "skipping track-change injection"
+            )
+            self._inject_at_track_change = False
+            # Still pre-generate for upcoming transitions
+            self._pre_generate_from_queue(
+                curr_title, curr_artist, next_title, next_artist, queue_ahead
+            )
+            return
+
+        # Deferred injection — winding-down was skipped because the previous
+        # track was a bumper/jingle.  Inject the banter now that a real song
+        # has started.
+        if winding_down_deferred_for_prev and should_comment and not curr_is_jingle:
+            log_info(
+                "[radio_host] Injecting deferred banter (winding-down was skipped "
+                "for bumper/jingle)"
+            )
+            self._inject_at_track_change = False
+            asyncio.create_task(
+                self._inject_banter_now(
+                    prev_title, prev_artist, curr_title, curr_artist
+                )
+            )
+            # Still pre-generate for upcoming transitions
+            self._pre_generate_from_queue(
+                curr_title, curr_artist, next_title, next_artist, queue_ahead
+            )
+            return
+
         # Fallback injection — only fires when winding_down was skipped (e.g.
         # the previous track was a jingle/bumper so no outro announcement was
         # made).  The main injection path is _on_winding_down (during the
@@ -671,11 +715,19 @@ class RadioHostPlugin:
             )
 
         # Pre-generate for upcoming transitions using queue data.
-        # The queue contains songs lined up to play. We pre-generate for
-        # transitions at positions 0→1, 1→2, and 2→3 (3 songs ahead).
-        # NOTE: queue_ahead[0] is the NEXT track, not the current one.
-        # The "from" side of each transition is the track that will be
-        # playing when the banter is used (current for first, queue[i] for rest).
+        self._pre_generate_from_queue(
+            curr_title, curr_artist, next_title, next_artist, queue_ahead
+        )
+
+    def _pre_generate_from_queue(
+        self,
+        curr_title: str,
+        curr_artist: str,
+        next_title: str | None,
+        next_artist: str | None,
+        queue_ahead: list[dict[str, str]] | None,
+    ) -> None:
+        """Pre-generate banter for upcoming transitions from queue data."""
         if queue_ahead and len(queue_ahead) >= 2:
             transitions_to_pregen = min(len(queue_ahead), 3)
             for i in range(transitions_to_pregen):
@@ -848,14 +900,18 @@ class RadioHostPlugin:
             )
             return
 
-        # Use next-track info from the monitor (refreshed at each verification).
+        # Fetch fresh nowplaying data to get the most up-to-date next-track
+        # info.  The monitor's next_track_* may be up to 45 s stale.
+        fresh_next = await self._fetch_next_track_info()
         actual_next = (
-            next_title
+            fresh_next.get("title")
+            or next_title
             or (self._monitor.next_track_title if self._monitor else "")
             or ""
         )
         actual_next_artist = (
-            next_artist
+            fresh_next.get("artist")
+            or next_artist
             or (self._monitor.next_track_artist if self._monitor else "")
             or ""
         )
@@ -912,6 +968,69 @@ class RadioHostPlugin:
             )
         )
 
+    async def _fetch_next_track_info(self) -> dict[str, str]:
+        """Fetch fresh nowplaying data and extract the next-track info."""
+        try:
+            np = await self._client.get_nowplaying(self._station_id)
+            playing_next = np.get("playing_next", {}) or {}
+            song = playing_next.get("song", {}) or {}
+            return {
+                "title": str(song.get("title", "")),
+                "artist": str(song.get("artist", "")),
+            }
+        except Exception:
+            return {"title": "", "artist": ""}
+
+    async def _wait_for_bumper_end(self, song_end_ts: float) -> None:
+        """After *song_end_ts*, poll AzuraCast and wait until any
+        bumper/jingle that started playing at song end finishes.
+        Returns when a real song is playing (or a reasonable timeout).
+        """
+        # First, wait until song_end_ts (the winding-down song ends)
+        now = _time.time()
+        if song_end_ts > now:
+            await asyncio.sleep(song_end_ts - now)
+
+        # Now poll to detect if something short (bumper/jingle) started.
+        # Wait up to 30 seconds for it to finish.
+        max_wait = 30.0
+        polled = 0.0
+        while polled < max_wait:
+            try:
+                np = await self._client.get_nowplaying(self._station_id)
+                current = np.get("now_playing", {}) or {}
+                track = current.get("song", {}) or {}
+                title = track.get("title", "") or ""
+                if "is speaking" in title.lower():
+                    return  # Our own banter is playing — proceed
+                playlist = current.get("playlist", "") or ""
+                elapsed = float(current.get("elapsed", 0) or 0)
+                duration = float(current.get("duration", 0) or 0)
+                remaining = duration - elapsed
+                playlist_lower = playlist.lower()
+                is_short = duration < 45 and duration > 0
+                is_bumper = "bumper" in playlist_lower
+                is_jingle_playlist = "jingle" in playlist_lower
+                if is_bumper or is_jingle_playlist or is_short:
+                    log_info(
+                        f"[radio_host] Bumper/jingle detected during transition gap; "
+                        f"waiting... ({remaining:.0f}s remaining of '{title}')"
+                    )
+                    # Wait for it to finish or timeout
+                    wait = min(max(remaining, 1.0), max_wait - polled)
+                    if wait > 0.5:
+                        await asyncio.sleep(wait)
+                    polled += wait
+                    continue
+                # Real song is playing — proceed with broadcast
+                return
+            except Exception:
+                await asyncio.sleep(1.0)
+                polled += 1.0
+        log_info(
+            "[radio_host] Bumper/jingle wait timeout; proceeding with broadcast anyway"
+        )
+
     async def _inject_winding_down_banter(
         self,
         banter_to_inject: dict,
@@ -919,7 +1038,8 @@ class RadioHostPlugin:
         curr_artist: str,
         song_end_ts: float,
     ) -> None:
-        """Background task: TTS + ffmpeg, then broadcast precisely at song end."""
+        """Background task: TTS + ffmpeg, then broadcast once the song ends
+        and any bumper/jingle in the transition gap has finished playing."""
         self._set_animation("speak")
         try:
             # Step 1: generate TTS audio immediately
@@ -930,27 +1050,21 @@ class RadioHostPlugin:
                 log_error("[radio_host] TTS failed for winding-down banter")
                 return
 
-            # Step 2: pre-convert to WebM with configured gain
-            webm_data = await self._client.convert_audio_to_webm(
-                audio_path, gain_db=self._gain_db
-            )
-            if webm_data is None:
-                return
+            # Step 2: wait for song end + bumper gap to clear.
+            # This replaces the old fixed-timestamp approach which could
+            # cause banter to play over AutoDJ bumpers/jingles.
+            await self._wait_for_bumper_end(song_end_ts)
 
-            # Step 3: wait until 2 s before song end, then connect WebDJ
-            now = _time.time()
-            connect_at = song_end_ts - 2.0
-            if connect_at > now:
-                await asyncio.sleep(connect_at - now)
-
-            result = await self._client.broadcast_webm_at(
-                webm_data=webm_data,
+            # Step 3: now broadcast into the clean gap.
+            # broadcast_banter handles ffmpeg conversion internally.
+            result = await self._client.broadcast_banter(
                 station_shortcode=self._station_id,
-                song_end_ts=song_end_ts,
+                audio_path=audio_path,
                 username=self._streamer_username,
                 password=self._streamer_password,
                 title=f"{self._streamer_username} is speaking",
                 artist="",
+                gain_db=self._gain_db,
             )
 
             await self._log_activity(
