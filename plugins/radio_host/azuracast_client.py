@@ -273,9 +273,10 @@ class AzuraCastClient:
             log_warning(f"[azuracast] Audio file not found: {input_path}")
             return None
         try:
-            # Apply dynamic normalization + explicit gain boost.
-            # dynaudnorm handles overall loudness, volume applies the user-configured dB gain.
-            audio_filter = f"dynaudnorm=f=150:g=15:p=0.95,volume={gain_db}dB"
+            # Apply dynamic normalization + limiter + explicit gain boost.
+            # dynaudnorm handles overall loudness, alimiter prevents clipping when
+            # boosting gain, volume applies the user-configured dB gain.
+            audio_filter = f"dynaudnorm=f=150:g=15:p=0.95,alimiter=limit=0.9,volume={gain_db}dB"
             proc = await asyncio.create_subprocess_exec(
                 "ffmpeg",
                 "-i",
