@@ -1374,6 +1374,8 @@ class RadioHostPlugin:
             [
                 f"Write your response in {lang}.",
                 "Generate a short DJ transition (1-3 sentences). "
+                "You might say who you are, what you're feeling, "
+                "or make a playful comment according your personality and current mood. "
                 f"Say something about the song NOW PLAYING ('{curr_title}'), "
                 "not the one that just finished. "
                 "Be yourself — your personality, your mood, your sense of humor. "
