@@ -276,7 +276,9 @@ class AzuraCastClient:
             # Apply dynamic normalization + limiter + explicit gain boost.
             # dynaudnorm handles overall loudness, alimiter prevents clipping when
             # boosting gain, volume applies the user-configured dB gain.
-            audio_filter = f"dynaudnorm=f=150:g=15:p=0.95,alimiter=limit=0.9,volume={gain_db}dB"
+            audio_filter = (
+                f"dynaudnorm=f=150:g=15:p=0.95,alimiter=limit=0.9,volume={gain_db}dB"
+            )
             proc = await asyncio.create_subprocess_exec(
                 "ffmpeg",
                 "-i",
