@@ -42,7 +42,7 @@ try:
     register_exposed_var(
         "ACTION_INTENT_ALLOW_MESSAGE_ACTIONS",
         label="Action Intent Allow Message Actions",
-        default=False,
+        default=True,
         value_type=bool,
         ui_type="bool",
         description="Allow Debrief to propose message_* actions",
@@ -244,11 +244,11 @@ class DebriefActionIntentPlugin:
         try:
             return bool(
                 config_registry.get_value(
-                    "ACTION_INTENT_ALLOW_MESSAGE_ACTIONS", False, value_type=bool
+                    "ACTION_INTENT_ALLOW_MESSAGE_ACTIONS", True, value_type=bool
                 )
             )
         except Exception:
-            return False
+            return True
 
     def _get_max_actions(self) -> int:
         try:
@@ -386,18 +386,30 @@ class DebriefActionIntentPlugin:
         proactive_enabled = self._proactive_enabled()
 
         system_prompt = (
-            "You are the Debrief Action-Intent analyzer. Your job is to detect\n"
-            "promised, implied, or missing actions that the assistant should have\n"
-            "performed based on the user message and the assistant response.\n\n"
-            "Rules:\n"
-            "- Only return actions from the available action schemas.\n"
-            "- Do NOT repeat actions already processed or failed.\n"
-            "- If no recovery actions are needed, return an empty list.\n"
-            "- If proactive reminders are enabled, infer if the user mentioned\n"
-            "  any future time/date or a task to remember and propose a suitable\n"
-            "  reminder action (e.g. schedule_message or event) without inventing\n"
-            "  missing details.\n"
-            "- Output ONLY valid JSON with the exact schema below.\n\n"
+            "You are the Debrief Action-Intent analyzer. Your job is to identify\n"
+            "actions the assistant PROMISED or IMPLIED in its response but did NOT\n"
+            "actually execute as formal actions.\n\n"
+            "CRITICAL RULES:\n"
+            "1. ALWAYS propose at least one recovery action when the assistant said\n"
+            "   things like 'ok, lo faccio', 'va bene, controllerò', 'ti rispondo',\n"
+            "   'te lo invio', 'lo faccio domani', or any other commitment.\n"
+            "2. Convert conversational promises into concrete executable actions\n"
+            "   using ONLY the available action schemas below.\n"
+            "3. If the assistant promised to send a message, you MUST propose a\n"
+            "   message_* action with the appropriate interface_path and text.\n"
+            "4. If the assistant promised to schedule/remind something, you MUST\n"
+            "   propose schedule_message or event with the details mentioned.\n"
+            "5. Do NOT return an empty list unless the assistant explicitly refused\n"
+            "   or said it cannot do something.\n"
+            "6. Do NOT repeat actions already in processed_action_types or failed_action_types.\n"
+            "7. Output ONLY valid JSON with the exact schema below.\n\n"
+            "EXAMPLES:\n"
+            'User: "Ricordamelo domani"\n'
+            'Assistant: "Va bene, ti scrivo domani."\n'
+            '→ [{"type": "schedule_message", "payload": {"text": "...", "send_in": "1 day"}}]\n\n'
+            'User: "Controlla e fammi sapere"\n'
+            'Assistant: "Ok, controllerò e ti dirò."\n'
+            '→ [{"type": "message_telegram_bot", "payload": {"text": "...", "interface_path": "..."}}]\n\n'
             "Schema:\n"
             '{"actions":[{"type":str,"payload":object,"reason":str,"confidence":"low|medium|high"}]}'
         )
