@@ -442,6 +442,9 @@ class ExternalCortexEngine(AIPluginBase):
         prompt_extra_kwargs: dict[str, Any] = {}
         if isinstance(messages, list):
             msg_list = messages
+            # Ensure sufficient output tokens for structured responses (e.g. Recon JSON).
+            # Most adapters default to 1024 which can truncate multi-field JSON output.
+            prompt_extra_kwargs.setdefault("max_tokens", 4096)
         else:
             prompt_extra_kwargs = self._tool_api_kwargs(messages)
             msg_list = self._build_messages(messages)

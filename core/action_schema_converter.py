@@ -108,10 +108,12 @@ def normalize_action_schema(
 def extract_for_llm_prompt(
     action_name: str, action_def: Dict[str, Any]
 ) -> Dict[str, Any]:
-    """Extract only the parts needed for LLM prompt (schema + brief).
+    """Extract the parts needed for LLM prompt (schema + brief + instructions).
 
-    This minimizes token usage by sending only essential information to the LLM.
-    Detailed examples and instructions are kept for corrector use.
+    Includes the ``examples`` block from the normalized action definition so the
+    LLM receives usage guidance (when to use the action, what to avoid, etc.).
+    This is critical for actions like ``search_current_knowledge`` where the
+    plugin's ``get_prompt_instructions()`` contains essential guardrails.
 
     Parameters
     ----------
@@ -123,7 +125,7 @@ def extract_for_llm_prompt(
     Returns
     -------
     Dict[str, Any]
-        Action definition with only schema and brief
+        Action definition with schema, brief, and examples/instructions
     """
     normalized = normalize_action_schema(action_name, action_def)
 
@@ -132,6 +134,12 @@ def extract_for_llm_prompt(
         "brief": normalized.get("brief", ""),
         "source": normalized.get("source", "unknown"),
     }
+
+    # Include examples/instructions if present — these contain critical usage
+    # guidance (e.g. when to use search_current_knowledge, what to avoid).
+    examples = normalized.get("examples")
+    if isinstance(examples, dict) and examples:
+        result["examples"] = examples
 
     return result
 
