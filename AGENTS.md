@@ -286,6 +286,14 @@ If any step fails, fix it before proceeding.
   `"⚠️ Stuck on [Error]. Requesting human or advanced model intervention."`
 - **Type hints required.** All Python functions need complete annotations (params + return).
 - **Cross-platform policy.** Default runtime is Linux containers. No Windows/macOS-specific primary code paths. Platform-specific logic only as a secondary, guarded case (`sys.platform`).
+- **No keyword-based implementations.**
+  Never design or implement features whose behavior depends primarily on detecting specific words, phrases, trigger terms, or regular expression matches, as this won't work in a multi language environment.
+  Avoid logic such as:
+  - `if message contains X then do Y`
+  - keyword lists
+  - trigger-word routing
+  - regex-based intent detection
+  - hardcoded phrase matching for feature activation
 
 ---
 
