@@ -1364,12 +1364,13 @@ class RadioHostPlugin:
                 f"NEVER say '{prev_title}' is now playing or coming up next.",
                 f"CRITICAL: Mention the now-playing song ('{curr_title}') by name. "
                 "Do NOT mix up which song is which.",
-                "Occasionally (roughly 1 in 3 transitions), add a brief "
-                "fun fact or curiosity about the artist or song — a notable "
+                "Add a brief fun fact or curiosity about the artist or song — a notable "
                 "achievement, a sample origin, or an interesting tidbit. "
-                "Keep it to one short sentence. Don't force it every time.",
+                "Keep it to one short sentence.",
                 "IMPORTANT: Respond using ONLY the 'radio_speak' action type. "
-                "Do NOT use 'message_send', 'send_message', 'message', or any other type.",
+                "Do NOT use 'message_send', 'send_message', 'message', or any other type."
+                "Unless you really want to talk about it with someone in the chat"
+                "But be aware that the user might not be listening to the radio, so please give them context.",
             ]
         )
         context_text = "\n".join(context_text_parts)
