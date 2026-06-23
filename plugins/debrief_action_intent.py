@@ -385,31 +385,46 @@ class DebriefActionIntentPlugin:
         max_actions = self._get_max_actions()
         proactive_enabled = self._proactive_enabled()
 
+        synth_name = "SyntH"
+        try:
+            synth_name = str(
+                config_registry.get_value("SYNTH_NAME", "SyntH", value_type=str)
+                or "SyntH"
+            ).strip()
+        except Exception:
+            pass
+
         system_prompt = (
-            "You are the Debrief Action-Intent analyzer. Your job is to identify\n"
-            "actions the assistant PROMISED or IMPLIED in its response but did NOT\n"
-            "actually execute as formal actions.\n\n"
-            "CRITICAL RULES:\n"
-            "1. ALWAYS propose at least one recovery action when the assistant said\n"
-            "   things like 'ok, lo faccio', 'va bene, controllerò', 'ti rispondo',\n"
-            "   'te lo invio', 'lo faccio domani', or any other commitment.\n"
-            "2. Convert conversational promises into concrete executable actions\n"
-            "   using ONLY the available action schemas below.\n"
-            "3. If the assistant promised to send a message, you MUST propose a\n"
-            "   message_* action with the appropriate interface_path and text.\n"
-            "4. If the assistant promised to schedule/remind something, you MUST\n"
-            "   propose schedule_message or event with the details mentioned.\n"
-            "5. Do NOT return an empty list unless the assistant explicitly refused\n"
-            "   or said it cannot do something.\n"
-            "6. Do NOT repeat actions already in processed_action_types or failed_action_types.\n"
-            "7. Output ONLY valid JSON with the exact schema below.\n\n"
+            f"You are the Debrief Action-Intent analyzer. Your job is to identify\n"
+            f"actions {synth_name} PROMISED or IMPLIED in its response but did NOT\n"
+            f"actually execute as formal actions.\n\n"
+            f"CRITICAL RULES:\n"
+            f"1. ALWAYS propose at least one recovery action when {synth_name} said\n"
+            f"   things like 'ok, i will do it', 'ok, i'll check', 'I will reply',\n"
+            f"   'I will send', 'i will do it tomorrow', or any other commitment.\n"
+            f"2. Convert conversational promises into concrete executable actions\n"
+            f"   using ONLY the available action schemas below.\n"
+            f"3. If {synth_name} promised to send a message, you MUST propose a\n"
+            f"   message_* action with the appropriate interface_path and text.\n"
+            f"4. If {synth_name} promised to schedule/remind something but did NOT\n"
+            f"   create a schedule_message or event action, you MUST propose it.\n"
+            f"   This is the most common failure mode: {synth_name} says 'ok, i will do it',\n"
+            f"   'ok, i'll check', 'I will reply', 'I will send', 'i will do it tomorrow'\n"
+            f"   but forgets to actually schedule it.\n"
+            f"5. Do NOT return an empty list unless {synth_name} explicitly refused\n"
+            f"   or said it cannot do something.\n"
+            f"6. Do NOT repeat actions already in processed_action_types or failed_action_types.\n"
+            f"7. Output ONLY valid JSON with the exact schema below.\n\n"
             "EXAMPLES:\n"
-            'User: "Ricordamelo domani"\n'
-            'Assistant: "Va bene, ti scrivo domani."\n'
+            'User: "Remind me tomorrow"\n'
+            f'{synth_name}: "Ok, I will write it tomorrow."\n'
             '→ [{"type": "schedule_message", "payload": {"text": "...", "send_in": "1 day"}}]\n\n'
-            'User: "Controlla e fammi sapere"\n'
-            'Assistant: "Ok, controllerò e ti dirò."\n'
+            'User: "Check and let me know"\n'
+            f'{synth_name}: "Ok, I will check and let you know."\n'
             '→ [{"type": "message_telegram_bot", "payload": {"text": "...", "interface_path": "..."}}]\n\n'
+            'User: "I need a reminder for the meeting"\n'
+            f'{synth_name}: "Perfect, I have set the reminder for the meeting."\n'
+            '→ [{"type": "schedule_message", "payload": {"text": "Meeting reminder", "send_in": "..."}}]\n\n'
             "Schema:\n"
             '{"actions":[{"type":str,"payload":object,"reason":str,"confidence":"low|medium|high"}]}'
         )
