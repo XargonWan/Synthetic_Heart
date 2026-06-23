@@ -54,6 +54,7 @@ class JingleInjector:
         text: str,
         style: str = "transition",
         pre_generated_audio_path: str | None = None,
+        synth_name: str | None = None,
     ) -> dict[str, Any]:
         if not text or not text.strip():
             return {"status": "skipped", "reason": "empty_text"}
@@ -78,12 +79,13 @@ class JingleInjector:
             except Exception as copy_err:
                 log_warning(f"[radio_host] Could not save persistent audio: {copy_err}")
 
+        speaker_name = synth_name or self._streamer_username or "SyntH"
         result = await self._client.broadcast_banter(
             station_shortcode=self._station_shortcode,
             audio_path=audio_path,
             username=self._streamer_username,
             password=self._streamer_password,
-            title=f"{self._streamer_username} is speaking",
+            title=f"{speaker_name} is speaking",
             artist="",
             gain_db=self._gain_db,
         )

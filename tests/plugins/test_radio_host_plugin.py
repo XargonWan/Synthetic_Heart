@@ -421,3 +421,275 @@ async def test_convert_audio_to_webm_applies_gain(
 
     assert result == b"fake-webm"
     assert captured["gain_db"] == 6.5
+
+
+# ---------------------------------------------------------------------------
+# RADIO_HOST_ANNOUNCE_IF_NO_LISTENERS gating
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_announce_suppressed_without_listeners(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When RADIO_HOST_ANNOUNCE_IF_NO_LISTENERS is True and current_listeners
+    is 0, _on_track_change must return early without injecting banter."""
+    _patch_radio_config(monkeypatch)
+
+    plugin = radio_module.RadioHostPlugin()
+    plugin._enabled = True
+    plugin._running = True
+    plugin._announce_if_no_listeners = True
+
+    inject_calls = []
+
+    async def capturing_inject(*args, **kwargs):
+        inject_calls.append((args, kwargs))
+
+    monkeypatch.setattr(plugin, "_inject_banter_now", capturing_inject)
+
+    # Simulate a monitor with 0 listeners and data available
+    fake_monitor = MagicMock()
+    fake_monitor.listener_data_available = True
+    fake_monitor.current_listeners = 0
+    fake_monitor.last_listeners = 0
+    fake_monitor.current_playlist = ""
+    plugin._monitor = fake_monitor
+
+    await plugin._on_track_change(
+        prev_title="Old Song",
+        prev_artist="Old Artist",
+        curr_title="New Song",
+        curr_artist="New Artist",
+        should_comment=True,
+    )
+
+    assert len(inject_calls) == 0, "No banter should be injected with 0 listeners"
+
+
+@pytest.mark.asyncio
+async def test_announce_allowed_with_listeners(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When RADIO_HOST_ANNOUNCE_IF_NO_LISTENERS is True and current_listeners
+    is > 0, _on_track_change must proceed normally."""
+    _patch_radio_config(monkeypatch)
+
+    plugin = radio_module.RadioHostPlugin()
+    plugin._enabled = True
+    plugin._running = True
+    plugin._announce_if_no_listeners = True
+    plugin._next_song_announcement = False  # de-announce only path
+
+    inject_calls = []
+
+    async def capturing_inject(*args, **kwargs):
+        inject_calls.append((args, kwargs))
+
+    monkeypatch.setattr(plugin, "_inject_banter_now", capturing_inject)
+
+    # Capture the coroutine passed to asyncio.create_task
+    captured_coro = []
+
+    original_create_task = asyncio.create_task
+
+    def capture_task(coro):
+        captured_coro.append(coro)
+        return original_create_task(coro)
+
+    monkeypatch.setattr(asyncio, "create_task", capture_task)
+
+    fake_monitor = MagicMock()
+    fake_monitor.listener_data_available = True
+    fake_monitor.current_listeners = 3
+    fake_monitor.last_listeners = 2
+    fake_monitor.current_playlist = ""
+    plugin._monitor = fake_monitor
+
+    await plugin._on_track_change(
+        prev_title="Old Song",
+        prev_artist="Old Artist",
+        curr_title="New Song",
+        curr_artist="New Artist",
+        should_comment=True,
+    )
+
+    assert len(captured_coro) == 1, f"Expected 1 task, got {len(captured_coro)}"
+
+    await captured_coro[0]
+
+    assert len(inject_calls) == 1, (
+        "Banter should be injected when listeners are present"
+    )
+    args, kwargs = inject_calls[0]
+    assert kwargs.get("deannounce_only") is True
+
+
+@pytest.mark.asyncio
+async def test_announce_always_when_feature_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When RADIO_HOST_ANNOUNCE_IF_NO_LISTENERS is False, announcements must
+    always proceed regardless of listener count."""
+    _patch_radio_config(monkeypatch)
+
+    plugin = radio_module.RadioHostPlugin()
+    plugin._enabled = True
+    plugin._running = True
+    plugin._announce_if_no_listeners = False
+    plugin._next_song_announcement = False
+
+    inject_calls = []
+
+    async def capturing_inject(*args, **kwargs):
+        inject_calls.append((args, kwargs))
+
+    monkeypatch.setattr(plugin, "_inject_banter_now", capturing_inject)
+
+    # Capture the coroutine passed to asyncio.create_task
+    captured_coro = []
+
+    original_create_task = asyncio.create_task
+
+    def capture_task(coro):
+        captured_coro.append(coro)
+        return original_create_task(coro)
+
+    monkeypatch.setattr(asyncio, "create_task", capture_task)
+
+    fake_monitor = MagicMock()
+    fake_monitor.listener_data_available = True
+    fake_monitor.current_listeners = 0
+    fake_monitor.last_listeners = 0
+    fake_monitor.current_playlist = ""
+    plugin._monitor = fake_monitor
+
+    await plugin._on_track_change(
+        prev_title="Old Song",
+        prev_artist="Old Artist",
+        curr_title="New Song",
+        curr_artist="New Artist",
+        should_comment=True,
+    )
+
+    assert len(captured_coro) == 1, f"Expected 1 task, got {len(captured_coro)}"
+
+    await captured_coro[0]
+
+    assert len(inject_calls) == 1, "Banter should be injected when feature is disabled"
+
+
+@pytest.mark.asyncio
+async def test_announce_fallback_when_listener_data_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When listener_data_available is False, the plugin must fall back to
+    the normal announcement path (compatibility with older AzuraCast)."""
+    _patch_radio_config(monkeypatch)
+
+    plugin = radio_module.RadioHostPlugin()
+    plugin._enabled = True
+    plugin._running = True
+    plugin._announce_if_no_listeners = True
+    plugin._next_song_announcement = False
+
+    inject_calls = []
+
+    async def capturing_inject(*args, **kwargs):
+        inject_calls.append((args, kwargs))
+
+    monkeypatch.setattr(plugin, "_inject_banter_now", capturing_inject)
+
+    # Capture the coroutine passed to asyncio.create_task
+    captured_coro = []
+
+    original_create_task = asyncio.create_task
+
+    def capture_task(coro):
+        captured_coro.append(coro)
+        return original_create_task(coro)
+
+    monkeypatch.setattr(asyncio, "create_task", capture_task)
+
+    fake_monitor = MagicMock()
+    fake_monitor.listener_data_available = False  # no data yet
+    fake_monitor.current_listeners = 0
+    fake_monitor.last_listeners = 0
+    fake_monitor.current_playlist = ""
+    plugin._monitor = fake_monitor
+
+    await plugin._on_track_change(
+        prev_title="Old Song",
+        prev_artist="Old Artist",
+        curr_title="New Song",
+        curr_artist="New Artist",
+        should_comment=True,
+    )
+
+    assert len(captured_coro) == 1, f"Expected 1 task, got {len(captured_coro)}"
+
+    await captured_coro[0]
+
+    assert len(inject_calls) == 1, (
+        "Banter should be injected when listener data is unavailable "
+        "(fallback to normal behavior)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_first_listener_resets_intermission(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the first listener arrives (last_listeners=0 -> current_listeners>0),
+    the intermission counter must be reset to 0."""
+    _patch_radio_config(monkeypatch)
+
+    plugin = radio_module.RadioHostPlugin()
+    plugin._enabled = True
+    plugin._running = True
+    plugin._announce_if_no_listeners = True
+    plugin._next_song_announcement = False
+    plugin._track_count_since_comment = 5  # simulate mid-intermission
+
+    inject_calls = []
+
+    async def capturing_inject(*args, **kwargs):
+        inject_calls.append((args, kwargs))
+
+    monkeypatch.setattr(plugin, "_inject_banter_now", capturing_inject)
+
+    # Capture the coroutine passed to asyncio.create_task
+    captured_coro = []
+
+    original_create_task = asyncio.create_task
+
+    def capture_task(coro):
+        captured_coro.append(coro)
+        return original_create_task(coro)
+
+    monkeypatch.setattr(asyncio, "create_task", capture_task)
+
+    fake_monitor = MagicMock()
+    fake_monitor.listener_data_available = True
+    fake_monitor.current_listeners = 1  # first listener
+    fake_monitor.last_listeners = 0  # was 0 before
+    fake_monitor.current_playlist = ""
+    plugin._monitor = fake_monitor
+
+    await plugin._on_track_change(
+        prev_title="Old Song",
+        prev_artist="Old Artist",
+        curr_title="New Song",
+        curr_artist="New Artist",
+        should_comment=True,
+    )
+
+    assert plugin._track_count_since_comment == 0, (
+        "Intermission counter should be reset when first listener arrives"
+    )
+
+    assert len(captured_coro) == 1, f"Expected 1 task, got {len(captured_coro)}"
+
+    await captured_coro[0]
+
+    assert len(inject_calls) == 1, "Banter should be injected for the first listener"

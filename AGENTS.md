@@ -1042,6 +1042,7 @@ All keys stored in the `config` table and accessible via `config_registry.get_va
 | `ACTIVE_VOX_ENGINE` | Active TTS engine |
 | `ACTIVE_AURIS_ENGINE` | Active STT engine |
 | `ACTIVE_IRIS_ENGINE` | Active vision/image engine |
+| `RADIO_HOST_ANNOUNCE_IF_NO_LISTENERS` | When enabled (default True), Synth only speaks on air if listeners are present. Set to False for always-on announcements. |
 | `SYNTH_NAME` | Synth's display name |
 | `SYNTH_PROFILE` | Synth's persona profile text (injected into every prompt) |
 | `SYNTH_ALIASES` | Comma-separated name aliases Synth responds to |

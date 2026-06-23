@@ -47,6 +47,28 @@ class TrackMonitor:
         self.next_track_artist: str | None = None
         self._end_announced_for_id: str | None = None
 
+        self._current_listeners: int = 0
+        self._last_listeners: int = 0
+        self.listener_data_available: bool = False
+
+        # Track ID for which winding-down was deferred (because current track
+        # was a bumper/jingle).  Set when winding-down is skipped for short
+        # content; consumed by _on_track_change to inject the deferred banter.
+        self._deferred_inject_for_track_id: str | None = None
+
+        # Track ID for which winding-down has already completed injection.
+        # Prevents _on_track_change from injecting a second banter for the
+        # same transition when a bumper played between songs.
+        self._winding_down_injected_for_id: str | None = None
+
+    @property
+    def current_listeners(self) -> int:
+        return self._current_listeners
+
+    @property
+    def last_listeners(self) -> int:
+        return self._last_listeners
+
     def update_config(
         self,
         station_id: str | None = None,
@@ -104,6 +126,15 @@ class TrackMonitor:
         title: str | None = track.get("title")
         artist: str | None = track.get("artist")
         playlist: str | None = current.get("playlist")
+
+        # Extract listener count from AzuraCast response.
+        listeners_obj = np.get("listeners", {}) or {}
+        self._last_listeners = self._current_listeners
+        try:
+            self._current_listeners = int(listeners_obj.get("total", 0) or 0)
+        except (TypeError, ValueError):
+            self._current_listeners = 0
+        self.listener_data_available = True
 
         if not track_id or not title or not artist:
             return
@@ -183,17 +214,21 @@ class TrackMonitor:
                         f"'{title}' by {artist}"
                     )
 
-                    # Only count real songs (non-jingles) toward the intermission.
-                    # Jingles play between real songs and should not advance the
-                    # "songs-since-comment" counter, so synth doesn't skip an
-                    # announcement just because a 10 s bumper played in between.
+                    # Only count real songs (non-jingles, non-bumpers) toward the
+                    # intermission.  Jingles and bumpers play between real songs
+                    # and should not advance the "songs-since-comment" counter,
+                    # so synth doesn't skip an announcement just because a
+                    # 10 s bumper played in between.
                     curr_playlist_lower = self.current_playlist.lower()
-                    curr_is_jingle = "jingle" in curr_playlist_lower
-                    if not curr_is_jingle:
+                    curr_is_jingle_or_bumper = (
+                        "jingle" in curr_playlist_lower
+                        or "bumper" in curr_playlist_lower
+                    )
+                    if not curr_is_jingle_or_bumper:
                         self._track_count_since_comment += 1
 
                     should_comment = (
-                        not curr_is_jingle
+                        not curr_is_jingle_or_bumper
                         and self._track_count_since_comment >= self._intermission
                     )
                     if should_comment:
@@ -208,7 +243,7 @@ class TrackMonitor:
                     await self._fire_track_change(
                         should_comment=should_comment,
                         queue_ahead=queue_ahead,
-                        curr_is_jingle=curr_is_jingle,
+                        curr_is_jingle=curr_is_jingle_or_bumper,
                     )
                 else:
                     if not self.next_track_title and queue_ahead:
@@ -251,6 +286,10 @@ class TrackMonitor:
                         f"'{self.current_track_title}' "
                         f"({duration:.0f}s, playlist='{playlist}')"
                     )
+                    # Record that winding-down was deferred for this track.
+                    # The deferred inject will be handled in _fire_track_change
+                    # when the next real song begins.
+                    self._deferred_inject_for_track_id = self._last_track_id
                 else:
                     log_info(
                         f"[radio_host] Song winding down: "
@@ -258,6 +297,10 @@ class TrackMonitor:
                         f"({remaining:.0f}s remaining)"
                     )
                     await self._fire_winding_down(remaining=remaining)
+                    # Mark winding-down as completed for this track so that
+                    # _fire_track_change does not inject a second banter if a
+                    # bumper plays between songs.
+                    self._winding_down_injected_for_id = self._last_track_id
 
     def _extract_next_song(self, np: dict) -> dict[str, str]:
         playing_next = np.get("playing_next", {}) or {}
@@ -337,6 +380,21 @@ class TrackMonitor:
         prev_is_jingle = bool(
             self._last_playlist and "jingle" in self._last_playlist.lower()
         )
+        # Also treat bumpers as non-commentable (skip injection for them too)
+        curr_playlist_lower = self.current_playlist.lower()
+        if not curr_is_jingle:
+            curr_is_jingle = "bumper" in curr_playlist_lower
+        # Determine whether winding-down was already injected for the
+        # previous track (if so, _on_track_change should NOT inject again).
+        wd_already_injected = self._winding_down_injected_for_id == self._last_track_id
+        # Determine whether winding-down was deferred (the previous track was
+        # a bumper/jingle so the banter needs to be injected now).
+        # Only consume the deferred flag when the current track is a real song
+        # (not another bumper), to preserve it across multiple back-to-back
+        # bumper/jingle transitions.
+        wd_deferred = self._deferred_inject_for_track_id is not None
+        if wd_deferred and not curr_is_jingle:
+            self._deferred_inject_for_track_id = None
         try:
             await self._on_track_change(
                 prev_title=self._last_track_title,
@@ -349,6 +407,8 @@ class TrackMonitor:
                 queue_ahead=queue_ahead,
                 prev_is_jingle=prev_is_jingle,
                 curr_is_jingle=curr_is_jingle,
+                winding_down_already_injected=wd_already_injected,
+                winding_down_deferred_for_prev=wd_deferred,
             )
         except Exception as e:
             log_error(f"[radio_host] Track change handler failed: {e}")
