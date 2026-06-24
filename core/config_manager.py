@@ -1027,18 +1027,23 @@ class ConfigRegistry:
     def _serialize_value(self, definition: ConfigDefinition, value: Any) -> str:
         if value is None:
             return ""
+        raw = str(value)
+        # Strip inline comments and trailing whitespace to prevent corruption
+        # like "Asia/Tokyo # Timezone for scheduled events..."
+        if "\n" not in raw:
+            raw = raw.split("#")[0].strip()
         if definition.value_type is bool:
-            return "true" if bool(value) else "false"
+            return "true" if bool(raw) else "false"
         if definition.value_type is int:
-            if value == "":
+            if raw == "":
                 return ""
-            return str(int(value))
+            return str(int(raw))
         if definition.value_type is float:
-            return str(float(value))
+            return str(float(raw))
         if definition.value_type == "json":
             import json
 
-            return json.dumps(value)
+            return json.dumps(raw)
         if callable(definition.value_type) and definition.value_type not in (
             bool,
             int,
@@ -1046,9 +1051,9 @@ class ConfigRegistry:
             str,
         ):
             converter = cast(Callable[[Any], Any], definition.value_type)
-            converted = converter(value)
+            converted = converter(raw)
             return str(converted)
-        return str(value)
+        return raw
 
     def _convert_value(self, definition: ConfigDefinition, raw_value: str) -> Any:
         if definition.key == "SYNTH_ALIASES":

@@ -4913,6 +4913,15 @@ class SynthWebUIInterface:
             )
             options = exposed_def.options if exposed_def else []
 
+            # If no explicit options from exposed_vars, try deriving from constraints
+            if not options and entry.get("constraints"):
+                constraints = entry["constraints"]
+                if isinstance(constraints, dict) and "choices" in constraints:
+                    choices = constraints["choices"]
+                    if choices and len(choices) > 0:
+                        options = choices
+                        ui_type = "combobox"
+
             # If this is the autonomy whitelist, present unsafe actions as choices
             if entry.get("key") == "AUTONOMY_ALLOWED_ACTIONS":
                 options = sorted(list(unsafe_actions))
