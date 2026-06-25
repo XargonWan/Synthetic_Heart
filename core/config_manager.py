@@ -1027,6 +1027,12 @@ class ConfigRegistry:
     def _serialize_value(self, definition: ConfigDefinition, value: Any) -> str:
         if value is None:
             return ""
+        # Handle JSON types BEFORE converting to string to avoid
+        # corrupting Python lists/dicts into Python repr strings.
+        if definition.value_type == "json":
+            import json
+
+            return json.dumps(value)
         raw = str(value)
         # Strip inline comments and trailing whitespace to prevent corruption
         # like "Asia/Tokyo # Timezone for scheduled events..."
@@ -1040,10 +1046,6 @@ class ConfigRegistry:
             return str(int(raw))
         if definition.value_type is float:
             return str(float(raw))
-        if definition.value_type == "json":
-            import json
-
-            return json.dumps(raw)
         if callable(definition.value_type) and definition.value_type not in (
             bool,
             int,
