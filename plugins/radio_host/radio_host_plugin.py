@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import random
 import time as _time
 from collections import deque
 from datetime import datetime, timezone
@@ -778,8 +777,8 @@ class RadioHostPlugin:
         ``RADIO_HOST_NEXT_SONG_ANNOUNCEMENT`` is disabled.
 
         Tries pre-generated audio first (stored at the previous track_change for
-        this exact transition).  Falls back to template text + TTS when no pre-gen
-        is available or the queue changed in between.
+        this exact transition).  Falls back to on-the-fly LLM generation when no
+        pre-gen is available or the queue changed in between.
         """
         banter_to_inject = self._pop_matching_banter(prev_title, prev_artist)
         if banter_to_inject:
@@ -795,26 +794,28 @@ class RadioHostPlugin:
                 log_info(
                     f"[radio_host] Pre-generated banter stale "
                     f"(was '{pre_gen_curr}', now '{curr_title}'); "
-                    f"falling back to template"
+                    f"generating on the fly"
                 )
                 banter_to_inject = None
 
         if banter_to_inject is None:
-            if deannounce_only:
-                banter_text = self._build_deannounce_template(prev_title, prev_artist)
-                log_info(
-                    f"[radio_host] Track change with de-announce template: "
-                    f"'{prev_title}'"
+            log_info(
+                f"[radio_host] No pre-generated banter available; "
+                f"generating LLM banter on the fly: '{prev_title}' -> '{curr_title}'"
+            )
+            banter_to_inject = await self._generate_banter_on_the_fly(
+                prev_title=prev_title,
+                prev_artist=prev_artist,
+                curr_title=curr_title,
+                curr_artist=curr_artist,
+                deannounce_only=deannounce_only,
+            )
+            if banter_to_inject is None:
+                log_error(
+                    "[radio_host] On-the-fly LLM banter generation failed; "
+                    "skipping injection"
                 )
-            else:
-                banter_text = self._build_banter_template(
-                    prev_title, prev_artist, curr_title, curr_artist
-                )
-                log_info(
-                    f"[radio_host] Track change with template banter: "
-                    f"'{prev_title}' -> '{curr_title}'"
-                )
-            banter_to_inject = {"text": banter_text, "style": "transition"}
+                return
 
         self._set_animation("speak")
         result = await self._injector.inject_banter(
@@ -902,7 +903,7 @@ class RadioHostPlugin:
             )
             return
 
-        # Generate banter text
+        # Generate banter text - always use LLM, never templates
         if self._next_song_announcement:
             # Full transition announcement: mentions both previous and next song.
             fresh_next = await self._fetch_next_track_info()
@@ -936,28 +937,49 @@ class RadioHostPlugin:
                     log_info(
                         f"[radio_host] Pre-generated banter stale "
                         f"(was '{pre_gen_next}', now '{actual_next}'); "
-                        f"falling back to template"
+                        f"generating on the fly"
                     )
                     banter_to_inject = None
 
             if banter_to_inject is None:
-                banter_text = self._build_winding_down_template(
-                    curr_title, curr_artist, actual_next, actual_next_artist
-                )
                 log_info(
-                    f"[radio_host] Winding down with template banter: "
-                    f"'{curr_title}' -> '{actual_next}'"
+                    f"[radio_host] No pre-generated banter available; "
+                    f"generating LLM banter on the fly: '{curr_title}' -> '{actual_next}'"
                 )
-                banter_to_inject = {"text": banter_text, "style": "transition"}
+                banter_to_inject = await self._generate_banter_on_the_fly(
+                    prev_title=curr_title,
+                    prev_artist=curr_artist,
+                    curr_title=actual_next,
+                    curr_artist=actual_next_artist,
+                    deannounce_only=False,
+                )
+                if banter_to_inject is None:
+                    log_error(
+                        "[radio_host] On-the-fly LLM banter generation failed; "
+                        "skipping winding-down injection"
+                    )
+                    return
         else:
             # De-announce only: mention the song that just finished,
             # without mentioning what's coming next.  Still uses the
             # timed injection pipeline so it lands in the gap.
-            banter_text = self._build_deannounce_template(curr_title, curr_artist)
             log_info(
-                f"[radio_host] Winding down with de-announce template: '{curr_title}'"
+                f"[radio_host] No pre-generated banter available; "
+                f"generating LLM banter on the fly (de-announce): '{curr_title}'"
             )
-            banter_to_inject = {"text": banter_text, "style": "transition"}
+            banter_to_inject = await self._generate_banter_on_the_fly(
+                prev_title=curr_title,
+                prev_artist=curr_artist,
+                curr_title="",
+                curr_artist="",
+                deannounce_only=True,
+            )
+            if banter_to_inject is None:
+                log_error(
+                    "[radio_host] On-the-fly LLM banter generation failed; "
+                    "skipping winding-down injection"
+                )
+                return
 
         # Clear the fallback flag — we just injected
         self._inject_at_track_change = False
@@ -1092,18 +1114,12 @@ class RadioHostPlugin:
 
     _MAX_PENDING_BANTER = 8
 
-    def _store_pending_banter(self, banter: dict[str, Any], source: str) -> None:
-        """Store pre-generated banter keyed by its transition.
+    def _store_pending_banter(self, banter: dict[str, Any]) -> None:
+        """Store pre-generated LLM banter keyed by its transition.
 
-        ``source`` is ``"template"`` or ``"llm"``; a fast template result must
-        not overwrite richer LLM banter already stored for the same transition.
         Oldest entries are pruned so stale transitions don't accumulate.
         """
         key = (banter.get("prev_title") or "", banter.get("prev_artist") or "")
-        existing = self._pending_banter.get(key)
-        if existing and existing.get("source") == "llm" and source == "template":
-            return
-        banter["source"] = source
         self._pending_banter.pop(key, None)
         self._pending_banter[key] = banter
         while len(self._pending_banter) > self._MAX_PENDING_BANTER:
@@ -1120,221 +1136,45 @@ class RadioHostPlugin:
         curr_artist: str,
     ) -> None:
         asyncio.create_task(
-            self._pre_generate_template_banter(
-                prev_title=prev_title,
-                prev_artist=prev_artist,
-                curr_title=curr_title,
-                curr_artist=curr_artist,
-            )
-        )
-        asyncio.create_task(
             self._enqueue_banter_generation(
                 prev_title=prev_title,
                 prev_artist=prev_artist,
                 curr_title=curr_title,
                 curr_artist=curr_artist,
                 pre_generate=True,
+                deannounce_only=False,
             )
         )
 
-    async def _pre_generate_template_banter(
+    async def _generate_banter_on_the_fly(
         self,
         prev_title: str,
         prev_artist: str,
         curr_title: str,
         curr_artist: str,
-    ) -> None:
-        text = self._build_banter_template(
-            prev_title, prev_artist, curr_title, curr_artist
+        deannounce_only: bool = False,
+    ) -> dict[str, Any] | None:
+        """Enqueue an urgent LLM banter generation and wait for it.
+
+        Returns the banter dict with ``text``, ``style``, and optionally
+        ``audio_path``, or None if the LLM did not respond in time.
+        """
+        await self._enqueue_banter_generation(
+            prev_title=prev_title,
+            prev_artist=prev_artist,
+            curr_title=curr_title,
+            curr_artist=curr_artist,
+            pre_generate=True,
+            deannounce_only=deannounce_only,
         )
-        audio_path = await self._injector.generate_tts(text)
-        self._store_pending_banter(
-            {
-                "text": text,
-                "style": "transition",
-                "audio_path": audio_path,
-                "prev_title": prev_title,
-                "prev_artist": prev_artist,
-                "curr_title": curr_title,
-                "curr_artist": curr_artist,
-            },
-            source="template",
-        )
-
-    def _build_deannounce_template(
-        self,
-        prev_title: str,
-        prev_artist: str,
-    ) -> str:
-        """Template for de-announce only: mentions the song that just finished,
-        but NOT the next track. Used when RADIO_HOST_NEXT_SONG_ANNOUNCEMENT is off."""
-        station = self._station_name.strip()
-        args = (prev_title, prev_artist)
-
-        templates = [
-            "That was {0} by {1}.",
-            "You just heard {0} by {1}.",
-            "{0} by {1}.",
-            "We were listening to {0} by {1}.",
-            "That track was {0} by {1}.",
-            "Great track from {1} — that was {0}.",
-            "I loved that one — {0} by {1}.",
-            "From {0} by {1}.",
-        ]
-        if station:
-            templates.extend(
-                [
-                    "You're listening to {2}. That was {0} by {1}.",
-                    "On {2}, we just heard {0} by {1}.",
-                    "Welcome back to {2}. That was {0} by {1}.",
-                    "You're tuned to {2} — that was {0} by {1}.",
-                ]
-            )
-
-        template = random.choice(templates)
-        text = template.format(*args, station) if station else template.format(*args)
-
-        lang = self._language.strip().lower() if self._language.strip() else "english"
-        if lang != "english":
-            if lang == "italian" or lang == "it":
-                it_templates = [
-                    "Abbiamo ascoltato {0} di {1}.",
-                    "Era {0} di {1}.",
-                    "{0} di {1}.",
-                    "Quello era {0} di {1}.",
-                    "Che pezzo, {0} di {1}.",
-                    "Bellissimo brano di {1} — {0}.",
-                ]
-                if station:
-                    it_templates.extend(
-                        [
-                            "Sei su {2}. Quello era {0} di {1}.",
-                            "Su {2}, abbiamo appena sentito {0} di {1}.",
-                            "Benvenuto su {2}. Prima {0} di {1}.",
-                            "Sei in sintonia con {2} — {0} di {1}.",
-                        ]
-                    )
-                it_template = random.choice(it_templates)
-                text = (
-                    it_template.format(*args, station)
-                    if station
-                    else it_template.format(*args)
-                )
-
-        return text
-
-    def _build_banter_template(
-        self,
-        prev_title: str,
-        prev_artist: str,
-        curr_title: str,
-        curr_artist: str,
-    ) -> str:
-        station = self._station_name.strip()
-
-        args = (prev_title, prev_artist, curr_title, curr_artist)
-        templates = [
-            "That was {0} by {1}. Now playing {2} by {3}.",
-            "You just heard {0} by {1}. Next up, {2} by {3}.",
-            "{0} by {1}, and now {2} by {3}.",
-            "We were listening to {0} by {1}. Here comes {2} by {3}.",
-            "That track was {0} by {1}. Let's keep going with {2} by {3}.",
-            "Great track from {1}. Now here's {2} by {3}.",
-            "I loved that one — {0} by {1}. What's next? {2} by {3}.",
-            "From {0} by {1}, we move on to {2} by {3}.",
-        ]
-        if station:
-            templates.extend(
-                [
-                    "You're listening to {4}. That was {0} by {1}, and now {2} by {3}.",
-                    "On {4}, we just heard {0} by {1}. Next up is {2} by {3}.",
-                    "Welcome back to {4}. That was {0} by {1}, now playing {2} by {3}.",
-                    "You're tuned to {4} — that was {0} by {1}, now {2} by {3}.",
-                ]
-            )
-
-        template = random.choice(templates)
-        text = template.format(*args, station) if station else template.format(*args)
-
-        lang = self._language.strip().lower() if self._language.strip() else "english"
-        if lang != "english":
-            if lang == "italian" or lang == "it":
-                it_templates = [
-                    "Abbiamo ascoltato {0} di {1}. Ora in onda {2} di {3}.",
-                    "Era {0} di {1}. Adesso {2} di {3}.",
-                    "{0} di {1}, e adesso {2} di {3}.",
-                    "Finiva {0} di {1}, parte ora {2} di {3}.",
-                    "Quello era {0} di {1}. Continuiamo con {2} di {3}.",
-                    "Che pezzo, {0} di {1}. Ora arriva {2} di {3}.",
-                    "Da {0} di {1} a {2} di {3}.",
-                    "Bellissimo brano di {1}. Adesso {2} di {3}.",
-                    "Dopo {0} di {1}, ecco {2} di {3}.",
-                ]
-                if station:
-                    it_templates.extend(
-                        [
-                            "Sei su {4}. Quello era {0} di {1}, ora {2} di {3}.",
-                            "Su {4}, abbiamo appena sentito {0} di {1}. Ora {2} di {3}.",
-                            "Benvenuto su {4}. Prima {0} di {1}, ora {2} di {3}.",
-                            "Sei in sintonia con {4} — {0} di {1}, e adesso {2} di {3}.",
-                        ]
-                    )
-                it_template = random.choice(it_templates)
-                text = (
-                    it_template.format(*args, station)
-                    if station
-                    else it_template.format(*args)
-                )
-
-        return text
-
-    def _build_winding_down_template(
-        self,
-        curr_title: str,
-        curr_artist: str,
-        next_title: str,
-        next_artist: str,
-    ) -> str:
-        station = self._station_name.strip()
-        args = (curr_title, curr_artist, next_title, next_artist)
-
-        lang = self._language.strip().lower() if self._language.strip() else "english"
-        if lang == "italian" or lang == "it":
-            templates = [
-                "Avete appena ascoltato {0} di {1}. A seguire: {2} di {3}.",
-                "Era {0} di {1}. Ora in arrivo: {2} di {3}.",
-                "Finisce qui {0} di {1}. Continua con {2} di {3}.",
-                "Avete sentito {0} di {1}. Prossimo: {2} di {3}.",
-                "Si conclude {0} di {1}. Subito dopo: {2} di {3}.",
-                "Ultimo giro per {0} di {1}. Ora tocca a {2} di {3}.",
-            ]
-            if station:
-                templates.extend(
-                    [
-                        "Su {4} avete appena sentito {0} di {1}. Ora arriva {2} di {3}.",
-                        "Su {4} finisce {0} di {1}. Prossimo: {2} di {3}.",
-                    ]
-                )
-        else:
-            templates = [
-                "You just heard {0} by {1}. Up next: {2} by {3}.",
-                "That was {0} by {1}. Coming up: {2} by {3}.",
-                "Just finished: {0} by {1}. Now: {2} by {3}.",
-                "We've been listening to {0} by {1}. Next: {2} by {3}.",
-                "{0} by {1} just ended. Here comes {2} by {3}.",
-                "Last spin for {0} by {1}. Now playing: {2} by {3}.",
-            ]
-            if station:
-                templates.extend(
-                    [
-                        "On {4}, you just heard {0} by {1}. Next up: {2} by {3}.",
-                        "On {4}, that was {0} by {1}. Coming next: {2} by {3}.",
-                    ]
-                )
-
-        template = random.choice(templates)
-        text = template.format(*args, station) if station else template.format(*args)
-        return text
+        # Poll _pending_banter for up to ~5s waiting for the LLM response
+        key = (prev_title, prev_artist)
+        for _ in range(20):
+            await asyncio.sleep(0.25)
+            banter = self._pending_banter.pop(key, None)
+            if banter:
+                return banter
+        return None
 
     def _set_animation(self, state: str) -> None:
         pm = get_persona_manager()
@@ -1348,49 +1188,77 @@ class RadioHostPlugin:
         curr_title: str,
         curr_artist: str,
         pre_generate: bool,
+        deannounce_only: bool = False,
     ) -> None:
         from core import message_queue
 
         lang = self._language.strip() or "English"
         desc = self._schedule_desc.strip()
         station = self._station_name.strip()
-        context_text_parts = [
-            f"Song that JUST FINISHED (do NOT say this is playing now): "
-            f"'{prev_title}' by {prev_artist}.",
-            f"Song that is NOW PLAYING (this is the one to announce): "
-            f"'{curr_title}' by {curr_artist}.",
-        ]
-        if station:
-            context_text_parts.append(f"You are on {station}.")
-        if desc:
-            context_text_parts.append(f"Current program: {desc}.")
-        # Include synth personality so the radio DJ voice stays in character
-        synth_profile = str(
-            config_registry.get_value("SYNTH_PROFILE", "") or ""
-        ).strip()
-        if synth_profile:
-            context_text_parts.append(f"Your personality: {synth_profile}")
-        context_text_parts.extend(
-            [
-                f"Write your response in {lang}.",
-                "Generate a short DJ transition (1-3 sentences). "
-                "You might say who you are, what you're feeling, "
-                "or make a playful comment according your personality and current mood. "
-                f"Say something about the song NOW PLAYING ('{curr_title}'), "
-                "not the one that just finished. "
-                "Be yourself — your personality, your mood, your sense of humor. "
-                f"NEVER say '{prev_title}' is now playing or coming up next.",
-                f"CRITICAL: Mention the now-playing song ('{curr_title}') by name. "
-                "Do NOT mix up which song is which.",
-                "Add a brief fun fact or curiosity about the artist or song — a notable "
-                "achievement, a sample origin, or an interesting tidbit. "
-                "Keep it to one short sentence.",
-                "IMPORTANT: Respond using ONLY the 'radio_speak' action type. "
-                "Do NOT use 'message_send', 'send_message', 'message', or any other type."
-                "Unless you really want to talk about it with someone in the chat"
-                "But be aware that the user might not be listening to the radio, so please give them context.",
+
+        if deannounce_only:
+            context_text_parts = [
+                f"Song that JUST FINISHED: '{prev_title}' by {prev_artist}.",
+                "The radio will play the next song automatically — you do NOT "
+                "need to introduce it. Just say a quick goodbye to this track.",
             ]
-        )
+            if station:
+                context_text_parts.append(f"You are on {station}.")
+            if desc:
+                context_text_parts.append(f"Current program: {desc}.")
+            synth_profile = str(
+                config_registry.get_value("SYNTH_PROFILE", "") or ""
+            ).strip()
+            if synth_profile:
+                context_text_parts.append(f"Your personality: {synth_profile}")
+            context_text_parts.extend(
+                [
+                    f"Write your response in {lang}.",
+                    "Generate a short radiophonic de-announcement (1-2 sentences). "
+                    "Just mention the song that finished — say it's been great, "
+                    "make a quick remark about it, nothing more. "
+                    "Be yourself — your personality and mood.",
+                    "IMPORTANT: Respond using ONLY the 'radio_speak' action type.",
+                ]
+            )
+        else:
+            context_text_parts = [
+                f"Song that JUST FINISHED (do NOT say this is playing now): "
+                f"'{prev_title}' by {prev_artist}.",
+                f"Song that is NOW PLAYING (this is the one to announce): "
+                f"'{curr_title}' by {curr_artist}.",
+            ]
+            if station:
+                context_text_parts.append(f"You are on {station}.")
+            if desc:
+                context_text_parts.append(f"Current program: {desc}.")
+            # Include synth personality so the radio DJ voice stays in character
+            synth_profile = str(
+                config_registry.get_value("SYNTH_PROFILE", "") or ""
+            ).strip()
+            if synth_profile:
+                context_text_parts.append(f"Your personality: {synth_profile}")
+            context_text_parts.extend(
+                [
+                    f"Write your response in {lang}.",
+                    "Generate a short DJ transition (1-3 sentences). "
+                    "You might say who you are, what you're feeling, "
+                    "or make a playful comment according your personality and current mood. "
+                    f"Say something about the song NOW PLAYING ('{curr_title}'), "
+                    "not the one that just finished. "
+                    "Be yourself — your personality, your mood, your sense of humor. "
+                    f"NEVER say '{prev_title}' is now playing or coming up next.",
+                    f"CRITICAL: Mention the now-playing song ('{curr_title}') by name. "
+                    "Do NOT mix up which song is which.",
+                    "Add a brief fun fact or curiosity about the artist or song — a notable "
+                    "achievement, a sample origin, or an interesting tidbit. "
+                    "Keep it to one short sentence.",
+                    "IMPORTANT: Respond using ONLY the 'radio_speak' action type. "
+                    "Do NOT use 'message_send', 'send_message', 'message', or any other type."
+                    "Unless you really want to talk about it with someone in the chat"
+                    "But be aware that the user might not be listening to the radio, so please give them context.",
+                ]
+            )
         context_text = "\n".join(context_text_parts)
 
         message = SimpleNamespace()
@@ -1675,7 +1543,7 @@ class RadioHostPlugin:
                     "curr_title": context.get("radio_pregenerate_next_title", ""),
                     "curr_artist": context.get("radio_pregenerate_next_artist", ""),
                 }
-                self._store_pending_banter(banter, source="llm")
+                self._store_pending_banter(banter)
                 log_info(
                     f"[radio_host] Stored pre-generated banter for "
                     f"'{banter['prev_title']}' -> '{banter['curr_title']}'"

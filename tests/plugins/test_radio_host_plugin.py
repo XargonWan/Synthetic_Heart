@@ -266,21 +266,14 @@ async def test_announce_disabled_injects_deannounce_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """When RADIO_HOST_NEXT_SONG_ANNOUNCEMENT is False, _on_track_change must
-    inject a de-announce (no next-track mention) and skip pre-generation."""
+    pre-generate LLM banter for upcoming transitions and skip injection here
+    (de-announce is handled by _on_winding_down instead)."""
     _patch_radio_config(monkeypatch)
 
     plugin = radio_module.RadioHostPlugin()
     plugin._enabled = True
     plugin._running = True
     plugin._next_song_announcement = False  # next-song announcement disabled
-
-    # Patch _inject_banter_now FIRST (before create_task captures the coroutine)
-    inject_calls = []
-
-    async def capturing_inject(*args, **kwargs):
-        inject_calls.append((args, kwargs))
-
-    monkeypatch.setattr(plugin, "_inject_banter_now", capturing_inject)
 
     # Capture the coroutine passed to asyncio.create_task
     captured_coro = []
@@ -308,20 +301,11 @@ async def test_announce_disabled_injects_deannounce_only(
         ],
     )
 
-    # Verify a task was created for the de-announce injection
-    assert len(captured_coro) == 1, f"Expected 1 task, got {len(captured_coro)}"
+    # With queue_ahead having 2+ items, _pre_generate_from_queue creates
+    # one LLM pre-generation task per transition (B->C, C->D)
+    assert len(captured_coro) == 2, f"Expected 2 pre-gen tasks, got {len(captured_coro)}"
 
-    # Run the captured coroutine (it will call our capturing_inject)
-    await captured_coro[0]
-
-    # Verify the de-announce call
-    assert len(inject_calls) == 1
-    args, kwargs = inject_calls[0]
-    assert kwargs.get("deannounce_only") is True
-    assert args[0] == "Old Song"  # prev_title
-    assert args[2] == "Old Song"  # curr_title (same as prev for de-announce)
-
-    # _inject_at_track_change must be cleared so no fallback fires later
+    # _inject_at_track_change must be False so no fallback injection fires
     assert plugin._inject_at_track_change is False
 
 
@@ -358,11 +342,10 @@ async def test_pregen_queue_uses_correct_from_track(
                 "prev_artist": prev_artist,
                 "curr_title": curr_title,
                 "curr_artist": curr_artist,
-                "text": f"Template: {prev_title} -> {curr_title}",
+                "text": f"LLM: {prev_title} -> {curr_title}",
                 "style": "transition",
                 "audio_path": None,
-            },
-            source="template",
+            }
         )
 
     monkeypatch.setattr(plugin, "_enqueue_pre_gen_banter", capture_enqueue)
@@ -472,7 +455,7 @@ async def test_announce_allowed_with_listeners(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """When RADIO_HOST_ANNOUNCE_IF_NO_LISTENERS is True and current_listeners
-    is > 0, _on_track_change must proceed normally."""
+    is > 0, _on_track_change must pre-generate LLM banter for upcoming tracks."""
     _patch_radio_config(monkeypatch)
 
     plugin = radio_module.RadioHostPlugin()
@@ -480,13 +463,6 @@ async def test_announce_allowed_with_listeners(
     plugin._running = True
     plugin._announce_if_no_listeners = True
     plugin._next_song_announcement = False  # de-announce only path
-
-    inject_calls = []
-
-    async def capturing_inject(*args, **kwargs):
-        inject_calls.append((args, kwargs))
-
-    monkeypatch.setattr(plugin, "_inject_banter_now", capturing_inject)
 
     # Capture the coroutine passed to asyncio.create_task
     captured_coro = []
@@ -514,15 +490,11 @@ async def test_announce_allowed_with_listeners(
         should_comment=True,
     )
 
-    assert len(captured_coro) == 1, f"Expected 1 task, got {len(captured_coro)}"
+    # With no queue_ahead and no next_title, no pre-generation tasks are created
+    assert len(captured_coro) == 0, f"Expected 0 tasks, got {len(captured_coro)}"
 
-    await captured_coro[0]
-
-    assert len(inject_calls) == 1, (
-        "Banter should be injected when listeners are present"
-    )
-    args, kwargs = inject_calls[0]
-    assert kwargs.get("deannounce_only") is True
+    # _inject_at_track_change must be False (de-announce handled by _on_winding_down)
+    assert plugin._inject_at_track_change is False
 
 
 @pytest.mark.asyncio
@@ -530,7 +502,7 @@ async def test_announce_always_when_feature_disabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """When RADIO_HOST_ANNOUNCE_IF_NO_LISTENERS is False, announcements must
-    always proceed regardless of listener count."""
+    always pre-generate LLM banter regardless of listener count."""
     _patch_radio_config(monkeypatch)
 
     plugin = radio_module.RadioHostPlugin()
@@ -538,13 +510,6 @@ async def test_announce_always_when_feature_disabled(
     plugin._running = True
     plugin._announce_if_no_listeners = False
     plugin._next_song_announcement = False
-
-    inject_calls = []
-
-    async def capturing_inject(*args, **kwargs):
-        inject_calls.append((args, kwargs))
-
-    monkeypatch.setattr(plugin, "_inject_banter_now", capturing_inject)
 
     # Capture the coroutine passed to asyncio.create_task
     captured_coro = []
@@ -572,11 +537,11 @@ async def test_announce_always_when_feature_disabled(
         should_comment=True,
     )
 
-    assert len(captured_coro) == 1, f"Expected 1 task, got {len(captured_coro)}"
+    # With no queue_ahead and no next_title, no pre-generation tasks are created
+    assert len(captured_coro) == 0, f"Expected 0 tasks, got {len(captured_coro)}"
 
-    await captured_coro[0]
-
-    assert len(inject_calls) == 1, "Banter should be injected when feature is disabled"
+    # _inject_at_track_change must be False (de-announce handled by _on_winding_down)
+    assert plugin._inject_at_track_change is False
 
 
 @pytest.mark.asyncio
@@ -584,7 +549,7 @@ async def test_announce_fallback_when_listener_data_unavailable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """When listener_data_available is False, the plugin must fall back to
-    the normal announcement path (compatibility with older AzuraCast)."""
+    pre-generating LLM banter (compatibility with older AzuraCast)."""
     _patch_radio_config(monkeypatch)
 
     plugin = radio_module.RadioHostPlugin()
@@ -592,13 +557,6 @@ async def test_announce_fallback_when_listener_data_unavailable(
     plugin._running = True
     plugin._announce_if_no_listeners = True
     plugin._next_song_announcement = False
-
-    inject_calls = []
-
-    async def capturing_inject(*args, **kwargs):
-        inject_calls.append((args, kwargs))
-
-    monkeypatch.setattr(plugin, "_inject_banter_now", capturing_inject)
 
     # Capture the coroutine passed to asyncio.create_task
     captured_coro = []
@@ -626,14 +584,11 @@ async def test_announce_fallback_when_listener_data_unavailable(
         should_comment=True,
     )
 
-    assert len(captured_coro) == 1, f"Expected 1 task, got {len(captured_coro)}"
+    # With no queue_ahead and no next_title, no pre-generation tasks are created
+    assert len(captured_coro) == 0, f"Expected 0 tasks, got {len(captured_coro)}"
 
-    await captured_coro[0]
-
-    assert len(inject_calls) == 1, (
-        "Banter should be injected when listener data is unavailable "
-        "(fallback to normal behavior)"
-    )
+    # _inject_at_track_change must be False (de-announce handled by _on_winding_down)
+    assert plugin._inject_at_track_change is False
 
 
 @pytest.mark.asyncio
@@ -650,13 +605,6 @@ async def test_first_listener_resets_intermission(
     plugin._announce_if_no_listeners = True
     plugin._next_song_announcement = False
     plugin._track_count_since_comment = 5  # simulate mid-intermission
-
-    inject_calls = []
-
-    async def capturing_inject(*args, **kwargs):
-        inject_calls.append((args, kwargs))
-
-    monkeypatch.setattr(plugin, "_inject_banter_now", capturing_inject)
 
     # Capture the coroutine passed to asyncio.create_task
     captured_coro = []
@@ -688,8 +636,5 @@ async def test_first_listener_resets_intermission(
         "Intermission counter should be reset when first listener arrives"
     )
 
-    assert len(captured_coro) == 1, f"Expected 1 task, got {len(captured_coro)}"
-
-    await captured_coro[0]
-
-    assert len(inject_calls) == 1, "Banter should be injected for the first listener"
+    # With no queue_ahead and no next_title, no pre-generation tasks are created
+    assert len(captured_coro) == 0, f"Expected 0 tasks, got {len(captured_coro)}"
