@@ -214,7 +214,6 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
         extra_body: dict[str, Any] = kwargs.pop("extra_body", {}) or {}
         if "enable_thinking" in kwargs:
             extra_body["enable_thinking"] = kwargs.pop("enable_thinking")
-        extra_body.setdefault("enable_thinking", False)
 
         filtered = {
             k: v for k, v in kwargs.items() if k not in ("model", "messages", "stream")
@@ -678,15 +677,17 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
         if "enable_thinking" not in kwargs:
             kwargs["enable_thinking"] = False
 
+        # Gemma 4 (and most vision-capable models) attend better when the image
+        # comes before the text prompt rather than after it.
         messages: list[dict[str, Any]] = [
             {
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": effective_prompt},
                     {
                         "type": "image_url",
                         "image_url": {"url": data_url},
                     },
+                    {"type": "text", "text": effective_prompt},
                 ],
             }
         ]
