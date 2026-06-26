@@ -396,12 +396,20 @@ class ExternalEndpointRegistry:
         if current == engine_name:
             return  # already active
 
-        # If current BASE_CORTEX is another external endpoint, respect that choice.
-        if current:
+        # Respect any explicitly configured engine — external endpoint or any
+        # registered built-in other than "manual" (the neutral default).
+        if current and current != "manual":
             try:
                 endpoints = await self.list_endpoints(enabled_only=True)
                 external_names = {ep.engine_name() for ep in endpoints}
                 if current in external_names:
+                    return
+            except Exception:
+                pass
+            try:
+                from core.cortex_registry import get_cortex_registry
+
+                if current in get_cortex_registry().get_available_engines():
                     return
             except Exception:
                 pass

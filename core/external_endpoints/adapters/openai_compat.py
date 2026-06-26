@@ -909,6 +909,18 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
                             if resp.status >= 400:
                                 body = await resp.text()
                                 last_err = f"HTTP {resp.status}: {body[:200]}"
+                                log_debug(
+                                    f"[openai_compat] ping_test {chat_url} failed: {last_err}"
+                                )
+                                # A structured 503 (JSON body) means the endpoint is
+                                # reachable and correctly parsed the request — the model
+                                # is just temporarily at capacity.  Treat as success.
+                                if resp.status == 503 and body.lstrip().startswith("{"):
+                                    log_debug(
+                                        f"[openai_compat] ping_test {chat_url}: "
+                                        f"structured 503 — endpoint reachable, model at capacity"
+                                    )
+                                    return True, ""
                                 continue
                             try:
                                 data = await resp.json()
@@ -969,7 +981,10 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
 
         if not capabilities["vision"]:
             probed_model_ids: set[str] = set()
+            _vision_probe_limit = 10
             for m in models:
+                if len(probed_model_ids) >= _vision_probe_limit:
+                    break
                 if not m.id or m.id in probed_model_ids:
                     continue
                 probed_model_ids.add(m.id)

@@ -139,8 +139,11 @@ async def probe_endpoint(endpoint: ExternalEndpoint, api_key: str = "") -> Probe
 
     cap_task = asyncio.create_task(adapter.probe_capabilities())
     model_task = asyncio.create_task(adapter.list_models())
-    # Ping a first available model; we won't know it yet, so use None (→ "default")
-    ping_task = asyncio.create_task(adapter.ping_test())
+    # Prefer the endpoint's configured default_model for the ping so capacity
+    # errors on a random first-in-list model don't block probing.
+    ping_task = asyncio.create_task(
+        adapter.ping_test(model=endpoint.default_model or None)
+    )
 
     capabilities: dict[str, bool] = {}
     models: list[str] = []

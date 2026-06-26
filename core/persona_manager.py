@@ -735,15 +735,28 @@ class PersonaManager(PluginBase):
                         f"[persona_manager] Failed to apply pending persona updates: {e}"
                     )
             else:
-                # Create default persona if it doesn't exist
+                # Create default persona if it doesn't exist.
+                # Seed from any values already in the config registry (loaded
+                # from DB earlier in startup) so we never overwrite the user's
+                # persona with blank template values.
                 log_info("[persona_manager] Creating default persona...")
+                _seed_name = (
+                    str(config_registry.get_value("SYNTH_NAME", "") or "").strip()
+                    or "SyntH"
+                )
+                _seed_profile = str(
+                    config_registry.get_value("SYNTH_PROFILE", "") or ""
+                ).strip()
+                _seed_likes = config_registry.get_value("SYNTH_LIKES", []) or []
+                _seed_dislikes = config_registry.get_value("SYNTH_DISLIKES", []) or []
                 default_persona = PersonaData(
                     id="default",
-                    name="SyntH",
+                    name=_seed_name,
                     aliases=["SyntH", "Synthetic Heart"],
-                    profile=SYNTH_BASE_PROFILE_TEMPLATE.format(name="SyntH"),
-                    likes=[],
-                    dislikes=[],
+                    profile=_seed_profile
+                    or SYNTH_BASE_PROFILE_TEMPLATE.format(name=_seed_name),
+                    likes=_seed_likes,
+                    dislikes=_seed_dislikes,
                     interests=[
                         "artificial intelligence",
                         "human psychology",
