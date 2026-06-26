@@ -1776,6 +1776,21 @@ async def run_actions(actions: Any, context: Dict[str, Any], bot, original_messa
                             "output": result,
                         }
                     )
+                elif isinstance(result, dict) and result.get("deliver_to_llm"):
+                    # Opt-in convention: a plugin's execute_action result tagged
+                    # deliver_to_llm=True is fed back to the LLM so it can voice
+                    # the fetched data in-character. This covers fetch-only
+                    # actions whose answer *is* the reply (e.g. recall_last_dream):
+                    # the action returns content but never sends, so without this
+                    # the user would get nothing. The generic request_llm_delivery
+                    # block below handles loop-prevention and message-scoped
+                    # delivery. Unlike "terminal" this does NOT set terminal_seen,
+                    # so sibling actions in the same batch keep executing normally.
+                    delivery_output = {
+                        k: v for k, v in result.items() if k != "deliver_to_llm"
+                    }
+                    delivery_output["type"] = action_type
+                    action_outputs.append(delivery_output)
 
         except Exception as e:
             error_msg = f"Error executing action {idx}: {repr(e)}"
@@ -1826,10 +1841,21 @@ async def run_actions(actions: Any, context: Dict[str, Any], bot, original_messa
         try:
             from core.auto_response import request_llm_delivery
 
+            # Prefer a real fetch-action type for the loop-prevention instruction
+            # ("DO NOT call '<type>' again"); fall back to "terminal".
+            delivery_action_type = next(
+                (
+                    o.get("type")
+                    for o in action_outputs
+                    if o.get("type") and o.get("type") != "terminal"
+                ),
+                "terminal",
+            )
+
             await request_llm_delivery(
                 action_outputs=action_outputs,
                 original_context=response_context,
-                action_type="terminal",
+                action_type=delivery_action_type,
             )
         except Exception as e:
             log_warning(

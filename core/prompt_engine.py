@@ -508,7 +508,6 @@ def _build_context_summary(
         kind="memories",
     )
     if not is_grillo_internal:
-        # Grillo internal beats use minimal memories (top 1-2 only)
         if memories:
             parts.append(
                 "[Memory honesty notice]\n"
@@ -516,14 +515,21 @@ def _build_context_summary(
                 "If a detail is not clearly supported, acknowledge uncertainty instead of inventing a recollection."
             )
         parts.append("[Relevant memories]")
-        for m in memories[:2]:  # Limit to 2 most recent for Grillo
+        for m in memories:
             snippet = str(m)
             if len(snippet) > 400:
                 snippet = snippet[:400] + "\u2026"
             parts.append(f"- {snippet}")
     elif is_grillo_internal and memories:
-        # Grillo internal beats show only minimal memory indicator
-        parts.append(f"[{len(memories)} relevant memories available]")
+        # Internal beats (temporal_reflection, relationship, memory_consolidation, etc.)
+        # need actual memory content to reflect on \u2014 include a compact block capped
+        # tighter than normal chat to keep token cost low.
+        parts.append("[Relevant memories]")
+        for m in memories[:2]:
+            snippet = str(m)
+            if len(snippet) > 300:
+                snippet = snippet[:300] + "\u2026"
+            parts.append(f"- {snippet}")
 
     participants: Any = context_section.get("participants")
     # Grillo internal beats skip participant bios entirely

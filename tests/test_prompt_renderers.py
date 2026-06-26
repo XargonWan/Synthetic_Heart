@@ -196,15 +196,35 @@ class TestOpenAIRenderer:
         text_part = next(part for part in last["content"] if part.get("type") == "text")
         assert "attached 1 image" in text_part["text"]
         assert "no accompanying text" in text_part["text"]
-        assert (
-            "Do not infer hidden, obscured, or non-visible features"
-            in text_part["text"]
-        )
-        # The persona must reply in character, not emit a bare image description
-        # (inline images now reach the chat model directly — see iris inline mode).
+        # Anti-hallucination guardrail must forbid inventing non-visible details.
+        assert "not clearly present" in text_part["text"]
         assert "Describe only" not in text_part["text"]
         assert "in-character" in text_part["text"]
-        assert "not a description" in text_part["text"]
+
+    def test_multimodal_image_with_text_stays_in_character(self) -> None:
+        req = _basic_request(current_text="What do you think about this one?")
+        renderer = OpenAIRenderer(req)
+        image_part = {
+            "type": "image_url",
+            "image_url": {"url": "data:image/png;base64,abc"},
+        }
+
+        messages = renderer.render_with_multimodal([image_part])
+
+        last = messages[-1]
+        text_part = next(part for part in last["content"] if part.get("type") == "text")
+        assert "attached 1 image" in text_part["text"]
+        # When the user attaches an image with a caption, the persona must react
+        # in character and answer (inline images reach the chat model directly).
+        assert "in-character" in text_part["text"]
+        # Anti-hallucination guardrail must forbid inventing non-visible details.
+        assert "not clearly see" in text_part["text"]
+        assert (
+            "do not fill" not in text_part["text"].lower()
+            or "Do not fill" in text_part["text"]
+        )
+        # The user's caption is still appended verbatim.
+        assert "What do you think about this one?" in text_part["text"]
 
     def test_multimodal_document_turn_adds_note_without_forwarding_binary(self) -> None:
         req = _basic_request(current_text="Can you inspect this manual?")

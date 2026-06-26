@@ -123,21 +123,29 @@ def _build_multimodal_turn_text(
     if image_count:
         if user_text:
             segments.append(
-                f"The user attached {image_count} image(s). Ground your reply only "
-                "in clearly visible details from the attached image(s). Do not "
-                "infer hidden, obscured, or non-visible features. If something is "
-                "ambiguous, say that you are unsure."
+                f"The user attached {image_count} image(s) along with their "
+                "message. React the way you naturally would if someone showed you "
+                "this in person and said that to you: an in-character reply that "
+                "answers them. If the user is asking you to describe or identify "
+                "what you see (clothing, objects, people, etc.), give a precise, "
+                "grounded answer based only on what is clearly visible — do not "
+                "name, describe, or reference any garment, accessory, colour, or "
+                "feature that you cannot clearly see in the image. Do not fill "
+                "gaps from memory, context, or typical examples of similar images. "
+                "If something is unclear or not visible, say you are not sure "
+                "rather than guessing. Otherwise, weave relevant visual details "
+                "naturally into your in-character reply."
             )
         else:
             segments.append(
                 f"The user attached {image_count} image(s) with no accompanying "
                 "text. React the way you naturally would if someone showed you "
-                "this in person: a short, in-character reply — not a description "
-                "or a list of what you see. You may briefly mention something from "
-                "the image when it is relevant to your reply, but base any visual "
-                "claim only on clearly visible details. Do not infer hidden, "
-                "obscured, or non-visible features. If something is ambiguous, say "
-                "that you are unsure."
+                "this in person: a short, in-character reply. You may briefly "
+                "mention something from the image when it is relevant, but base "
+                "any visual claim only on clearly visible details. Do not name, "
+                "describe, or reference any feature that is not clearly present "
+                "in the image. If something is ambiguous, say you are unsure "
+                "rather than guessing."
             )
 
     if document_descriptions:

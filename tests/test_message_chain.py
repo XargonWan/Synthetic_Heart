@@ -145,5 +145,52 @@ class TestGenericActionTypeNormalization(unittest.IsolatedAsyncioTestCase):
         mock_corrector.assert_called_once()
 
 
+class TestRootLevelActionRecovery(unittest.IsolatedAsyncioTestCase):
+    """Regression for gemma-uncensored malformed responses where the last
+    action leaks to root level instead of sitting inside the actions array:
+
+        {"actions": [...], "type": "message_telegram_bot", "payload": {...}}
+
+    Before the fix this caused the corrector to fire multiple times, each
+    pass re-emitting a message_telegram_bot and producing quadruple texts.
+    """
+
+    @patch("core.action_parser.run_action", new_callable=AsyncMock)
+    @patch("core.transport_layer.run_corrector_middleware", new_callable=AsyncMock)
+    @patch("core.action_parser.get_supported_action_types")
+    async def test_root_level_action_recovered_without_corrector(
+        self,
+        mock_supported: MagicMock,
+        mock_corrector: AsyncMock,
+        mock_run_action: AsyncMock,
+    ) -> None:
+        """Root-level type+payload must be folded in without triggering the corrector."""
+        mock_supported.return_value = {"message_telegram_bot", "update_emotion_state"}
+        mock_corrector.return_value = None
+        mock_run_action.return_value = (True, None)
+
+        msg = SimpleNamespace(chat_id=42, text="", from_cortex=True, thread_id=None)
+        # Exact structure gemma-4-uncensored emits: message action is at root.
+        text = (
+            '{"actions": [{"type": "update_emotion_state", "payload": {"arousal": 9.5}}],'
+            ' "type": "message_telegram_bot",'
+            ' "payload": {"text": "Hello!", "interface_path": "telegram_bot/42"}}'
+        )
+
+        await message_chain.handle_incoming_message(
+            bot=None,
+            message=msg,
+            text=text,
+            source="llm",
+            context={"interface_path": "telegram_bot/42", "interface": "telegram_bot"},
+        )
+
+        mock_corrector.assert_not_called()
+        self.assertEqual(mock_run_action.call_count, 2)
+        executed_types = {c.args[0].get("type") for c in mock_run_action.call_args_list}
+        self.assertIn("update_emotion_state", executed_types)
+        self.assertIn("message_telegram_bot", executed_types)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -938,6 +938,27 @@ async def handle_incoming_message(
                     # Don't return here - let corrector fix it
                     parsed = None  # Force correction path
                 else:
+                    # Recover a root-level type+payload action that the LLM placed
+                    # outside the actions array, e.g.:
+                    #   {"actions": [...], "type": "message_telegram_bot", "payload": {...}}
+                    # gemma-uncensored and similar models occasionally emit this
+                    # malformed structure where the last action leaks to root.
+                    # Folding it in here avoids the corrector firing for every
+                    # message that ends this way, which would produce duplicate
+                    # user-visible messages via the deliver_to_llm chain.
+                    _root_type = parsed.get("type")
+                    _root_payload = parsed.get("payload")
+                    if (
+                        isinstance(_root_type, str)
+                        and _root_type not in ("actions", "recovery_actions")
+                        and isinstance(_root_payload, dict)
+                    ):
+                        actions.append({"type": _root_type, "payload": _root_payload})
+                        log_info(
+                            f"[message_chain] \U0001f504 Recovered root-level action "
+                            f"'{_root_type}' outside actions array → appended"
+                        )
+
                     # Normalize OpenAI tool calling format (name/parameters) to type/payload
                     for i, act in enumerate(actions):
                         if isinstance(act, dict):
@@ -2197,6 +2218,13 @@ async def handle_incoming_message(
                         processed = result.get("processed", [])
                         failed = result.get("failed_actions", [])
                         errors = result.get("errors", [])
+                        # A non-empty action_outputs means run_actions already
+                        # enqueued an LLM delivery follow-up (terminal output, or a
+                        # deliver_to_llm fetch action like recall_last_dream). That
+                        # follow-up *is* the user's reply, so the missing-reply
+                        # corrector must not also fire — otherwise both produce a
+                        # message and the user gets a double reply.
+                        delivered_to_llm = bool(result.get("action_outputs"))
 
                         # remember if we actually ran anything
                         if processed:
@@ -2287,6 +2315,7 @@ async def handle_incoming_message(
                                 and not is_scoped_non_message
                                 and not has_user_response
                                 and not has_user_output_action
+                                and not delivered_to_llm
                             ):
                                 missing_user_reply = True
 
@@ -2342,6 +2371,7 @@ async def handle_incoming_message(
                                 and not is_scoped_non_message
                                 and not has_user_response
                                 and not has_user_output_action
+                                and not delivered_to_llm
                             ):
                                 log_warning(
                                     f"[message_chain] ⚠️ LLM generated no outbound message action for user-facing interface '{interface_path}' — triggering corrector for missing reply"
