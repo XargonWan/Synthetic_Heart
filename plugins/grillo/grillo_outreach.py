@@ -13,7 +13,6 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from core.config_manager import config_registry
 from core.logging_utils import log_debug, log_error, log_info, log_warning
-from plugins.grillo.common_instructions import GRILLO_INSTRUCTIONS
 
 # How often the loop wakes to check whether a scheduled outreach is due. The
 # cadence between outreaches is governed by GRILLO_OUTREACH_INTERVAL_HOURS; this
@@ -256,12 +255,16 @@ class GrilloOutreachPlugin:
                         if content:
                             snippets.append(content)
 
-                    # Get recent memories
+                    # Get recent memories — GROUP BY content deduplicates rows
+                    # that grillo_observer writes once per beat for the same message.
+                    # The 60-day window drops stale entries from old/inactive chats.
                     await cur.execute(
                         """
-                        SELECT content FROM memories 
-                        WHERE content IS NOT NULL 
-                        ORDER BY timestamp DESC 
+                        SELECT content FROM memories
+                        WHERE content IS NOT NULL
+                          AND timestamp >= NOW() - INTERVAL 60 DAY
+                        GROUP BY content
+                        ORDER BY MAX(timestamp) DESC
                         LIMIT %s
                         """,
                         (limit,),
@@ -456,8 +459,6 @@ Return TWO actions:
 - a `{action_type}` message action whose `text` is the opening line you actually send
   (no meta-commentary, no stage directions)
 - a `create_personal_diary_entry` action that records why you reached out, with `interaction_summary`, `personal_thought`, and `emotions`
-
-{GRILLO_INSTRUCTIONS}
 
 RESPOND ONLY WITH VALID JSON:
 {{"actions": [{{"type": "{action_type}", "payload": {{"text": "your message here", "interface_path": "{interface_path_example}"}}}}, {{"type": "create_personal_diary_entry", "payload": {{"interaction_summary": "brief summary of this outreach", "personal_thought": "private first-person thought behind the outreach", "emotions": [{{"type": "longing", "intensity": 0.6}}]}}}}], "meta": {{"autonomous": true, "rationale": "Grillo outreach"}}}}
