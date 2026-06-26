@@ -2018,7 +2018,7 @@ async def run_corrector_middleware(
 
             correction_payload = {
                 "system_message": {
-                    "type": "error",
+                    "type": "correction",
                     "message": correction_message_text,
                     "your_reply": text,
                     "original_user_message": original_user_message,

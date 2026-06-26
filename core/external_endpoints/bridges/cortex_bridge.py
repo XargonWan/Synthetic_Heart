@@ -793,8 +793,20 @@ class ExternalCortexEngine(AIPluginBase):
             )
 
         if not isinstance(prompt, dict):
-            content: str = prompt if isinstance(prompt, str) else str(prompt)
-            return [{"role": "user", "content": content}]
+            _parsed_prompt: Any = None
+            if isinstance(prompt, str):
+                try:
+                    _parsed_prompt = json.loads(prompt)
+                except Exception:
+                    pass
+            if isinstance(_parsed_prompt, dict):
+                prompt = _parsed_prompt
+            else:
+                content: str = prompt if isinstance(prompt, str) else str(prompt)
+                return [{"role": "user", "content": content}]
+
+        if "system_message" in prompt:
+            return self._build_correction_messages(prompt)
 
         prompt_request = prompt.get("__prompt_request")
         if prompt_request is not None:
@@ -854,6 +866,51 @@ class ExternalCortexEngine(AIPluginBase):
                 {"role": "user", "content": user_msg_content},
             ]
         return [{"role": "user", "content": user_msg_content}]
+
+    def _build_correction_messages(
+        self, payload: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        """Convert a corrector payload into properly role-separated messages.
+
+        The corrector sends ``{"system_message": {...}}`` as a flat JSON blob.
+        Splitting it into system / assistant / user roles gives the LLM clear
+        signal about what each part is, which meaningfully improves coherence
+        compared to receiving a single large user-role JSON string.
+        """
+        sm = payload.get("system_message") or {}
+        correction_instruction = str(sm.get("message") or "")
+        your_reply = str(sm.get("your_reply") or "")
+        original_user_message = str(sm.get("original_user_message") or "")
+        required_format = sm.get("required_format")
+        strict_requirements = sm.get("strict_requirements") or []
+
+        user_parts: list[str] = []
+        if original_user_message:
+            user_parts.append(f"Original user message:\n{original_user_message}")
+        if required_format:
+            user_parts.append(
+                f"Required format:\n{json.dumps(required_format, ensure_ascii=False)}"
+            )
+        if strict_requirements:
+            reqs = "\n".join(f"- {r}" for r in strict_requirements)
+            user_parts.append(f"Strict requirements:\n{reqs}")
+        user_parts.append("Respond with ONLY valid JSON.")
+        user_content = (
+            "\n\n".join(user_parts)
+            if user_parts
+            else "Provide a corrected JSON response."
+        )
+
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": correction_instruction},
+        ]
+        if your_reply:
+            messages.append({"role": "assistant", "content": your_reply})
+        messages.append({"role": "user", "content": user_content})
+        log_debug(
+            f"[cortex_bridge] correction payload split into {len(messages)} role-separated messages"
+        )
+        return messages
 
     async def handle_incoming_message(
         self, bot: Any, message: Any, prompt: Any
