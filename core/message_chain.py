@@ -1035,6 +1035,26 @@ async def handle_incoming_message(
                                     log_debug(
                                         f"[message_chain] Gathered {len(_extra)} flat fields into payload for {act.get('type')}"
                                     )
+                            elif "payload" in act and "type" in act:
+                                # Merge any action-level keys that belong inside
+                                # payload but were placed at the action level by
+                                # the LLM (e.g. interface_path, chat_name,
+                                # reply_to_message_id for message_* actions).
+                                _orphaned = {
+                                    k: v
+                                    for k, v in act.items()
+                                    if k not in _ACTION_SYSTEM_KEYS
+                                }
+                                if _orphaned:
+                                    for k in _orphaned:
+                                        del act[k]
+                                    for k, v in _orphaned.items():
+                                        if k not in act["payload"]:
+                                            act["payload"][k] = v
+                                    log_debug(
+                                        f"[message_chain] Merged {len(_orphaned)} orphaned action-level"
+                                        f" key(s) into payload for {act.get('type')}: {list(_orphaned)}"
+                                    )
             elif isinstance(parsed, list):
                 actions = parsed
                 # Normalize OpenAI tool calling format for bare list responses
@@ -1085,6 +1105,26 @@ async def handle_incoming_message(
                                 log_debug(
                                     f"[message_chain] Gathered {len(_extra)} flat fields into payload for {act.get('type')}"
                                 )
+                        elif "payload" in act and "type" in act:
+                            # Merge any action-level keys that belong inside
+                            # payload but were placed at the action level by
+                            # the LLM (e.g. interface_path, chat_name,
+                            # reply_to_message_id for message_* actions).
+                            _orphaned = {
+                                k: v
+                                for k, v in act.items()
+                                if k not in _ACTION_SYSTEM_KEYS
+                            }
+                            if _orphaned:
+                                for k in _orphaned:
+                                    del act[k]
+                                for k, v in _orphaned.items():
+                                    if k not in act["payload"]:
+                                        act["payload"][k] = v
+                                log_debug(
+                                    f"[message_chain] Merged {len(_orphaned)} orphaned action-level key(s) into"
+                                    f" payload for {act.get('type')}: {list(_orphaned)}"
+                                )
             elif isinstance(parsed, dict) and (
                 "type" in parsed
                 or "name" in parsed
@@ -1123,6 +1163,23 @@ async def handle_incoming_message(
                         parsed["payload"] = _extra
                         log_debug(
                             f"[message_chain] Gathered {len(_extra)} flat fields into payload for {parsed.get('type')}"
+                        )
+                elif (
+                    isinstance((_pl := parsed.get("payload")), dict)
+                    and "type" in parsed
+                ):
+                    _orphaned = {
+                        k: v for k, v in parsed.items() if k not in _ACTION_SYSTEM_KEYS
+                    }
+                    if _orphaned:
+                        for k in _orphaned:
+                            del parsed[k]
+                        for k, v in _orphaned.items():
+                            if k not in _pl:
+                                _pl[k] = v
+                        log_debug(
+                            f"[message_chain] Merged {len(_orphaned)} orphaned action-level key(s) into"
+                            f" payload for {parsed.get('type')}: {list(_orphaned)}"
                         )
                 if "payload" not in parsed:
                     parsed["payload"] = {}
