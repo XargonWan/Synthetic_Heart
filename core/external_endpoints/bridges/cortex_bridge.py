@@ -472,23 +472,36 @@ class ExternalCortexEngine(AIPluginBase):
         tools, so nothing is lost — it is just delivered as text.
         """
         try:
+            from core.config_manager import config_registry
             from core.core_initializer import core_initializer
             from core.prompt_engine import minify_actions_block
 
-            names = {
-                getattr(m, "name", None)
+            names: set[str] = {
+                str(n)
                 for m in (getattr(prompt_request, "tool_declarations", None) or [])
+                if (n := getattr(m, "name", None)) is not None
             }
-            names.discard(None)
             if not names:
                 return
+
+            # Drop message_* actions that belong to other interfaces — the
+            # model only needs the one matching its current interface.
+            _rtx = getattr(prompt_request, "runtime_ctx", None)
+            _iface: str = str(getattr(_rtx, "interface_name", "") or "").strip()
+            if _iface:
+                names = {
+                    n
+                    for n in names
+                    if not n.startswith("message_") or n == f"message_{_iface}"
+                }
 
             raw = core_initializer.actions_block.get("available_actions", {}) or {}
             scoped = {k: v for k, v in raw.items() if k in names}
             if not scoped:
                 return
 
-            catalog = minify_actions_block(scoped, lite=False)
+            is_lite: bool = bool(config_registry.get_value("PROMPT_LITE_MODE", False))
+            catalog = minify_actions_block(scoped, lite=is_lite)
             # Render as a flat, unambiguous list — NOT a nested JSON dict. The
             # nested ``{name: {brief, schema}}`` shape made small models emit
             # sub-keys like "brief" as action types.
