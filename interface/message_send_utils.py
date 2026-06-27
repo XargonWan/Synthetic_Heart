@@ -948,10 +948,11 @@ async def cortex_response_send(
     except Exception:
         dedupe_window = _DEFAULT_DEDUPE_WINDOW
 
-    try:
-        import time
-        import re
+    import time
+    import re
 
+    dedupe_key: str | None = None
+    try:
         # perform a more aggressive normalization so we catch invisible
         # characters, zero‑width spaces, extra linebreaks, etc.  The previous
         # logic simply collapsed whitespace which could still leave a stray
@@ -973,8 +974,9 @@ async def cortex_response_send(
                 f"[cortex_response_send] Suppressing duplicate send to {chat_id} (within {dedupe_window}s)"
             )
             return None
-        # Record this send
-        _OUTGOING_DEDUPE[dedupe_key] = now
+        # Stamp deferred to after a successful send — see below.
+        # A failed attempt (e.g. thread-not-found before fallback retry) must
+        # not poison the cache and suppress the retry within the dedup window.
     except Exception:
         # Non-fatal if dedupe fails
         pass
@@ -992,6 +994,13 @@ async def cortex_response_send(
             # _send_with_retry may return a telegram Message object or None; keep last non-None
             if sent is not None:
                 last_sent = sent
+        # Record the send only after all chunks succeed so a failed attempt
+        # never blocks a legitimate fallback retry within the dedup window.
+        if dedupe_key is not None:
+            try:
+                _OUTGOING_DEDUPE[dedupe_key] = time.time()
+            except Exception:
+                pass
         # Return the last sent message (if any) to allow callers to track trainer-side message ids
         return last_sent
     except Exception as e:
