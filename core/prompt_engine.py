@@ -138,7 +138,7 @@ def minify_actions_block(
     When ``lite=True`` (Prompt Lite Mode for small/local models), applies aggressive
     minification on top of the standard pass:
 
-    - Filters to essential actions only (message_*, diary, tts, animation)
+    - Filters to essential actions only (message_*, diary, emotion, tts, animation)
     - Strips schemas down to brief-only (no schema object)
 
     Parameters
@@ -160,6 +160,7 @@ def minify_actions_block(
 
     _LITE_ESSENTIAL_ACTIONS = (
         "create_personal_diary_entry",
+        "update_emotion_state",
         "tts_speak",
         "use_animation",
     )
