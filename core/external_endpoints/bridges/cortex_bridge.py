@@ -495,6 +495,19 @@ class ExternalCortexEngine(AIPluginBase):
                     if not n.startswith("message_") or n == f"message_{_iface}"
                 }
 
+            # Drop animation/visual actions when no animation client is connected.
+            # Emitting use_animation with no WebUI open triggers a corrector pass.
+            _animation_names = {"use_animation", "tts_speak"}
+            if names & _animation_names:
+                try:
+                    from core.animation_handler import get_karada_state_server
+
+                    _srv = get_karada_state_server()
+                    if _srv is None or not _srv.has_connected_clients():
+                        names -= _animation_names
+                except Exception:
+                    pass
+
             raw = core_initializer.actions_block.get("available_actions", {}) or {}
             scoped = {k: v for k, v in raw.items() if k in names}
             if not scoped:
