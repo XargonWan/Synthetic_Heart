@@ -296,6 +296,21 @@ class CoreInitializer:
                     f"Interface discovery (pre-config load) failed: {e}"
                 )
 
+            # 4.5. Eagerly import core modules that register config vars at module level.
+            # These are imported lazily during chat turns (after load_all_from_db has
+            # already run), so their keys would never be in _definitions at bulk-load
+            # time and would always fall back to defaults.  Importing here ensures vars
+            # like PROMPT_LITE_MODE are registered before the DB sweep below.
+            for _early_mod in ("core.history_engine", "core.chat_attention"):
+                try:
+                    import importlib
+
+                    importlib.import_module(_early_mod)
+                except Exception as _e:
+                    log_warning(
+                        f"[core_initializer] Early import of '{_early_mod}' failed: {_e}"
+                    )
+
             # 3.5. Load all configurations from DB AFTER persona manager initialization
             # This ensures SYNTH_NAME, SYNTH_PROFILE, SYNTH_ALIASES have been registered and can be loaded from DB
             log_info("[core_initializer] Loading all configurations from database...")
