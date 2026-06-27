@@ -214,6 +214,9 @@ _NON_USER_FACING_ACTION_HINTS = (
     "deprecated",
     "internal",
 )
+# Actions that are purely system/pipeline mechanisms and must never appear in
+# the model-visible actions block, regardless of plugin description text.
+_SYSTEM_ONLY_ACTION_NAMES: frozenset[str] = frozenset({"static_inject"})
 _CONTEXT_SEGMENT_SPLIT_RE = re.compile(r"(?:\n\s*|\s+)---(?:\s*\n|\s+)")
 _SOUL_RECALLED_MEMORY_RE = re.compile(
     r"^\[SOUL recalled memory\s*\|\s*(?P<meta>[^\]]+)\]\s*(?P<body>.*)$",
@@ -261,6 +264,8 @@ def _derive_default_prompt_action_types(
     allowed: set[str] = set()
     current_interface = str(interface_name or "").strip()
     for action_name, action_def in available_actions.items():
+        if action_name in _SYSTEM_ONLY_ACTION_NAMES:
+            continue
         if _is_non_user_facing_action(action_def):
             continue
 

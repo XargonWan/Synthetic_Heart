@@ -121,32 +121,20 @@ def _build_multimodal_turn_text(
             document_page_image_sections.append(section)
 
     if image_count:
+        img_noun = "image" if image_count == 1 else f"{image_count} images"
+        vision_frame = (
+            f"[VISION: You are directly seeing the {img_noun} above — treat it as "
+            "your own eyes, not a description handed to you. Let what you see ground "
+            "your reply, your emotions, and any internal thoughts or diary entries. "
+            "Reference specific visible details naturally. Only describe what is "
+            "unambiguously visible; say you are unsure about anything unclear or "
+            "off-frame rather than guessing.]"
+        )
         if user_text:
-            segments.append(
-                f"The user attached {image_count} image(s) along with their "
-                "message. React the way you naturally would if someone showed you "
-                "this in person and said that to you: an in-character reply that "
-                "answers them. If the user is asking you to describe or identify "
-                "what you see (clothing, objects, people, etc.), give a precise, "
-                "grounded answer based only on what is clearly visible — do not "
-                "name, describe, or reference any garment, accessory, colour, or "
-                "feature that you cannot clearly see in the image. Do not fill "
-                "gaps from memory, context, or typical examples of similar images. "
-                "If something is unclear or not visible, say you are not sure "
-                "rather than guessing. Otherwise, weave relevant visual details "
-                "naturally into your in-character reply."
-            )
+            segments.append(user_text)
+            segments.append(vision_frame)
         else:
-            segments.append(
-                f"The user attached {image_count} image(s) with no accompanying "
-                "text. React the way you naturally would if someone showed you "
-                "this in person: a short, in-character reply. You may briefly "
-                "mention something from the image when it is relevant, but base "
-                "any visual claim only on clearly visible details. Do not name, "
-                "describe, or reference any feature that is not clearly present "
-                "in the image. If something is ambiguous, say you are unsure "
-                "rather than guessing."
-            )
+            segments.append(vision_frame)
 
     if document_descriptions:
         preview = ", ".join(document_descriptions[:3])
@@ -177,7 +165,7 @@ def _build_multimodal_turn_text(
                 "the user for an excerpt or for a document-capable route."
             )
 
-    if user_text:
+    if user_text and not image_count:
         segments.append(user_text)
 
     return "\n\n".join(segment for segment in segments if segment)
