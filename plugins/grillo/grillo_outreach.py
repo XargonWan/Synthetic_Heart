@@ -13,7 +13,21 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from core.config_manager import config_registry
 from core.logging_utils import log_debug, log_error, log_info, log_warning
+from core.variables_engine import register_exposed_var
 from plugins.grillo.common_instructions import GRILLO_INSTRUCTIONS
+
+
+register_exposed_var(
+    "GRILLO_OUTREACH_ENABLED",
+    label="Enable Grillo Outreach",
+    default=False,
+    value_type=bool,
+    ui_type="boolean",
+    description="Allow Grillo to proactively send messages to interfaces (Telegram/Discord)",
+    scope="plugins",
+    component="grillo_outreach",
+    tags=["plugin"],
+)
 
 
 class GrilloOutreachPlugin:
