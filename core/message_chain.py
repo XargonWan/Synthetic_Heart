@@ -2362,6 +2362,31 @@ async def handle_incoming_message(
             )
             return BLOCKED
 
+        # Check if the LLM returned a clear server-side error (not fixable by correction).
+        # In these cases the corrector would also fail since it hits the same engine, so
+        # skip directly to the fallback to avoid wasting minutes of retry time.
+        _SERVER_ERROR_MARKERS = (
+            "logprobs not supported",
+            "internal server error",
+            "service unavailable",
+            "bad gateway",
+            "gateway timeout",
+            "503 service unavailable",
+            "502 bad gateway",
+            "504 gateway timeout",
+        )
+        if any(marker in (text or "").lower() for marker in _SERVER_ERROR_MARKERS):
+            log_warning(
+                "[message_chain] LLM returned server-side error; skipping correction loop "
+                f"(error: {(text or '')[:200]})"
+            )
+            if not actions_executed_during_loop:
+                await send_llm_fallback_message(
+                    bot, message, f"LLM engine error: {(text or '')[:200]}", context=ctx
+                )
+                return LLM_FAILED
+            return ACTIONS_EXECUTED
+
         attempt += 1
         if attempt > max_retries:
             failure_reason = (
