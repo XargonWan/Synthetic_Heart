@@ -115,6 +115,75 @@ def redact_multimodal_for_logging(obj: Any) -> Any:
     return _redact_multimodal_recursive(copy.deepcopy(obj))
 
 
+def _repair_premature_string_close(text: str) -> str:
+    """Repair JSON where the LLM closes a string value prematurely then continues
+    with literal \\n escape sequences and more text outside the string.
+
+    LLM produces (invalid JSON):
+        "key": "First paragraph." \\n\\nSecond paragraph.
+
+    After repair (valid JSON):
+        "key": "First paragraph.\\n\\nSecond paragraph."
+
+    The \\n sequences remain as JSON string escapes; the premature closing quote
+    is removed and a proper one is appended after the continuation text.
+    """
+    # Match: premature closing " + optional spaces + one or more literal \\n sequences
+    # + continuation text up to the next real newline, quote, or closing brace.
+    # In the regex, \\n matches the two-char sequence backslash+n in the text string.
+    # This pattern can only occur in already-invalid JSON, so false-positive risk is nil.
+    pattern = re.compile(r'"( *\\n)+([^\n"]*)')
+
+    def _fix(m: re.Match) -> str:
+        # m.group(0) starts with " (premature close), e.g. '" \\n\\nSome text'
+        # Drop the leading " and close properly after the continuation content.
+        body = m.group(0)[1:].rstrip()
+        return body + '"'
+
+    return pattern.sub(_fix, text)
+
+
+def _repair_inline_premature_string_close(text: str) -> str:
+    """Repair JSON where the LLM prematurely closes a string with " then continues
+    inline with space + text, potentially spanning multiple real newlines.
+
+    LLM produces (invalid JSON):
+        "text": "Mm-mmph!" I gasp, scratching at your thighs...
+                                                 (more lines)
+        "next_key": value
+
+    After repair (valid JSON):
+        "text": "Mm-mmph! I gasp, scratching at your thighs...\\n(more lines)"
+        "next_key": value
+
+    Real newlines in the continuation are encoded as \\n JSON escape sequences.
+    A trailing comma before the next property line is stripped.
+    """
+    # Match:
+    #   "           premature closing quote
+    #   ( [A-Za-z]  space + letter starts the inline continuation (not a JSON token)
+    #   [^"]*? )    rest of continuation, non-greedy, no embedded quotes
+    #   (,?)        capture optional trailing comma (must be restored after the fixed string)
+    #   [ \t]*      trailing whitespace
+    #   (?=\n[ \t]*["}])  lookahead: newline before next JSON key or closing brace
+    pattern = re.compile(
+        r'"( [A-Za-z][^"]*?)(,?)[ \t]*(?=\n[ \t]*["}])',
+        re.DOTALL,
+    )
+
+    def _fix(m: re.Match) -> str:
+        continuation = m.group(1)
+        trailing_comma = m.group(2)  # "," or ""
+        # Encode real newlines as JSON \\n escape sequences
+        encoded = continuation.replace("\n", "\\n")
+        # Escape any stray embedded double-quotes
+        encoded = encoded.replace('"', '\\"')
+        # Restore the comma so the next sibling key stays valid JSON
+        return encoded.rstrip() + '"' + trailing_comma
+
+    return pattern.sub(_fix, text)
+
+
 def extract_json_from_text(text: str, return_metadata: bool = False) -> Optional[Dict]:
     """Extract the first valid JSON object or array from text.
 
@@ -164,8 +233,17 @@ def extract_json_from_text(text: str, return_metadata: bool = False) -> Optional
             cleaned_text = cleaned_text[:-3]  # Remove ```
         cleaned_text = cleaned_text.strip()
 
-    # Also try original text in case cleaning broke something
-    texts_to_try = [cleaned_text, text.strip()]
+    # Apply targeted repairs for premature string close patterns produced by LLMs.
+    # Pass 1: literal \\n sequences outside the string  ("value." \\n\\nmore)
+    # Pass 2: inline text continuation after premature close  ("sound!" I gasp...)
+    repaired_text = _repair_premature_string_close(cleaned_text)
+    repaired_text = _repair_inline_premature_string_close(repaired_text)
+    if repaired_text != cleaned_text:
+        log_debug("[extract_json_from_text] Applied premature string close repair")
+        texts_to_try = [repaired_text, cleaned_text, text.strip()]
+    else:
+        # Also try original text in case cleaning broke something
+        texts_to_try = [cleaned_text, text.strip()]
 
     decoder = json.JSONDecoder()
     found_json = None
