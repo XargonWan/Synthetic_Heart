@@ -458,32 +458,66 @@ def _get_builtin_interface_message_action_types() -> set[str]:
     }
 
 
+# ID-style fields coerced to *int* only — a chat/user/message id is never a
+# float, and a quoted id like ``"5208932647"`` must become an int for DB lookups.
+_INT_ID_FIELDS = {"chat_id", "user_id", "message_id", "animation_state"}
+
+# Numeric *parameter* fields (counts, limits, time windows). Coerced to int when
+# integral, float otherwise. Grammar-constrained local models routinely quote
+# numbers (``"limit": "5"``) — valid JSON, but the string then breaks downstream
+# int math and SQL ``LIMIT`` clauses. Normalizing here fixes every such action at
+# once rather than per-plugin. Genuinely string-typed numeric fields (e.g. the
+# Telegram ``target`` id, free text) are intentionally absent so they stay strings.
+_NUMERIC_PARAM_FIELDS = {
+    "limit",
+    "offset",
+    "count",
+    "index",
+    "page",
+    "page_size",
+    "depth",
+    "top_k",
+    "lines",
+    "context",
+    "context_lines",
+    "cycles",
+    "max_results",
+    "max_memories",
+    "total_count",
+    "total_pages",
+    "older_than_days",
+    "older_than_hours",
+    "days",
+    "hours",
+    "minutes",
+    "seconds",
+    "duration",
+    "intensity",
+    "threshold",
+    "temperature",
+}
+
+
 def _normalize_payload(action_type: str, payload: dict) -> None:
-    """Normalize payload by converting string numbers to int for numeric fields.
+    """Normalize a payload in-place so quoted numbers become real numbers.
 
-    This makes the system more flexible by accepting both ``"2"`` and ``2`` for
-    numeric IDs.  We also strip surrounding whitespace so ``" 42 "`` works, and
-    we recursively normalize nested dictionaries.
+    Local models behind ``force_action_grammar`` (and small models generally)
+    often emit numeric values as JSON strings — ``"limit": "5"`` instead of
+    ``"limit": 5``. The shape is valid, but the string then breaks downstream
+    integer math and SQL ``LIMIT`` clauses. We coerce two field classes,
+    recursively through nested dicts and lists:
 
-    Modifies the payload dict in-place.
+    * ID-style fields (``chat_id``, ``user_id``, ``message_id``,
+      ``animation_state``, anything ending in ``_id``) → ``int``.
+    * Known numeric parameter fields (see ``_NUMERIC_PARAM_FIELDS``) → ``int``
+      when integral, ``float`` otherwise.
 
-    Fields that should be integers:
-    - chat_id: Chat identifier
-    - user_id: User identifier
-    - message_id
-    - animation_state
-    - Any field ending with ``_id``
+    Non-numeric strings, already-numeric values, and string-typed fields such as
+    the Telegram ``target`` id are left untouched.
     """
-    # Fields that should always be integers
-    int_fields = {"chat_id", "user_id", "message_id", "animation_state"}
 
-    # Also handle fields ending with _id
-    for key in payload.keys():
-        if key.endswith("_id") and key not in int_fields:
-            int_fields.add(key)
-
-    def _coerce(value):
-        """Try to convert a value to an int if it looks like one."""
+    def _coerce_int(value):
+        """Convert a clean integer string to ``int``; otherwise return as-is."""
         if isinstance(value, str):
             s = value.strip()
             if s.lstrip("-").isdigit():
@@ -493,29 +527,53 @@ def _normalize_payload(action_type: str, payload: dict) -> None:
                     pass
         return value
 
-    # Normalize top-level fields
-    for field in int_fields:
-        if field in payload:
-            orig = payload[field]
-            coerced = _coerce(orig)
-            if coerced is not orig:
-                payload[field] = coerced
-                log_debug(
-                    f"[action_parser] Normalized {action_type}.payload.{field}: '{orig}' -> {coerced}"
-                )
+    def _coerce_number(value):
+        """Convert a clean numeric string to ``int`` (integral) or ``float``."""
+        if not isinstance(value, str):
+            return value
+        s = value.strip()
+        if s.lstrip("-").isdigit():
+            try:
+                return int(s)
+            except (ValueError, TypeError):
+                return value
+        # Plain decimal like "0.9" or "-1.5" — reject inf/nan/"1e3" by requiring
+        # exactly one dot with digits on both sides.
+        if s.count(".") == 1:
+            intpart, _, fracpart = s.lstrip("-").partition(".")
+            if intpart.isdigit() and fracpart.isdigit():
+                try:
+                    return float(s)
+                except (ValueError, TypeError):
+                    return value
+        return value
 
-    # Normalize nested dict fields (like target: {chat_id: ...})
-    for key, value in list(payload.items()):
-        if isinstance(value, dict):
-            for nested_field in int_fields:
-                if nested_field in value:
-                    orig = value[nested_field]
-                    coerced = _coerce(orig)
-                    if coerced is not orig:
-                        value[nested_field] = coerced
-                        log_debug(
-                            f"[action_parser] Normalized {action_type}.payload.{key}.{nested_field}: '{orig}' -> {coerced}"
-                        )
+    def _walk(obj, path: str) -> None:
+        if isinstance(obj, dict):
+            for key, value in list(obj.items()):
+                if isinstance(value, (dict, list)):
+                    _walk(value, f"{path}.{key}")
+                    continue
+                if not isinstance(key, str):
+                    continue
+                if key in _INT_ID_FIELDS or key.endswith("_id"):
+                    coerced = _coerce_int(value)
+                elif key in _NUMERIC_PARAM_FIELDS:
+                    coerced = _coerce_number(value)
+                else:
+                    continue
+                if coerced is not value:
+                    obj[key] = coerced
+                    log_debug(
+                        f"[action_parser] Normalized {action_type}.payload"
+                        f"{path}.{key}: {value!r} -> {coerced!r}"
+                    )
+        elif isinstance(obj, list):
+            for i, item in enumerate(obj):
+                if isinstance(item, (dict, list)):
+                    _walk(item, f"{path}[{i}]")
+
+    _walk(payload, "")
 
 
 def _attempt_auto_fix(actions: list) -> bool:
@@ -1718,6 +1776,21 @@ async def run_actions(actions: Any, context: Dict[str, Any], bot, original_messa
                             "output": result,
                         }
                     )
+                elif isinstance(result, dict) and result.get("deliver_to_llm"):
+                    # Opt-in convention: a plugin's execute_action result tagged
+                    # deliver_to_llm=True is fed back to the LLM so it can voice
+                    # the fetched data in-character. This covers fetch-only
+                    # actions whose answer *is* the reply (e.g. recall_last_dream):
+                    # the action returns content but never sends, so without this
+                    # the user would get nothing. The generic request_llm_delivery
+                    # block below handles loop-prevention and message-scoped
+                    # delivery. Unlike "terminal" this does NOT set terminal_seen,
+                    # so sibling actions in the same batch keep executing normally.
+                    delivery_output = {
+                        k: v for k, v in result.items() if k != "deliver_to_llm"
+                    }
+                    delivery_output["type"] = action_type
+                    action_outputs.append(delivery_output)
 
         except Exception as e:
             error_msg = f"Error executing action {idx}: {repr(e)}"
@@ -1768,10 +1841,21 @@ async def run_actions(actions: Any, context: Dict[str, Any], bot, original_messa
         try:
             from core.auto_response import request_llm_delivery
 
+            # Prefer a real fetch-action type for the loop-prevention instruction
+            # ("DO NOT call '<type>' again"); fall back to "terminal".
+            delivery_action_type = next(
+                (
+                    o.get("type")
+                    for o in action_outputs
+                    if o.get("type") and o.get("type") != "terminal"
+                ),
+                "terminal",
+            )
+
             await request_llm_delivery(
                 action_outputs=action_outputs,
                 original_context=response_context,
-                action_type="terminal",
+                action_type=delivery_action_type,
             )
         except Exception as e:
             log_warning(

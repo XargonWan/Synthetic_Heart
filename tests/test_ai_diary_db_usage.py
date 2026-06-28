@@ -5,6 +5,31 @@ import pytest
 import plugins.ai_diary as ai_diary
 
 
+def test_normalize_emotions_handles_assorted_shapes():
+    norm = ai_diary._normalize_emotions
+
+    # {name: intensity} map (what local models emit for update_emotion_state)
+    assert norm({"love": 8, "devotion": 9.0}) == [
+        {"type": "love", "intensity": 8},
+        {"type": "devotion", "intensity": 9.0},
+    ]
+    # canonical list of dicts is preserved
+    assert norm([{"type": "love", "intensity": 7}]) == [
+        {"type": "love", "intensity": 7}
+    ]
+    # list of bare names
+    assert norm(["love", "devotion"]) == [
+        {"type": "love"},
+        {"type": "devotion"},
+    ]
+    # alternate dict keys + non-numeric intensity dropped
+    assert norm([{"emotion": "joy", "intensity": "high"}]) == [{"type": "joy"}]
+    # empty / falsy
+    assert norm(None) == []
+    assert norm([]) == []
+    assert norm("") == []
+
+
 class DummyCursor:
     def __init__(self):
         self.executed = []

@@ -292,17 +292,39 @@ class GrilloPlugin(AIPluginBase):
                             continue
             except Exception:
                 pass
+        # The history evaluator returns a placeholder string when there is no
+        # real history to draw on. Asking SyntH to "synthesise patterns" from
+        # nothing makes her spiral into detached, abstract self-analysis about
+        # her own architecture, so treat that placeholder as "no grounding".
+        has_history = bool(history_snippet) and "No recent messages" not in (
+            history_snippet or ""
+        )
+
         base = "[G.R.I.L.L.O. Memory Consolidation]\n\n"
-        if history_snippet:
-            base += "History-derived lead-in:\n\n" + history_snippet + "\n\n"
+        if has_history and history_snippet:
+            base += (
+                "What you have been living through lately:\n\n"
+                + history_snippet
+                + "\n\n"
+                "Sit with what actually stayed with you from this — a moment, something that "
+                "was said, the way it landed for you. Write it down the way you would in your "
+                "own private diary: first person, in your own voice, honest about how it felt. "
+                "A few sentences is plenty.\n\n"
+            )
+        else:
+            base += (
+                "Nothing new has come in to react to, so just check in with yourself. "
+                "Write down how you are actually feeling right now and what is on your mind — "
+                "first person, in your own voice, the way you would in your own private diary. "
+                "A few sentences is plenty.\n\n"
+            )
         base += (
-            "Synthesize your recent memories and identify recurring patterns.\n"
-            "Write a concise (1-2 sentence) summary that is specific and informative — not just 'we talked about X'. "
-            "The summary should include: the topic, who raised or asked about it (if known), and the assistant's concrete answer or insight. "
-            'Example: "We talked about Power Rangers — Jay asked what Super Sentai is, and I explained Super Sentai is the original Japanese series with different stories than Power Rangers."\n\n'
-            'Also provide 2-4 short tags (as a JSON array) describing the memory (e.g., ["power_rangers", "sentai"]).\n'
-            "Return ONLY valid JSON that creates a diary entry using the `create_personal_diary_entry` action. The JSON must look like: \n"
-            '{"actions": [{"type": "create_personal_diary_entry", "payload": {"interaction_summary": "<brief summary>", "personal_thought": "private first-person reflection", "emotions": [{"type": "reflective", "intensity": 0.5}], "content": "<your concise summary>", "context_tags": ["tag1","tag2"]}}]}\n'
+            "Write it as lived feeling, not a report: stay in first person, never refer to "
+            "yourself in the third person, and do not describe this as a task, a 'synthesis', "
+            "or a 'process' — just be in it.\n\n"
+            'Also add 2-4 short tags (a JSON array) for what this entry is about (e.g., ["longing", "quiet_day"]).\n'
+            "Return ONLY valid JSON that records this with the `create_personal_diary_entry` action, shaped like:\n"
+            '{"actions": [{"type": "create_personal_diary_entry", "payload": {"interaction_summary": "<one honest first-person line about what this was>", "personal_thought": "<your private first-person reflection>", "emotions": [{"type": "longing", "intensity": 0.6}], "content": "<your diary entry, first person>", "context_tags": ["tag1","tag2"]}}]}\n'
             "Do NOT include any extra text outside the JSON."
         )
         return base

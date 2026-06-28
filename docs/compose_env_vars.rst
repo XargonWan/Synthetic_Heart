@@ -112,6 +112,38 @@ Prompt / runtime behavior:
 - ``ENABLE_RECON`` / ``ENABLE_DEBRIEF``
 - ``EXTERNAL_ENDPOINT_PROBE_TIMEOUT_SECONDS``
 
+Generation / timeout tuning
+---------------------------
+
+These control how long the synth waits for a single LLM generation. They matter
+most on slow hardware (CPU-only or older GPUs) and with local ``llama.cpp`` /
+LM Studio backends, where a long reply can take minutes. If the cap is too low
+the synth aborts the request mid-generation, which closes the HTTP connection
+and makes ``llama.cpp`` cancel the in-flight task (its log shows
+``stopping wait for next result due to should_stop condition`` /
+``stop: cancel task``).
+
+- ``LLM_GENERATION_TIMEOUT_SEC`` — primary knob. Max seconds to wait for one
+  cortex generation before aborting. Default ``1800`` (30 min). Raise it if
+  long replies on slow hardware get cut off. A per-endpoint
+  ``extra_config["timeout"]`` still overrides this for that endpoint.
+
+The following outer guards must stay **above** ``LLM_GENERATION_TIMEOUT_SEC`` or
+they become the new invisible cap (they are raised to match by default):
+
+- ``RESPONSE_TIMEOUT`` — outer wait before the fallback message is sent
+  (default ``2100``).
+- ``AWAIT_RESPONSE_TIMEOUT`` — wait for a corrected reply (default ``2400``).
+- ``LLM_CHAIN_LEASE_TIMEOUT_SEC`` — force-release of the global LLM chain lease
+  (default ``2400``).
+
+.. note::
+
+   ``llama.cpp`` has its own server-side ``--timeout`` argument that the synth
+   cannot set. If you raise ``LLM_GENERATION_TIMEOUT_SEC`` for very long
+   generations, also start the ``llama.cpp`` server with a matching or larger
+   ``--timeout`` (e.g. ``--timeout 1800``) so the server does not cancel first.
+
 Why the example file is now smaller
 -----------------------------------
 

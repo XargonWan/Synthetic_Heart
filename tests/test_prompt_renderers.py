@@ -194,12 +194,35 @@ class TestOpenAIRenderer:
 
         last = messages[-1]
         text_part = next(part for part in last["content"] if part.get("type") == "text")
-        assert "attached 1 image" in text_part["text"]
-        assert "no accompanying text" in text_part["text"]
-        assert (
-            "Do not infer hidden, obscured, or non-visible features"
-            in text_part["text"]
-        )
+        # Persona-first vision framing: model is told it is seeing directly.
+        assert "VISION" in text_part["text"]
+        assert "directly seeing" in text_part["text"]
+        # Anti-hallucination guardrail must still be present.
+        assert "unambiguously visible" in text_part["text"]
+        # Vision frame must mention grounding emotions/diary so the monologue is affected.
+        assert "emotions" in text_part["text"]
+        assert "diary" in text_part["text"]
+
+    def test_multimodal_image_with_text_stays_in_character(self) -> None:
+        req = _basic_request(current_text="What do you think about this one?")
+        renderer = OpenAIRenderer(req)
+        image_part = {
+            "type": "image_url",
+            "image_url": {"url": "data:image/png;base64,abc"},
+        }
+
+        messages = renderer.render_with_multimodal([image_part])
+
+        last = messages[-1]
+        text_part = next(part for part in last["content"] if part.get("type") == "text")
+        # Persona-first vision framing present.
+        assert "VISION" in text_part["text"]
+        # Anti-hallucination guardrail must still be present.
+        assert "unambiguously visible" in text_part["text"]
+        # The user's caption must appear before the vision frame.
+        caption = "What do you think about this one?"
+        assert caption in text_part["text"]
+        assert text_part["text"].index(caption) < text_part["text"].index("[VISION:")
 
     def test_multimodal_document_turn_adds_note_without_forwarding_binary(self) -> None:
         req = _basic_request(current_text="Can you inspect this manual?")
@@ -273,6 +296,61 @@ class TestOpenAIRenderer:
         }
         result = OpenAIRenderer.parse_tool_call_response(data)
         assert result == "Just a text reply"
+
+    def test_parse_tool_call_response_preserves_reply_alongside_tool_calls(
+        self,
+    ) -> None:
+        """A reply in ``content`` must survive when the model also emits a
+        side-effect tool call (regression: reply was silently dropped, which
+        triggered the missing-reply correction loop on local tool-calling
+        models like Qwen3.5 / Gemma)."""
+        data = {
+            "choices": [
+                {
+                    "message": {
+                        "content": "Morning babe, feeling great!",
+                        "tool_calls": [
+                            {
+                                "function": {
+                                    "name": "create_personal_diary_entry",
+                                    "arguments": '{"interaction_summary": "chat"}',
+                                }
+                            }
+                        ],
+                    }
+                }
+            ]
+        }
+        parsed = json.loads(OpenAIRenderer.parse_tool_call_response(data))
+        assert parsed["actions"][0]["type"] == "create_personal_diary_entry"
+        assert parsed["message"] == "Morning babe, feeling great!"
+
+    def test_parse_tool_call_response_no_duplicate_when_message_tool_call(
+        self,
+    ) -> None:
+        """When the model already routes the reply through a ``message_*`` tool
+        call, the leftover ``content`` must NOT be surfaced again as a
+        top-level message (avoids a duplicate reply)."""
+        data = {
+            "choices": [
+                {
+                    "message": {
+                        "content": "some thinking residue",
+                        "tool_calls": [
+                            {
+                                "function": {
+                                    "name": "message_telegram_bot",
+                                    "arguments": '{"text": "Hi there"}',
+                                }
+                            }
+                        ],
+                    }
+                }
+            ]
+        }
+        parsed = json.loads(OpenAIRenderer.parse_tool_call_response(data))
+        assert parsed["actions"][0]["type"] == "message_telegram_bot"
+        assert "message" not in parsed
 
     def test_no_history_renders_only_system_and_current(self) -> None:
         req = _basic_request()

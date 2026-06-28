@@ -647,6 +647,16 @@ class SoulPlugin(PluginBase):
         if session_id == "nightly" or session_id.startswith("diary_merge:"):
             return True
 
+        # Grillo self-initiated outreach entries store the routing preamble as
+        # the episodic trace. That preamble is pure system noise — it contains
+        # no conversation memory. Any real content from those sessions is
+        # captured by normal diary entries from the same turn.
+        # Two preamble formats exist (pre/post rename of the outreach plugin).
+        if trace.startswith("[self-initiated outreach]") or trace.startswith(
+            "[g.r.i.l.l.o. outreach]"
+        ):
+            return True
+
         return (
             "[diary consolidation" in trace
             or "performed update_diary_entry action" in trace

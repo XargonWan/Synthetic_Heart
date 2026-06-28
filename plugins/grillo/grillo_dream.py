@@ -140,6 +140,7 @@ class GrilloDreamPlugin:
                             "status": "success",
                             "dream_content": None,
                             "message": "No recent dreams found in the archives.",
+                            "deliver_to_llm": True,
                         }
 
                     response_text, diary_content, prompt_text, executed_at = row
@@ -153,6 +154,7 @@ class GrilloDreamPlugin:
                             "status": "success",
                             "dream_content": None,
                             "message": "Found a dream record but the content appears to be missing.",
+                            "deliver_to_llm": True,
                         }
 
                     return {
@@ -160,6 +162,7 @@ class GrilloDreamPlugin:
                         "dream_content": final_content,
                         "timestamp": executed_at.isoformat() if executed_at else None,
                         "message": f"Recalled dream from {executed_at}",
+                        "deliver_to_llm": True,
                     }
 
         except Exception as e:
@@ -167,6 +170,7 @@ class GrilloDreamPlugin:
             return {
                 "status": "error",
                 "message": f"Database error recalling dream: {e}",
+                "deliver_to_llm": True,
             }
 
     async def start(self):

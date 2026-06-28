@@ -43,17 +43,20 @@ async def test_grillo_skips_chats_with_last_message_from_synth(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_memory_consolidation_prompt_instructions_are_specific(monkeypatch):
-    # Ensure the prompt now requests a concise, specific summary and provides an example
+async def test_memory_consolidation_prompt_is_first_person_journaling(monkeypatch):
+    # The prompt should ask for first-person felt journaling, not a detached
+    # third-person summary/synthesis (the old "analyst" framing read clinical).
     gp = GrilloPlugin()
     gp.history_evaluator = FakeHistoryEvaluator()
 
     prompt = await gp._create_memory_consolidation_prompt()
-    assert "concise" in prompt
-    assert "1-2 sentence" in prompt
-    assert "We talked about" in prompt or "Example:" in prompt
+    assert "first person" in prompt
     assert "create_personal_diary_entry" in prompt
     assert "context_tags" in prompt
+    # Must not slip back into the detached analyst framing.
+    assert "the assistant's" not in prompt
+    assert "Power Rangers" not in prompt
+    assert "identify recurring patterns" not in prompt
 
 
 @pytest.mark.asyncio

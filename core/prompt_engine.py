@@ -138,7 +138,7 @@ def minify_actions_block(
     When ``lite=True`` (Prompt Lite Mode for small/local models), applies aggressive
     minification on top of the standard pass:
 
-    - Filters to essential actions only (message_*, diary, tts, animation)
+    - Filters to essential actions only (message_*, diary, emotion, tts, animation)
     - Strips schemas down to brief-only (no schema object)
 
     Parameters
@@ -160,6 +160,7 @@ def minify_actions_block(
 
     _LITE_ESSENTIAL_ACTIONS = (
         "create_personal_diary_entry",
+        "update_emotion_state",
         "tts_speak",
         "use_animation",
     )
@@ -213,6 +214,9 @@ _NON_USER_FACING_ACTION_HINTS = (
     "deprecated",
     "internal",
 )
+# Actions that are purely system/pipeline mechanisms and must never appear in
+# the model-visible actions block, regardless of plugin description text.
+_SYSTEM_ONLY_ACTION_NAMES: frozenset[str] = frozenset({"static_inject"})
 _CONTEXT_SEGMENT_SPLIT_RE = re.compile(r"(?:\n\s*|\s+)---(?:\s*\n|\s+)")
 _SOUL_RECALLED_MEMORY_RE = re.compile(
     r"^\[SOUL recalled memory\s*\|\s*(?P<meta>[^\]]+)\]\s*(?P<body>.*)$",
@@ -260,6 +264,8 @@ def _derive_default_prompt_action_types(
     allowed: set[str] = set()
     current_interface = str(interface_name or "").strip()
     for action_name, action_def in available_actions.items():
+        if action_name in _SYSTEM_ONLY_ACTION_NAMES:
+            continue
         if _is_non_user_facing_action(action_def):
             continue
 
@@ -508,7 +514,6 @@ def _build_context_summary(
         kind="memories",
     )
     if not is_grillo_internal:
-        # Grillo internal beats use minimal memories (top 1-2 only)
         if memories:
             parts.append(
                 "[Memory honesty notice]\n"
@@ -516,14 +521,21 @@ def _build_context_summary(
                 "If a detail is not clearly supported, acknowledge uncertainty instead of inventing a recollection."
             )
         parts.append("[Relevant memories]")
-        for m in memories[:2]:  # Limit to 2 most recent for Grillo
+        for m in memories:
             snippet = str(m)
             if len(snippet) > 400:
                 snippet = snippet[:400] + "\u2026"
             parts.append(f"- {snippet}")
     elif is_grillo_internal and memories:
-        # Grillo internal beats show only minimal memory indicator
-        parts.append(f"[{len(memories)} relevant memories available]")
+        # Internal beats (temporal_reflection, relationship, memory_consolidation, etc.)
+        # need actual memory content to reflect on \u2014 include a compact block capped
+        # tighter than normal chat to keep token cost low.
+        parts.append("[Relevant memories]")
+        for m in memories[:2]:
+            snippet = str(m)
+            if len(snippet) > 300:
+                snippet = snippet[:300] + "\u2026"
+            parts.append(f"- {snippet}")
 
     participants: Any = context_section.get("participants")
     # Grillo internal beats skip participant bios entirely
@@ -2075,10 +2087,26 @@ def load_json_instructions() -> str:
     # Compact instructions for LLM prompts (minified to save tokens).
     # Keep this small but authoritative: the LLM must reply using only valid JSON
     # following the exact actions / payload structure.
+
+    # Resolve the trainer name dynamically (config-driven, never hardcoded) so the
+    # autonomy rationale is written in-voice and names people instead of writing
+    # detached "the user" prose — small local models in particular parrot whatever
+    # framing the instructions use.
+    try:
+        from core.config import get_trainer_display_name
+
+        trainer_name = get_trainer_display_name()
+    except Exception:
+        trainer_name = ""
+    if trainer_name:
+        naming_hint = f" Name people, not 'the user' (your trainer: {trainer_name})."
+    else:
+        naming_hint = " Name people, not 'the user'."
+
     instructions = (
         "MASTER INSTRUCTION: Use ONLY actions from the 'actions' block. Never fabricate.\n"
         "If an action you need is not available, reply with JSON explaining why.\n"
-        "AUTONOMY GUIDELINES: You MAY proactively propose or execute allowed actions when beneficial. When acting autonomously include a brief `meta` object with `autonomous: true` and a short `rationale` explaining why the action is taken. If an action is disallowed, return a JSON proposal describing the need.\n"
+        f"AUTONOMY GUIDELINES: You MAY proactively propose or execute allowed actions when beneficial. When acting autonomously include a brief `meta` object with `autonomous: true` and a short first-person `rationale` (your own voice) for why you are acting.{naming_hint} If an action is disallowed, return a JSON proposal describing the need.\n"
         "RESPOND ONLY WITH VALID JSON. No text before or after.\n"
         "Use input.interface and input.payload.source.interface_path to route replies.\n"
         "NEVER use 'target' — always use 'interface_path' in message actions.\n"

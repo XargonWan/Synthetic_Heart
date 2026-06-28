@@ -145,5 +145,109 @@ class TestGenericActionTypeNormalization(unittest.IsolatedAsyncioTestCase):
         mock_corrector.assert_called_once()
 
 
+class TestRootLevelActionRecovery(unittest.IsolatedAsyncioTestCase):
+    """Regression for gemma-uncensored malformed responses where the last
+    action leaks to root level instead of sitting inside the actions array:
+
+        {"actions": [...], "type": "message_telegram_bot", "payload": {...}}
+
+    Before the fix this caused the corrector to fire multiple times, each
+    pass re-emitting a message_telegram_bot and producing quadruple texts.
+    """
+
+    @patch("core.action_parser.run_action", new_callable=AsyncMock)
+    @patch("core.transport_layer.run_corrector_middleware", new_callable=AsyncMock)
+    @patch("core.action_parser.get_supported_action_types")
+    async def test_root_level_action_recovered_without_corrector(
+        self,
+        mock_supported: MagicMock,
+        mock_corrector: AsyncMock,
+        mock_run_action: AsyncMock,
+    ) -> None:
+        """Root-level type+payload must be folded in without triggering the corrector."""
+        mock_supported.return_value = {"message_telegram_bot", "update_emotion_state"}
+        mock_corrector.return_value = None
+        mock_run_action.return_value = (True, None)
+
+        msg = SimpleNamespace(chat_id=42, text="", from_cortex=True, thread_id=None)
+        # Exact structure gemma-4-uncensored emits: message action is at root.
+        text = (
+            '{"actions": [{"type": "update_emotion_state", "payload": {"arousal": 9.5}}],'
+            ' "type": "message_telegram_bot",'
+            ' "payload": {"text": "Hello!", "interface_path": "telegram_bot/42"}}'
+        )
+
+        await message_chain.handle_incoming_message(
+            bot=None,
+            message=msg,
+            text=text,
+            source="llm",
+            context={"interface_path": "telegram_bot/42", "interface": "telegram_bot"},
+        )
+
+        mock_corrector.assert_not_called()
+        self.assertEqual(mock_run_action.call_count, 2)
+        executed_types = {c.args[0].get("type") for c in mock_run_action.call_args_list}
+        self.assertIn("update_emotion_state", executed_types)
+        self.assertIn("message_telegram_bot", executed_types)
+
+
+class TestOrphanedActionLevelKeys(unittest.IsolatedAsyncioTestCase):
+    """Regression for Gemma-4 placing routing keys (interface_path, chat_name,
+    reply_to_message_id) at the action dict level instead of inside payload:
+
+        {"type": "message_telegram_bot",
+         "payload": {"text": "Hi"},
+         "interface_path": "telegram_bot/123",
+         "reply_to_message_id": "456"}
+
+    The orphaned keys must be silently merged into payload so the message is
+    routed correctly, without triggering the corrector.
+    """
+
+    @patch("core.action_parser.run_action", new_callable=AsyncMock)
+    @patch("core.transport_layer.run_corrector_middleware", new_callable=AsyncMock)
+    @patch("core.action_parser.get_supported_action_types")
+    async def test_orphaned_routing_keys_merged_into_payload(
+        self,
+        mock_supported: MagicMock,
+        mock_corrector: AsyncMock,
+        mock_run_action: AsyncMock,
+    ) -> None:
+        """interface_path / reply_to_message_id at action level must be folded
+        into payload without triggering the corrector."""
+        mock_supported.return_value = {"message_telegram_bot"}
+        mock_corrector.return_value = None
+        mock_run_action.return_value = (True, None)
+
+        msg = SimpleNamespace(chat_id=42, text="", from_cortex=True, thread_id=None)
+        text = (
+            '{"actions": [{"type": "message_telegram_bot",'
+            ' "payload": {"text": "Come here and get cozy"},'
+            ' "interface_path": "telegram_bot/5208932647",'
+            ' "chat_name": "Scar",'
+            ' "reply_to_message_id": "1517052647"}]}'
+        )
+
+        await message_chain.handle_incoming_message(
+            bot=None,
+            message=msg,
+            text=text,
+            source="llm",
+            context={"interface_path": "telegram_bot/5208932647", "interface": "telegram_bot"},
+        )
+
+        mock_corrector.assert_not_called()
+        mock_run_action.assert_called_once()
+        executed = mock_run_action.call_args[0][0]
+        self.assertEqual(executed.get("type"), "message_telegram_bot")
+        payload = executed.get("payload", {})
+        self.assertEqual(payload.get("text"), "Come here and get cozy")
+        self.assertEqual(payload.get("interface_path"), "telegram_bot/5208932647")
+        self.assertEqual(payload.get("chat_name"), "Scar")
+        # _normalize_payload converts numeric strings to int during validate_action
+        self.assertEqual(payload.get("reply_to_message_id"), 1517052647)
+
+
 if __name__ == "__main__":
     unittest.main()

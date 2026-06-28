@@ -2524,6 +2524,61 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                                 }).catch(() => {});
                             }
                         }
+
+                        // --- Per-endpoint extra config editor (external endpoints only) ---
+                        const cfgWrap = document.getElementById('cortex-engine-config-wrap');
+                        const cfgArea = document.getElementById('cortex-engine-config');
+                        const cfgSave = document.getElementById('cortex-engine-config-save');
+                        const cfgStatus = document.getElementById('cortex-engine-config-status');
+                        if (cfgWrap && cfgArea) {
+                            if (active && active.is_external && active.endpoint_id != null) {
+                                cfgWrap.style.display = '';
+                                const ec = active.extra_config || {};
+                                cfgArea.value = Object.keys(ec).length ? JSON.stringify(ec, null, 2) : '';
+                                if (cfgStatus) cfgStatus.textContent = '';
+                                if (cfgSave) {
+                                    cfgSave._epId = active.endpoint_id;
+                                    if (!cfgSave.dataset.bound) {
+                                        cfgSave.dataset.bound = '1';
+                                        cfgSave.addEventListener('click', async () => {
+                                            const setCfgStatus = (msg, ok) => {
+                                                if (!cfgStatus) return;
+                                                cfgStatus.textContent = msg;
+                                                cfgStatus.style.color = ok ? 'var(--success,#27ae60)' : 'var(--danger,#c0392b)';
+                                            };
+                                            const raw = (cfgArea.value || '').trim();
+                                            let parsed = {};
+                                            if (raw) {
+                                                try {
+                                                    parsed = JSON.parse(raw);
+                                                } catch (err) {
+                                                    setCfgStatus('Invalid JSON: ' + err.message, false);
+                                                    return;
+                                                }
+                                                if (typeof parsed !== 'object' || Array.isArray(parsed) || parsed === null) {
+                                                    setCfgStatus('Extra Config must be a JSON object.', false);
+                                                    return;
+                                                }
+                                            }
+                                            try {
+                                                const res = await fetch(`/api/external-endpoints/${cfgSave._epId}`, {
+                                                    method: 'PUT',
+                                                    headers: { 'Content-Type': 'application/json' },
+                                                    body: JSON.stringify({ extra_config: parsed }),
+                                                });
+                                                if (!res.ok) throw new Error('HTTP ' + res.status);
+                                                setCfgStatus('Saved — reload this engine to apply.', true);
+                                                if (window.showToast) window.showToast('Engine config saved', false);
+                                            } catch (err) {
+                                                setCfgStatus('Save failed: ' + err.message, false);
+                                            }
+                                        });
+                                    }
+                                }
+                            } else {
+                                cfgWrap.style.display = 'none';
+                            }
+                        }
                     };
 
                     // Populate cortex kind select

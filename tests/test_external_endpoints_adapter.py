@@ -1100,13 +1100,311 @@ async def test_external_cortex_engine_forwards_gemini_tool_declarations():
     assert response == '{"actions": []}'
     assert prompt.supports_tool_calling is True
     assert captured["model"] == "gemini-3.1-flash-lite-preview"
-    assert captured["kwargs"]["timeout"] == 120.0
+    assert captured["kwargs"]["timeout"] == 1800.0
     tools = captured["kwargs"]["tools"]
     assert len(tools) == 1
     declarations = tools[0]["function_declarations"]
     assert declarations[0]["name"] == "send_message"
     assert captured["messages"][0]["role"] == "system"
     assert captured["messages"][-1]["role"] == "user"
+
+
+def _openai_endpoint(extra_config: dict) -> "ExternalEndpoint":
+    return ExternalEndpoint(
+        id=7,
+        name="local-llama",
+        display_label="Local llama.cpp",
+        protocol=EndpointProtocol.OPENAI,
+        base_url="http://127.0.0.1:8081/v1",
+        api_key_enc=None,
+        enabled=True,
+        capabilities={"cortex": True},
+        subsystem_map={"cortex": True},
+        available_models=["local-model"],
+        default_model="local-model",
+        probe_status="success",
+        last_probe_at=None,
+        extra_config=extra_config,
+    )
+
+
+@pytest.mark.asyncio
+async def test_force_json_object_sets_response_format():
+    """force_json_object in extra_config asks the server for valid-JSON output."""
+    from core.external_endpoints.bridges.cortex_bridge import ExternalCortexEngine
+    from core.prompt_request import PromptRequest
+
+    endpoint = _openai_endpoint({"force_json_object": True})
+    captured: dict[str, Any] = {}
+
+    class FakeAdapter:
+        async def chat_completion(self, messages, model=None, **kwargs):
+            captured["kwargs"] = kwargs
+            return SimpleNamespace(content='{"actions": []}', model=model)
+
+    # No tool declarations -> JSON-content path, response_format applies.
+    prompt = PromptRequest(
+        system_instruction="Use valid JSON.",
+        current_text="ping",
+        mode="chat",
+    )
+    engine = ExternalCortexEngine(endpoint, cast(Any, FakeAdapter()))
+    await engine.handle_incoming_message(None, None, prompt)
+
+    assert captured["kwargs"]["response_format"] == {"type": "json_object"}
+
+
+@pytest.mark.asyncio
+async def test_response_format_dropped_when_tools_active():
+    """response_format must not be sent alongside native tool-calling."""
+    from core.external_endpoints.bridges.cortex_bridge import ExternalCortexEngine
+    from core.prompt_request import PromptRequest
+
+    endpoint = _openai_endpoint({"force_json_object": True})
+    captured: dict[str, Any] = {}
+
+    class FakeAdapter:
+        async def chat_completion(self, messages, model=None, **kwargs):
+            captured["kwargs"] = kwargs
+            return SimpleNamespace(content='{"actions": []}', model=model)
+
+    manifest = SimpleNamespace(
+        name="send_message",
+        description="Send a reply",
+        parameters=[
+            SimpleNamespace(
+                name="text",
+                type="string",
+                description="Reply text",
+                enum=None,
+                required=True,
+            )
+        ],
+    )
+    prompt = PromptRequest(
+        system_instruction="Use valid JSON.",
+        current_text="ping",
+        tool_declarations=[manifest],
+        mode="chat",
+    )
+    engine = ExternalCortexEngine(endpoint, cast(Any, FakeAdapter()))
+    await engine.handle_incoming_message(None, None, prompt)
+
+    assert "tools" in captured["kwargs"]
+    assert "response_format" not in captured["kwargs"]
+
+
+def test_strip_thinking_handles_thought_and_dangling_close():
+    """Reasoning leaks must be stripped: full blocks, <thought>, and a dangling
+    closing tag (open tag dropped by the server)."""
+    from core.external_endpoints.adapters.openai_compat import _strip_thinking
+
+    assert _strip_thinking('<thought>reasoning</thought>{"a":1}') == '{"a":1}'
+    assert _strip_thinking("<think>x</think>hi") == "hi"
+    # open tag dropped: "reasoning … </thought>{json}"
+    assert (
+        _strip_thinking('reasoning here </thought>\n{"actions":[]}') == '{"actions":[]}'
+    )
+    # plain content is untouched
+    assert _strip_thinking('{"actions":[]}') == '{"actions":[]}'
+
+
+@pytest.mark.asyncio
+async def test_extra_config_max_tokens_forwarded():
+    """max_tokens in extra_config reaches the adapter (caps runaway generations)."""
+    from core.external_endpoints.bridges.cortex_bridge import ExternalCortexEngine
+    from core.prompt_request import PromptRequest
+
+    endpoint = _openai_endpoint({"max_tokens": 1234})
+    captured: dict[str, Any] = {}
+
+    class FakeAdapter:
+        async def chat_completion(self, messages, model=None, **kwargs):
+            captured["kwargs"] = kwargs
+            return SimpleNamespace(content='{"actions": []}', model=model)
+
+    manifest = SimpleNamespace(
+        name="send_message",
+        description="Send a reply",
+        parameters=[
+            SimpleNamespace(
+                name="text",
+                type="string",
+                description="Reply text",
+                enum=None,
+                required=True,
+            )
+        ],
+    )
+    prompt = PromptRequest(
+        system_instruction="Use valid JSON.",
+        current_text="ping",
+        tool_declarations=[manifest],
+        mode="chat",
+    )
+    engine = ExternalCortexEngine(endpoint, cast(Any, FakeAdapter()))
+    await engine.handle_incoming_message(None, None, prompt)
+
+    assert captured["kwargs"]["max_tokens"] == 1234
+
+
+def test_max_tokens_default_only_for_local_flagged_endpoints():
+    """The default cap applies only to local-flagged endpoints; cloud stays uncapped."""
+    from core.external_endpoints.bridges.cortex_bridge import (
+        _LOCAL_MAX_TOKENS_DEFAULT,
+        ExternalCortexEngine,
+    )
+
+    flagged = ExternalCortexEngine(
+        _openai_endpoint({"disable_tools": True}), cast(Any, SimpleNamespace())
+    )
+    assert flagged._extra_api_kwargs()["max_tokens"] == _LOCAL_MAX_TOKENS_DEFAULT
+
+    grammar = ExternalCortexEngine(
+        _openai_endpoint({"force_action_grammar": True}), cast(Any, SimpleNamespace())
+    )
+    assert grammar._extra_api_kwargs()["max_tokens"] == _LOCAL_MAX_TOKENS_DEFAULT
+
+    # A plain (cloud) openai endpoint gets no default cap…
+    plain = ExternalCortexEngine(_openai_endpoint({}), cast(Any, SimpleNamespace()))
+    assert "max_tokens" not in plain._extra_api_kwargs()
+
+    # …but an explicit value is always honored.
+    explicit = ExternalCortexEngine(
+        _openai_endpoint({"max_tokens": 1234}), cast(Any, SimpleNamespace())
+    )
+    assert explicit._extra_api_kwargs()["max_tokens"] == 1234
+
+
+@pytest.mark.asyncio
+async def test_mirror_gated_on_local_flags(monkeypatch):
+    """Origin mirror runs only for local-flagged openai endpoints, not cloud ones."""
+    import core.config as cfg
+    import core.cortex_registry as creg
+    from core.external_endpoints.bridges.cortex_bridge import ExternalCortexEngine
+    from plugins.message_plugin import MessagePlugin
+
+    async def fake_active(scope=None):
+        return "engine"
+
+    monkeypatch.setattr(cfg, "get_active_cortex_engine", fake_active)
+
+    plugin = MessagePlugin()
+    msg = SimpleNamespace(chat_id=5208932647)
+
+    flagged = ExternalCortexEngine(
+        _openai_endpoint({"disable_tools": True}), cast(Any, SimpleNamespace())
+    )
+    monkeypatch.setattr(
+        creg,
+        "get_cortex_registry",
+        lambda: SimpleNamespace(get_engine=lambda _n: flagged),
+    )
+    assert await plugin._should_mirror_origin_path({}, msg) is True
+
+    # A plain (cloud) openai endpoint must NOT be mirrored.
+    plain = ExternalCortexEngine(_openai_endpoint({}), cast(Any, SimpleNamespace()))
+    monkeypatch.setattr(
+        creg,
+        "get_cortex_registry",
+        lambda: SimpleNamespace(get_engine=lambda _n: plain),
+    )
+    assert await plugin._should_mirror_origin_path({}, msg) is False
+
+
+def test_build_actions_gbnf_structure():
+    """The grammar enumerates the exact action names and dedupes/drops falsy."""
+    from core.external_endpoints.action_grammar import build_actions_gbnf
+
+    assert build_actions_gbnf([]) is None
+
+    g = build_actions_gbnf(["message_telegram_bot", "create_personal_diary_entry"])
+    assert g is not None
+    assert "root" in g and "actiontype" in g
+    # action names appear as JSON-quoted literals in the type enum
+    assert '\\"message_telegram_bot\\"' in g
+    assert '\\"create_personal_diary_entry\\"' in g
+
+    g2 = build_actions_gbnf(["a", "a", "", None])  # type: ignore[list-item]
+    assert g2 is not None and g2.count('\\"a\\"') == 1
+
+
+@pytest.mark.asyncio
+async def test_force_action_grammar_attaches_grammar_without_tools():
+    """force_action_grammar sends a GBNF grammar via extra_body and no tools."""
+    from core.external_endpoints.bridges.cortex_bridge import ExternalCortexEngine
+    from core.prompt_request import PromptRequest
+
+    endpoint = _openai_endpoint({"force_action_grammar": True})
+    captured: dict[str, Any] = {}
+
+    class FakeAdapter:
+        async def chat_completion(self, messages, model=None, **kwargs):
+            captured["kwargs"] = kwargs
+            return SimpleNamespace(content='{"actions": []}', model=model)
+
+    manifest = SimpleNamespace(
+        name="send_message", description="Send a reply", parameters=[]
+    )
+    prompt = PromptRequest(
+        system_instruction="Use valid JSON.",
+        current_text="ping",
+        tool_declarations=[manifest],
+        mode="chat",
+    )
+    engine = ExternalCortexEngine(endpoint, cast(Any, FakeAdapter()))
+    await engine.handle_incoming_message(None, None, prompt)
+
+    assert "tools" not in captured["kwargs"]
+    extra_body = captured["kwargs"].get("extra_body") or {}
+    assert "grammar" in extra_body
+    assert "send_message" in extra_body["grammar"]
+    assert prompt.supports_tool_calling is False
+
+
+@pytest.mark.asyncio
+async def test_disable_tools_uses_in_prompt_protocol():
+    """disable_tools suppresses native tools and keeps the JSON-content protocol."""
+    from core.external_endpoints.bridges.cortex_bridge import ExternalCortexEngine
+    from core.prompt_request import PromptRequest
+
+    endpoint = _openai_endpoint({"disable_tools": True, "force_json_object": True})
+    captured: dict[str, Any] = {}
+
+    class FakeAdapter:
+        async def chat_completion(self, messages, model=None, **kwargs):
+            captured["kwargs"] = kwargs
+            return SimpleNamespace(content='{"actions": []}', model=model)
+
+    manifest = SimpleNamespace(
+        name="send_message",
+        description="Send a reply",
+        parameters=[
+            SimpleNamespace(
+                name="text",
+                type="string",
+                description="Reply text",
+                enum=None,
+                required=True,
+            )
+        ],
+    )
+    prompt = PromptRequest(
+        system_instruction="Use valid JSON.",
+        current_text="ping",
+        tool_declarations=[manifest],
+        mode="chat",
+    )
+    engine = ExternalCortexEngine(endpoint, cast(Any, FakeAdapter()))
+    await engine.handle_incoming_message(None, None, prompt)
+
+    # Native tools must be suppressed entirely…
+    assert "tools" not in captured["kwargs"]
+    assert "tool_choice" not in captured["kwargs"]
+    # …and the renderer must stay on the content-JSON protocol (no tool_calls).
+    assert prompt.supports_tool_calling is False
+    # response_format survives because no tools are present to clash with it.
+    assert captured["kwargs"]["response_format"] == {"type": "json_object"}
 
 
 @pytest.mark.asyncio

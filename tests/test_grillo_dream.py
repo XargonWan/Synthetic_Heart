@@ -92,3 +92,42 @@ def test_seconds_until_next_run_returns_int():
     sec = p._seconds_until_next_run("05:00")
     assert isinstance(sec, int)
     assert 0 <= sec <= 24 * 3600
+
+
+@pytest.mark.asyncio
+async def test_recall_last_dream_tags_deliver_to_llm(monkeypatch):
+    """_recall_last_dream marks its result so the action parser voices it back
+    to the LLM (fetch-only action whose answer is the reply)."""
+    p = GrilloDreamPlugin()
+
+    class DummyCursor:
+        async def execute(self, *args, **kwargs):
+            pass
+
+        async def fetchone(self):
+            return None  # no dream on record -> the "not found" branch
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class DummyConn:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        def cursor(self):
+            return DummyCursor()
+
+    import core.db as cdb
+
+    monkeypatch.setattr(cdb, "get_conn_ctx", lambda: DummyConn())
+
+    result = await p._recall_last_dream()
+    assert result["deliver_to_llm"] is True
+    assert result["dream_content"] is None
+    assert "No recent dreams" in result["message"]

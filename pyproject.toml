@@ -55,6 +55,7 @@ dependencies = [
     "langfuse>=2.60.10",
     "fastembed>=0.3.6",
     "pypdf>=6.10.2",
+    "json-repair>=0.61.0",
 ]
 
 [project.optional-dependencies]

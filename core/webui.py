@@ -8322,8 +8322,10 @@ class SynthWebUIInterface:
                 except Exception:
                     pass
 
-            # For external endpoints, fall back to DB if the in-memory bridge has
-            # stale/empty available_models (e.g. bridge created before first probe).
+            # Detect external-endpoint engines and pull live endpoint details:
+            # the id + extra_config feed the inline per-endpoint config editor,
+            # and available_models acts as a fallback when the in-memory bridge
+            # predates the first probe.
             try:
                 from core.external_endpoints.bridges.cortex_bridge import (
                     ExternalCortexEngine as _ExtCB,
@@ -8332,20 +8334,25 @@ class SynthWebUIInterface:
                 _is_external = isinstance(instance, _ExtCB)
             except Exception:
                 _is_external = False
-            if not supported_models and _is_external:
+            endpoint_id: int | None = None
+            endpoint_extra_config: dict | None = None
+            if _is_external:
                 try:
                     from core.external_endpoints.registry import (
                         get_external_endpoint_registry,
                     )
 
                     _ext_reg = get_external_endpoint_registry()
-                    _fallback_ep = await _ext_reg.get_endpoint_by_name(
+                    _ep_fresh = await _ext_reg.get_endpoint_by_name(
                         instance._endpoint.name  # type: ignore[union-attr]
                     )
-                    if _fallback_ep and _fallback_ep.available_models:
-                        supported_models = list(_fallback_ep.available_models)
-                        if not current_model and _fallback_ep.default_model:
-                            current_model = _fallback_ep.default_model
+                    if _ep_fresh is not None:
+                        endpoint_id = _ep_fresh.id
+                        endpoint_extra_config = _ep_fresh.extra_config
+                        if not supported_models and _ep_fresh.available_models:
+                            supported_models = list(_ep_fresh.available_models)
+                            if not current_model and _ep_fresh.default_model:
+                                current_model = _ep_fresh.default_model
                 except Exception:
                     pass
 
@@ -8390,6 +8397,8 @@ class SynthWebUIInterface:
                     "supported_models": supported_models,
                     "current_model": current_model,
                     "is_external": _is_external,
+                    "endpoint_id": endpoint_id,
+                    "extra_config": endpoint_extra_config,
                 }
             )
         interfaces_data: List[dict] = []
@@ -8645,6 +8654,26 @@ class SynthWebUIInterface:
                     "active": active_auris == "disabled",
                 }
             )
+            # Hardcoded pseudo-engine: bypass Auris transcription entirely and
+            # forward the raw audio bytes inline to the Cortex engine so an
+            # audio-capable multimodal model can hear the audio directly.  Only
+            # useful when the active Cortex endpoint accepts inline audio.
+            auris_data.append(
+                {
+                    "name": "inline",
+                    "display_name": "Inline (send to LLM)",
+                    "label": "Forward audio inline to a multimodal Cortex engine",
+                    "capabilities": {"audio": True},
+                    "description": (
+                        "Bypass Auris transcription and send the audio directly "
+                        "to the LLM (requires an audio-capable Cortex endpoint)"
+                    ),
+                    "status": "success",
+                    "details": "Active" if active_auris == "inline" else "",
+                    "error": None,
+                    "active": active_auris == "inline",
+                }
+            )
             for _name in AURIS_REGISTRY.get_available_engines():
                 _meta = AURIS_REGISTRY.get_engine_meta(_name)
                 _caps = _meta.get("capabilities") or {}
@@ -8744,6 +8773,26 @@ class SynthWebUIInterface:
                     "details": "Active" if active_iris == "disabled" else "",
                     "error": None,
                     "active": active_iris == "disabled",
+                }
+            )
+            # Hardcoded pseudo-engine: bypass Iris entirely and forward image /
+            # video bytes inline to the Cortex engine so a vision-capable LLM can
+            # see the media directly (no separate description step).  Only takes
+            # effect when the active Cortex endpoint is marked vision-capable.
+            iris_data.append(
+                {
+                    "name": "inline",
+                    "display_name": "Inline (send to LLM)",
+                    "label": "Forward images inline to a multimodal Cortex engine",
+                    "capabilities": {"vision": True},
+                    "description": (
+                        "Bypass Iris descriptions and send the image directly to "
+                        "the LLM (requires a vision-capable Cortex endpoint)"
+                    ),
+                    "status": "success",
+                    "details": "Active" if active_iris == "inline" else "",
+                    "error": None,
+                    "active": active_iris == "inline",
                 }
             )
             for _name in IRIS_REGISTRY.get_available_engines():

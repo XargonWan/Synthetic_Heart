@@ -33,15 +33,25 @@ from core.external_endpoints.adapters.base import (
 _KNOWN_TTS_PATHS = ["/audio/speech", "/v1/audio/speech"]
 _KNOWN_STT_PATHS = ["/audio/transcriptions", "/v1/audio/transcriptions"]
 
-# Matches <think>…</think> and <thinking>…</thinking> blocks produced by
-# reasoning models (Qwen3.5, DeepSeek-R1, etc.) when thinking leaks into content.
+# Matches <think>…</think>, <thinking>…</thinking>, and <thought>…</thought>
+# blocks produced by reasoning models (Qwen3.5, DeepSeek-R1, etc.) when thinking
+# leaks into content despite enable_thinking=False.
 _THINKING_RE = re.compile(
-    r"<think(?:ing)?>.*?</think(?:ing)?>", re.DOTALL | re.IGNORECASE
+    r"<(?:think(?:ing)?|thought)>.*?</(?:think(?:ing)?|thought)>",
+    re.DOTALL | re.IGNORECASE,
+)
+# Some models drop the opening tag and emit a reasoning preamble terminated by a
+# lone closing tag (e.g. "reasoning… </thought>{json}"). Strip everything up to
+# and including the first such closing tag.
+_THINKING_LEADING_CLOSE_RE = re.compile(
+    r"^.*?</(?:think(?:ing)?|thought)>\s*", re.DOTALL | re.IGNORECASE
 )
 
 
 def _strip_thinking(text: str) -> str:
-    return _THINKING_RE.sub("", text).strip()
+    cleaned = _THINKING_RE.sub("", text)
+    cleaned = _THINKING_LEADING_CLOSE_RE.sub("", cleaned, count=1)
+    return cleaned.strip()
 
 
 class OpenAICompatAdapter(BaseProtocolAdapter):
@@ -129,10 +139,10 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
         tool_calls_raw: Any = None
 
         if isinstance(message, dict):
-            content = str(message.get("content") or "")
+            content = _strip_thinking(str(message.get("content") or ""))
             tool_calls_raw = message.get("tool_calls")
         else:
-            content = str(getattr(message, "content", "") or "")
+            content = _strip_thinking(str(getattr(message, "content", "") or ""))
             tool_calls_raw = getattr(message, "tool_calls", None)
 
         tool_calls: list[dict[str, Any]] = []
@@ -204,7 +214,6 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
         extra_body: dict[str, Any] = kwargs.pop("extra_body", {}) or {}
         if "enable_thinking" in kwargs:
             extra_body["enable_thinking"] = kwargs.pop("enable_thinking")
-        extra_body.setdefault("enable_thinking", False)
 
         filtered = {
             k: v for k, v in kwargs.items() if k not in ("model", "messages", "stream")
@@ -668,15 +677,17 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
         if "enable_thinking" not in kwargs:
             kwargs["enable_thinking"] = False
 
+        # Gemma 4 (and most vision-capable models) attend better when the image
+        # comes before the text prompt rather than after it.
         messages: list[dict[str, Any]] = [
             {
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": effective_prompt},
                     {
                         "type": "image_url",
                         "image_url": {"url": data_url},
                     },
+                    {"type": "text", "text": effective_prompt},
                 ],
             }
         ]
@@ -898,6 +909,18 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
                             if resp.status >= 400:
                                 body = await resp.text()
                                 last_err = f"HTTP {resp.status}: {body[:200]}"
+                                log_debug(
+                                    f"[openai_compat] ping_test {chat_url} failed: {last_err}"
+                                )
+                                # A structured 503 (JSON body) means the endpoint is
+                                # reachable and correctly parsed the request — the model
+                                # is just temporarily at capacity.  Treat as success.
+                                if resp.status == 503 and body.lstrip().startswith("{"):
+                                    log_debug(
+                                        f"[openai_compat] ping_test {chat_url}: "
+                                        f"structured 503 — endpoint reachable, model at capacity"
+                                    )
+                                    return True, ""
                                 continue
                             try:
                                 data = await resp.json()
@@ -958,7 +981,10 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
 
         if not capabilities["vision"]:
             probed_model_ids: set[str] = set()
+            _vision_probe_limit = 10
             for m in models:
+                if len(probed_model_ids) >= _vision_probe_limit:
+                    break
                 if not m.id or m.id in probed_model_ids:
                     continue
                 probed_model_ids.add(m.id)

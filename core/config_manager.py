@@ -1039,7 +1039,13 @@ class ConfigRegistry:
         if "\n" not in raw:
             raw = raw.split("#")[0].strip()
         if definition.value_type is bool:
-            return "true" if bool(raw) else "false"
+            if isinstance(value, bool):
+                return "true" if value else "false"
+            return (
+                "true"
+                if str(value).strip().lower() in {"1", "true", "yes", "on"}
+                else "false"
+            )
         if definition.value_type is int:
             if raw == "":
                 return ""

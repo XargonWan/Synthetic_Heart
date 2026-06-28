@@ -22,6 +22,12 @@ if TYPE_CHECKING:
     from core.external_endpoints.adapters.base import BaseProtocolAdapter
     from core.external_endpoints.models import ExternalEndpoint
 
+# Default completion cap applied ONLY to local-model endpoints (those opting into
+# disable_tools / force_action_grammar). Stops a repetition loop from filling the
+# whole context window. Cloud openai endpoints (xai, openrouter) are left uncapped
+# unless they set max_tokens explicitly.
+_LOCAL_MAX_TOKENS_DEFAULT = 4096
+
 
 # ---------------------------------------------------------------------------
 # Multimodal extraction helper
@@ -316,11 +322,60 @@ class ExternalCortexEngine(AIPluginBase):
           the entire context window on chain-of-thought tokens before generating
           a response.  Drastically reduces latency on models that default to
           extended thinking mode.
+        * ``force_json_object`` (bool) — request ``response_format={"type":
+          "json_object"}`` so the server constrains decoding to syntactically
+          valid JSON.  Recommended for small local quants (llama.cpp / LM Studio)
+          that otherwise emit malformed action JSON (unescaped quotes, missing
+          delimiters) on long replies and trigger corrector retries.
+        * ``response_format`` (dict) — forwarded verbatim; use for an explicit
+          ``{"type": "json_schema", ...}`` constraint. Takes precedence over
+          ``force_json_object``.
+        * ``grammar`` (str) — llama.cpp GBNF grammar string, sent via
+          ``extra_body`` for the strictest, schema-level constraint.
+        * ``force_action_grammar`` (bool) — auto-build a GBNF grammar for the
+          action-JSON shape (type enum from the request's actions) and send it
+          via ``extra_body``. Implies the in-prompt protocol (no native tools).
+          The hardest constraint: the model must emit exactly one well-formed
+          ``{"actions":[...]}`` object — no thinking preamble, malformed JSON,
+          invented types, or repeated objects. A manual ``grammar`` wins over it.
+        * ``max_tokens`` (int) — cap on completion length. An explicit value
+          always applies; otherwise a safe default is applied only when this is a
+          local-model endpoint (``disable_tools`` / ``force_action_grammar``).
+          Cloud openai endpoints stay uncapped unless they set this. Prevents
+          repetition loops from filling the whole context window.
+
+        Note: ``response_format`` / ``grammar`` are dropped when native
+        tool-calling is active (see ``generate_response``) because tool-calling
+        already constrains output and most servers reject the combination.
         """
         extra = self._endpoint.extra_config or {}
         kwargs: dict[str, Any] = {}
         if extra.get("disable_thinking"):
             kwargs["enable_thinking"] = False
+
+        # Cap completion length. An explicit value always wins; otherwise apply a
+        # safe default ONLY for local-model endpoints (disable_tools /
+        # force_action_grammar) so cloud openai endpoints stay uncapped.
+        max_tokens = extra.get("max_tokens")
+        if max_tokens is not None:
+            try:
+                kwargs["max_tokens"] = int(max_tokens)
+            except (TypeError, ValueError):
+                pass
+        elif self._disable_tools():
+            kwargs["max_tokens"] = _LOCAL_MAX_TOKENS_DEFAULT
+
+        response_format = extra.get("response_format")
+        if response_format is None and extra.get("force_json_object"):
+            response_format = {"type": "json_object"}
+        if response_format is not None:
+            kwargs["response_format"] = response_format
+
+        grammar = extra.get("grammar")
+        if grammar:
+            extra_body = kwargs.setdefault("extra_body", {})
+            extra_body["grammar"] = grammar
+
         return kwargs
 
     def _get_retry_settings(self) -> tuple[int, float]:
@@ -332,6 +387,170 @@ class ExternalCortexEngine(AIPluginBase):
     def _retry_on_timeout(self) -> bool:
         extra = self._endpoint.extra_config or {}
         return bool(extra.get("retry_on_timeout", False))
+
+    def _disable_tools(self) -> bool:
+        """True when this endpoint opts out of native tool-calling.
+
+        Small local models often ignore native function-calling and emit the
+        action JSON in plain content; advertising 49 tools then just confuses
+        them. Setting ``disable_tools`` in extra_config forces the legacy
+        in-prompt JSON-action protocol instead (the action catalog is folded
+        into the system prompt by ``_inject_actions_into_prompt``).
+
+        ``force_action_grammar`` also implies this: a GBNF grammar constrains the
+        *content* output, which only makes sense without native tool-calling.
+        """
+        extra = self._endpoint.extra_config or {}
+        return bool(extra.get("disable_tools") or extra.get("force_action_grammar"))
+
+    def _build_action_grammar(self, prompt_request: Any) -> str | None:
+        """Build a GBNF grammar for the action JSON, or ``None``.
+
+        Opt-in via ``extra_config.force_action_grammar``. A manual ``grammar`` in
+        extra_config takes precedence (handled in ``_extra_api_kwargs``), so this
+        returns ``None`` when one is set. The grammar's ``type`` enum is the exact
+        set of action names offered for this request, so the model cannot invent
+        or duplicate types and must emit a single well-formed object.
+        """
+        extra = self._endpoint.extra_config or {}
+        if not extra.get("force_action_grammar") or extra.get("grammar"):
+            return None
+        try:
+            from core.external_endpoints.action_grammar import build_actions_gbnf
+
+            names = sorted(
+                {
+                    getattr(m, "name", None)
+                    for m in (getattr(prompt_request, "tool_declarations", None) or [])
+                }
+                - {None}
+            )
+            return build_actions_gbnf(names)
+        except Exception as exc:
+            log_warning(
+                f"[cortex_bridge:{self._endpoint.name}] action grammar build failed: {exc}"
+            )
+            return None
+
+    def _build_fallback_action_grammar(self) -> str | None:
+        """Build a catalog-wide action grammar for prompts without a PromptRequest.
+
+        Opt-in via ``extra_config.force_action_grammar`` (a manual ``grammar``
+        in extra_config still wins, handled in ``_extra_api_kwargs``). Used when
+        a caller sends a raw string/dict prompt — notably the corrector's
+        JSON-correction retries — so the strict action-JSON shape is still
+        enforced even though no scoped ``tool_declarations`` are available. The
+        ``type`` enum is the full set of action types from the core actions
+        block. Returns ``None`` when the endpoint hasn't opted in or no action
+        names are available, so callers simply skip attaching a grammar.
+        """
+        extra = self._endpoint.extra_config or {}
+        if not extra.get("force_action_grammar") or extra.get("grammar"):
+            return None
+        try:
+            from core.core_initializer import core_initializer
+            from core.external_endpoints.action_grammar import build_actions_gbnf
+
+            available = (
+                core_initializer.actions_block.get("available_actions", {}) or {}
+            )
+            names = sorted(n for n in available.keys() if isinstance(n, str))
+            return build_actions_gbnf(names)
+        except Exception as exc:
+            log_debug(
+                f"[cortex_bridge:{self._endpoint.name}] fallback action grammar build failed: {exc}"
+            )
+            return None
+
+    def _inject_actions_into_prompt(self, prompt_request: Any) -> None:
+        """Fold the scoped action catalog into the system prompt.
+
+        Needed when native tools are disabled: the PromptRequest path otherwise
+        delivers the available actions *only* as native tool declarations, so
+        without this the model would lose its action catalog entirely. The
+        catalog is built from the same actions that would have been offered as
+        tools, so nothing is lost — it is just delivered as text.
+        """
+        try:
+            from core.config_manager import config_registry
+            from core.core_initializer import core_initializer
+            from core.prompt_engine import minify_actions_block
+
+            names: set[str] = {
+                str(n)
+                for m in (getattr(prompt_request, "tool_declarations", None) or [])
+                if (n := getattr(m, "name", None)) is not None
+            }
+            if not names:
+                return
+
+            # Drop message_* actions that belong to other interfaces — the
+            # model only needs the one matching its current interface.
+            _rtx = getattr(prompt_request, "runtime_ctx", None)
+            _iface: str = str(getattr(_rtx, "interface_name", "") or "").strip()
+            if _iface:
+                names = {
+                    n
+                    for n in names
+                    if not n.startswith("message_") or n == f"message_{_iface}"
+                }
+
+            # Drop animation/visual actions when no animation client is connected.
+            # Emitting use_animation with no WebUI open triggers a corrector pass.
+            _animation_names = {"use_animation", "tts_speak"}
+            if names & _animation_names:
+                try:
+                    from core.animation_handler import get_karada_state_server
+
+                    _srv = get_karada_state_server()
+                    if _srv is None or not _srv.has_connected_clients():
+                        names -= _animation_names
+                except Exception:
+                    pass
+
+            raw = core_initializer.actions_block.get("available_actions", {}) or {}
+            scoped = {k: v for k, v in raw.items() if k in names}
+            if not scoped:
+                return
+
+            is_lite: bool = bool(config_registry.get_value("PROMPT_LITE_MODE", False))
+            catalog = minify_actions_block(scoped, lite=is_lite)
+            # Render as a flat, unambiguous list — NOT a nested JSON dict. The
+            # nested ``{name: {brief, schema}}`` shape made small models emit
+            # sub-keys like "brief" as action types.
+            lines: list[str] = []
+            for name, spec in catalog.items():
+                if not isinstance(spec, dict):
+                    lines.append(f"- {name}")
+                    continue
+                brief = str(spec.get("brief", "") or "").strip()
+                schema = spec.get("schema")
+                props = (
+                    list((schema.get("properties") or {}).keys())
+                    if isinstance(schema, dict)
+                    else []
+                )
+                line = f"- {name}"
+                if brief:
+                    line += f": {brief}"
+                if props:
+                    line += f" (payload keys: {', '.join(str(p) for p in props)})"
+                lines.append(line)
+
+            block = (
+                "\n\n=== AVAILABLE ACTIONS ===\n"
+                'Reply ONLY as {"actions":[{"type":"<action_name>","payload":{...}}]}. '
+                'Each "type" MUST be exactly one of the action names below — do not '
+                "invent, combine, or abbreviate names, and never use a payload key as "
+                "a type:\n" + "\n".join(lines)
+            )
+            prompt_request.system_instruction = (
+                getattr(prompt_request, "system_instruction", "") or ""
+            ) + block
+        except Exception as exc:
+            log_warning(
+                f"[cortex_bridge:{self._endpoint.name}] action-catalog injection failed: {exc}"
+            )
 
     @staticmethod
     def _is_retryable_exception(exc: Exception) -> bool:
@@ -369,7 +588,14 @@ class ExternalCortexEngine(AIPluginBase):
         )
 
     def _get_request_timeout(self) -> float:
-        """Get the request timeout from endpoint extra_config or use a safe default."""
+        """Get the request timeout from endpoint extra_config or the configured default.
+
+        Precedence: per-endpoint ``extra_config["timeout"]`` → the global
+        ``LLM_GENERATION_TIMEOUT_SEC`` config var (env/.env/WebUI tunable) →
+        a generous hard fallback. The default is intentionally large so slow
+        hardware is not silently cut off mid-generation (which closes the socket
+        and makes llama.cpp cancel the task).
+        """
         extra = self._endpoint.extra_config or {}
         timeout = extra.get("timeout")
         if timeout is not None:
@@ -377,7 +603,16 @@ class ExternalCortexEngine(AIPluginBase):
                 return float(timeout)
             except (ValueError, TypeError):
                 pass
-        return 120.0
+        try:
+            from core.config_manager import config_registry
+
+            return float(
+                config_registry.get_value(
+                    "LLM_GENERATION_TIMEOUT_SEC", 1800, value_type=int
+                )
+            )
+        except Exception:
+            return 1800.0
 
     def _tool_api_kwargs(self, prompt: Any) -> dict[str, Any]:
         """Build adapter kwargs derived from a typed PromptRequest.
@@ -402,6 +637,27 @@ class ExternalCortexEngine(AIPluginBase):
                     prompt_request = candidate
 
             if prompt_request is None or not prompt_request.tool_declarations:
+                # No typed PromptRequest — e.g. the corrector's JSON-correction
+                # retries pass a raw string prompt (and recon may pass a plain
+                # dict). On force_action_grammar endpoints, still constrain the
+                # output by falling back to a grammar built from the full
+                # registered action catalog, so these retries don't regress to
+                # unconstrained JSON that a small local model can't recover from
+                # (which otherwise exhausts the corrector). Gated on the
+                # endpoint's extra_config, so other engines are never affected.
+                fallback = self._build_fallback_action_grammar()
+                return {"extra_body": {"grammar": fallback}} if fallback else {}
+
+            if self._disable_tools():
+                # Force the legacy in-prompt JSON-action protocol: keep native
+                # tools off, fold the action catalog into the system prompt, and
+                # leave supports_tool_calling False so the renderer expects a
+                # JSON-in-content reply rather than tool_calls.
+                prompt_request.supports_tool_calling = False
+                self._inject_actions_into_prompt(prompt_request)
+                grammar = self._build_action_grammar(prompt_request)
+                if grammar:
+                    return {"extra_body": {"grammar": grammar}}
                 return {}
 
             prompt_request.supports_tool_calling = True
@@ -462,6 +718,21 @@ class ExternalCortexEngine(AIPluginBase):
             try:
                 extra_kwargs = self._extra_api_kwargs()
                 extra_kwargs.update(prompt_extra_kwargs)
+                # Native tool-calling already constrains output, and most
+                # OpenAI-compatible servers reject response_format alongside
+                # tools — so let tool-calling win when both are present.
+                if "tools" in extra_kwargs:
+                    extra_kwargs.pop("response_format", None)
+                    grammar_body = extra_kwargs.get("extra_body")
+                    if isinstance(grammar_body, dict):
+                        grammar_body.pop("grammar", None)
+                        if not grammar_body:
+                            extra_kwargs.pop("extra_body", None)
+                # A grammar is the strongest constraint; response_format is then
+                # redundant and can conflict on some servers, so drop it.
+                _eb = extra_kwargs.get("extra_body")
+                if isinstance(_eb, dict) and _eb.get("grammar"):
+                    extra_kwargs.pop("response_format", None)
                 extra_kwargs.setdefault("timeout", request_timeout)
                 chat_resp = await asyncio.wait_for(
                     self._adapter.chat_completion(
@@ -548,8 +819,20 @@ class ExternalCortexEngine(AIPluginBase):
             )
 
         if not isinstance(prompt, dict):
-            content: str = prompt if isinstance(prompt, str) else str(prompt)
-            return [{"role": "user", "content": content}]
+            _parsed_prompt: Any = None
+            if isinstance(prompt, str):
+                try:
+                    _parsed_prompt = json.loads(prompt)
+                except Exception:
+                    pass
+            if isinstance(_parsed_prompt, dict):
+                prompt = _parsed_prompt
+            else:
+                content: str = prompt if isinstance(prompt, str) else str(prompt)
+                return [{"role": "user", "content": content}]
+
+        if "system_message" in prompt:
+            return self._build_correction_messages(prompt)
 
         prompt_request = prompt.get("__prompt_request")
         if prompt_request is not None:
@@ -609,6 +892,51 @@ class ExternalCortexEngine(AIPluginBase):
                 {"role": "user", "content": user_msg_content},
             ]
         return [{"role": "user", "content": user_msg_content}]
+
+    def _build_correction_messages(
+        self, payload: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        """Convert a corrector payload into properly role-separated messages.
+
+        The corrector sends ``{"system_message": {...}}`` as a flat JSON blob.
+        Splitting it into system / assistant / user roles gives the LLM clear
+        signal about what each part is, which meaningfully improves coherence
+        compared to receiving a single large user-role JSON string.
+        """
+        sm = payload.get("system_message") or {}
+        correction_instruction = str(sm.get("message") or "")
+        your_reply = str(sm.get("your_reply") or "")
+        original_user_message = str(sm.get("original_user_message") or "")
+        required_format = sm.get("required_format")
+        strict_requirements = sm.get("strict_requirements") or []
+
+        user_parts: list[str] = []
+        if original_user_message:
+            user_parts.append(f"Original user message:\n{original_user_message}")
+        if required_format:
+            user_parts.append(
+                f"Required format:\n{json.dumps(required_format, ensure_ascii=False)}"
+            )
+        if strict_requirements:
+            reqs = "\n".join(f"- {r}" for r in strict_requirements)
+            user_parts.append(f"Strict requirements:\n{reqs}")
+        user_parts.append("Respond with ONLY valid JSON.")
+        user_content = (
+            "\n\n".join(user_parts)
+            if user_parts
+            else "Provide a corrected JSON response."
+        )
+
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": correction_instruction},
+        ]
+        if your_reply:
+            messages.append({"role": "assistant", "content": your_reply})
+        messages.append({"role": "user", "content": user_content})
+        log_debug(
+            f"[cortex_bridge] correction payload split into {len(messages)} role-separated messages"
+        )
+        return messages
 
     async def handle_incoming_message(
         self, bot: Any, message: Any, prompt: Any

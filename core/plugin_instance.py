@@ -97,13 +97,14 @@ try:
     register_exposed_var(
         "LLM_CHAIN_LEASE_TIMEOUT_SEC",
         label="LLM chain lease timeout (s)",
-        default=600,
+        default=2400,
         value_type=int,
         ui_type="number",
         description=(
             "Force-release the global LLM chain lease after this many seconds to "
-            "avoid deadlocks. Set to 0 to disable. Recommended: 600s (10 min) for "
-            "slow engines like selenium-llm-engine with Gemini."
+            "avoid deadlocks. Set to 0 to disable. Keep this above "
+            "LLM_GENERATION_TIMEOUT_SEC so the lease is not released while a slow "
+            "generation is still running (default 2400s / 40 min)."
         ),
         scope="agent",
         component="agent",
@@ -128,12 +129,12 @@ async def _llm_chain_lease():
     try:
         timeout = int(
             config_registry.get_value(
-                "LLM_CHAIN_LEASE_TIMEOUT_SEC", 600, value_type=int
+                "LLM_CHAIN_LEASE_TIMEOUT_SEC", 2400, value_type=int
             )
-            or 600
+            or 2400
         )
     except Exception:
-        timeout = 600
+        timeout = 2400
 
     acquired = False
     try:
@@ -620,7 +621,11 @@ async def handle_incoming_message(
             context_memory_or_prompt.get("is_voice_input", False)
         )
         _has_transcribed_text = bool(getattr(message, "text", None))
-        if _is_voice_input and _has_transcribed_text:
+        # In Auris 'inline' mode no transcription happens, so always extract the
+        # raw audio attachment (even when a caption supplies message text) so it
+        # can be forwarded inline to the Cortex engine.
+        _auris_inline = _get_active_auris_engine() == "inline"
+        if _is_voice_input and _has_transcribed_text and not _auris_inline:
             attachments: list[dict] = []
             log_debug(
                 "[plugin_instance] Skipping multimodal extraction: is_voice_input=True and text present (already transcribed)"
@@ -633,57 +638,70 @@ async def handle_incoming_message(
             log_info(
                 f"[plugin_instance] Message contains {len(attachments)} attachments from user {user_id}"
             )
-            # Do NOT pass the user's text as the Iris prompt — Iris must
-            # receive a neutral plain-text instruction so the vision engine
-            # returns a description rather than formatted/structured output.
-            # The user's actual question is answered by the main LLM after the
-            # Iris description is injected into the context.
-            _IRIS_PLAIN_TEXT_PROMPT = (
-                "IMPORTANT: Respond in plain conversational text only. "
-                "Do NOT use JSON, XML or any structured format. "
-                "Simply describe what you see in the image."
-            )
-            iris_result = await _describe_attachment_images_with_iris(
-                attachments, prompt=_IRIS_PLAIN_TEXT_PROMPT
-            )
-            if iris_result is not None:
-                try:
-                    original_text = getattr(message, "text", "") or ""
-                    # Build a structured block with all available metadata.
-                    parts: list[str] = [iris_result.description]
-                    if iris_result.language:
-                        parts.append(f"language: {iris_result.language}")
-                    if iris_result.confidence is not None:
-                        parts.append(f"confidence: {iris_result.confidence:.2f}")
-                    description_block = "[Iris vision: " + " | ".join(parts) + "]"
-                    if original_text:
-                        setattr(
-                            message, "text", f"{original_text}\n\n{description_block}"
+            # 'inline' is a hardcoded Iris pseudo-engine: skip the description
+            # step entirely and let image/video bytes flow through to the Cortex
+            # engine so a vision-capable multimodal model can see them directly.
+            # (The cortex bridge drops image parts — with a warning — when the
+            # active endpoint is not marked vision-capable.)
+            if _get_active_iris_engine() == "inline":
+                log_info(
+                    "[plugin_instance] Iris inline mode: forwarding image/video "
+                    "attachments to the Cortex engine without description"
+                )
+            else:
+                # Do NOT pass the user's text as the Iris prompt — Iris must
+                # receive a neutral plain-text instruction so the vision engine
+                # returns a description rather than formatted/structured output.
+                # The user's actual question is answered by the main LLM after the
+                # Iris description is injected into the context.
+                _IRIS_PLAIN_TEXT_PROMPT = (
+                    "IMPORTANT: Respond in plain conversational text only. "
+                    "Do NOT use JSON, XML or any structured format. "
+                    "Simply describe what you see in the image."
+                )
+                iris_result = await _describe_attachment_images_with_iris(
+                    attachments, prompt=_IRIS_PLAIN_TEXT_PROMPT
+                )
+                if iris_result is not None:
+                    try:
+                        original_text = getattr(message, "text", "") or ""
+                        # Build a structured block with all available metadata.
+                        parts: list[str] = [iris_result.description]
+                        if iris_result.language:
+                            parts.append(f"language: {iris_result.language}")
+                        if iris_result.confidence is not None:
+                            parts.append(f"confidence: {iris_result.confidence:.2f}")
+                        description_block = "[Iris vision: " + " | ".join(parts) + "]"
+                        if original_text:
+                            setattr(
+                                message,
+                                "text",
+                                f"{original_text}\n\n{description_block}",
+                            )
+                        else:
+                            setattr(message, "text", description_block)
+                        log_info(
+                            "[plugin_instance] Appended Iris vision analysis to prompt text"
                         )
-                    else:
-                        setattr(message, "text", description_block)
-                    log_info(
-                        "[plugin_instance] Appended Iris vision analysis to prompt text"
-                    )
-                except Exception as exc:
-                    log_warning(
-                        f"[plugin_instance] Could not append Iris description to message text: {exc}"
-                    )
+                    except Exception as exc:
+                        log_warning(
+                            f"[plugin_instance] Could not append Iris description to message text: {exc}"
+                        )
 
-            # Strip image/video base64 data from attachments so the Cortex
-            # engine does not receive raw vision bytes.  Iris already provided
-            # a textual description (or a placeholder).  Audio and document
-            # attachments are kept intact for engines that support them natively.
-            attachments = [
-                att
-                for att in attachments
-                if not (
-                    att.get("mime_type")
-                    or att.get("content_type")
-                    or att.get("type")
-                    or ""
-                ).startswith(("image/", "video/"))
-            ]
+                # Strip image/video base64 data from attachments so the Cortex
+                # engine does not receive raw vision bytes.  Iris already provided
+                # a textual description (or a placeholder).  Audio and document
+                # attachments are kept intact for engines that support them natively.
+                attachments = [
+                    att
+                    for att in attachments
+                    if not (
+                        att.get("mime_type")
+                        or att.get("content_type")
+                        or att.get("type")
+                        or ""
+                    ).startswith(("image/", "video/"))
+                ]
 
         if isinstance(context_memory_or_prompt, str):
             try:
@@ -1386,6 +1404,79 @@ def _build_unviewable_media_placeholder(
     )
 
 
+def _get_active_iris_engine() -> str:
+    """Return the configured active Iris engine name.
+
+    May be a registered engine name, ``"disabled"`` (vision off), or the
+    hardcoded ``"inline"`` pseudo-engine (forward image/video bytes straight to
+    the Cortex engine instead of producing a textual description).  Falls back to
+    ``"disabled"`` on any error.
+    """
+    try:
+        from core.core_initializer import PLUGIN_REGISTRY
+
+        iris = PLUGIN_REGISTRY.get("iris_plugin")
+        if iris is not None:
+            try:
+                iris.refresh_config()
+            except Exception:
+                pass
+            return str(getattr(iris, "_active_engine_name", "disabled") or "disabled")
+    except Exception:
+        pass
+    try:
+        from core.config_manager import config_registry
+
+        return str(
+            config_registry.get_value(
+                "ACTIVE_IRIS_ENGINE",
+                "disabled",
+                value_type=str,
+                group="plugins",
+                component="iris_plugin",
+            )
+            or "disabled"
+        )
+    except Exception:
+        return "disabled"
+
+
+def _get_active_auris_engine() -> str:
+    """Return the configured active Auris (STT) engine name.
+
+    May be a registered engine name, ``"disabled"`` (STT off), or the hardcoded
+    ``"inline"`` pseudo-engine (forward audio bytes straight to the Cortex engine
+    instead of transcribing).  Falls back to ``"disabled"`` on any error.
+    """
+    try:
+        from core.core_initializer import PLUGIN_REGISTRY
+
+        auris = PLUGIN_REGISTRY.get("auris_plugin")
+        if auris is not None:
+            try:
+                auris.refresh_config()
+            except Exception:
+                pass
+            return str(getattr(auris, "_active_engine_name", "disabled") or "disabled")
+    except Exception:
+        pass
+    try:
+        from core.config_manager import config_registry
+
+        return str(
+            config_registry.get_value(
+                "ACTIVE_AURIS_ENGINE",
+                "disabled",
+                value_type=str,
+                group="plugins",
+                component="auris_plugin",
+            )
+            or "disabled"
+        )
+    except Exception:
+        return "disabled"
+
+
 async def _describe_attachment_images_with_iris(
     attachments: list[dict],
     prompt: str | None = None,
@@ -1437,8 +1528,10 @@ async def _describe_attachment_images_with_iris(
         except Exception:
             pass
         active_engine = getattr(iris, "_active_engine_name", "disabled")
-        if active_engine == "disabled":
-            log_info("[plugin_instance] Iris skip: active engine is 'disabled'")
+        if active_engine in ("disabled", "inline"):
+            # 'inline' is handled upstream (images flow to the Cortex engine
+            # untouched); reaching here means there is no description engine.
+            log_info(f"[plugin_instance] Iris skip: active engine is '{active_engine}'")
             return IrisResult(
                 description=_build_unviewable_media_placeholder(
                     first_media_mime_type, reason="disabled"

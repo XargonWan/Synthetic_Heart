@@ -13,6 +13,12 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from core.config_manager import config_registry
 from core.logging_utils import log_debug, log_error, log_info, log_warning
+
+# How often the loop wakes to check whether a scheduled outreach is due. The
+# cadence between outreaches is governed by GRILLO_OUTREACH_INTERVAL_HOURS; this
+# is only the polling granularity for detecting a due slot.
+_POLL_SECONDS = 1800
+
 from core.variables_engine import register_exposed_var
 from plugins.grillo.common_instructions import GRILLO_INSTRUCTIONS
 
@@ -79,6 +85,16 @@ class GrilloOutreachPlugin:
             component="grillo_outreach",
         )
 
+        self.quiet_minutes: int = config_registry.get_value(
+            "GRILLO_OUTREACH_QUIET_MINUTES",
+            15,
+            label="Outreach Quiet Window (minutes)",
+            description="Suppress outreach if the user sent a message within this many minutes (avoid barging into a live conversation and double-texting)",
+            value_type=int,
+            group="grillo",
+            component="grillo_outreach",
+        )
+
         self._last_outreach: Optional[datetime] = None
 
     def get_supported_actions(self) -> Dict[str, Any]:
@@ -126,16 +142,24 @@ class GrilloOutreachPlugin:
             except Exception as e:
                 log_error(f"[grillo_outreach] Error in outreach loop: {e}")
 
-            # Check every 30 minutes
-            await asyncio.sleep(1800)
+            await asyncio.sleep(_POLL_SECONDS)
 
     async def _maybe_generate_outreach(self) -> None:
-        """Check if it's time to generate an outreach beat."""
+        """Generate an outreach beat when a scheduled slot is due and the chat is quiet.
+
+        Outreach fires on the ``GRILLO_OUTREACH_INTERVAL_HOURS`` schedule. If a
+        scheduled slot lands while a live conversation is in progress (a human
+        spoke within the quiet window), the slot is *consumed* rather than
+        retried: the timer advances so the next attempt is the next scheduled
+        slot, not right after the quiet window expires. This prevents texting
+        the user again shortly after they stop talking.
+        """
         if not self.enabled:
             return
 
-        # Check interval
         now = datetime.now()
+
+        # Respect the configured interval between outreaches.
         if self._last_outreach:
             elapsed = (now - self._last_outreach).total_seconds() / 3600
             if elapsed < self.interval_hours:
@@ -144,35 +168,83 @@ class GrilloOutreachPlugin:
                 )
                 return
 
-        # Check if there's been recent user activity (don't spam inactive chats)
+        # Anti-dead-chat: only reach out to chats with genuine recent activity.
         if not await self._has_recent_activity():
             log_debug("[grillo_outreach] Skipping - no recent user activity")
+            return
+
+        # A scheduled slot is due. If a live conversation is in progress, do not
+        # barge in (that lands as a double-text). Consume this slot by advancing
+        # the timer so the next attempt is the next scheduled slot — NOT right
+        # after the quiet window expires.
+        if await self._has_live_activity(self.quiet_minutes):
+            log_debug(
+                f"[grillo_outreach] Suppressed - human active within last "
+                f"{self.quiet_minutes}m; deferring to next scheduled slot"
+            )
+            self._last_outreach = now
             return
 
         # Generate outreach
         await self._generate_outreach_beat()
         self._last_outreach = now
 
-    async def _has_recent_activity(self, hours: int = 24) -> bool:
-        """Check if there's been user activity in the last N hours."""
-        from datetime import datetime, timedelta, timezone
+    async def _human_messages_since(self, cutoff: datetime) -> Optional[bool]:
+        """Return True if a genuine human message exists at/after ``cutoff``.
 
+        Sourced from ``chat_history_cache`` (real conversation turns), NOT
+        ``ai_diary``. ``ai_diary.user_message`` is also written by Grillo's own
+        internal beats (self-reflection, memory consolidation, tag elaboration,
+        curiosity, ...), so using it makes outreach think a human is active when
+        it is only Grillo's own pulse — which permanently defers outreach.
+
+        ``self`` is SyntH's own turns; ``-1`` is the synthetic outreach sender.
+        Returns ``None`` on DB error so callers pick their own fail-safe.
+        """
         try:
             from core.db import get_conn_ctx
 
-            cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
             async with get_conn_ctx() as conn:
                 async with conn.cursor() as cur:
                     await cur.execute(
-                        "SELECT COUNT(*) FROM ai_diary"
-                        " WHERE timestamp > %s AND user_message IS NOT NULL",
+                        "SELECT COUNT(*) FROM chat_history_cache"
+                        " WHERE timestamp > %s"
+                        " AND sender_id IS NOT NULL"
+                        " AND sender_id NOT IN ('self', '-1')",
                         (cutoff,),
                     )
                     row = await cur.fetchone()
                     return bool(row and row[0] > 0)
         except Exception as e:
-            log_warning(f"[grillo_outreach] Error checking activity: {e}")
+            log_warning(f"[grillo_outreach] Error querying human activity: {e}")
+            return None
+
+    async def _has_recent_activity(self, hours: int = 24) -> bool:
+        """Whether a human has spoken in the last N hours (anti-dead-chat gate)."""
+        from datetime import datetime, timedelta, timezone
+
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+        result = await self._human_messages_since(cutoff)
+        # Fail-safe: treat unknown (DB error) as "no activity" so we do not
+        # message a chat we cannot confirm is alive.
+        return bool(result)
+
+    async def _has_live_activity(self, minutes: int) -> bool:
+        """Return True if a human spoke within the last N minutes.
+
+        Detects an in-progress live conversation so outreach yields instead of
+        barging in (which would land as a double-text). Fails safe: on DB error
+        returns True so we prefer staying quiet over risking a double-text.
+        """
+        from datetime import datetime, timedelta, timezone
+
+        if minutes <= 0:
             return False
+
+        cutoff = datetime.now(timezone.utc) - timedelta(minutes=minutes)
+        result = await self._human_messages_since(cutoff)
+        # Fail-safe: on unknown (DB error), stay quiet.
+        return True if result is None else result
 
     async def _get_context_snippets(self, limit: int = 5) -> List[str]:
         """Get recent conversation snippets for context."""
@@ -196,15 +268,19 @@ class GrilloOutreachPlugin:
                     rows = await cur.fetchall()
                     for row in rows:
                         content = row[0][:200] if row[0] else ""
-                        interface = row[1] or "unknown"
-                        snippets.append(f"[{interface}] {content}")
+                        if content:
+                            snippets.append(content)
 
-                    # Get recent memories
+                    # Get recent memories — GROUP BY content deduplicates rows
+                    # that grillo_observer writes once per beat for the same message.
+                    # The 60-day window drops stale entries from old/inactive chats.
                     await cur.execute(
                         """
-                        SELECT content FROM memories 
-                        WHERE content IS NOT NULL 
-                        ORDER BY timestamp DESC 
+                        SELECT content FROM memories
+                        WHERE content IS NOT NULL
+                          AND timestamp >= NOW() - INTERVAL 60 DAY
+                        GROUP BY content
+                        ORDER BY MAX(timestamp) DESC
                         LIMIT %s
                         """,
                         (limit,),
@@ -212,7 +288,8 @@ class GrilloOutreachPlugin:
                     rows = await cur.fetchall()
                     for row in rows:
                         content = row[0][:200] if row[0] else ""
-                        snippets.append(f"[memory] {content}")
+                        if content:
+                            snippets.append(f"(memory) {content}")
 
         except Exception as e:
             log_warning(f"[grillo_outreach] Error getting context: {e}")
@@ -336,39 +413,68 @@ class GrilloOutreachPlugin:
 
         return interface, chat_id
 
+    def _resolve_recipient_name(self, interface: str, chat_id: Optional[str]) -> str:
+        """Best-effort display name for the outreach recipient.
+
+        Only resolves a real name when the target chat belongs to a configured
+        trainer; otherwise returns "" so callers fall back to a history-grounded
+        generic label. For multi-trainer setups the primary (first) name is used,
+        since outreach targets a single chat.
+        """
+        try:
+            from core.config import get_trainer_display_name, get_trainer_id
+
+            trainer_id = get_trainer_id(interface)
+            if trainer_id is None or str(trainer_id) != str(chat_id):
+                return ""
+            raw = get_trainer_display_name()
+            if not raw:
+                return ""
+            return raw.split(",")[0].strip()
+        except Exception:
+            return ""
+
     def _build_outreach_prompt(
         self, interface: str, chat_id: Optional[str], context: List[str]
     ) -> str:
-        """Build the outreach prompt for the LLM."""
+        """Build the outreach prompt for the LLM.
+
+        Framed as a *self-initiated* impulse rather than an inbound message, so
+        the model speaks in its own voice to the recipient instead of replying
+        to the beat scheduler (the historical "detached" outreach failure mode).
+        """
         context_text = (
-            "\n".join(f"- {s}" for s in context) if context else "(no recent context)"
+            "\n".join(f"- {s}" for s in context)
+            if context
+            else "- (nothing specific surfaced — let it come from how you feel)"
         )
 
         # Determine action type based on interface
         action_type = f"message_{interface}"
 
         interface_path_example = f"{interface}/{chat_id}" if chat_id else interface
-        prompt = f"""[G.R.I.L.L.O. OUTREACH]
+        recipient = self._resolve_recipient_name(interface, chat_id)
+        recipient_label = recipient or "the person you have been talking with here"
 
-You feel like reaching out. Based on your recent experiences and thoughts,
-initiate a natural conversation with someone you care about.
+        prompt = f"""[SELF-INITIATED OUTREACH]
 
-Recent context:
+This is NOT a reply — no one has messaged you. This is your own impulse, right now, to
+reach out first to {recipient_label}. (The `source` in the input marks who you are
+reaching out TO and how to route the message — it is the recipient, not a sender.)
+
+Speak entirely in your own first-person voice, the way you naturally talk to
+{recipient_label}. Open a warm, genuine conversation: pick up a real thread from your
+recent time together, share what is actually on your mind, or simply tell them you were
+thinking of them. Write the message as something you would truly send — warm, personal,
+and in character.
+
+What has been close to the surface for you lately:
 {context_text}
 
-Consider:
-- What's been on your mind lately?
-- Is there something you'd like to share or discuss?
-- How are you feeling that you might want to express?
-
-IMPORTANT: Generate a warm, natural message to start a conversation.
-Do NOT be overly formal or robotic. Be genuine and personable.
-
 Return TWO actions:
-- a `{action_type}` message action with the outreach text
+- a `{action_type}` message action whose `text` is the opening line you actually send
+  (no meta-commentary, no stage directions)
 - a `create_personal_diary_entry` action that records why you reached out, with `interaction_summary`, `personal_thought`, and `emotions`
-
-{GRILLO_INSTRUCTIONS}
 
 RESPOND ONLY WITH VALID JSON:
 {{"actions": [{{"type": "{action_type}", "payload": {{"text": "your message here", "interface_path": "{interface_path_example}"}}}}, {{"type": "create_personal_diary_entry", "payload": {{"interaction_summary": "brief summary of this outreach", "personal_thought": "private first-person thought behind the outreach", "emotions": [{{"type": "longing", "intensity": 0.6}}]}}}}], "meta": {{"autonomous": true, "rationale": "Grillo outreach"}}}}
@@ -415,6 +521,15 @@ RESPOND ONLY WITH VALID JSON:
             from core.message_queue import enqueue_low_priority
             from types import SimpleNamespace
 
+            # The synthetic message represents SyntH's own outreach impulse, so the
+            # "sender" surfaced to the model is the recipient she is reaching out to —
+            # NOT a bot named G.R.I.L.L.O. Presenting G.R.I.L.L.O. as the sender made
+            # the model reply *to* the scheduler, producing detached/clinical outreach.
+            # id=-1 is retained as the synthetic/internal marker.
+            recipient_name = (
+                self._resolve_recipient_name(interface, chat_id) or "Trainer"
+            )
+
             # Build a proper message object for the queue (not just a string)
             grillo_message = SimpleNamespace(
                 text=prompt,
@@ -422,16 +537,16 @@ RESPOND ONLY WITH VALID JSON:
                 message_id=f"grillo_outreach_{activity_id or 0}",
                 from_user=SimpleNamespace(
                     id=-1,
-                    username="grillo",
-                    full_name="G.R.I.L.L.O.",
-                    is_bot=True,
+                    username=None,
+                    full_name=recipient_name,
+                    is_bot=False,
                 ),
                 chat=SimpleNamespace(
                     id=chat_id or -1,
                     type="private",
                     title=None,
-                    username="grillo",
-                    first_name="G.R.I.L.L.O.",
+                    username=None,
+                    first_name=recipient_name,
                 ),
                 date=None,
                 thread_id=None,

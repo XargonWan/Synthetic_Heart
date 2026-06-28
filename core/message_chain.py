@@ -49,9 +49,13 @@ FAILED_MESSAGE_TEXT = config_registry.get_var(
 # Register RESPONSE_TIMEOUT configuration
 RESPONSE_TIMEOUT = config_registry.get_var(
     "RESPONSE_TIMEOUT",
-    300,
+    2100,
     label="Response Timeout",
-    description="Maximum time in seconds to wait for LLM responses before sending fallback message.",
+    description=(
+        "Maximum time in seconds to wait for LLM responses before sending a "
+        "fallback message. Must stay above LLM_GENERATION_TIMEOUT_SEC so a slow "
+        "generation is not cut off by this outer guard."
+    ),
     value_type=int,
     group="core",
     component="core",
@@ -934,6 +938,27 @@ async def handle_incoming_message(
                     # Don't return here - let corrector fix it
                     parsed = None  # Force correction path
                 else:
+                    # Recover a root-level type+payload action that the LLM placed
+                    # outside the actions array, e.g.:
+                    #   {"actions": [...], "type": "message_telegram_bot", "payload": {...}}
+                    # gemma-uncensored and similar models occasionally emit this
+                    # malformed structure where the last action leaks to root.
+                    # Folding it in here avoids the corrector firing for every
+                    # message that ends this way, which would produce duplicate
+                    # user-visible messages via the deliver_to_llm chain.
+                    _root_type = parsed.get("type")
+                    _root_payload = parsed.get("payload")
+                    if (
+                        isinstance(_root_type, str)
+                        and _root_type not in ("actions", "recovery_actions")
+                        and isinstance(_root_payload, dict)
+                    ):
+                        actions.append({"type": _root_type, "payload": _root_payload})
+                        log_info(
+                            f"[message_chain] \U0001f504 Recovered root-level action "
+                            f"'{_root_type}' outside actions array → appended"
+                        )
+
                     # Normalize OpenAI tool calling format (name/parameters) to type/payload
                     for i, act in enumerate(actions):
                         if isinstance(act, dict):
@@ -1010,6 +1035,26 @@ async def handle_incoming_message(
                                     log_debug(
                                         f"[message_chain] Gathered {len(_extra)} flat fields into payload for {act.get('type')}"
                                     )
+                            elif "payload" in act and "type" in act:
+                                # Merge any action-level keys that belong inside
+                                # payload but were placed at the action level by
+                                # the LLM (e.g. interface_path, chat_name,
+                                # reply_to_message_id for message_* actions).
+                                _orphaned = {
+                                    k: v
+                                    for k, v in act.items()
+                                    if k not in _ACTION_SYSTEM_KEYS
+                                }
+                                if _orphaned:
+                                    for k in _orphaned:
+                                        del act[k]
+                                    for k, v in _orphaned.items():
+                                        if k not in act["payload"]:
+                                            act["payload"][k] = v
+                                    log_debug(
+                                        f"[message_chain] Merged {len(_orphaned)} orphaned action-level"
+                                        f" key(s) into payload for {act.get('type')}: {list(_orphaned)}"
+                                    )
             elif isinstance(parsed, list):
                 actions = parsed
                 # Normalize OpenAI tool calling format for bare list responses
@@ -1060,6 +1105,26 @@ async def handle_incoming_message(
                                 log_debug(
                                     f"[message_chain] Gathered {len(_extra)} flat fields into payload for {act.get('type')}"
                                 )
+                        elif "payload" in act and "type" in act:
+                            # Merge any action-level keys that belong inside
+                            # payload but were placed at the action level by
+                            # the LLM (e.g. interface_path, chat_name,
+                            # reply_to_message_id for message_* actions).
+                            _orphaned = {
+                                k: v
+                                for k, v in act.items()
+                                if k not in _ACTION_SYSTEM_KEYS
+                            }
+                            if _orphaned:
+                                for k in _orphaned:
+                                    del act[k]
+                                for k, v in _orphaned.items():
+                                    if k not in act["payload"]:
+                                        act["payload"][k] = v
+                                log_debug(
+                                    f"[message_chain] Merged {len(_orphaned)} orphaned action-level key(s) into"
+                                    f" payload for {act.get('type')}: {list(_orphaned)}"
+                                )
             elif isinstance(parsed, dict) and (
                 "type" in parsed
                 or "name" in parsed
@@ -1098,6 +1163,23 @@ async def handle_incoming_message(
                         parsed["payload"] = _extra
                         log_debug(
                             f"[message_chain] Gathered {len(_extra)} flat fields into payload for {parsed.get('type')}"
+                        )
+                elif (
+                    isinstance((_pl := parsed.get("payload")), dict)
+                    and "type" in parsed
+                ):
+                    _orphaned = {
+                        k: v for k, v in parsed.items() if k not in _ACTION_SYSTEM_KEYS
+                    }
+                    if _orphaned:
+                        for k in _orphaned:
+                            del parsed[k]
+                        for k, v in _orphaned.items():
+                            if k not in _pl:
+                                _pl[k] = v
+                        log_debug(
+                            f"[message_chain] Merged {len(_orphaned)} orphaned action-level key(s) into"
+                            f" payload for {parsed.get('type')}: {list(_orphaned)}"
                         )
                 if "payload" not in parsed:
                     parsed["payload"] = {}
@@ -1587,6 +1669,11 @@ async def handle_incoming_message(
                 if source == "llm" or getattr(message, "from_cortex", False):
                     has_user_response = False
                     has_tts = False
+                    # Set when the LLM emits an action that delivers user-visible
+                    # output on its own (a self-replying plugin action). Tracked
+                    # separately from has_user_response so it suppresses the
+                    # missing-reply corrector without affecting message/TTS handling.
+                    has_user_output_action = False
                     user_message_action = None
                     # Determine current set of message action types from config (dynamic)
                     current_message_action_types = []
@@ -1627,6 +1714,41 @@ async def handle_incoming_message(
                             ]
                         except Exception:
                             current_message_action_types = []
+
+                    # Action types that deliver user-visible output on their own
+                    # (self-replying plugin actions, e.g. a plugin that calls
+                    # bot.send_message inside execute_action). They satisfy the
+                    # "did the user get a reply this turn?" check so the missing-reply
+                    # corrector does not fire when the LLM responds with only such an
+                    # action. Engine-agnostic and unrelated to any endpoint grammar —
+                    # purely about whether the user receives output. Contributors add
+                    # their own self-replying actions here via config; fetch-only
+                    # actions that need a follow-up reply (e.g. recall_last_dream) must
+                    # NOT be listed.
+                    current_user_output_action_types = []
+                    try:
+                        from core.config_manager import config_registry
+
+                        USER_OUTPUT_ACTION_TYPES = config_registry.get_var(
+                            "USER_OUTPUT_ACTION_TYPES",
+                            ["get_recent_chats"],
+                            label="User-output action types",
+                            description=(
+                                "Action types that deliver user-visible output on their own "
+                                "(self-replying plugin actions). Counted as a user reply so the "
+                                "missing-reply corrector does not fire when the LLM responds with "
+                                "only such an action."
+                            ),
+                            group="core",
+                            component="message_chain",
+                        )
+                        current_user_output_action_types = (
+                            list(USER_OUTPUT_ACTION_TYPES.value)
+                            if hasattr(USER_OUTPUT_ACTION_TYPES, "value")
+                            else list(USER_OUTPUT_ACTION_TYPES)
+                        )
+                    except Exception:
+                        current_user_output_action_types = []
 
                     if isinstance(actions, list):
                         actions = cast(list[dict[str, Any]], actions)
@@ -1688,6 +1810,8 @@ async def handle_incoming_message(
                                 if not user_message_action:
                                     user_message_action = action
                                 # break
+                            if action_name in current_user_output_action_types:
+                                has_user_output_action = True
 
                     # Auto-inject TTS if there's a user response but no tts_speak
                     # Only for actual user-facing interfaces (not internal like grillo)
@@ -2151,6 +2275,13 @@ async def handle_incoming_message(
                         processed = result.get("processed", [])
                         failed = result.get("failed_actions", [])
                         errors = result.get("errors", [])
+                        # A non-empty action_outputs means run_actions already
+                        # enqueued an LLM delivery follow-up (terminal output, or a
+                        # deliver_to_llm fetch action like recall_last_dream). That
+                        # follow-up *is* the user's reply, so the missing-reply
+                        # corrector must not also fire — otherwise both produce a
+                        # message and the user gets a double reply.
+                        delivered_to_llm = bool(result.get("action_outputs"))
 
                         # remember if we actually ran anything
                         if processed:
@@ -2240,6 +2371,8 @@ async def handle_incoming_message(
                                 and not is_internal_chat
                                 and not is_scoped_non_message
                                 and not has_user_response
+                                and not has_user_output_action
+                                and not delivered_to_llm
                             ):
                                 missing_user_reply = True
 
@@ -2294,6 +2427,8 @@ async def handle_incoming_message(
                                 and not is_internal_chat
                                 and not is_scoped_non_message
                                 and not has_user_response
+                                and not has_user_output_action
+                                and not delivered_to_llm
                             ):
                                 log_warning(
                                     f"[message_chain] ⚠️ LLM generated no outbound message action for user-facing interface '{interface_path}' — triggering corrector for missing reply"

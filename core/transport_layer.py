@@ -25,9 +25,9 @@ _EXPECTING_SYSTEM_REPLY: dict = {}
 # Register the timeout used when waiting for a system reply to a correction prompt.
 AWAIT_RESPONSE_TIMEOUT = config_registry.get_var(
     "AWAIT_RESPONSE_TIMEOUT",
-    600,
+    2400,
     label="Await Response Timeout",
-    description="Maximum time in seconds to wait for a system reply after requesting a correction before the expectation expires.",
+    description="Maximum time in seconds to wait for a system reply after requesting a correction before the expectation expires. Kept above LLM_GENERATION_TIMEOUT_SEC so a slow corrected generation is not abandoned early.",
     value_type=int,
     group="core",
     component="core",
@@ -434,15 +434,77 @@ def extract_json_from_text(
             if found_json:
                 break
 
-        if not found_json:
-            log_debug("[extract_json_from_text] No valid JSON found in text")
-            log_debug(
-                f"[extract_json_from_text] Text content (first 500 chars): {text[:500]}"
-            )
-            log_debug(
-                f"[extract_json_from_text] Text content (last 500 chars): {text[-500:]}"
-            )
-            return (None, metadata) if return_metadata else None
+    # json_repair runs when:
+    # (a) nothing was found at all, OR
+    # (b) all scan strategies found a dict that lacks an 'actions' key — meaning
+    #     we fell back to a nested sub-object (e.g. a diary payload dict) because
+    #     the outer wrapper failed to parse due to a missing closing brace.
+    # We don't replace a found list (which is the actions array) or a dict that
+    # already has 'actions' — those are valid results the rest of the pipeline can
+    # handle.
+    _json_repair_needed = not found_json or (
+        isinstance(found_json, dict) and "actions" not in found_json
+    )
+    if _json_repair_needed:
+        try:
+            from json_repair import repair_json as _json_repair
+
+            _repaired = _json_repair(text, return_objects=True)
+
+            _repair_candidate: Any = None
+            if isinstance(_repaired, dict) and "actions" in _repaired:
+                _repair_candidate = _repaired
+            elif isinstance(_repaired, list):
+                # json_repair sometimes splits a malformed single object into a
+                # list when it encounters orphaned trailing objects.  Detect the
+                # common pattern: [outer_dict_with_actions, extra_action_dict, ...]
+                # and merge the extras back into the actions list so all actions
+                # are recovered (e.g. use_animation returned after the outer }).
+                _outer = next(
+                    (i for i in _repaired if isinstance(i, dict) and "actions" in i),
+                    None,
+                )
+                if _outer is not None:
+                    _extra_actions = [
+                        i
+                        for i in _repaired
+                        if i is not _outer
+                        and isinstance(i, dict)
+                        and ("type" in i or "action" in i)
+                    ]
+                    if _extra_actions:
+                        _merged: dict[str, Any] = dict(_outer)
+                        _merged["actions"] = (
+                            list(_outer.get("actions") or []) + _extra_actions
+                        )
+                        _repair_candidate = _merged
+                    else:
+                        _repair_candidate = _outer
+
+            if _repair_candidate is not None:
+                found_json = _repair_candidate
+                metadata["had_errors"] = False
+                metadata["had_extra_text"] = False
+                metadata["prefix_length"] = 0
+                metadata["suffix_length"] = 0
+                metadata["syntax_repaired"] = True
+                log_info(
+                    "[extract_json_from_text] ✅ JSON repaired via json_repair (syntax error recovery)"
+                )
+        except ImportError:
+            pass
+        except Exception as _e:
+            log_debug(f"[extract_json_from_text] json_repair failed: {_e}")
+
+    if not found_json:
+        log_debug("[extract_json_from_text] No valid JSON found in text")
+        log_debug(
+            f"[extract_json_from_text] Text content (first 500 chars): {text[:500]}"
+        )
+        log_debug(
+            f"[extract_json_from_text] Text content (last 500 chars): {text[-500:]}"
+        )
+        return (None, metadata) if return_metadata else None
 
     # Log results based on what we found
     if metadata.get("had_extra_text", False):
@@ -1991,9 +2053,34 @@ async def run_corrector_middleware(
                 context.get("interface") if context else None
             )
 
+            # Carry the active persona (identity + likes/dislikes) into the
+            # correction prompt. The corrector sends a fresh single-message
+            # prompt with no system/history, so without this the model loses its
+            # persona and improvises off-character replies (e.g. inventing its
+            # likes/dislikes) on every corrected turn.
+            try:
+                from core.persona_manager import get_persona_manager
+
+                _pm = get_persona_manager()
+                if _pm is not None:
+                    _identity = _pm.get_static_identity_content() or ""
+                    _prefs = _pm.get_static_preference_content() or ""
+                    _persona_block = "\n\n".join(
+                        p.strip() for p in (_identity, _prefs) if p and p.strip()
+                    )
+                    if _persona_block:
+                        correction_message_text = (
+                            "=== PERSONA (stay in character) ===\n"
+                            f"{_persona_block}\n\n"
+                            "=== CORRECTION ===\n"
+                            f"{correction_message_text}"
+                        )
+            except Exception as _pe:
+                log_debug(f"[corrector_middleware] persona prepend skipped: {_pe}")
+
             correction_payload = {
                 "system_message": {
-                    "type": "error",
+                    "type": "correction",
                     "message": correction_message_text,
                     "your_reply": text,
                     "original_user_message": original_user_message,

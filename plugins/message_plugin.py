@@ -82,6 +82,58 @@ class MessagePlugin:
                 + str(payload)
             )
 
+    async def _should_mirror_origin_path(self, context, original_message) -> bool:
+        """Whether a reply's route should be forced to the originating chat.
+
+        Scoped to **local-model** openai endpoints — those with ``disable_tools``
+        or ``force_action_grammar`` set. Such models frequently hallucinate
+        ``interface_path`` (e.g. ``/channels/main``), so a direct reply silently
+        fails to deliver ("Chat not found"). Cloud openai endpoints (xai,
+        openrouter) route reliably and are left untouched, as are non-openai and
+        grillo/outreach/internal turns (the latter target a system-chosen chat).
+        """
+        try:
+            if isinstance(context, dict) and (
+                context.get("beat_type") == "outreach"
+                or context.get("grillo_beat")
+                or context.get("activity_log_id")
+                or context.get("grillo_activity_log_id")
+            ):
+                return False
+            if getattr(original_message, "chat_id", None) in (None, "", -1, "-1"):
+                return False
+
+            from core.config import derive_cortex_scope, get_active_cortex_engine
+            from core.cortex_registry import get_cortex_registry
+            from core.external_endpoints.bridges.cortex_bridge import (
+                ExternalCortexEngine,
+            )
+            from core.external_endpoints.models import EndpointProtocol
+
+            # Resolve the engine for THIS turn's scope (base/trainer), not just the
+            # global base. Scopes are routinely split (e.g. local 1070ti base +
+            # xai trainer for image recognition); only the local openai_compat
+            # engine needs path mirroring — an xai trainer turn must be left alone.
+            scope = derive_cortex_scope(context if isinstance(context, dict) else None)
+            engine_name = await get_active_cortex_engine(scope=scope)
+            if not engine_name:
+                return False
+            instance = get_cortex_registry().get_engine(engine_name)
+            if not (
+                isinstance(instance, ExternalCortexEngine)
+                and getattr(instance._endpoint, "protocol", None)
+                is EndpointProtocol.OPENAI
+            ):
+                return False
+            # All endpoints here are openai-protocol, so gate on the local-model
+            # marker (the same flags as disable_tools / force_action_grammar).
+            # Cloud openai endpoints (xai, openrouter) route reliably and must NOT
+            # be mirrored.
+            extra = getattr(instance._endpoint, "extra_config", None) or {}
+            return bool(extra.get("disable_tools") or extra.get("force_action_grammar"))
+        except Exception:
+            return False
+
     async def _handle_message_action(
         self, action: dict, context: dict, bot, original_message
     ):
@@ -133,6 +185,33 @@ class MessagePlugin:
                 if self.supported_interfaces
                 else "telegram_bot"
             )
+
+        # openai_compat cortex routing safety: these small local models routinely
+        # hallucinate the interface_path (e.g. "/channels/main") so a direct reply
+        # never reaches the user. For these engines only — and only on normal user
+        # turns (grillo/outreach keep their system-chosen target) — mirror the
+        # reply back to the originating chat instead of trusting the model.
+        if await self._should_mirror_origin_path(context, original_message):
+            origin_interface = (
+                (context.get("interface") if isinstance(context, dict) else None)
+                or getattr(original_message, "interface", None)
+                or interface_name
+            )
+            origin_chat = getattr(original_message, "chat_id", None)
+            origin_thread = getattr(original_message, "thread_id", None) or getattr(
+                original_message, "message_thread_id", None
+            )
+            if origin_chat is not None and (
+                str(interface_name) != str(origin_interface)
+                or str(target) != str(origin_chat)
+            ):
+                log_info(
+                    "[message_plugin] openai_compat reply path mirror: "
+                    f"{interface_name}/{target} -> {origin_interface}/{origin_chat}"
+                )
+                interface_name = origin_interface
+                target = origin_chat
+                thread_id = origin_thread
 
         log_debug(
             f"[message_plugin] Handling {action_type} via {interface_name}: {str(text)[:50]}..."

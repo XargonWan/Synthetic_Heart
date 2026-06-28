@@ -1370,9 +1370,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         log_debug("🔴 [PRIORITY 4] Calling message_queue.enqueue now...")
 
-        # Wrap message to add wake/sleep flag for prompt engine
+        # Wrap message to add wake/sleep flag for prompt engine.
+        # Pass `text` explicitly so media captions survive: a Telegram photo/
+        # video stores its caption in `.caption`, not `.text`, so without this
+        # the current turn would look caption-less downstream (the `text` local
+        # above already resolves `message.text or message.caption`).
         wrapped_message = MessageWrapper(
             message,
+            text=text,
             is_wake_sleep_command=is_wake_sleep_command,
             # Flag: tells message_chain to auto-inject TTS only for voice-originated messages.
             is_voice_input=bool(

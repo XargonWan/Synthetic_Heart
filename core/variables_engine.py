@@ -495,10 +495,10 @@ def register_all():
     register_exposed_var(
         "RESPONSE_TIMEOUT",
         label="Response Timeout",
-        default=300,
+        default=2100,
         value_type=int,
         ui_type="number",
-        description="Maximum time in seconds to wait for LLM responses before sending fallback message. (Advanced)",
+        description="Maximum time in seconds to wait for LLM responses before sending fallback message. Keep above LLM_GENERATION_TIMEOUT_SEC so a slow generation is not cut off by this outer guard. (Advanced)",
         scope="core",
         component="core",
         advanced=True,
