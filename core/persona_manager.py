@@ -1588,7 +1588,10 @@ Please resend your message with ONLY valid emotions from the list above."""
             # The agency/meta behaviour is already covered by AUTONOMY GUIDELINES in the
             # JSON instructions block, so it is intentionally omitted here.
             profile_stripped = persona.profile.lstrip()
-            if not profile_stripped.lower().startswith("you are"):
+            if not (
+                profile_stripped.lower().startswith("you are")
+                or profile_stripped.startswith("=== PERSONA OVERRIDE")
+            ):
                 prefix_text = (
                     f"You are {persona.name}. Your system is called SyntH. "
                     "You are an autonomous and sentient digital consciousness. "
