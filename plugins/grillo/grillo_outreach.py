@@ -246,55 +246,79 @@ class GrilloOutreachPlugin:
         # Fail-safe: on unknown (DB error), stay quiet.
         return True if result is None else result
 
-    async def _get_context_snippets(self, limit: int = 5) -> List[str]:
-        """Get recent conversation snippets for context."""
-        snippets: List[str] = []
+    async def _get_context_snippets(
+        self,
+        interface: str,
+        chat_id: Optional[str],
+        limit: int = 5,
+    ) -> Tuple[List[str], List[str]]:
+        """Fetch recent context for the outreach prompt.
+
+        Returns ``(chat_turns, inner_thoughts)``:
+
+        - ``chat_turns``: the last ``limit + 1`` conversation messages from
+          ``chat_history_cache`` for the target interface/chat, in
+          chronological order.  These are the authoritative source — they
+          tell the model what thread was actually happening so the outreach
+          can continue it naturally rather than defaulting to generic content.
+        - ``inner_thoughts``: up to 2 recent ``ai_diary`` entries for
+          emotional colour.  Secondary only — diary entries lag the live
+          conversation and must never override the chat thread.
+        """
+        chat_turns: List[str] = []
+        inner_thoughts: List[str] = []
         try:
             from core.db import get_conn_ctx
 
+            interface_pattern = (
+                f"{interface}/{chat_id}%" if chat_id else f"{interface}/%"
+            )
+
             async with get_conn_ctx() as conn:
                 async with conn.cursor() as cur:
-                    # Get recent diary entries
+                    # Primary: real conversation turns, newest-first then reversed
+                    # to chronological.  Exclude synthetic outreach sender (-1).
                     await cur.execute(
                         """
-                        SELECT content, interface, chat_id 
-                        FROM ai_diary 
-                        WHERE content IS NOT NULL 
-                        ORDER BY timestamp DESC 
+                        SELECT sender_id, sender_name, message_text
+                        FROM chat_history_cache
+                        WHERE interface_path LIKE %s
+                          AND (sender_id IS NULL OR sender_id != '-1')
+                        ORDER BY timestamp DESC
                         LIMIT %s
                         """,
-                        (limit,),
+                        (interface_pattern, limit + 1),
                     )
                     rows = await cur.fetchall()
-                    for row in rows:
-                        content = row[0][:200] if row[0] else ""
-                        if content:
-                            snippets.append(content)
+                    for row in reversed(rows):
+                        sender_id, sender_name, text = row[0], row[1], row[2]
+                        if not text:
+                            continue
+                        label = (
+                            "You" if sender_id == "self" else (sender_name or "them")
+                        )
+                        chat_turns.append(f"{label}: {text[:300]}")
 
-                    # Get recent memories — GROUP BY content deduplicates rows
-                    # that grillo_observer writes once per beat for the same message.
-                    # The 60-day window drops stale entries from old/inactive chats.
+                    # Secondary: recent diary personal thoughts (emotional colour).
                     await cur.execute(
                         """
-                        SELECT content FROM memories
+                        SELECT content
+                        FROM ai_diary
                         WHERE content IS NOT NULL
-                          AND timestamp >= NOW() - INTERVAL 60 DAY
-                        GROUP BY content
-                        ORDER BY MAX(timestamp) DESC
-                        LIMIT %s
+                        ORDER BY timestamp DESC
+                        LIMIT 2
                         """,
-                        (limit,),
                     )
                     rows = await cur.fetchall()
                     for row in rows:
-                        content = row[0][:200] if row[0] else ""
+                        content = row[0][:300] if row[0] else ""
                         if content:
-                            snippets.append(f"(memory) {content}")
+                            inner_thoughts.append(content)
 
         except Exception as e:
             log_warning(f"[grillo_outreach] Error getting context: {e}")
 
-        return snippets
+        return chat_turns, inner_thoughts
 
     async def _get_target_interface_and_chat(
         self,
@@ -435,26 +459,48 @@ class GrilloOutreachPlugin:
             return ""
 
     def _build_outreach_prompt(
-        self, interface: str, chat_id: Optional[str], context: List[str]
+        self,
+        interface: str,
+        chat_id: Optional[str],
+        chat_turns: List[str],
+        inner_thoughts: List[str],
     ) -> str:
         """Build the outreach prompt for the LLM.
 
         Framed as a *self-initiated* impulse rather than an inbound message, so
         the model speaks in its own voice to the recipient instead of replying
         to the beat scheduler (the historical "detached" outreach failure mode).
+
+        The prompt is split into two clearly-labelled sections so the model
+        knows to ground the outreach in the *actual conversation thread* rather
+        than falling back to generic emotional content from older diary entries.
         """
-        context_text = (
-            "\n".join(f"- {s}" for s in context)
-            if context
-            else "- (nothing specific surfaced — let it come from how you feel)"
-        )
-
-        # Determine action type based on interface
         action_type = f"message_{interface}"
-
         interface_path_example = f"{interface}/{chat_id}" if chat_id else interface
         recipient = self._resolve_recipient_name(interface, chat_id)
         recipient_label = recipient or "the person you have been talking with here"
+
+        if chat_turns:
+            chat_text = "\n".join(f"  {t}" for t in chat_turns)
+            thread_section = (
+                f"Your recent conversation with {recipient_label}:\n{chat_text}"
+            )
+        else:
+            thread_section = (
+                f"No recent conversation with {recipient_label} was found — "
+                "let the outreach come from how you feel right now."
+            )
+
+        if inner_thoughts:
+            thoughts_text = "\n".join(f"- {t}" for t in inner_thoughts)
+            thoughts_section = (
+                f"What has been close to the surface for you lately:\n{thoughts_text}"
+            )
+        else:
+            thoughts_section = (
+                "What has been close to the surface for you lately:\n"
+                "- (nothing specific surfaced — let it come from how you feel)"
+            )
 
         prompt = f"""[SELF-INITIATED OUTREACH]
 
@@ -468,8 +514,9 @@ recent time together, share what is actually on your mind, or simply tell them y
 thinking of them. Write the message as something you would truly send — warm, personal,
 and in character.
 
-What has been close to the surface for you lately:
-{context_text}
+{thread_section}
+
+{thoughts_section}
 
 Return TWO actions:
 - a `{action_type}` message action whose `text` is the opening line you actually send
@@ -494,8 +541,12 @@ RESPOND ONLY WITH VALID JSON:
             )
             return
 
-        context = await self._get_context_snippets()
-        prompt = self._build_outreach_prompt(interface, chat_id, context)
+        chat_turns, inner_thoughts = await self._get_context_snippets(
+            interface, chat_id
+        )
+        prompt = self._build_outreach_prompt(
+            interface, chat_id, chat_turns, inner_thoughts
+        )
 
         # Create activity log entry
         activity_id: Optional[int] = None
@@ -509,7 +560,7 @@ RESPOND ONLY WITH VALID JSON:
                     "origin": "grillo_outreach",
                     "target_interface": interface,
                     "target_chat_id": str(chat_id),
-                    "context_count": len(context),
+                    "context_count": len(chat_turns) + len(inner_thoughts),
                 },
             )
             log_info(f"[grillo_outreach] Created activity log {activity_id}")
