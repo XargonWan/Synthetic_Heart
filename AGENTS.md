@@ -286,6 +286,7 @@ If any step fails, fix it before proceeding.
   `"⚠️ Stuck on [Error]. Requesting human or advanced model intervention."`
 - **Type hints required.** All Python functions need complete annotations (params + return).
 - **Cross-platform policy.** Default runtime is Linux containers. No Windows/macOS-specific primary code paths. Platform-specific logic only as a secondary, guarded case (`sys.platform`).
+- **Read logs if a bug fix is requested**": always read container logs or logs folder if some issue raises and the user asks your bug fixing in order to find the real cause of the issue, do not reply with guesses but with a real analisys of the logs and the code
 - **No keyword-based implementations.**
   Never design or implement features whose behavior depends primarily on detecting specific words, phrases, trigger terms, or regular expression matches, as this won't work in a multi language environment.
   Avoid logic such as:
