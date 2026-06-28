@@ -35,6 +35,8 @@ class GrilloPlugin(AIPluginBase):
     _scheduler_running = False
     _scheduler_task: Optional[asyncio.Task] = None
     _beat_pending = False
+    # Keep references to fire-and-forget reset tasks so GC doesn't eat them.
+    _reset_tasks: set[asyncio.Task] = set()
     # Metric: number of suppressed outbound messages due to duplicate protection
     suppressed_count: int = 0
 
@@ -116,9 +118,22 @@ class GrilloPlugin(AIPluginBase):
                 # build prompt
                 prompt = await self._create_beat_prompt(beat_type)
                 if prompt:
+                    # Enqueue the beat using internal queue **before** setting
+                    # _beat_pending so a failure here doesn't lock the flag forever.
+                    try:
+                        await self._enqueue_with_low_priority(prompt, beat_type)
+                    except Exception as e:
+                        log_error(f"[grillo] Failed to enqueue beat {beat_type}: {e}")
+                        # _beat_pending was never set — loop will retry naturally
+                        await asyncio.sleep(30)
+                        continue
                     GrilloPlugin._beat_pending = True
-                    # Enqueue the beat using internal queue
-                    await self._enqueue_with_low_priority(prompt, beat_type)
+                    # Schedule a persistent reset task so GC cannot discard it.
+                    reset_task = asyncio.create_task(
+                        self._reset_beat_pending_after_delay()
+                    )
+                    GrilloPlugin._reset_tasks.add(reset_task)
+                    reset_task.add_done_callback(GrilloPlugin._reset_tasks.discard)
                 await asyncio.sleep(self.beat_interval)
             except asyncio.CancelledError:
                 break
@@ -450,8 +465,12 @@ class GrilloPlugin(AIPluginBase):
                 interface_id="grillo",
                 original_message=None,
             )
-            # Reset pending flag after small delay to avoid flooding
-            asyncio.create_task(self._reset_beat_pending_after_delay())
+            # Reset pending flag after small delay to avoid flooding.
+            # The reset task reference is already managed in _grillo_beat_loop
+            # by the persistent _reset_tasks set; this fallback is kept for safety.
+            task = asyncio.create_task(self._reset_beat_pending_after_delay())
+            GrilloPlugin._reset_tasks.add(task)
+            task.add_done_callback(GrilloPlugin._reset_tasks.discard)
         except Exception as e:
             log_error(f"[grillo] Failed to enqueue beat: {e}")
             GrilloPlugin._beat_pending = False
