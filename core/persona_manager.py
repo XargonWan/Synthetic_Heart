@@ -154,11 +154,54 @@ def _get_persona_profile():
     return SYNTH_BASE_PROFILE_TEMPLATE.format(name="SyntH")
 
 
-def _set_persona_profile(value):
+def _set_persona_profile(value: str) -> None:
     """Set persona profile (will be saved when persona is saved)."""
     if _persona_manager_instance and _persona_manager_instance._current_persona:
         _persona_manager_instance._current_persona.profile = value
-        # Note: Saving is handled by the webui or other components when needed
+
+
+def _get_persona_likes() -> list:
+    """Get current persona likes from in-memory persona."""
+    global _persona_manager_instance
+    if _persona_manager_instance is None:
+        try:
+            _persona_manager_instance = get_persona_manager()
+        except Exception:
+            pass
+    current_persona = getattr(_persona_manager_instance, "_current_persona", None)
+    if current_persona:
+        return list(getattr(current_persona, "likes", None) or [])
+    return []
+
+
+def _set_persona_likes(value: Any) -> None:
+    """Update in-memory persona likes so webui saves aren't stomped on next LLM turn."""
+    if _persona_manager_instance and _persona_manager_instance._current_persona:
+        _persona_manager_instance._current_persona.likes = (
+            list(value) if isinstance(value, list) else []
+        )
+
+
+def _get_persona_dislikes() -> list:
+    """Get current persona dislikes from in-memory persona."""
+    global _persona_manager_instance
+    if _persona_manager_instance is None:
+        try:
+            _persona_manager_instance = get_persona_manager()
+        except Exception:
+            pass
+    current_persona = getattr(_persona_manager_instance, "_current_persona", None)
+    if current_persona:
+        return list(getattr(current_persona, "dislikes", None) or [])
+    return []
+
+
+def _set_persona_dislikes(value: Any) -> None:
+    """Update in-memory persona dislikes so webui saves aren't stomped on next LLM turn."""
+    if _persona_manager_instance and _persona_manager_instance._current_persona:
+        _persona_manager_instance._current_persona.dislikes = (
+            list(value) if isinstance(value, list) else []
+        )
 
 
 def _get_persona_aliases():
@@ -648,6 +691,20 @@ class PersonaManager(PluginBase):
         # Set global reference for config getters/setters
         global _persona_manager_instance
         _persona_manager_instance = self
+
+        # Wire getters/setters for likes/dislikes so webui POSTs update the
+        # in-memory persona (prevents _save_to_config_registry from stomping
+        # user edits with stale empty lists on the next LLM turn).
+        for _key, _getter, _setter in [
+            ("SYNTH_LIKES", _get_persona_likes, _set_persona_likes),
+            ("SYNTH_DISLIKES", _get_persona_dislikes, _set_persona_dislikes),
+        ]:
+            if _key in config_registry._definitions:
+                _defn = config_registry._definitions[_key]
+                if _defn.getter is None:
+                    _defn.getter = _getter
+                if _defn.setter is None:
+                    _defn.setter = _setter
 
         # Animation management
         self._animation_handler = None

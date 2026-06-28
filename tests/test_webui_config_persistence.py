@@ -102,3 +102,44 @@ async def test_save_persona_routes_changes_through_config_registry(monkeypatch):
         ("SYNTH_LIKES", ["tea"], False),
         ("SYNTH_DISLIKES", ["noise"], False),
     ]
+
+
+@pytest.mark.asyncio
+async def test_webui_set_value_for_likes_updates_current_persona(monkeypatch):
+    """Regression: webui POST SYNTH_LIKES must update _current_persona.likes so that
+    _save_to_config_registry (called on every LLM response) doesn't stomp the edit."""
+
+    async def fake_persist(_key: str, _value: str) -> bool:
+        return True
+
+    manager = persona_manager_module.PersonaManager()
+    manager._current_persona = persona_manager_module.PersonaData(
+        id="default",
+        name="SyntH",
+        aliases=[],
+        profile="",
+        likes=["old-like"],
+        dislikes=["old-dislike"],
+        created_at=datetime.now(timezone.utc).isoformat(),
+        last_updated=datetime.now(timezone.utc).isoformat(),
+    )
+    manager._persona_loaded = True
+
+    monkeypatch.setattr(persona_manager_module, "_persona_manager_instance", manager)
+    monkeypatch.setattr(config_registry, "_persist_to_db", fake_persist)
+
+    await config_registry.set_value(
+        "SYNTH_LIKES", ["new-like-1", "new-like-2"], require_persist=True
+    )
+    await config_registry.set_value(
+        "SYNTH_DISLIKES", ["new-dislike"], require_persist=True
+    )
+
+    current = manager.get_current_persona()
+    assert current is not None
+    assert current.likes == ["new-like-1", "new-like-2"], (
+        "_current_persona.likes was not updated — _save_to_config_registry would overwrite webui edits"
+    )
+    assert current.dislikes == ["new-dislike"], (
+        "_current_persona.dislikes was not updated — _save_to_config_registry would overwrite webui edits"
+    )

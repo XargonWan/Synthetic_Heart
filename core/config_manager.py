@@ -1052,6 +1052,12 @@ class ConfigRegistry:
             return str(int(raw))
         if definition.value_type is float:
             return str(float(raw))
+        # dict/list used as value_type should be serialised as JSON, not via
+        # dict(str_value) which throws when the string isn't an iterable of pairs.
+        if definition.value_type is dict or definition.value_type is list:
+            import json
+
+            return json.dumps(value)
         if callable(definition.value_type) and definition.value_type not in (
             bool,
             int,
@@ -1083,6 +1089,14 @@ class ConfigRegistry:
                 import json
 
                 if not raw_value or raw_value.strip() == "":
+                    return definition.default
+                return json.loads(raw_value)
+            # dict/list used as value_type: deserialize as JSON, same as "json" type.
+            # Calling dict(raw_string) or list(raw_string) fails on arbitrary strings.
+            if definition.value_type is dict or definition.value_type is list:
+                import json
+
+                if not raw_value or str(raw_value).strip() == "":
                     return definition.default
                 return json.loads(raw_value)
             if callable(definition.value_type) and definition.value_type not in (
