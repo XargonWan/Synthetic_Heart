@@ -1049,6 +1049,9 @@ class ConfigRegistry:
         if definition.value_type is int:
             if raw == "":
                 return ""
+            # JSON booleans arrive as Python bool; str(False)=="False" not "0"
+            if isinstance(value, bool):
+                return str(int(value))
             return str(int(raw))
         if definition.value_type is float:
             return str(float(raw))
