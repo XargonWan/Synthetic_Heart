@@ -2,6 +2,7 @@
 
 import os
 import re
+import sys
 import asyncio
 import time
 from inspect import isawaitable
@@ -10,7 +11,7 @@ from telegram import Update, Bot
 
 # Some test environments may not expose all exception names from python-telegram-bot
 try:
-    from telegram.error import TelegramError, RetryAfter, BadRequest, TimedOut
+    from telegram.error import TelegramError, RetryAfter, BadRequest, TimedOut, Conflict
 except Exception:
     # Provide safe fallbacks so the module imports in tests without the real library
     class TelegramError(Exception):
@@ -23,6 +24,9 @@ except Exception:
         pass
 
     class TimedOut(Exception):
+        pass
+
+    class Conflict(Exception):
         pass
 
 
@@ -1714,7 +1718,9 @@ def _schedule_start_bot_retry(delay_seconds: float = 30.0) -> None:
 def _is_transient_startup_error(exc: Exception) -> bool:
     if isinstance(exc, (TimedOut, TimeoutError, asyncio.TimeoutError, OSError)):
         return True
-    return isinstance(exc, TelegramError) and not isinstance(exc, BadRequest)
+    return isinstance(exc, TelegramError) and not isinstance(
+        exc, (BadRequest, Conflict)
+    )
 
 
 async def _cleanup_failed_startup_app(app: object | None) -> None:
@@ -1847,6 +1853,13 @@ async def start_bot() -> bool:
             update: object, context: ContextTypes.DEFAULT_TYPE
         ) -> None:
             """Log errors caused by updates."""
+            if isinstance(context.error, Conflict):
+                log_error(
+                    "[telegram_bot] ⚠️ Conflict: another bot instance is already polling "
+                    "with this token. Each SyntH instance must use a unique BOTFATHER_TOKEN. "
+                    "Telegram does not allow two bots to poll the same token simultaneously."
+                )
+                return
             log_error(
                 f"[telegram_bot] Exception while handling an update: {context.error}"
             )
@@ -1881,7 +1894,17 @@ async def start_bot() -> bool:
             log_error(f"[telegram_bot] Error in polling loop: {repr(e)}")
             raise
         finally:
-            log_info("[telegram_bot] Polling loop task ending...")
+            log_info(
+                "[telegram_bot] Polling loop task ending — stopping application..."
+            )
+            try:
+                await _cleanup_failed_startup_app(app)
+            except asyncio.CancelledError:
+                log_warning(
+                    "[telegram_bot] App cleanup interrupted by second cancellation"
+                )
+            except Exception as cleanup_exc:
+                log_debug(f"[telegram_bot] Error during polling cleanup: {cleanup_exc}")
 
     startup_attempts = 3
     last_error: Exception | None = None
@@ -2870,7 +2893,15 @@ def reload_interface():
 # Auto-start Telegram bot at import time if configured
 # This is only for backwards compatibility when running outside of core_initializer
 # Normally, initialize_interface() will be called by the core after config load
-if telegram_interface is None and BOTFATHER_TOKEN and _parse_trainer_id_from_config():
+# Skip entirely when running under pytest — tests import this module but must never
+# touch a live Telegram token.
+_under_pytest = "pytest" in sys.modules or "unittest" in sys.modules
+if (
+    not _under_pytest
+    and telegram_interface is None
+    and BOTFATHER_TOKEN
+    and _parse_trainer_id_from_config()
+):
     log_info("[telegram_bot] Legacy autostart: creating interface at import time")
     initialize_interface()
 
