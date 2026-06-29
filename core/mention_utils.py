@@ -176,6 +176,23 @@ async def is_message_for_bot(
         print(f"ERROR in log_debug: {e}")
         return False, "error_in_function"
 
+    # Priority 0: Peer SyntH suppression — block cascade loops between two
+    # SyntH instances in the same group before any alias/mention logic runs.
+    # The LLM is never invoked for suppressed peer messages; they are still
+    # added to context by the caller so this bot stays aware of them.
+    try:
+        from core.peer_policy import is_peer_synth, should_respond_to_peer
+
+        sender = getattr(message, "from_user", None)
+        sender_id: int | None = getattr(sender, "id", None)
+        sender_is_bot: bool = bool(getattr(sender, "is_bot", False))
+        if sender_is_bot and sender_id is not None and is_peer_synth(sender_id):
+            if not should_respond_to_peer(message, bot_username, None):
+                log_debug(f"[mention] Peer SyntH {sender_id} suppressed by peer policy")
+                return False, "peer_synth"
+    except Exception as _peer_err:
+        log_debug(f"[mention] Peer policy check failed (non-fatal): {_peer_err}")
+
     # If there's no textual content but the update contains media, we
     # previously treated it as automatically directed.  That caused the bot to
     # react/reply to *every* photo/voice/video in group chats even when it
