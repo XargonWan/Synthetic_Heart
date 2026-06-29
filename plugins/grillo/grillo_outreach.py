@@ -13,14 +13,12 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from core.config_manager import config_registry
 from core.logging_utils import log_debug, log_error, log_info, log_warning
+from core.variables_engine import register_exposed_var
 
 # How often the loop wakes to check whether a scheduled outreach is due. The
 # cadence between outreaches is governed by GRILLO_OUTREACH_INTERVAL_HOURS; this
 # is only the polling granularity for detecting a due slot.
 _POLL_SECONDS = 1800
-
-from core.variables_engine import register_exposed_var
-from plugins.grillo.common_instructions import GRILLO_INSTRUCTIONS
 
 
 register_exposed_var(
