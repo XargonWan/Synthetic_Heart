@@ -198,7 +198,7 @@ async def test_upsert_retries_insert_when_user_message_overflows(monkeypatch):
         async def fetchone(self):
             if "INFORMATION_SCHEMA.COLUMNS" in self._last_query:
                 return ("varchar", 255)
-            if "FROM ai_diary WHERE DATE(timestamp) = CURDATE()" in self._last_query:
+            if "FROM ai_diary WHERE timestamptz::date = CURRENT_DATE" in self._last_query:
                 return None
             return None
 
@@ -260,7 +260,7 @@ async def test_upsert_refreshes_origin_fields_from_real_message_context(monkeypa
         async def fetchone(self):
             if "INFORMATION_SCHEMA.COLUMNS" in self._last_query:
                 return ("text", None)
-            if "FROM ai_diary WHERE DATE(timestamp) = CURDATE()" in self._last_query:
+            if "FROM ai_diary WHERE timestamptz::date = CURRENT_DATE" in self._last_query:
                 return (
                     99,
                     "existing content",
@@ -339,7 +339,7 @@ async def test_upsert_does_not_replace_real_interface_with_diary_merge(monkeypat
         async def fetchone(self):
             if "INFORMATION_SCHEMA.COLUMNS" in self._last_query:
                 return ("text", None)
-            if "FROM ai_diary WHERE DATE(timestamp) = CURDATE()" in self._last_query:
+            if "FROM ai_diary WHERE timestamptz::date = CURRENT_DATE" in self._last_query:
                 return (
                     99,
                     "existing content",
@@ -455,7 +455,7 @@ async def test_update_diary_entry_archives_merged_source_rows(monkeypatch):
     assert result["success"] is True
     assert executed == [
         (
-            "UPDATE ai_diary SET content=%s, timestamp=%s WHERE id=%s",
+            "UPDATE ai_diary SET content=%s, timestamptz=%s WHERE id=%s",
             ("merged prose", datetime.fromisoformat("2026-04-18T21:00:00+00:00"), 42),
         )
     ]

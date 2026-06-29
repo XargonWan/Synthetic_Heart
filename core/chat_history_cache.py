@@ -122,7 +122,7 @@ async def save_chat_message(
                         SELECT id FROM chat_history_cache 
                         WHERE interface_path = %s 
                         AND message_text = %s 
-                        AND timestamp > %s
+                        AND timestamptz > %s
                         LIMIT 1
                         """,
                         (interface_path, message_text, dedup_cutoff),
@@ -144,10 +144,10 @@ async def save_chat_message(
                 if timestamp:
                     await cur.execute(
                         """
-                        INSERT INTO chat_history_cache 
-                        (interface_path, sender_name, sender_id, message_text, metadata, timestamp)
+                        INSERT INTO chat_history_cache
+                        (interface_path, sender_name, sender_id, message_text, metadata, timestamptz)
                         VALUES (%s, %s, %s, %s, %s, %s)
-                        ON DUPLICATE KEY UPDATE timestamp=VALUES(timestamp), metadata=VALUES(metadata)
+                        ON CONFLICT (interface_path, timestamptz) DO UPDATE SET metadata=EXCLUDED.metadata
                     """,
                         (
                             interface_path,
@@ -161,10 +161,10 @@ async def save_chat_message(
                 else:
                     await cur.execute(
                         """
-                        INSERT INTO chat_history_cache 
-                        (interface_path, sender_name, sender_id, message_text, metadata, timestamp)
-                        VALUES (%s, %s, %s, %s, %s, UTC_TIMESTAMP())
-                        ON DUPLICATE KEY UPDATE timestamp=UTC_TIMESTAMP(), metadata=VALUES(metadata)
+                        INSERT INTO chat_history_cache
+                        (interface_path, sender_name, sender_id, message_text, metadata, timestamptz)
+                        VALUES (%s, %s, %s, %s, %s, NOW())
+                        ON CONFLICT DO NOTHING
                     """,
                         (
                             interface_path,
@@ -184,7 +184,7 @@ async def save_chat_message(
                         SELECT id FROM (
                             SELECT id FROM chat_history_cache
                             WHERE interface_path = %s
-                            ORDER BY timestamp DESC
+                            ORDER BY timestamptz DESC
                             LIMIT %s
                         ) AS temp
                     )
@@ -269,15 +269,15 @@ async def load_chat_history(interface_path: str, limit: int | None = None) -> de
                 # for downstream consumers such as WebUI replay and prompt context.
                 await cur.execute(
                     """
-                    SELECT sender_name, sender_id, message_text, timestamp, interface_path, metadata
+                    SELECT sender_name, sender_id, message_text, timestamptz, interface_path, metadata
                     FROM (
-                        SELECT sender_name, sender_id, message_text, timestamp, interface_path, metadata, id
+                        SELECT sender_name, sender_id, message_text, timestamptz, interface_path, metadata, id
                         FROM chat_history_cache
                         WHERE interface_path = %s
-                        ORDER BY timestamp DESC, id DESC
+                        ORDER BY timestamptz DESC, id DESC
                         LIMIT %s
                     ) AS recent_messages
-                    ORDER BY timestamp ASC, id ASC
+                    ORDER BY timestamptz ASC, id ASC
                 """,
                     (interface_path, history_limit),
                 )
@@ -356,9 +356,9 @@ async def load_global_chat_history(limit: int = 10) -> deque:
             async with conn.cursor() as cur:
                 await cur.execute(
                     """
-                    SELECT sender_name, sender_id, message_text, timestamp, interface_path
+                    SELECT sender_name, sender_id, message_text, timestamptz, interface_path
                     FROM chat_history_cache
-                    ORDER BY timestamp DESC
+                    ORDER BY timestamptz DESC
                     LIMIT %s
                     """,
                     (limit,),
@@ -420,15 +420,15 @@ async def load_global_chat_history_since(
         async with get_conn_ctx() as conn:
             async with conn.cursor() as cur:
                 query = """
-                    SELECT sender_name, sender_id, message_text, timestamp, interface_path
+                    SELECT sender_name, sender_id, message_text, timestamptz, interface_path
                     FROM chat_history_cache
                     WHERE interface_path NOT LIKE 'discord_live_%%'
                 """
                 params: list[Any] = []
                 if since:
-                    query += "\n AND timestamp > %s"
+                    query += "\n AND timestamptz > %s"
                     params.append(since)
-                query += "\n ORDER BY timestamp ASC, id ASC\n LIMIT %s"
+                query += "\n ORDER BY timestamptz ASC, id ASC\n LIMIT %s"
                 params.append(limit)
 
                 await cur.execute(query, tuple(params))
@@ -494,15 +494,15 @@ async def load_chat_history_for_guild(
             async with conn.cursor() as cur:
                 # Build the base query
                 query = """
-                    SELECT sender_name, sender_id, message_text, timestamp, interface_path
+                    SELECT sender_name, sender_id, message_text, timestamptz, interface_path
                     FROM chat_history_cache
                     WHERE interface_path LIKE %s
                 """
                 params: list[Any] = [f"discord_{guild_id}_%"]
                 if since:
-                    query += "\n AND timestamp > %s"
+                    query += "\n AND timestamptz > %s"
                     params.append(since)
-                query += "\n ORDER BY timestamp ASC, id ASC\n LIMIT %s"
+                query += "\n ORDER BY timestamptz ASC, id ASC\n LIMIT %s"
                 params.append(limit)
 
                 await cur.execute(query, tuple(params))
@@ -585,7 +585,7 @@ async def get_cache_stats() -> dict:
 
                 # Oldest and newest messages
                 await cur.execute("""
-                    SELECT MIN(timestamp), MAX(timestamp) FROM chat_history_cache
+                    SELECT MIN(timestamptz), MAX(timestamptz) FROM chat_history_cache
                 """)
                 result = await cur.fetchone()
                 oldest, newest = result if result else (None, None)

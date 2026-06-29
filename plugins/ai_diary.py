@@ -690,8 +690,8 @@ async def _upsert_diary_impl(
                 "SELECT id, content, personal_thought, interaction_summary, "
                 "user_message, emotions, context_tags, involved_users, "
                 "interface, chat_id, thread_id "
-                "FROM ai_diary WHERE DATE(timestamp) = CURDATE() "
-                "ORDER BY timestamp DESC LIMIT 1"
+                "FROM ai_diary WHERE timestamptz::date = CURRENT_DATE "
+                "ORDER BY timestamptz DESC LIMIT 1"
             )
             existing = await cursor.fetchone()
             if existing:
@@ -735,7 +735,7 @@ async def _upsert_diary_impl(
                     SET content=%s, personal_thought=%s, interaction_summary=%s,
                         user_message=%s, emotions=%s, context_tags=%s,
                         involved_users=%s, interface=%s, chat_id=%s,
-                        thread_id=%s, timestamp=NOW()
+                        thread_id=%s, timestamptz=NOW()
                     WHERE id=%s
                     """
                 update_params = (
@@ -1091,11 +1091,11 @@ async def get_recent_entries_async(
 
         entries = await _fetchall(
             """
-            SELECT id, content, personal_thought, timestamp, context_tags, involved_users, 
+            SELECT id, content, personal_thought, timestamptz AS timestamp, context_tags, involved_users,
                    emotions, interface, chat_id, thread_id, interaction_summary, user_message
             FROM ai_diary
-            WHERE timestamp >= %s
-            ORDER BY timestamp DESC
+            WHERE timestamptz >= %s
+            ORDER BY timestamptz DESC
             """,
             (cutoff_date,),
         )
@@ -1176,11 +1176,11 @@ def get_entries_by_tags(tags: List[str], limit: int = 10) -> List[Dict[str, Any]
             return []
 
         query = f"""
-            SELECT id, content, personal_thought, timestamp, context_tags, involved_users, 
+            SELECT id, content, personal_thought, timestamptz AS timestamp, context_tags, involved_users,
                    emotions, interface, chat_id, thread_id, interaction_summary, user_message
             FROM ai_diary
             WHERE {" OR ".join(tag_conditions)}
-            ORDER BY timestamp DESC
+            ORDER BY timestamptz DESC
             LIMIT %s
         """
         params.append(limit)
@@ -1211,13 +1211,13 @@ def get_entries_with_person(person: str, limit: int = 10) -> List[Dict[str, Any]
         entries = _run(
             _fetchall(
                 """
-            SELECT id, content, personal_thought, timestamp, context_tags, involved_users, 
+            SELECT id, content, personal_thought, timestamptz AS timestamp, context_tags, involved_users,
                    emotions, interface, chat_id, thread_id, interaction_summary, user_message
             FROM ai_diary
             WHERE """
                 + " OR ".join(person_conditions)
                 + """
-            ORDER BY timestamp DESC
+            ORDER BY timestamptz DESC
             LIMIT %s
             """,
                 tuple(person_params + [limit]),
@@ -1278,14 +1278,14 @@ def cleanup_old_entries(days_to_keep: int = 30) -> int:
         # First count how many will be deleted
         count_result = _run(
             _fetchall(
-                "SELECT COUNT(*) as count FROM ai_diary WHERE timestamp < %s",
+                "SELECT COUNT(*) as count FROM ai_diary WHERE timestamptz < %s",
                 (cutoff_date,),
             )
         )
         count = count_result[0]["count"] if count_result else 0
 
         # Delete old entries
-        _run(_execute("DELETE FROM ai_diary WHERE timestamp < %s", (cutoff_date,)))
+        _run(_execute("DELETE FROM ai_diary WHERE timestamptz < %s", (cutoff_date,)))
 
         log_info(f"[ai_diary] Cleaned up {count} old diary entries")
         return count
@@ -1665,11 +1665,11 @@ class DiaryPlugin:
             cutoff_date = datetime.now() - timedelta(days=diary_days)
             recent_entries = await _fetchall(
                 """
-                SELECT id, content, personal_thought, timestamp, context_tags, involved_users, 
+                SELECT id, content, personal_thought, timestamptz AS timestamp, context_tags, involved_users,
                        emotions, interface, chat_id, thread_id, interaction_summary, user_message
                 FROM ai_diary
-                WHERE timestamp >= %s
-                ORDER BY timestamp DESC
+                WHERE timestamptz >= %s
+                ORDER BY timestamptz DESC
                 """,
                 (cutoff_date,),
             )
@@ -1827,7 +1827,7 @@ class DiaryPlugin:
 
                 if merge_timestamp is not None:
                     await _execute(
-                        "UPDATE ai_diary SET content=%s, timestamp=%s WHERE id=%s",
+                        "UPDATE ai_diary SET content=%s, timestamptz=%s WHERE id=%s",
                         (new_content, merge_timestamp, int(entry_id)),
                     )
                 else:
@@ -1861,8 +1861,8 @@ class DiaryPlugin:
                     extra_stale = await _fetchall(
                         """
                         SELECT id FROM ai_diary
-                        WHERE DATE(timestamp) = (
-                            SELECT DATE(timestamp) FROM ai_diary WHERE id = %s
+                        WHERE timestamptz::date = (
+                            SELECT timestamptz::date FROM ai_diary WHERE id = %s
                         )
                         AND id != %s
                         """,
@@ -1941,8 +1941,8 @@ def archive_diary_entries(entry_ids: List[int]) -> Dict[str, Any]:
             _run(
                 _execute(
                     """
-                INSERT INTO ai_diary_archive 
-                (id, content, personal_thought, emotions, interaction_summary, timestamp, 
+                INSERT INTO ai_diary_archive
+                (id, content, personal_thought, emotions, interaction_summary, timestamptz,
                  interface, chat_id, thread_id, user_message, context_tags)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
@@ -1952,7 +1952,7 @@ def archive_diary_entries(entry_ids: List[int]) -> Dict[str, Any]:
                         entry["personal_thought"],
                         entry["emotions"],
                         entry["interaction_summary"],
-                        entry["timestamp"],
+                        entry.get("timestamptz"),
                         entry["interface"],
                         entry["chat_id"],
                         entry["thread_id"],
@@ -2006,8 +2006,8 @@ def unarchive_diary_entries(entry_ids: List[int]) -> Dict[str, Any]:
             _run(
                 _execute(
                     """
-                INSERT INTO ai_diary 
-                (id, content, personal_thought, emotions, interaction_summary, timestamp, 
+                INSERT INTO ai_diary
+                (id, content, personal_thought, emotions, interaction_summary, timestamptz,
                  interface, chat_id, thread_id, user_message, context_tags)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
@@ -2017,7 +2017,7 @@ def unarchive_diary_entries(entry_ids: List[int]) -> Dict[str, Any]:
                         entry["personal_thought"],
                         entry["emotions"],
                         entry["interaction_summary"],
-                        entry["timestamp"],
+                        entry.get("timestamptz"),
                         entry["interface"],
                         entry["chat_id"],
                         entry["thread_id"],
@@ -2080,11 +2080,11 @@ def get_all_diary_entries(include_archived: bool = False) -> List[Dict[str, Any]
         entries = _run(
             _fetchall(
                 """
-            SELECT id, content, personal_thought, timestamp, context_tags, 
+            SELECT id, content, personal_thought, timestamptz AS timestamp, context_tags,
                    emotions, interface, chat_id, thread_id, interaction_summary, user_message,
                    FALSE as archived
             FROM ai_diary
-            ORDER BY timestamp DESC
+            ORDER BY timestamptz DESC
             """
             )
         )
@@ -2093,11 +2093,11 @@ def get_all_diary_entries(include_archived: bool = False) -> List[Dict[str, Any]
             archived_entries = _run(
                 _fetchall(
                     """
-                SELECT id, content, personal_thought, timestamp, context_tags, 
+                SELECT id, content, personal_thought, timestamptz AS timestamp, context_tags,
                        emotions, interface, chat_id, thread_id, interaction_summary, user_message,
                        TRUE as archived
                 FROM ai_diary_archive
-                ORDER BY timestamp DESC
+                ORDER BY timestamptz DESC
                 """
                 )
             )
