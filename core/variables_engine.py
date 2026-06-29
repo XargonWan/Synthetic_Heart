@@ -889,6 +889,41 @@ def register_all():
         component="grillo",
     )
 
+    # --- Multi-instance peer coordination ---
+    register_exposed_var(
+        "SYNTH_PEER_IDS",
+        label="Peer SyntH Bot IDs",
+        default=[],
+        value_type="json",
+        ui_type="string",
+        description=(
+            "JSON array of Telegram user IDs of other SyntH instances that share "
+            "groups with this one. Messages from these bots are handled according "
+            "to SYNTH_PEER_POLICY to prevent infinite response cascades. "
+            "Example: [1234567, 8901234]."
+        ),
+        scope="interface",
+        component="peer_policy",
+        tags=["multi-instance"],
+    )
+
+    register_exposed_var(
+        "SYNTH_PEER_POLICY",
+        label="Peer SyntH Response Policy",
+        default="silent",
+        value_type=str,
+        ui_type="select",
+        description=(
+            "'silent' never responds to peer messages (default); 'observe' is an alias for silent; "
+            "'mention_only' responds when this bot's username or any alias appears "
+            "in the peer message, but never in a reply chain."
+        ),
+        scope="interface",
+        component="peer_policy",
+        options=["silent", "observe", "mention_only"],
+        tags=["multi-instance"],
+    )
+
     log_info("[variables_engine] Completed explicit exposed var registrations")
 
 

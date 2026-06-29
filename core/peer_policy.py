@@ -29,47 +29,10 @@ import json
 from typing import Any
 
 from core.logging_utils import log_debug, log_warning
-from core.variables_engine import register_exposed_var
 
-# ---------------------------------------------------------------------------
-# Config registration — surfaces both keys in the WebUI
-# ---------------------------------------------------------------------------
-
-register_exposed_var(
-    "SYNTH_PEER_IDS",
-    label="Peer SyntH Bot IDs",
-    default=[],
-    value_type="json",
-    ui_type="string",
-    description=(
-        "JSON array of Telegram user IDs of other SyntH instances that share "
-        "groups with this one. Messages from these bots are handled according "
-        "to SYNTH_PEER_POLICY to prevent infinite response cascades. "
-        "Example: [1234567, 8901234]."
-    ),
-    scope="interface",
-    component="peer_policy",
-    tags=["multi-instance"],
-)
-
-register_exposed_var(
-    "SYNTH_PEER_POLICY",
-    label="Peer SyntH Response Policy",
-    default="silent",
-    value_type=str,
-    ui_type="select",
-    description=(
-        "How to handle messages from peer SyntH bots listed in SYNTH_PEER_IDS. "
-        "'silent' never responds (default); 'observe' is an alias for silent; "
-        "'mention_only' responds when this bot's username or any alias appears "
-        "in the peer message, but never in a reply chain."
-    ),
-    scope="interface",
-    component="peer_policy",
-    options=["silent", "observe", "mention_only"],
-    tags=["multi-instance"],
-)
-
+# Config vars (SYNTH_PEER_IDS, SYNTH_PEER_POLICY) are registered in
+# core/variables_engine.py::register_all() so they appear in the WebUI
+# at startup without this module needing to be imported first.
 
 # ---------------------------------------------------------------------------
 # Runtime helpers
