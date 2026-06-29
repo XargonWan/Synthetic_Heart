@@ -16,10 +16,11 @@ Config keys (set via WebUI or DB):
                                        still reach context so this bot stays
                                        aware of what the peer said. (default)
                       "observe"      – explicit alias for "silent".
-                      "mention_only" – respond only when this bot is explicitly
-                                       @username-mentioned in the peer message
-                                       AND the peer message is not itself a
-                                       reply to this bot (breaks reply chains).
+                      "mention_only" – respond only when this bot's username or
+                                       any of its configured aliases appear in
+                                       the peer message, AND the peer message is
+                                       not itself a reply to this bot (breaks
+                                       reply chains).
 """
 
 from __future__ import annotations
@@ -56,12 +57,12 @@ register_exposed_var(
     label="Peer SyntH Response Policy",
     default="silent",
     value_type=str,
-    ui_type="string",
+    ui_type="select",
     description=(
         "How to handle messages from peer SyntH bots listed in SYNTH_PEER_IDS. "
-        "Options: 'silent' (never respond, default), "
-        "'observe' (alias for silent), "
-        "'mention_only' (respond only on explicit @username mention, no reply chains)."
+        "'silent' never responds (default); 'observe' is an alias for silent; "
+        "'mention_only' responds when this bot's username or any alias appears "
+        "in the peer message, but never in a reply chain."
     ),
     scope="interface",
     component="peer_policy",
@@ -151,7 +152,8 @@ def should_respond_to_peer(
                 )
                 return False
 
-        # Allow only if this bot is explicitly @mentioned by username.
+        # Allow if this bot is @mentioned by username OR if any configured
+        # alias appears in the peer message (LLMs rarely output @handles).
         text: str = (
             getattr(message, "text", "") or getattr(message, "caption", "") or ""
         )
@@ -161,8 +163,19 @@ def should_respond_to_peer(
             )
             return True
 
+        try:
+            from core.mention_utils import is_synth_mentioned
+
+            if is_synth_mentioned(text):
+                log_debug(
+                    "[peer_policy] mention_only: alias match in peer message → allowing"
+                )
+                return True
+        except Exception as e:
+            log_debug(f"[peer_policy] alias check failed (non-fatal): {e}")
+
         log_debug(
-            "[peer_policy] mention_only: no explicit @mention found → suppressing"
+            "[peer_policy] mention_only: no @mention or alias found → suppressing"
         )
         return False
 
