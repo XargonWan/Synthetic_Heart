@@ -2895,11 +2895,17 @@ def reload_interface():
 # Normally, initialize_interface() will be called by the core after config load
 # Skip entirely when running under pytest — tests import this module but must never
 # touch a live Telegram token.
-_under_pytest = "pytest" in sys.modules or "unittest" in sys.modules
+#
+# Force early evaluation of BOTFATHER_TOKEN so _load_definition_sync runs now,
+# setting env_override=True if the token is in env. Without this, load_all_from_db
+# runs first and marks the definition loaded with value=None (DB default), making
+# _load_definition_sync a no-op and leaving the bot permanently disabled.
+_botfather_configured = bool(BOTFATHER_TOKEN)
+_under_pytest = "pytest" in sys.modules
 if (
     not _under_pytest
     and telegram_interface is None
-    and BOTFATHER_TOKEN
+    and _botfather_configured
     and _parse_trainer_id_from_config()
 ):
     log_info("[telegram_bot] Legacy autostart: creating interface at import time")
