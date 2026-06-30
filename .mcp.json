@@ -11,7 +11,9 @@
     "grok-api-docs": {
       "type": "stdio",
       "command": "node",
-      "args": ["d:/dev/13/synthetic_heart/mcp_servers/grok-api-mcp/dist/index.js"]
+      "args": [
+        "d:/dev/13/synthetic_heart/mcp_servers/grok-api-mcp/dist/index.js"
+      ]
     },
     "xai-docs-official": {
       "type": "sse",
@@ -20,22 +22,37 @@
     "gitnexus": {
       "type": "stdio",
       "command": "npx",
-      "args": ["gitnexus", "mcp"]
+      "args": [
+        "gitnexus",
+        "mcp"
+      ]
     },
     "synth-logs": {
       "type": "stdio",
       "command": "uv",
-      "args": ["run", "python", "mcp_servers/synth_logs.py"]
+      "args": [
+        "run",
+        "python",
+        "mcp_servers/synth_logs.py"
+      ]
     },
     "synth-db": {
       "type": "stdio",
       "command": "uv",
-      "args": ["run", "python", "mcp_servers/synth_db.py"]
+      "args": [
+        "run",
+        "python",
+        "mcp_servers/synth_db.py"
+      ]
     },
     "synth-cortex": {
       "type": "stdio",
       "command": "uv",
-      "args": ["run", "python", "mcp_servers/synth_cortex.py"]
+      "args": [
+        "run",
+        "python",
+        "mcp_servers/synth_cortex.py"
+      ]
     },
     "affine": {
       "type": "stdio",
@@ -44,12 +61,14 @@
     "langfuse": {
       "type": "stdio",
       "command": "npx",
-      "args": ["-y", "@therealsachin/langfuse-mcp"],
-      "env": {
-        "LANGFUSE_PUBLIC_KEY": "YOUR_LANGFUSE_PUBLIC_KEY",
-        "LANGFUSE_SECRET_KEY": "YOUR_LANGFUSE_SECRET_KEY",
-        "LANGFUSE_BASEURL": "https://fuse.zwiz.town"
-      }
+      "args": [
+        "-y",
+        "dotenv-cli",
+        "--",
+        "npx",
+        "-y",
+        "@therealsachin/langfuse-mcp"
+      ]
     }
   }
 }
