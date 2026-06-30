@@ -125,6 +125,16 @@ INCLUDE_LOCAL_TIME_IN_PROMPTS = config_registry.get_var(
     value_type=bool,
 )
 
+USE_PERSONA_IN_SYSTEM_PROMPTS = config_registry.get_var(
+    "USE_PERSONA_IN_SYSTEM_PROMPTS",
+    True,
+    label="Use Persona in System Prompts",
+    description="Whether to prepend the persona/identity template in instructions.",
+    group="core",
+    component="prompt_engine",
+    value_type=bool,
+)
+
 
 def minify_actions_block(
     available_actions: dict,

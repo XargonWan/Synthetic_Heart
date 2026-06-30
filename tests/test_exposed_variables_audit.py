@@ -8,6 +8,8 @@ def test_exposed_variables_have_label_description_and_component():
     helper_prefixes = ("TEST_", "MOCK_")
     key_component_overrides = {
         "SYNTH_CURRENT_ANIMATION": "animation",
+        "SYNTH_PEER_IDS": "peer_policy",
+        "SYNTH_PEER_POLICY": "peer_policy",
     }
 
     # Helper expected component for common prefixes

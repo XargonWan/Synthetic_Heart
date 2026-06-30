@@ -105,7 +105,7 @@ try:
 
     register_exposed_var(
         "XAI_API_KEY",
-        label="xAI API Key",
+        label="XAI API Key",
         default="",
         value_type=str,
         ui_type="password",
@@ -117,7 +117,7 @@ try:
     )
     register_exposed_var(
         "XAI_BASE_URL",
-        label="xAI Base URL",
+        label="XAI Base URL",
         default="https://api.x.ai",
         value_type=str,
         ui_type="string",
@@ -162,7 +162,7 @@ except Exception:
 XAI_API_KEY = config_registry.get_var(
     "XAI_API_KEY",
     "",
-    label="xAI API Key",
+    label="XAI API Key",
     description="API key for xAI Grok.",
     group="llm",
     component="xai_grok",
@@ -172,7 +172,7 @@ XAI_API_KEY = config_registry.get_var(
 XAI_BASE_URL = config_registry.get_var(
     "XAI_BASE_URL",
     "https://api.x.ai",
-    label="xAI Base URL",
+    label="XAI Base URL",
     description="Base URL for the xAI API.",
     group="llm",
     component="xai_grok",
