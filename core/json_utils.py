@@ -152,12 +152,15 @@ def _repair_json_string_speech_quotes(raw: str) -> str:
     re-escapes any ``"`` that is not a true string closer.
 
     A ``"`` is a *true closer* when the next non-horizontal-whitespace character
-    is one of ``,``, ``}``, ``]``, or end-of-string.  A newline after ``"`` is
-    also a true closer when the next non-blank line begins with ``}``, ``]``, or
-    a ``"key":`` pattern.
+    is ``}``, ``]``, or end-of-string. A ``,`` or newline after ``"`` is only a
+    true closer when what follows (after skipping whitespace) is a closing
+    bracket or a ``"key":`` pattern — otherwise it's prose punctuation after
+    embedded dialogue (e.g. ``"spoken line," she said, "more dialogue"``) and
+    the quote is treated as embedded.
 
-    ``\"`` (backslash-quote) where the character following the pair is structural
-    is treated as a mistakenly-escaped closer (the ``\\`` is stripped).
+    ``\"`` (backslash-quote) where the character following the pair is structural,
+    or immediately precedes a ``"key":`` pattern, is treated as a mistakenly-escaped
+    closer (the ``\\`` is stripped).
 
     Real newline / carriage-return / tab characters inside the value are encoded
     as their JSON escape sequences so the result is always valid JSON.
@@ -171,6 +174,21 @@ def _repair_json_string_speech_quotes(raw: str) -> str:
 
     def _is_structural(ch: str) -> bool:
         return ch in ",}]"
+
+    def _looks_like_next_key(s: str, j: int) -> bool:
+        """True if ``s[j:]`` starts with a ``"key":`` pattern (next sibling key)."""
+        n = len(s)
+        if j >= n or s[j] != '"':
+            return False
+        key_end = j + 1
+        while key_end < n and s[key_end] != '"':
+            if s[key_end] == "\\":
+                key_end += 1
+            key_end += 1
+        colon = key_end + 1
+        while colon < n and s[colon] in " \t":
+            colon += 1
+        return colon < n and s[colon] == ":"
 
     def _scan_value(s: str, pos: int) -> tuple[str, int]:
         """Scan the string value starting just after the opening quote.
@@ -193,9 +211,19 @@ def _repair_json_string_speech_quotes(raw: str) -> str:
                     while j < n and s[j] in " \t":
                         j += 1
                     if j >= n or _is_structural(s[j]):
-                        # LLM mistakenly escaped the actual string closer.
-                        # Drop the backslash; emit just the closing quote.
+                        # LLM mistakenly escaped the actual string closer,
+                        # followed by JSON punctuation. Drop the backslash;
+                        # emit just the closing quote.
                         out.append('"')
+                        pos += 2
+                        found_close = True
+                        break
+                    elif _looks_like_next_key(s, j):
+                        # Mistakenly-escaped closer immediately followed by the
+                        # next sibling key with no separating comma in the
+                        # source (e.g. `secret,\" "reply_message_id": ...`).
+                        # Drop the backslash and insert the missing comma.
+                        out.append('",')
                         pos += 2
                         found_close = True
                         break
@@ -217,12 +245,30 @@ def _repair_json_string_speech_quotes(raw: str) -> str:
                 while j < n and s[j] in " \t":
                     j += 1
 
-                if j >= n or _is_structural(s[j]):
-                    # True closer: followed by JSON structural char or end.
+                if j >= n or s[j] in "}]":
+                    # True closer: followed by closing brace/bracket or end.
                     out.append('"')
                     pos += 1
                     found_close = True
                     break
+
+                elif s[j] == ",":
+                    # Ambiguous: a real JSON separator before the next key, or
+                    # just prose punctuation after embedded dialogue (e.g.
+                    # `"spoken line," she said, "more dialogue"`). Peek past
+                    # the comma for a real "key": pattern or closing bracket.
+                    k = j + 1
+                    while k < n and s[k] in " \t\n":
+                        k += 1
+                    if (k >= n or s[k] in "}]") or _looks_like_next_key(s, k):
+                        out.append('"')
+                        pos += 1
+                        found_close = True
+                        break
+                    else:
+                        # Prose comma after embedded dialogue — keep going.
+                        out.append('\\"')
+                        pos += 1
 
                 elif s[j] == "\n":
                     # Newline after quote — check what the next non-blank line
@@ -236,30 +282,28 @@ def _repair_json_string_speech_quotes(raw: str) -> str:
                         pos += 1
                         found_close = True
                         break
-                    elif s[k] == '"':
-                        # Could be the next JSON key "foo": …
-                        key_end = k + 1
-                        while key_end < n and s[key_end] != '"':
-                            if s[key_end] == "\\":
-                                key_end += 1
-                            key_end += 1
-                        colon = key_end + 1
-                        while colon < n and s[colon] in " \t":
-                            colon += 1
-                        if colon < n and s[colon] == ":":
-                            # Looks like a real key → current " is the true closer.
-                            out.append('"')
-                            pos += 1
-                            found_close = True
-                            break
-                        else:
-                            # Quoted speech on the next line → embedded quote.
-                            out.append('\\"')
-                            pos += 1
+                    elif _looks_like_next_key(s, k):
+                        # Looks like a real key but the source has no comma
+                        # between the closing quote and the newline-led next
+                        # key → current " is the true closer; insert the
+                        # missing comma.
+                        out.append('",')
+                        pos += 1
+                        found_close = True
+                        break
                     else:
-                        # More narrative on the next line → embedded quote.
+                        # Quoted speech (or other narrative) on the next line
+                        # → embedded quote.
                         out.append('\\"')
                         pos += 1
+
+                elif _looks_like_next_key(s, j):
+                    # Same-line case with no comma at all between the closing
+                    # quote and the next key (e.g. `"text": "foo" "next_key": ...`).
+                    out.append('",')
+                    pos += 1
+                    found_close = True
+                    break
 
                 else:
                     # Followed by non-structural, non-newline → embedded speech quote.

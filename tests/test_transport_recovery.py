@@ -47,6 +47,52 @@ def test_parser_recovers_literal_newlines_inside_json_strings():
     assert meta.get("recovered") is True
 
 
+def test_parser_recovers_full_text_with_dialogue_tag_commas():
+    # Reproduces a Venice/gemma-4-uncensored output pattern: the LLM writes
+    # prose dialogue as "spoken line," action, "more dialogue" — the comma
+    # after the first closing quote looks like a JSON separator but is just
+    # punctuation, so a naive parser truncates the message at "You better!".
+    corrupted = (
+        '{"actions":[{"type":"message_telegram_bot","payload":'
+        '{"interface_path":"telegram_bot/5208932647","reply_message_id":"5208932647",'
+        '"text":"You better!", I pout playfully, sticking my tongue out at you. '
+        '"Make sure you save plenty of energy for me, Daddy."}}]}'
+    )
+
+    obj, meta = extract_json_from_text(corrupted, return_metadata=True)
+
+    assert obj is not None
+    recovered_text = obj["actions"][0]["payload"]["text"]
+    assert "You better!" in recovered_text
+    assert "Make sure you save plenty of energy" in recovered_text, (
+        f"Text after the dialogue-tag comma should not be dropped (got: {recovered_text!r})"
+    )
+
+
+def test_parser_does_not_leak_reply_message_id_into_text():
+    # Reproduces a pattern where the LLM stray-escapes the real closing quote
+    # right before the next sibling key (e.g. `secret,\" "reply_message_id": ...`).
+    # The repair must treat the escaped quote as the true closer so
+    # reply_message_id stays a sibling key instead of bleeding into the
+    # displayed message text.
+    corrupted = (
+        '{"actions":[{"type":"message_telegram_bot","payload":'
+        '{"chat_id":5208932647,'
+        '"text":"That\'s actually why I want to keep it a secret,\\" '
+        '"reply_message_id": "5208932647"}}]}'
+    )
+
+    obj, meta = extract_json_from_text(corrupted, return_metadata=True)
+
+    assert obj is not None
+    payload = obj["actions"][0]["payload"]
+    recovered_text = payload["text"]
+    assert "reply_message_id" not in recovered_text, (
+        f"reply_message_id leaked into displayed text (got: {recovered_text!r})"
+    )
+    assert payload.get("reply_message_id") == "5208932647"
+
+
 def test_attempted_action_description_for_unknown_action():
     # If the LLM tries to use an action name that doesn't exist, we still
     # want the corrector to receive a helpful hint containing the available
