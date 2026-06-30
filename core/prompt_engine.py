@@ -1528,13 +1528,7 @@ async def build_prompt_request(
     # Skip prepending static persona for internal system/maintenance tasks (like diary_merge/diary_consolidation)
     # to avoid triggering safety filters of external LLMs on explicit instructions.
     _use_persona = bool(
-        config_registry.get_value(
-            "USE_PERSONA_IN_SYSTEM_PROMPTS",
-            True,
-            value_type=bool,
-            group="core",
-            component="prompt_engine",
-        )
+        config_registry.get_value("USE_PERSONA_IN_SYSTEM_PROMPTS", True)
     )
     if static_persona and _use_persona:
         json_instructions = f"=== CRITICAL SYSTEM IDENTITY ===\n{static_persona}\n\n=== JSON RESPONSE INSTRUCTIONS ===\n{json_instructions}"

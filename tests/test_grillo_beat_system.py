@@ -46,6 +46,7 @@ async def test_grillo_beat_types_exist() -> None:
         "self_reflection",
         "curiosity",
         "relationship",
+        "temporal_reflection",
     ]
 
     # Check _select_beat_type returns one of the expected types
@@ -163,7 +164,8 @@ async def test_grillo_outreach_prompt_generation() -> None:
     prompt = plugin._build_outreach_prompt(
         interface="telegram_bot",
         chat_id="123456",
-        context=["Test context 1", "Test context 2"],
+        chat_turns=["Test context 1", "Test context 2"],
+        inner_thoughts=[],
     )
 
     assert "SELF-INITIATED OUTREACH" in prompt

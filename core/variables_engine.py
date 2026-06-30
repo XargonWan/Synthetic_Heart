@@ -115,7 +115,7 @@ class ExposedVarDefinition:
         # For file-backed variables we accept a string path or dict metadata; skip casting
         if self.ui_type == "file":
             return
-        if self.value_type is not None and not callable(self.value_type):
+        if isinstance(self.value_type, type):
             try:
                 # Attempt simple cast for primitives
                 _ = self.value_type(value)
@@ -127,9 +127,9 @@ class ExposedVarDefinition:
         # Validator can be a dict describing rules or a callable
         if self.validator is None:
             return
-        if callable(self.validator):
+        if isinstance(self.validator, Callable):
             try:
-                ok = self.validator(value)
+                ok = self.validator(value)  # type: ignore
             except Exception as e:
                 raise ValidationError(f"Validator for {self.key} raised: {e}")
             if not ok:
@@ -914,7 +914,7 @@ def register_all():
         value_type=str,
         ui_type="select",
         description=(
-            "'silent' never responds to peer messages (default); 'observe' is an alias for silent; "
+            "Policy 'silent' never responds to peer messages (default); 'observe' is an alias for silent; "
             "'mention_only' responds when this bot's username or any alias appears "
             "in the peer message, but never in a reply chain."
         ),
