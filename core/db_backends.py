@@ -233,10 +233,12 @@ def _translate_create_table(sql: str) -> str:
     translated = translated.replace("`", '"')
     translated = re.sub(r"\bLONGTEXT\b", "TEXT", translated, flags=re.IGNORECASE)
     translated = re.sub(r"\bMEDIUMTEXT\b", "TEXT", translated, flags=re.IGNORECASE)
-    translated = re.sub(r"\bDATETIME\b", "TIMESTAMPTZ", translated, flags=re.IGNORECASE)
-    translated = re.sub(
-        r"\bTIMESTAMP\b", "TIMESTAMPTZ", translated, flags=re.IGNORECASE
-    )
+    # Case-sensitive: MariaDB DDL in this codebase always writes type keywords
+    # in UPPERCASE and column names in lowercase (e.g. `timestamp DATETIME`).
+    # Matching case-insensitively here renamed the literal column "timestamp"
+    # to "timestamptz" along with the type, corrupting the schema on Postgres.
+    translated = re.sub(r"\bDATETIME\b", "TIMESTAMPTZ", translated)
+    translated = re.sub(r"\bTIMESTAMP\b", "TIMESTAMPTZ", translated)
     translated = re.sub(
         r"\bDOUBLE\b", "DOUBLE PRECISION", translated, flags=re.IGNORECASE
     )
