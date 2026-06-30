@@ -294,7 +294,26 @@ def extract_json_from_text(
     sanitized = _remove_control_chars(text)
     stripped_noise = _strip_stacktraces_and_addresses(text)
 
+    # Pre-parse repairs: fix LLM patterns that break standard JSON parsing.
+    # Pass 1 fixes literal \n escape sequences outside a string; Pass 2
+    # re-escapes unescaped speech-marker quotes inside text-heavy fields.
+    # Both are cheap string scans — only the repaired variant is inserted when
+    # it differs from the cleaned original.
+    try:
+        from core.json_utils import (
+            _repair_premature_string_close as _repair_p1,
+            _repair_json_string_speech_quotes as _repair_p2,
+        )
+
+        _pre_repaired = _repair_p1(cleaned_text)
+        _pre_repaired = _repair_p2(_pre_repaired)
+    except Exception:
+        _pre_repaired = cleaned_text
+
     texts_to_try: list[str] = []
+    if _pre_repaired and _pre_repaired != cleaned_text:
+        texts_to_try.append(_pre_repaired)
+
     for candidate in (
         cleaned_text,
         stripped_noise.strip(),

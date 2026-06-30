@@ -9,23 +9,27 @@ def test_parser_records_error_on_unescaped_quotes():
 
     obj, meta = extract_json_from_text(corrupted, return_metadata=True)
 
-    # json_repair handles unescaped quotes directly, so we get a clean repaired
-    # result rather than a partial recovery that needs a corrector round-trip.
+    # The pre-parse speech-quote repair re-escapes the inner quotes so the
+    # standard JSON decoder accepts the result without needing json_repair.
     assert obj is not None, "Decoder should return repaired JSON"
     assert isinstance(obj, dict) and "actions" in obj, (
         "Repaired result should be a dict with 'actions'"
     )
-    assert meta.get("syntax_repaired") is True, (
-        "Parser should mark syntax_repaired=True when json_repair fixed the output"
+    # Confirm the full text (including the embedded quoted word) was recovered,
+    # not just the truncated fragment before the first speech quote.
+    actions = obj.get("actions", [])
+    msg_action = next(
+        (
+            a
+            for a in actions
+            if isinstance(a, dict) and a.get("type") == "message_telegram_bot"
+        ),
+        None,
     )
-    # LAST_JSON_ERROR_INFO is still populated from the initial scan pass that
-    # detected the malformed input before json_repair ran.
-    assert transport_layer.LAST_JSON_ERROR_INFO is not None and isinstance(
-        transport_layer.LAST_JSON_ERROR_INFO, str
-    )
-    assert (
-        "Expecting" in transport_layer.LAST_JSON_ERROR_INFO
-        or "Invalid" in transport_layer.LAST_JSON_ERROR_INFO
+    assert msg_action is not None, "message_telegram_bot action should be present"
+    recovered_text = msg_action.get("payload", {}).get("text", "")
+    assert "quote" in recovered_text, (
+        f"Full text should be recovered (got: {recovered_text!r})"
     )
 
 
