@@ -26,6 +26,7 @@ Config keys (set via WebUI or DB):
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from typing import Any
 
 from core.logging_utils import log_debug, log_warning
@@ -149,6 +150,56 @@ def get_peer_policy() -> str:
         )
         return "silent"
     return policy
+
+
+async def peer_already_responded(interface_path: str, since: datetime) -> bool:
+    """Return True if any peer SyntH bot posted in this chat after *since*.
+
+    Used for turn-taking coordination: if a peer already responded to the
+    triggering message, suppress this instance's turn.  Fails open (returns
+    False) so a DB error never permanently silences a SyntH.
+    """
+    if not is_peer_mode_enabled():
+        return False
+    peer_ids = get_peer_ids()
+    if not peer_ids:
+        return False
+
+    peer_id_strs = [str(pid) for pid in peer_ids]
+    placeholders = ", ".join(["%s"] * len(peer_id_strs))
+
+    since_utc = since
+    if since_utc.tzinfo is None:
+        since_utc = since_utc.replace(tzinfo=timezone.utc)
+
+    # Match chat-level path (first two segments) so thread IDs don't fragment results.
+    parts = interface_path.split("/")
+    path_prefix = "/".join(parts[:2]) + "%"
+
+    try:
+        from core.db import get_conn_ctx
+
+        async with get_conn_ctx() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    f"SELECT COUNT(*) FROM chat_history_cache "
+                    f"WHERE interface_path LIKE %s "
+                    f"AND sender_id IN ({placeholders}) "
+                    f"AND timestamptz > %s",
+                    (path_prefix, *peer_id_strs, since_utc),
+                )
+                row = await cur.fetchone()
+                found = bool(row and row[0] > 0)
+                if found:
+                    log_debug(
+                        "[peer_policy] Peer response detected — suppressing this turn"
+                    )
+                return found
+    except Exception as e:
+        log_warning(
+            f"[peer_policy] peer_already_responded check failed (failing open): {e}"
+        )
+        return False
 
 
 def is_peer_synth(user_id: int) -> bool:

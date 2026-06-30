@@ -925,6 +925,39 @@ def register_all():
     )
 
     register_exposed_var(
+        "SYNTH_PEER_TURN_DELAY_MIN",
+        label="Peer Turn Delay Min (seconds)",
+        default=1.0,
+        value_type=float,
+        ui_type="number",
+        description=(
+            "Minimum seconds to wait before responding in a shared group when peer "
+            "SyntHs are present. Combined with a random jitter up to "
+            "SYNTH_PEER_TURN_DELAY_MAX to stagger responses and reduce simultaneous replies."
+        ),
+        scope="interface",
+        component="peer_policy",
+        tags=["multi-instance"],
+    )
+
+    register_exposed_var(
+        "SYNTH_PEER_TURN_DELAY_MAX",
+        label="Peer Turn Delay Max (seconds)",
+        default=8.0,
+        value_type=float,
+        ui_type="number",
+        description=(
+            "Maximum seconds to wait before responding in a shared group when peer "
+            "SyntHs are present. After this delay the bot checks whether a peer already "
+            "responded; if so it suppresses its own turn. Should exceed your typical LLM "
+            "response time to be effective (default 8s covers most cases)."
+        ),
+        scope="interface",
+        component="peer_policy",
+        tags=["multi-instance"],
+    )
+
+    register_exposed_var(
         "SYNTH_PEER_ENABLED",
         label="Enable Peer SyntH Mode",
         default=False,

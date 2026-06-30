@@ -12,6 +12,8 @@ def test_exposed_variables_have_label_description_and_component():
         "SYNTH_PEER_POLICY": "peer_policy",
         "SYNTH_PEER_ENABLED": "peer_policy",
         "SYNTH_PEER_NAMES": "peer_policy",
+        "SYNTH_PEER_TURN_DELAY_MIN": "peer_policy",
+        "SYNTH_PEER_TURN_DELAY_MAX": "peer_policy",
     }
 
     # Helper expected component for common prefixes

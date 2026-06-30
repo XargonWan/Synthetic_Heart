@@ -4,6 +4,7 @@ import os
 import re
 import sys
 import asyncio
+import random
 import time
 from inspect import isawaitable
 from typing import Optional
@@ -1357,6 +1358,44 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     else:
         log_debug("Not a trainer reply - continuing to queue forwarding")
+
+    # === PRIORITY 3.5: Peer turn coordination (shared group RP) ===
+    # When multiple SyntHs share a group, both see the same message and would
+    # respond simultaneously. We stagger with a random delay then check whether
+    # a peer already posted; if so, yield this turn to them.
+    if message.chat.type in ("group", "supergroup"):
+        try:
+            from core.peer_policy import (
+                get_peer_ids,
+                is_peer_mode_enabled,
+                peer_already_responded,
+            )
+
+            if is_peer_mode_enabled() and get_peer_ids():
+                _delay_min = float(
+                    config_registry.get_value("SYNTH_PEER_TURN_DELAY_MIN", 1.0)
+                )
+                _delay_max = float(
+                    config_registry.get_value("SYNTH_PEER_TURN_DELAY_MAX", 8.0)
+                )
+                _jitter = random.uniform(_delay_min, max(_delay_min, _delay_max))
+                log_debug(
+                    f"[telegram_bot] Peer turn coordination: waiting {_jitter:.1f}s"
+                )
+                await asyncio.sleep(_jitter)
+
+                _msg_date = getattr(message, "date", None)
+                if _msg_date is not None and await peer_already_responded(
+                    interface_path, _msg_date
+                ):
+                    log_debug(
+                        "[telegram_bot] Peer already responded — yielding this turn"
+                    )
+                    return
+        except Exception as _peer_turn_err:
+            log_debug(
+                f"[telegram_bot] Peer turn coordination skipped (non-fatal): {_peer_turn_err}"
+            )
 
     # === PRIORITY 4: Forward to centralized queue (default behavior) ===
     log_debug(
