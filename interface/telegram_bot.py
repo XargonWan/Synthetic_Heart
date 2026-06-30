@@ -4,7 +4,6 @@ import os
 import re
 import sys
 import asyncio
-import random
 import time
 from inspect import isawaitable
 from typing import Optional
@@ -1360,38 +1359,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         log_debug("Not a trainer reply - continuing to queue forwarding")
 
     # === PRIORITY 3.5: Peer turn coordination (shared group RP) ===
-    # When multiple SyntHs share a group, both see the same message and would
-    # respond simultaneously. We stagger with a random delay then check whether
-    # a peer already posted; if so, yield this turn to them.
+    # Priority-based: set SYNTH_PEER_TURN_FLOOR_SECONDS=0 on the primary instance
+    # (responds immediately) and to a value safely above typical LLM response time
+    # on every secondary instance (e.g. 20 for a 7-12s LLM).  The secondary waits
+    # the floor, then checks whether the primary already posted; if so it yields.
     if message.chat.type in ("group", "supergroup"):
         try:
-            from core.peer_policy import (
-                get_peer_ids,
-                is_peer_mode_enabled,
-                peer_already_responded,
-            )
+            from core.peer_policy import get_peer_ids, is_peer_mode_enabled
 
             if is_peer_mode_enabled() and get_peer_ids():
-                _delay_min = float(
-                    config_registry.get_value("SYNTH_PEER_TURN_DELAY_MIN", 1.0)
+                _floor = float(
+                    config_registry.get_value("SYNTH_PEER_TURN_FLOOR_SECONDS", 0.0)
                 )
-                _delay_max = float(
-                    config_registry.get_value("SYNTH_PEER_TURN_DELAY_MAX", 8.0)
-                )
-                _jitter = random.uniform(_delay_min, max(_delay_min, _delay_max))
-                log_debug(
-                    f"[telegram_bot] Peer turn coordination: waiting {_jitter:.1f}s"
-                )
-                await asyncio.sleep(_jitter)
-
-                _msg_date = getattr(message, "date", None)
-                if _msg_date is not None and await peer_already_responded(
-                    interface_path, _msg_date
-                ):
+                if _floor > 0:
                     log_debug(
-                        "[telegram_bot] Peer already responded — yielding this turn"
+                        f"[telegram_bot] Peer turn stagger: secondary waiting {_floor:.1f}s"
                     )
-                    return
+                    await asyncio.sleep(_floor)
         except Exception as _peer_turn_err:
             log_debug(
                 f"[telegram_bot] Peer turn coordination skipped (non-fatal): {_peer_turn_err}"

@@ -925,32 +925,18 @@ def register_all():
     )
 
     register_exposed_var(
-        "SYNTH_PEER_TURN_DELAY_MIN",
-        label="Peer Turn Delay Min (seconds)",
-        default=1.0,
+        "SYNTH_PEER_TURN_FLOOR_SECONDS",
+        label="Peer Turn Floor (seconds)",
+        default=0.0,
         value_type=float,
         ui_type="number",
         description=(
-            "Minimum seconds to wait before responding in a shared group when peer "
-            "SyntHs are present. Combined with a random jitter up to "
-            "SYNTH_PEER_TURN_DELAY_MAX to stagger responses and reduce simultaneous replies."
-        ),
-        scope="interface",
-        component="peer_policy",
-        tags=["multi-instance"],
-    )
-
-    register_exposed_var(
-        "SYNTH_PEER_TURN_DELAY_MAX",
-        label="Peer Turn Delay Max (seconds)",
-        default=8.0,
-        value_type=float,
-        ui_type="number",
-        description=(
-            "Maximum seconds to wait before responding in a shared group when peer "
-            "SyntHs are present. After this delay the bot checks whether a peer already "
-            "responded; if so it suppresses its own turn. Should exceed your typical LLM "
-            "response time to be effective (default 8s covers most cases)."
+            "Turn-coordination floor for shared Telegram groups. "
+            "Set to 0 on the primary instance (responds immediately). "
+            "Set to a value greater than your typical LLM response time on every "
+            "secondary instance — e.g. 20 for a 7-12s LLM. The secondary waits this "
+            "many seconds, then checks whether the primary already responded; if so it "
+            "suppresses its own turn. Requires each instance to have its own value set."
         ),
         scope="interface",
         component="peer_policy",

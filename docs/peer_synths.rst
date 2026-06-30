@@ -81,6 +81,10 @@ For every SyntH in the group, open **WebUI → Settings → Peer Policy** and fi
      - JSON object mapping each ID to their SyntH display name. Example: ``{"8243553794": "Aria", "1122334455": "Sol"}``
    * - **Peer SyntH Response Policy**
      - See policy reference below. Start with ``mention_only``.
+   * - **Peer Turn Floor (seconds)**
+     - See turn coordination below. Set to ``0`` on the primary instance;
+       set to a value above your typical LLM response time on every secondary
+       instance (e.g. ``20`` for a 7–12 s LLM).
 
 Example for a three-SyntH group (configuring **Aria**):
 
@@ -161,6 +165,64 @@ Aria and Sol using ``mention_only`` it looks like this:
 
 The names come from ``SYNTH_PEER_NAMES``. If a peer ID has no name entry it
 falls back to ``SyntH#<id>``.
+
+
+Turn Coordination (Roleplay)
+----------------------------
+
+When multiple SyntHs use ``mention_only`` (or have peer mode enabled with open
+responses), both instances see every user message simultaneously and would
+normally both start generating at the same time. The **Peer Turn Floor** setting
+coordinates this without requiring a shared database.
+
+**How it works**
+
+One instance is designated the *primary* (``SYNTH_PEER_TURN_FLOOR_SECONDS = 0``).
+It responds immediately as normal. Every other instance is *secondary* (floor > 0):
+when a group message comes in, the secondary waits the floor duration, then checks
+whether the primary already posted a response. If it has, the secondary suppresses
+its own turn silently. If it has not (primary is still generating), the secondary
+responds — both reply that round, but this only happens on unusually slow LLM calls.
+
+**Setting the floor**
+
+Set the floor to a comfortable margin above your longest normal response time:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 25 20 55
+
+   * - Typical LLM time
+     - Recommended floor
+     - Notes
+   * - 3–6 s
+     - ``10``
+     - Fast endpoint; leaves 4–7 s margin.
+   * - 7–12 s
+     - ``20``
+     - Standard; covers 12 s + delivery overhead with margin to spare.
+   * - 15–25 s
+     - ``35``
+     - Slower local model or long context.
+
+The rare spike (e.g. 60 s) will occasionally produce a double response — this
+cannot be prevented without a shared database and is usually harmless in an RP
+context.
+
+**Each instance gets its own value**
+
+.. code-block:: text
+
+   soul  (primary)   → SYNTH_PEER_TURN_FLOOR_SECONDS = 0
+   soul2 (secondary) → SYNTH_PEER_TURN_FLOOR_SECONDS = 20
+
+Leave ``SYNTH_PEER_TURN_FLOOR_SECONDS`` at the default (``0``) on any instance
+that should respond immediately. Only secondary instances need a non-zero value.
+
+.. note::
+
+   Turn coordination only activates for Telegram group or supergroup chats.
+   Private chats and other interfaces are not affected.
 
 
 Disabling
