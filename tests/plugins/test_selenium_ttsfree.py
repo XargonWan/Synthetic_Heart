@@ -9,10 +9,19 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
+has_selenium = True
 try:
-    from plugins.selenium_ttsfree import SeleniumTTSFreePlugin
-except ModuleNotFoundError:
-    from plugins_dev.selenium_ttsfree import SeleniumTTSFreePlugin
+    try:
+        from plugins.selenium_ttsfree import SeleniumTTSFreePlugin  # type: ignore
+    except ModuleNotFoundError:
+        from plugins_dev.selenium_ttsfree import SeleniumTTSFreePlugin
+except ModuleNotFoundError as e:
+    if "selenium" in str(e):
+        has_selenium = False
+    else:
+        raise
+
+pytestmark = pytest.mark.skipif(not has_selenium, reason="selenium not installed")
 
 
 def test_validate_payload_success():

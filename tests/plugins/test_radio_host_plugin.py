@@ -318,7 +318,9 @@ async def test_announce_disabled_injects_deannounce_only(
 
     # With queue_ahead having 2+ items, _pre_generate_from_queue creates
     # one LLM pre-generation task per transition (B->C, C->D)
-    assert len(captured_coro) == 2, f"Expected 2 pre-gen tasks, got {len(captured_coro)}"
+    assert len(captured_coro) == 2, (
+        f"Expected 2 pre-gen tasks, got {len(captured_coro)}"
+    )
 
     # _inject_at_track_change must be False so no fallback injection fires
     assert plugin._inject_at_track_change is False

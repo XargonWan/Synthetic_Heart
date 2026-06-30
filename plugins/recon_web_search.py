@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Any, Dict, List, Optional
+from typing import List
 
 from core.config_manager import config_registry
 from core.logging_utils import log_debug, log_info, log_warning
@@ -53,7 +53,7 @@ class ReconWebSearchPlugin:
             "Determine if the user request requires a web search to provide up-to-date information. "
             "If YES, generate 1-3 specific search queries that would help answer the user's question. "
             'Return as an object: {"web_search": ["query1", "query2", ...]}. '
-            "If NO web search is needed, return an empty list: {\"web_search\": []}. "
+            'If NO web search is needed, return an empty list: {"web_search": []}. '
             "Examples of when to search: current events, news, weather, recent developments, factual information that may have changed. "
             "Examples of when NOT to search: general knowledge, opinions, hypothetical scenarios, internal system questions."
         )
@@ -134,7 +134,9 @@ class ReconWebSearchPlugin:
                     if isinstance(raw, dict):
                         nested = raw.get("web_search")
                         if isinstance(nested, list):
-                            return [str(q).strip() for q in nested if str(q).strip()][:3]
+                            return [str(q).strip() for q in nested if str(q).strip()][
+                                :3
+                            ]
             except json.JSONDecodeError:
                 pass
 
@@ -174,7 +176,9 @@ class ReconWebSearchPlugin:
             if isinstance(data, dict):
                 raw_queries = data.get("web_search")
                 if isinstance(raw_queries, list):
-                    queries = [str(q).strip() for q in raw_queries if str(q).strip()][:3]
+                    queries = [str(q).strip() for q in raw_queries if str(q).strip()][
+                        :3
+                    ]
                 elif isinstance(raw_queries, dict):
                     nested = raw_queries.get("web_search")
                     if isinstance(nested, list):

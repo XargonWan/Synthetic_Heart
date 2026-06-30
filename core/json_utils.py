@@ -2,7 +2,7 @@ import copy
 import json
 import re
 from collections.abc import Mapping, Sequence
-from typing import Any, Optional, Dict
+from typing import Any, Optional, Dict, Union, Tuple
 from core.logging_utils import log_debug, log_info, log_warning
 
 
@@ -337,7 +337,9 @@ def _repair_inline_premature_string_close(text: str) -> str:
     return pattern.sub(_fix, text)
 
 
-def extract_json_from_text(text: str, return_metadata: bool = False) -> Optional[Dict]:
+def extract_json_from_text(
+    text: str, return_metadata: bool = False
+) -> Union[Optional[Dict], Tuple[Optional[Dict], Dict[str, Any]]]:
     """Extract the first valid JSON object or array from text.
 
     This function is smart enough to extract JSON even when LLMs (like Gemini)
@@ -488,8 +490,8 @@ def extract_json_from_text(text: str, return_metadata: bool = False) -> Optional
 
     # Log results based on what we found
     if metadata.get("had_extra_text", False):
-        prefix_len = metadata.get("prefix_length", 0)
-        suffix_len = metadata.get("suffix_length", 0)
+        prefix_len = int(metadata.get("prefix_length", 0))
+        suffix_len = int(metadata.get("suffix_length", 0))
         log_info(
             f"[extract_json_from_text] ✅ Extracted JSON with {prefix_len + suffix_len} extra chars (prefix: {prefix_len}, suffix: {suffix_len})"
         )

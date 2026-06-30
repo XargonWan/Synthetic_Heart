@@ -234,7 +234,10 @@ class TestOrphanedActionLevelKeys(unittest.IsolatedAsyncioTestCase):
             message=msg,
             text=text,
             source="llm",
-            context={"interface_path": "telegram_bot/5208932647", "interface": "telegram_bot"},
+            context={
+                "interface_path": "telegram_bot/5208932647",
+                "interface": "telegram_bot",
+            },
         )
 
         mock_corrector.assert_not_called()
