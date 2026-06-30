@@ -453,7 +453,7 @@ class EmotionManager(PluginBase):
                     cm = await cm
                 async with cm as cur:
                     await cur.execute(
-                        "SELECT emotion_name, intensity, timestamptz FROM emotion_state ORDER BY timestamptz DESC"
+                        "SELECT emotion_name, intensity, timestamp FROM emotion_state ORDER BY timestamp DESC"
                     )
                     rows = await cur.fetchall()
 
@@ -491,7 +491,7 @@ class EmotionManager(PluginBase):
                     cm = await cm
                 async with cm as cur:
                     await cur.execute(
-                        "SELECT emotion_name, intensity, timestamptz FROM emotion_state"
+                        "SELECT emotion_name, intensity, timestamp FROM emotion_state"
                     )
                     rows = await cur.fetchall()
 
@@ -616,8 +616,8 @@ class EmotionManager(PluginBase):
                 sql_values.append("%s")
                 params.append(value)
 
-        if "timestamptz" in columns:
-            sql_columns.append("timestamptz")
+        if "timestamp" in columns:
+            sql_columns.append("timestamp")
             sql_values.append("%s")
             params.append(datetime.now(timezone.utc))
 
@@ -676,7 +676,7 @@ class EmotionManager(PluginBase):
                     if existing:
                         # Update existing
                         await cur.execute(
-                            "UPDATE emotion_state SET intensity = %s, timestamptz = NOW() WHERE emotion_name = %s",
+                            "UPDATE emotion_state SET intensity = %s, timestamp = NOW() WHERE emotion_name = %s",
                             (intensity, emotion),
                         )
                     else:
@@ -897,7 +897,7 @@ class EmotionManager(PluginBase):
                 async with conn.cursor() as cur:
                     # Get all emotions
                     await cur.execute(
-                        "SELECT emotion_name, intensity, timestamptz FROM emotion_state"
+                        "SELECT emotion_name, intensity, timestamp FROM emotion_state"
                     )
                     rows = await cur.fetchall()
                     existing_emotions = {row[0] for row in rows}
@@ -948,7 +948,7 @@ class EmotionManager(PluginBase):
                     # decayed value, compounding the decay each cycle.
                     if to_update:
                         await cur.executemany(
-                            "UPDATE emotion_state SET intensity = %s, timestamptz = NOW() "
+                            "UPDATE emotion_state SET intensity = %s, timestamp = NOW() "
                             "WHERE emotion_name = %s",
                             to_update,
                         )
@@ -965,7 +965,7 @@ class EmotionManager(PluginBase):
 
                     if to_insert:
                         await cur.executemany(
-                            "INSERT INTO emotion_state (emotion_name, intensity, timestamptz) VALUES (%s, %s, NOW())",
+                            "INSERT INTO emotion_state (emotion_name, intensity, timestamp) VALUES (%s, %s, NOW())",
                             to_insert,
                         )
 
@@ -1004,9 +1004,9 @@ class EmotionManager(PluginBase):
                     async with cm as cur:
                         # Get latest 20 diary entries with emotions AND timestamp
                         await cur.execute(
-                            """SELECT emotions, timestamptz FROM ai_diary
-                               WHERE emotions IS NOT NULL AND emotions != '[]'
-                               ORDER BY timestamptz DESC LIMIT 20"""
+                            """SELECT emotions, timestamp FROM ai_diary 
+                               WHERE emotions IS NOT NULL AND emotions != '[]' 
+                               ORDER BY timestamp DESC LIMIT 20"""
                         )
                         rows = await cur.fetchall()
 

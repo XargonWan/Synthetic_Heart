@@ -101,6 +101,7 @@ def test_current_chat_history_respects_last_n(monkeypatch):
 
 def test_no_duplication_with_history_recent(monkeypatch):
     monkeypatch.setattr("core.action_parser.gather_static_injections", _dummy_gather)
+    monkeypatch.setattr("core.core_initializer.PLUGIN_REGISTRY", {})
     now = datetime.now(timezone.utc)
     msg = _make_msg("Carol", "Dup", now - timedelta(minutes=1))
 
@@ -116,13 +117,9 @@ def test_no_duplication_with_history_recent(monkeypatch):
         date=now,
     )
 
-    async def _fake_cache_load(ip):
-        return deque([msg])
-
     async def _fake_global_load(limit=10):
         return deque([{**msg, "interface_path": interface}])
 
-    monkeypatch.setattr("core.chat_history_cache.load_chat_history", _fake_cache_load)
     monkeypatch.setattr(
         "core.chat_history_cache.load_global_chat_history", _fake_global_load
     )
@@ -135,8 +132,7 @@ def test_no_duplication_with_history_recent(monkeypatch):
     current_entries = res["context"].get("history_current_chat", [])
     recent_entries = res["context"].get("history_recent", [])
     assert any("Carol" in e for e in current_entries)
-    # Carol's "Dup" message (from the same interface) must not appear in recent
-    assert not any("Carol" in e and "Dup" in e for e in recent_entries)
+    assert recent_entries == []
 
 
 def test_local_global_separation(monkeypatch):
@@ -259,9 +255,6 @@ def test_unified_history_keeps_local_messages_when_global_tail_is_busy(monkeypat
         "core.history_engine._get_int",
         lambda key, default: 3 if key == "CONTEXT_VERBOSITY" else default,
     )
-    # Isolate from real DB: prevent plugins (ai_diary etc.) from contributing
-    # history_recent entries that would displace the mock "Other" messages under
-    # the verbosity=3 trim.
     monkeypatch.setattr("core.core_initializer.PLUGIN_REGISTRY", {})
 
     now = datetime.now(timezone.utc)
@@ -409,6 +402,6 @@ def test_load_chat_history_for_guild_queries(monkeypatch):
     assert len(result2) == 1
     cur2 = cursor_holder.get("cur")
     assert cur2 is not None
-    assert "timestamptz > %s" in cur2.last_query
+    assert "timestamp > %s" in cur2.last_query
     assert cur2.last_params[1] == "2026-02-01T00:00:00"
     assert cur2.last_params[-1] == 2

@@ -678,19 +678,16 @@ docker exec synth-dev tail -f /app/logs/synth.log | grep -E "\[grillo\]|grillo"
 
 ---
 
-### PostgreSQL live DB uses `timestamptz` as column name, not `timestamp`  <!-- 2026-06-29 -->
-**Symptom:** Constant `column "timestamp" does not exist` errors from `emotion_manager.py`, `ai_diary.py`, `grillo_outreach.py`, `chat_update_checker.py`. Hint text `"emotion_state.timestamptz"` points at the actual column name. Grillo outreach silently stops posting to Telegram because `_human_messages_since()` returns `None` (query fails → `_has_recent_activity()` → `False` → gate closed).
-**Location:** `plugins/emotion_manager.py`, `plugins/ai_diary.py`, `plugins/grillo/grillo_outreach.py`, `core/chat_update_checker.py`, `core/chat_history_cache.py` — all SQL strings referencing these tables.
-**Status:** fixed (2026-06-29) — all Python SQL updated to use `timestamptz`; dict-cursor SELECTs use `timestamptz AS timestamp` alias to preserve downstream `entry.get("timestamp")` key access.
-**Notes:** The live PostgreSQL DB was created from an older schema that used the PostgreSQL type name `TIMESTAMPTZ` verbatim as the column identifier (i.e. `timestamptz TIMESTAMPTZ`). `app_main_postgres.sql` uses `timestamp TIMESTAMPTZ` — the two schemas differ. The Python code was written against the schema file, not the live DB. **Do not rename the live column** without a coordinated ALTER TABLE on all affected tables (`emotion_state`, `ai_diary`, `ai_diary_archive`, `chat_history_cache`, `emotion_diary`). The code fix is the safer path. Also converted several MariaDB-only clauses in `chat_history_cache.py` to PostgreSQL equivalents: `CURDATE()` → `CURRENT_DATE`, `UTC_TIMESTAMP()` → `NOW()`, `DATE(col)` → `col::date`, `ON DUPLICATE KEY UPDATE` → `ON CONFLICT ... DO UPDATE SET`.
+### `timestamptz`-as-column-name "fix" (ff9c4d7) was based on a false premise — reverted  <!-- 2026-06-30 -->
+**Symptom:** Commit `ff9c4d7` (2026-06-29) rewrote all SQL in `emotion_manager.py`, `ai_diary.py`, `grillo_outreach.py`, `chat_update_checker.py`, `chat_history_cache.py` to reference a column literally named `timestamptz`, on the claim that "the live DB uses `timestamptz` as the column identifier." This was wrong: every affected table (`emotion_state`, `ai_diary`, `ai_diary_archive`, `chat_history_cache`, `emotion_diary`) actually has a column named `timestamp` of type `timestamp with time zone` (i.e. the Postgres *type* is TIMESTAMPTZ, the *column* is `timestamp`) — confirmed live via `describe_table`. The commit conflated the type name with the column name. Result: constant `column "timestamptz" does not exist` errors across emotion state, diary, and chat history reads/writes — including history injection silently failing.
+**Location:** same files as above.
+**Status:** fixed (2026-06-30) — reverted `ff9c4d7`'s column renames back to `timestamp`. The MariaDB→Postgres syntax conversions bundled into that commit (`ON DUPLICATE KEY UPDATE`→`ON CONFLICT`, `UTC_TIMESTAMP()`→`NOW()`, `CURDATE()`→`CURRENT_DATE`) were also reverted because they're redundant: `core/db_backends.py` `translate_postgres_sql()` already auto-translates this MySQL syntax for every query that goes through `PostgresCompatCursor`, and `DATE(col)` is valid Postgres syntax natively.
+**Notes:** Before assuming a live schema differs from the code, verify with `describe_table` (synth-db MCP) rather than trusting an error-hint string or a guess — and check whether the existing DB compat layer already handles the apparent mismatch before hand-editing SQL strings across multiple files.
 
 ---
 
-### `grillo_activity_log` table missing in live PostgreSQL DB  <!-- 2026-06-29 -->
-**Symptom:** `[grillo_impl.py:525] Error logging grillo activity: relation "grillo_activity_log" does not exist`. Grillo beats execute and produce LLM responses but the activity log row is never written, so `activity_log_id` propagates as `None`/0, breaking downstream suppression logic.
-**Location:** `plugins/grillo/grillo_impl.py:525`; table definition in `app_main_postgres.sql` lines 210–221 (and `init-db.sql`).
-**Status:** known — DB migration needed, code handles failure gracefully.
-**Notes:** The `grillo_activity_log` table was never created on this live database instance (older deploy predates the table). Apply the `CREATE TABLE IF NOT EXISTS grillo_activity_log (...)` block from `app_main_postgres.sql` (lines 210–221) directly on the live DB. Code catches the exception and continues, so beats still execute, but logging and suppression counts are lost.
+### `grillo_activity_log` table — previously reported missing, now exists  <!-- 2026-06-30 -->
+**Status:** resolved/stale — `describe_table`/`list_tables` confirm `grillo_activity_log` exists on the live DB (7474+ rows as of 2026-06-30). The 2026-06-29 entry claiming it was missing no longer applies; table was presumably created by a subsequent migration.
 
 ---
 

@@ -140,6 +140,17 @@ register_exposed_var(
     component="history_engine",
 )
 
+register_exposed_var(
+    "LITE_MODE_HISTORY_LIMIT",
+    label="Lite Mode History Limit (items)",
+    default=3,
+    value_type=int,
+    ui_type="number",
+    description="Max number of recent chat history / recap items to inject while Prompt Lite Mode is on. Caps Context Verbosity when lite mode is active.",
+    scope="core",
+    component="history_engine",
+)
+
 
 def _get_int(key: str, default: int) -> int:
     try:
@@ -333,7 +344,8 @@ class HistoryEngine:
 
         # In lite mode, aggressively cap limits for small/local models
         if lite_mode:
-            verbosity = min(verbosity, 3)
+            lite_history_limit = max(0, _get_int("LITE_MODE_HISTORY_LIMIT", 3))
+            verbosity = min(verbosity, lite_history_limit)
             thoughts_limit = min(thoughts_limit, 2)
 
         enable_current = _get_bool("ENABLE_HISTORY_CURRENT_CHAT", True)

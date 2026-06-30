@@ -460,7 +460,7 @@ def _get_builtin_interface_message_action_types() -> set[str]:
 
 # ID-style fields coerced to *int* only — a chat/user/message id is never a
 # float, and a quoted id like ``"5208932647"`` must become an int for DB lookups.
-_INT_ID_FIELDS = {"chat_id", "user_id", "message_id", "animation_state"}
+_INT_ID_FIELDS = {"chat_id", "user_id", "message_id"}
 
 # Numeric *parameter* fields (counts, limits, time windows). Coerced to int when
 # integral, float otherwise. Grammar-constrained local models routinely quote

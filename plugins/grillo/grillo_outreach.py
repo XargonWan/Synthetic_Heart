@@ -206,7 +206,7 @@ class GrilloOutreachPlugin:
                 async with conn.cursor() as cur:
                     await cur.execute(
                         "SELECT COUNT(*) FROM chat_history_cache"
-                        " WHERE timestamptz > %s"
+                        " WHERE timestamp > %s"
                         " AND sender_id IS NOT NULL"
                         " AND sender_id NOT IN ('self', '-1')",
                         (cutoff,),

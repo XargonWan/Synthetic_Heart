@@ -1334,7 +1334,9 @@ async def build_prompt_request(
             peer_block = get_peer_context_block()
             if peer_block:
                 recon_instructions.append(peer_block)
-                log_debug("[json_prompt] Peer context block injected for Telegram group")
+                log_debug(
+                    "[json_prompt] Peer context block injected for Telegram group"
+                )
     except Exception as e:
         log_debug(f"[json_prompt] Peer context block skipped: {e}")
 

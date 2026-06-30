@@ -12,11 +12,11 @@ async def test_detects_new_messages(monkeypatch):
 
     # Simulate DB responses
     async def fake_execute(query, params=()):
-        if "MAX(timestamptz)" in query or "MAX(UNIX_TIMESTAMP(timestamptz))" in query:
+        if "MAX(timestamp)" in query or "MAX(UNIX_TIMESTAMP(timestamp))" in query:
             return [(1000.0,)]
         elif (
-            "WHERE timestamptz > %s" in query
-            or "WHERE UNIX_TIMESTAMP(timestamptz) > %s" in query
+            "WHERE timestamp > %s" in query
+            or "WHERE UNIX_TIMESTAMP(timestamp) > %s" in query
             or "WHERE last_active >" in query
         ):
             return [
@@ -42,7 +42,7 @@ async def test_no_updates(monkeypatch):
     checker = cuc.get_chat_update_checker()
 
     async def fake_execute(query, params=()):
-        if "MAX(timestamptz)" in query or "MAX(UNIX_TIMESTAMP(timestamptz))" in query:
+        if "MAX(timestamp)" in query or "MAX(UNIX_TIMESTAMP(timestamp))" in query:
             return [(1000.0,)]
         return []
 
@@ -97,12 +97,12 @@ async def test_peek_does_not_consume(monkeypatch):
 
     async def fake_execute(query, params=()):
         # MAX query
-        if "MAX(timestamptz)" in query or "MAX(UNIX_TIMESTAMP(timestamptz))" in query:
+        if "MAX(timestamp)" in query or "MAX(UNIX_TIMESTAMP(timestamp))" in query:
             return [(1000.0,)]
         # rows since last_known
         if (
-            "WHERE timestamptz > %s" in query
-            or "WHERE UNIX_TIMESTAMP(timestamptz) > %s" in query
+            "WHERE timestamp > %s" in query
+            or "WHERE UNIX_TIMESTAMP(timestamp) > %s" in query
         ):
             return [("telegram_bot/-1", "Jay", "31321637", 950.0)]
         return []
@@ -126,9 +126,9 @@ async def test_checker_uses_timestamp_comparison_with_datetime_cutoff(monkeypatc
 
     async def fake_execute(query, params=()):
         executed.append((query, params))
-        if "MAX(timestamptz)" in query:
+        if "MAX(timestamp)" in query:
             return [(1000.0,)]
-        if "WHERE timestamptz > %s" in query:
+        if "WHERE timestamp > %s" in query:
             return [("telegram_bot/chat_a", "Jay", "u1", 950.0)]
         return []
 
@@ -141,6 +141,6 @@ async def test_checker_uses_timestamp_comparison_with_datetime_cutoff(monkeypatc
     rows_query, row_params = executed[1]
     assert "UNIX_TIMESTAMP" not in max_query
     assert "UNIX_TIMESTAMP" not in rows_query
-    assert "WHERE timestamptz > %s" in rows_query
+    assert "WHERE timestamp > %s" in rows_query
     assert isinstance(row_params[0], datetime)
     assert row_params[0].tzinfo is UTC

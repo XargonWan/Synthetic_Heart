@@ -949,8 +949,8 @@ class PersonaManager(PluginBase):
             },
             "use_animation": {
                 "description": "Set the current animation state for the persona (idle, think, write, talk)",
-                "required_fields": ["animation_state"],
-                "optional_fields": ["session_id"],
+                "required_fields": [],
+                "optional_fields": ["animation_state", "animation", "session_id"],
             },
         }
 
@@ -2016,7 +2016,7 @@ Please resend your message with ONLY valid emotions from the list above."""
 
     async def handle_use_animation(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """Handle use_animation action - allows LLM to choose specific animation state."""
-        animation_state = payload.get("animation_state")
+        animation_state = payload.get("animation_state") or payload.get("animation")
         if not animation_state:
             return {"status": "error", "message": "animation_state is required"}
 
