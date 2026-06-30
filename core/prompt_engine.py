@@ -1321,6 +1321,17 @@ async def build_prompt_request(
     except Exception as e:
         log_warning(f"[json_prompt] Failed to gather static injections: {e}")
 
+    # === 3b. Peer SyntH awareness block ===
+    try:
+        from core.peer_policy import get_peer_context_block
+
+        peer_block = get_peer_context_block()
+        if peer_block:
+            recon_instructions.append(peer_block)
+            log_debug("[json_prompt] Peer context block injected into instructions")
+    except Exception as e:
+        log_debug(f"[json_prompt] Peer context block skipped: {e}")
+
     # === 4. Input payload ===
     # interface_path was already extracted at the beginning
     # If still not found, check if context_memory is actually a context dict with interface_path

@@ -924,6 +924,38 @@ def register_all():
         tags=["multi-instance"],
     )
 
+    register_exposed_var(
+        "SYNTH_PEER_ENABLED",
+        label="Enable Peer SyntH Mode",
+        default=False,
+        value_type=bool,
+        ui_type="bool",
+        description=(
+            "Enable peer-awareness mode for shared group spaces. When on, peer SyntH "
+            "messages are filtered per SYNTH_PEER_POLICY and an instruction block is "
+            "injected into every prompt so this instance knows who the other SyntHs are."
+        ),
+        scope="interface",
+        component="peer_policy",
+        tags=["multi-instance"],
+    )
+
+    register_exposed_var(
+        "SYNTH_PEER_NAMES",
+        label="Peer SyntH Names",
+        default="{}",
+        value_type=str,
+        ui_type="string",
+        description=(
+            "JSON object mapping each peer bot ID to their SyntH display name. "
+            'Example: {"8243553794": "Aria", "1122334455": "Sol"}. '
+            "Used to identify peers by name in the prompt instruction block."
+        ),
+        scope="interface",
+        component="peer_policy",
+        tags=["multi-instance"],
+    )
+
     log_info("[variables_engine] Completed explicit exposed var registrations")
 
 

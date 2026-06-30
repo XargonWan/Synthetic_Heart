@@ -180,16 +180,24 @@ async def is_message_for_bot(
     # SyntH instances in the same group before any alias/mention logic runs.
     # The LLM is never invoked for suppressed peer messages; they are still
     # added to context by the caller so this bot stays aware of them.
+    # Skipped entirely when SYNTH_PEER_ENABLED is False (peer mode off).
     try:
-        from core.peer_policy import is_peer_synth, should_respond_to_peer
+        from core.peer_policy import (
+            is_peer_mode_enabled,
+            is_peer_synth,
+            should_respond_to_peer,
+        )
 
-        sender = getattr(message, "from_user", None)
-        sender_id: int | None = getattr(sender, "id", None)
-        sender_is_bot: bool = bool(getattr(sender, "is_bot", False))
-        if sender_is_bot and sender_id is not None and is_peer_synth(sender_id):
-            if not should_respond_to_peer(message, bot_username, None):
-                log_debug(f"[mention] Peer SyntH {sender_id} suppressed by peer policy")
-                return False, "peer_synth"
+        if is_peer_mode_enabled():
+            sender = getattr(message, "from_user", None)
+            sender_id: int | None = getattr(sender, "id", None)
+            sender_is_bot: bool = bool(getattr(sender, "is_bot", False))
+            if sender_is_bot and sender_id is not None and is_peer_synth(sender_id):
+                if not should_respond_to_peer(message, bot_username, None):
+                    log_debug(
+                        f"[mention] Peer SyntH {sender_id} suppressed by peer policy"
+                    )
+                    return False, "peer_synth"
     except Exception as _peer_err:
         log_debug(f"[mention] Peer policy check failed (non-fatal): {_peer_err}")
 

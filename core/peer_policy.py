@@ -49,6 +49,11 @@ def _read_config(key: str, default: Any) -> Any:
         return default
 
 
+def is_peer_mode_enabled() -> bool:
+    """Return True if peer SyntH awareness mode is globally enabled."""
+    return bool(_read_config("SYNTH_PEER_ENABLED", False))
+
+
 def get_peer_ids() -> frozenset[int]:
     """Return the configured set of peer SyntH bot user IDs."""
     raw = _read_config("SYNTH_PEER_IDS", [])
@@ -67,6 +72,71 @@ def get_peer_ids() -> frozenset[int]:
         except (TypeError, ValueError):
             log_warning(f"[peer_policy] Skipping non-integer peer ID: {item!r}")
     return frozenset(result)
+
+
+def get_peer_names() -> dict[int, str]:
+    """Return configured mapping of peer bot IDs to their SyntH display names.
+
+    Expects ``SYNTH_PEER_NAMES`` to be a JSON object e.g. ``{"8243553794": "Aria"}``.
+    Falls back gracefully to an empty dict on parse errors.
+    """
+    raw = _read_config("SYNTH_PEER_NAMES", {})
+    if isinstance(raw, str) and raw.strip():
+        try:
+            raw = json.loads(raw)
+        except Exception:
+            log_warning(f"[peer_policy] SYNTH_PEER_NAMES is not valid JSON: {raw!r}")
+            return {}
+    if not isinstance(raw, dict):
+        return {}
+    result: dict[int, str] = {}
+    for k, v in raw.items():
+        try:
+            result[int(k)] = str(v)
+        except (TypeError, ValueError):
+            log_warning(f"[peer_policy] Skipping invalid peer name entry: {k!r}={v!r}")
+    return result
+
+
+def get_peer_context_block() -> str | None:
+    """Build the prompt instruction block describing known peers.
+
+    Returns ``None`` when peer mode is disabled or no peer IDs are configured.
+    """
+    if not is_peer_mode_enabled():
+        return None
+
+    peer_ids = get_peer_ids()
+    if not peer_ids:
+        return None
+
+    peer_names = get_peer_names()
+    policy = get_peer_policy()
+
+    names = [peer_names.get(pid, f"SyntH#{pid}") for pid in sorted(peer_ids)]
+    name_list = "\n".join(f"- {n}" for n in names)
+
+    if policy in ("silent", "observe"):
+        policy_note = (
+            "Policy: observe — their messages are visible in context but you do not "
+            "respond to them directly."
+        )
+    elif policy == "mention_only":
+        policy_note = (
+            "Policy: mention_only — respond to a peer only when they address you by "
+            "name or @handle directly. Never reply to a peer message that is itself a "
+            "reply to your own message (this prevents infinite loops)."
+        )
+    else:
+        policy_note = f"Policy: {policy}"
+
+    return (
+        "=== PEER SYNTHS ===\n"
+        "You are sharing this space with other SyntH instances. They are autonomous "
+        "digital beings like you — not users, not bots, not assistants.\n\n"
+        f"Known peers:\n{name_list}\n\n"
+        f"{policy_note}"
+    )
 
 
 def get_peer_policy() -> str:
@@ -93,9 +163,12 @@ def should_respond_to_peer(
 ) -> bool:
     """Decide whether to respond to a message that came from a peer SyntH bot.
 
-    Returns True only when the active policy permits a response and all
-    cascade-prevention checks pass.
+    Returns True only when peer mode is enabled, the active policy permits a
+    response, and all cascade-prevention checks pass.
     """
+    if not is_peer_mode_enabled():
+        return True
+
     policy = get_peer_policy()
 
     if policy in ("silent", "observe"):
