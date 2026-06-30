@@ -1321,14 +1321,20 @@ async def build_prompt_request(
     except Exception as e:
         log_warning(f"[json_prompt] Failed to gather static injections: {e}")
 
-    # === 3b. Peer SyntH awareness block ===
+    # === 3b. Peer SyntH awareness block (Telegram groups only) ===
     try:
-        from core.peer_policy import get_peer_context_block
+        _chat_type = getattr(getattr(message, "chat", None), "type", None)
+        _is_tg_group = interface_name == "telegram_bot" and _chat_type in (
+            "group",
+            "supergroup",
+        )
+        if _is_tg_group:
+            from core.peer_policy import get_peer_context_block
 
-        peer_block = get_peer_context_block()
-        if peer_block:
-            recon_instructions.append(peer_block)
-            log_debug("[json_prompt] Peer context block injected into instructions")
+            peer_block = get_peer_context_block()
+            if peer_block:
+                recon_instructions.append(peer_block)
+                log_debug("[json_prompt] Peer context block injected for Telegram group")
     except Exception as e:
         log_debug(f"[json_prompt] Peer context block skipped: {e}")
 
