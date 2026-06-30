@@ -1351,16 +1351,6 @@ class RadioHostPlugin:
     def _fallback_activity_rows(self) -> list[dict[str, Any]]:
         return [dict(row) for row in self._recent_activities]
 
-    def is_enabled(self) -> bool:
-        """Only expose radio actions when the radio host is toggled on.
-
-        Without this, ``core_initializer`` defaults the plugin to enabled and
-        injects ``radio_speak`` / ``radio_update_metadata`` into every prompt —
-        wasting tokens (and confusing small local LLMs) even when
-        ``RADIO_HOST_ENABLED`` is off.
-        """
-        return bool(self._enabled)
-
     def get_supported_actions(self) -> dict:
         return {
             "radio_speak": {
