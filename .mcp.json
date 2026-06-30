@@ -46,8 +46,8 @@
       "command": "npx",
       "args": ["-y", "@therealsachin/langfuse-mcp"],
       "env": {
-        "LANGFUSE_PUBLIC_KEY": "pk-lf-9e5f606b-dd83-4002-beb8-354d70f4b1c7",
-        "LANGFUSE_SECRET_KEY": "sk-lf-e1296dae-a75f-40ef-abb6-2dd9cb95dfca",
+        "LANGFUSE_PUBLIC_KEY": "YOUR_LANGFUSE_PUBLIC_KEY",
+        "LANGFUSE_SECRET_KEY": "YOUR_LANGFUSE_SECRET_KEY",
         "LANGFUSE_BASEURL": "https://fuse.zwiz.town"
       }
     }
