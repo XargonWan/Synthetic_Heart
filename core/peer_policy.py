@@ -32,6 +32,7 @@ Config keys (set via WebUI or DB):
 
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import datetime, timezone
 from typing import Any
@@ -45,6 +46,48 @@ from core.logging_utils import log_debug, log_warning
 # ---------------------------------------------------------------------------
 # Runtime helpers
 # ---------------------------------------------------------------------------
+
+# Per-chat wake signal so wait_for_peer_reply() reacts immediately when a new
+# message is recorded, instead of blindly sleeping a fixed interval. Keyed by
+# the chat-level interface_path prefix (same normalization as
+# peer_already_responded's path_prefix) so thread IDs share one event.
+# Each entry also remembers the event loop it was created on: asyncio.Event
+# is bound to whichever loop is running when it's first waited on, so a stale
+# entry from a previous/foreign loop (e.g. across a loop restart, or between
+# independent test runs) must never be reused -- it would raise instead of
+# just failing open.
+_message_arrival_events: dict[str, tuple[asyncio.AbstractEventLoop, asyncio.Event]] = {}
+
+
+def _chat_key(interface_path: str) -> str:
+    parts = interface_path.split("/")
+    return "/".join(parts[:2])
+
+
+def notify_message_arrived(interface_path: str) -> None:
+    """Wake any pending :func:`wait_for_peer_reply` call for this chat.
+
+    Call this right after a message is recorded into chat history/context so
+    relay waits react immediately rather than on the next poll tick. Safe to
+    call unconditionally (no-op if nothing is currently waiting on this chat).
+    """
+    cached = _message_arrival_events.get(_chat_key(interface_path))
+    if cached is None:
+        return
+    loop, event = cached
+    if loop is asyncio.get_event_loop():
+        event.set()
+
+
+def _get_arrival_event(interface_path: str) -> asyncio.Event:
+    key = _chat_key(interface_path)
+    loop = asyncio.get_event_loop()
+    cached = _message_arrival_events.get(key)
+    if cached is not None and cached[0] is loop:
+        return cached[1]
+    event = asyncio.Event()
+    _message_arrival_events[key] = (loop, event)
+    return event
 
 
 def _read_config(key: str, default: Any) -> Any:
@@ -288,33 +331,42 @@ async def wait_for_peer_reply(
     timeout_seconds: float | None = None,
     poll_interval: float = 1.5,
 ) -> bool:
-    """Poll until *peer_id* replies in *interface_path* after *since*, or timeout.
+    """Wait until *peer_id* replies in *interface_path* after *since*, or timeout.
 
-    Used for mention-order turn relay (see :func:`get_relay_wait_peer`).
-    Fails open: always returns once *timeout_seconds* elapses so an
-    offline/slow peer can never permanently block this instance's turn.
+    Used for mention-order turn relay (see :func:`get_relay_wait_peer`). Reacts
+    immediately when :func:`notify_message_arrived` fires for this chat (called
+    right after any message is recorded into chat history), so a fast peer
+    reply doesn't sit idle for the rest of a fixed poll interval; *poll_interval*
+    is only a safety-net upper bound between checks, covering the case where a
+    notification is missed. Fails open: always returns once *timeout_seconds*
+    elapses so an offline/slow peer can never permanently block this instance's
+    turn.
     """
     if timeout_seconds is None:
         timeout_seconds = float(_read_config("SYNTH_PEER_RELAY_TIMEOUT_SECONDS", 60.0))
     if timeout_seconds <= 0:
         return False
 
-    import asyncio
-
     loop = asyncio.get_event_loop()
     deadline = loop.time() + timeout_seconds
     target = frozenset({peer_id})
+    event = _get_arrival_event(interface_path)
 
     while True:
         if await peer_already_responded(interface_path, since, peer_ids=target):
             return True
-        if loop.time() >= deadline:
+        remaining = deadline - loop.time()
+        if remaining <= 0:
             log_debug(
                 f"[peer_policy] Relay wait for peer {peer_id} timed out after "
                 f"{timeout_seconds:.0f}s -- proceeding anyway"
             )
             return False
-        await asyncio.sleep(poll_interval)
+        event.clear()
+        try:
+            await asyncio.wait_for(event.wait(), timeout=min(remaining, poll_interval))
+        except asyncio.TimeoutError:
+            pass
 
 
 def is_peer_synth(user_id: int) -> bool:

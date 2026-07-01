@@ -1066,6 +1066,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         log_warning(f"[telegram_bot] Failed to add message to context: {e}")
         # Continue processing even if context tracking fails
 
+    try:
+        from core.peer_policy import notify_message_arrived
+
+        notify_message_arrived(interface_path)
+    except Exception as e:
+        log_debug(f"[telegram_bot] notify_message_arrived failed (non-fatal): {e}")
+
     # Animation lifecycle is handled centrally by the core message queue (enqueue -> THINK,
     # generation start -> WRITE/TALK, generation end -> IDLE). Telegram should not broadcast
     # a 'think' state here, otherwise messages that are ignored/pre-filtered would still

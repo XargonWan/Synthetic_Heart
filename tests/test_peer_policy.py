@@ -184,3 +184,34 @@ async def test_wait_for_peer_reply_fails_open_on_timeout(monkeypatch):
     )
 
     assert result is False
+
+
+@pytest.mark.asyncio
+async def test_wait_for_peer_reply_wakes_immediately_on_notify(monkeypatch):
+    """notify_message_arrived() must short-circuit the poll interval instead
+    of forcing the wait to sit out the full interval every cycle."""
+    import asyncio
+    import time
+
+    monkeypatch.setattr("core.peer_policy.is_peer_mode_enabled", lambda: True)
+    cursor = _DummyCursor(responses=[False, True])
+    monkeypatch.setattr("core.db.get_conn_ctx", lambda: _DummyConn(cursor))
+
+    async def _notify_soon():
+        await asyncio.sleep(0.05)
+        peer_policy.notify_message_arrived("telegram_bot/-123")
+
+    start = time.monotonic()
+    asyncio.create_task(_notify_soon())
+    result = await peer_policy.wait_for_peer_reply(
+        "telegram_bot/-123",
+        peer_id=111,
+        since=datetime.now(timezone.utc),
+        timeout_seconds=10,
+        poll_interval=5,
+    )
+    elapsed = time.monotonic() - start
+
+    assert result is True
+    # Should wake on the notify (~0.05s), not sit out the 5s poll interval.
+    assert elapsed < 1.0
