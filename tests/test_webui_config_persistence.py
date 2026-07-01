@@ -143,3 +143,80 @@ async def test_webui_set_value_for_likes_updates_current_persona(monkeypatch):
     assert current.dislikes == ["new-dislike"], (
         "_current_persona.dislikes was not updated — _save_to_config_registry would overwrite webui edits"
     )
+
+
+@pytest.mark.asyncio
+async def test_load_persona_first_call_reads_db_not_getter_defaults(monkeypatch):
+    """Regression: on the very first load_persona() call (e.g. during async_init),
+    _current_persona is still None. SYNTH_NAME/SYNTH_ALIASES/SYNTH_LIKES/
+    SYNTH_DISLIKES all have getters that read _current_persona — with nothing to
+    read, those getters silently return hard-coded defaults instead of the DB
+    value, so the persona gets bootstrapped wrong and that wrong state then risks
+    being written back to the DB. load_persona() must bypass those getters via
+    get_persisted_value() so the first call always reflects the real DB content.
+    """
+    persisted = {
+        "SYNTH_NAME": "2D",
+        "SYNTH_ALIASES": ["SyntH", "Synthetic Heart", "2D", "Dee", "Angel"],
+        "SYNTH_PROFILE": "You are 2D, also called Dee.",
+        "SYNTH_LIKES": ["board games", "sunny days"],
+        "SYNTH_DISLIKES": ["loud noises"],
+    }
+
+    async def fake_get_persisted_value(key, default):
+        return persisted.get(key, default)
+
+    manager = persona_manager_module.PersonaManager()
+    manager._current_persona = None  # cold start — nothing to read from yet
+    monkeypatch.setattr(persona_manager_module, "_persona_manager_instance", manager)
+    monkeypatch.setattr(
+        config_registry, "get_persisted_value", fake_get_persisted_value
+    )
+
+    result = await manager.load_persona("default")
+
+    assert result is not None
+    assert result.name == "2D"
+    assert result.aliases == ["SyntH", "Synthetic Heart", "2D", "Dee", "Angel"]
+    assert result.profile == "You are 2D, also called Dee."
+    assert result.likes == ["board games", "sunny days"]
+    assert result.dislikes == ["loud noises"]
+
+
+@pytest.mark.asyncio
+async def test_load_persona_does_not_overwrite_persisted_profile_with_skin_json(
+    monkeypatch,
+):
+    """Regression: once SYNTH_PROFILE has been saved (webui edit, persona action,
+    etc.) it must stay authoritative. load_persona() previously re-assembled the
+    profile from the skin's persona.json on every call whenever a matching skin
+    folder existed, silently reverting any saved edit on the next restart."""
+    persisted = {
+        "SYNTH_NAME": "2D",
+        "SYNTH_ALIASES": [],
+        "SYNTH_PROFILE": "Custom hand-edited profile that must survive reloads.",
+        "SYNTH_LIKES": [],
+        "SYNTH_DISLIKES": [],
+    }
+
+    async def fake_get_persisted_value(key, default):
+        return persisted.get(key, default)
+
+    manager = persona_manager_module.PersonaManager()
+    manager._current_persona = None
+    monkeypatch.setattr(persona_manager_module, "_persona_manager_instance", manager)
+    monkeypatch.setattr(
+        config_registry, "get_persisted_value", fake_get_persisted_value
+    )
+    monkeypatch.setattr(
+        manager,
+        "_load_persona_json",
+        lambda skin_name: pytest.fail(
+            "_load_persona_json must not be called when a profile is already persisted"
+        ),
+    )
+
+    result = await manager.load_persona("default")
+
+    assert result is not None
+    assert result.profile == "Custom hand-edited profile that must survive reloads."

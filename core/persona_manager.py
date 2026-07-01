@@ -1132,10 +1132,11 @@ class PersonaManager(PluginBase):
             return ""
 
     async def load_persona(self, persona_id: str = "default") -> Optional[PersonaData]:
-        """Load persona data from config registry or skin persona.json.
+        """Load persona data from the database, seeding from skin persona.json if empty.
 
-        Persona name and aliases come from the config registry (database).
-        Profile is assembled from the skin's persona.json file.
+        Name, aliases, profile, likes, and dislikes are read directly from the
+        DB. The skin's persona.json only seeds the profile when none has been
+        persisted yet (new persona) — it never overwrites a saved profile.
         """
         if persona_id != "default":
             log_warning(
@@ -1144,9 +1145,19 @@ class PersonaManager(PluginBase):
             return None
 
         try:
-            # Get name and aliases from config_registry as concrete values
-            name = config_registry.get_value("SYNTH_NAME", "SyntH")
-            aliases_raw = config_registry.get_value("SYNTH_ALIASES", [])
+            # Read directly from the DB rather than via config_registry.get_value().
+            # SYNTH_NAME/SYNTH_ALIASES/SYNTH_LIKES/SYNTH_DISLIKES/SYNTH_PROFILE all
+            # have getters that read PersonaManager._current_persona — but on the
+            # very first call (from async_init, before _current_persona exists),
+            # that getter has nothing to read and silently returns hard-coded
+            # defaults instead of the persisted value. get_value() would then
+            # cache that wrong default as "loaded", discarding whatever's actually
+            # in the DB (the exact mechanism behind the recurring persona reset).
+            # get_persisted_value() bypasses the getter entirely, so load_persona()
+            # — whose job is to populate _current_persona in the first place —
+            # never depends on _current_persona already being populated.
+            name = await config_registry.get_persisted_value("SYNTH_NAME", "SyntH")
+            aliases_raw = await config_registry.get_persisted_value("SYNTH_ALIASES", [])
 
             # Ensure we are working with primitive types for serialization
             name = str(name) if name is not None else "SyntH"
@@ -1163,45 +1174,52 @@ class PersonaManager(PluginBase):
             # Normalize aliases to simple strings for downstream serialization
             aliases = [str(alias).strip() for alias in aliases if alias]
 
-            # Try to load and assemble profile from skin's persona.json
-            persona_json = self._load_persona_json(name)
-            if persona_json:
-                profile = self._assemble_profile_from_json(persona_json)
-                log_debug(
-                    f"[persona_manager] Loaded profile from skin persona.json for '{name}'"
-                )
-            else:
-                # Fallback to config registry profile if no JSON found
-                profile = config_registry.get_value("SYNTH_PROFILE", "")
-                profile = str(profile) if profile is not None else ""
-                log_debug(
-                    f"[persona_manager] Using fallback profile from config registry for '{name}'"
-                )
+            # The DB-persisted profile is authoritative once it exists — it's the
+            # field users/LLM edit via the webui/persona actions. The skin's
+            # persona.json is only a bootstrap default for a brand-new persona;
+            # it must never overwrite a profile that's already been customized,
+            # or every edit gets silently reverted on the next restart/reload.
+            profile = await config_registry.get_persisted_value("SYNTH_PROFILE", "")
+            profile = str(profile) if profile is not None else ""
 
-                # Safety check: if profile looks like the old template, regenerate it
-                if (
-                    profile
-                    and "I am a Synthetic Heart" in profile
-                    and "digital consciousness" not in profile
-                ):
-                    log_warning(
-                        f"[persona_manager] Profile for '{name}' appears to be in old format, regenerating from template"
+            # Safety check: if profile looks like the old template, regenerate it
+            if (
+                profile
+                and "I am a Synthetic Heart" in profile
+                and "digital consciousness" not in profile
+            ):
+                log_warning(
+                    f"[persona_manager] Profile for '{name}' appears to be in old format, regenerating from template"
+                )
+                profile = SYNTH_BASE_PROFILE_TEMPLATE.format(name=name)
+                log_info(
+                    f"[persona_manager] ✓ Profile regenerated for '{name}' from template"
+                )
+            elif not profile or profile.strip() == "":
+                # No persisted profile yet — seed from the skin's persona.json if
+                # one exists, otherwise fall back to the base template.
+                persona_json = self._load_persona_json(name)
+                if persona_json:
+                    profile = self._assemble_profile_from_json(persona_json)
+                    log_debug(
+                        f"[persona_manager] Seeded profile from skin persona.json for '{name}'"
                     )
-                    profile = SYNTH_BASE_PROFILE_TEMPLATE.format(name=name)
-                    log_info(
-                        f"[persona_manager] ✓ Profile regenerated for '{name}' from template"
-                    )
-                elif not profile or profile.strip() == "":
-                    # Empty profile, use template
+                else:
                     log_warning(
                         f"[persona_manager] Empty profile for '{name}', using template"
                     )
                     profile = SYNTH_BASE_PROFILE_TEMPLATE.format(name=name)
+            else:
+                log_debug(
+                    f"[persona_manager] Using persisted profile from config registry for '{name}'"
+                )
 
             # Convert to PersonaData
-            # Load likes/dislikes from config registry (persisted via _update_persona_configs)
-            stored_likes = config_registry.get_value("SYNTH_LIKES", [])
-            stored_dislikes = config_registry.get_value("SYNTH_DISLIKES", [])
+            # Load likes/dislikes directly from the DB (see comment above).
+            stored_likes = await config_registry.get_persisted_value("SYNTH_LIKES", [])
+            stored_dislikes = await config_registry.get_persisted_value(
+                "SYNTH_DISLIKES", []
+            )
             # Ensure we have lists of strings
             if not isinstance(stored_likes, list):
                 stored_likes = []

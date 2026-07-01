@@ -205,6 +205,25 @@ class ConfigRegistry:
             self._load_definition_sync(definition)
         return definition.value
 
+    async def get_persisted_value(self, key: str, default: Any) -> Any:
+        """Return the value actually persisted in the DB, bypassing any getter.
+
+        ``get_value()`` runs a registered getter (if any) instead of reading the
+        database — correct for runtime reads, but wrong for bootstrapping code
+        whose own getter reflects state that bootstrap call is responsible for
+        populating in the first place (e.g. PersonaManager.load_persona() reading
+        SYNTH_NAME/SYNTH_ALIASES/SYNTH_LIKES/SYNTH_DISLIKES via getters that read
+        PersonaManager._current_persona, which doesn't exist yet on first load).
+        Use this instead of get_value() in that situation.
+        """
+        definition = self._definitions.get(key)
+        raw_value = await self._load_from_db(key)
+        if raw_value is None:
+            return default
+        if definition is None:
+            return raw_value
+        return self._convert_value(definition, raw_value)
+
     def get_var(
         self,
         key: str,
