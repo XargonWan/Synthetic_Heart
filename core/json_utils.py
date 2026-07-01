@@ -143,6 +143,37 @@ def _repair_premature_string_close(text: str) -> str:
     return pattern.sub(_fix, text)
 
 
+_APOSTROPHE_ESCAPED_TAIL_RE = re.compile(
+    r"'((?:,\s*\\\"[A-Za-z_][A-Za-z0-9_]*\\\"\s*:\s*"
+    r"(?:\\\"[^\"\\]*\\\"|-?\d+(?:\.\d+)?|true|false|null)\s*)+)"
+)
+
+
+def _repair_apostrophe_closed_escaped_tail(text: str) -> str:
+    """Repair JSON where the LLM closes a string value with an apostrophe
+    instead of a double quote, then continues with escaped-quote sibling
+    keys that were meant to be real JSON object keys, not string content.
+
+    LLM produces (invalid JSON):
+        "text": "Some reply!', \\"interface_path\\": \\"telegram_bot/1\\"}
+
+    After repair (valid JSON):
+        "text": "Some reply!", "interface_path": "telegram_bot/1"}
+
+    The apostrophe becomes the real closing quote, and the escaped quotes in
+    the trailing key/value run are unescaped back into real JSON structure.
+    A legitimate JSON string cannot contain an unescaped apostrophe directly
+    followed by an escaped-quote ``"key": value`` run like this, so the
+    false-positive risk is nil.
+    """
+
+    def _fix(m: re.Match) -> str:
+        tail = m.group(1)
+        return '"' + tail.replace('\\"', '"')
+
+    return _APOSTROPHE_ESCAPED_TAIL_RE.sub(_fix, text)
+
+
 def _repair_json_string_speech_quotes(raw: str) -> str:
     """Re-escape unescaped speech-marker quotes inside known text-heavy JSON fields.
 
@@ -434,8 +465,11 @@ def extract_json_from_text(
 
     # Apply targeted repairs for premature string close patterns produced by LLMs.
     # Pass 1: literal \\n sequences outside the string  ("value." \\n\\nmore)
-    # Pass 2: re-escape unescaped speech quotes inside text-heavy fields
+    # Pass 2: apostrophe used as a string closer, followed by an escaped-quote
+    #         run of sibling keys that belong outside the string
+    # Pass 3: re-escape unescaped speech quotes inside text-heavy fields
     repaired_text = _repair_premature_string_close(cleaned_text)
+    repaired_text = _repair_apostrophe_closed_escaped_tail(repaired_text)
     repaired_text = _repair_json_string_speech_quotes(repaired_text)
     if repaired_text != cleaned_text:
         log_debug("[extract_json_from_text] Applied premature string close repair")

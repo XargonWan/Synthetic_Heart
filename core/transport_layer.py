@@ -302,11 +302,13 @@ def extract_json_from_text(
     try:
         from core.json_utils import (
             _repair_premature_string_close as _repair_p1,
-            _repair_json_string_speech_quotes as _repair_p2,
+            _repair_apostrophe_closed_escaped_tail as _repair_p2,
+            _repair_json_string_speech_quotes as _repair_p3,
         )
 
         _pre_repaired = _repair_p1(cleaned_text)
         _pre_repaired = _repair_p2(_pre_repaired)
+        _pre_repaired = _repair_p3(_pre_repaired)
     except Exception:
         _pre_repaired = cleaned_text
 

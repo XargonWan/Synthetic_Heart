@@ -93,6 +93,35 @@ def test_parser_does_not_leak_reply_message_id_into_text():
     assert payload.get("reply_message_id") == "5208932647"
 
 
+def test_parser_recovers_apostrophe_closed_string_with_escaped_sibling_keys():
+    # Reproduces a Venice/gemma-4-uncensored output pattern (Langfuse trace
+    # fe3fb88f-317e-4b01-a6b3-0b4c0ff6a844): the LLM closes the "text" value
+    # with an apostrophe instead of a double quote, then continues with
+    # escaped-quote sibling keys that were meant to be real JSON object keys.
+    # Without this repair, json_repair's fallback swallows the whole tail
+    # into the displayed message text instead of restoring interface_path /
+    # chat_name / reply_to_message_id as sibling keys.
+    corrupted = (
+        '{"actions":[{"type":"message_telegram_bot","payload":{"text":'
+        '"That\'s it! Please hurry!\', \\"interface_path\\": '
+        '\\"telegram_bot/5208932647\\", \\"chat_name\\": \\"Scarlet\\", '
+        '\\"reply_to_message_id\\": \\"5208932647\\"}}]}'
+    )
+
+    obj, meta = extract_json_from_text(corrupted, return_metadata=True)
+
+    assert obj is not None
+    payload = obj["actions"][0]["payload"]
+    recovered_text = payload["text"]
+    assert "interface_path" not in recovered_text, (
+        f"Sibling keys leaked into displayed text (got: {recovered_text!r})"
+    )
+    assert recovered_text == "That's it! Please hurry!"
+    assert payload.get("interface_path") == "telegram_bot/5208932647"
+    assert payload.get("chat_name") == "Scarlet"
+    assert payload.get("reply_to_message_id") == "5208932647"
+
+
 def test_attempted_action_description_for_unknown_action():
     # If the LLM tries to use an action name that doesn't exist, we still
     # want the corrector to receive a helpful hint containing the available
