@@ -99,6 +99,59 @@ def test_current_chat_history_respects_last_n(monkeypatch):
     assert "Bob" in entries[0]
 
 
+def test_lite_mode_history_limit_overrides_context_verbosity(monkeypatch):
+    """LITE_MODE_HISTORY_LIMIT is the WebUI-exposed dial next to the Lite Mode
+    toggle -- it must be authoritative while lite mode is on, not silently
+    capped by the separate, general CONTEXT_VERBOSITY dial."""
+    monkeypatch.setattr("core.action_parser.gather_static_injections", _dummy_gather)
+
+    def _fake_get_int(key, default):
+        if key == "CONTEXT_VERBOSITY":
+            return 2
+        if key == "LITE_MODE_HISTORY_LIMIT":
+            return 8
+        return default
+
+    monkeypatch.setattr("core.history_engine._get_int", _fake_get_int)
+    monkeypatch.setattr(
+        "core.history_engine._get_bool",
+        lambda key, default: True if key == "PROMPT_LITE_MODE" else default,
+    )
+
+    now = datetime.now(timezone.utc)
+    msgs = [
+        _make_msg(f"User{i}", f"Message {i}", now - timedelta(minutes=10 - i))
+        for i in range(6)
+    ]
+
+    interface = "telegram_bot/999"
+    context_memory = {interface: deque([])}
+
+    async def _fake_cache_load(ip):
+        assert ip == interface
+        return deque(msgs)
+
+    monkeypatch.setattr("core.chat_history_cache.load_chat_history", _fake_cache_load)
+
+    message = SimpleNamespace(
+        interface_path=interface,
+        text="test",
+        message_id=7,
+        from_user=SimpleNamespace(full_name="user", username="user"),
+        date=now,
+    )
+
+    res = asyncio.run(
+        prompt_engine.build_json_prompt(
+            message, context_memory, interface_name="telegram"
+        )
+    )
+    entries = res["context"].get("history_current_chat", [])
+    # All 6 available messages should come through -- capped by the lite-mode
+    # limit (8), not by the lower general CONTEXT_VERBOSITY (2).
+    assert len(entries) == 6
+
+
 def test_no_duplication_with_history_recent(monkeypatch):
     monkeypatch.setattr("core.action_parser.gather_static_injections", _dummy_gather)
     monkeypatch.setattr("core.core_initializer.PLUGIN_REGISTRY", {})

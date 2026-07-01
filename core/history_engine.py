@@ -146,7 +146,7 @@ register_exposed_var(
     default=3,
     value_type=int,
     ui_type="number",
-    description="Max number of recent chat history / recap items to inject while Prompt Lite Mode is on. Caps Context Verbosity when lite mode is active.",
+    description="Max number of recent chat history / recap items to inject while Prompt Lite Mode is on. Overrides Context Verbosity while lite mode is active.",
     scope="core",
     component="history_engine",
 )
@@ -342,10 +342,13 @@ class HistoryEngine:
         verbosity = max(0, _get_int("CONTEXT_VERBOSITY", 10))
         thoughts_limit = max(0, _get_int("THOUGHTS_LIMIT", 5))
 
-        # In lite mode, aggressively cap limits for small/local models
+        # In lite mode, the dedicated lite-mode limit is authoritative -- it's
+        # the WebUI-exposed dial right next to the Lite Mode toggle, and
+        # min()-ing it against the general CONTEXT_VERBOSITY dial meant raising
+        # it above CONTEXT_VERBOSITY silently had no effect (the two dials
+        # look independent in the UI but weren't).
         if lite_mode:
-            lite_history_limit = max(0, _get_int("LITE_MODE_HISTORY_LIMIT", 3))
-            verbosity = min(verbosity, lite_history_limit)
+            verbosity = max(0, _get_int("LITE_MODE_HISTORY_LIMIT", 3))
             thoughts_limit = min(thoughts_limit, 2)
 
         enable_current = _get_bool("ENABLE_HISTORY_CURRENT_CHAT", True)
