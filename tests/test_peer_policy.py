@@ -1,3 +1,7 @@
+from datetime import datetime, timezone
+
+import pytest
+
 from core import peer_policy
 
 
@@ -56,3 +60,127 @@ def test_row_with_non_integer_id_is_skipped(monkeypatch):
 
     assert peer_policy.get_peer_ids() == frozenset({5})
     assert peer_policy.get_peer_names() == {5: "Good"}
+
+
+def _enable_peer_mode(monkeypatch, names):
+    monkeypatch.setattr("core.peer_policy.is_peer_mode_enabled", lambda: True)
+    monkeypatch.setattr("core.peer_policy.get_peer_names", lambda: names)
+
+
+def test_get_relay_wait_peer_returns_preceding_peer(monkeypatch):
+    """'2B, ... 2D, ...' -- 2D's own instance should wait on 2B (id 111)."""
+    _enable_peer_mode(monkeypatch, {111: "2B"})
+    monkeypatch.setattr("core.mention_utils.get_current_aliases", lambda: ["2D", "Dee"])
+
+    peer_id = peer_policy.get_relay_wait_peer("Hey 2b, and Dee, introduce yourselves")
+    assert peer_id == 111
+
+
+def test_get_relay_wait_peer_none_when_own_name_first(monkeypatch):
+    """'2D, ... 2B, ...' -- 2D is mentioned first, so 2D shouldn't wait on anyone."""
+    _enable_peer_mode(monkeypatch, {111: "2B"})
+    monkeypatch.setattr("core.mention_utils.get_current_aliases", lambda: ["2D", "Dee"])
+
+    peer_id = peer_policy.get_relay_wait_peer("Dee, say hi to 2b")
+    assert peer_id is None
+
+
+def test_get_relay_wait_peer_none_when_this_bot_not_mentioned(monkeypatch):
+    _enable_peer_mode(monkeypatch, {111: "2B"})
+    monkeypatch.setattr("core.mention_utils.get_current_aliases", lambda: ["2D", "Dee"])
+
+    peer_id = peer_policy.get_relay_wait_peer("Hey 2b, how are you?")
+    assert peer_id is None
+
+
+def test_get_relay_wait_peer_none_when_peer_mode_disabled(monkeypatch):
+    monkeypatch.setattr("core.peer_policy.is_peer_mode_enabled", lambda: False)
+
+    peer_id = peer_policy.get_relay_wait_peer("Hey 2b, and Dee, introduce yourselves")
+    assert peer_id is None
+
+
+class _DummyCursor:
+    def __init__(self, responses):
+        self._responses = responses
+        self.executed_sql: list[str] = []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        pass
+
+    async def execute(self, q, params=None):
+        self.executed_sql.append(q)
+
+    async def fetchone(self):
+        found = self._responses.pop(0) if self._responses else False
+        return (1 if found else 0,)
+
+
+class _DummyConn:
+    def __init__(self, cursor):
+        self._cursor = cursor
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        pass
+
+    def cursor(self):
+        return self._cursor
+
+
+@pytest.mark.asyncio
+async def test_peer_already_responded_queries_timestamp_column(monkeypatch):
+    """Regression guard: the query must use the real `timestamp` column, not
+    the nonexistent `timestamptz` (which silently fail-opened to False)."""
+    monkeypatch.setattr("core.peer_policy.is_peer_mode_enabled", lambda: True)
+    cursor = _DummyCursor(responses=[True])
+    monkeypatch.setattr("core.db.get_conn_ctx", lambda: _DummyConn(cursor))
+
+    result = await peer_policy.peer_already_responded(
+        "telegram_bot/-123",
+        since=datetime.now(timezone.utc),
+        peer_ids=frozenset({111}),
+    )
+
+    assert result is True
+    assert any("timestamp >" in sql for sql in cursor.executed_sql)
+    assert not any("timestamptz" in sql for sql in cursor.executed_sql)
+
+
+@pytest.mark.asyncio
+async def test_wait_for_peer_reply_returns_true_once_peer_responds(monkeypatch):
+    monkeypatch.setattr("core.peer_policy.is_peer_mode_enabled", lambda: True)
+    cursor = _DummyCursor(responses=[False, False, True])
+    monkeypatch.setattr("core.db.get_conn_ctx", lambda: _DummyConn(cursor))
+
+    result = await peer_policy.wait_for_peer_reply(
+        "telegram_bot/-123",
+        peer_id=111,
+        since=datetime.now(timezone.utc),
+        timeout_seconds=10,
+        poll_interval=0,
+    )
+
+    assert result is True
+
+
+@pytest.mark.asyncio
+async def test_wait_for_peer_reply_fails_open_on_timeout(monkeypatch):
+    monkeypatch.setattr("core.peer_policy.is_peer_mode_enabled", lambda: True)
+    cursor = _DummyCursor(responses=[])  # peer never responds
+    monkeypatch.setattr("core.db.get_conn_ctx", lambda: _DummyConn(cursor))
+
+    result = await peer_policy.wait_for_peer_reply(
+        "telegram_bot/-123",
+        peer_id=111,
+        since=datetime.now(timezone.utc),
+        timeout_seconds=0.05,
+        poll_interval=0.02,
+    )
+
+    assert result is False

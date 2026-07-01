@@ -158,16 +158,22 @@ def get_peer_policy() -> str:
     return policy
 
 
-async def peer_already_responded(interface_path: str, since: datetime) -> bool:
-    """Return True if any peer SyntH bot posted in this chat after *since*.
+async def peer_already_responded(
+    interface_path: str,
+    since: datetime,
+    peer_ids: frozenset[int] | None = None,
+) -> bool:
+    """Return True if a peer SyntH bot posted in this chat after *since*.
 
-    Used for turn-taking coordination: if a peer already responded to the
-    triggering message, suppress this instance's turn.  Fails open (returns
-    False) so a DB error never permanently silences a SyntH.
+    Checks all configured peers by default; pass *peer_ids* to narrow the
+    check to one or more specific peers (used by :func:`wait_for_peer_reply`
+    for mention-order relay). Fails open (returns False) so a DB error never
+    permanently silences a SyntH.
     """
     if not is_peer_mode_enabled():
         return False
-    peer_ids = get_peer_ids()
+    if peer_ids is None:
+        peer_ids = get_peer_ids()
     if not peer_ids:
         return False
 
@@ -191,7 +197,7 @@ async def peer_already_responded(interface_path: str, since: datetime) -> bool:
                     f"SELECT COUNT(*) FROM chat_history_cache "
                     f"WHERE interface_path LIKE %s "
                     f"AND sender_id IN ({placeholders}) "
-                    f"AND timestamptz > %s",
+                    f"AND timestamp > %s",
                     (path_prefix, *peer_id_strs, since_utc),
                 )
                 row = await cur.fetchone()
@@ -206,6 +212,103 @@ async def peer_already_responded(interface_path: str, since: datetime) -> bool:
             f"[peer_policy] peer_already_responded check failed (failing open): {e}"
         )
         return False
+
+
+def get_relay_wait_peer(text: str) -> int | None:
+    """Return the peer bot ID this instance should wait on before replying.
+
+    Implements mention-order turn relay: when a single message addresses
+    multiple SyntHs in sequence (e.g. "2B, ... 2D, ..."), the later-addressed
+    instance should wait for the earlier one to actually post its reply
+    before generating its own — so the earlier reply is already present in
+    this instance's own chat history/context (added unconditionally when the
+    peer's message arrives, see peer_synths.rst) by the time this instance
+    responds.
+
+    Returns the peer mentioned closest before this bot's own mention, or
+    None if this bot isn't mentioned, no configured peer precedes it, or
+    peer mode is disabled.
+    """
+    if not text or not is_peer_mode_enabled():
+        return None
+
+    peer_names = get_peer_names()
+    if not peer_names:
+        return None
+
+    text_lower = text.lower()
+
+    peer_positions: list[tuple[int, int]] = []
+    for pid, name in peer_names.items():
+        if not name:
+            continue
+        idx = text_lower.find(name.lower())
+        if idx != -1:
+            peer_positions.append((idx, pid))
+    if not peer_positions:
+        return None
+
+    try:
+        from core.mention_utils import get_current_aliases
+
+        my_positions = [
+            text_lower.find(alias.lower()) for alias in get_current_aliases() if alias
+        ]
+    except Exception as e:
+        log_debug(f"[peer_policy] get_relay_wait_peer alias lookup failed: {e}")
+        return None
+    my_positions = [p for p in my_positions if p != -1]
+    if not my_positions:
+        # This bot isn't named in the text at all -- normal mention/attention
+        # logic decides whether it responds; relay ordering doesn't apply.
+        return None
+    my_pos = min(my_positions)
+
+    preceding = [(pos, pid) for pos, pid in peer_positions if pos < my_pos]
+    if not preceding:
+        return None
+
+    # If more than one peer precedes us, wait on the closest (last-mentioned)
+    # one -- in a well-behaved relay chain its reply implies the earlier
+    # peers already went too, so we don't stack up N sequential waits.
+    preceding.sort()
+    return preceding[-1][1]
+
+
+async def wait_for_peer_reply(
+    interface_path: str,
+    peer_id: int,
+    since: datetime,
+    timeout_seconds: float | None = None,
+    poll_interval: float = 1.5,
+) -> bool:
+    """Poll until *peer_id* replies in *interface_path* after *since*, or timeout.
+
+    Used for mention-order turn relay (see :func:`get_relay_wait_peer`).
+    Fails open: always returns once *timeout_seconds* elapses so an
+    offline/slow peer can never permanently block this instance's turn.
+    """
+    if timeout_seconds is None:
+        timeout_seconds = float(_read_config("SYNTH_PEER_RELAY_TIMEOUT_SECONDS", 60.0))
+    if timeout_seconds <= 0:
+        return False
+
+    import asyncio
+
+    loop = asyncio.get_event_loop()
+    deadline = loop.time() + timeout_seconds
+    target = frozenset({peer_id})
+
+    while True:
+        if await peer_already_responded(interface_path, since, peer_ids=target):
+            return True
+        if loop.time() >= deadline:
+            log_debug(
+                f"[peer_policy] Relay wait for peer {peer_id} timed out after "
+                f"{timeout_seconds:.0f}s -- proceeding anyway"
+            )
+            return False
+        await asyncio.sleep(poll_interval)
 
 
 def is_peer_synth(user_id: int) -> bool:

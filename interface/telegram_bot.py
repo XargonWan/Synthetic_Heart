@@ -1358,24 +1358,55 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         log_debug("Not a trainer reply - continuing to queue forwarding")
 
-    # === PRIORITY 3.5: Peer turn coordination (shared group RP) ===
-    # Priority-based: set SYNTH_PEER_TURN_FLOOR_SECONDS=0 on the primary instance
-    # (responds immediately) and to a value safely above typical LLM response time
-    # on every secondary instance (e.g. 20 for a 7-12s LLM).  The secondary waits
-    # the floor, then checks whether the primary already posted; if so it yields.
+    # === PRIORITY 3.5: Peer turn coordination / mention-order relay (shared group RP) ===
+    # Two distinct mechanisms, both gated on peer mode + configured peer IDs:
+    #
+    # 1. Mention-order relay: if this message explicitly addresses another
+    #    SyntH before this one (e.g. "2B, ... 2D, ..."), wait for that peer to
+    #    actually post their reply before proceeding, so it's already in this
+    #    instance's own chat history by the time this instance responds.
+    #
+    # 2. Turn floor (fallback when no explicit relay ordering is present):
+    #    set SYNTH_PEER_TURN_FLOOR_SECONDS=0 on the primary instance (responds
+    #    immediately) and to a value safely above typical LLM response time on
+    #    every secondary instance (e.g. 20 for a 7-12s LLM). The secondary
+    #    waits the floor, then checks whether the primary already posted; if
+    #    so it yields its own turn entirely.
     if message.chat.type in ("group", "supergroup"):
         try:
-            from core.peer_policy import get_peer_ids, is_peer_mode_enabled
+            from core.peer_policy import (
+                get_peer_ids,
+                get_relay_wait_peer,
+                is_peer_mode_enabled,
+                peer_already_responded,
+                wait_for_peer_reply,
+            )
 
             if is_peer_mode_enabled() and get_peer_ids():
-                _floor = float(
-                    config_registry.get_value("SYNTH_PEER_TURN_FLOOR_SECONDS", 0.0)
-                )
-                if _floor > 0:
+                _relay_peer = get_relay_wait_peer(text) if text else None
+                if _relay_peer is not None:
                     log_debug(
-                        f"[telegram_bot] Peer turn stagger: secondary waiting {_floor:.1f}s"
+                        f"[telegram_bot] Relay ordering: waiting for peer {_relay_peer} to reply first"
                     )
-                    await asyncio.sleep(_floor)
+                    await wait_for_peer_reply(
+                        interface_path, _relay_peer, since=message.date
+                    )
+                else:
+                    _floor = float(
+                        config_registry.get_value("SYNTH_PEER_TURN_FLOOR_SECONDS", 0.0)
+                    )
+                    if _floor > 0:
+                        log_debug(
+                            f"[telegram_bot] Peer turn stagger: secondary waiting {_floor:.1f}s"
+                        )
+                        await asyncio.sleep(_floor)
+                        if await peer_already_responded(
+                            interface_path, since=message.date
+                        ):
+                            log_debug(
+                                "[telegram_bot] Peer already responded to this trigger — yielding turn"
+                            )
+                            return
         except Exception as _peer_turn_err:
             log_debug(
                 f"[telegram_bot] Peer turn coordination skipped (non-fatal): {_peer_turn_err}"

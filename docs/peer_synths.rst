@@ -228,6 +228,55 @@ that should respond immediately. Only secondary instances need a non-zero value.
    Private chats and other interfaces are not affected.
 
 
+Mention-Order Relay (Addressing Multiple SyntHs in One Message)
+-----------------------------------------------------------------
+
+When a single message addresses more than one SyntH in sequence — e.g. "2B,
+tell me the plan. 2D, what do you think?" — the SyntHs should reply in the
+order they were addressed, and the later one should be able to react to what
+the earlier one actually said. This is separate from turn coordination above
+(which only prevents an *accidental* double reply to the same undirected
+trigger); mention-order relay is for an *intentional*, ordered exchange.
+
+**How it works**
+
+Each instance checks whether the message names a configured peer (via
+``SYNTH_PEERS``) *before* naming this instance's own alias/persona name. If
+so, this instance waits — polling its own ``chat_history_cache`` — for that
+specific peer to actually post a reply before generating its own. Because
+every instance unconditionally records every message it sees in the shared
+Telegram group into its own chat history (regardless of whether it responds
+to that message), the earlier peer's reply is already present in this
+instance's own context by the time it finally responds.
+
+If the earlier peer never replies (offline, erroring, or policy-suppressed),
+the wait fails open after ``SYNTH_PEER_RELAY_TIMEOUT_SECONDS`` (default
+``60``) and this instance proceeds with its own turn anyway, rather than
+staying silent forever.
+
+Configure via **WebUI → Settings → Peer Policy → Peer Relay Timeout
+(seconds)**. Set to ``0`` to disable relay waiting entirely (falls back to
+plain turn coordination above).
+
+**Example**
+
+With Aria configured as a peer named "Aria" on Sol's instance (and vice
+versa), a message like::
+
+   Aria, what's your take? Sol, what about you?
+
+makes Sol's instance detect that "Aria" is mentioned before Sol's own name,
+so Sol waits for Aria's reply to land in its history before generating its
+own — Sol's reply can then naturally reference what Aria just said.
+
+.. note::
+
+   Relay ordering only considers peers configured in ``SYNTH_PEERS`` and this
+   instance's own current aliases/persona name — it has no effect on ordinary
+   human users, and, like turn coordination, only applies to Telegram group
+   or supergroup chats.
+
+
 Attention Window (Staying in the Conversation)
 -----------------------------------------------
 

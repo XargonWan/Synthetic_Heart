@@ -945,6 +945,26 @@ def register_all():
     )
 
     register_exposed_var(
+        "SYNTH_PEER_RELAY_TIMEOUT_SECONDS",
+        label="Peer Relay Timeout (seconds)",
+        default=60.0,
+        value_type=float,
+        ui_type="number",
+        description=(
+            "Mention-order turn relay: when a message addresses multiple SyntHs in "
+            "sequence (e.g. '2B, ... 2D, ...'), the later-addressed instance waits up "
+            "to this many seconds for the earlier one to actually post its reply before "
+            "generating its own -- so the earlier reply is already in this instance's "
+            "own chat history by the time it responds. Set to 0 to disable relay "
+            "waiting entirely. Fails open: if the earlier peer never replies within "
+            "this window, this instance proceeds anyway rather than staying silent."
+        ),
+        scope="interface",
+        component="peer_policy",
+        tags=["multi-instance"],
+    )
+
+    register_exposed_var(
         "SYNTH_PEER_ENABLED",
         label="Enable Peer SyntH Mode",
         default=False,
