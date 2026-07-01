@@ -454,6 +454,39 @@ async def get_active_cortex_engine(scope: str | None = None) -> str:
         reg = get_cortex_registry()
         available = set(reg.get_available_engines())
         if chosen not in available:
+            # Before treating this as a genuinely stale/removed engine, check
+            # whether it's a still-configured external endpoint (e.g. Venice2)
+            # that simply hasn't (re)registered into the in-memory
+            # CortexRegistry yet -- this happens transiently around startup or
+            # endpoint edits. Persisting the fallback below in that case would
+            # silently and *permanently* discard the user's real selection,
+            # since get_default_engine() just returns whichever built-in engine
+            # module sorts first on disk (currently "anthropic") -- not a
+            # meaningful default. See AGENTS.md SS12 for the incident this guards
+            # against (BASE_CORTEX kept reverting to anthropic).
+            try:
+                from core.external_endpoints.registry import (
+                    get_external_endpoint_registry,
+                )
+
+                endpoints = await get_external_endpoint_registry().list_endpoints(
+                    enabled_only=True
+                )
+                if chosen in {ep.engine_name() for ep in endpoints}:
+                    log_warning(
+                        f"[config] ⚠️ Cortex engine '{chosen}' is a configured "
+                        "external endpoint not yet registered in the CortexRegistry "
+                        "-- keeping it instead of silently switching away."
+                    )
+                    log_debug(
+                        f"[config] 🧠 Active Cortex ({scope or 'base'}): {chosen}"
+                    )
+                    return chosen
+            except Exception as ext_exc:
+                log_warning(
+                    f"[config] Failed to check external endpoints for '{chosen}': {ext_exc}"
+                )
+
             # Stale engine name in DB (e.g. removed engine from a previous branch).
             # Fall back to the registry default rather than leaving the system broken.
             updates: list[tuple[str, str]] = []
