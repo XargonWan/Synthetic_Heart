@@ -371,6 +371,14 @@ docker exec synth-dev tail -f /app/logs/synth.log | grep -E "\[grillo\]|grillo"
 
 ---
 
+### Full test suite has 3 pre-existing order-dependent failures (`config_registry` singleton pollution)  <!-- 2026-07-01 -->
+**Symptom:** Running `uv run pytest tests/ -k "not selenium"` (the full suite) fails `test_vox_defaults.py::test_active_vox_engine_default_is_kitten`, `test_vox_plugin.py::test_active_vox_engine_default_is_kitten`, and `test_grillo_prevent_duplicates.py::test_grillo_suppresses_when_last_is_synth`. All three pass when run in isolation or in small groups.
+**Location:** `core/config_manager.py` (`config_registry` is a process-wide singleton); the failing assertions read `config_registry.get_value("ACTIVE_VOX_ENGINE", None)` and expect the hard-coded default `"kitten"`.
+**Status:** known, pre-existing — confirmed via `git stash` that these 3 fail identically on unmodified `develop` (commit `e4558376`), so it is not caused by any specific feature change; whichever test runs first in the full ordering leaks the *real* DB-loaded value (`"disabled"`, per the live config table) into `config_registry._definitions["ACTIVE_VOX_ENGINE"]`, and it's never reset before the default-expecting test runs.
+**Notes:** Don't waste a debugging session re-diagnosing this if the full suite shows exactly these 3 failures — verify first with `git stash` whether they reproduce on unmodified code before assuming a regression. Real fix would be giving `config_registry` (or at least the affected definitions) a per-test reset/fixture instead of relying on process-wide state; out of scope for whatever unrelated change surfaced this note.
+
+---
+
 ### `grillo_impl.create_activity_log` writes to a table that doesn't exist on Postgres  <!-- 2026-07-01 -->
 **Symptom:** `[grillo] create_activity_log failed: relation "grillo_activity_log" does not exist` on every grillo beat.
 **Location:** `plugins/grillo/grillo_impl.py:525` (`create_activity_log`); the live Postgres "soul" DB has `radio_activity_log` but no `grillo_activity_log` (confirmed via `list_tables()` — `radio_activity_log` exists with both a stale `timestamptz` and a working `timestamp` column, see `FIXED_ISSUES.md` "Postgres DDL translator…"; `grillo_activity_log` is simply absent).
