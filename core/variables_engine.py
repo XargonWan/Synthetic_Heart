@@ -969,6 +969,25 @@ def register_all():
     )
 
     register_exposed_var(
+        "SYNTH_PEER_MENTION_COOLDOWN_SECONDS",
+        label="Peer Mention Cooldown (seconds)",
+        default=20.0,
+        value_type=float,
+        ui_type="number",
+        description=(
+            "Under 'mention_only' policy: how long after this instance's own last "
+            "message in a chat to suppress a new mention_only trigger from a peer. "
+            "A human message and a peer's message often land seconds apart and each "
+            "independently mention this bot's alias, which without this would produce "
+            "two replies back-to-back for what reads as one conversational beat. "
+            "Set to 0 to disable."
+        ),
+        scope="interface",
+        component="peer_policy",
+        tags=["multi-instance"],
+    )
+
+    register_exposed_var(
         "SYNTH_PEER_ENABLED",
         label="Enable Peer SyntH Mode",
         default=False,

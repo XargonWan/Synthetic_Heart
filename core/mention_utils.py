@@ -193,7 +193,7 @@ async def is_message_for_bot(
             sender_id: int | None = getattr(sender, "id", None)
             sender_is_bot: bool = bool(getattr(sender, "is_bot", False))
             if sender_is_bot and sender_id is not None and is_peer_synth(sender_id):
-                if not should_respond_to_peer(message, bot_username, None):
+                if not await should_respond_to_peer(message, bot_username, None):
                     log_debug(
                         f"[mention] Peer SyntH {sender_id} suppressed by peer policy"
                     )

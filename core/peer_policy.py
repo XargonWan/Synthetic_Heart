@@ -374,7 +374,45 @@ def is_peer_synth(user_id: int) -> bool:
     return user_id in get_peer_ids()
 
 
-def should_respond_to_peer(
+async def _self_replied_recently(chat_id: int, cooldown_seconds: float) -> bool:
+    """Return True if this bot itself sent a message in *chat_id* within the
+    last *cooldown_seconds*.
+
+    Used to throttle mention_only peer responses: in an active multi-bot
+    group, a human message and a peer's message often land seconds apart and
+    each independently mentions this bot's alias, causing two replies in
+    quick succession. Fails open (False) so a DB error never permanently
+    silences a SyntH.
+    """
+    if cooldown_seconds <= 0:
+        return False
+    try:
+        from core.db import get_conn_ctx
+
+        path_prefix = f"telegram_bot/{chat_id}%"
+        async with get_conn_ctx() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT MAX(timestamp) FROM chat_history_cache "
+                    "WHERE interface_path LIKE %s AND sender_id = 'self'",
+                    (path_prefix,),
+                )
+                row = await cur.fetchone()
+                if not row or not row[0]:
+                    return False
+                last_ts = row[0]
+                if last_ts.tzinfo is None:
+                    last_ts = last_ts.replace(tzinfo=timezone.utc)
+                elapsed = (datetime.now(timezone.utc) - last_ts).total_seconds()
+                return elapsed < cooldown_seconds
+    except Exception as e:
+        log_warning(
+            f"[peer_policy] self_replied_recently check failed (failing open): {e}"
+        )
+        return False
+
+
+async def should_respond_to_peer(
     message: object,
     bot_username: str | None,
     bot_id: int | None,
@@ -405,6 +443,26 @@ def should_respond_to_peer(
                     "[peer_policy] mention_only: peer message is a reply to this bot → suppressing (chain break)"
                 )
                 return False
+
+        # Suppress if we already replied in this chat very recently. A human
+        # message and a peer's message routinely land a few seconds apart in
+        # an active group and each independently mention this bot's alias --
+        # without this, both would trigger a full response, producing two
+        # replies back-to-back for what reads as one conversational beat.
+        cooldown_seconds = float(
+            _read_config("SYNTH_PEER_MENTION_COOLDOWN_SECONDS", 20.0)
+        )
+        chat_id = getattr(getattr(message, "chat", None), "id", None)
+        if (
+            cooldown_seconds > 0
+            and chat_id is not None
+            and await _self_replied_recently(chat_id, cooldown_seconds)
+        ):
+            log_debug(
+                f"[peer_policy] mention_only: self replied within cooldown "
+                f"({cooldown_seconds:.0f}s) → suppressing"
+            )
+            return False
 
         # Allow if this bot is @mentioned by username OR if any configured
         # alias appears in the peer message (LLMs rarely output @handles).

@@ -1,4 +1,5 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 
@@ -182,6 +183,138 @@ async def test_wait_for_peer_reply_fails_open_on_timeout(monkeypatch):
         timeout_seconds=0.05,
         poll_interval=0.02,
     )
+
+    assert result is False
+
+
+class _TimestampCursor:
+    """Cursor stub for MAX(timestamp)-style queries (single-row, single-column)."""
+
+    def __init__(self, value):
+        self._value = value
+        self.executed_sql: list[str] = []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        pass
+
+    async def execute(self, q, params=None):
+        self.executed_sql.append(q)
+
+    async def fetchone(self):
+        return (self._value,)
+
+
+class _DummyChat:
+    def __init__(self, id=-123):
+        self.id = id
+
+
+class _DummyPeerMessage:
+    def __init__(self, text, chat_id=-123, reply_to_message=None):
+        self.text = text
+        self.chat = _DummyChat(chat_id)
+        self.reply_to_message = reply_to_message
+
+
+def _enable_mention_only(monkeypatch, cooldown=20.0):
+    monkeypatch.setattr("core.peer_policy.is_peer_mode_enabled", lambda: True)
+    monkeypatch.setattr("core.peer_policy.get_peer_policy", lambda: "mention_only")
+    monkeypatch.setattr(
+        "core.peer_policy._read_config",
+        lambda key, default: (
+            cooldown if key == "SYNTH_PEER_MENTION_COOLDOWN_SECONDS" else default
+        ),
+    )
+    monkeypatch.setattr("core.mention_utils.is_synth_mentioned", lambda text: True)
+
+
+@pytest.mark.asyncio
+async def test_should_respond_to_peer_suppresses_within_cooldown(monkeypatch):
+    """A peer message that mentions our alias must be suppressed if we just
+    replied in this chat -- this is the fix for the back-to-back double
+    response reported when a human message and a peer message both mention
+    this bot's alias within seconds of each other."""
+    _enable_mention_only(monkeypatch)
+    cursor = _TimestampCursor(datetime.now(timezone.utc))
+    monkeypatch.setattr("core.db.get_conn_ctx", lambda: _DummyConn(cursor))
+
+    msg = _DummyPeerMessage("Hey Dee, how's it going?")
+    result = await peer_policy.should_respond_to_peer(msg, "my_bot", 999)
+
+    assert result is False
+
+
+@pytest.mark.asyncio
+async def test_should_respond_to_peer_allows_after_cooldown_expires(monkeypatch):
+    _enable_mention_only(monkeypatch)
+    stale = datetime.now(timezone.utc) - timedelta(seconds=60)
+    cursor = _TimestampCursor(stale)
+    monkeypatch.setattr("core.db.get_conn_ctx", lambda: _DummyConn(cursor))
+
+    msg = _DummyPeerMessage("Hey Dee, how's it going?")
+    result = await peer_policy.should_respond_to_peer(msg, "my_bot", 999)
+
+    assert result is True
+
+
+@pytest.mark.asyncio
+async def test_should_respond_to_peer_allows_when_never_replied(monkeypatch):
+    _enable_mention_only(monkeypatch)
+    cursor = _TimestampCursor(None)
+    monkeypatch.setattr("core.db.get_conn_ctx", lambda: _DummyConn(cursor))
+
+    msg = _DummyPeerMessage("Hey Dee, how's it going?")
+    result = await peer_policy.should_respond_to_peer(msg, "my_bot", 999)
+
+    assert result is True
+
+
+@pytest.mark.asyncio
+async def test_should_respond_to_peer_cooldown_disabled_skips_db_check(monkeypatch):
+    _enable_mention_only(monkeypatch, cooldown=0)
+
+    def _boom():
+        raise AssertionError("DB should not be queried when cooldown is disabled")
+
+    monkeypatch.setattr("core.db.get_conn_ctx", lambda: _boom())
+
+    msg = _DummyPeerMessage("Hey Dee, how's it going?")
+    result = await peer_policy.should_respond_to_peer(msg, "my_bot", 999)
+
+    assert result is True
+
+
+@pytest.mark.asyncio
+async def test_should_respond_to_peer_reply_chain_break_precedes_cooldown_check(
+    monkeypatch,
+):
+    """Reply-to-us suppression must short-circuit before the cooldown DB
+    lookup even runs."""
+    _enable_mention_only(monkeypatch)
+
+    def _boom():
+        raise AssertionError("DB should not be queried for a reply-chain break")
+
+    monkeypatch.setattr("core.db.get_conn_ctx", lambda: _boom())
+
+    reply_to = SimpleNamespace(from_user=SimpleNamespace(id=999))
+    msg = _DummyPeerMessage("Hey Dee!", reply_to_message=reply_to)
+    result = await peer_policy.should_respond_to_peer(msg, "my_bot", 999)
+
+    assert result is False
+
+
+@pytest.mark.asyncio
+async def test_self_replied_recently_fails_open_on_db_error(monkeypatch):
+    def _boom():
+        raise RuntimeError("db unavailable")
+
+    monkeypatch.setattr("core.db.get_conn_ctx", lambda: _boom())
+
+    result = await peer_policy._self_replied_recently(-123, 20.0)
 
     assert result is False
 
