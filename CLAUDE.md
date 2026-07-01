@@ -42,8 +42,8 @@ Fix failures before moving on.
 |------|-------|
 | Core engine | `core/` |
 | Plugins | `plugins/` |
-| LLM engines (new) | `cortex/` |
-| LLM engines (legacy) | `llm_engines/` |
+| LLM engines | `engines/external_engines/` |
+| Live audio engines | `engines/live/` |
 | Interfaces | `interface/` |
 | Tests | `tests/` |
 | Docs | `docs/` |
@@ -181,7 +181,7 @@ See `AGENTS.md` for the full architecture reference, animation system details, p
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **synthetic_heart** (9044 symbols, 29174 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **synthetic_heart** (10324 symbols, 33256 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
 

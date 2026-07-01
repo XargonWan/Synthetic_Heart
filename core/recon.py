@@ -742,6 +742,9 @@ async def gather_recon_contributions(
                 tags=tags,
                 keywords=norm_keywords,
                 max_results=max_results,
+                # Pass the raw LLM text so plugins can attempt their own
+                # extraction when the JSON parser returned an empty dict.
+                _raw_llm_text=llm_text,
             )
         except Exception as e:
             log_warning(f"[recon] Recon plugin {plugin_name} parse failed: {e}")

@@ -96,6 +96,26 @@ TRAINER_NAME = config_registry.get_var(
     component="core",
 )
 
+
+def get_trainer_display_name() -> str:
+    """Resolve the configured trainer name(s) for use in prompt text.
+
+    Read live from the config registry so runtime edits take effect without a
+    restart, falling back to the module-level ``TRAINER_NAME``. Returns an empty
+    string when no real name is configured (still the ``"Trainer"`` placeholder)
+    so callers can omit the reference instead of leaking a default. A
+    comma-separated multi-trainer value is preserved verbatim.
+    """
+    try:
+        raw = config_registry.get_value("TRAINER_NAME", "Trainer")
+    except Exception:
+        raw = TRAINER_NAME
+    name = str(raw or "").strip()
+    if not name or name == "Trainer":
+        return ""
+    return name
+
+
 BASE_CORTEX = config_registry.get_var(
     "BASE_CORTEX",
     "manual",
@@ -140,6 +160,27 @@ LIVE_CORTEX = config_registry.get_var(
     component="cortex",
     hidden=True,  # Managed via the Cortex Engines scope selectors
     allow_env_override=False,
+)
+
+# LLM generation request timeout. Caps how long the synth waits for a single
+# cortex generation before aborting. On slow hardware a long reply can exceed a
+# short timeout, which aborts the HTTP request and makes llama.cpp cancel the
+# in-flight task ("should_stop"). The default is intentionally generous so weak
+# hardware does not hit an invisible cap; override per host via the
+# LLM_GENERATION_TIMEOUT_SEC env var (.env) or the WebUI. A per-endpoint
+# extra_config["timeout"] still takes precedence when set.
+LLM_GENERATION_TIMEOUT_SEC = config_registry.get_var(
+    "LLM_GENERATION_TIMEOUT_SEC",
+    1800,
+    label="LLM Generation Timeout (s)",
+    description=(
+        "Maximum time in seconds to wait for a single LLM cortex generation "
+        "before aborting. Raise this on slow hardware so long replies are not "
+        "cut off mid-generation. Settable via the .env file."
+    ),
+    value_type=int,
+    group="core",
+    component="cortex",
 )
 
 # ----------------------------------------------------------------------
@@ -468,7 +509,13 @@ def derive_cortex_scope(context: dict | None) -> str | None:
         return None
     if context.get("is_trainer"):
         return "trainer"
-    if context.get("grillo_beat"):
+    # Diary consolidation ("diary_merge") is a grillo-family background task, but
+    # it is re-dispatched as its own interface without the ``grillo_beat`` flag.
+    # Route it explicitly to the grillo scope so it follows GRILLO_CORTEX. Without
+    # this it falls through to BASE_CORTEX and silently breaks whenever the base
+    # engine is not usable (e.g. a keyless Anthropic base) — a near-undebuggable
+    # failure for end users.
+    if context.get("grillo_beat") or context.get("diary_merge_beat"):
         return "grillo"
     return None
 

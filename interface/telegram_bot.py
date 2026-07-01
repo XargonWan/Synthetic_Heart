@@ -1370,9 +1370,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         log_debug("🔴 [PRIORITY 4] Calling message_queue.enqueue now...")
 
-        # Wrap message to add wake/sleep flag for prompt engine
+        # Wrap message to add wake/sleep flag for prompt engine.
+        # Pass `text` explicitly so media captions survive: a Telegram photo/
+        # video stores its caption in `.caption`, not `.text`, so without this
+        # the current turn would look caption-less downstream (the `text` local
+        # above already resolves `message.text or message.caption`).
         wrapped_message = MessageWrapper(
             message,
+            text=text,
             is_wake_sleep_command=is_wake_sleep_command,
             # Flag: tells message_chain to auto-inject TTS only for voice-originated messages.
             is_voice_input=bool(
@@ -1499,7 +1504,7 @@ async def manage_chat_id_command(update: Update, context: ContextTypes.DEFAULT_T
             except ValueError:
                 await update.message.reply_text("Invalid ID")
                 return
-        await recent_chats.reset_chat(cid)
+        await recent_chats.reset_chat(cid, "telegram_bot")
         await update.message.reply_text(
             f"✅ Reset mapping for `{cid}`.", parse_mode="Markdown"
         )
@@ -1666,29 +1671,105 @@ async def plugin_startup_callback(application):
 # Global variable to track the telegram polling task
 _polling_task = None
 _bot_started = False
+_bot_starting = False
+_bot_retry_task: asyncio.Task | None = None
 
 
-async def start_bot():
+def _schedule_start_bot_retry(delay_seconds: float = 30.0) -> None:
+    """Schedule a one-shot retry after a transient Telegram startup failure."""
+    global _bot_retry_task
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        log_debug("[telegram_bot] No running loop; cannot schedule startup retry")
+        return
+
+    if _bot_retry_task is not None and not _bot_retry_task.done():
+        log_debug("[telegram_bot] Startup retry already scheduled; skipping")
+        return
+
+    async def _retry_start() -> None:
+        global _bot_retry_task
+        try:
+            await asyncio.sleep(delay_seconds)
+            log_info("[telegram_bot] Retrying Telegram bot startup after failure...")
+            await start_bot()
+        except asyncio.CancelledError:
+            log_debug("[telegram_bot] Startup retry task cancelled")
+            raise
+        except Exception as e:
+            log_error(f"[telegram_bot] Startup retry failed: {repr(e)}")
+        finally:
+            if _bot_retry_task is asyncio.current_task():
+                _bot_retry_task = None
+
+    _bot_retry_task = loop.create_task(_retry_start())
+    _bot_retry_task.set_name("telegram_bot_retry")
+    log_info(
+        f"[telegram_bot] Scheduled Telegram bot startup retry in {delay_seconds:.0f}s"
+    )
+
+
+def _is_transient_startup_error(exc: Exception) -> bool:
+    if isinstance(exc, (TimedOut, TimeoutError, asyncio.TimeoutError, OSError)):
+        return True
+    return isinstance(exc, TelegramError) and not isinstance(exc, BadRequest)
+
+
+async def _cleanup_failed_startup_app(app: object | None) -> None:
+    if app is None:
+        return
+
+    updater = getattr(app, "updater", None)
+    try:
+        if updater is not None and getattr(updater, "running", False):
+            await updater.stop()
+    except Exception as exc:
+        log_debug(
+            f"[telegram_bot] Ignoring updater cleanup error after failed startup: {repr(exc)}"
+        )
+
+    for method_name in ("stop", "shutdown"):
+        method = getattr(app, method_name, None)
+        if not callable(method):
+            continue
+        try:
+            result = method()
+            if isawaitable(result):
+                await result
+        except Exception as exc:
+            log_debug(
+                f"[telegram_bot] Ignoring {method_name} cleanup error after failed startup: {repr(exc)}"
+            )
+
+
+async def start_bot() -> bool:
     """Start the Telegram bot application.
 
     This function assumes the core has already been initialized.
     It should be called from TelegramInterface.start() or during autostart.
     """
-    global _bot_started
+    global _bot_started, _bot_starting, _bot_retry_task
     if _bot_started:
         log_debug(
             "[telegram_bot] start_bot() already called, skipping duplicate startup"
         )
-        return
+        return True
+
+    if _bot_starting:
+        log_debug("[telegram_bot] start_bot() already in progress, skipping")
+        return False
 
     log_info("[telegram_bot] start_bot() function called")
-    _bot_started = True
+    _bot_starting = True
 
     if not BOTFATHER_TOKEN:
         log_warning(
             "[telegram_bot] BOTFATHER_TOKEN not configured - skipping Telegram bot startup"
         )
-        return
+        _bot_starting = False
+        return False
 
     # Parse trainer ID from configuration
     trainer_id = _parse_trainer_id_from_config()
@@ -1696,18 +1777,17 @@ async def start_bot():
         log_warning(
             "[telegram_bot] No trainer ID found in TRAINER_IDS - skipping Telegram bot startup"
         )
-        return
+        _bot_starting = False
+        return False
 
     # Set trainer ID in the registry (interface is already registered at import time)
     _interface_registry.set_trainer_id("telegram_bot", trainer_id)
     log_info(f"[telegram_bot] Set trainer ID {trainer_id} for telegram_bot interface")
 
-    try:
+    def _build_application() -> object:
         log_info("[telegram_bot] Building Telegram application...")
 
         # Check if we should disable SSL verification (for dev environments with cert issues)
-        import os
-
         disable_ssl = os.getenv("TELEGRAM_DISABLE_SSL_VERIFY", "0") == "1"
 
         if disable_ssl:
@@ -1717,37 +1797,27 @@ async def start_bot():
             # Monkey-patch httpx to disable SSL verification globally for this process
             import httpx
 
-            # Store original client init
             original_client_init = httpx.AsyncClient.__init__
 
-            # Create wrapper that forces verify=False
             def patched_client_init(self, *args, **kwargs):
                 kwargs["verify"] = False
                 return original_client_init(self, *args, **kwargs)
 
-            # Apply monkey patch
             httpx.AsyncClient.__init__ = patched_client_init
             log_debug(
                 "[telegram_bot] Patched httpx.AsyncClient to disable SSL verification"
             )
 
-        # Configure timeouts to avoid frequent TimedOut warnings
-        # connect_timeout: time to establish connection
-        # read_timeout: time to wait for response from Telegram servers
-        # write_timeout: time to send data to Telegram servers
-        # pool_timeout: time to wait for connection from pool
-
-        # Convert ConfigVar to string for ApplicationBuilder
         bot_token_str = str(BOTFATHER_TOKEN) if BOTFATHER_TOKEN else None
 
         app = (
             ApplicationBuilder()
             .token(bot_token_str)
             .post_init(plugin_startup_callback)
-            .connect_timeout(30.0)  # Increased from default ~5s to 30s
-            .read_timeout(30.0)  # Increased from default ~5s to 30s
-            .write_timeout(30.0)  # Increased from default ~5s to 30s
-            .pool_timeout(10.0)  # Connection pool timeout
+            .connect_timeout(30.0)
+            .read_timeout(30.0)
+            .write_timeout(30.0)
+            .pool_timeout(10.0)
             .build()
         )
         log_info("[telegram_bot] Telegram application built successfully")
@@ -1756,10 +1826,8 @@ async def start_bot():
         log_info(f"[telegram_bot] BOTFATHER_TOKEN configured: {bot_token_status}")
 
         log_info("[telegram_bot] Adding command handlers...")
-        # Use generic command handler for all commands
         app.add_handler(MessageHandler(filters.COMMAND, handle_command))
 
-        # Single unified message handler for ALL non-command messages
         log_info("[telegram_bot] Adding unified MessageHandler for all messages...")
         app.add_handler(
             MessageHandler(
@@ -1775,7 +1843,6 @@ async def start_bot():
         )
         log_info("[telegram_bot] All handlers added successfully")
 
-        # Add error handler to catch any exceptions
         async def error_handler(
             update: object, context: ContextTypes.DEFAULT_TYPE
         ) -> None:
@@ -1788,19 +1855,9 @@ async def start_bot():
 
         app.add_error_handler(error_handler)
         log_info("[telegram_bot] Error handler added")
+        return app
 
-        # The interface will register itself once the Telegram application has
-        # been initialized below. Calling core_initializer.register_interface
-        # here would run before the interface instance exists and generates a
-        # misleading warning about missing action support.
-    except Exception as e:
-        log_error(f"[telegram_bot] Error building Telegram application: {repr(e)}")
-        raise
-
-    # Plugin startup is handled by plugin_startup_callback
-    # No need for fallback as the callback ensures proper async startup
-
-    async def _run_polling_loop():
+    async def _run_polling_loop(app):
         """Run the polling loop in a separate background task.
 
         This function will run indefinitely until cancelled or until an error occurs.
@@ -1826,47 +1883,84 @@ async def start_bot():
         finally:
             log_info("[telegram_bot] Polling loop task ending...")
 
+    startup_attempts = 3
+    last_error: Exception | None = None
+
     try:
-        log_info("[telegram_bot] Starting Telegram application initialization...")
-        # Use async initialization instead of run_polling to avoid event loop conflicts
-        await app.initialize()
-        log_info("[telegram_bot] Telegram application initialized")
+        for attempt in range(1, startup_attempts + 1):
+            app = None
+            try:
+                if attempt > 1:
+                    log_info(
+                        "[telegram_bot] Retrying Telegram startup inline after transient failure "
+                        f"({attempt}/{startup_attempts})"
+                    )
 
-        # Stop any existing updater before starting a new one
-        if app.updater and app.updater.running:
-            log_info("[telegram_bot] Stopping existing updater...")
-            await app.updater.stop()
-            log_info("[telegram_bot] Existing updater stopped")
+                app = _build_application()
+                log_info(
+                    "[telegram_bot] Starting Telegram application initialization..."
+                )
+                await app.initialize()
+                log_info("[telegram_bot] Telegram application initialized")
 
-        # Update the global interface instance with the bot
-        global telegram_interface, _polling_task
-        telegram_interface.bot = app.bot
-        telegram_interface.is_enabled = True
-        telegram_interface.disabled_reason = None
-        log_debug("[telegram_bot] Bot instance assigned to telegram_interface")
+                if app.updater and app.updater.running:
+                    log_info("[telegram_bot] Stopping existing updater...")
+                    await app.updater.stop()
+                    log_info("[telegram_bot] Existing updater stopped")
 
-        # Rebuild action schemas (summary will be shown later by main initialization)
-        from core.core_initializer import core_initializer
+                global telegram_interface, _polling_task
+                telegram_interface.bot = app.bot
+                telegram_interface.is_enabled = True
+                telegram_interface.disabled_reason = None
+                log_debug("[telegram_bot] Bot instance assigned to telegram_interface")
 
-        await core_initializer.refresh_actions_block()
-        log_debug("[telegram_bot] Action schemas refreshed")
+                from core.core_initializer import core_initializer
 
-        await app.start()
-        log_info("[telegram_bot] Telegram application started")
+                await core_initializer.refresh_actions_block()
+                log_debug("[telegram_bot] Action schemas refreshed")
 
-        # Create a background task for polling that doesn't block start_bot() from returning
-        log_info("[telegram_bot] Creating background polling task...")
-        _polling_task = asyncio.create_task(_run_polling_loop())
-        _polling_task.set_name("telegram_polling")
-        log_info("[telegram_bot] Background polling task created and scheduled")
-        log_info(
-            "[telegram_bot] start_bot() completed successfully - polling running in background"
-        )
+                await app.start()
+                log_info("[telegram_bot] Telegram application started")
 
+                log_info("[telegram_bot] Creating background polling task...")
+                _polling_task = asyncio.create_task(_run_polling_loop(app))
+                _polling_task.set_name("telegram_polling")
+                log_info("[telegram_bot] Background polling task created and scheduled")
+                log_info(
+                    "[telegram_bot] start_bot() completed successfully - polling running in background"
+                )
+                _bot_started = True
+                if _bot_retry_task is not None and not _bot_retry_task.done():
+                    _bot_retry_task.cancel()
+                _bot_retry_task = None
+                return True
+            except Exception as e:
+                last_error = e
+                _bot_started = False
+                if telegram_interface is not None:
+                    telegram_interface.bot = None
+                await _cleanup_failed_startup_app(app)
+                if attempt < startup_attempts and _is_transient_startup_error(e):
+                    delay_seconds = float(attempt * 2)
+                    log_warning(
+                        "[telegram_bot] Transient startup failure during initialization: "
+                        f"{repr(e)}; retrying in {delay_seconds:.0f}s"
+                    )
+                    await asyncio.sleep(delay_seconds)
+                    continue
+                raise
     except Exception as e:
-        log_error(f"[telegram_bot] Error during Telegram bot startup: {repr(e)}")
-        raise
+        failure = last_error or e
+        _bot_started = False
+        if telegram_interface is not None:
+            telegram_interface.bot = None
+            telegram_interface.is_enabled = False
+            telegram_interface.disabled_reason = f"Startup failed: {repr(failure)}"
+        log_error(f"[telegram_bot] Error during Telegram bot startup: {repr(failure)}")
+        _schedule_start_bot_retry()
+        return False
     finally:
+        _bot_starting = False
         # Note: We don't stop/shutdown the app here because the polling task runs in background
         # The proper shutdown will be handled by the application lifecycle when signals are received
         log_debug("[telegram_bot] start_bot() finally block completed")
@@ -1990,8 +2084,16 @@ class TelegramInterface:
         log_info("[telegram_interface] Configuration validated, starting bot...")
 
         # Start the actual bot
-        await start_bot()
-        log_info("[telegram_interface] Telegram interface started successfully")
+        started = await start_bot()
+        if started:
+            self.is_enabled = True
+            self.disabled_reason = None
+            log_info("[telegram_interface] Telegram interface started successfully")
+        else:
+            self._disable(self.disabled_reason or "Telegram bot startup failed")
+            log_warning(
+                f"[telegram_interface] Telegram interface not ready: {self.disabled_reason}"
+            )
 
     def _disable(self, reason: str) -> None:
         """Mark interface as disabled with a reason."""
@@ -2013,7 +2115,7 @@ class TelegramInterface:
                     "chat_name",
                     "reply_to_message_id",
                 ],
-                "description": "Send a text message via Telegram",
+                "description": "Send a text reply to the user via Telegram - REQUIRED whenever responding to a human message",
             },
             "audio_telegram_bot": {
                 "required_fields": ["audio", "interface_path"],
@@ -2328,7 +2430,7 @@ class TelegramInterface:
 
     async def send_message(
         self, payload: dict, original_message: object | None = None
-    ) -> None:
+    ) -> bool:
         """Send a message using the stored bot.
 
         Parameters
@@ -2345,8 +2447,15 @@ class TelegramInterface:
         import json
 
         if self.bot is None:
-            log_warning("[telegram_interface] Bot not initialized, cannot send message")
-            return
+            log_warning(
+                "[telegram_interface] Bot not initialized, attempting recovery before send"
+            )
+            restarted = await start_bot()
+            if not restarted or self.bot is None:
+                log_warning(
+                    "[telegram_interface] Bot recovery failed, cannot send message"
+                )
+                return False
 
         text = payload.get("text", "")
         interface_path = payload.get("interface_path")
@@ -2366,15 +2475,23 @@ class TelegramInterface:
             pass
 
         # If no interface_path and no chat_name, silently ignore (likely from synthetic event message)
-        if not interface_path and not chat_name:
+        if not interface_path and not chat_name and payload.get("target") is None:
             log_debug(
                 "[telegram_interface] Skipping send: no interface_path or chat_name provided (likely synthetic event message)"
             )
-            return
+            return True
+
+        correction_payload = {
+            "system_message": {
+                "type": "error",
+                "message": "Telegram delivery failed. Please repeat your previous message using an explicit chat_id or interface_path.",
+                "your_reply": payload,
+            }
+        }
 
         # Extract chat_id and thread_id from interface_path if provided
-        thread_id = None
-        target = None
+        thread_id = payload.get("thread_id")
+        target = payload.get("target")
         if interface_path:
             from core.interface_path_utils import extract_legacy_ids
 
@@ -2391,7 +2508,7 @@ class TelegramInterface:
 
         if not text or (target is None and chat_name is None):
             log_warning("[telegram_interface] Missing text or destination, aborting")
-            return
+            return False
 
         chat_id = target
 
@@ -2435,8 +2552,15 @@ class TelegramInterface:
                         )
                     except Exception:
                         pass
-                return
+                return False
             if not row:
+                correction_payload = {
+                    "system_message": {
+                        "type": "error",
+                        "message": f"No channels found with name {chat_name}, please repeat your previous message putting the chat_id instead of chat_name",
+                        "your_reply": payload,
+                    }
+                }
                 # Use orchestrator instead of legacy corrector for not-found
                 from core.transport_layer import notify_corrector_of_system_message
 
@@ -2447,7 +2571,7 @@ class TelegramInterface:
                     thread_id=None,
                     interface="telegram",
                 )
-                return
+                return False
             chat_id = row.get("chat_id", chat_id)
             thread_id = row.get("thread_id", thread_id)
 
@@ -2534,18 +2658,21 @@ class TelegramInterface:
             )
 
             # Save SyntH's response via core chat_context_manager
-            try:
-                from core.chat_context_manager import save_response_message
-                from core.interface_path_utils import build_interface_path
+            if not payload.get("skip_history", False):
+                try:
+                    from core.chat_context_manager import save_response_message
+                    from core.interface_path_utils import build_interface_path
 
-                msg_interface_path = build_interface_path(
-                    "telegram_bot", str(chat_id), str(thread_id) if thread_id else None
-                )
-                await save_response_message(msg_interface_path, text)
-            except Exception as e:
-                log_debug(
-                    f"[telegram_interface] Failed to save response via context_manager: {e}"
-                )
+                    msg_interface_path = build_interface_path(
+                        "telegram_bot",
+                        str(chat_id),
+                        str(thread_id) if thread_id else None,
+                    )
+                    await save_response_message(msg_interface_path, text)
+                except Exception as e:
+                    log_debug(
+                        f"[telegram_interface] Failed to save response via context_manager: {e}"
+                    )
 
         except BadRequest as e:
             if "chat not found" in str(e).lower():
@@ -2559,7 +2686,7 @@ class TelegramInterface:
                     thread_id=thread_id,
                     interface="telegram",
                 )
-                return
+                return False
             else:
                 # Generic error -> request correction via orchestrator
                 from core.transport_layer import notify_corrector_of_system_message
@@ -2571,8 +2698,9 @@ class TelegramInterface:
                     thread_id=thread_id,
                     interface="telegram",
                 )
-                return
+                return False
         await self._verify_delivery(sent_message, payload, original_message)
+        return True
 
     async def add_reaction(self, message, emoji: str) -> bool:
         """Add a reaction to a message.
@@ -2591,9 +2719,14 @@ class TelegramInterface:
             log_debug(f"[telegram_interface] self.bot is None: {self.bot is None}")
             if not self.bot:
                 log_warning(
-                    "[telegram_interface] Bot instance is None, cannot add reaction"
+                    "[telegram_interface] Bot instance is None, attempting recovery before reaction"
                 )
-                return False
+                restarted = await start_bot()
+                if not restarted or not self.bot:
+                    log_warning(
+                        "[telegram_interface] Bot recovery failed, cannot add reaction"
+                    )
+                    return False
 
             chat_id = getattr(message, "chat_id", None) or getattr(
                 message.chat, "id", None
@@ -2669,7 +2802,12 @@ def shutdown_interface():
 
     Called before reload or shutdown to properly cleanup resources.
     """
-    global telegram_interface, _polling_task
+    global \
+        telegram_interface, \
+        _polling_task, \
+        _bot_started, \
+        _bot_starting, \
+        _bot_retry_task
 
     if telegram_interface is None:
         log_debug("[telegram_bot] No interface to shutdown")
@@ -2689,6 +2827,14 @@ def shutdown_interface():
                     pass
             _polling_task = None
 
+        if _bot_retry_task is not None:
+            if not _bot_retry_task.done():
+                try:
+                    _bot_retry_task.cancel()
+                except Exception:
+                    pass
+            _bot_retry_task = None
+
         # Stop the bot if it's running
         if telegram_interface.bot is not None:
             # The actual bot shutdown is handled by the application lifecycle
@@ -2703,6 +2849,8 @@ def shutdown_interface():
             log_debug("[telegram_bot] Unregistered from interface registry")
 
         telegram_interface = None
+        _bot_started = False
+        _bot_starting = False
         log_info("[telegram_bot] Telegram interface shutdown complete")
 
     except Exception as e:

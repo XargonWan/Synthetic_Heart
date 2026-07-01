@@ -42,7 +42,7 @@ try:
     register_exposed_var(
         "ACTION_INTENT_ALLOW_MESSAGE_ACTIONS",
         label="Action Intent Allow Message Actions",
-        default=False,
+        default=True,
         value_type=bool,
         ui_type="bool",
         description="Allow Debrief to propose message_* actions",
@@ -244,11 +244,11 @@ class DebriefActionIntentPlugin:
         try:
             return bool(
                 config_registry.get_value(
-                    "ACTION_INTENT_ALLOW_MESSAGE_ACTIONS", False, value_type=bool
+                    "ACTION_INTENT_ALLOW_MESSAGE_ACTIONS", True, value_type=bool
                 )
             )
         except Exception:
-            return False
+            return True
 
     def _get_max_actions(self) -> int:
         try:
@@ -385,19 +385,46 @@ class DebriefActionIntentPlugin:
         max_actions = self._get_max_actions()
         proactive_enabled = self._proactive_enabled()
 
+        synth_name = "SyntH"
+        try:
+            synth_name = str(
+                config_registry.get_value("SYNTH_NAME", "SyntH", value_type=str)
+                or "SyntH"
+            ).strip()
+        except Exception:
+            pass
+
         system_prompt = (
-            "You are the Debrief Action-Intent analyzer. Your job is to detect\n"
-            "promised, implied, or missing actions that the assistant should have\n"
-            "performed based on the user message and the assistant response.\n\n"
-            "Rules:\n"
-            "- Only return actions from the available action schemas.\n"
-            "- Do NOT repeat actions already processed or failed.\n"
-            "- If no recovery actions are needed, return an empty list.\n"
-            "- If proactive reminders are enabled, infer if the user mentioned\n"
-            "  any future time/date or a task to remember and propose a suitable\n"
-            "  reminder action (e.g. schedule_message or event) without inventing\n"
-            "  missing details.\n"
-            "- Output ONLY valid JSON with the exact schema below.\n\n"
+            f"You are the Debrief Action-Intent analyzer. Your job is to identify\n"
+            f"actions {synth_name} PROMISED or IMPLIED in its response but did NOT\n"
+            f"actually execute as formal actions.\n\n"
+            f"CRITICAL RULES:\n"
+            f"1. ALWAYS propose at least one recovery action when {synth_name} said\n"
+            f"   things like 'ok, i will do it', 'ok, i'll check', 'I will reply',\n"
+            f"   'I will send', 'i will do it tomorrow', or any other commitment.\n"
+            f"2. Convert conversational promises into concrete executable actions\n"
+            f"   using ONLY the available action schemas below.\n"
+            f"3. If {synth_name} promised to send a message, you MUST propose a\n"
+            f"   message_* action with the appropriate interface_path and text.\n"
+            f"4. If {synth_name} promised to schedule/remind something but did NOT\n"
+            f"   create a schedule_message or event action, you MUST propose it.\n"
+            f"   This is the most common failure mode: {synth_name} says 'ok, i will do it',\n"
+            f"   'ok, i'll check', 'I will reply', 'I will send', 'i will do it tomorrow'\n"
+            f"   but forgets to actually schedule it.\n"
+            f"5. Do NOT return an empty list unless {synth_name} explicitly refused\n"
+            f"   or said it cannot do something.\n"
+            f"6. Do NOT repeat actions already in processed_action_types or failed_action_types.\n"
+            f"7. Output ONLY valid JSON with the exact schema below.\n\n"
+            "EXAMPLES:\n"
+            'User: "Remind me tomorrow"\n'
+            f'{synth_name}: "Ok, I will write it tomorrow."\n'
+            '→ [{"type": "schedule_message", "payload": {"text": "...", "send_in": "1 day"}}]\n\n'
+            'User: "Check and let me know"\n'
+            f'{synth_name}: "Ok, I will check and let you know."\n'
+            '→ [{"type": "message_telegram_bot", "payload": {"text": "...", "interface_path": "..."}}]\n\n'
+            'User: "I need a reminder for the meeting"\n'
+            f'{synth_name}: "Perfect, I have set the reminder for the meeting."\n'
+            '→ [{"type": "schedule_message", "payload": {"text": "Meeting reminder", "send_in": "..."}}]\n\n'
             "Schema:\n"
             '{"actions":[{"type":str,"payload":object,"reason":str,"confidence":"low|medium|high"}]}'
         )

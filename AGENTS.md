@@ -22,12 +22,12 @@
                   └──┬──────────┬──────────────┬─────────┘
                      │          │              │
               ┌──────┴───┐  ┌───┴────┐   ┌─────┴──────┐
-              │ plugins/ │  │ cortex/│   │ interface/ │
-              │          │  │ llm_   │   │            │
-              │ actions  │  │ engines│   │ Telegram   │
-              │ agents   │  │        │   │ Discord    │
-              │          │  │ Gemini │   │ Matrix     │
-              └──────────┘  │ GPT …  │   │ Ollama API │
+              │ plugins/ │  │engines/│   │ interface/ │
+              │          │  │        │   │            │
+              │ actions  │  │external│   │ Telegram   │
+              │ agents   │  │ live   │   │ Discord    │
+              │          │  │ agent  │   │ Matrix     │
+              └──────────┘  │Gemini …│   │ Ollama API │
                             └────────┘   └────────────┘
 ```
 
@@ -35,7 +35,7 @@
 |-------|----------|---------|
 | **Core** | `core/` | Message chain, validation, dispatcher, DB, notifier. Never hardcodes plugin/LLM/interface logic. |
 | **Plugins** | `plugins/` | Provide actions via `get_supported_actions()`. Subclass `PluginBase` or `AIPluginBase`. |
-| **LLM Engines** | `cortex/`, `llm_engines/` | Interchangeable reasoning backends. Subclass `AIPluginBase`. |
+| **LLM Engines** | `engines/` | Interchangeable reasoning backends (`external_engines/`, `live/`, `agent/`). Subclass `AIPluginBase`. |
 | **Interfaces** | `interface/` | I/O adapters (Telegram, Discord, Matrix, Ollama compat). Register actions via `get_supported_actions()`. |
 
 **Golden rule:** removing any plugin, engine, or interface must not break the rest of the system.
@@ -86,7 +86,7 @@ The **Agent plugin** (`plugins/agent_plugin.py`) gives Synth a controlled hand f
 - Subclass `AIPluginBase`.
 - Handle reasoning, output JSON actions.
 - Multiple engines can coexist; hot-swappable.
-- Primary: `cortex/llm_engine/` (newer). Legacy: `llm_engines/`.
+- Location: `engines/external_engines/` (API engines), `engines/live/` (live audio), `engines/agent/` (agentic). The `cortex/` and `llm_engines/` paths referenced in older docs no longer exist.
 
 ---
 
@@ -286,6 +286,15 @@ If any step fails, fix it before proceeding.
   `"⚠️ Stuck on [Error]. Requesting human or advanced model intervention."`
 - **Type hints required.** All Python functions need complete annotations (params + return).
 - **Cross-platform policy.** Default runtime is Linux containers. No Windows/macOS-specific primary code paths. Platform-specific logic only as a secondary, guarded case (`sys.platform`).
+- **Read logs if a bug fix is requested**": always read container logs or logs folder if some issue raises and the user asks your bug fixing in order to find the real cause of the issue, do not reply with guesses but with a real analisys of the logs and the code
+- **No keyword-based implementations.**
+  Never design or implement features whose behavior depends primarily on detecting specific words, phrases, trigger terms, or regular expression matches, as this won't work in a multi language environment.
+  Avoid logic such as:
+  - `if message contains X then do Y`
+  - keyword lists
+  - trigger-word routing
+  - regex-based intent detection
+  - hardcoded phrase matching for feature activation
 
 ---
 
@@ -317,15 +326,24 @@ Monitor: `docker exec synth-dev tail -f /app/logs/synth.log | grep -E "run_actio
 ---
 
 ## 10. Documentation
+After any substatnial code change or feature addition evaluate a documentation update.
 
-- Location: `docs/` (Sphinx, ReadTheDocs format, English).
+- Location of Wiki/Documentation: `docs/` (Sphinx, ReadTheDocs format, English).
+- README.md is located in the project root
 - Evaluate whether your changes require a docs update. If they do, update docs as part of the task.
+- At the same time update this file, AGENTS.md if something critical is missing for the future iterations or if the information need to be updated
 
 ---
 
 ## 11. Container & Infrastructure Notes
 
+**Container restart:**
+```bash
+docker compose up -d --build
+```
+
 **Dev container restart:**
+Some devs might want to have a developemnt deploy, usually called `docker-compose-dev.yml`
 ```bash
 docker compose -f docker-compose-dev.yml --env-file .env-dev up -d --build && rm -rf logs/dev/*
 ```
@@ -348,6 +366,100 @@ docker exec synth-dev tail -f /app/logs/synth.log | grep -E "\[grillo\]|grillo"
 > **Status:** known / in progress / workaround in place
 > **Notes:** anything that helps the next agent understand it fast
 > ```
+
+> Resolved issues (Status: fixed) have been moved to [`FIXED_ISSUES.md`](FIXED_ISSUES.md).
+
+---
+
+### GBNF action grammar — hard constraint for local cortex output  <!-- 2026-06-21 -->
+**What:** `force_action_grammar: true` in an openai_compat endpoint's `extra_config` makes `cortex_bridge` auto-build a GBNF grammar (`core/external_endpoints/action_grammar.py:build_actions_gbnf`) whose `type` enum is the exact set of actions offered for the request, and send it via `extra_body.grammar`. llama.cpp then constrains decoding so the model can only emit one well-formed `{"actions":[{"type":<known>,"payload":{...}}]}` object — no `<think>`/`<thought>` preamble (output must start with `{`), no malformed JSON, no invented/combined/duplicated types, and generation stops after the first object (kills the repetition cascade). This is the real fix for the whole class of local-model output failures; `force_json_object` is best-effort and silently ignored by many llama.cpp builds.
+**Scope/safety:** opt-in per endpoint and only wired through the OPENAI-protocol path — other engines (gemini/anthropic/xai) are untouched. Implies the in-prompt protocol (`_disable_tools()` returns true for it, since a grammar constrains *content*, not tool_calls). A manual `extra_config.grammar` takes precedence; `response_format` is dropped when a grammar is present (redundant/conflicting). Payload schemas are intentionally NOT encoded (only `payload ::= object`) — encoding all 49 action schemas would be enormous/brittle.
+**Caveat:** the grammar is generated, not validated against a live llama.cpp here. If a malformed grammar ever slips in, the server rejects the request and the turn fails — remove `force_action_grammar` to fall back. The builder fails safe (returns `None` → no grammar) on any internal error.
+
+---
+
+### Local model 20-min runaway + leaked `<thought>` (json_object not enforced)  <!-- 2026-06-21 -->
+**Symptom:** A single chat turn took ~20 min and logged a malformed thinking tag plus cascading repeated `message_telegram_bot` outputs; only the first message was delivered. Trace: 1240s elapsed, `prompt 4887 + completion 27881 ≈ 32768` — the model generated until it **filled its entire 32k context window**.
+**Location:** `core/external_endpoints/adapters/openai_compat.py` (`_strip_thinking`, `chat_completion`); `core/external_endpoints/bridges/cortex_bridge.py` (`_extra_api_kwargs`).
+**Status:** mitigated (2026-06-21).
+**Notes:** Two independent causes. (1) The model ignored `enable_thinking=False` and emitted reasoning terminated by `</thought>`; `_strip_thinking` only matched `<think>`/`<thinking>`, not `<thought>`, nor a dangling closing tag (open tag dropped), so it leaked into content (JSON was still extracted after it, so the first reply went out). Fixed: regex now covers `thought` and a leading `^.*?</…>` dangling close. (2) **`response_format: json_object` is NOT enforced by this llama.cpp/model** — the output contained reasoning + prose + repeated JSON objects, i.e. free-form, so `force_json_object` is effectively a no-op here. With **no `max_tokens`**, a repetition loop ran to the context limit. Fixed: a default `max_tokens` (4096) is applied by `cortex_bridge._extra_api_kwargs()` — **only for local-model endpoints** (`disable_tools` / `force_action_grammar`); an explicit `extra_config.max_tokens` always wins, and cloud openai endpoints (xai, openrouter) stay uncapped (scoping tightened 2026-06-21 — every endpoint here is `protocol: openai`, so the blanket adapter default was wrong). The only *hard* JSON constraint for this server remains a GBNF `grammar` (already forwardable via `extra_config.grammar`); `json_object` should be treated as best-effort on local backends.
+
+---
+
+### Langfuse traces that "start with an error" are corrector retries, not a fault  <!-- 2026-06-20 -->
+**Symptom:** In Langfuse the input of many generations begins with `{"system_message": {"type": "error", "message": "=== PERSONA … === CORRECTION === CRITICAL ERROR: Your previous response was not valid JSON or incomplete …"}}`. Looks alarming, as if the system errored before the model ran.
+**Location:** `core/transport_layer.py` `run_corrector_middleware` (`correction_payload = {"system_message": {"type": "error", …}}`, ~line 2019); the 2026-06-20 fix also prepends the persona block. This object is sent as the **user-role content** of a fresh single-turn request.
+**Status:** working as designed (recovery), but high-frequency on local quants — diagnosis only, not changed.
+**Notes:** These traces are the corrector asking the model to repeat valid JSON after `extract_json_from_text` failed. Common trigger on the `1070ti` openai_compat endpoint is a **JSON syntax error in a long reply** (e.g. `Expecting ',' delimiter at line 1 column 8360` — an unescaped `"` mid-string), not the "missing message action" loop documented above. The retry usually recovers (valid `message_*` action in the output). Root enabler: `core/external_endpoints/adapters/openai_compat.py` sends **no `response_format`/grammar** (only `extra_body.enable_thinking=False`), so the model free-decodes and small Q4 models break JSON on 2–4 paragraph outputs. Why it's invisible in `cortex_api.log`/`synth-cortex`: the whole correction envelope is one big string sanitized to `<string: N chars>`, so `cortex_search("system_message")` returns nothing — only Langfuse shows the full text. Mitigation now shipped: set `force_json_object: true` (or an explicit `response_format` / `grammar`) in the cortex endpoint's `extra_config` — `cortex_bridge._extra_api_kwargs()` forwards it so llama.cpp constrains decoding to valid JSON (auto-dropped when native tool-calling is active). See `docs/external_endpoints.rst` "Constrained JSON output". Opt-in per endpoint (zero regression for others); enable it on the local `1070ti` endpoint via the WebUI. Other levers: shorter outputs; stronger cortex.
+
+**Important follow-up (2026-06-20): `force_json_object` alone does NOT fix the small-model silence, and is silently dropped on chat turns.** Investigation of a "no reply" report showed two things: (1) chat turns always send 49 native `tools`, and the guard in `generate_response` strips `response_format` whenever tools are present — so `force_json_object` only ever applied to non-tool turns (e.g. diary merge), never to chats. (2) The actual silence is a *schema* failure, not a syntax one: the small quant returned valid JSON but emitted diary fields (`interaction_summary`/`personal_thought`/`emotions`/`content`) as top-level action types with **no `message_*` action** → `message_chain` "no outbound message action" → corrector loop → fallback skipped → user gets nothing. `json_object` guarantees syntax, not the action schema, so it can't fix this. New lever: `disable_tools: true` in `extra_config` (`cortex_bridge._disable_tools` / `_inject_actions_into_prompt`) — stops advertising native tools and folds the scoped action catalog into the system prompt (the legacy in-prompt protocol). **Critical implementation note:** in the PromptRequest path the action catalog is delivered *only* via native tools (`OpenAIRenderer.render()` emits system+history+current; `system_instruction` carries format rules + persona, NOT the actions list), so a naive "stop sending tools" would strip the catalog entirely — `disable_tools` MUST re-inject it (it does). With tools off, the `response_format` guard no longer fires, so `force_json_object` finally applies to chats. The guaranteed fix for "always include a message action" is still a json_schema/GBNF grammar (not yet built).
+
+**Follow-up (2026-06-20): with `disable_tools` on, the model now emits a message action but mis-addresses it.** After `disable_tools`+`force_json_object`, a manual reply came out as valid JSON *with* a message action — but the small quant hallucinated `interface_path: "/channels/main"` (→ Telegram chat `channels` → `BadRequest('Chat not found')`, silent non-delivery) and mangled the type (`"message_plugin, telegram_bot"`). Grillo outreach was unaffected because its target chat is system-set, not echoed from an incoming message. Two fixes: (1) `_inject_actions_into_prompt` now renders the catalog as a flat `- name: brief (payload keys: …)` list instead of a nested `{name:{brief,schema}}` dict — the nested shape made the model emit sub-keys like `brief` as action types. (2) `message_plugin._handle_message_action` now mirrors a reply to the **originating chat** when `_should_mirror_origin_path` is true, and is **excluded** for grillo/outreach/internal turns (those legitimately target a system-chosen chat). Routing detection is **per-turn scope-aware**: `_should_mirror_origin_path` resolves the engine via `derive_cortex_scope(context)` → `get_active_cortex_engine(scope)`. **Scope gate (2026-06-21):** in this deployment *every* endpoint is `protocol: openai` (1070ti, openrouter, xai-grok, xtx), so "OPENAI protocol" alone is not a useful discriminator — the mirror is therefore gated on the **local-model marker** (`extra_config.disable_tools` or `force_action_grammar`, the same flags `_disable_tools()` reads). So only the flagged local endpoint (1070ti) is mirrored; cloud openai endpoints (xai, openrouter) are left alone. `is_trainer` is present on the action-execution context (set in `message_queue`, passed straight through `run_action` → `execute_action`).
+
+---
+
+### Codebase audit completed — do not re-sweep  <!-- 2026-06-12 -->
+**Symptom:** N/A — this is an audit record, not a bug.
+**Location:** Whole repo; detailed ledger = the 24 commits ending at `d423162` (2026-06-11/12).
+**Status:** done — 15 production bugs fixed, 28 vacuous tests resurrected, production dirs lint-clean.
+**Notes:** The following checks were already performed and need not be repeated unless the code has changed since `d423162`:
+- *Commit review*: all commits from the month before 2026-06-11 reviewed line-by-line; defects fixed.
+- *Extended lint sweep* (`ruff --select B,PLE,ASYNC,RUF006,B023,B005,B039,B905`) across `core/`, `plugins/`, `engines/`, `interface/`: every hit triaged; real bugs fixed (loop-binding in `message_queue`/`notifier`, `lstrip` sample-URL bug, blocking subprocess in `gemini_cli`), the rest are accepted idiom (B904/ASYNC230/ASYNC109/B007/B009/B010/B027) or documented (RUF006, entry below).
+- *Default `ruff check`*: production dirs (`core`, `plugins`, `engines`, `interface`, `mcp_servers`, `vendor`) pass with zero errors. Remaining failures live only in `tests/`, `plugins_dev/`, `interface_dev/` (dev sandboxes, left as-is, incl. known F821s in `telethon_userbot.py` and `gasmask.py`).
+- *Semantic `ty` sweep* of `core/` (minus `webui.py`), `plugins/`, `engines/`, `interface/`: all call-level error classes (missing/unknown-argument, unresolved-reference/import, call-non-callable, not-iterable/subscriptable, invalid-argument-type) triaged. Real crashes fixed (`bio_manager.update_user_name`, `event_plugin` phantom `get_local_tz` + `run_action` signature, `message_send_utils` `TELEGRAM_TRAINER_ID`/missing `global`s, `telegram_bot.reset_chat`, `recent_chats` chat-path keys). Remaining `ty` diagnostics are annotation debt (`param: str = None` defaults, dict value-union noise, private `_queue` access) — verified non-bugs.
+- *Targeted pattern hunts*: nested `asyncio.run` (all guarded), HTTP calls without timeout (none in prod code), `run_coroutine_threadsafe().result()` deadlocks (none), `unittest.TestCase` classes with `async def` tests (all four affected files fixed).
+- *Known false positives* (don't re-investigate): `grillo_compactor` extract_json tuple overload, Iris/Auris TypedDict capability dicts, discord `disconnect(force)` stub mismatch, `ollama_compat_server` payload value-union subscript, `variables_engine` guarded casts, `models.py` hasattr-guarded isoformat.
+- *Explicitly NOT audited*: `core/webui.py` logic (maintainer decision — "works well enough"), runtime/integration behaviour against a live DB, deep business logic of `radio_host`/`emotion_manager`/memory plugins beyond pattern level, `automation_tools/`, `scripts/`, `webtop/`.
+- *Continuation pass (2026-06-12, HEAD `fd424ef`, code unchanged since `d423162`)*: deep business-logic review of `plugins/radio_host/` (all 5 files), `plugins/emotion_manager.py`, `plugins/memory_search.py`, `core/synth_core_memory.py`, `plugins/ai_diary.py`; review of `automation_tools/`, `webtop/` shell scripts; default + extended ruff sweep of `scripts/` (clean except two accepted-idiom hits: B007/B905 in `windows_setup.py`). All findings recorded as individual 2026-06-12 entries below; on maintainer request the same day, the fixes were applied (see each entry's Status). Still NOT audited: `core/webui.py` logic, live-DB integration behaviour beyond log sampling, `plugins_dev/`, `interface_dev/`.
+- *Open decisions for the maintainer*: delete `core/presence_manager.py` (entry below); add a CI `ruff check` gate (two of the shipped bugs were plain F821s a lint gate would have caught); run the `emotion_diary` schema migration on existing databases (entry below); verify `schedule_description` populates on the next live radio run (entry below).
+
+---
+
+### `core/presence_manager.py` is dead and partially broken  <!-- 2026-06-12 -->
+**Symptom:** None at runtime — nothing imports this module anywhere.
+**Location:** `core/presence_manager.py`
+**Status:** known — candidate for deletion, pending a maintainer decision.
+**Notes:** `presence_loop`/`evaluate_emotions` would work if wired in, but `reflect_on_recent_responses` imports `core.llm_logic` (a module that has never existed), calls `get_recent_responses(limit=10)` against a `(since_timestamp)` signature, and passes `insert_memory(emotion_state=...)` which may not match. Do not wire this module in without fixing those first.
+
+---
+
+### `ai_diary` sync `_run()` bridge blocks the event loop up to 10 s per call  <!-- 2026-06-12 -->
+**Symptom:** Interaction processing can stall while a diary entry is written; under DB latency the whole loop freezes for up to the 10 s future timeout.
+**Location:** `plugins/ai_diary.py`, `_run()` (ThreadPoolExecutor + `asyncio.run` + `future.result(timeout=10.0)`).
+**Status:** partially fixed.
+**Notes:** `DiaryPlugin.execute_action` is now `async`: the diary-write path awaits `add_diary_entry_async`/`_execute` directly, and the consolidation archive step runs the sync helper via `asyncio.to_thread`, so the action path no longer blocks the event loop. The sync wrappers (`add_diary_entry`, `get_entries_by_tags`, `archive_diary_entries`, ...) still use the `_run` bridge for their remaining sync callers (e.g. `core/webui.py` calls `archive_diary_entries` synchronously from async handlers) — convert those call sites when touching webui.
+
+---
+
+### `memory_search` plugin is deliberately dormant (`PLUGIN_CLASS = None`) with latent bugs  <!-- 2026-06-12 -->
+**Symptom:** None at runtime — the `memory_search` action is not registered; the file gives no hint it is disabled.
+**Location:** `plugins/memory_search.py` (last line), deactivated in commit `fee51dc` (2026-02-13) when the Recon plugins were introduced; live free-search now goes through `core/prompt_engine.free_memory_search`.
+**Status:** known — dormant by maintainer action, not dead code by accident. Latent bugs fixed 2026-06-12.
+**Notes:** Nothing in production instantiates `MemorySearchPlugin`, and the loader skips `PLUGIN_CLASS = None` modules. The latent bugs were fixed in place so reactivation is safe: empty OR-joins no longer produce invalid `WHERE ()` SQL for time-window-only free searches, and the chat-history sub-query is now restricted to mode='free' (tags mode with a time window no longer floods results with unrelated chat rows). To reactivate, restore `PLUGIN_CLASS = MemorySearchPlugin`.
+
+---
+
+### pytest runs pollute the live `logs/` directory with test noise  <!-- 2026-06-12 -->
+**Symptom:** `get_recent_errors` MCP output is dominated by bursts like `Recon plugin MagicMock parse failed ...` and synthetic `telegram_bot/1` correction warnings, all stamped within the same second.
+**Location:** Test suite logging through the real `core/logging_utils.py` handlers into `logs/synth.log`.
+**Status:** known, not fixed.
+**Notes:** When triaging runtime errors from the synth-logs MCP, check whether the burst coincides with a `uv run pytest` invocation (MagicMock strings are the giveaway) before treating entries as production failures. Complements the existing "Interface tests can leak into the live `chat_history_cache`" entry.
+
+---
+
+### Unreferenced fire-and-forget asyncio tasks (RUF006)  <!-- 2026-06-11 -->
+**Symptom:** Fire-and-forget work occasionally never completes, with no error logged. ~80 call sites use bare `asyncio.create_task(...)` / `ensure_future(...)` without keeping a reference (`ruff check --select RUF006` lists them).
+**Location:** Spread across `core/` (webui, transport_layer, message_chain), `plugins/`, `interface/`.
+**Status:** known, not fixed — the event loop holds only weak references, so an un-referenced task *can* be garbage-collected mid-flight. Most of these are short-lived sends and complete before GC, which is why it is rarely observed.
+**Notes:** When touching one of these sites, keep a reference (module-level `set` + `task.add_done_callback(set.discard)`) rather than ignoring the return value. Do not mass-fix; convert opportunistically.
+
+---
+
+### Order-dependent test failures in full pytest runs  <!-- 2026-06-11 -->
+**Symptom:** `test_db_cutover::test_cutover_runs_backup_and_migration`, `test_exposed_variables_static::test_no_direct_getenv_for_exposed_vars`, `test_exposed_variables_style::test_exposed_variable_label_and_description_style`, `test_vox_defaults::test_active_vox_engine_default_is_kitten`, and `test_vox_plugin::test_active_vox_engine_default_is_kitten` fail in a full `uv run pytest` run (e.g. `assert 'disabled' == 'kitten'`) but all pass when their files are run in isolation. The affected set shifts slightly between runs (`test_grillo_beat_system::test_grillo_beat_types_exist` has also tripped this way).
+**Location:** `tests/` (config-registry / exposed-vars global state leaking between test modules)
+**Status:** known — pre-existing, not tied to any single commit.
+**Notes:** The `config_registry` and exposed-variable registry are process-global; earlier tests register or mutate vars (e.g. `ACTIVE_VOX_ENGINE` ends up `'disabled'`) that later default-assertion tests then see. When triaging a full-suite run, re-run the failing file alone before assuming a regression. Also note: local `.env` values (e.g. `SYNTH_PRIMARY_DB=soul`) leak into tests that don't pin them — `tests/test_db_preflight.py` now monkeypatches `core.db._get_db_type` for this reason. The reverse also happens: `tests/test_message_queue.py` `test_enqueue_*` tests hit the live DB configured in `.env` and time out when it is slow/unreachable (they pass standalone only with a responsive DB; verified unrelated to code changes via stash A/B).
 
 ---
 
@@ -383,14 +495,6 @@ docker exec synth-dev tail -f /app/logs/synth.log | grep -E "\[grillo\]|grillo"
 
 ---
 
-### Corrector returns empty when `successful_actions = []`  <!-- 2026-04-13 -->
-**Symptom:** LLM outputs actions without a `type` field (e.g. `{"arousal": 5}`). The unsupported-action check fires, sets `correction_context` with `successful_actions=[]`, and calls the corrector. The corrector told the LLM "PARTIAL SUCCESS — 0 actions succeeded, do NOT repeat successful ones", which was self-contradictory and caused the LLM to return an empty string all 4 attempts → fallback '😵'.
-**Location:** `core/transport_layer.py` → `run_corrector_middleware`, the `if correction_context:` block that builds `correction_message_text`.
-**Status:** fixed — when `successful_actions` is empty the corrector now uses a `CORRECTION NEEDED` prompt asking the LLM to resend the full response, not the "PARTIAL SUCCESS" / "do not repeat" wording that misled it.
-**Notes:** Also added `"Every action object inside 'actions' MUST have a 'type' field"` to `strict_requirements`. The root trigger is the LLM emitting bare dict actions like `{"arousal": 5}` or `{"feelings": {...}}` without a `type` key; the strict requirement now explicitly prohibits this.
-
----
-
 ### `test_corrector_on_top_level_message.py` — fake corrector never called  <!-- 2026-04-13 -->
 **Symptom:** `test_corrector_invoked_when_top_level_message_without_message_action` fails with `AssertionError: assert 'context' in {}` — the `called` dict is empty because the fake was never invoked.
 **Location:** `tests/test_corrector_on_top_level_message.py`
@@ -407,75 +511,10 @@ docker exec synth-dev tail -f /app/logs/synth.log | grep -E "\[grillo\]|grillo"
 
 ---
 
-### `test_openrouter_engine.py` uses stale import patch targets  <!-- 2026-04-17 -->
-**Symptom:** Multiple tests fail with `ModuleNotFoundError: No module named 'cortex'` when patching paths like `cortex.llm_provider.openrouter.*`.
-**Location:** `tests/test_openrouter_engine.py` patch targets; current engine module lives under `engines/external_engines/openrouter.py`.
-**Status:** fixed.
-**Notes:** Patch targets now point to `engines.external_engines.openrouter.*`. Suite also reflects current document-attachment handling (`application/pdf`) in multimodal extraction.
-
----
-
-### `grillo_outreach` may route to invalid chat id `-1`  <!-- 2026-04-17 -->
-**Symptom:** Outreach scheduler starts and enqueues beats, but messages are sent to `interface_path` values like `synth_webui/-1` and do not appear in active WebUI sessions (e.g. `webui_default`).
-**Location:** `plugins/grillo/grillo_outreach.py` target resolution in `_get_target_interface_and_chat`; fallback query over `chat_history_cache` can recover stale interface paths.
-**Status:** fixed.
-**Notes:** Resolution now rejects sentinel chat IDs (`-1`, empty, `none`, `null`) and prefers explicitly configured `GRILLO_OUTREACH_CHAT_IDS` before DB fallback. If outreach appears silent, check for warnings like `no active websocket for session -1` in `synth.log`.
-
----
-
-### google-genai async close can raise `_async_httpx_client` AttributeError  <!-- 2026-04-17 -->
-**Symptom:** Console shows `Task exception was never retrieved` with `BaseApiClient.aclose()` failing: `AttributeError: 'BaseApiClient' object has no attribute '_async_httpx_client'`.
-**Location:** google-genai SDK cleanup path (`google/genai/_api_client.py`) triggered from project client instances in `engines/external_engines/gemini_api.py`, `core/live_session_manager.py`, `plugins/live_engines/gemini.py`, and `core/external_endpoints/adapters/gemini_adapter.py`.
-**Status:** fixed in-project workaround.
-**Notes:** Added `core/genai_client_utils.py` and apply `harden_genai_client_for_async_close(...)` immediately after each `genai.Client(...)` construction. It injects a no-op async close target when missing, preventing unhandled shutdown tasks on affected SDK builds.
-
----
-
-### Langfuse response may attach to wrong request when model label drifts  <!-- 2026-04-18 -->
-**Symptom:** Some traces show request metadata only (missing output/error/status/elapsed), while nearby traces can look mismatched during concurrent calls.
-**Location:** `core/cortex_api_logger.py`, `_pop_langfuse_request` fallback behavior.
-**Status:** fixed.
-**Notes:** Previous fallback popped the newest stack item even when `engine/model` did not match, which could orphan the correct request. Matching now uses: (1) exact `engine+model`, (2) same `engine`, and otherwise returns `None` without popping unrelated requests.
-
----
-
 ### `emotion_diary` legacy schema truncates low intensities to zero  <!-- 2026-04-18 -->
-**Symptom:** `emotion_diary` appears dominated by zero-intensity rows even while `emotion_state` has non-zero baseline values (e.g. `0.1` for low emotions).
-**Location:** MariaDB table `emotion_diary` (legacy schema), `plugins/emotion_manager.py` (`_log_emotion_diary_entry` / `set_emotion`).
-**Status:** known, not fixed.
-**Notes:** Some deployments still use a legacy `emotion_diary` schema with `id varchar(100)` and `intensity int(11)` (no `timestamp`). The emotion manager writes floats (including baseline `0.1`), but DB coercion stores these as `0`, creating misleading analytics. The plugin's schema-adaptive insert avoids crashes but does not prevent numeric truncation.
-
----
-
-### `grillo_activity_log.diary_entry_id` may reference missing `ai_diary` rows  <!-- 2026-04-18 -->
-**Symptom:** PostgreSQL staging migration can fail on `grillo_activity_log_diary_entry_id_fkey` with errors like `Key (diary_entry_id)=(1566) is not present in table "ai_diary"`.
-**Location:** MariaDB source data in `grillo_activity_log` vs `ai_diary`; migration handling in `core/main_db_migration.py`.
-**Status:** fixed in-project workaround.
-**Notes:** The real `3306` source contained 24 orphaned `grillo_activity_log.diary_entry_id` values. The migration now preserves those activity rows but writes the broken `diary_entry_id` references as `NULL` in PostgreSQL, matching the target FK policy (`ON DELETE SET NULL`) and allowing the rest of the dataset to load.
-
----
-
-### Postgres compat release path can emit unawaited `Pool.release` warnings  <!-- 2026-04-18 -->
-**Symptom:** Runtime smoke against Postgres logs `RuntimeWarning: coroutine 'Pool.release' was never awaited` during connection cleanup.
-**Location:** `core/db_backends.py` (`PostgresCompatConnection.close`), `core/db.py` (`release_conn`, `_ConnProxy.close`).
-**Status:** fixed.
-**Notes:** `asyncpg.Pool.release(...)` is awaitable. The compat close path now returns the release result instead of consuming it synchronously, and `release_conn()` awaits any awaitable close/release result so Postgres cleanup stays warning-free.
-
----
-
-### Proxy cursors can break `async with` via delegated `__aenter__` lookup  <!-- 2026-04-18 -->
-**Symptom:** Startup preflight logs `[db] ensure_plugin_tables failed: '_ProxyCursor' object does not support the asynchronous context manager protocol` even though the inner cursor supports async context methods.
-**Location:** `core/db.py` (`ensure_plugin_tables` local `_cursor_ctx` helper, `_ConnProxy.cursor` proxy wrappers).
-**Status:** fixed.
-**Notes:** Special-method lookup for `async with` bypasses `__getattr__`, so proxy cursors that only delegate `__aenter__`/`__aexit__` cannot be used directly in `async with`. The preflight helper now calls the delegated enter/exit methods explicitly when present.
-
----
-
-### `ai_diary` merge query still uses MySQL `GROUP_CONCAT ... SEPARATOR` syntax  <!-- 2026-04-18 -->
-**Symptom:** Runtime logs show `syntax error at or near "SEPARATOR"` during diary merge/debrief paths.
-**Location:** `plugins/ai_diary.py` (`DiaryPlugin.on_debrief`, query around `_get_unmerged_entries`).
-**Status:** known, not fixed.
-**Notes:** PostgreSQL rejects MySQL's `GROUP_CONCAT(... SEPARATOR ...)` form. The current query needs a Postgres equivalent such as `string_agg(...)` on the Postgres path.
+**Location:** MariaDB table `emotion_diary`, `plugins/ai_diary.py` `init_diary_table()`, `plugins/emotion_manager.py`.
+**Status:** partially fixed — code resolved 2026-06-12, existing databases still need a manual migration.
+**Notes:** Root cause was two competing `CREATE TABLE IF NOT EXISTS` definitions (ai_diary's `intensity INT` variant vs emotion_manager's `intensity FLOAT`); the DDLs are now identical, so fresh databases are correct. **Open maintainer action:** already-deployed databases keep the old table — run `ALTER TABLE emotion_diary MODIFY intensity FLOAT` (plus id/timestamp alignment) on the live DB if accurate emotion history matters.
 
 ---
 
@@ -519,219 +558,11 @@ docker exec synth-dev tail -f /app/logs/synth.log | grep -E "\[grillo\]|grillo"
 
 ---
 
-### `send_message` alias rewrite could trigger avoidable correction on `body` payloads  <!-- 2026-04-18 -->
-**Symptom:** Langfuse traces can show an initial LLM reply like `{"type":"send_message","payload":{"body":"..."}}` that is semantically fine, but validation fails after internal normalization rewrites the type to `message_telegram_bot` without a canonical `payload.text` field. The corrector retry then succeeds, making the first correction look unnecessarily "stupid".
-**Location:** `core/message_chain.py`, LLM-originated action normalization before validation.
-**Status:** fixed.
-**Notes:** The message chain now promotes legacy text aliases (`body`, `content`, `message`, `value`) into `payload.text` before validation and reruns `interface_path` injection after rewriting generic `message` / `send_message` actions to concrete `message_*` types.
-
----
-
-### OpenAI-compatible external endpoint probe ignored configured adapter timeout  <!-- 2026-04-19 -->
-**Symptom:** Fresh OpenAI-compatible endpoints (for example OpenRouter) can log `ping_test exception ... Connection timeout` and `list_models HTTP fallback failed ... TimeoutError()` during auto-probe even when the endpoint-level probe timeout is configured much higher, leaving `available_models` empty in the UI.
-**Location:** `core/external_endpoints/adapters/openai_compat.py` (`_list_models_via_http`, `ping_test`), `core/external_endpoints/probe.py` timeout plumbing.
-**Status:** fixed.
-**Notes:** The adapter was built with `endpoint.extra_config.timeout`, but `list_models()` still hardcoded a 40s HTTP timeout and `ping_test()` defaulted to 30s with a 10s connect timeout unless a caller overrode it manually. The adapter now uses its configured timeout for both model discovery and ping probes by default.
-
----
-
-### `external_endpoints.updated_at` string writes can fail on Postgres-backed endpoint registry paths  <!-- 2026-04-19 -->
-**Symptom:** Runtime warnings like `ext endpoint model DB persist failed: invalid input for query argument $2: '2026-04-18 22:08:45' (expected a datetime.date or datetime.datetime instance, got 'str')` can appear when saving endpoint state such as default model selection.
-**Location:** `core/external_endpoints/registry.py` (`update_endpoint`, `set_subsystem_map`, `_auto_set_default_model`, `set_default_model`).
-**Status:** fixed.
-**Notes:** Several registry writes formatted `updated_at` as a string while other paths already passed real timezone-aware `datetime` objects. The registry now binds real UTC datetimes consistently, matching the Postgres-compatible probe result path.
-
----
-
-### Queued trainer notifications could lose `skip_history` and pollute prompt context  <!-- 2026-04-19 -->
-**Symptom:** Engine-switch notifications like `✅ Cortex engine dynamically updated to ...` could appear in `chat_history_cache` / `history_recent`, especially during startup or interface registration races.
-**Location:** `core/notifier.py` (`flush_pending_for_interface`), `core/history_engine.py`.
-**Status:** fixed.
-**Notes:** The direct `notify_trainer()` path already sent `skip_history=True`, but queued trainer notifications were flushed later without that flag. The flush path now preserves `skip_history`, and the history builder ignores these legacy self-notification rows so old DB pollution stops affecting prompt context.
-
----
-
-### `ai_diary` consolidation could recursively re-merge whole days and bloat Gemini prompts  <!-- 2026-04-19 -->
-**Symptom:** Langfuse shows very large `@diary_merge` prompts with repeated diary fragments, and Gemini generations can stretch into ~100s while prompt reduction still fails to get under the size cap.
-**Location:** `plugins/ai_diary.py` (`DiaryPlugin.on_debrief`, `DiaryPlugin.execute_action` for `update_diary_entry`).
-**Status:** fixed.
-**Notes:** The consolidation beat grouped all rows for a day, updated only one row, and left the source rows in place; subsequent merges could concatenate the already-merged blob plus the originals again. The merge beat now carries exact source row IDs and the original merge timestamp through context, and `update_diary_entry` archives the merged source fragments after writing the consolidated row.
-
----
-
-### OpenAI-compatible image turns could be silently downgraded to text after a stale probe  <!-- 2026-04-19 -->
-**Symptom:** Image-only or image-plus-text turns reach prompt construction with attachments present, but the external endpoint request contains only text parts, so OpenRouter-compatible models appear to ignore the image.
-**Location:** `core/external_endpoints/bridges/cortex_bridge.py`, `core/external_endpoints/adapters/openai_compat.py`, `core/external_endpoints/probe.py`.
-**Status:** fixed.
-**Notes:** Fresh probes could persist `capabilities["vision"] = false` and `capabilities["cortex"] = false` when `ping_test()` / `_probe_vision_support()` fell back to the invalid model name `"default"`. The Cortex bridge then trusted the stale endpoint-level `vision` flag and silently stripped `image_url` parts even after the user selected a real model. Probes now resolve a concrete model before sending test requests, and the bridge forwards image parts when a vision mapping or explicit model selection exists so multimodal turns are not silently flattened.
-
----
-
-### OpenAI-compatible image-only turns could hallucinate non-visible details  <!-- 2026-04-19 -->
-**Symptom:** Requests with a real `image_url` attachment can still produce invented details (for example a nonexistent blindfold) when the user sends only an image and no caption.
-**Location:** `core/prompt_renderers.py` (`OpenAIRenderer.render_with_multimodal`).
-**Status:** fixed.
-**Notes:** The multipart current-turn text companion previously contained only the runtime prefix when `current_text` was empty, leaving the model free to fill gaps from prior chat context. The OpenAI renderer now adds an explicit grounding instruction for image attachments, telling the model to describe only clearly visible details and to admit uncertainty for ambiguous content.
-
----
-
-### SOUL `async_consolidate` ran on every idle compile  <!-- 2026-04-19 -->
-**Symptom:** Langfuse shows frequent `async_consolidate` traces that look like diary-consolidation churn, often on every idle transcript flush.
-**Location:** `plugins/soul_plugin.py` (`SoulPlugin._compile_interface`).
-**Status:** fixed.
-**Notes:** The SOUL plugin called `self._compiler.async_consolidate()` after every `post_session_compile()`, so routine idle compiles emitted consolidation work and traces far too often. The plugin now throttles background consolidation with a cooldown while `soul_force_compile` still bypasses the cooldown for explicit manual compiles.
-
----
-
-### SOUL Postgres recall could full-scan memcells and trip static injection timeouts  <!-- 2026-04-19 -->
-**Symptom:** Runtime logs show `get_static_injection() on SoulPlugin timed out after 5s` even though memcells and embeddings are present in Postgres; direct profiling shows `PostgresSoulRepository.recall_memories()` taking about 5.2 seconds on warm calls.
-**Location:** `core/soul/repository.py` (`PostgresSoulRepository.recall_memories`), SOUL Postgres tables `mem_cells` / `mem_cell_vectors`.
-**Status:** fixed.
-**Notes:** The lexical fallback query used unindexed `atomic_facts::text` trigram checks plus a composite `to_tsvector(episodic_trace || atomic_facts::text)` expression, forcing a sequential scan over `mem_cells`. Candidate selection now stays on indexed `episodic_trace` trigram/tsvector expressions and computes richer episodic-trace-plus-atomic-facts lexical overlap in Python after fetch. Live probe on `2026-04-19` dropped warm repo recall from about `5.2s` to about `3.3s` end-to-end static injection. When verifying SOUL state, query the separate `SOUL_POSTGRES_DSN` store directly; the `synth-db` MCP points at the legacy `synth` schema and cannot see `mem_cells`.
-
----
-
-### SOUL recall could inject diary-merge housekeeping into live prompts  <!-- 2026-04-19 -->
-**Symptom:** User-facing prompt context could include `soul_recalled_memories` entries such as `[DIARY CONSOLIDATION - INTERNAL SYSTEM TASK] ...` or `Performed update_diary_entry action`, leaking maintenance-only traces into normal chat turns.
-**Location:** `plugins/soul_plugin.py` (`SoulPlugin._recall_memories`).
-**Status:** fixed.
-**Notes:** SOUL memcells do not carry an explicit internal-task flag, so the live prompt path now filters diary-merge and nightly housekeeping traces before formatting recalled memories. This keeps normal same-chat recall intact while excluding consolidation-only prompt noise.
-
----
-
-### Selective correction context could store counts instead of action lists  <!-- 2026-04-19 -->
-**Symptom:** `corrector_middleware` could log `object of type 'int' has no len()` or `'int' object is not iterable` immediately after `Using payload_thread_id=...`, then exhaust retries without returning corrected JSON.
-**Location:** `core/action_parser.py` (`_request_selective_correction`), `core/transport_layer.py` (`run_corrector_middleware`).
-**Status:** fixed.
-**Notes:** `_request_selective_correction` stored integer counts in `correction_context.successful_actions` / `failed_actions`, but the transport-layer corrector expects iterable action/error records when building the selective-correction prompt. The producer now stores the real action lists plus explicit `successful_count` / `failed_count` fields, and the consumer defensively normalizes legacy malformed contexts.
-
----
-
-### Telegram multimodal extraction assumed every optional media attribute exists  <!-- 2026-04-19 -->
-**Symptom:** Runtime logs could show `Error extracting Telegram attachments: 'types.SimpleNamespace' object has no attribute 'photo'`, and attachment extraction aborted before reaching later media fields.
-**Location:** `core/multimodal_attachment.py` (`extract_multimodal_from_telegram`).
-**Status:** fixed.
-**Notes:** The Telegram extractor read `message.photo`, `message.document`, `message.audio`, `message.voice`, `message.video`, `message.video_note`, and `message.sticker` directly. Partial PTB message objects and test doubles do not guarantee those attributes exist. The extractor now uses `getattr(..., None)` for every optional field and treats missing sticker flags as false.
-
----
-
-### Async diary commands called sync diary retrieval on the event-loop thread  <!-- 2026-04-19 -->
-**Symptom:** Trainer diary commands could trip sync/async bridge errors while fetching diary entries from an async context, and `core/generic_commands.py` also imported a stale helper name (`last_chats_command_generic`) that no longer existed in `core.recent_chats`.
-**Location:** `core/command_registry.py` (`diary_command`, `context_command`), `core/generic_commands.py` (`generic_diary_command`, import of `last_chats_command_generic`).
-**Status:** fixed.
-**Notes:** The async command handlers now offload `get_recent_entries(...)` via `asyncio.to_thread(...)` instead of calling the sync diary bridge directly on the active loop thread. `generic_commands` now imports `last_chats_command` under the expected alias, and `command_registry.context_command` was aligned with the actual `core.context` API (`set_context_state` / `get_context_state`).
-
----
-
-### Recovered JSON with extra trailing content could drop later actions silently  <!-- 2026-04-20 -->
-**Symptom:** Runtime logs could show `JSON recovered after ... parsing errors`, followed by a successful `message_*` action execution and `All actions executed successfully despite JSON recovery`, even though the raw LLM response still contained additional malformed actions later in the payload. The recovered first action would run, but later diary/emotion/animation actions could be lost without a correction pass.
-**Location:** `core/message_chain.py` (`handle_incoming_message` recovery/correction branch), `core/transport_layer.py` (`extract_json_from_text`).
-**Status:** fixed.
-**Notes:** The message chain now treats `recovered=True` plus retained extra text as a selective-correction case, even when the salvaged actions themselves executed successfully. This preserves already-run actions while asking the corrector for the dropped remainder instead of silently terminating the loop.
-
----
-
-### External cortex bridge dropped PromptRequest and fell back to legacy JSON flattening  <!-- 2026-04-20 -->
-**Symptom:** External endpoint-backed cortex engines (for example OpenRouter via `ExternalCortexEngine`) could log classic `system + giant user blob` requests even when `build_prompt_request()` had attached a `__prompt_request`. MCP traces showed large serialized prompt dicts in the last user turn instead of the renderer's structured messages.
-**Location:** `core/plugin_instance.py` (`prompt.pop("__prompt_request", None)` handoff), `core/external_endpoints/bridges/cortex_bridge.py` (`ExternalCortexEngine`).
-**Status:** fixed.
-**Notes:** `plugin_instance` only forwards the typed prompt object when the resolved engine advertises `supports_prompt_request`. The bridge already knew how to render `PromptRequest`, but did not set the flag, so the typed object was stripped and the bridge always fell back to the legacy dict path. `ExternalCortexEngine.supports_prompt_request = True` now keeps the typed prompt alive end-to-end.
-
----
-
-### External OpenAI-compatible PDF attachments were serialized as image parts  <!-- 2026-04-20 -->
-**Symptom:** Uploading a PDF manual through an external OpenAI-compatible cortex endpoint (for example OpenRouter → xAI Grok) could fail with `Invalid request content: Invalid base64-encoded image.` MCP traces showed the last user turn containing `{"type":"image_url","image_url":{"url":"data:application/pdf;base64,..."}}`.
-**Location:** `core/external_endpoints/bridges/cortex_bridge.py` (`ExternalCortexEngine._format_mm_part`, `_build_mm_parts_from_prompt_request`), `core/prompt_renderers.py` (`_build_multimodal_turn_text`, `OpenAIRenderer.render_with_multimodal`).
-**Status:** fixed.
-**Notes:** The external bridge treated every non-Gemini binary attachment as an OpenAI `image_url` data URI, so PDFs were mislabeled as images and rejected by providers that validate image content. OpenAI-compatible document attachments are now converted into document-aware prompt context: extracted document text is injected into the final user turn when available, and image-only/scanned PDFs fall back to attached page images plus explicit prompt guidance so vision-capable models can read visible text from the document pages. Gemini endpoints still receive native inline document data.
-
----
-
-### External endpoint adapters still do not use native tool calls end-to-end  <!-- 2026-04-20 -->
-**Symptom:** Even after PromptRequest rendering, external endpoint-backed cortex engines can still rely on freeform JSON-in-text responses instead of native tool calls. MCP traces for external OpenRouter-backed turns may show `messages` only, with no observable `tools` payload, and malformed multi-action JSON can still occur.
-**Location:** `core/external_endpoints/bridges/cortex_bridge.py` (`generate_response` only forwards `messages`), `core/external_endpoints/adapters/openai_compat.py` (`chat_completion` returns `message.content` only, no tool-call parsing), plus other external adapters.
-**Status:** known, not fixed.
-**Notes:** The PromptRequest handoff bug is fixed, so external bridges now render structured messages, but the external adapter stack still lacks a full tool-declaration and tool-call-response path comparable to the built-in OpenRouter engine. Until that lands, external endpoints remain vulnerable to malformed text JSON in multi-action replies.
-
----
-
-### Selective correction retried safety-blocked actions and wasted an extra LLM call  <!-- 2026-04-20 -->
-**Symptom:** After a user-visible `message_*` action succeeded, logs could still show a second OpenRouter call from `corrector_middleware` that returned `{"actions":[]}` because the only remaining failed action was already marked `unfixable` (for example `update_emotion_state` blocked by safety policy / whitelist).
-**Location:** `core/action_parser.py` (`_request_selective_correction`).
-**Status:** fixed.
-**Notes:** `_request_selective_correction()` now filters out failed actions marked `unfixable` before building the correction prompt. If every failed action is unfixable, the helper skips the corrector entirely instead of burning an extra round-trip that can only return an empty action list.
-
----
-
-### Literal newlines inside JSON strings could trigger a spurious corrector round-trip  <!-- 2026-04-20 -->
-**Symptom:** Runtime logs could show a raw LLM reply that already looks like `{"actions":[...]}`, followed by repeated `Invalid control character` parse errors and `LLM returned non-JSON output; activating corrector to request JSON format`. A second LLM call then re-emits the same message with properly escaped newlines.
-**Location:** `core/transport_layer.py` (`extract_json_from_text`).
-**Status:** fixed.
-**Notes:** Some external OpenAI-compatible models can emit literal newline, carriage-return, or tab characters inside quoted `payload.message` / `payload.text` strings instead of escaped JSON sequences. `extract_json_from_text()` now tries an additional variant that escapes control characters only while inside JSON string literals, so otherwise-valid action payloads recover locally without falling into the corrector loop.
-
----
-
-### Legacy `diary_entry` action alias could trigger an avoidable correction hop  <!-- 2026-04-20 -->
-**Symptom:** OpenRouter-backed manual turns could return a mostly valid action list such as `send_message` + `update_emotion_state` + `diary_entry`, then log `Detected unsupported action types from LLM: ['diary_entry']` and spend one extra corrector request only to rename the diary action to `create_personal_diary_entry`.
-**Location:** `core/message_chain.py` (`handle_incoming_message` normalization path before unsupported-action validation).
-**Status:** fixed.
-**Notes:** The message chain already normalized generic message aliases, but it did not rewrite the legacy diary action name before checking supported action types. `diary_entry` is now normalized in-place to `create_personal_diary_entry`, so mixed manual replies can execute directly without a correction round-trip.
-
----
-
-### Legacy `diary` action and diary payload aliases could still force correction or drop diary metadata  <!-- 2026-04-20 -->
-**Symptom:** OpenRouter-backed manual turns could recover into a valid action list such as `send_message` + `update_emotion_state` + `diary`, then still log `Detected unsupported action types from LLM: ['diary']` and make one avoidable correction call. Even when the corrector renamed the action to `create_personal_diary_entry`, payload keys like `entry`, `summary`, and `thought` could bypass the diary plugin's canonical `interaction_summary` / `personal_thought` fields.
-**Location:** `core/message_chain.py` normalization helpers before unsupported-action validation and action execution.
-**Status:** fixed.
-**Notes:** The message chain now normalizes both legacy diary action names (`diary`, `diary_entry`) and legacy diary payload keys (`entry`, `summary`, `thought`) into the canonical diary action schema before validation. This lets recovered manual replies execute without a corrector hop and preserves diary metadata for downstream diary creation.
-
----
-
-### Standalone `thought` action could still force correction instead of populating diary metadata  <!-- 2026-04-20 -->
-**Symptom:** OpenRouter-backed manual turns could return `send_message` + `diary` + `thought`, log `Detected unsupported action types from LLM: ['thought']`, and spend a correction round-trip only to drop the reflective thought from the final action list.
-**Location:** `core/message_chain.py` diary normalization helpers before unsupported-action validation.
-**Status:** fixed.
-**Notes:** Some replies emitted `thought` as a separate legacy action object instead of a `create_personal_diary_entry.payload.personal_thought` field. The message chain now folds a standalone `thought` action into the paired diary action before validation, preserving `personal_thought` metadata and avoiding the correction hop.
-
----
-
-### `chat_history_cache` deduplication query still used MySQL `DATE_SUB(... INTERVAL ...)` syntax  <!-- 2026-04-20 -->
-**Symptom:** Live manual turns could log `Deduplication check failed: syntax error at or near "5"` from `chat_history_cache`, then continue after skipping the duplicate check.
-**Location:** `core/chat_history_cache.py` (`save_chat_message`, duplicate-message guard query).
-**Status:** fixed.
-**Notes:** The Postgres SQL translator already rewrote `UTC_TIMESTAMP()` but not MySQL's `DATE_SUB(..., INTERVAL 5 SECOND)` form. The deduplication check now computes the 5-second cutoff in Python and passes it as a normal query parameter, keeping the save path dialect-neutral.
-
----
-
-### `chat_update_checker` DB polling still used MySQL `UNIX_TIMESTAMP(...)` syntax  <!-- 2026-04-20 -->
-**Symptom:** Runtime logs could show `DB query failed, falling back to in-memory check: function unix_timestamp(timestamp with time zone) does not exist` while polling for new non-self chat activity.
-**Location:** `core/chat_update_checker.py` (`ChatUpdateChecker._check_once`).
-**Status:** fixed.
-**Notes:** The checker used `MAX(UNIX_TIMESTAMP(timestamp))` and `WHERE UNIX_TIMESTAMP(timestamp) > %s`, which works on MySQL but fails on Postgres. The polling path now queries raw timestamps, converts DB values to epoch seconds in Python, and passes a timezone-aware `datetime` cutoff back into the follow-up query so both backends stay compatible.
-
----
-
-### SOUL static injection could time out on internal `grillo/-1` turns  <!-- 2026-04-20 -->
-**Symptom:** Runtime logs could show `get_static_injection() on SoulPlugin timed out after 5s` during internal Grillo memory-consolidation prompt assembly, even though the prompt later completed without any `soul_*` injections.
-**Location:** `plugins/soul_plugin.py` (`SoulPlugin.get_static_injection`).
-**Status:** fixed.
-**Notes:** SOUL runtime recall is useful for real user/session interfaces, but not for internal Grillo control turns like `grillo/-1`. The plugin now short-circuits static injection for internal Grillo interfaces before session bookkeeping or repository recall, avoiding wasted recall work and eliminating this fresh timeout path.
-
----
-
-### Grillo outreach synthetic message ids could skip PromptRequest assembly  <!-- 2026-04-20 -->
-**Symptom:** Grillo outreach turns could log `PromptRequest assembly skipped: invalid literal for int() with base 10: 'grillo_outreach_0'`, then fall back to the legacy flattened prompt path even though normal manual turns were already using `__prompt_request`.
-**Location:** `core/prompt_engine.py` (`_assemble_prompt_request`, `RuntimeContext.message_id` assignment).
-**Status:** fixed.
-**Notes:** Outreach beats synthesize string message ids like `grillo_outreach_0`. `_assemble_prompt_request()` previously coerced every `message_id` through `int(...)`, so typed prompt assembly aborted for those turns. The runtime now tolerates non-numeric message ids by leaving `RuntimeContext.message_id` unset instead of crashing, which keeps structured prompt rendering enabled for outreach beats.
-
----
-
-### Exact runtime timestamps could make trainer replies over-mention time and location  <!-- 2026-04-20 -->
-**Symptom:** Ordinary trainer replies could keep volunteering lines like `at 17:43 CEST right here in ...` even when the user did not ask for the time or location, making every response feel overly anchored to prompt metadata.
-**Location:** `core/prompt_renderers.py` (`_build_runtime_prefix`), `core/prompt_engine.py` (`load_unminified_chat_instruction`).
-**Status:** fixed.
-**Notes:** The current-turn runtime prefix injected the exact timestamp into every rendered user message, while the shared chat instruction only said to treat time fields as authoritative and did not tell the model to keep them in the background. The prompt stack now omits the exact timestamp from the per-turn prefix and explicitly tells the model to use time and location as ambient context unless precise details are actually needed.
+### External OpenAI-compatible adapters still do not use native tool calls end-to-end  <!-- 2026-05-07 -->
+**Symptom:** External Gemini cortex turns now log native `tools` payloads and can return parsed function-call actions, but OpenAI-compatible external endpoints can still rely on freeform JSON-in-text responses instead of native tool calls. MCP traces for external OpenRouter-backed turns may still show `messages` only or text-only completions with malformed multi-action JSON.
+**Location:** Remaining gap is primarily `core/external_endpoints/adapters/openai_compat.py` (`chat_completion` still returns `message.content` only, no tool-call parsing) plus any other non-Gemini external adapters that do not consume native tool declarations. External Gemini path is now handled by `core/external_endpoints/bridges/cortex_bridge.py` and `core/external_endpoints/adapters/gemini_adapter.py`.
+**Status:** partially fixed.
+**Notes:** The external bridge now preserves `PromptRequest` tool declarations for Gemini endpoints, forwards Gemini-native `tools`, and the SDK adapter normalizes Gemini `function_call` responses back into SyntH JSON actions. The remaining end-to-end native tool-calling gap is on external OpenAI-compatible and other non-Gemini adapters.
 
 ---
 
@@ -743,11 +574,11 @@ docker exec synth-dev tail -f /app/logs/synth.log | grep -E "\[grillo\]|grillo"
 
 ---
 
-### Broad validation is currently blocked by unrelated repo issues  <!-- 2026-04-22 -->
-**Symptom:** `uv run ruff check --fix .` fails on pre-existing files outside most feature slices (observed in `interface/message_send_utils.py`, `interface_dev/reddit_interface.py`, `interface_dev/telethon_userbot.py`, `interface_dev/x_interface.py`, `plugins/bio_manager.py`), and broad `uv run pytest --ignore=tests/plugins/test_selenium_ttsfree.py` can still surface unrelated failing tests (observed during one run: `tests/test_exposed_variables_static.py`, `tests/test_iris.py`).
-**Location:** Mixed pre-existing validation debt across interfaces, plugins, and broad regression suite.
-**Status:** known, not fixed.
-**Notes:** When working on a focused feature, still run the mandatory repo-wide commands for signal, but expect unrelated failures. Use scoped lint/type checks on touched files plus targeted pytest around the modified area to verify the feature itself until the broader repo debt is cleaned up. Additional unrelated pytest failures observed on `2026-04-22`: `tests/test_mobile_chat_behavior.py`, `tests/test_multimodal_attachment.py`, `tests/test_ollama_compat_server.py`, `tests/test_selkies_api.py`, `tests/test_vox_plugin.py`.
+### Orphan `synth-soul-db` can block the Postgres-first runtime on port 5432  <!-- 2026-05-11 -->
+**Symptom:** The browser can show `Unsafe attempt to load URL https://localhost:8000/ from frame with URL chrome-error://chromewebdata/`, `curl -kI https://localhost:8000` fails with TLS EOF / broken pipe, and `synth` logs loop on startup with `Legacy DB cutover failed: [Errno -2] Name or service not known`.
+**Location:** Docker Compose runtime state after switching to the Postgres-first stack; stale orphan containers such as `synth-soul-db` and `synth-db-backup` can survive from the older topology.
+**Status:** known / operational workaround.
+**Notes:** In the observed failure, the current `synth-db` service could not bind host port `5432` because orphan `synth-soul-db` still owned it. `docker compose up -d --force-recreate synth-db synth` then left `synth` and `synth-legacy-db` on `synth_network` while `synth-db` never came up correctly, so `synth` could resolve `synth-legacy-db` but not `synth-db`. Safe recovery was: stop the orphan containers without deleting volumes, then rerun `docker compose up -d --force-recreate synth-db synth`. After that, `docker exec synth getent hosts synth-db synth-legacy-db` resolved both hosts and `https://localhost:8000` returned `200 OK` again.
 
 ---
 
@@ -764,6 +595,102 @@ docker exec synth-dev tail -f /app/logs/synth.log | grep -E "\[grillo\]|grillo"
 **Location:** `core/action_state_manager.py`, `res/synth_webui/js/chat-window.mjs`
 **Status:** fixed.
 **Notes:** `ActionStateManager.update_phase()` now snapshots the old phase before mutation, and the chat window now logs incoming `action_state` WebSocket events so frontend and backend traces can be correlated directly.
+
+---
+
+### Stale `synth` image after branch switch can keep the old MySQL code path  <!-- 2026-05-11 -->
+**Symptom:** On `feat/postgres-migration`, `synth-db` (Postgres) is healthy and `docker compose config` resolves `DB_HOST=synth-db` / `DB_PORT=5432`, but WebUI still fails with TLS EOF and `synth` logs show `aiomysql` errors such as `OperationalError(2013, 'Lost connection to MySQL server during query')` or `Can't connect to MySQL server on 'synth-db'`.
+**Location:** Docker runtime / rebuilt state of the `synth` application container after changing branches.
+**Status:** known / operational workaround.
+**Notes:** The running `synth` container can still contain code from the previous branch even though the workspace and compose file are already on the Postgres migration branch. In the observed case, `/app/core/db.py` inside the live container still defaulted `_get_db_type()` to `mariadb`, while the workspace version defaulted to `postgres`. Safe recovery was: `docker compose up -d --build synth`, then verify the live container code and recheck `https://localhost:8000`.
+
+---
+
+### Repo-wide lint still has unrelated failures, but broad pytest is green  <!-- 2026-05-07 -->
+**Symptom:** `uv run ruff check --fix .` can still fail on pre-existing files outside most feature slices (observed in `interface/message_send_utils.py`, `interface_dev/reddit_interface.py`, `interface_dev/telethon_userbot.py`, `interface_dev/x_interface.py`, `plugins/bio_manager.py`), but broad `uv run pytest --ignore=tests/plugins/test_selenium_ttsfree.py -q --disable-warnings` passed on `2026-05-07` with `1185 passed, 15 skipped`.
+**Location:** Mixed pre-existing validation debt across interfaces, plugins, and broad regression suite.
+**Status:** partially fixed.
+**Notes:** The order-dependent pytest failures observed on `2026-05-06` in `tests/test_ai_diary_pool_behavior.py`, `tests/test_current_chat_history.py`, `tests/test_grillo_observer.py`, `tests/test_iris.py`, `tests/test_mobile_chat_behavior.py`, `tests/test_ollama_compat_server.py`, `tests/test_send_message_no_ws.py`, and `tests/test_vox_plugin.py` were fixed on `2026-05-07`. When working on a focused feature, still run the mandatory repo-wide commands for signal, but treat repo-wide Ruff failures as unrelated debt unless your slice touches those files. Use scoped lint/type checks on touched files plus targeted pytest around the modified area when the global lint pass is still dirty.
+
+---
+
+### `plugins/ai_diary.py` still has pre-existing scoped `ty` failures  <!-- 2026-05-07 -->
+**Symptom:** Even focused validation can fail on `uv run ty check plugins/ai_diary.py` with existing Optional/default and loose-type diagnostics such as `invalid-parameter-default`, `invalid-return-type`, and `unsupported-operator`, even when the only new edit is a small schema dict change.
+**Location:** `plugins/ai_diary.py`
+**Status:** known, not fixed.
+**Notes:** This is separate from the Gemini tool-schema regressions. If you only touch prompt/action metadata inside `DiaryPlugin.get_supported_actions()`, validate behavior with targeted pytest plus scoped type checks on the new shared schema-conversion files; do not assume fresh `ty` failures in `plugins/ai_diary.py` were introduced by the schema edit.
+
+---
+
+### `SYNTH_PRIMARY_DB=memory` can inherit stale MariaDB cortex settings for Grillo  <!-- 2026-05-05 -->
+**Symptom:** After switching to `SYNTH_PRIMARY_DB=memory`, fresh `grillo_activity_log` rows can appear in MariaDB with empty `response_text` / `diary_entry_id`, while logs show `[cortex_bridge:<engine>] generate_response failed: Connection error.` for internal `grillo/-1` beats.
+**Location:** Selected primary DB config registry (`BASE_CORTEX`, `GRILLO_CORTEX`) plus runtime Grillo prompt execution.
+**Status:** known / configuration-dependent.
+**Notes:** The DB selector itself can work correctly while still exposing older config values from the chosen DB. In the observed MariaDB case, `GRILLO_CORTEX=Default` fell through to `BASE_CORTEX=gemma`, so Grillo inherited a dead engine after the switch. When changing primary DBs, verify or realign the selected DB's cortex config keys, not just the connection settings.
+
+---
+
+### Interface tests can leak into the live `chat_history_cache` if persistence is not stubbed  <!-- 2026-05-05 -->
+**Symptom:** Running pytest can inject obvious test rows into runtime prompt context, for example `telegram_bot/123456789 -> "Private Rekku test"`, `synth_webui/session1 -> "Hello"`, or `discord_bot/888888 -> "hi"`.
+**Location:** Tests that call real interface entry points such as `interface.telegram_bot.handle_message`, `SynthWebUIInterface.send_message`, or `DiscordInterface.send_message` without mocking `add_message_to_context`, `save_chat_message`, or `save_response_message`.
+**Status:** workaround in place for the known offenders.
+**Notes:** The affected tests now stub persistence explicitly. When adding new interface tests, mock chat-history persistence or use isolated DB fixtures, otherwise runtime prompt context can be contaminated by test data.
+
+---
+
+### `interface/telegram_bot.py` has ~60 pre-existing `ty check` errors  <!-- 2026-05-07 -->
+**Symptom:** `uv run ty check interface/telegram_bot.py` emits ~60 errors: `unresolved-attribute` on `Message | None` and `User | None` unions, `invalid-return-type` on `get_trainer_id`, `invalid-argument-type` on coroutine-vs-Iterable, etc.
+**Location:** `interface/telegram_bot.py` throughout.
+**Status:** known, not fixed — all pre-existing before any session modifications.
+**Notes:** These are python-telegram-bot optional-chaining patterns that `ty` doesn't resolve without stub annotations. Any agent editing this file will see the same errors and should confirm via `git diff` that their change is limited to a single line before concluding the errors are pre-existing.
+
+---
+
+### `core/webui.py` has broad pre-existing `ty check` noise  <!-- 2026-05-11 -->
+**Symptom:** `uv run ty check core/webui.py` emits a long list of pre-existing diagnostics such as Starlette middleware callable mismatches, unresolved animation-handler attributes on stub unions, optional persona-manager attribute access, and deprecated `datetime.utcnow()` usage.
+**Location:** `core/webui.py` throughout.
+**Status:** known, not fixed.
+**Notes:** During the manual-backup WebUI work, `get_errors` stayed clean for the touched backup route/button code, but scoped `ty` still reported many unrelated historical issues across the file. Validate local WebUI edits with focused tests plus `get_errors`, and do not assume fresh `ty` noise in this file came from a small endpoint/template change.
+
+---
+
+### Correction system re-sends `message_*` on non-message action failures, causing duplicate Telegram messages  <!-- 2026-06-26 -->
+**Symptom:** User receives two identical (or near-identical) replies on Telegram for a single message. Langfuse shows 3 traces in rapid succession: a broken primary generation, a first correction that sends the message, then a second correction that sends a second message.
+**Location:** `core/transport_layer.py` `run_corrector_middleware`; correction prompt assembly.
+**Root cause:** When the primary generation (Venice/gemma-4-uncensored) produces broken output (prose + malformed JSON), the corrector issues a retry that includes a full `message_*` action and delivers it. If any non-message action in that first correction fails (e.g. `use_animation` with an invalid field), a *second* correction is triggered. The second correction prompt says "0 actions failed" but still hands the model the original user message — the model re-generates a complete response including a new `message_*`, causing a duplicate delivery.
+**Status:** known, not fixed.
+**Notes:** The corrector prompt needs to track which actions already succeeded (specifically: whether a `message_*` action has already been delivered) and suppress re-generation of message actions in follow-up correction passes. Until fixed, the workaround is to ensure `use_animation` (and other minor supplementary actions) don't trigger a correction pass at all, or to make the corrector only ask the model to emit the *failed* action types. Observed in Langfuse session at 06:49 CEST on 2026-06-26: traces dd3f1636 (first correction, message delivered) and e69bce37 (second correction, duplicate delivered).
+
+---
+
+### Gemma-4 missing closing `}` for action dict → diary payload selected as `parsed`  <!-- 2026-06-26 -->
+**Symptom:** message_chain logs `Normalizing action-key dictionary format` + `Added 6 synthetic action(s) for unregistered top-level key(s): interaction_summary, content, personal_thought, emotions, context_tags, involved_users` (the diary payload's own fields). Immediately followed by 12 unsupported action types, a correction, and eventual delivery. Trace: `ab6930e3-1689-48c6-a284-ea927c31695a`.
+**Location:** `core/transport_layer.py` `extract_json_from_text`; triggered by gemma-4-uncensored (Venice) output.
+**Root cause:** Gemma-4 sometimes emits the diary action dict without its closing `}`, so the outer `{"actions": [...], "type": "message_telegram_bot", ...}` is also malformed. The raw_decode scan falls back to the diary *payload* dict (minimum extra-chars parseable candidate). That dict has no `actions` key → message_chain normalizes its 6 fields as fake action types, then the unregistered-top-level-keys block doubles them to 12 → correction fires.
+**Status:** fixed 2026-06-26 — `json_repair` now also runs when `found_json` is a dict without `"actions"` (not just when nothing is found). It fixes the missing brace, json_repair returns a list `[outer_with_actions, use_animation]`, the list is detected and merged back into a single dict with `"actions"` containing all recovered actions. `syntax_repaired=True` in metadata; `had_errors=False`; no correction needed.
+**Notes:** The fix is in `extract_json_from_text` — the `_json_repair_needed` condition block at the bottom of the outer scan loop (outside all `if not found_json:` guards). Also: `json_repair` was NOT the cause of this trace (confirmed — no `json_repair` log entry exists; the bug predates the json_repair integration).
+
+---
+
+### Admin/maintenance actions leak into non-lite in-prompt catalogs for local endpoints  <!-- 2026-06-27 -->
+**Symptom:** When `PROMPT_LITE_MODE=false` and a local endpoint uses `disable_tools: true` or `force_action_grammar: true`, the `=== AVAILABLE ACTIONS ===` block injected by `_inject_actions_into_prompt` contains ~44 actions including admin/maintenance ones that should never appear in a normal chat prompt: `soul_force_compile`, `soul_force_rollup`, `soul_get_status`, `soul_run_curator`, `bio_full_request`, `bio_update`, `block_user`, `unblock_user`, `cleanup_old_chats`, `cleanup_old_mappings`, `compact_now`, `ensure_chat`, `resolve_chat`, `get_recent_chats`, `list_chats`, `decay_emotions`, `set_emotion`, `sync_emotions_from_all_sources`, `update_emotion_from_tags`, `static_inject`, `send_mate_message`, `trigger_weather_report`, `schedule_message`, and others.
+**Location:** `core/external_endpoints/bridges/cortex_bridge.py` `_inject_actions_into_prompt`; `core/prompt_engine.py` `_derive_default_prompt_action_types`, `_is_non_user_facing_action`.
+**Status:** known — cross-interface `message_*` leak and `PROMPT_LITE_MODE` bypass both fixed 2026-06-27; admin action leak in non-lite mode is open.
+**Notes:** The pre-filter (`_derive_default_prompt_action_types`) only excludes actions whose source matches a *registered* interface name. Plugin-provided actions (sources: `soul`, `bio`, `blocklist`, etc.) have no matching interface, so they pass through for every interface. `_is_non_user_facing_action` can exclude them if their brief/description contains "admin only", "deprecated", or "internal" — but most admin actions don't use those keywords. Two fix approaches: **(A) Tag at the plugin level** — add `"admin only"` to the brief of admin actions in each plugin's `get_supported_actions()`, so the existing guard in `_is_non_user_facing_action` catches them with zero new plumbing. **(B) Add an `admin_only` flag** to the action schema contract and update `_is_non_user_facing_action` to check it — cleaner but requires a schema change. Approach (A) is simpler. `PROMPT_LITE_MODE=true` already filters all these actions — the issue only affects non-lite local endpoints.
+
+---
+
+### Recon `parse_recon_response` missing `_raw_llm_text` on 4 plugins  <!-- 2026-06-27 -->
+**Symptom:** `Recon plugin ReconMemoryRecollectorPlugin parse failed: parse_recon_response() got an unexpected keyword argument '_raw_llm_text'` — and same for log_reader, tone_evaluator, language_evaluator. Crashes the entire recon dispatch for that plugin group, producing zero recon contributions.
+**Location:** `plugins/recon_memory_recollector.py`, `plugins/recon_log_reader.py`, `plugins/recon_tone_evaluator.py`, `plugins/recon_language_evaluator.py` — all `parse_recon_response()` signatures.
+**Status:** fixed.
+**Notes:** `core/recon.py:747` passes `_raw_llm_text=llm_text` as a keyword arg to all recon plugins. Four plugins didn't accept it. `recon_web_search.py` already had it (was fixed earlier). The fix adds `_raw_llm_text: str | None = None` as the last keyword parameter.
+
+### Server-side LLM errors skip correction loop  <!-- 2026-06-27 -->
+**Symptom:** When the LLM engine returns a non-recoverable error (e.g. `Logprobs not supported` from selenium-llm-engine proxying Gemini), the correction loop in `message_chain.py` would call the corrector 2+ times, each hitting the same dead engine and waiting for timeout (~120s each), before finally sending a fallback message.
+**Location:** `core/message_chain.py` (correction loop, line ~2365).
+**Status:** fixed.
+**Notes:** The fix adds a pre-check in the correction loop: if the LLM return text contains a known server-error marker (`logprobs not supported`, `internal server error`, `service unavailable`, `5xx` gateway errors), skip directly to the fallback message. The `Logprobs not supported` error itself comes from the selenium-llm-engine (not SyntH) — the OpenAI SDK it uses internally sends `logprobs` to Gemini, which rejects it. Fix the selenium-llm-engine to strip/not-set `logprobs` in its OpenAI-compatible adapter.
 
 ---
 
@@ -793,7 +720,7 @@ docker exec synth-dev tail -f /app/logs/synth.log | grep -E "\[grillo\]|grillo"
 | `chat_history_cache` | `core/chat_history_cache.py` | Message history per `interface_path`; source of truth for prompt context |
 | `chat_session_meta` | `core/session_meta.py` | Per-interface session metadata (JSON blob) |
 | `chat_archives` | `core/chat_archives_db.py` | Long-term archived chat history |
-| `ai_diary` | `plugins/ai_diary.py` | Synth's diary entries (`content LONGTEXT`, no `user_message` column in the canonical schema — see §12 for the recurring overflow issue) |
+| `ai_diary` | `plugins/ai_diary.py` | Synth's diary entries. Two competing CREATEs in the same file: `init_diary_table()` uses `content TEXT` + `user_message TEXT`; the lazy-init fallback uses `content LONGTEXT`. See §12 for the `user_message` overflow issue |
 | `ai_diary_archive` | `plugins/ai_diary.py` | Archived diary entries |
 | `memories` | `plugins/ai_diary.py` | Long-term memory entries (`content`, `author`, `tags`, `scope`, `emotion`) |
 | `emotion_state` | `plugins/emotion_manager.py` | Current emotion intensities with timestamps for decay |
@@ -832,6 +759,7 @@ All keys stored in the `config` table and accessible via `config_registry.get_va
 | `ACTIVE_VOX_ENGINE` | Active TTS engine |
 | `ACTIVE_AURIS_ENGINE` | Active STT engine |
 | `ACTIVE_IRIS_ENGINE` | Active vision/image engine |
+| `RADIO_HOST_ANNOUNCE_IF_NO_LISTENERS` | When enabled (default True), Synth only speaks on air if listeners are present. Set to False for always-on announcements. |
 | `SYNTH_NAME` | Synth's display name |
 | `SYNTH_PROFILE` | Synth's persona profile text (injected into every prompt) |
 | `SYNTH_ALIASES` | Comma-separated name aliases Synth responds to |
@@ -878,7 +806,7 @@ All keys stored in the `config` table and accessible via `config_registry.get_va
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **synthetic_heart** (9044 symbols, 29174 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **synthetic_heart** (10324 symbols, 33256 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
 

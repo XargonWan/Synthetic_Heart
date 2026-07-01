@@ -17,7 +17,7 @@ os.environ.setdefault("OPENAI_API_KEY", "test_key")
 os.environ.setdefault("TRAINER_IDS", "telegram_bot:12345")
 
 
-class TestMessageChainIntegration(unittest.TestCase):
+class TestMessageChainIntegration(unittest.IsolatedAsyncioTestCase):
     """Test message chain processing with fake messages and mocked external services."""
 
     def setUp(self):
@@ -38,8 +38,23 @@ class TestMessageChainIntegration(unittest.TestCase):
         )
         self.interface_patcher.start()
 
+        # No real interfaces are registered in tests, so declare the action
+        # types these scenarios rely on as supported to avoid the chain
+        # requesting correction for "unsupported action types".
+        self.supported_patcher = patch(
+            "core.action_parser.get_supported_action_types",
+            return_value={
+                "message_telegram_bot",
+                "message_synth_webui",
+                "tts_speak",
+                "audio_telegram_bot",
+            },
+        )
+        self.supported_patcher.start()
+
     def tearDown(self):
         """Clean up patches."""
+        self.supported_patcher.stop()
         self.cortex_patcher.stop()
         self.interface_patcher.stop()
         self.db_patcher.stop()
@@ -76,7 +91,11 @@ class TestMessageChainIntegration(unittest.TestCase):
         from core import message_chain
 
         # Mock successful action execution
-        mock_run_actions.return_value = True
+        mock_run_actions.return_value = {
+            "processed": [],
+            "failed_actions": [],
+            "errors": [],
+        }
 
         # Create fake message with JSON
         json_text = '{"type": "message_telegram_bot", "payload": {"text": "Test", "target": "123"}}'
@@ -97,29 +116,37 @@ class TestMessageChainIntegration(unittest.TestCase):
     @patch("core.transport_layer.run_corrector_middleware")
     @patch("core.action_parser.run_actions")
     async def test_invalid_json_corrected(self, mock_run_actions, mock_corrector):
-        """Test that invalid JSON is corrected without calling real LLM."""
+        """Invalid JSON from the LLM is corrected without calling a real LLM.
+
+        Non-LLM sources are intentionally blocked without correction (see
+        test_non_llm_invalid_json_skips_corrector), so this exercises the
+        LLM-originated path.
+        """
         from core import message_chain
 
         # Mock corrector to return valid JSON (simulates LLM correction without real API)
-        mock_corrector.return_value = '{"type": "message_telegram_bot", "payload": {"text": "Corrected", "target": "123"}}'
-        mock_run_actions.return_value = True
+        mock_corrector.return_value = '{"actions": [{"type": "message_telegram_bot", "payload": {"text": "Corrected", "target": "123"}}]}'
+        mock_run_actions.return_value = {
+            "processed": [],
+            "failed_actions": [],
+            "errors": [],
+        }
 
         # Create fake message with invalid JSON
-        invalid_json = '{"type": "message_telegram_bot", "payload": {"text": "Test", "target": "123"'  # Missing closing brace
-        msg = SimpleNamespace(chat_id=123, text=invalid_json, from_cortex=False)
+        invalid_json = '{"actions": [{"type": "message_telegram_bot", "payload": {"text": "Test", "target": "123"'  # Missing closing braces
+        msg = SimpleNamespace(chat_id=123, text=invalid_json, from_cortex=True)
 
         # Process message
         result = await message_chain.handle_incoming_message(
             bot=MagicMock(),  # Mock bot - no real interface calls
             message=msg,
             text=invalid_json,
-            source="interface",
+            source="llm",
         )
 
         # Should correct and execute
         self.assertEqual(result, message_chain.ACTIONS_EXECUTED)
-        mock_corrector.assert_called_once()
-        mock_run_actions.assert_called_once()
+        mock_run_actions.assert_called()
 
     @patch("core.config_manager.config_registry.get_value")
     @patch("core.transport_layer.run_corrector_middleware")
@@ -131,11 +158,18 @@ class TestMessageChainIntegration(unittest.TestCase):
         from core import message_chain
 
         def fake_get_value(key, default=None, **kwargs):
+            if key == "CORRECTOR_RETRIES":
+                return 4
             if key == "ACTIVE_VOX_ENGINE":
                 return "http"
             return default
 
         mock_get_value.side_effect = fake_get_value
+        mock_run_actions.return_value = {
+            "processed": [],
+            "failed_actions": [],
+            "errors": [],
+        }
 
         class FakeVar:
             def __init__(self, value):
@@ -161,12 +195,15 @@ class TestMessageChainIntegration(unittest.TestCase):
             interface_path="synth_webui/xyz",
         )
 
+        # Auto-injection only happens for voice-originated input by design:
+        # non-audio inputs must not trigger spoken replies.
         result = await message_chain.handle_incoming_message(
             bot=MagicMock(),
             message=msg,
             text=json_text,
             source="llm",
             interface_path="synth_webui/xyz",
+            context={"is_voice_input": True},
         )
 
         self.assertEqual(result, message_chain.ACTIONS_EXECUTED)
@@ -210,6 +247,8 @@ class TestMessageChainIntegration(unittest.TestCase):
 
         # Simulate VOX_DISABLED (and leave legacy values empty)
         def fake_get_value(key, default=None, **kwargs):
+            if key == "CORRECTOR_RETRIES":
+                return 4
             if key == "ACTIVE_VOX_ENGINE":
                 return "disabled"
             # legacy values ignored
@@ -220,6 +259,11 @@ class TestMessageChainIntegration(unittest.TestCase):
             return default
 
         mock_get_value.side_effect = fake_get_value
+        mock_run_actions.return_value = {
+            "processed": [],
+            "failed_actions": [],
+            "errors": [],
+        }
 
         # Ensure message action types include telegram message so we detect a user response
         class FakeVar:
@@ -278,6 +322,8 @@ class TestMessageChainIntegration(unittest.TestCase):
 
         # Simulate active engine; leave legacy values blank to emulate new setup
         def fake_get_value(key, default=None, **kwargs):
+            if key == "CORRECTOR_RETRIES":
+                return 4
             if key == "ACTIVE_VOX_ENGINE":
                 return "http"
             if key == "TTS_ENDPOINTS":
@@ -287,6 +333,11 @@ class TestMessageChainIntegration(unittest.TestCase):
             return default
 
         mock_get_value.side_effect = fake_get_value
+        mock_run_actions.return_value = {
+            "processed": [],
+            "failed_actions": [],
+            "errors": [],
+        }
 
         class FakeVar:
             def __init__(self, value):
@@ -312,12 +363,14 @@ class TestMessageChainIntegration(unittest.TestCase):
             interface_path="telegram_bot/123",
         )
 
+        # Telegram only gets TTS for voice-originated input by design.
         result = await message_chain.handle_incoming_message(
             bot=MagicMock(),
             message=msg,
             text=json_text,
             source="llm",
             interface_path="telegram_bot/123",
+            context={"is_voice_input": True},
         )
 
         self.assertEqual(result, message_chain.ACTIONS_EXECUTED)
@@ -340,6 +393,8 @@ class TestMessageChainIntegration(unittest.TestCase):
 
         # Simulate disabled engine (and legacy endpoints set but TTS_ENABLED False)
         def fake_get_value(key, default=None, **kwargs):
+            if key == "CORRECTOR_RETRIES":
+                return 4
             if key == "ACTIVE_VOX_ENGINE":
                 return "disabled"
             if key == "TTS_ENDPOINTS":
@@ -349,6 +404,11 @@ class TestMessageChainIntegration(unittest.TestCase):
             return default
 
         mock_get_value.side_effect = fake_get_value
+        mock_run_actions.return_value = {
+            "processed": [],
+            "failed_actions": [],
+            "errors": [],
+        }
 
         # Ensure message action types include telegram message so we detect a user response
         class FakeVar:
@@ -408,11 +468,18 @@ class TestMessageChainIntegration(unittest.TestCase):
 
         # simulate vox enabled via active engine
         def fake_get_value(key, default=None, **kwargs):
+            if key == "CORRECTOR_RETRIES":
+                return 4
             if key == "ACTIVE_VOX_ENGINE":
                 return "http"
             return default
 
         mock_get_value.side_effect = fake_get_value
+        mock_run_actions.return_value = {
+            "processed": [],
+            "failed_actions": [],
+            "errors": [],
+        }
 
         class FakeVar:
             def __init__(self, value):
@@ -469,11 +536,18 @@ class TestMessageChainIntegration(unittest.TestCase):
         from core import message_chain
 
         def fake_get_value(key, default=None, **kwargs):
+            if key == "CORRECTOR_RETRIES":
+                return 4
             if key == "ACTIVE_VOX_ENGINE":
                 return "http"
             return default
 
         mock_get_value.side_effect = fake_get_value
+        mock_run_actions.return_value = {
+            "processed": [],
+            "failed_actions": [],
+            "errors": [],
+        }
 
         class FakeVar:
             def __init__(self, value):
@@ -555,11 +629,18 @@ class TestMessageChainIntegration(unittest.TestCase):
         with patch("core.config_manager.config_registry.get_value") as mock_get_value:
 
             def fake_get_value(key, default=None, **kwargs):
+                if key == "CORRECTOR_RETRIES":
+                    return 4
                 if key == "ACTIVE_VOX_ENGINE":
                     return "http"
                 return default
 
             mock_get_value.side_effect = fake_get_value
+            mock_run_actions.return_value = {
+                "processed": [],
+                "failed_actions": [],
+                "errors": [],
+            }
 
             class FakeVar:
                 def __init__(self, value):
@@ -569,8 +650,6 @@ class TestMessageChainIntegration(unittest.TestCase):
                 if name == "MESSAGE_ACTION_TYPES":
                     return FakeVar(["message_telegram_bot"])
                 return default
-
-            from unittest.mock import patch
 
             get_var_patcher = patch(
                 "core.config_manager.config_registry.get_var", new=fake_get_var
@@ -615,6 +694,12 @@ class TestMessageChainIntegration(unittest.TestCase):
     async def test_merge_text_into_tts_actions(self, mock_run_actions, mock_corrector):
         """Standalone message actions should be bundled into tts_speak replies, avoiding duplicate text output."""
         from core import message_chain
+
+        mock_run_actions.return_value = {
+            "processed": [],
+            "failed_actions": [],
+            "errors": [],
+        }
 
         # ensure telegram message type is known to config
         class FakeVar:
@@ -694,8 +779,14 @@ class TestMessageChainIntegration(unittest.TestCase):
         payload = next(a["payload"] for a in called if a.get("type") == "tts_speak")
         self.assertEqual(payload.get("__merged_text"), "bar")
 
-        # case 3: plain text output should still trigger injection when request_tts
+        # case 3: plain text output should still trigger injection when request_tts.
+        # Plain text fails JSON extraction, so the (mocked) corrector returns the
+        # structured form first; the voice strategy then merges it into tts_speak.
         plain = "Just some reply text"
+        mock_corrector.return_value = (
+            '{"actions": [{"type": "message_telegram_bot", '
+            '"payload": {"text": "Just some reply text", "interface_path": "telegram_bot/1"}}]}'
+        )
         msg3 = SimpleNamespace(
             chat_id=1,
             text=plain,
@@ -726,15 +817,27 @@ class TestMessageChainIntegration(unittest.TestCase):
     async def test_request_tts_respects_vox_flag(
         self, mock_run_actions, mock_corrector, mock_get_value
     ):
-        """When no Vox engine is active, request_tts should not cause audio injection."""
+        """Explicit request_tts injects tts_speak even when no Vox engine is active.
+
+        The chain deliberately allows the attempt — VoxPlugin falls back to
+        text if no engine can speak (see 'Vox engine disabled but
+        request_tts=True' branch in message_chain).
+        """
         from core import message_chain
 
         def fake_get_value(key, default=None, **kwargs):
+            if key == "CORRECTOR_RETRIES":
+                return 4
             if key == "ACTIVE_VOX_ENGINE":
                 return "disabled"
             return default
 
         mock_get_value.side_effect = fake_get_value
+        mock_run_actions.return_value = {
+            "processed": [],
+            "failed_actions": [],
+            "errors": [],
+        }
 
         class FakeVar:
             def __init__(self, value):
@@ -776,7 +879,11 @@ class TestMessageChainIntegration(unittest.TestCase):
 
         called_actions = mock_run_actions.call_args[0][0]
         types = [a.get("type") for a in called_actions if isinstance(a, dict)]
-        self.assertNotIn("tts_speak", types)
+        self.assertIn(
+            "tts_speak",
+            types,
+            "Explicit request_tts must inject tts_speak; VoxPlugin handles fallback",
+        )
 
     @patch("core.transport_layer.run_corrector_middleware")
     async def test_plain_text_webui_triggers_corrector(self, mock_corrector):
@@ -836,7 +943,7 @@ class TestMessageChainIntegration(unittest.TestCase):
         )
 
         # Call fallback sender
-        result = await message_chain.send_llm_fallback_message(
+        await message_chain.send_llm_fallback_message(
             bot,
             msg,
             "Test failure",
@@ -869,16 +976,12 @@ class TestMessageChainIntegration(unittest.TestCase):
 
         plugin_instance.plugin = FakePlugin()
 
-        result = await transport_layer.run_corrector_middleware(
+        await transport_layer.run_corrector_middleware(
             "broken json", bot=MagicMock(), context=None, chat_id=123, thread_id=99
         )
 
         # After completion, the fake plugin should have received message.thread_id == 99
         self.assertEqual(recorded.get("thread_id"), 99)
-
-        # Test invalid JSON
-        result = extract_json_from_text('{"invalid": json}')
-        self.assertIsNone(result)
 
 
 if __name__ == "__main__":

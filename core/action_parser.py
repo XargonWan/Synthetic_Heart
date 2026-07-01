@@ -3,6 +3,7 @@
 
 import asyncio
 import inspect
+import re
 import time
 from typing import Any, Dict, List, Tuple
 
@@ -23,6 +24,7 @@ register_action_safety_config()
 
 _retry_tracker = {}
 _STATIC_INJECTION_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+_GRILLO_ACTIVITY_MESSAGE_ID_RE = re.compile(r"^grillo_[a-z_]+_(\d+)$")
 
 
 def _extract_json_local(text: str):
@@ -34,6 +36,93 @@ def _extract_json_local(text: str):
     from core.transport_layer import extract_json_from_text
 
     return extract_json_from_text(text, return_metadata=False)
+
+
+def _extract_grillo_activity_log_id(
+    context: Dict[str, Any] | None, message: Any
+) -> int | None:
+    """Resolve the current Grillo activity id from context or synthetic message id."""
+    if isinstance(context, dict):
+        for key in ("activity_log_id", "grillo_activity_log_id"):
+            value = context.get(key)
+            if value is None:
+                continue
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                continue
+
+    message_id = getattr(message, "message_id", None)
+    if not isinstance(message_id, str):
+        return None
+
+    match = _GRILLO_ACTIVITY_MESSAGE_ID_RE.match(message_id.strip())
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except (TypeError, ValueError):
+        return None
+
+
+def _normalize_diary_emotions(emotions_payload: Any) -> List[Dict[str, Any]]:
+    """Normalize emotion payloads into ai_diary's list-of-dicts shape."""
+    if isinstance(emotions_payload, list):
+        normalized: List[Dict[str, Any]] = []
+        for entry in emotions_payload:
+            if isinstance(entry, dict) and entry.get("type"):
+                normalized.append(entry)
+        return normalized
+
+    if not isinstance(emotions_payload, dict):
+        return []
+
+    normalized = []
+    for emotion_type, intensity in emotions_payload.items():
+        normalized.append({"type": str(emotion_type), "intensity": intensity})
+    return normalized
+
+
+def _extract_diary_metadata_from_actions(
+    processed_actions: List[Dict[str, Any]],
+    context: Dict[str, Any] | None,
+) -> Dict[str, Any]:
+    """Collect diary metadata explicitly expressed by the LLM across actions/meta."""
+    diary_payload: Dict[str, Any] = {}
+
+    for action in processed_actions:
+        if action.get("type") == "create_personal_diary_entry":
+            payload = action.get("payload") or {}
+            if isinstance(payload, dict):
+                diary_payload.update(payload)
+            break
+
+    if not diary_payload.get("emotions"):
+        for action in reversed(processed_actions):
+            if action.get("type") != "update_emotion_state":
+                continue
+            payload = action.get("payload") or {}
+            if isinstance(payload, dict):
+                emotions_payload = payload.get("emotions", payload)
+                diary_payload["emotions"] = _normalize_diary_emotions(emotions_payload)
+            break
+
+    llm_response_text = (
+        context.get("llm_response_text") if isinstance(context, dict) else None
+    )
+    if isinstance(llm_response_text, str) and llm_response_text.strip():
+        parsed_llm = _extract_json_local(llm_response_text)
+        if isinstance(parsed_llm, dict):
+            meta = parsed_llm.get("meta") or {}
+            rationale = meta.get("rationale") if isinstance(meta, dict) else None
+            if (
+                isinstance(meta, dict)
+                and isinstance(rationale, str)
+                and rationale.strip()
+            ):
+                diary_payload.setdefault("personal_thought", rationale.strip())
+
+    return diary_payload
 
 
 def _maybe_unescape_text_in_payload(payload: dict) -> None:
@@ -369,32 +458,66 @@ def _get_builtin_interface_message_action_types() -> set[str]:
     }
 
 
+# ID-style fields coerced to *int* only — a chat/user/message id is never a
+# float, and a quoted id like ``"5208932647"`` must become an int for DB lookups.
+_INT_ID_FIELDS = {"chat_id", "user_id", "message_id", "animation_state"}
+
+# Numeric *parameter* fields (counts, limits, time windows). Coerced to int when
+# integral, float otherwise. Grammar-constrained local models routinely quote
+# numbers (``"limit": "5"``) — valid JSON, but the string then breaks downstream
+# int math and SQL ``LIMIT`` clauses. Normalizing here fixes every such action at
+# once rather than per-plugin. Genuinely string-typed numeric fields (e.g. the
+# Telegram ``target`` id, free text) are intentionally absent so they stay strings.
+_NUMERIC_PARAM_FIELDS = {
+    "limit",
+    "offset",
+    "count",
+    "index",
+    "page",
+    "page_size",
+    "depth",
+    "top_k",
+    "lines",
+    "context",
+    "context_lines",
+    "cycles",
+    "max_results",
+    "max_memories",
+    "total_count",
+    "total_pages",
+    "older_than_days",
+    "older_than_hours",
+    "days",
+    "hours",
+    "minutes",
+    "seconds",
+    "duration",
+    "intensity",
+    "threshold",
+    "temperature",
+}
+
+
 def _normalize_payload(action_type: str, payload: dict) -> None:
-    """Normalize payload by converting string numbers to int for numeric fields.
+    """Normalize a payload in-place so quoted numbers become real numbers.
 
-    This makes the system more flexible by accepting both ``"2"`` and ``2`` for
-    numeric IDs.  We also strip surrounding whitespace so ``" 42 "`` works, and
-    we recursively normalize nested dictionaries.
+    Local models behind ``force_action_grammar`` (and small models generally)
+    often emit numeric values as JSON strings — ``"limit": "5"`` instead of
+    ``"limit": 5``. The shape is valid, but the string then breaks downstream
+    integer math and SQL ``LIMIT`` clauses. We coerce two field classes,
+    recursively through nested dicts and lists:
 
-    Modifies the payload dict in-place.
+    * ID-style fields (``chat_id``, ``user_id``, ``message_id``,
+      ``animation_state``, anything ending in ``_id``) → ``int``.
+    * Known numeric parameter fields (see ``_NUMERIC_PARAM_FIELDS``) → ``int``
+      when integral, ``float`` otherwise.
 
-    Fields that should be integers:
-    - chat_id: Chat identifier
-    - user_id: User identifier
-    - message_id
-    - animation_state
-    - Any field ending with ``_id``
+    Non-numeric strings, already-numeric values, and string-typed fields such as
+    the Telegram ``target`` id are left untouched.
     """
-    # Fields that should always be integers
-    int_fields = {"chat_id", "user_id", "message_id", "animation_state"}
 
-    # Also handle fields ending with _id
-    for key in payload.keys():
-        if key.endswith("_id") and key not in int_fields:
-            int_fields.add(key)
-
-    def _coerce(value):
-        """Try to convert a value to an int if it looks like one."""
+    def _coerce_int(value):
+        """Convert a clean integer string to ``int``; otherwise return as-is."""
         if isinstance(value, str):
             s = value.strip()
             if s.lstrip("-").isdigit():
@@ -404,29 +527,53 @@ def _normalize_payload(action_type: str, payload: dict) -> None:
                     pass
         return value
 
-    # Normalize top-level fields
-    for field in int_fields:
-        if field in payload:
-            orig = payload[field]
-            coerced = _coerce(orig)
-            if coerced is not orig:
-                payload[field] = coerced
-                log_debug(
-                    f"[action_parser] Normalized {action_type}.payload.{field}: '{orig}' -> {coerced}"
-                )
+    def _coerce_number(value):
+        """Convert a clean numeric string to ``int`` (integral) or ``float``."""
+        if not isinstance(value, str):
+            return value
+        s = value.strip()
+        if s.lstrip("-").isdigit():
+            try:
+                return int(s)
+            except (ValueError, TypeError):
+                return value
+        # Plain decimal like "0.9" or "-1.5" — reject inf/nan/"1e3" by requiring
+        # exactly one dot with digits on both sides.
+        if s.count(".") == 1:
+            intpart, _, fracpart = s.lstrip("-").partition(".")
+            if intpart.isdigit() and fracpart.isdigit():
+                try:
+                    return float(s)
+                except (ValueError, TypeError):
+                    return value
+        return value
 
-    # Normalize nested dict fields (like target: {chat_id: ...})
-    for key, value in list(payload.items()):
-        if isinstance(value, dict):
-            for nested_field in int_fields:
-                if nested_field in value:
-                    orig = value[nested_field]
-                    coerced = _coerce(orig)
-                    if coerced is not orig:
-                        value[nested_field] = coerced
-                        log_debug(
-                            f"[action_parser] Normalized {action_type}.payload.{key}.{nested_field}: '{orig}' -> {coerced}"
-                        )
+    def _walk(obj, path: str) -> None:
+        if isinstance(obj, dict):
+            for key, value in list(obj.items()):
+                if isinstance(value, (dict, list)):
+                    _walk(value, f"{path}.{key}")
+                    continue
+                if not isinstance(key, str):
+                    continue
+                if key in _INT_ID_FIELDS or key.endswith("_id"):
+                    coerced = _coerce_int(value)
+                elif key in _NUMERIC_PARAM_FIELDS:
+                    coerced = _coerce_number(value)
+                else:
+                    continue
+                if coerced is not value:
+                    obj[key] = coerced
+                    log_debug(
+                        f"[action_parser] Normalized {action_type}.payload"
+                        f"{path}.{key}: {value!r} -> {coerced!r}"
+                    )
+        elif isinstance(obj, list):
+            for i, item in enumerate(obj):
+                if isinstance(item, (dict, list)):
+                    _walk(item, f"{path}[{i}]")
+
+    _walk(payload, "")
 
 
 def _attempt_auto_fix(actions: list) -> bool:
@@ -585,6 +732,14 @@ def validate_action(
     supported_types.update(_get_core_declared_action_types())
     supported_types.update(_get_builtin_interface_message_action_types())
     action_type = action.get("type")
+    if (
+        action_type
+        and isinstance(action_type, str)
+        and action_type.startswith("default_api:")
+    ):
+        action_type = action_type.split("default_api:", 1)[1]
+        action["type"] = action_type
+
     if not action_type:
         errors.append("Missing 'type'")
     elif action_type not in supported_types:
@@ -1621,6 +1776,21 @@ async def run_actions(actions: Any, context: Dict[str, Any], bot, original_messa
                             "output": result,
                         }
                     )
+                elif isinstance(result, dict) and result.get("deliver_to_llm"):
+                    # Opt-in convention: a plugin's execute_action result tagged
+                    # deliver_to_llm=True is fed back to the LLM so it can voice
+                    # the fetched data in-character. This covers fetch-only
+                    # actions whose answer *is* the reply (e.g. recall_last_dream):
+                    # the action returns content but never sends, so without this
+                    # the user would get nothing. The generic request_llm_delivery
+                    # block below handles loop-prevention and message-scoped
+                    # delivery. Unlike "terminal" this does NOT set terminal_seen,
+                    # so sibling actions in the same batch keep executing normally.
+                    delivery_output = {
+                        k: v for k, v in result.items() if k != "deliver_to_llm"
+                    }
+                    delivery_output["type"] = action_type
+                    action_outputs.append(delivery_output)
 
         except Exception as e:
             error_msg = f"Error executing action {idx}: {repr(e)}"
@@ -1671,10 +1841,21 @@ async def run_actions(actions: Any, context: Dict[str, Any], bot, original_messa
         try:
             from core.auto_response import request_llm_delivery
 
+            # Prefer a real fetch-action type for the loop-prevention instruction
+            # ("DO NOT call '<type>' again"); fall back to "terminal".
+            delivery_action_type = next(
+                (
+                    o.get("type")
+                    for o in action_outputs
+                    if o.get("type") and o.get("type") != "terminal"
+                ),
+                "terminal",
+            )
+
             await request_llm_delivery(
                 action_outputs=action_outputs,
                 original_context=response_context,
-                action_type="terminal",
+                action_type=delivery_action_type,
             )
         except Exception as e:
             log_warning(
@@ -1740,6 +1921,24 @@ async def run_actions(actions: Any, context: Dict[str, Any], bot, original_messa
     }
 
 
+def _llm_already_provided_diary_content(processed_actions: list) -> bool:
+    """Return True if any action is create_personal_diary_entry with explicit content.
+
+    When the LLM already provides a full diary entry with its own ``content``
+    field, the automatic summary hook would duplicate it.  All Grillo beats
+    (self_reflection, curiosity, memory_consolidation, …) send ``content`` in
+    their diary payload, so this catches all of them.
+    """
+    for action in processed_actions:
+        if action.get("type") != "create_personal_diary_entry":
+            continue
+        payload = action.get("payload") or {}
+        content = (payload.get("content") or "").strip()
+        if content:
+            return True
+    return False
+
+
 async def _create_diary_entry_for_actions(processed_actions, context, original_message):
     """Create a diary entry summarizing the actions performed during this interaction."""
     if not processed_actions:
@@ -1752,17 +1951,37 @@ async def _create_diary_entry_for_actions(processed_actions, context, original_m
             log_debug("[action_parser] Diary plugin disabled, skipping diary entry")
             return
 
+        if isinstance(context, dict) and (
+            context.get("beat_type") == "diary_consolidation"
+            or context.get("interface") == "diary_merge"
+        ):
+            log_debug(
+                "[action_parser] Skipping automatic diary entry for internal diary consolidation"
+            )
+            return
+
+        # If the LLM already provided a diary entry with explicit content,
+        # skip the automatic summary — it would just append a duplicate fragment.
+        if _llm_already_provided_diary_content(processed_actions):
+            log_debug(
+                "[action_parser] LLM provided explicit diary content — skipping automatic summary"
+            )
+            return
+
         # Extract relevant information
         interface_name = context.get("interface", "unknown")
         chat_id = getattr(original_message, "chat_id", None)
+        thread_id = getattr(original_message, "thread_id", None)
+        if thread_id is None:
+            thread_id = getattr(original_message, "message_thread_id", None)
+        if thread_id is None and isinstance(context, dict):
+            thread_id = context.get("thread_id") or context.get("payload_thread_id")
 
         # Prefer LLM-provided diary metadata when present.
         # This avoids generic/hardcoded reflections unrelated to the real context.
-        llm_diary_payload = {}
-        for action in processed_actions:
-            if action.get("type") == "create_personal_diary_entry":
-                llm_diary_payload = action.get("payload") or {}
-                break
+        llm_diary_payload = _extract_diary_metadata_from_actions(
+            processed_actions, context if isinstance(context, dict) else None
+        )
 
         # Get user message from context or original_message
         user_message = ""
@@ -1866,9 +2085,11 @@ async def _create_diary_entry_for_actions(processed_actions, context, original_m
             involved_users=involved_list,
             interface=interface_name,
             chat_id=str(chat_id) if chat_id else None,
-            grillo_activity_log_id=context.get("activity_log_id")
-            if isinstance(context, dict)
-            else None,
+            thread_id=str(thread_id) if thread_id is not None else None,
+            grillo_activity_log_id=_extract_grillo_activity_log_id(
+                context if isinstance(context, dict) else None,
+                original_message,
+            ),
             interaction_summary=llm_diary_payload.get("interaction_summary"),
             personal_thought=llm_diary_payload.get("personal_thought"),
             emotions=llm_diary_payload.get("emotions"),

@@ -4,9 +4,9 @@ import re
 from typing import Any, Iterable, Sequence
 
 try:  # pragma: no cover - import guard
-    import asyncpg  # type: ignore
+    import asyncpg
 except Exception:  # pragma: no cover - executed when asyncpg missing
-    asyncpg = None
+    asyncpg: Any = None
 
 
 _CONFLICT_KEYS: dict[str, tuple[str, ...]] = {
@@ -49,6 +49,7 @@ async def create_postgres_pool(
     minsize: int,
     maxsize: int,
     dsn: str | None = None,
+    server_settings: dict[str, str] | None = None,
 ) -> Any:
     if asyncpg is None:
         raise RuntimeError("asyncpg is not installed")
@@ -58,6 +59,8 @@ async def create_postgres_pool(
         "max_size": maxsize,
         "command_timeout": 30,
     }
+    if server_settings:
+        kwargs["server_settings"] = server_settings
     if dsn:
         kwargs["dsn"] = dsn
     else:

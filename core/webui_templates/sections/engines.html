@@ -64,6 +64,24 @@
                     </div>
                 </div>
 
+                <!-- Per-endpoint extra config — shown only for external endpoints -->
+                <div id="cortex-engine-config-wrap" style="display:none; margin-top:14px; max-width:680px;">
+                    <label style="display:block; margin-bottom:4px; font-weight:600;">Engine Configuration <span style="color:var(--muted); font-weight:400; font-size:0.85rem;">(JSON — applies to this endpoint)</span></label>
+                    <textarea id="cortex-engine-config" rows="5" spellcheck="false" placeholder='{"disable_thinking": true, "force_json_object": true}'
+                        style="width:100%; padding:9px 12px; background:var(--background); color:var(--text); border:1px solid var(--border,#444); border-radius:8px; font-family:monospace; font-size:0.85rem; resize:vertical;"></textarea>
+                    <div style="margin-top:5px; font-size:0.8rem; color:var(--muted);">
+                        Cortex keys: <code>timeout</code> (request seconds), <code>max_tokens</code> (caps reply length),
+                        <code>disable_thinking</code>, <code>disable_tools</code> (use in-prompt JSON instead of native tools — best for small local models),
+                        and <code>force_action_grammar</code> (strongest — GBNF-constrains output to the action schema) /
+                        <code>force_json_object</code> / <code>grammar</code> to constrain output to valid JSON.
+                        Must be a JSON object; leave blank for defaults.
+                    </div>
+                    <div style="display:flex; gap:10px; align-items:center; margin-top:8px;">
+                        <button id="cortex-engine-config-save" class="pill" type="button">Save Config</button>
+                        <span id="cortex-engine-config-status" class="meta" style="font-size:0.85rem;"></span>
+                    </div>
+                </div>
+
                 <div class="components-list" id="components-cortex-list"></div>
             </div>
 
@@ -344,6 +362,7 @@
             <button class="ext-ep-edit-btn pill secondary" style="padding:5px 12px; font-size:0.85rem;">Edit</button>
             <button class="ext-ep-toggle-btn pill" style="padding:5px 12px; font-size:0.85rem;"></button>
             <button class="ext-ep-probe-btn pill" style="padding:5px 12px; font-size:0.85rem;">Probe</button>
+            <span class="ext-ep-probe-echo" style="font-size:0.85rem; margin-left:2px;"></span>
             <button class="ext-ep-delete-btn pill" style="padding:5px 12px; font-size:0.85rem; background:var(--danger,#c0392b); color:#fff;">Delete</button>
         </div>
 
@@ -360,9 +379,10 @@
         <!-- Model selector -->
         <div class="ext-ep-model-row" style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
             <label style="font-size:0.85rem; font-weight:600; min-width:110px;">Available Models</label>
-            <input class="ext-ep-model-select" type="text" autocomplete="off"
-                style="padding:6px 10px; background:var(--background); color:var(--text); border:1px solid var(--primary); border-radius:8px; min-width:220px; flex:1; max-width:400px;">
-            <datalist class="ext-ep-model-datalist"></datalist>
+            <select class="ext-ep-model-dropdown"
+                style="padding:6px 10px; background:var(--background); color:var(--text); border:1px solid var(--primary); border-radius:8px; min-width:220px; flex:1; max-width:400px;"></select>
+            <input class="ext-ep-model-select" type="text" autocomplete="off" placeholder="Enter a model name…"
+                style="display:none; padding:6px 10px; background:var(--background); color:var(--text); border:1px solid var(--primary); border-radius:8px; min-width:220px; flex:1; max-width:400px;">
             <button class="ext-ep-model-test pill secondary" style="padding:5px 12px; font-size:0.85rem;">Test</button>
             <span class="ext-ep-model-test-echo" style="font-size:0.85rem; margin-left:2px;"></span>
         </div>

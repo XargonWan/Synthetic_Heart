@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import types
+from typing import Any, cast
 from unittest.mock import patch
 
 import pytest
@@ -76,6 +77,7 @@ def test_registry_load_engine_caches_instance() -> None:
             file_path: str,
             mime_type: str | None = None,
             prompt: str | None = None,
+            model: str | None = None,
         ) -> IrisResult | None:
             return IrisResult(description="a cat", language="en")
 
@@ -100,6 +102,7 @@ def test_registry_register_instance() -> None:
             file_path: str,
             mime_type: str | None = None,
             prompt: str | None = None,
+            model: str | None = None,
         ) -> IrisResult | None:
             return IrisResult(description="direct", language=None)
 
@@ -138,6 +141,81 @@ async def test_iris_plugin_disabled_returns_none() -> None:
         assert result is None
 
 
+def test_iris_plugin_is_enabled_tracks_active_engine() -> None:
+    from plugins.iris_plugin import IrisPlugin
+
+    plugin = IrisPlugin.__new__(IrisPlugin)
+    plugin._active_engine_name = "disabled"
+    plugin._engine_settings = {}
+    plugin._default_prompt = "Describe this image."
+    plugin._default_model = ""
+
+    with patch.object(
+        plugin,
+        "refresh_config",
+        side_effect=lambda: setattr(plugin, "_active_engine_name", "disabled"),
+    ):
+        assert plugin.is_enabled() is False
+
+    with patch.object(
+        plugin,
+        "refresh_config",
+        side_effect=lambda: setattr(plugin, "_active_engine_name", "vision"),
+    ):
+        assert plugin.is_enabled() is True
+
+
+@pytest.mark.asyncio
+async def test_iris_plugin_inline_returns_none() -> None:
+    """'inline' has no description engine, so describe_media returns None."""
+    with patch("core.core_initializer.register_plugin"):
+        from plugins.iris_plugin import IrisPlugin
+
+        plugin = IrisPlugin.__new__(IrisPlugin)
+        plugin._active_engine_name = "inline"
+        plugin._engine_settings = {}
+        plugin._default_prompt = "Describe this image."
+        plugin._default_model = ""
+
+        result = await plugin.describe_media("/tmp/fake.jpg")
+        assert result is None
+
+
+def test_iris_plugin_inline_is_not_enabled() -> None:
+    """'inline' must not expose the vision_describe action (is_enabled False)."""
+    from plugins.iris_plugin import IrisPlugin
+
+    plugin = IrisPlugin.__new__(IrisPlugin)
+    plugin._active_engine_name = "inline"
+    plugin._engine_settings = {}
+    plugin._default_prompt = "Describe this image."
+    plugin._default_model = ""
+
+    with patch.object(
+        plugin,
+        "refresh_config",
+        side_effect=lambda: setattr(plugin, "_active_engine_name", "inline"),
+    ):
+        assert plugin.is_enabled() is False
+
+
+def test_get_active_iris_engine_reflects_pseudo_engine() -> None:
+    """_get_active_iris_engine reports the configured engine, including 'inline'."""
+    import core.plugin_instance as pi
+
+    class _FakeIris:
+        def __init__(self, name: str) -> None:
+            self._active_engine_name = name
+
+        def refresh_config(self) -> None:  # no-op
+            pass
+
+    for engine_name in ("inline", "disabled", "selenium-llm-engine"):
+        registry = {"iris_plugin": _FakeIris(engine_name)}
+        with patch("core.core_initializer.PLUGIN_REGISTRY", registry):
+            assert pi._get_active_iris_engine() == engine_name
+
+
 @pytest.mark.asyncio
 async def test_iris_plugin_file_not_found_returns_none() -> None:
     """When the file does not exist the plugin returns None."""
@@ -155,7 +233,7 @@ async def test_iris_plugin_file_not_found_returns_none() -> None:
 
 
 @pytest.mark.asyncio
-async def test_iris_plugin_calls_engine(tmp_path) -> None:  # type: ignore[no-untyped-def]
+async def test_iris_plugin_calls_engine(tmp_path) -> None:
     """Plugin calls the engine and returns IrisResult."""
 
     from plugins.iris_base import IrisEngineBase, IrisResult
@@ -166,6 +244,7 @@ async def test_iris_plugin_calls_engine(tmp_path) -> None:  # type: ignore[no-un
             file_path: str,
             mime_type: str | None = None,
             prompt: str | None = None,
+            model: str | None = None,
         ) -> IrisResult | None:
             return IrisResult(description="a sunny beach", language="en")
 
@@ -197,7 +276,7 @@ async def test_iris_plugin_calls_engine(tmp_path) -> None:  # type: ignore[no-un
 
 
 @pytest.mark.asyncio
-async def test_iris_plugin_passes_model_override_to_engine(tmp_path) -> None:  # type: ignore[no-untyped-def]
+async def test_iris_plugin_passes_model_override_to_engine(tmp_path) -> None:
     from plugins.iris_base import IrisEngineBase, IrisResult
 
     class MockEngine(IrisEngineBase):
@@ -243,7 +322,7 @@ async def test_iris_plugin_passes_model_override_to_engine(tmp_path) -> None:  #
 
 
 @pytest.mark.asyncio
-async def test_external_iris_engine_uses_model_override(tmp_path) -> None:  # type: ignore[no-untyped-def]
+async def test_external_iris_engine_uses_model_override(tmp_path) -> None:
     from core.external_endpoints.bridges.iris_bridge import ExternalIrisEngine
     from core.external_endpoints.models import EndpointProtocol, ExternalEndpoint
 
@@ -293,17 +372,19 @@ async def test_external_iris_engine_uses_model_override(tmp_path) -> None:  # ty
 
 
 @pytest.mark.asyncio
-async def test_gemini_adapter_uses_model_override(tmp_path) -> None:  # type: ignore[no-untyped-def]
+async def test_gemini_adapter_uses_model_override(tmp_path) -> None:
     import sys
     from types import ModuleType
 
     from core.external_endpoints.adapters.gemini_adapter import GeminiAdapter
 
-    dummy_client = type("DummyClient", (), {})()
-    dummy_client.models = type("DummyModels", (), {})()
+    dummy_client = types.SimpleNamespace(models=types.SimpleNamespace())
 
-    def generate_content(model: str, contents: list[dict[str, object]]) -> object:
+    def generate_content(
+        *, model: str, contents: list[object], config: object | None = None
+    ) -> object:
         assert model == "chatgpt-vision"
+        assert config is not None
 
         class DummyResponse:
             text = "a sunny beach"
@@ -312,16 +393,37 @@ async def test_gemini_adapter_uses_model_override(tmp_path) -> None:  # type: ig
 
     dummy_client.models.generate_content = generate_content
 
-    google_module = ModuleType("google")
-    genai_module = ModuleType("google.genai")
-    types_module = ModuleType("google.genai.types")
+    google_module = cast(Any, ModuleType("google"))
+    genai_module = cast(Any, ModuleType("google.genai"))
+    types_module = cast(Any, ModuleType("google.genai.types"))
 
     class DummyPart:
         @staticmethod
         def from_bytes(data: bytes, mime_type: str) -> dict[str, object]:
             return {"type": "image", "data": data}
 
+    class DummyGenerateContentConfig(dict):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+
+    class DummySafetySetting(dict):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+
+    class DummyHarmCategory:
+        HARM_CATEGORY_HARASSMENT = "harassment"
+        HARM_CATEGORY_HATE_SPEECH = "hate_speech"
+        HARM_CATEGORY_SEXUALLY_EXPLICIT = "sexually_explicit"
+        HARM_CATEGORY_DANGEROUS_CONTENT = "dangerous_content"
+
+    class DummyHarmBlockThreshold:
+        OFF = "off"
+
     types_module.Part = DummyPart
+    types_module.GenerateContentConfig = DummyGenerateContentConfig
+    types_module.SafetySetting = DummySafetySetting
+    types_module.HarmCategory = DummyHarmCategory
+    types_module.HarmBlockThreshold = DummyHarmBlockThreshold
     genai_module.types = types_module
     google_module.genai = genai_module
 
@@ -361,6 +463,7 @@ async def test_describe_attachment_images_with_iris() -> None:
             file_path: str,
             mime_type: str | None = None,
             prompt: str | None = None,
+            model: str | None = None,
         ) -> IrisResult | None:
             return IrisResult(description="a red ball", language="en")
 
@@ -444,6 +547,7 @@ async def test_describe_attachment_images_with_iris_engine_failure_returns_place
             file_path: str,
             mime_type: str | None = None,
             prompt: str | None = None,
+            model: str | None = None,
         ) -> None:
             return None
 
@@ -507,7 +611,7 @@ def test_iris_result_full() -> None:
 
 
 @pytest.mark.asyncio
-async def test_handle_custom_action_vision_describe(tmp_path) -> None:  # type: ignore[no-untyped-def]
+async def test_handle_custom_action_vision_describe(tmp_path) -> None:
     from plugins.iris_base import IrisEngineBase, IrisResult
 
     class MockEngine(IrisEngineBase):
@@ -516,6 +620,7 @@ async def test_handle_custom_action_vision_describe(tmp_path) -> None:  # type: 
             file_path: str,
             mime_type: str | None = None,
             prompt: str | None = None,
+            model: str | None = None,
         ) -> IrisResult | None:
             return IrisResult(description="mountains", language="en", confidence=0.9)
 
@@ -560,6 +665,7 @@ async def test_execute_action_vision_describe_uses_current_attachment() -> None:
             file_path: str,
             mime_type: str | None = None,
             prompt: str | None = None,
+            model: str | None = None,
         ) -> IrisResult | None:
             with open(file_path, "rb") as fh:
                 assert fh.read() == b"\x89PNG"
@@ -643,6 +749,7 @@ async def test_describe_attachment_returns_full_iris_result_with_metadata() -> N
             file_path: str,
             mime_type: str | None = None,
             prompt: str | None = None,
+            model: str | None = None,
         ) -> IrisResult | None:
             return IrisResult(
                 description="sunset over ocean", language="en", confidence=0.92

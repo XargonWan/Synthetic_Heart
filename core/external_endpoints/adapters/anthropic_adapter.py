@@ -116,6 +116,13 @@ class AnthropicAdapter(BaseProtocolAdapter):
         _req_start = _time.monotonic()
 
         try:
+            tools = kwargs.get("tools")
+            if isinstance(tools, list) and tools:
+                payload["tools"] = tools
+            tool_choice = kwargs.get("tool_choice")
+            if isinstance(tool_choice, dict) and tool_choice:
+                payload["tool_choice"] = tool_choice
+
             async with aiohttp.ClientSession() as session:
                 async with session.post(
                     f"{self._base_url}/v1/messages",
@@ -138,12 +145,16 @@ class AnthropicAdapter(BaseProtocolAdapter):
                             f"[anthropic_adapter] API error {resp.status}: {error_msg}"
                         )
 
-                    content_blocks = data.get("content", [])
-                    content_text = "".join(
-                        block.get("text", "")
-                        for block in content_blocks
-                        if block.get("type") == "text"
-                    )
+                    from core.prompt_renderers import AnthropicRenderer
+
+                    content_text = AnthropicRenderer.parse_tool_use_response(data)
+                    if not content_text:
+                        content_blocks = data.get("content", [])
+                        content_text = "".join(
+                            block.get("text", "")
+                            for block in content_blocks
+                            if block.get("type") == "text"
+                        )
                     usage_raw = data.get("usage", {})
                     usage = {
                         "prompt_tokens": usage_raw.get("input_tokens", 0),

@@ -11,6 +11,7 @@ from core.prompt_renderers import (
     OpenAIRenderer,
     TextRenderer,
 )
+from core.live_tool_registry import LiveToolRegistry
 from core.prompt_request import PromptRequest, RuntimeContext, Turn
 
 
@@ -193,12 +194,35 @@ class TestOpenAIRenderer:
 
         last = messages[-1]
         text_part = next(part for part in last["content"] if part.get("type") == "text")
-        assert "attached 1 image" in text_part["text"]
-        assert "no accompanying text" in text_part["text"]
-        assert (
-            "Do not infer hidden, obscured, or non-visible features"
-            in text_part["text"]
-        )
+        # Persona-first vision framing: model is told it is seeing directly.
+        assert "VISION" in text_part["text"]
+        assert "directly seeing" in text_part["text"]
+        # Anti-hallucination guardrail must still be present.
+        assert "unambiguously visible" in text_part["text"]
+        # Vision frame must mention grounding emotions/diary so the monologue is affected.
+        assert "emotions" in text_part["text"]
+        assert "diary" in text_part["text"]
+
+    def test_multimodal_image_with_text_stays_in_character(self) -> None:
+        req = _basic_request(current_text="What do you think about this one?")
+        renderer = OpenAIRenderer(req)
+        image_part = {
+            "type": "image_url",
+            "image_url": {"url": "data:image/png;base64,abc"},
+        }
+
+        messages = renderer.render_with_multimodal([image_part])
+
+        last = messages[-1]
+        text_part = next(part for part in last["content"] if part.get("type") == "text")
+        # Persona-first vision framing present.
+        assert "VISION" in text_part["text"]
+        # Anti-hallucination guardrail must still be present.
+        assert "unambiguously visible" in text_part["text"]
+        # The user's caption must appear before the vision frame.
+        caption = "What do you think about this one?"
+        assert caption in text_part["text"]
+        assert text_part["text"].index(caption) < text_part["text"].index("[VISION:")
 
     def test_multimodal_document_turn_adds_note_without_forwarding_binary(self) -> None:
         req = _basic_request(current_text="Can you inspect this manual?")
@@ -272,6 +296,61 @@ class TestOpenAIRenderer:
         }
         result = OpenAIRenderer.parse_tool_call_response(data)
         assert result == "Just a text reply"
+
+    def test_parse_tool_call_response_preserves_reply_alongside_tool_calls(
+        self,
+    ) -> None:
+        """A reply in ``content`` must survive when the model also emits a
+        side-effect tool call (regression: reply was silently dropped, which
+        triggered the missing-reply correction loop on local tool-calling
+        models like Qwen3.5 / Gemma)."""
+        data = {
+            "choices": [
+                {
+                    "message": {
+                        "content": "Morning babe, feeling great!",
+                        "tool_calls": [
+                            {
+                                "function": {
+                                    "name": "create_personal_diary_entry",
+                                    "arguments": '{"interaction_summary": "chat"}',
+                                }
+                            }
+                        ],
+                    }
+                }
+            ]
+        }
+        parsed = json.loads(OpenAIRenderer.parse_tool_call_response(data))
+        assert parsed["actions"][0]["type"] == "create_personal_diary_entry"
+        assert parsed["message"] == "Morning babe, feeling great!"
+
+    def test_parse_tool_call_response_no_duplicate_when_message_tool_call(
+        self,
+    ) -> None:
+        """When the model already routes the reply through a ``message_*`` tool
+        call, the leftover ``content`` must NOT be surfaced again as a
+        top-level message (avoids a duplicate reply)."""
+        data = {
+            "choices": [
+                {
+                    "message": {
+                        "content": "some thinking residue",
+                        "tool_calls": [
+                            {
+                                "function": {
+                                    "name": "message_telegram_bot",
+                                    "arguments": '{"text": "Hi there"}',
+                                }
+                            }
+                        ],
+                    }
+                }
+            ]
+        }
+        parsed = json.loads(OpenAIRenderer.parse_tool_call_response(data))
+        assert parsed["actions"][0]["type"] == "message_telegram_bot"
+        assert "message" not in parsed
 
     def test_no_history_renders_only_system_and_current(self) -> None:
         req = _basic_request()
@@ -436,6 +515,127 @@ class TestGeminiRenderer:
         decls = result["tools"][0].get("function_declarations", [])
         assert len(decls) == 1
         assert decls[0]["name"] == "send_message"
+
+    def test_tools_built_from_normalized_actions_preserve_parameters(self) -> None:
+        actions = {
+            "message_telegram_bot": {
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "text": {
+                            "type": "string",
+                            "description": "Field: text",
+                        },
+                        "interface_path": {
+                            "type": "string",
+                            "description": "Field: interface_path",
+                        },
+                    },
+                    "required": ["text", "interface_path"],
+                },
+                "brief": "Send a text message via Telegram",
+                "source": "message_plugin, telegram_bot",
+            }
+        }
+
+        req = _basic_request(supports_tool_calling=True)
+        req.tool_declarations = LiveToolRegistry.build_manifests_from_actions(actions)
+        renderer = GeminiRenderer(req)
+        result = renderer.render()
+
+        decls = result["tools"][0].get("function_declarations", [])
+        assert len(decls) == 1
+        params = decls[0]["parameters"]
+        assert params["properties"]["text"]["type"] == "STRING"
+        assert params["properties"]["interface_path"]["type"] == "STRING"
+        assert sorted(params["required"]) == ["interface_path", "text"]
+
+    def test_tools_built_from_normalized_actions_preserve_array_items(self) -> None:
+        actions = {
+            "create_personal_diary_entry": {
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "interaction_summary": {
+                            "type": "string",
+                            "description": "Brief summary",
+                        },
+                        "emotions": {
+                            "type": "array",
+                            "description": "Emotion entries",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "type": {"type": "string"},
+                                    "intensity": {"type": "number"},
+                                },
+                                "required": ["type", "intensity"],
+                            },
+                        },
+                        "context_tags": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                        },
+                        "involved_users": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                        },
+                    },
+                    "required": ["interaction_summary"],
+                },
+                "brief": "Add a diary entry.",
+                "source": "ai_diary",
+            }
+        }
+
+        req = _basic_request(supports_tool_calling=True)
+        req.tool_declarations = LiveToolRegistry.build_manifests_from_actions(actions)
+        renderer = GeminiRenderer(req)
+        result = renderer.render()
+
+        params = result["tools"][0]["function_declarations"][0]["parameters"]
+        emotions = params["properties"]["emotions"]
+        assert emotions["type"] == "ARRAY"
+        assert emotions["items"]["type"] == "OBJECT"
+        assert emotions["items"]["properties"]["type"]["type"] == "STRING"
+        assert emotions["items"]["properties"]["intensity"]["type"] == "NUMBER"
+        assert params["properties"]["context_tags"]["items"]["type"] == "STRING"
+        assert params["properties"]["involved_users"]["items"]["type"] == "STRING"
+
+    def test_tools_built_from_normalized_actions_default_missing_array_items(
+        self,
+    ) -> None:
+        actions = {
+            "create_personal_diary_entry": {
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "context_tags": {
+                            "type": "array",
+                            "description": "Tags for topics discussed (optional)",
+                        },
+                        "meta_blob": {
+                            "type": "object",
+                            "description": "Optional nested object.",
+                        },
+                    },
+                    "required": [],
+                },
+                "brief": "Add a diary entry.",
+                "source": "ai_diary",
+            }
+        }
+
+        req = _basic_request(supports_tool_calling=True)
+        req.tool_declarations = LiveToolRegistry.build_manifests_from_actions(actions)
+        renderer = GeminiRenderer(req)
+        result = renderer.render()
+
+        params = result["tools"][0]["function_declarations"][0]["parameters"]
+        assert params["properties"]["context_tags"]["type"] == "ARRAY"
+        assert params["properties"]["context_tags"]["items"]["type"] == "STRING"
+        assert params["properties"]["meta_blob"]["type"] == "OBJECT"
+        assert params["properties"]["meta_blob"]["properties"] == {}
 
     def test_no_tools_key_when_disabled(self) -> None:
         req = _basic_request(supports_tool_calling=False)

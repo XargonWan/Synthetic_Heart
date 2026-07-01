@@ -24,7 +24,7 @@ def _make_msg(name, text, dt):
 def test_format_current_chat_history(monkeypatch):
     monkeypatch.setattr("core.action_parser.gather_static_injections", _dummy_gather)
 
-    now = datetime.utcnow().replace(tzinfo=timezone.utc)
+    now = datetime.now(timezone.utc)
     msg1 = _make_msg("Alice", "Hello world", now - timedelta(minutes=2))
     msg2 = _make_msg("Bob", "Hi there", now - timedelta(minutes=1))
 
@@ -66,7 +66,7 @@ def test_current_chat_history_respects_last_n(monkeypatch):
         lambda key, default: 1 if key == "CONTEXT_VERBOSITY" else default,
     )
 
-    now = datetime.utcnow().replace(tzinfo=timezone.utc)
+    now = datetime.now(timezone.utc)
     msg1 = _make_msg("Alice", "Old", now - timedelta(minutes=10))
     msg2 = _make_msg("Bob", "New", now - timedelta(minutes=1))
 
@@ -101,7 +101,7 @@ def test_current_chat_history_respects_last_n(monkeypatch):
 
 def test_no_duplication_with_history_recent(monkeypatch):
     monkeypatch.setattr("core.action_parser.gather_static_injections", _dummy_gather)
-    now = datetime.utcnow().replace(tzinfo=timezone.utc)
+    now = datetime.now(timezone.utc)
     msg = _make_msg("Carol", "Dup", now - timedelta(minutes=1))
 
     interface = "telegram_bot/789"
@@ -114,6 +114,13 @@ def test_no_duplication_with_history_recent(monkeypatch):
         message_id=3,
         from_user=SimpleNamespace(full_name="user", username="user"),
         date=now,
+    )
+
+    async def _fake_global_load(limit=10):
+        return deque([{**msg, "interface_path": interface}])
+
+    monkeypatch.setattr(
+        "core.chat_history_cache.load_global_chat_history", _fake_global_load
     )
 
     res = asyncio.run(
@@ -132,7 +139,7 @@ def test_local_global_separation(monkeypatch):
     global_history excludes messages from the same `interface_path`."""
     monkeypatch.setattr("core.action_parser.gather_static_injections", _dummy_gather)
 
-    now = datetime.utcnow().replace(tzinfo=timezone.utc)
+    now = datetime.now(timezone.utc)
     local_msg = _make_msg("Alice", "Local message", now - timedelta(minutes=2))
     other_msg = _make_msg("Eve", "Other chat message", now - timedelta(minutes=1))
 
@@ -189,7 +196,7 @@ def test_history_scope_local_only(monkeypatch):
     which stream is primary."""
     monkeypatch.setattr("core.action_parser.gather_static_injections", _dummy_gather)
 
-    now = datetime.utcnow().replace(tzinfo=timezone.utc)
+    now = datetime.now(timezone.utc)
     local_msg = _make_msg("Alice", "Local only", now - timedelta(minutes=2))
     other_msg = _make_msg("Eve", "External", now - timedelta(minutes=1))
 
@@ -248,7 +255,7 @@ def test_unified_history_keeps_local_messages_when_global_tail_is_busy(monkeypat
         lambda key, default: 3 if key == "CONTEXT_VERBOSITY" else default,
     )
 
-    now = datetime.utcnow().replace(tzinfo=timezone.utc)
+    now = datetime.now(timezone.utc)
     interface = "telegram_bot/777"
 
     local_old = _make_msg("Alice", "Local oldest", now - timedelta(minutes=8))
@@ -396,7 +403,3 @@ def test_load_chat_history_for_guild_queries(monkeypatch):
     assert "timestamp > %s" in cur2.last_query
     assert cur2.last_params[1] == "2026-02-01T00:00:00"
     assert cur2.last_params[-1] == 2
-    # Also verify that passing the scope via `context_memory` dict works equivalently
-    context_memory = {}
-    context_memory_with_scope = {**context_memory, "history_scope": "local"}
-    # (no further prompt generation needed for this helper test)

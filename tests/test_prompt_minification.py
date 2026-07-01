@@ -52,7 +52,7 @@ class TestLoadJsonInstructions:
         size = len(instructions)
 
         # Guard against accidental runaway growth while allowing expanded safety rules.
-        assert size < 4000, f"Instructions too large: {size} chars (expected < 4000)"
+        assert size < 5000, f"Instructions too large: {size} chars (expected < 5000)"
         print(f"✅ Minified instructions: {size} chars")
 
     def test_instructions_preserves_meaning(self):

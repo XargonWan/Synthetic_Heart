@@ -180,3 +180,59 @@ async def test_enqueue_preserves_explicit_interface_path(monkeypatch):
     assert result == "ok"
     assert recorded
     assert recorded[0].get("interface_path") == "telegram_bot/12345"
+
+
+@pytest.mark.asyncio
+async def test_enqueue_recovers_grillo_activity_id_from_synthetic_message_id(
+    monkeypatch,
+):
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setattr(message_queue, "is_user_blocked", AsyncMock(return_value=False))
+
+    class DummyPlugin:
+        def get_rate_limit(self):
+            return 1000, 1, 1.0
+
+    monkeypatch.setattr(plugin_instance, "get_plugin", lambda: DummyPlugin())
+    monkeypatch.setattr(
+        message_queue.rate_limit, "is_allowed", lambda *args, **kwargs: True
+    )
+
+    recorded = []
+
+    async def fake_handle(bot, message, context_memory_or_prompt, interface=None, **kw):
+        if isinstance(context_memory_or_prompt, dict):
+            recorded.append(context_memory_or_prompt.copy())
+        return "ok"
+
+    monkeypatch.setattr(plugin_instance, "handle_incoming_message", fake_handle)
+
+    msg = SimpleNamespace(
+        chat_id=5208932647,
+        message_id="grillo_outreach_6364",
+        from_user=SimpleNamespace(id=-1),
+        chat=SimpleNamespace(
+            type="private",
+            id=5208932647,
+            title=None,
+            username=None,
+            first_name=None,
+        ),
+        text="background outreach",
+    )
+
+    await message_queue.run()
+    result = await message_queue.enqueue_and_wait(
+        bot=None,
+        message=msg,
+        context_memory={},
+        interface_id="telegram_bot",
+        skip_mention_check=True,
+        timeout=2.0,
+    )
+
+    assert result == "ok"
+    assert recorded
+    assert recorded[0].get("activity_log_id") == 6364
+    assert recorded[0].get("grillo_activity_log_id") == 6364

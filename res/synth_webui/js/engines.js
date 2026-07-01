@@ -135,32 +135,66 @@
             subsysEl.appendChild(pill);
         }
 
-        // Model selector
+        // Model selector — dropdown (probed models) + custom text input fallback
+        const modelDropdown = card.querySelector('.ext-ep-model-dropdown');
         const modelInput = card.querySelector('.ext-ep-model-select');
-        const datalist = card.querySelector('.ext-ep-model-datalist');
-        const listId = 'ext-ep-models-' + ep.id;
-        datalist.id = listId;
-        modelInput.setAttribute('list', listId);
+        const CUSTOM_VALUE = '__custom__';
 
         const models = Array.isArray(ep.available_models) ? ep.available_models : [];
-        if (models.length === 0) {
-            modelInput.placeholder = ep.probe_status === 'never' ? '— probe first —' : '— none found —';
-            modelInput.disabled = true;
-        } else {
-            modelInput.placeholder = 'Type to search or select a model...';
-            modelInput.disabled = false;
-            for (const m of models) {
-                const opt = document.createElement('option');
-                opt.value = m;
-                datalist.appendChild(opt);
-            }
-        }
-        if (ep.default_model) {
-            modelInput.value = ep.default_model;
+        const current = ep.default_model || '';
+
+        // Populate the dropdown: a leading placeholder, all probed models, then a
+        // "custom" entry that reveals the free-text input.
+        modelDropdown.innerHTML = '';
+        const placeholder = document.createElement('option');
+        placeholder.value = '';
+        placeholder.textContent = models.length === 0
+            ? (ep.probe_status === 'never' ? '— probe first or enter custom —' : '— no models found, enter custom —')
+            : '— select a model —';
+        modelDropdown.appendChild(placeholder);
+
+        for (const m of models) {
+            const opt = document.createElement('option');
+            opt.value = m;
+            opt.textContent = m;
+            modelDropdown.appendChild(opt);
         }
 
+        const customOpt = document.createElement('option');
+        customOpt.value = CUSTOM_VALUE;
+        customOpt.textContent = '✏️ Custom…';
+        modelDropdown.appendChild(customOpt);
+
+        // Helper to read the effective model value (dropdown or custom input).
+        const readModel = () =>
+            modelDropdown.value === CUSTOM_VALUE ? modelInput.value.trim() : modelDropdown.value;
+
+        // Initial selection: match the saved default against the known models.
+        if (current && models.includes(current)) {
+            modelDropdown.value = current;
+            modelInput.style.display = 'none';
+        } else if (current) {
+            // Saved model not in the probed list → treat as custom.
+            modelDropdown.value = CUSTOM_VALUE;
+            modelInput.value = current;
+            modelInput.style.display = '';
+        } else {
+            modelDropdown.value = '';
+            modelInput.style.display = 'none';
+        }
+
+        modelDropdown.addEventListener('change', () => {
+            if (modelDropdown.value === CUSTOM_VALUE) {
+                modelInput.style.display = '';
+                modelInput.focus();
+                return; // wait for the user to type + blur before saving
+            }
+            modelInput.style.display = 'none';
+            handleSetModel(ep.id, modelDropdown.value, card);
+        });
+
         modelInput.addEventListener('change', () => {
-            handleSetModel(ep.id, modelInput.value, card);
+            handleSetModel(ep.id, readModel(), card);
         });
 
         // Probe time
@@ -177,11 +211,10 @@
         toggleBtn.style.color = '#fff';
         toggleBtn.addEventListener('click', () => handleToggle(ep.id, !ep.enabled));
 
-        card.querySelector('.ext-ep-probe-btn').addEventListener('click', () => handleProbe(ep.id));
+        card.querySelector('.ext-ep-probe-btn').addEventListener('click', () => handleProbe(ep.id, card));
         card.querySelector('.ext-ep-delete-btn').addEventListener('click', () => handleDelete(ep.id, ep.display_label || ep.name));
         card.querySelector('.ext-ep-model-test').addEventListener('click', () => {
-            const model = modelInput.value;
-            handleTestModel(ep.id, model, card);
+            handleTestModel(ep.id, readModel(), card);
         });
 
         return card;
@@ -203,20 +236,28 @@
         }
     }
 
-    async function handleProbe(id) {
+    async function handleProbe(id, card) {
+        const echoEl = card ? card.querySelector('.ext-ep-probe-echo') : null;
+        if (echoEl) { echoEl.textContent = 'Probing endpoint…'; echoEl.style.color = 'var(--muted)'; }
         try {
-            setStatus('Probing endpoint…', '');
             const result = await apiFetch(`/api/external-endpoints/${id}/probe`, { method: 'POST' });
             const capStr = Object.entries(result.capabilities || {})
                 .filter(([, v]) => v).map(([k]) => k).join(', ') || 'none';
-            setStatus(
-                `Probe ${result.status}: capabilities=[${capStr}] models=${result.models?.length ?? 0}`,
-                result.status === 'success' ? 'var(--success,#27ae60)' : 'var(--danger,#c0392b)'
-            );
+            const msg = `Probe ${result.status}: capabilities=[${capStr}] models=${result.models?.length ?? 0}`;
+            const color = result.status === 'success' ? 'var(--success,#27ae60)' : 'var(--danger,#c0392b)';
             await loadEndpoints();
             window.SynthWebUI?.loadEnginesSummary?.();
+            // loadEndpoints() rebuilds all cards, so re-select the refreshed card by id.
+            const newEcho = document.querySelector(`.ext-ep-card[data-id="${id}"] .ext-ep-probe-echo`);
+            if (newEcho) {
+                newEcho.textContent = msg;
+                newEcho.style.color = color;
+            }
         } catch (e) {
-            setStatus('Probe error: ' + e.message, 'var(--danger,#c0392b)');
+            if (echoEl) {
+                echoEl.textContent = 'Probe error: ' + e.message;
+                echoEl.style.color = 'var(--danger,#c0392b)';
+            }
         }
     }
 

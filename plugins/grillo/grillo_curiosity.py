@@ -23,8 +23,9 @@ class GrilloCuriosityPlugin(AIPluginBase):
             intro += "Context:\n" + context_snippet + "\n\n"
         intro += (
             "What questions have emerged? What topics spark your curiosity?\n\n"
-            "End with a JSON action to create a diary entry exploring your curiosity."
-            '{"actions": [{"type": "create_personal_diary_entry", "payload": {"content": "your curious thoughts"}}]}'
+            "End with a JSON action to create a diary entry exploring your curiosity. "
+            "Include `interaction_summary`, `personal_thought`, and `emotions` as well as the diary `content`."
+            '{"actions": [{"type": "create_personal_diary_entry", "payload": {"interaction_summary": "brief summary", "personal_thought": "private first-person reflection", "emotions": [{"type": "curious", "intensity": 0.7}], "content": "your curious thoughts"}}]}'
         )
         return intro
 

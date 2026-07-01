@@ -143,8 +143,13 @@ class IrisPlugin(AIPluginBase):
         """
         self.refresh_config()
 
-        if self._active_engine_name == "disabled":
-            log_info("[iris_plugin] Engine disabled; skipping vision analysis.")
+        if self._active_engine_name in ("disabled", "inline"):
+            # 'inline' has no description engine — image bytes are forwarded to
+            # the Cortex engine directly by the message chain instead.
+            log_info(
+                f"[iris_plugin] Engine '{self._active_engine_name}'; "
+                "skipping vision analysis."
+            )
             return None
 
         if not os.path.exists(file_path):
@@ -236,6 +241,12 @@ class IrisPlugin(AIPluginBase):
                 ],
             }
         }
+
+    def is_enabled(self) -> bool:
+        self.refresh_config()
+        # 'inline' forwards image bytes straight to the Cortex engine and has no
+        # description engine, so the vision_describe action is not exposed.
+        return self._active_engine_name not in ("disabled", "inline")
 
     def get_prompt_instructions(self, action_name: str) -> dict:
         if action_name == "vision_describe":

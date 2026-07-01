@@ -156,8 +156,53 @@ def get_time_of_day_label(dt_or_hour) -> str:
     return "late_evening"
 
 
+def get_current_season(dt: datetime) -> str:
+    """Return a season label based on the month (Northern Hemisphere).
+
+    Refinements for transitions:
+    - March: Early Spring
+    - April: Mid Spring
+    - May: Late Spring
+    - June: Early Summer
+    - July: Mid Summer
+    - August: Late Summer
+    - September: Early Autumn
+    - October: Mid Autumn
+    - November: Late Autumn
+    - December: Early Winter
+    - January: Mid Winter
+    - February: Late Winter
+    """
+    month = dt.month
+    if month == 3:
+        return "Early Spring"
+    if month == 4:
+        return "Mid Spring"
+    if month == 5:
+        return "Late Spring"
+    if month == 6:
+        return "Early Summer"
+    if month == 7:
+        return "Mid Summer"
+    if month == 8:
+        return "Late Summer"
+    if month == 9:
+        return "Early Autumn"
+    if month == 10:
+        return "Mid Autumn"
+    if month == 11:
+        return "Late Autumn"
+    if month == 12:
+        return "Early Winter"
+    if month == 1:
+        return "Mid Winter"
+    if month == 2:
+        return "Late Winter"
+    return "Spring"  # Fallback
+
+
 async def get_local_time_fields(dt=None, interface_path: str | None = None) -> dict:
-    """Return a dict with local_time, local_hour, time_of_day, local_date.
+    """Return a dict with local_time, local_hour, time_of_day, local_date, season, day_of_week.
 
     - dt: a datetime instance (aware or naive). If None, uses current UTC now.
     - interface_path: optional session identifier used to look up session_meta timezone
@@ -170,7 +215,7 @@ async def get_local_time_fields(dt=None, interface_path: str | None = None) -> d
 
     # Resolve base datetime
     if dt is None:
-        dt = _dt.utcnow()
+        dt = _dt.now(ZoneInfo("UTC"))
 
     # If naive, treat as UTC
     try:
@@ -213,10 +258,14 @@ async def get_local_time_fields(dt=None, interface_path: str | None = None) -> d
     local_hour = int(local_dt.hour)
     time_of_day = get_time_of_day_label(local_dt)
     local_date = local_dt.strftime("%Y-%m-%d")
+    season = get_current_season(local_dt)
+    day_of_week = local_dt.strftime("%A")
 
     return {
         "local_time": local_time,
         "local_hour": local_hour,
         "time_of_day": time_of_day,
         "local_date": local_date,
+        "season": season,
+        "day_of_week": day_of_week,
     }

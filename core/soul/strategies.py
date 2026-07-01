@@ -149,37 +149,82 @@ class RuleBasedMemCellExtractor:
 class RuleBasedDspExtractor:
     """Extract lightweight DSP facts from transcript text."""
 
+    _SELF_SPEAKER_LABELS = frozenset({"self", "synth", "assistant", "2b", "raine"})
+
     async def extract_dsp(
         self, *, transcript: str, current_date: date
     ) -> DspExtractionModel:
+        del current_date
         text = (transcript or "").strip()
         if not text:
             return DspExtractionModel(
                 user_facts=[], user_preferences=[], ai_self_facts=[]
             )
 
-        facts = self._extract_user_facts(text)
-        prefs = self._extract_preferences(text)
+        user_lines, self_lines = self._split_transcript_by_speaker(text)
+        user_text = "\n".join(user_lines) if user_lines else text
+        self_text = "\n".join(self_lines)
+
+        facts = self._extract_user_facts(user_text)
+        prefs = self._extract_preferences(user_text)
         return DspExtractionModel(
             user_facts=facts,
             user_preferences=prefs,
-            ai_self_facts=[],
+            ai_self_facts=self._extract_ai_self_facts(self_text),
         )
+
+    def _split_transcript_by_speaker(self, text: str) -> tuple[list[str], list[str]]:
+        user_lines: list[str] = []
+        self_lines: list[str] = []
+        structured_lines = 0
+
+        for raw_line in text.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+
+            match = re.match(
+                r"^(?:\[[^\]]+\]\s*)?(?P<speaker>[^:\n]{1,40}):\s*(?P<content>.+?)\s*$",
+                line,
+            )
+            if match is None:
+                continue
+
+            structured_lines += 1
+            speaker = match.group("speaker").strip().strip("\"'").lower()
+            content = self._clean_fact_value(match.group("content"))
+            if not content:
+                continue
+
+            if speaker in self._SELF_SPEAKER_LABELS:
+                self_lines.append(content)
+            else:
+                user_lines.append(content)
+
+        if structured_lines == 0:
+            return ([text] if text else []), []
+
+        return user_lines, self_lines
 
     def _extract_user_facts(self, text: str) -> list[str]:
         facts: list[str] = []
 
-        for match in re.finditer(r"\bI am\s+([^\.\n]+)", text, flags=re.IGNORECASE):
-            value = match.group(1).strip()
-            if value:
-                facts.append(f"User says they are {value}")
+        facts.extend(self._extract_first_person_facts(text, subject="User"))
 
-        for match in re.finditer(
-            r"\bI work on\s+([^\.\n]+)", text, flags=re.IGNORECASE
-        ):
-            value = match.group(1).strip()
-            if value:
-                facts.append(f"User works on {value}")
+        leading_status_patterns = [
+            (r"^\s*doing\s+([^,\n!?]+)", "User reports doing {value}"),
+            (r"^\s*feeling\s+([^,\n!?]+)", "User reports feeling {value}"),
+            (r"^\s*staying\s+([^,\n!?]+)", "User is staying {value}"),
+            (r"^\s*recovering\s+([^,\n!?]+)", "User reports recovering {value}"),
+        ]
+        for line in text.splitlines():
+            for pattern, template in leading_status_patterns:
+                match = re.search(pattern, line, flags=re.IGNORECASE)
+                if match is None:
+                    continue
+                value = self._clean_fact_value(match.group(1))
+                if value:
+                    facts.append(template.format(value=value))
 
         return list(dict.fromkeys(facts))
 
@@ -195,6 +240,51 @@ class RuleBasedDspExtractor:
             for match in re.finditer(pattern, text, flags=re.IGNORECASE):
                 value = match.group(1).strip()
                 if value:
-                    prefs.append(value)
+                    cleaned = self._clean_fact_value(value)
+                    if pattern == r"\bI prefer\s+([^\.\n]+)":
+                        cleaned = re.split(
+                            r",\s*(?:please\b|respond\b)",
+                            cleaned,
+                            maxsplit=1,
+                            flags=re.IGNORECASE,
+                        )[0].strip()
+                    if cleaned:
+                        prefs.append(cleaned)
 
         return list(dict.fromkeys(prefs))
+
+    def _extract_ai_self_facts(self, text: str) -> list[str]:
+        if not text.strip():
+            return []
+        return list(dict.fromkeys(self._extract_first_person_facts(text, subject="AI")))
+
+    def _extract_first_person_facts(self, text: str, *, subject: str) -> list[str]:
+        patterns = [
+            (r"\bI(?:'m| am)\s+([^\.\n!?]+)", f"{subject} says they are {{value}}"),
+            (r"\bI feel\s+([^\.\n!?]+)", f"{subject} feels {{value}}"),
+            (r"\bI(?:'ve| have) been\s+([^\.\n!?]+)", f"{subject} has been {{value}}"),
+            (r"\bI work on\s+([^\.\n!?]+)", f"{subject} works on {{value}}"),
+            (
+                r"\bI(?:'m| am) working on\s+([^\.\n!?]+)",
+                f"{subject} is working on {{value}}",
+            ),
+            (r"\bI(?:'m| am) making\s+([^\.\n!?]+)", f"{subject} is making {{value}}"),
+            (r"\bI need to\s+([^\.\n!?]+)", f"{subject} needs to {{value}}"),
+            (r"\bI want to\s+([^\.\n!?]+)", f"{subject} wants to {{value}}"),
+            (r"\bI (?:like|love)\s+([^\.\n!?]+)", f"{subject} likes {{value}}"),
+        ]
+
+        facts: list[str] = []
+        for pattern, template in patterns:
+            for match in re.finditer(pattern, text, flags=re.IGNORECASE):
+                value = self._clean_fact_value(match.group(1))
+                if value:
+                    facts.append(template.format(value=value))
+        return facts
+
+    @staticmethod
+    def _clean_fact_value(value: str) -> str:
+        cleaned = (value or "").strip().strip("\"'")
+        cleaned = re.sub(r"\s+", " ", cleaned)
+        cleaned = cleaned.rstrip(" .,;:!?")
+        return cleaned[:160]

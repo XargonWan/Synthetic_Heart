@@ -58,7 +58,7 @@ def test_default_response_timeout():
     # The configuration registry default should match the new value we set in the code.
     from core.message_chain import RESPONSE_TIMEOUT
 
-    assert int(RESPONSE_TIMEOUT) == 300
+    assert int(RESPONSE_TIMEOUT) == 2100
 
 
 def test_system_reply_timeout_from_config():

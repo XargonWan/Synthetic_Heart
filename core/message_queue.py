@@ -1,9 +1,12 @@
 import asyncio
+from dataclasses import dataclass
 import inspect
 import time
 import queue as _thread_queue
 import heapq
+import re
 from datetime import datetime
+from typing import Any, cast
 import traceback
 from types import SimpleNamespace
 
@@ -36,11 +39,44 @@ _lock_loop: asyncio.AbstractEventLoop | None = None
 _consumer_task: asyncio.Task | None = None
 _counter = 0  # Monotonic counter to prevent dict comparison when priorities are equal
 
+
+@dataclass(slots=True)
+class _BackgroundTaskEntry:
+    task: asyncio.Task
+    cancel_on_user_message: bool = True
+
+
 # Track running LOW_PRIORITY background tasks by interface_path so they can be
 # cancelled when a higher-priority (user) message arrives for the same chat.
 # This prevents duplicate responses when a grillo outreach beat and a user
 # message target the same interface_path concurrently.
-_bg_tasks: dict[str, asyncio.Task] = {}
+_bg_tasks: dict[str, _BackgroundTaskEntry] = {}
+
+_GRILLO_ACTIVITY_MESSAGE_ID_RE = re.compile(r"^grillo_[a-z_]+_(\d+)$")
+
+
+def _should_cancel_low_priority_on_user_message(context: object) -> bool:
+    if not isinstance(context, dict):
+        return True
+    context_dict = cast(dict[str, object], context)
+    return not (
+        bool(context_dict.get("grillo_beat"))
+        and context_dict.get("beat_type") == "outreach"
+    )
+
+
+def _extract_grillo_activity_log_id(message: object) -> int | None:
+    """Recover a Grillo activity id from a synthetic message id when needed."""
+    message_id = getattr(message, "message_id", None)
+    if not isinstance(message_id, str):
+        return None
+    match = _GRILLO_ACTIVITY_MESSAGE_ID_RE.match(message_id.strip())
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except (TypeError, ValueError):
+        return None
 
 
 def _get_queue() -> asyncio.PriorityQueue:
@@ -939,6 +975,15 @@ async def _consumer_loop() -> None:
                     # Add interface_path to context dict so prompt_engine can access it
                     context = final.get("context", {})
                     if isinstance(context, dict):
+                        if not context.get("activity_log_id"):
+                            recovered_activity_log_id = _extract_grillo_activity_log_id(
+                                final.get("message")
+                            )
+                            if recovered_activity_log_id is not None:
+                                context["activity_log_id"] = recovered_activity_log_id
+                                context["grillo_activity_log_id"] = (
+                                    recovered_activity_log_id
+                                )
                         context["interface_path"] = interface_path
                         context["thread_id"] = thread_id
                         # Propagate trainer flag so plugin_instance can route
@@ -1030,7 +1075,18 @@ async def _consumer_loop() -> None:
                                 f"[QUEUE] on_generation_start hook failed for {interface_path}: {hook_exc}"
                             )
 
-                    def _resolve_generation_animation_state(event: str) -> str:
+                    # NOTE: closures below that can run *deferred* (via
+                    # add_done_callback after the loop has moved on) bind the
+                    # current item's values as keyword defaults — loop variables
+                    # share one cell across iterations, so reading them late
+                    # would target the wrong queue item (same trick as
+                    # _bg_done_cb further down).
+                    def _resolve_generation_animation_state(
+                        event: str,
+                        *,
+                        _final: dict = final,
+                        _interface_path: str = interface_path,
+                    ) -> str:
                         """Resolve an animation state name for generation lifecycle.
 
                         Priority (best-effort):
@@ -1044,7 +1100,7 @@ async def _consumer_loop() -> None:
                         """
                         default_state = "write" if event == "start" else "idle"
 
-                        context_obj = final.get("context")
+                        context_obj = _final.get("context")
                         if isinstance(context_obj, dict):
                             if event == "start":
                                 for k in (
@@ -1064,7 +1120,7 @@ async def _consumer_loop() -> None:
                                         return v.strip()
 
                         try:
-                            iface_id = final.get("interface")
+                            iface_id = _final.get("interface")
                             iface = (
                                 INTERFACE_REGISTRY.get(iface_id) if iface_id else None
                             )
@@ -1082,9 +1138,9 @@ async def _consumer_loop() -> None:
                                 if callable(fn):
                                     v = fn(
                                         event=event,
-                                        interface_path=interface_path,
+                                        interface_path=_interface_path,
                                         context=context_obj,
-                                        message=final.get("message"),
+                                        message=_final.get("message"),
                                     )
                                     if isinstance(v, str) and v.strip():
                                         return v.strip()
@@ -1098,9 +1154,9 @@ async def _consumer_loop() -> None:
                                 )
                                 if callable(fn):
                                     res = fn(
-                                        interface_path=interface_path,
+                                        interface_path=_interface_path,
                                         context=context_obj,
-                                        message=final.get("message"),
+                                        message=_final.get("message"),
                                     )
                                     # Accept (start, end) or dict-like
                                     if isinstance(res, (tuple, list)) and len(res) >= 2:
@@ -1116,7 +1172,9 @@ async def _consumer_loop() -> None:
 
                         return default_state
 
-                    async def _broadcast_global_animation_state(state: str) -> None:
+                    async def _broadcast_global_animation_state(
+                        state: str, *, _final: dict = final
+                    ) -> None:
                         """Best-effort global animation state update (broadcast to all WebUI clients).
 
                         Some interfaces (e.g. Telegram) pass a raw Bot object which does not
@@ -1124,7 +1182,7 @@ async def _consumer_loop() -> None:
                         consistent with `plan-animationHandlerVrm.prompt.md`.
                         """
                         # Allow interfaces to disable core broadcast if they manage it themselves.
-                        context_obj = final.get("context")
+                        context_obj = _final.get("context")
                         if (
                             isinstance(context_obj, dict)
                             and context_obj.get("core_animation_broadcast") is False
@@ -1142,9 +1200,15 @@ async def _consumer_loop() -> None:
                                 f"[QUEUE] Failed to broadcast animation state '{state}': {anim_exc}"
                             )
 
-                    async def _call_bot_generation_end(task: asyncio.Task) -> None:
+                    async def _call_bot_generation_end(
+                        task: asyncio.Task,
+                        *,
+                        _final: dict = final,
+                        _interface_path: str = interface_path,
+                        _context: Any = context,
+                    ) -> None:
                         try:
-                            bot_obj = final.get("bot")
+                            bot_obj = _final.get("bot")
                             if bot_obj is None:
                                 return
                             fn = getattr(bot_obj, "on_generation_end", None)
@@ -1158,21 +1222,21 @@ async def _consumer_loop() -> None:
                                 success = False
                             if inspect.iscoroutinefunction(fn):
                                 await fn(
-                                    interface_path=interface_path,
+                                    interface_path=_interface_path,
                                     success=success,
-                                    context=context,
-                                    message=final.get("message"),
+                                    context=_context,
+                                    message=_final.get("message"),
                                 )
                             else:
                                 fn(
-                                    interface_path=interface_path,
+                                    interface_path=_interface_path,
                                     success=success,
-                                    context=context,
-                                    message=final.get("message"),
+                                    context=_context,
+                                    message=_final.get("message"),
                                 )
                         except Exception as hook_exc:
                             log_debug(
-                                f"[QUEUE] on_generation_end hook failed for {interface_path}: {hook_exc}"
+                                f"[QUEUE] on_generation_end hook failed for {_interface_path}: {hook_exc}"
                             )
 
                     try:
@@ -1181,9 +1245,17 @@ async def _consumer_loop() -> None:
                         # yields — so the Grillo task cannot make further progress
                         # (e.g. write to chat history) between now and when we
                         # actually start processing the user message.
-                        _existing_bg = _bg_tasks.pop(interface_path, None)
-                        if _existing_bg is not None and not _existing_bg.done():
-                            _existing_bg.cancel()
+                        _existing_bg = _bg_tasks.get(interface_path)
+                        if _existing_bg is not None and _existing_bg.task.done():
+                            _bg_tasks.pop(interface_path, None)
+                            _existing_bg = None
+                        if (
+                            _existing_bg is not None
+                            and _existing_bg.cancel_on_user_message
+                            and not _existing_bg.task.done()
+                        ):
+                            _bg_tasks.pop(interface_path, None)
+                            _existing_bg.task.cancel()
                             log_info(
                                 f"[QUEUE] Cancelled LOW_PRIORITY background task for {interface_path} "
                                 f"(superseded by incoming user message)"
@@ -1198,9 +1270,13 @@ async def _consumer_loop() -> None:
                         for _gk in [
                             k for k in list(_bg_tasks) if k.startswith("grillo/")
                         ]:
-                            _gt = _bg_tasks.pop(_gk, None)
-                            if _gt is not None and not _gt.done():
-                                _gt.cancel()
+                            _gt = _bg_tasks.get(_gk)
+                            if _gt is not None and _gt.task.done():
+                                _bg_tasks.pop(_gk, None)
+                                _gt = None
+                            if _gt is not None and not _gt.task.done():
+                                _bg_tasks.pop(_gk, None)
+                                _gt.task.cancel()
                                 log_info(
                                     f"[QUEUE] Cancelled Grillo internal beat {_gk} "
                                     f"(user message arrived for {interface_path})"
@@ -1266,12 +1342,20 @@ async def _consumer_loop() -> None:
 
                             # Track this background task so it can be cancelled if a
                             # user message arrives for the same interface_path.
-                            _bg_tasks[interface_path] = processing_task
+                            _bg_entry = _BackgroundTaskEntry(
+                                task=processing_task,
+                                cancel_on_user_message=_should_cancel_low_priority_on_user_message(
+                                    context
+                                ),
+                            )
+                            _bg_tasks[interface_path] = _bg_entry
 
-                            # Ensure generation_end hook is called when background task completes
+                            # Ensure generation_end hook is called when background task completes.
+                            # Bind the current iteration's closure: the callback fires after the
+                            # loop has moved on and the name would resolve to a newer item's hook.
                             processing_task.add_done_callback(
-                                lambda t: asyncio.create_task(
-                                    _call_bot_generation_end(t)
+                                lambda t, _cb=_call_bot_generation_end: (
+                                    asyncio.create_task(_cb(t))
                                 )
                             )
 
@@ -1281,9 +1365,12 @@ async def _consumer_loop() -> None:
                             def _bg_done_cb(
                                 t: asyncio.Task,
                                 _ipath: str = _captured_ipath,
+                                _entry: _BackgroundTaskEntry = _bg_entry,
                             ) -> None:
                                 # Remove from tracking dict
-                                _bg_tasks.pop(_ipath, None)
+                                current_entry = _bg_tasks.get(_ipath)
+                                if current_entry is _entry:
+                                    _bg_tasks.pop(_ipath, None)
                                 try:
                                     exc = t.exception()
                                     if exc is not None:
@@ -1366,13 +1453,24 @@ async def _consumer_loop() -> None:
                                     f"[QUEUE] Processing task kept alive (non-cancellable engine) for chat {chat_id}"
                                 )
 
-                                async def _clear_processing_when_done() -> None:
+                                async def _clear_processing_when_done(
+                                    *,
+                                    _ptask: asyncio.Task = processing_task,
+                                    _chat_id: Any = chat_id,
+                                    _ipath: str = interface_path,
+                                    _end_cb: Any = _call_bot_generation_end,
+                                    _broadcast: Any = _broadcast_global_animation_state,
+                                    _resolve: Any = _resolve_generation_animation_state,
+                                ) -> None:
+                                    # Runs via add_done_callback after the loop has moved
+                                    # on — all loop variables and per-iteration closures
+                                    # must be bound as defaults, not read from the cells.
                                     try:
                                         try:
-                                            exc = processing_task.exception()
+                                            exc = _ptask.exception()
                                             if exc is not None:
                                                 log_warning(
-                                                    f"[QUEUE] Background processing task error for chat {chat_id}: {exc}"
+                                                    f"[QUEUE] Background processing task error for chat {_chat_id}: {exc}"
                                                 )
                                         except asyncio.CancelledError:
                                             return
@@ -1380,9 +1478,7 @@ async def _consumer_loop() -> None:
                                             pass
 
                                         try:
-                                            await _call_bot_generation_end(
-                                                processing_task
-                                            )
+                                            await _end_cb(_ptask)
                                         except Exception:
                                             pass
 
@@ -1397,39 +1493,33 @@ async def _consumer_loop() -> None:
                                                     queued_item, "chat_id", None
                                                 )
                                             )
-                                            if item_chat == chat_id:
+                                            if item_chat == _chat_id:
                                                 still_pending = True
                                                 break
                                         if not still_pending:
                                             try:
                                                 existing_meta = (
-                                                    await get_session_meta_fn(
-                                                        interface_path
-                                                    )
+                                                    await get_session_meta_fn(_ipath)
                                                     or {}
                                                 )
                                                 existing_meta["processing"] = False
                                                 await set_session_meta_fn(
-                                                    interface_path, existing_meta
+                                                    _ipath, existing_meta
                                                 )
                                             except Exception as set_e:
                                                 log_debug(
                                                     f"[QUEUE] Failed to clear processing session meta (background): {set_e}"
                                                 )
-                                            await _broadcast_global_animation_state(
-                                                _resolve_generation_animation_state(
-                                                    "end"
-                                                )
-                                            )
+                                            await _broadcast(_resolve("end"))
                                     except Exception as e:
                                         log_debug(
-                                            f"[QUEUE] Error in background completion handler for chat {chat_id}: {e}"
+                                            f"[QUEUE] Error in background completion handler for chat {_chat_id}: {e}"
                                         )
 
                                 try:
                                     processing_task.add_done_callback(
-                                        lambda _t: asyncio.create_task(
-                                            _clear_processing_when_done()
+                                        lambda _t, _cb=_clear_processing_when_done: (
+                                            asyncio.create_task(_cb())
                                         )
                                     )
                                 except Exception as cb_e:

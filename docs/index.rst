@@ -32,6 +32,7 @@ getting started.
    plugins
    external_endpoints
    auris_vox
+   radio_azuracast
    vrm_animations
    animation_system
    webui_controls

@@ -213,8 +213,9 @@ class BlocklistPlugin:
                 import asyncio
 
                 asyncio.create_task(
-                    self._block_user_action(bot, original_message, user_id, reason)
+                    self._block_user_action(context, original_message, user_id, reason)
                 )
+            return None
 
         elif action_type == "unblock_user":
             user_id = payload.get("user_id")
@@ -222,8 +223,9 @@ class BlocklistPlugin:
                 import asyncio
 
                 asyncio.create_task(
-                    self._unblock_user_action(bot, original_message, user_id)
+                    self._unblock_user_action(context, original_message, user_id)
                 )
+            return None
 
         elif action_type == "is_user_blocked":
             user_id = payload.get("user_id")
@@ -231,74 +233,89 @@ class BlocklistPlugin:
                 import asyncio
 
                 asyncio.create_task(
-                    self._check_user_blocked(bot, original_message, user_id)
+                    self._check_user_blocked(context, original_message, user_id)
                 )
+            return None
 
         elif action_type == "get_blocked_users":
             import asyncio
 
-            asyncio.create_task(self._send_blocked_users(bot, original_message))
+            asyncio.create_task(self._send_blocked_users(context, original_message))
+            return None
 
-    async def _block_user_action(self, bot, original_message, user_id, reason):
-        """Execute block user action and send response."""
+        return None
+
+    async def _block_user_action(self, context, original_message, user_id, reason):
+        """Execute block user action and return message action."""
         try:
             await block_user(user_id, reason)
-            await bot.send_message(
-                original_message.chat_id,
-                f"✅ User {user_id} has been blocked.\nReason: {reason}",
-            )
+            text = f"✅ User {user_id} has been blocked.\nReason: {reason}"
         except Exception as e:
-            await bot.send_message(
-                original_message.chat_id, f"❌ Failed to block user {user_id}: {e}"
-            )
+            text = f"❌ Failed to block user {user_id}: {e}"
+        return self._build_message_action(text, context, original_message)
 
-    async def _unblock_user_action(self, bot, original_message, user_id):
-        """Execute unblock user action and send response."""
+    async def _unblock_user_action(self, context, original_message, user_id):
+        """Execute unblock user action and return message action."""
         try:
             success = await unblock_user(user_id)
             if success:
-                await bot.send_message(
-                    original_message.chat_id, f"✅ User {user_id} has been unblocked."
-                )
+                text = f"✅ User {user_id} has been unblocked."
             else:
-                await bot.send_message(
-                    original_message.chat_id,
-                    f"⚠️ User {user_id} was not in the blocklist.",
-                )
+                text = f"⚠️ User {user_id} was not in the blocklist."
         except Exception as e:
-            await bot.send_message(
-                original_message.chat_id, f"❌ Failed to unblock user {user_id}: {e}"
-            )
+            text = f"❌ Failed to unblock user {user_id}: {e}"
+        return self._build_message_action(text, context, original_message)
 
-    async def _check_user_blocked(self, bot, original_message, user_id):
-        """Check if user is blocked and send response."""
+    async def _check_user_blocked(self, context, original_message, user_id):
+        """Check if user is blocked and return message action."""
         try:
             blocked = await is_user_blocked(user_id)
             status = "🚫 BLOCKED" if blocked else "✅ NOT BLOCKED"
-            await bot.send_message(
-                original_message.chat_id, f"User {user_id}: {status}"
-            )
+            text = f"User {user_id}: {status}"
         except Exception as e:
-            await bot.send_message(
-                original_message.chat_id, f"❌ Failed to check user {user_id}: {e}"
-            )
+            text = f"❌ Failed to check user {user_id}: {e}"
+        return self._build_message_action(text, context, original_message)
 
-    async def _send_blocked_users(self, bot, original_message):
-        """Send list of blocked users."""
+    async def _send_blocked_users(self, context, original_message):
+        """Get list of blocked users and return message action."""
         try:
             blocked_users = await get_blocked_users()
             if blocked_users:
-                response = "🚫 Blocked Users:\n"
+                text = "🚫 Blocked Users:\n"
                 for user in blocked_users:
-                    response += f"• {user['user_id']}: {user['reason']} (blocked: {user['blocked_at']})\n"
+                    text += f"• {user['user_id']}: {user['reason']} (blocked: {user['blocked_at']})\n"
             else:
-                response = "✅ No users are currently blocked."
-
-            await bot.send_message(original_message.chat_id, response)
+                text = "✅ No users are currently blocked."
         except Exception as e:
-            await bot.send_message(
-                original_message.chat_id, f"❌ Failed to get blocked users: {e}"
+            text = f"❌ Failed to get blocked users: {e}"
+        return self._build_message_action(text, context, original_message)
+
+    @staticmethod
+    def _build_message_action(text: str, context: dict, original_message) -> dict:
+        """Build a message action dict for interface-agnostic delivery."""
+        interface_path = None
+        if context and isinstance(context, dict):
+            interface_path = context.get("interface_path")
+        if not interface_path and original_message:
+            interface_path = getattr(original_message, "interface_path", None)
+        if not interface_path:
+            log_warning(
+                "[blocklist] Cannot build message action: no interface_path available"
             )
+            return None
+
+        interface_name = interface_path.split("/")[0] if interface_path else None
+        if not interface_name:
+            return None
+
+        action_type = f"message_{interface_name}"
+        return {
+            "type": action_type,
+            "payload": {
+                "text": text,
+                "interface_path": interface_path,
+            },
+        }
 
 
 PLUGIN_CLASS = BlocklistPlugin

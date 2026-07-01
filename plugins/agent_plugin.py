@@ -138,6 +138,16 @@ class AgentPlugin(AIPluginBase):
         if loop is not None:
             self._attach_task = loop.create_task(self._attach_to_active_engine())
 
+    def is_enabled(self) -> bool:
+        """Only expose agent actions when the agent is toggled on.
+
+        Without this, ``core_initializer`` defaults the plugin to enabled and
+        injects ``agent_execute`` / ``propose_action`` / ``approve_action`` into
+        every prompt even when ``AGENT_ENABLED`` is off or we are not running in
+        a container — bloating the tool block for small local LLMs.
+        """
+        return bool(self._enabled)
+
     async def _attach_to_active_engine(self) -> None:
         try:
             from core.config import get_active_cortex_engine

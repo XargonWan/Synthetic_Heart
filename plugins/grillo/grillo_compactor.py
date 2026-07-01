@@ -319,10 +319,12 @@ class GrilloCompactorPlugin:
         """
         try:
             # Local imports
-            from core.db import get_conn_ctx
+            from core.db import _get_db_type, get_conn_ctx
 
             age_days = self.age_days
             limit = max(1, int(self.batch_size))
+            is_postgres = _get_db_type() == "postgres"
+            cutoff_dt = datetime.now(timezone.utc) - timedelta(days=age_days)
 
             offset = 0
             processed_any = False
@@ -333,34 +335,57 @@ class GrilloCompactorPlugin:
                     async with conn.cursor() as cur:
                         # Fetch candidate older diary entries (ordered oldest first), with pagination via OFFSET
                         if marker:
-                            await cur.execute(
-                                "SELECT id, content, context_tags as tags, timestamp FROM ai_diary WHERE timestamp < DATE_SUB(NOW(), INTERVAL %s DAY) AND JSON_CONTAINS(context_tags, %s) ORDER BY timestamp ASC LIMIT %s OFFSET %s",
-                                (age_days, json.dumps(marker), limit, offset),
-                            )
+                            if is_postgres:
+                                await cur.execute(
+                                    "SELECT id, content, context_tags as tags, timestamp FROM ai_diary WHERE timestamp < %s AND COALESCE(NULLIF(BTRIM(context_tags), ''), '[]')::jsonb ? %s ORDER BY timestamp ASC LIMIT %s OFFSET %s",
+                                    (cutoff_dt, str(marker), limit, offset),
+                                )
+                            else:
+                                await cur.execute(
+                                    "SELECT id, content, context_tags as tags, timestamp FROM ai_diary WHERE timestamp < DATE_SUB(NOW(), INTERVAL %s DAY) AND JSON_CONTAINS(context_tags, %s) ORDER BY timestamp ASC LIMIT %s OFFSET %s",
+                                    (age_days, json.dumps(marker), limit, offset),
+                                )
                             candidates = await cur.fetchall()
                             # Fallback: some rows have non-standard context_tags formatting; try LIKE-based search
                             if not candidates:
                                 try:
                                     log_debug(
-                                        f"[grillo_compactor] JSON_CONTAINS returned no results for marker {marker}; trying LIKE fallback"
+                                        f"[grillo_compactor] Tag predicate returned no results for marker {marker}; trying LIKE fallback"
                                     )
-                                    await cur.execute(
-                                        "SELECT id, content, context_tags as tags, timestamp FROM ai_diary WHERE timestamp < DATE_SUB(NOW(), INTERVAL %s DAY) AND context_tags LIKE %s ORDER BY timestamp ASC LIMIT %s OFFSET %s",
-                                        (
-                                            age_days,
-                                            "%" + str(marker) + "%",
-                                            limit,
-                                            offset,
-                                        ),
-                                    )
+                                    if is_postgres:
+                                        await cur.execute(
+                                            "SELECT id, content, context_tags as tags, timestamp FROM ai_diary WHERE timestamp < %s AND context_tags LIKE %s ORDER BY timestamp ASC LIMIT %s OFFSET %s",
+                                            (
+                                                cutoff_dt,
+                                                "%" + str(marker) + "%",
+                                                limit,
+                                                offset,
+                                            ),
+                                        )
+                                    else:
+                                        await cur.execute(
+                                            "SELECT id, content, context_tags as tags, timestamp FROM ai_diary WHERE timestamp < DATE_SUB(NOW(), INTERVAL %s DAY) AND context_tags LIKE %s ORDER BY timestamp ASC LIMIT %s OFFSET %s",
+                                            (
+                                                age_days,
+                                                "%" + str(marker) + "%",
+                                                limit,
+                                                offset,
+                                            ),
+                                        )
                                     candidates = await cur.fetchall()
                                 except Exception:
                                     candidates = []
                         else:
-                            await cur.execute(
-                                "SELECT id, content, context_tags as tags, timestamp FROM ai_diary WHERE timestamp < DATE_SUB(NOW(), INTERVAL %s DAY) ORDER BY timestamp ASC LIMIT %s OFFSET %s",
-                                (age_days, limit, offset),
-                            )
+                            if is_postgres:
+                                await cur.execute(
+                                    "SELECT id, content, context_tags as tags, timestamp FROM ai_diary WHERE timestamp < %s ORDER BY timestamp ASC LIMIT %s OFFSET %s",
+                                    (cutoff_dt, limit, offset),
+                                )
+                            else:
+                                await cur.execute(
+                                    "SELECT id, content, context_tags as tags, timestamp FROM ai_diary WHERE timestamp < DATE_SUB(NOW(), INTERVAL %s DAY) ORDER BY timestamp ASC LIMIT %s OFFSET %s",
+                                    (age_days, limit, offset),
+                                )
                             candidates = await cur.fetchall()
 
                 if not candidates:

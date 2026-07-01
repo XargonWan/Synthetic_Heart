@@ -15,7 +15,7 @@ def _plugin_config_value(
 ) -> Any:
     overrides = {
         "ACTION_INTENT_DEBRIEF_ENABLED": True,
-        "ACTION_INTENT_ALLOW_MESSAGE_ACTIONS": False,
+        "ACTION_INTENT_ALLOW_MESSAGE_ACTIONS": True,
         "ACTION_INTENT_MAX_ACTIONS": 3,
         "ACTION_INTENT_PROACTIVE_ENABLED": True,
     }
@@ -126,7 +126,10 @@ async def test_debrief_action_intent_uses_corrector_for_invalid_json(
     assert called["chat_id"] == 42
     assert called["thread_id"] == 7
     assert called["context"]["original_user_message"] == "Ricordamelo domani"
-    assert called["context"]["allowed_action_types"] == ["schedule_message"]
+    assert set(called["context"]["allowed_action_types"]) == {
+        "schedule_message",
+        "message_telegram_bot",
+    }
     assert called["context"]["message"].interface_path == "telegram/42"
     assert result == {
         "recovery_actions": [

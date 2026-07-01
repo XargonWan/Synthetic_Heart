@@ -2524,6 +2524,61 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                                 }).catch(() => {});
                             }
                         }
+
+                        // --- Per-endpoint extra config editor (external endpoints only) ---
+                        const cfgWrap = document.getElementById('cortex-engine-config-wrap');
+                        const cfgArea = document.getElementById('cortex-engine-config');
+                        const cfgSave = document.getElementById('cortex-engine-config-save');
+                        const cfgStatus = document.getElementById('cortex-engine-config-status');
+                        if (cfgWrap && cfgArea) {
+                            if (active && active.is_external && active.endpoint_id != null) {
+                                cfgWrap.style.display = '';
+                                const ec = active.extra_config || {};
+                                cfgArea.value = Object.keys(ec).length ? JSON.stringify(ec, null, 2) : '';
+                                if (cfgStatus) cfgStatus.textContent = '';
+                                if (cfgSave) {
+                                    cfgSave._epId = active.endpoint_id;
+                                    if (!cfgSave.dataset.bound) {
+                                        cfgSave.dataset.bound = '1';
+                                        cfgSave.addEventListener('click', async () => {
+                                            const setCfgStatus = (msg, ok) => {
+                                                if (!cfgStatus) return;
+                                                cfgStatus.textContent = msg;
+                                                cfgStatus.style.color = ok ? 'var(--success,#27ae60)' : 'var(--danger,#c0392b)';
+                                            };
+                                            const raw = (cfgArea.value || '').trim();
+                                            let parsed = {};
+                                            if (raw) {
+                                                try {
+                                                    parsed = JSON.parse(raw);
+                                                } catch (err) {
+                                                    setCfgStatus('Invalid JSON: ' + err.message, false);
+                                                    return;
+                                                }
+                                                if (typeof parsed !== 'object' || Array.isArray(parsed) || parsed === null) {
+                                                    setCfgStatus('Extra Config must be a JSON object.', false);
+                                                    return;
+                                                }
+                                            }
+                                            try {
+                                                const res = await fetch(`/api/external-endpoints/${cfgSave._epId}`, {
+                                                    method: 'PUT',
+                                                    headers: { 'Content-Type': 'application/json' },
+                                                    body: JSON.stringify({ extra_config: parsed }),
+                                                });
+                                                if (!res.ok) throw new Error('HTTP ' + res.status);
+                                                setCfgStatus('Saved — reload this engine to apply.', true);
+                                                if (window.showToast) window.showToast('Engine config saved', false);
+                                            } catch (err) {
+                                                setCfgStatus('Save failed: ' + err.message, false);
+                                            }
+                                        });
+                                    }
+                                }
+                            } else {
+                                cfgWrap.style.display = 'none';
+                            }
+                        }
                     };
 
                     // Populate cortex kind select
@@ -2570,7 +2625,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                         }
                     } catch (e) { console.debug('[synth_webui] init: failed to render initial cortex cards', e); }
                     // Bind engineSelect change to switch engine
-                    if (!engineSelect.dataset.bound) {
+                        if (engineSelect && !engineSelect.dataset.bound) {
                         engineSelect.addEventListener('change', async () => {
                             const selected = engineSelect.value;
                             if (!selected) return;
@@ -3796,6 +3851,8 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
             function initSettingsTab() {
                 if (!window.__synth_settings_initialized) {
                     const resetBtn = document.getElementById('reset-window-positions');
+                    const backupBtn = document.getElementById('create-database-backup');
+                    const backupStatus = document.getElementById('database-backup-status');
                     if (resetBtn) {
                         resetBtn.addEventListener('click', () => {
                             try {
@@ -3833,6 +3890,31 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                                     chat.style.height = '';
                                 }
                             } catch (e) { /* ignore */ }
+                        });
+                    }
+                    if (backupBtn) {
+                        backupBtn.addEventListener('click', async () => {
+                            backupBtn.disabled = true;
+                            if (backupStatus) backupStatus.textContent = 'Creating backup…';
+                            try {
+                                const response = await fetch('/api/database/backup', {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                });
+                                const payload = await response.json().catch(() => ({}));
+                                if (!response.ok || !payload.success) {
+                                    throw new Error(payload.detail || payload.error || `HTTP ${response.status}`);
+                                }
+                                const filename = payload.filename || payload.path || 'backup completed';
+                                if (backupStatus) backupStatus.textContent = `Backup created: ${filename}`;
+                                try { if (window.showToast) window.showToast(`Database backup created: ${filename}`, false); } catch (e) { /* ignore */ }
+                            } catch (error) {
+                                const message = error && error.message ? error.message : 'Backup failed';
+                                if (backupStatus) backupStatus.textContent = `Backup failed: ${message}`;
+                                try { if (window.showToast) window.showToast(`Database backup failed: ${message}`, true); } catch (e) { /* ignore */ }
+                            } finally {
+                                backupBtn.disabled = false;
+                            }
                         });
                     }
                     initNotifications();

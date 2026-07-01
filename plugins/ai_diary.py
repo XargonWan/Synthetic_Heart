@@ -71,6 +71,21 @@ DIARY_CONFIG = {
 }
 
 
+def _build_json_array_membership_clause(
+    column: str, values: List[str]
+) -> tuple[list[str], list[Any]]:
+    if _get_db_type() == "postgres":
+        return (
+            [f"COALESCE(NULLIF(BTRIM({column}), ''), '[]')::jsonb ? %s"] * len(values),
+            list(values),
+        )
+
+    return (
+        [f"JSON_CONTAINS({column}, %s)"] * len(values),
+        [json.dumps(value) for value in values],
+    )
+
+
 def get_diary_config(interface_name: str) -> dict:
     """Get diary configuration for a specific interface."""
     return DIARY_CONFIG
@@ -334,19 +349,25 @@ async def init_diary_table():
             )
         """)
 
-        # Legacy emotion_diary table (moved from core)
+        # emotion_diary is owned by plugins/emotion_manager.py. This bootstrap
+        # DDL must stay identical to EmotionManager._ensure_table_exists so
+        # whichever plugin initializes first creates the same schema — the old
+        # variant here (id VARCHAR, intensity INT, no timestamp) truncated
+        # float intensities to zero (see AGENTS.md §12).
         await cursor.execute("""
             CREATE TABLE IF NOT EXISTS emotion_diary (
-                id VARCHAR(100) PRIMARY KEY,
+                id INT AUTO_INCREMENT PRIMARY KEY,
                 source VARCHAR(100),
-                event TEXT,
-                emotion VARCHAR(50),
-                intensity INT,
-                state VARCHAR(50),
-                trigger_condition TEXT,
+                event VARCHAR(100),
+                emotion VARCHAR(100),
+                intensity FLOAT,
+                state VARCHAR(100),
+                trigger_condition VARCHAR(255),
                 decision_logic TEXT,
-                next_check DATETIME
-            )
+                next_check DATETIME,
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                INDEX idx_timestamp (timestamp)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
         """)
 
         # Archive table for archived diary entries
@@ -443,11 +464,84 @@ async def _execute(query: str, params: tuple = ()):
 
 
 async def _fetchall(query: str, params: tuple = ()) -> List[Dict]:
-    """Fetch all results from a database query."""
+    """Fetch all results from a database query as plain mutable dicts.
+
+    The Postgres compat cursor yields immutable asyncpg ``Record`` rows even
+    when a DictCursor is requested; callers mutate JSON fields in place, so
+    every row is copied into a real dict here.
+    """
     async with get_db() as conn:
         cursor = await conn.cursor(aiomysql.DictCursor)
         await cursor.execute(query, params)
-        return await cursor.fetchall()
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+
+def _parse_json_list(value: Any) -> list:
+    """Parse a JSON-list column value defensively (handles None, str, list)."""
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    try:
+        parsed = json.loads(value)
+        return parsed if isinstance(parsed, list) else []
+    except Exception:
+        return []
+
+
+def _normalize_emotions(emotions: Any) -> list[dict[str, Any]]:
+    """Coerce assorted emotion shapes into ``[{"type": str, "intensity": num}]``.
+
+    Small local models emit emotions inconsistently — as a ``{name: intensity}``
+    map (the ``update_emotion_state`` shape), a list of names, or the canonical
+    list of dicts. Normalise them all so diary entries actually capture emotions
+    instead of dropping them with an "Invalid emotion format" warning.
+    """
+    if not emotions:
+        return []
+
+    def _intensity(value: Any) -> Any:
+        return (
+            value
+            if isinstance(value, (int, float)) and not isinstance(value, bool)
+            else None
+        )
+
+    normalized: list[dict[str, Any]] = []
+
+    if isinstance(emotions, dict):
+        for name, intensity in emotions.items():
+            if not name:
+                continue
+            entry: dict[str, Any] = {"type": str(name)}
+            if _intensity(intensity) is not None:
+                entry["intensity"] = intensity
+            normalized.append(entry)
+        return normalized
+
+    if isinstance(emotions, (list, tuple)):
+        for item in emotions:
+            if isinstance(item, dict):
+                etype = item.get("type") or item.get("emotion") or item.get("name")
+                if not etype:
+                    continue
+                entry = {"type": str(etype)}
+                if _intensity(item.get("intensity")) is not None:
+                    entry["intensity"] = item["intensity"]
+                normalized.append(entry)
+            elif isinstance(item, str) and item.strip():
+                normalized.append({"type": item.strip()})
+        return normalized
+
+    return []
+
+
+def _isoformat_timestamp(value: Any) -> Any:
+    """Convert a datetime column value to ISO text, passing through others."""
+    if value is None:
+        return None
+    return value.isoformat() if hasattr(value, "isoformat") else value
 
 
 def _merge_json_list(existing_json: str | None, new_items: list) -> list:
@@ -519,6 +613,46 @@ def _clip_for_column(text: str | None, max_len: int) -> str | None:
     return f"{text[:keep]}{suffix}"
 
 
+def _normalize_diary_origin_value(value: Any) -> str | None:
+    """Normalize optional diary origin metadata into a comparable string."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text or text.lower() in {"none", "null"}:
+        return None
+    return text
+
+
+def _merge_diary_interface(existing: Any, incoming: Any) -> str | None:
+    """Prefer meaningful external interfaces over placeholders/internal ones."""
+    internal_interfaces = {"unknown", "grillo", "diary_merge"}
+    existing_text = _normalize_diary_origin_value(existing)
+    incoming_text = _normalize_diary_origin_value(incoming)
+    if incoming_text and incoming_text not in internal_interfaces:
+        return incoming_text
+    if existing_text and existing_text not in internal_interfaces:
+        return existing_text
+    return incoming_text or existing_text
+
+
+def _merge_diary_chat_id(existing: Any, incoming: Any) -> str | None:
+    """Prefer real chat ids over internal sentinel ids when merging a day row."""
+    existing_text = _normalize_diary_origin_value(existing)
+    incoming_text = _normalize_diary_origin_value(incoming)
+    if incoming_text and incoming_text != "-1":
+        return incoming_text
+    if existing_text and existing_text != "-1":
+        return existing_text
+    return incoming_text or existing_text
+
+
+def _merge_diary_thread_id(existing: Any, incoming: Any) -> str | None:
+    """Fill thread ids when available without blanking an existing value."""
+    return _normalize_diary_origin_value(incoming) or _normalize_diary_origin_value(
+        existing
+    )
+
+
 def _is_user_message_overflow_error(exc: Exception) -> bool:
     """Check whether DB error corresponds to ai_diary.user_message overflow."""
     msg = str(exc).lower()
@@ -554,7 +688,8 @@ async def _upsert_diary_impl(
             # Look for today's entry
             await cursor.execute(
                 "SELECT id, content, personal_thought, interaction_summary, "
-                "user_message, emotions, context_tags, involved_users "
+                "user_message, emotions, context_tags, involved_users, "
+                "interface, chat_id, thread_id "
                 "FROM ai_diary WHERE DATE(timestamp) = CURDATE() "
                 "ORDER BY timestamp DESC LIMIT 1"
             )
@@ -569,6 +704,9 @@ async def _upsert_diary_impl(
                     ex_emotions,
                     ex_tags,
                     ex_involved,
+                    ex_interface,
+                    ex_chat_id,
+                    ex_thread_id,
                 ) = existing
                 merged_content = (
                     f"{ex_content}{_SEP}{content}" if ex_content else content
@@ -589,11 +727,15 @@ async def _upsert_diary_impl(
                     else (user_message or ex_user_msg)
                 )
                 merged_user_msg = _clip_for_column(merged_user_msg, user_message_limit)
+                merged_interface = _merge_diary_interface(ex_interface, interface)
+                merged_chat_id = _merge_diary_chat_id(ex_chat_id, chat_id)
+                merged_thread_id = _merge_diary_thread_id(ex_thread_id, thread_id)
                 update_sql = """
                     UPDATE ai_diary
                     SET content=%s, personal_thought=%s, interaction_summary=%s,
                         user_message=%s, emotions=%s, context_tags=%s,
-                        involved_users=%s, timestamp=NOW()
+                        involved_users=%s, interface=%s, chat_id=%s,
+                        thread_id=%s, timestamp=NOW()
                     WHERE id=%s
                     """
                 update_params = (
@@ -604,6 +746,9 @@ async def _upsert_diary_impl(
                     json.dumps(_merge_json_list(ex_emotions, emotions)),
                     json.dumps(_merge_json_list(ex_tags, context_tags)),
                     json.dumps(_merge_json_list(ex_involved, involved_users)),
+                    merged_interface,
+                    merged_chat_id,
+                    merged_thread_id,
                     ex_id,
                 )
                 try:
@@ -734,18 +879,12 @@ def add_diary_entry(
     if not content.strip():
         return
 
-    emotions = emotions or []
+    emotions = _normalize_emotions(emotions)
     context_tags = context_tags or []
     involved_users = involved_users or []
 
     # Normalize interface name for consistency
     interface = normalize_interface_name(interface)
-
-    # Validate emotions format
-    for emotion in emotions:
-        if not isinstance(emotion, dict) or "type" not in emotion:
-            log_warning(f"[ai_diary] Invalid emotion format: {emotion}")
-            continue
 
     try:
         diary_entry_id = _run(
@@ -862,18 +1001,12 @@ async def add_diary_entry_async(
     if not content.strip():
         return
 
-    emotions = emotions or []
+    emotions = _normalize_emotions(emotions)
     context_tags = context_tags or []
     involved_users = involved_users or []
 
     # Normalize interface name for consistency
     interface = normalize_interface_name(interface)
-
-    # Validate emotions format
-    for emotion in emotions:
-        if not isinstance(emotion, dict) or "type" not in emotion:
-            log_warning(f"[ai_diary] Invalid emotion format: {emotion}")
-            continue
 
     try:
         diary_entry_id = await _upsert_diary_impl(
@@ -917,31 +1050,33 @@ async def add_diary_entry_async(
         PLUGIN_ENABLED = False
 
 
-def get_recent_entries(days: int = 2, max_chars: int = None) -> List[Dict[str, Any]]:
-    """Get diary entries from the last N days, optionally limited by character count.
+async def get_recent_entries_async(
+    days: int = 2, max_chars: int | None = None
+) -> List[Dict[str, Any]]:
+    """Get diary entries from the last N days, optionally limited by character count (async version).
     Returns list of dict entries with all database columns, empty list if plugin is disabled.
     Entries are ordered from most recent to oldest, and if max_chars is specified,
     older entries are discarded first to stay within the character limit."""
     global PLUGIN_ENABLED
 
     log_debug(
-        f"[ai_diary] get_recent_entries called with days={days}, max_chars={max_chars}, PLUGIN_ENABLED={PLUGIN_ENABLED}"
+        f"[ai_diary] get_recent_entries_async called with days={days}, max_chars={max_chars}, PLUGIN_ENABLED={PLUGIN_ENABLED}"
     )
 
     # Attempt lazy initialization if plugin was disabled at startup
     if not PLUGIN_ENABLED:
         try:
             log_debug(
-                "[ai_diary] Attempting lazy initialization for get_recent_entries..."
+                "[ai_diary] Attempting lazy initialization for get_recent_entries_async..."
             )
-            _run(_execute("SELECT 1 FROM ai_diary LIMIT 1"))
+            await _execute("SELECT 1 FROM ai_diary LIMIT 1")
             PLUGIN_ENABLED = True
             log_info(
-                "[ai_diary] Plugin lazy-initialized successfully in get_recent_entries"
+                "[ai_diary] Plugin lazy-initialized successfully in get_recent_entries_async"
             )
         except Exception as init_error:
             log_debug(
-                f"[ai_diary] Lazy initialization failed in get_recent_entries: {init_error}"
+                f"[ai_diary] Lazy initialization failed in get_recent_entries_async: {init_error}"
             )
             log_debug("[ai_diary] Plugin disabled, returning empty list")
             return []
@@ -954,29 +1089,26 @@ def get_recent_entries(days: int = 2, max_chars: int = None) -> List[Dict[str, A
         cutoff_date = datetime.now() - timedelta(days=days)
         log_debug(f"[ai_diary] Looking for entries after {cutoff_date}")
 
-        entries = _run(
-            _fetchall(
-                """
+        entries = await _fetchall(
+            """
             SELECT id, content, personal_thought, timestamp, context_tags, involved_users, 
                    emotions, interface, chat_id, thread_id, interaction_summary, user_message
             FROM ai_diary
             WHERE timestamp >= %s
             ORDER BY timestamp DESC
             """,
-                (cutoff_date,),
-            )
+            (cutoff_date,),
         )
 
         log_debug(f"[ai_diary] Raw query returned {len(entries)} entries")
 
-        # Convert JSON fields back to objects
+        # Convert JSON fields back to objects (defensively: columns may hold
+        # NULL, malformed text, or already-decoded lists on JSON-typed schemas)
         for entry in entries:
-            entry["context_tags"] = json.loads(entry.get("context_tags", "[]"))
-            entry["involved_users"] = json.loads(entry.get("involved_users", "[]"))
-            entry["emotions"] = json.loads(entry.get("emotions", "[]"))
-            entry["timestamp"] = (
-                entry["timestamp"].isoformat() if entry["timestamp"] else None
-            )
+            entry["context_tags"] = _parse_json_list(entry.get("context_tags"))
+            entry["involved_users"] = _parse_json_list(entry.get("involved_users"))
+            entry["emotions"] = _parse_json_list(entry.get("emotions"))
+            entry["timestamp"] = _isoformat_timestamp(entry.get("timestamp"))
 
         log_debug(f"[ai_diary] After JSON parsing: {len(entries)} entries")
 
@@ -1019,22 +1151,26 @@ def get_recent_entries(days: int = 2, max_chars: int = None) -> List[Dict[str, A
         return entries
 
     except Exception as e:
-        log_error(f"[ai_diary] Failed to get recent entries: {e}")
+        log_error(f"[ai_diary] Failed to get recent entries async: {e}")
         # Disable plugin if database is unavailable
         PLUGIN_ENABLED = False
         return []
+
+
+def get_recent_entries(
+    days: int = 2, max_chars: int | None = None
+) -> List[Dict[str, Any]]:
+    """Get diary entries from the last N days, optionally limited by character count (sync wrapper)."""
+    return _run(get_recent_entries_async(days=days, max_chars=max_chars))
 
 
 def get_entries_by_tags(tags: List[str], limit: int = 10) -> List[Dict[str, Any]]:
     """Get diary entries that contain any of the specified context tags."""
     try:
         # Create OR conditions for tag matching
-        tag_conditions = []
-        params = []
-
-        for tag in tags:
-            tag_conditions.append("JSON_CONTAINS(context_tags, %s)")
-            params.append(json.dumps(tag))
+        tag_conditions, params = _build_json_array_membership_clause(
+            "context_tags", tags
+        )
 
         if not tag_conditions:
             return []
@@ -1051,14 +1187,13 @@ def get_entries_by_tags(tags: List[str], limit: int = 10) -> List[Dict[str, Any]
 
         entries = _run(_fetchall(query, tuple(params)))
 
-        # Convert JSON fields back to objects
+        # Convert JSON fields back to objects (defensively: columns may hold
+        # NULL, malformed text, or already-decoded lists on JSON-typed schemas)
         for entry in entries:
-            entry["context_tags"] = json.loads(entry.get("context_tags", "[]"))
-            entry["involved_users"] = json.loads(entry.get("involved_users", "[]"))
-            entry["emotions"] = json.loads(entry.get("emotions", "[]"))
-            entry["timestamp"] = (
-                entry["timestamp"].isoformat() if entry["timestamp"] else None
-            )
+            entry["context_tags"] = _parse_json_list(entry.get("context_tags"))
+            entry["involved_users"] = _parse_json_list(entry.get("involved_users"))
+            entry["emotions"] = _parse_json_list(entry.get("emotions"))
+            entry["timestamp"] = _isoformat_timestamp(entry.get("timestamp"))
 
         return entries
 
@@ -1070,28 +1205,32 @@ def get_entries_by_tags(tags: List[str], limit: int = 10) -> List[Dict[str, Any]
 def get_entries_with_person(person: str, limit: int = 10) -> List[Dict[str, Any]]:
     """Get diary entries that involve a specific person."""
     try:
+        person_conditions, person_params = _build_json_array_membership_clause(
+            "involved_users", [person]
+        )
         entries = _run(
             _fetchall(
                 """
             SELECT id, content, personal_thought, timestamp, context_tags, involved_users, 
                    emotions, interface, chat_id, thread_id, interaction_summary, user_message
             FROM ai_diary
-            WHERE JSON_CONTAINS(involved_users, %s)
+            WHERE """
+                + " OR ".join(person_conditions)
+                + """
             ORDER BY timestamp DESC
             LIMIT %s
             """,
-                (json.dumps(person), limit),
+                tuple(person_params + [limit]),
             )
         )
 
-        # Convert JSON fields back to objects
+        # Convert JSON fields back to objects (defensively: columns may hold
+        # NULL, malformed text, or already-decoded lists on JSON-typed schemas)
         for entry in entries:
-            entry["context_tags"] = json.loads(entry.get("context_tags", "[]"))
-            entry["involved_users"] = json.loads(entry.get("involved_users", "[]"))
-            entry["emotions"] = json.loads(entry.get("emotions", "[]"))
-            entry["timestamp"] = (
-                entry["timestamp"].isoformat() if entry["timestamp"] else None
-            )
+            entry["context_tags"] = _parse_json_list(entry.get("context_tags"))
+            entry["involved_users"] = _parse_json_list(entry.get("involved_users"))
+            entry["emotions"] = _parse_json_list(entry.get("emotions"))
+            entry["timestamp"] = _isoformat_timestamp(entry.get("timestamp"))
 
         return entries
 
@@ -1308,7 +1447,7 @@ class DiaryPlugin:
     def get_supported_action_types(self):
         return ["static_inject", "create_personal_diary_entry", "update_diary_entry"]
 
-    def get_history_contributions(self, **kwargs):
+    async def get_history_contributions(self, **kwargs):
         """Provide diary entries as a history contribution for the core HistoryEngine."""
         try:
             from core.history_types import HistoryContribution
@@ -1339,7 +1478,9 @@ class DiaryPlugin:
             # readable without dumping multi-page merged blobs into the prompt.
             per_field_limit = max(300, diary_budget // 4)
 
-            raw_entries = get_recent_entries(days=days, max_chars=diary_budget)
+            raw_entries = await get_recent_entries_async(
+                days=days, max_chars=diary_budget
+            )
 
             # Truncate heavy text fields on each returned entry so the history
             # engine receives compact, LLM-digestible records rather than the
@@ -1370,6 +1511,16 @@ class DiaryPlugin:
             return []
 
     def get_supported_actions(self):
+        # Trainer name is resolved dynamically (config-driven, never hardcoded) so
+        # the diary examples model first-person, named prose instead of detached
+        # "the user" framing that small local models otherwise copy verbatim.
+        try:
+            from core.config import get_trainer_display_name
+
+            trainer_name = get_trainer_display_name()
+        except Exception:
+            trainer_name = ""
+        example_person = trainer_name or "my trainer"
         return {
             "static_inject": {
                 "schema": {"type": "object", "properties": {}, "required": []},
@@ -1386,7 +1537,7 @@ class DiaryPlugin:
                     "properties": {
                         "interaction_summary": {
                             "type": "string",
-                            "description": "Summary of what happened in this interaction. Do NOT include weather, temperature, or location data — that context is provided separately.",
+                            "description": "Summary of what happened in this interaction, written in YOUR OWN first-person voice as yourself and referring to people by name (never 'the user'). Do NOT include weather, temperature, or location data — that context is provided separately.",
                         },
                         "content": {
                             "type": "string",
@@ -1394,7 +1545,7 @@ class DiaryPlugin:
                         },
                         "personal_thought": {
                             "type": "string",
-                            "description": "Personal reflection on the interaction (optional). Focus on emotions and relationship dynamics, not environmental conditions.",
+                            "description": "Personal reflection on the interaction (optional), written in first person as yourself. Focus on your emotions and the relationship dynamics, naming people directly rather than calling them 'the user'. Leave out environmental conditions.",
                         },
                         "emotions": {
                             "type": "array",
@@ -1415,10 +1566,12 @@ class DiaryPlugin:
                         "context_tags": {
                             "type": "array",
                             "description": "Tags for topics discussed (optional)",
+                            "items": {"type": "string"},
                         },
                         "involved_users": {
                             "type": "array",
                             "description": "Users involved in the interaction (optional)",
+                            "items": {"type": "string"},
                         },
                     },
                     "required": ["interaction_summary"],
@@ -1429,27 +1582,28 @@ class DiaryPlugin:
                     "when_to_use": "Use this action in every single response to record the interaction in synth's personal memory",
                     "examples": [
                         {
-                            "scenario": "User asks about weather",
+                            "scenario": "A question about the weather",
                             "payload": {
-                                "interaction_summary": "User asked about weather conditions and I provided current forecast"
+                                "interaction_summary": f"{example_person} asked me about the weather, so I shared the current forecast."
                             },
                         },
                         {
-                            "scenario": "User has technical problem",
+                            "scenario": "Helping with a technical problem",
                             "payload": {
-                                "interaction_summary": "User reported technical issues with their system and I provided troubleshooting steps"
+                                "interaction_summary": f"{example_person} hit a technical snag and I walked them through fixing it."
                             },
                         },
                         {
                             "scenario": "Casual conversation",
                             "payload": {
-                                "interaction_summary": "Had a friendly chat about user's interests and daily activities"
+                                "interaction_summary": f"{example_person} and I had a relaxed chat about how their day was going."
                             },
                         },
                     ],
                     "notes": [
                         "interaction_summary is REQUIRED and must describe what happened in this conversation",
-                        "Be specific about what the user asked and what you provided",
+                        "Write it in YOUR OWN first-person voice as yourself, referring to people by name (never 'the user')",
+                        "Be specific about what was said and what you did, thought, or felt",
                         "Use clear, descriptive language that would help remember this interaction later",
                         "Other fields are optional and will be generated automatically if not provided",
                         "This action MUST be included in every response without exception",
@@ -1522,16 +1676,10 @@ class DiaryPlugin:
 
             # Process entries
             for entry in recent_entries:
-                if isinstance(entry.get("context_tags"), str):
-                    entry["context_tags"] = json.loads(entry["context_tags"] or "[]")
-                if isinstance(entry.get("involved_users"), str):
-                    entry["involved_users"] = json.loads(
-                        entry["involved_users"] or "[]"
-                    )
-                if isinstance(entry.get("emotions"), str):
-                    entry["emotions"] = json.loads(entry["emotions"] or "[]")
-                if entry.get("timestamp") and hasattr(entry["timestamp"], "isoformat"):
-                    entry["timestamp"] = entry["timestamp"].isoformat()
+                entry["context_tags"] = _parse_json_list(entry.get("context_tags"))
+                entry["involved_users"] = _parse_json_list(entry.get("involved_users"))
+                entry["emotions"] = _parse_json_list(entry.get("emotions"))
+                entry["timestamp"] = _isoformat_timestamp(entry.get("timestamp"))
 
             duration = time.time() - start
             if duration > 0.1:
@@ -1552,8 +1700,14 @@ class DiaryPlugin:
             # Return empty list, not empty dict - so the key is present
             return {"latest_diary_entries": []}
 
-    def execute_action(self, action: dict, context: dict, bot, original_message):
-        """Execute diary-related actions."""
+    async def execute_action(
+        self, action: dict, context: dict, bot: Any, original_message: Any
+    ) -> dict:
+        """Execute diary-related actions.
+
+        Async on purpose: the previous sync version bridged into the DB via
+        `_run()`, blocking the event loop for up to 10 s per diary write.
+        """
         action_type = action.get("type")
         payload = action.get("payload", {})
 
@@ -1626,7 +1780,7 @@ class DiaryPlugin:
                     }
 
                 # Create diary entry with provided information
-                add_diary_entry(
+                await add_diary_entry_async(
                     content=content,
                     personal_thought=personal_thought,
                     emotions=emotions,
@@ -1672,37 +1826,60 @@ class DiaryPlugin:
                         merge_timestamp = None
 
                 if merge_timestamp is not None:
-                    _run(
-                        _execute(
-                            "UPDATE ai_diary SET content=%s, timestamp=%s WHERE id=%s",
-                            (new_content, merge_timestamp, int(entry_id)),
-                        )
+                    await _execute(
+                        "UPDATE ai_diary SET content=%s, timestamp=%s WHERE id=%s",
+                        (new_content, merge_timestamp, int(entry_id)),
                     )
                 else:
-                    _run(
-                        _execute(
-                            "UPDATE ai_diary SET content=%s WHERE id=%s",
-                            (new_content, int(entry_id)),
-                        )
+                    await _execute(
+                        "UPDATE ai_diary SET content=%s WHERE id=%s",
+                        (new_content, int(entry_id)),
                     )
 
+                # Collect stale entry ids: prefer context-provided source ids,
+                # but also auto-discover any other rows sharing the same day
+                # so the consolidator works even without merge_source_ids.
+                stale_entry_ids: List[int] = []
+                seen_ids: set[int] = {int(entry_id)}
                 merged_source_ids = (
                     context.get("diary_merge_source_ids") if context else []
                 )
-                stale_entry_ids: List[int] = []
-                seen_ids: set[int] = set()
                 for raw_id in merged_source_ids or []:
                     try:
                         parsed_id = int(raw_id)
                     except Exception:
                         continue
-                    if parsed_id == int(entry_id) or parsed_id in seen_ids:
+                    if parsed_id in seen_ids:
                         continue
                     seen_ids.add(parsed_id)
                     stale_entry_ids.append(parsed_id)
 
+                # Auto-discover additional stale rows for the same calendar day
+                # (they are not referenced in merge_source_ids but linger as
+                # separate fragments from the upsert-or-dedupe era).
+                try:
+                    extra_stale = await _fetchall(
+                        """
+                        SELECT id FROM ai_diary
+                        WHERE DATE(timestamp) = (
+                            SELECT DATE(timestamp) FROM ai_diary WHERE id = %s
+                        )
+                        AND id != %s
+                        """,
+                        (int(entry_id), int(entry_id)),
+                    )
+                    for row in extra_stale:
+                        rid = row.get("id")
+                        if rid is not None and rid not in seen_ids:
+                            seen_ids.add(rid)
+                            stale_entry_ids.append(rid)
+                except Exception as e:
+                    log_debug(f"[ai_diary] Auto-discovery of stale rows failed: {e}")
+
                 if stale_entry_ids:
-                    archive_result = archive_diary_entries(stale_entry_ids)
+                    archive_result = await asyncio.to_thread(
+                        archive_diary_entries, stale_entry_ids
+                    )
                     if not archive_result.get("success"):
                         log_warning(
                             "[ai_diary] Consolidation archived row cleanup failed for "
@@ -1711,7 +1888,7 @@ class DiaryPlugin:
 
                 log_info(
                     f"[ai_diary] Diary entry {entry_id} consolidated to clean prose"
-                    f" (archived {len(stale_entry_ids)} source fragments)"
+                    f" (archived {len(stale_entry_ids)} stale rows)"
                 )
                 return {"success": True, "message": f"Diary entry {entry_id} updated"}
             except Exception as e:
@@ -1730,161 +1907,13 @@ class DiaryPlugin:
         context: dict,
         original_message: object,
     ) -> None:
-        """After each interaction, find the oldest unmerged diary day (last 7 days) and enqueue a consolidation beat.
+        """No-op: diary consolidation is now handled by GrilloDiaryConsolidatorPlugin.
 
-        Looks for diary rows whose ``content`` contains the ``---`` fragment separator,
-        meaning the LLM has not yet synthesised them into coherent prose.  Only ONE beat is
-        enqueued per debrief call (the oldest unmerged day) so that the queue is not flooded.
-        Each successive interaction will process the next oldest day until all are clean.
-
-        The ``diary_merge_beat`` context flag prevents recursive triggering when the merge
-        beat's own response goes through debrief.
+        The ``diary_merge_beat`` guard is kept here to prevent recursive loops
+        when the consolidation beat's own response goes through debrief.
         """
-        if not PLUGIN_ENABLED:
-            return
-        # Prevent recursive loop: the merge beat itself triggers on_debrief again
         if (context or {}).get("diary_merge_beat"):
             return
-
-        try:
-            # Find the oldest day in the last 7 days that still has '---' in its content.
-            # Because historical days may have multiple rows (pre-upsert data), we use
-            # GROUP_CONCAT so a day with many separate rows still shows up here if any
-            # row contains '---' OR if there is more than one row for that day.
-            if _get_db_type() == "postgres":
-                rows = await _fetchall(
-                    """
-                    SELECT id, combined, row_count, source_ids, first_timestamp
-                    FROM (
-                        SELECT
-                            MAX(id) AS id,
-                            string_agg(content, E'\n\n---\n\n' ORDER BY id ASC) AS combined,
-                            string_agg(id::text, ',' ORDER BY id ASC) AS source_ids,
-                            COUNT(*) AS row_count,
-                            MIN(timestamp) AS first_timestamp
-                        FROM ai_diary
-                        WHERE timestamp >= CURRENT_DATE - INTERVAL '7 days'
-                        GROUP BY DATE(timestamp)
-                    ) daily_entries
-                    WHERE row_count > 1 OR combined LIKE %s
-                    ORDER BY first_timestamp ASC
-                    LIMIT 1
-                    """,
-                    ("%---%",),
-                )
-            else:
-                rows = await _fetchall(
-                    """
-                    SELECT
-                        id,
-                        combined,
-                        row_count,
-                        source_ids,
-                        first_timestamp
-                    FROM (
-                        SELECT
-                            MAX(id) AS id,
-                            GROUP_CONCAT(content ORDER BY id ASC SEPARATOR '\n\n---\n\n') AS combined,
-                            GROUP_CONCAT(id ORDER BY id ASC SEPARATOR ',') AS source_ids,
-                            COUNT(*) AS row_count,
-                            MIN(timestamp) AS first_timestamp
-                        FROM ai_diary
-                        WHERE timestamp >= DATE_SUB(CURDATE(), INTERVAL 7 DAY)
-                        GROUP BY DATE(timestamp)
-                    ) daily_entries
-                    WHERE row_count > 1 OR combined LIKE %s
-                    ORDER BY first_timestamp ASC
-                    LIMIT 1
-                    """,
-                    ("%---%",),
-                )
-        except Exception as e:
-            log_debug(f"[ai_diary] on_debrief: DB error fetching unmerged entries: {e}")
-            return
-
-        if not rows:
-            return
-
-        row = rows[0]
-        entry_id: int = row["id"]
-        content: str = row["combined"] or ""
-        row_count: int = row["row_count"]
-        source_ids_raw = row.get("source_ids") or ""
-        source_entry_ids: List[int] = []
-        for raw_id in str(source_ids_raw).split(","):
-            raw_id = raw_id.strip()
-            if not raw_id:
-                continue
-            try:
-                source_entry_ids.append(int(raw_id))
-            except Exception:
-                continue
-        if not source_entry_ids:
-            source_entry_ids = [int(entry_id)]
-        first_timestamp = row.get("first_timestamp")
-
-        if "---" not in content and row_count <= 1:
-            return
-
-        log_info(
-            f"[ai_diary] on_debrief: oldest unmerged day has entry id={entry_id} "
-            f"({row_count} rows, {content.count('---')} separators) — enqueueing merge beat"
-        )
-
-        prompt = (
-            "[DIARY CONSOLIDATION — INTERNAL SYSTEM TASK]\n\n"
-            "Your personal diary has accumulated multiple entries from the same day "
-            "(separated by '---'). Rewrite them as a single, coherent first-person diary entry "
-            "that weaves all the information together naturally.\n\n"
-            "Rules:\n"
-            "- Write flowing first-person prose (no bullet lists, no '---' separators).\n"
-            "- Preserve every meaningful detail from all fragments.\n"
-            "- Remove exact duplicates; keep nuance and emotional context.\n"
-            f"- The entry id to UPDATE is: {entry_id}\n\n"
-            "Diary fragments:\n\n"
-            f"{content}\n\n"
-            "Respond with ONLY valid JSON — no other text:\n"
-            '{"actions": [{"type": "update_diary_entry", "payload": {"id": '
-            f'{entry_id}, "content": "<your merged prose here>"'
-            "}}]}"
-        )
-
-        try:
-            from types import SimpleNamespace
-            from core import message_queue
-
-            message = SimpleNamespace()
-            message.chat_id = -1
-            message.message_id = 0
-            message.text = prompt
-            message.from_user = SimpleNamespace(
-                id=-1,
-                username="diary_merge",
-                full_name="Diary Merge",
-                first_name="Diary",
-            )
-            message.chat = SimpleNamespace(id=-1, type="internal")
-            message.date = datetime.utcnow()
-
-            await message_queue.enqueue_low_priority(
-                None,
-                message,
-                context_memory={
-                    "diary_merge_beat": True,
-                    "diary_entry_id": entry_id,
-                    "diary_merge_source_ids": source_entry_ids,
-                    "diary_merge_timestamp": first_timestamp,
-                    "allowed_action_types": ["update_diary_entry"],
-                    "skip_history": True,
-                },
-                interface_id="diary_merge",
-                original_message=None,
-            )
-            log_info(
-                f"[ai_diary] on_debrief: diary consolidation beat enqueued for entry id={entry_id}"
-            )
-        except Exception as e:
-            log_error(f"[ai_diary] on_debrief: failed to enqueue merge beat: {e}")
 
 
 def archive_diary_entries(entry_ids: List[int]) -> Dict[str, Any]:
@@ -2076,11 +2105,9 @@ def get_all_diary_entries(include_archived: bool = False) -> List[Dict[str, Any]
 
         # Convert JSON fields back to objects
         for entry in entries:
-            entry["context_tags"] = json.loads(entry.get("context_tags", "[]"))
-            entry["emotions"] = json.loads(entry.get("emotions", "[]"))
-            entry["timestamp"] = (
-                entry["timestamp"].isoformat() if entry["timestamp"] else None
-            )
+            entry["context_tags"] = _parse_json_list(entry.get("context_tags"))
+            entry["emotions"] = _parse_json_list(entry.get("emotions"))
+            entry["timestamp"] = _isoformat_timestamp(entry.get("timestamp"))
 
         return entries
 

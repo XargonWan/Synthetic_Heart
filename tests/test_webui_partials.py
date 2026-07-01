@@ -21,3 +21,12 @@ def test_section_files_exist():
         with open(path, "r", encoding="utf-8") as f:
             data = f.read()
         assert len(data.strip()) > 0, f"Section file {s} appears empty"
+
+
+def test_settings_section_contains_manual_backup_button():
+    path = os.path.join(BASE, "sections", "settings.html")
+    with open(path, "r", encoding="utf-8") as f:
+        data = f.read()
+
+    assert 'id="create-database-backup"' in data
+    assert 'id="database-backup-status"' in data

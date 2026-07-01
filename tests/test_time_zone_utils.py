@@ -24,3 +24,12 @@ def test_get_time_of_day_label_with_datetime():
     assert get_time_of_day_label(dt) == "early_morning"
     dt2 = datetime(2026, 2, 10, 15, 30, tzinfo=ZoneInfo("UTC"))
     assert get_time_of_day_label(dt2) == "afternoon"
+
+
+def test_get_current_season():
+    from core.time_zone_utils import get_current_season
+
+    assert get_current_season(datetime(2026, 3, 15)) == "Early Spring"
+    assert get_current_season(datetime(2026, 5, 20)) == "Late Spring"
+    assert get_current_season(datetime(2026, 7, 4)) == "Mid Summer"
+    assert get_current_season(datetime(2026, 12, 25)) == "Early Winter"

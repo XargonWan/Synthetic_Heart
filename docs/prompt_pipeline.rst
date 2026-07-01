@@ -126,6 +126,49 @@ Attachments are no longer documented as a giant base64 blob living inside a
 This keeps text prompts smaller and avoids duplicating heavy binary payloads in
  both the text and multimodal layers.
 
+Image handling: Iris vs. inline
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+By default, incoming images and video are handled by the **Iris** vision
+subsystem (``ACTIVE_IRIS_ENGINE``): the media is sent to a vision engine for a
+textual description that is injected into the prompt as an ``[Iris vision: ...]``
+block, after which the raw image/video bytes are stripped from
+``PromptRequest.attachments`` so the Cortex engine never receives them.
+
+The Iris engine dropdown in the WebUI also exposes a hardcoded ``inline``
+pseudo-engine. When selected, the description step is skipped and the original
+image/video bytes are forwarded untouched in ``PromptRequest.attachments``, so a
+vision-capable Cortex model can see the media directly. This is the path to use
+for testing native multimodal models (including local ones served over the
+OpenAI-compatible adapter).
+
+Inline mode only takes effect when the active Cortex endpoint is marked
+vision-capable (the ``vision`` capability / subsystem flag, or a configured
+``default_model``). Otherwise the cortex bridge drops the image parts and logs a
+warning — see ``_supports_vision_for_mm_parts`` in
+``core/external_endpoints/bridges/cortex_bridge.py``.
+
+Audio handling: Auris vs. inline
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Incoming audio (voice notes, audio files) follows the same pattern through the
+**Auris** speech-to-text subsystem (``ACTIVE_AURIS_ENGINE``). By default the
+interface transcribes the audio to text (Auris, with a Live engine fallback via
+``core/media_dispatcher.py``) and enqueues that text; the raw audio is not sent
+to the Cortex engine.
+
+The Auris engine dropdown also exposes a hardcoded ``inline`` pseudo-engine.
+When selected, transcription is skipped at every stage (``transcribe_audio``, the
+``dispatch_media`` Auris path, and the Live fallback all short-circuit), and
+``handle_incoming_message`` always extracts the raw audio attachment — even when
+a caption supplies text — so the audio is forwarded inline in
+``PromptRequest.attachments`` for an audio-capable model to hear directly.
+
+Note that the OpenAI-compatible wire format only expresses ``audio/wav`` and
+``audio/mpeg`` inline (``input_audio``); other formats such as the OGG used by
+Telegram voice notes are downgraded to a document placeholder for those
+endpoints. Gemini endpoints accept any format via ``inline_data``.
+
 Operational notes
 -----------------
 

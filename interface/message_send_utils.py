@@ -51,6 +51,19 @@ _COOLDOWN_PROCESSOR_RUNNING = False
 max_message_preview_len = 100
 
 
+def _get_telegram_trainer_id() -> int | None:
+    """Resolve the Telegram trainer id from config for failure alerts."""
+    try:
+        from core.config import get_trainer_id
+
+        tid = get_trainer_id("telegram_bot")
+        if isinstance(tid, (list, tuple)):
+            tid = tid[0] if tid else None
+        return int(tid) if tid is not None else None
+    except Exception:
+        return None
+
+
 def truncate_message(text: Optional[str], limit: int = 4000) -> str:
     """Return ``text`` truncated to fit within Telegram limits."""
     if not text:
@@ -148,6 +161,7 @@ async def _send_with_retry(
     except Exception as ex:
         log_error(f"[telegram_utils] Error checking cooldown: {ex}")
         pass
+    global _BOT_NONE_WARNED, _LAST_BOT_NONE_LOG_TIME
     if bot is None:
         # Log a single diagnostic warning with stacktrace to find the caller, then suppress repeats
         if not _BOT_NONE_WARNED:
@@ -309,7 +323,7 @@ async def _send_with_retry(
                     raise e
                 # If it's a non-parse error and not recoverable, re-raise to be handled by caller
                 raise
-    trainer_id = TELEGRAM_TRAINER_ID
+    trainer_id = _get_telegram_trainer_id()
     if trainer_id:
         try:
             await bot.send_message(
@@ -344,6 +358,7 @@ async def safe_send(
     forwarded as-is.
     """  # [FIX]
     global _BOT_NONE_WARNED
+    global _BOT_NONE_WARNED, _LAST_BOT_NONE_LOG_TIME
     if bot is None:
         if not _BOT_NONE_WARNED:
             log_warning(
@@ -420,7 +435,7 @@ async def safe_edit(
                 )
         except Exception:
             raise
-    trainer_id = TELEGRAM_TRAINER_ID
+    trainer_id = _get_telegram_trainer_id()
     if trainer_id:
         try:
             await bot.send_message(
@@ -455,7 +470,7 @@ async def send_with_thread_fallback(
     sending to that chat using the accompanying fallback parameters.
     """
 
-    global _BOT_NONE_WARNED
+    global _BOT_NONE_WARNED, _LAST_BOT_NONE_LOG_TIME
     if bot is None:
         # Log a single warning to avoid flooding logs; subsequent calls are debug.
         if not _BOT_NONE_WARNED:
@@ -933,10 +948,11 @@ async def cortex_response_send(
     except Exception:
         dedupe_window = _DEFAULT_DEDUPE_WINDOW
 
-    try:
-        import time
-        import re
+    import time
+    import re
 
+    dedupe_key: str | None = None
+    try:
         # perform a more aggressive normalization so we catch invisible
         # characters, zero‑width spaces, extra linebreaks, etc.  The previous
         # logic simply collapsed whitespace which could still leave a stray
@@ -958,8 +974,9 @@ async def cortex_response_send(
                 f"[cortex_response_send] Suppressing duplicate send to {chat_id} (within {dedupe_window}s)"
             )
             return None
-        # Record this send
-        _OUTGOING_DEDUPE[dedupe_key] = now
+        # Stamp deferred to after a successful send — see below.
+        # A failed attempt (e.g. thread-not-found before fallback retry) must
+        # not poison the cache and suppress the retry within the dedup window.
     except Exception:
         # Non-fatal if dedupe fails
         pass
@@ -977,6 +994,13 @@ async def cortex_response_send(
             # _send_with_retry may return a telegram Message object or None; keep last non-None
             if sent is not None:
                 last_sent = sent
+        # Record the send only after all chunks succeed so a failed attempt
+        # never blocks a legitimate fallback retry within the dedup window.
+        if dedupe_key is not None:
+            try:
+                _OUTGOING_DEDUPE[dedupe_key] = time.time()
+            except Exception:
+                pass
         # Return the last sent message (if any) to allow callers to track trainer-side message ids
         return last_sent
     except Exception as e:

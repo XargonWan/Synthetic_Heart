@@ -257,6 +257,96 @@ async def test_message_chain_honors_prompt_scoped_allowed_action_types(monkeypat
     assert run_actions_calls[0]["actions"][0]["type"] == "vision_describe"
 
 
+def _corrector_harness(monkeypatch, parsed_actions: list[dict], supported_types: set):
+    """Wire the common monkeypatches and return the corrector-call recorder.
+
+    The parsed actions are made *supported* (so they pass the unsupported-action
+    pre-check) and run_actions is faked to report success, so the chain reaches
+    the "all actions succeeded — is a user reply missing?" branch.
+    """
+    corrector_calls: list[str] = []
+
+    async def fake_corrector(
+        text, bot=None, context=None, chat_id=None, thread_id=None
+    ):
+        corrector_calls.append(text)
+        return None
+
+    def fake_extract_json(text, return_metadata=False):
+        return ({"actions": parsed_actions}, {})
+
+    async def fake_run_actions(actions, context, bot, original_message):
+        return {
+            "processed": list(actions or []),
+            "failed_actions": [],
+            "errors": [],
+        }
+
+    monkeypatch.setattr(
+        action_parser, "get_supported_action_types", lambda: set(supported_types)
+    )
+    monkeypatch.setattr("core.transport_layer.run_corrector_middleware", fake_corrector)
+    monkeypatch.setattr(
+        "core.transport_layer.extract_json_from_text", fake_extract_json
+    )
+    monkeypatch.setattr("core.action_parser.run_actions", fake_run_actions)
+    monkeypatch.setattr("core.persona_manager.get_persona_manager", lambda: None)
+    return corrector_calls
+
+
+@pytest.mark.asyncio
+async def test_self_replying_action_suppresses_missing_reply_corrector(monkeypatch):
+    # get_recent_chats delivers its own user-visible output, so a turn that
+    # contains only it must NOT trigger the missing-reply corrector.
+    corrector_calls = _corrector_harness(
+        monkeypatch,
+        [{"type": "get_recent_chats", "payload": {"limit": 5}}],
+        supported_types={"get_recent_chats"},
+    )
+
+    msg = SimpleNamespace(
+        chat_id=123, interface_path="telegram_bot/123", from_cortex=True
+    )
+
+    result = await message_chain.handle_incoming_message(
+        bot=None,
+        message=msg,
+        text='{"actions":[{"type":"get_recent_chats","payload":{"limit":5}}]}',
+        source="llm",
+        context={"interface_path": "telegram_bot/123"},
+    )
+
+    assert result == message_chain.ACTIONS_EXECUTED
+    assert not corrector_calls
+
+
+@pytest.mark.asyncio
+async def test_plain_internal_action_still_triggers_missing_reply_corrector(
+    monkeypatch,
+):
+    # A non-message action that is NOT a self-replying user-output action (here a
+    # diary entry) leaves the user without a reply, so the corrector must fire.
+    corrector_calls = _corrector_harness(
+        monkeypatch,
+        [{"type": "diary_entry", "payload": {"content": "noted"}}],
+        supported_types={"diary_entry"},
+    )
+
+    msg = SimpleNamespace(
+        chat_id=123, interface_path="telegram_bot/123", from_cortex=True
+    )
+
+    await message_chain.handle_incoming_message(
+        bot=None,
+        message=msg,
+        text='{"actions":[{"type":"diary_entry","payload":{"content":"noted"}}]}',
+        source="llm",
+        context={"interface_path": "telegram_bot/123"},
+    )
+
+    assert corrector_calls
+
+
 @pytest.mark.asyncio
 async def test_invalid_emotions_corrector_uses_full_run_action_signature(monkeypatch):
     scheduled = asyncio.Event()

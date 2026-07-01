@@ -71,6 +71,13 @@ git_*.txt
 _[Bb]uild
 .gitnexus
 opencode.json
+.claude
+.clinerules
+.codex
+.cursor
+.gemini
+.vscode
+.zed
 
 # Local installer outputs and downloaded packaging dependencies
 installer/Output/

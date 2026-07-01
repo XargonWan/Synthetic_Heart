@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from core.live_tool_registry import tool_parameter_schema
 from core.prompt_request import PromptRequest, RuntimeContext
 
 if TYPE_CHECKING:
@@ -120,20 +121,20 @@ def _build_multimodal_turn_text(
             document_page_image_sections.append(section)
 
     if image_count:
+        img_noun = "image" if image_count == 1 else f"{image_count} images"
+        vision_frame = (
+            f"[VISION: You are directly seeing the {img_noun} above — treat it as "
+            "your own eyes, not a description handed to you. Let what you see ground "
+            "your reply, your emotions, and any internal thoughts or diary entries. "
+            "Reference specific visible details naturally. Only describe what is "
+            "unambiguously visible; say you are unsure about anything unclear or "
+            "off-frame rather than guessing.]"
+        )
         if user_text:
-            segments.append(
-                f"The user attached {image_count} image(s). Ground your reply only "
-                "in clearly visible details from the attached image(s). Do not "
-                "infer hidden, obscured, or non-visible features. If something is "
-                "ambiguous, say that you are unsure."
-            )
+            segments.append(user_text)
+            segments.append(vision_frame)
         else:
-            segments.append(
-                f"The user attached {image_count} image(s) with no accompanying "
-                "text. Describe only clearly visible details from the attached "
-                "image(s). Do not infer hidden, obscured, or non-visible features. "
-                "If something is ambiguous, say that you are unsure."
-            )
+            segments.append(vision_frame)
 
     if document_descriptions:
         preview = ", ".join(document_descriptions[:3])
@@ -164,7 +165,7 @@ def _build_multimodal_turn_text(
                 "the user for an excerpt or for a document-capable route."
             )
 
-    if user_text:
+    if user_text and not image_count:
         segments.append(user_text)
 
     return "\n\n".join(segment for segment in segments if segment)
@@ -178,12 +179,7 @@ def _manifest_to_openai_schema(manifest: "ToolManifest") -> dict[str, Any]:
         "required": [],
     }
     for p in manifest.parameters:
-        prop: dict[str, Any] = {"type": p.type}
-        if p.description:
-            prop["description"] = p.description
-        if p.enum:
-            prop["enum"] = p.enum
-        params["properties"][p.name] = prop
+        params["properties"][p.name] = tool_parameter_schema(p)
         if p.required:
             params["required"].append(p.name)
 
@@ -205,12 +201,7 @@ def _manifest_to_anthropic_tool(manifest: "ToolManifest") -> dict[str, Any]:
         "required": [],
     }
     for p in manifest.parameters:
-        prop: dict[str, Any] = {"type": p.type}
-        if p.description:
-            prop["description"] = p.description
-        if p.enum:
-            prop["enum"] = p.enum
-        input_schema["properties"][p.name] = prop
+        input_schema["properties"][p.name] = tool_parameter_schema(p)
         if p.required:
             input_schema["required"].append(p.name)
 
@@ -228,21 +219,10 @@ def _manifest_to_gemini_tool(manifest: "ToolManifest") -> dict[str, Any]:
         "properties": {},
         "required": [],
     }
-    _TYPE_MAP = {
-        "string": "STRING",
-        "integer": "INTEGER",
-        "number": "NUMBER",
-        "boolean": "BOOLEAN",
-        "object": "OBJECT",
-        "array": "ARRAY",
-    }
     for p in manifest.parameters:
-        prop: dict[str, Any] = {"type": _TYPE_MAP.get(p.type, "STRING")}
-        if p.description:
-            prop["description"] = p.description
-        if p.enum:
-            prop["enum"] = p.enum
-        parameters["properties"][p.name] = prop
+        parameters["properties"][p.name] = tool_parameter_schema(
+            p, uppercase_types=True
+        )
         if p.required:
             parameters["required"].append(p.name)
 
@@ -411,7 +391,24 @@ class OpenAIRenderer:
             if name:
                 actions.append({"type": name, "payload": args})
 
-        return json.dumps({"actions": actions}, ensure_ascii=False)
+        result: dict[str, Any] = {"actions": actions}
+
+        # Preserve any natural-language reply the model emitted alongside its
+        # tool calls.  Tool-trained local models (Qwen3.5, Gemma) routinely put
+        # the user-facing reply in ``content`` while using ``tool_calls`` only
+        # for side-effects (diary, emotion updates).  Dropping ``content`` here
+        # leaves the turn with no ``message_*`` action, so the message chain
+        # fires a "missing reply" correction loop.  Surfacing it under the
+        # top-level ``message`` key lets the chain map it to the interface's
+        # ``message_*`` action (deduped against an existing message action).
+        # Only do this when the tool calls did not already carry a message.
+        content_text = str(message.get("content") or "").strip()
+        if content_text and not any(
+            str(a.get("type", "")).startswith("message_") for a in actions
+        ):
+            result["message"] = content_text
+
+        return json.dumps(result, ensure_ascii=False)
 
 
 # ---------------------------------------------------------------------------

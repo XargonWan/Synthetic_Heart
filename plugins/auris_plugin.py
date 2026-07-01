@@ -154,9 +154,13 @@ class AurisPlugin(AIPluginBase):
         """
         self.refresh_config()
 
-        # if the configured engine is explicitly disabled, behave identically
-        if self._active_engine_name == "disabled":
-            log_info("[auris_plugin] Engine disabled; skipping transcription.")
+        # 'inline' forwards raw audio bytes to the Cortex engine instead of
+        # transcribing; 'disabled' turns the subsystem off.  Both skip STT here.
+        if self._active_engine_name in ("disabled", "inline"):
+            log_info(
+                f"[auris_plugin] Engine '{self._active_engine_name}'; "
+                "skipping transcription."
+            )
             return None
 
         if not os.path.exists(file_path):
@@ -219,6 +223,12 @@ class AurisPlugin(AIPluginBase):
                 "optional_fields": ["mime_type", "engine"],
             }
         }
+
+    def is_enabled(self) -> bool:
+        self.refresh_config()
+        # 'inline' forwards audio bytes straight to the Cortex engine and has no
+        # transcription engine, so the stt_transcribe action is not exposed.
+        return self._active_engine_name not in ("disabled", "inline")
 
     def get_prompt_instructions(self, action_name: str) -> dict:
         if action_name == "stt_transcribe":
@@ -344,7 +354,7 @@ class AurisPlugin(AIPluginBase):
         if not text or not text.strip():
             return None
         try:
-            from lingua import LanguageDetectorBuilder  # type: ignore[import]
+            from lingua import LanguageDetectorBuilder
 
             detector = (
                 LanguageDetectorBuilder.from_all_languages()

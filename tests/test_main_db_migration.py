@@ -175,6 +175,7 @@ async def test_audit_only_run_skips_target_connection(
         SimpleNamespace(DictCursor=object, connect=fake_connect),
     )
     monkeypatch.setattr(migration, "asyncpg", None)
+    monkeypatch.setattr(migration, "connect_source_db", fake_connect)
 
     config = MainDbMigrationConfig(
         source_host="localhost",

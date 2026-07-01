@@ -79,6 +79,19 @@ def test_instructions_prohibit_embedded_emotion_tags():
     )
 
 
+def test_instructions_prohibit_referencing_input_metadata_prefix():
+    instructions = load_json_instructions()
+    assert "INPUT METADATA" in instructions
+    assert "the user did not write it" in instructions
+
+
+def test_instructions_require_chat_reply_action():
+    instructions = load_json_instructions()
+    assert "CHAT REPLY REQUIRED" in instructions
+    assert "GRILLO INTERNAL MODE is NOT active" in instructions
+    assert "hard failure" in instructions
+
+
 def test_instructions_enforce_first_person_identity():
     instructions = load_json_instructions()
     assert "Stay inside the active persona in first person" in instructions
@@ -120,7 +133,26 @@ def test_build_context_summary_adds_memory_honesty_notice_when_memories_present(
     assert "[Memory honesty notice]" in summary
     assert "recalled internal records" in summary
     assert "acknowledge uncertainty instead of inventing a recollection" in summary
-    assert "[SOUL recalled memory | 2026-04-20 | same chat]" in summary
+    assert (
+        "Recalled memory from 2026-04-20 (same chat): Scarlet loves jasmine tea."
+        in summary
+    )
+    assert "SOUL recalled memory" not in summary
+
+
+def test_build_context_summary_humanizes_diary_entries() -> None:
+    summary = _build_context_summary(
+        {
+            "history_recent": [
+                "[diary 07/05/26:0335] summary: First memory. --- First memory. --- Second memory. | thought: Private note. --- Private note."
+            ],
+            "thoughts": ["[thought 07/05/26:0335] Private note. --- Private note."],
+        }
+    )
+
+    assert "Diary entry from 07/05/26:0335: First memory. | Second memory." in summary
+    assert "Thought from 07/05/26:0335: Private note." in summary
+    assert "| thought:" not in summary
 
 
 def test_build_live_system_instruction_enforces_identity_rules(monkeypatch):
@@ -188,33 +220,39 @@ def test_build_context_summary_keeps_exact_runtime_facts_implicit_by_default() -
     summary = _build_context_summary(
         {
             "date": "2026-04-20",
-            "time": "21:27 CEST",
+            "time": "21:27",
             "time_of_day": "late evening",
             "location": "Sečovlje,Slovenia",
+            "season": "Mid Spring",
+            "day_of_week": "Monday",
         }
     )
 
-    assert "[Ambient runtime context]" in summary
-    assert "Use these runtime facts only when they matter" in summary
-    assert "Do not quote them verbatim in ordinary replies" in summary
-    assert "Current part of day: late evening." in summary
-    assert "Current local time: 21:27 CEST" not in summary
-    assert "Current local setting: Sečovlje,Slovenia" not in summary
+    assert "[SYSTEM: REALITY ANCHOR]" in summary
+    assert "- Current Date: Monday, April 20, 2026" in summary
+    assert "- Current Time: 9:27 PM" in summary
+    assert "- Season: Mid Spring" in summary
+    assert "- Current Location: Sečovlje,Slovenia" in summary
+    assert "Temporal Delta: It is now 2026" in summary
 
 
 def test_build_context_summary_can_surface_exact_runtime_facts_when_requested() -> None:
     summary = _build_context_summary(
         {
             "date": "2026-04-20",
-            "time": "21:27 CEST",
+            "time": "21:27",
             "location": "Sečovlje,Slovenia",
+            "season": "Mid Spring",
+            "day_of_week": "Monday",
         },
         include_explicit_runtime_facts=True,
     )
 
-    assert "Current date: 2026-04-20" in summary
-    assert "Current local time: 21:27 CEST" in summary
-    assert "Current local setting: Sečovlje,Slovenia" in summary
+    assert "[SYSTEM: REALITY ANCHOR]" in summary
+    assert "- Current Date: Monday, April 20, 2026" in summary
+    assert "- Current Time: 9:27 PM" in summary
+    assert "- Season: Mid Spring" in summary
+    assert "- Current Location: Sečovlje,Slovenia" in summary
 
 
 def test_build_json_prompt_gates_exact_runtime_facts_by_current_turn(monkeypatch):
@@ -224,8 +262,10 @@ def test_build_json_prompt_gates_exact_runtime_facts_by_current_turn(monkeypatch
     async def dummy_local_time_fields(message_date, interface_path=None):
         return {
             "local_date": "2026-04-20",
-            "local_time": "21:27 CEST",
+            "local_time": "21:27",
             "time_of_day": "late evening",
+            "season": "Mid Spring",
+            "day_of_week": "Monday",
         }
 
     monkeypatch.setattr("core.action_parser.gather_static_injections", dummy_gather)
@@ -243,17 +283,20 @@ def test_build_json_prompt_gates_exact_runtime_facts_by_current_turn(monkeypatch
 
     result = asyncio.run(build_json_prompt(message, {}, interface_name="telegram_bot"))
     summary = result["__prompt_request"].context_summary
-    assert "Current part of day: late evening." in summary
-    assert "Current local time: 21:27 CEST" not in summary
-    assert "Current local setting: Sečovlje,Slovenia" not in summary
+    assert "[SYSTEM: REALITY ANCHOR]" in summary
+    assert "- Current Date: Monday, April 20, 2026" in summary
+    assert "- Current Time: 9:27 PM" in summary
+    assert "- Current Location: Sečovlje,Slovenia" in summary
 
     message.text = "What time is it there?"
     explicit = asyncio.run(
         build_json_prompt(message, {}, interface_name="telegram_bot")
     )
     explicit_summary = explicit["__prompt_request"].context_summary
-    assert "Current local time: 21:27 CEST" in explicit_summary
-    assert "Current local setting: Sečovlje,Slovenia" in explicit_summary
+    assert "[SYSTEM: REALITY ANCHOR]" in explicit_summary
+    assert "- Current Date: Monday, April 20, 2026" in explicit_summary
+    assert "- Current Time: 9:27 PM" in explicit_summary
+    assert "- Current Location: Sečovlje,Slovenia" in explicit_summary
 
 
 def test_build_live_prompt_request_keeps_runtime_facts_ambient_by_default(monkeypatch):
@@ -379,6 +422,81 @@ def test_build_json_prompt_filters_actions_by_allowlist(monkeypatch):
         )
 
         assert list(result["actions"].keys()) == ["create_personal_diary_entry"]
+    finally:
+        core_initializer.actions_block = original_actions_block
+
+
+def test_build_json_prompt_derives_default_interface_action_scope(monkeypatch):
+    async def dummy_gather(message, ctx):
+        return {}
+
+    monkeypatch.setattr("core.action_parser.gather_static_injections", dummy_gather)
+
+    from core.core_initializer import core_initializer
+
+    monkeypatch.setattr(
+        "core.core_initializer.INTERFACE_REGISTRY",
+        {"telegram_bot": object(), "discord_bot": object()},
+        raising=False,
+    )
+
+    original_actions_block = core_initializer.actions_block
+    core_initializer.actions_block = {
+        "available_actions": {
+            "create_personal_diary_entry": {
+                "schema": {"type": "object", "properties": {}, "required": []},
+                "brief": "Create diary entry.",
+                "source": "ai_diary",
+            },
+            "message_telegram_bot": {
+                "schema": {"type": "object", "properties": {}, "required": []},
+                "brief": "Send Telegram message.",
+                "source": "message_plugin, telegram_bot",
+            },
+            "message_discord_bot": {
+                "schema": {"type": "object", "properties": {}, "required": []},
+                "brief": "Send Discord message.",
+                "source": "message_plugin, discord_bot",
+            },
+            "update_diary_entry": {
+                "schema": {"type": "object", "properties": {}, "required": []},
+                "brief": "Replace diary entry content with a synthesised version (internal — triggered by the daily consolidation beat only).",
+                "source": "ai_diary",
+            },
+            "promote_upload": {
+                "schema": {"type": "object", "properties": {}, "required": []},
+                "brief": "Promote a temporary animation upload into a target skin (admin only).",
+                "source": "mate_engine",
+            },
+        }
+    }
+
+    try:
+        message = SimpleNamespace(
+            chat_id=1,
+            text="hello",
+            message_id=1,
+            from_user=SimpleNamespace(full_name="user", username="user"),
+            date=datetime.now(timezone.utc),
+            interface_path="telegram_bot/1",
+        )
+
+        result = asyncio.run(
+            build_json_prompt(message, {}, interface_name="telegram_bot")
+        )
+
+        assert sorted(result["actions"].keys()) == [
+            "create_personal_diary_entry",
+            "message_telegram_bot",
+        ]
+
+        pr = result["__prompt_request"]
+        tool_names = {
+            getattr(tool, "name", None)
+            for tool in pr.tool_declarations
+            if getattr(tool, "name", None)
+        }
+        assert tool_names == {"create_personal_diary_entry", "message_telegram_bot"}
     finally:
         core_initializer.actions_block = original_actions_block
 
@@ -614,3 +732,31 @@ class TestHistoryToTurns:
         turns = self._call(lines, {"2b", "toobs"})
         assert len(turns) == 1
         assert turns[0].role == "assistant"
+
+    def test_drops_leading_assistant_run_when_user_appears_later(self) -> None:
+        lines = [
+            '[13/04/26:0900] self: "Older outreach"',
+            '[13/04/26:0901] self: "Another outreach"',
+            '[13/04/26:0902] Scar: "Replying now"',
+            '[13/04/26:0903] self: "Thanks"',
+        ]
+
+        turns = self._call(lines, {"2b"})
+
+        assert [turn.role for turn in turns] == ["user", "assistant"]
+        assert turns[0].content == "Replying now"
+        assert turns[1].content == "Thanks"
+
+    def test_coalesces_consecutive_same_role_turns(self) -> None:
+        lines = [
+            '[13/04/26:0924] Scar: "First part"',
+            '[13/04/26:0925] Scar: "Second part"',
+            '[13/04/26:0926] self: "First answer"',
+            '[13/04/26:0927] self: "Second answer"',
+        ]
+
+        turns = self._call(lines, {"2b"})
+
+        assert [turn.role for turn in turns] == ["user", "assistant"]
+        assert turns[0].content == "First part\n\nSecond part"
+        assert turns[1].content == "First answer\n\nSecond answer"

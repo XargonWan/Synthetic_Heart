@@ -255,6 +255,7 @@ class VoxPlugin(AIPluginBase):
         engine_name: str | None = None,
         merged_text: str | None = None,
         allow_fallback: bool = True,
+        generate_only: bool = False,
     ) -> dict[str, Any]:
         """Full TTS pipeline: generate → write → dispatch → lip-sync.
 
@@ -401,16 +402,17 @@ class VoxPlugin(AIPluginBase):
         if audio_duration_s is not None:
             log_debug(f"[vox_plugin] audio duration: {audio_duration_s:.2f}s")
 
-        # --- Dispatch to interface ---
-        await self._dispatch(
-            audio_path=out_path,
-            interface_path=interface_path,
-            caption=merged_text or text,
-            lipsync_data=lipsync_data,
-            context=context,
-            original_message=original_message,
-            audio_duration_s=audio_duration_s,
-        )
+        # --- Dispatch to interface (skip for internal callers like radio host) ---
+        if not generate_only:
+            await self._dispatch(
+                audio_path=out_path,
+                interface_path=interface_path,
+                caption=merged_text or text,
+                lipsync_data=lipsync_data,
+                context=context,
+                original_message=original_message,
+                audio_duration_s=audio_duration_s,
+            )
 
         # --- Schedule facial expression timeline (voice responses) ---
         # For voice responses (allow_fallback=True, no parallel message_*
@@ -479,6 +481,10 @@ class VoxPlugin(AIPluginBase):
                 "optional_fields": ["emo"],
             }
         }
+
+    def is_enabled(self) -> bool:
+        self.refresh_config()
+        return self._active_engine_name != "disabled"
 
     def get_prompt_instructions(self, action_name: str) -> dict:
         if action_name == "tts_speak":
@@ -626,9 +632,10 @@ class VoxPlugin(AIPluginBase):
 
             persona_json: dict[str, Any] | None = None
             pm = get_persona_manager()
-            if pm and getattr(pm, "_current_persona", None):
+            current_persona = getattr(pm, "_current_persona", None) if pm else None
+            if pm and current_persona:
                 try:
-                    persona_json = pm._load_persona_json(pm._current_persona.name)
+                    persona_json = pm._load_persona_json(current_persona.name)
                 except Exception:
                     persona_json = None
 
@@ -704,7 +711,7 @@ class VoxPlugin(AIPluginBase):
             if iface_name == "synth_webui" and hasattr(target_iface, "send_tts_audio"):
                 session_id = levels[0] if levels else None
                 if session_id:
-                    send_kwargs = {
+                    send_kwargs: dict[str, Any] = {
                         "session_id": session_id,
                         "audio_path": str(audio_path),
                         "text": caption,

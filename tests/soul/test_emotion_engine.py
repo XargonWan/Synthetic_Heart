@@ -1,5 +1,5 @@
 from core.soul.emotion_engine import EmotionalEngine
-from core.soul.models import EmotionalEvent, EmotionalState
+from core.soul.models import EmotionalEvent, EmotionalProfile, EmotionalState
 
 
 def test_apply_event_updates_state() -> None:
@@ -41,3 +41,21 @@ def test_turn_delta_payload_shape() -> None:
 
     assert "e" in payload
     assert set(payload["e"].keys()) == {"joy", "fear", "sad", "anger"}
+
+
+def test_emotional_profile_from_dict_applies_overrides() -> None:
+    profile = EmotionalProfile.from_dict({"anxiety": 0.9, "loneliness": 0.1})
+    assert profile.anxiety == 0.9
+    assert profile.loneliness == 0.1
+    assert profile.concern_for_user == 0.90
+
+
+def test_emotional_profile_from_dict_clamps_out_of_range() -> None:
+    profile = EmotionalProfile.from_dict({"anxiety": 2.5, "self_preservation": -1.0})
+    assert profile.anxiety == 1.0
+    assert profile.self_preservation == 0.0
+
+
+def test_emotional_profile_from_dict_empty_uses_all_defaults() -> None:
+    profile = EmotionalProfile.from_dict({})
+    assert profile.as_dict() == EmotionalProfile().as_dict()

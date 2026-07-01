@@ -169,7 +169,11 @@ class LocalKittenTTS:
         return self._phonemizer_cache[espeak_lang]
 
     def generate(
-        self, text: str, voice: str = "Bella", language: str | None = None
+        self,
+        text: str,
+        voice: str = "Bella",
+        language: str | None = None,
+        speed: float = 1.3,
     ) -> Any:
         """Synthesise *text* and return audio (bytes or numpy array).
 
@@ -182,6 +186,9 @@ class LocalKittenTTS:
         to match *language* before synthesis, then restored.  kittentts 0.8.x
         hardcodes ``en-us`` in its constructor, so without this swap non-English
         text is mispronounced.
+
+        *speed* is forwarded to the ONNX model ( ``1.0`` = normal, ``>1`` = faster ).
+        The vendored gTTS stub ignores the speed parameter.
         """
         if not self._engine:
             raise RuntimeError(
@@ -197,7 +204,8 @@ class LocalKittenTTS:
         # concurrent TTS calls on the same model instance don't race.
         espeak_lang = _espeak_lang_code(language)
         log_info(
-            f"[vox/kitten] generate: voice={voice!r} lang={language!r} espeak={espeak_lang!r}"
+            f"[vox/kitten] generate: voice={voice!r} lang={language!r} "
+            f"espeak={espeak_lang!r} speed={speed}"
         )
         model = self._engine.model  # KittenTTS_1_Onnx instance
         with self._phonemizer_lock:
@@ -208,7 +216,7 @@ class LocalKittenTTS:
                 f"[vox/kitten] phonemizer swapped to espeak '{espeak_lang}' (id={id(new_phonemizer)})"
             )
             try:
-                result = self._engine.generate(text=text, voice=voice)
+                result = self._engine.generate(text=text, voice=voice, speed=speed)
             finally:
                 model.phonemizer = old_phonemizer
         return result
@@ -313,6 +321,21 @@ register_exposed_var(
     advanced=True,
 )
 
+register_exposed_var(
+    "KITTEN_SPEED",
+    label="Kitten TTS — Speech speed",
+    default=1.3,
+    value_type=float,
+    ui_type="string",
+    description=(
+        "Speaking rate multiplier. 1.0 = normal, >1 = faster, <1 = slower. "
+        "Range 0.5–2.0."
+    ),
+    scope="plugins",
+    component="vox_plugin",
+    advanced=False,
+)
+
 # ---------------------------------------------------------------------------
 # Model cache (one instance per model_id to avoid repeated loads)
 # ---------------------------------------------------------------------------
@@ -377,6 +400,47 @@ def _audio_to_wav(audio_array: Any, sample_rate: int) -> bytes | None:
         return None
 
 
+def _normalize_wav_bytes(
+    wav_bytes: bytes,
+    target_level: float = 0.891,
+) -> bytes:
+    """Peak-normalize WAV bytes to *target_level* (default -1 dBFS).
+
+    Uses only Python built-ins + numpy so it works even when pydub/soundfile
+    are not installed.  Handles 8/16/32-bit PCM WAV.
+    """
+    import wave
+
+    import numpy as np
+
+    with wave.open(io.BytesIO(wav_bytes), "rb") as wav:
+        nchannels = wav.getnchannels()
+        sampwidth = wav.getsampwidth()
+        framerate = wav.getframerate()
+        nframes = wav.getnframes()
+        raw = wav.readframes(nframes)
+
+    dtype_map = {1: np.int8, 2: np.int16, 4: np.int32}
+    max_int_map = {1: 127, 2: 32767, 4: 2147483647}
+    dtype = dtype_map.get(sampwidth, np.int16)
+    max_int = max_int_map.get(sampwidth, 32767)
+
+    arr = np.frombuffer(raw, dtype=dtype).astype(np.float64)
+
+    max_val = float(np.max(np.abs(arr)))
+    if max_val > 1e-10:
+        arr = arr * (target_level * max_int / max_val)
+    arr = arr.astype(dtype)
+
+    out = io.BytesIO()
+    with wave.open(out, "wb") as wav:
+        wav.setnchannels(nchannels)
+        wav.setsampwidth(sampwidth)
+        wav.setframerate(framerate)
+        wav.writeframes(arr.tobytes())
+    return out.getvalue()
+
+
 # ---------------------------------------------------------------------------
 # KittenVoxEngine
 # ---------------------------------------------------------------------------
@@ -402,6 +466,17 @@ class KittenVoxEngine(VoxEngineBase):
                 "KITTEN_VOICE",
                 _DEFAULT_VOICE,
                 value_type=str,
+                group="plugins",
+                component="vox_plugin",
+            )
+        )
+
+    def _active_speed(self) -> float:
+        return float(
+            config_registry.get_value(
+                "KITTEN_SPEED",
+                1.3,
+                value_type=float,
                 group="plugins",
                 component="vox_plugin",
             )
@@ -446,7 +521,8 @@ class KittenVoxEngine(VoxEngineBase):
             # applies the correct voice model.
             # Samples always use 'en' language; LocalKittenTTS.generate() decides
             # whether to forward it to the underlying engine or not.
-            audio = tts.generate(text=text, voice=speaker, language="en")
+            speed = self._active_speed()
+            audio = tts.generate(text=text, voice=speaker, language="en", speed=speed)
             if isinstance(audio, bytes):
                 return audio
             wav = _audio_to_wav(audio, _SAMPLE_RATE)
@@ -516,6 +592,7 @@ class KittenVoxEngine(VoxEngineBase):
         voice = str(
             kwargs.get("speaker") or kwargs.get("voice") or self._active_voice()
         )
+        speed = float(kwargs.get("speed") or self._active_speed())
 
         tts = _get_model(model_id)
         if tts is None:
@@ -524,11 +601,21 @@ class KittenVoxEngine(VoxEngineBase):
         try:
             # LocalKittenTTS.generate() internally decides whether to pass
             # ``language`` to the underlying engine based on _USING_VENDOR_STUB.
-            audio = tts.generate(text=text, voice=voice, language=language)
+            audio = tts.generate(text=text, voice=voice, language=language, speed=speed)
             # Engine may return raw bytes (WAV/MP3) or a numpy array.
             if isinstance(audio, bytes):
-                return audio
-            return _audio_to_wav(audio, _SAMPLE_RATE)
+                return _normalize_wav_bytes(audio, target_level=0.891)
+            # Clean peak-normalize to -1 dBFS.  No makeup gain / hard
+            # clipping here — transparent loudness is handled downstream
+            # by ffmpeg dynaudnorm in broadcast_banter.
+            import numpy as np
+
+            arr = audio.numpy() if hasattr(audio, "numpy") else audio
+            max_val = float(np.max(np.abs(arr)))
+            if max_val > 1e-10:
+                arr = (arr / max_val) * 0.891
+            arr = np.clip(arr, -1.0, 1.0)
+            return _audio_to_wav(arr, _SAMPLE_RATE)
         except Exception as exc:
             log_error(f"[vox/kitten] TTS generation failed: {exc}")
             return None

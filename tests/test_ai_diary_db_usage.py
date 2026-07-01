@@ -5,6 +5,31 @@ import pytest
 import plugins.ai_diary as ai_diary
 
 
+def test_normalize_emotions_handles_assorted_shapes():
+    norm = ai_diary._normalize_emotions
+
+    # {name: intensity} map (what local models emit for update_emotion_state)
+    assert norm({"love": 8, "devotion": 9.0}) == [
+        {"type": "love", "intensity": 8},
+        {"type": "devotion", "intensity": 9.0},
+    ]
+    # canonical list of dicts is preserved
+    assert norm([{"type": "love", "intensity": 7}]) == [
+        {"type": "love", "intensity": 7}
+    ]
+    # list of bare names
+    assert norm(["love", "devotion"]) == [
+        {"type": "love"},
+        {"type": "devotion"},
+    ]
+    # alternate dict keys + non-numeric intensity dropped
+    assert norm([{"emotion": "joy", "intensity": "high"}]) == [{"type": "joy"}]
+    # empty / falsy
+    assert norm(None) == []
+    assert norm([]) == []
+    assert norm("") == []
+
+
 class DummyCursor:
     def __init__(self):
         self.executed = []
@@ -78,6 +103,42 @@ def test_run_falls_back_to_asyncio_run_when_no_loop(monkeypatch):
 
     res = ai_diary._run("noop")
     assert res == "ok"
+
+
+def test_get_entries_by_tags_uses_postgres_jsonb(monkeypatch):
+    captured: dict[str, object] = {}
+
+    async def fake_fetchall(query, params=None):
+        captured["query"] = query
+        captured["params"] = params
+        return []
+
+    monkeypatch.setattr(ai_diary, "_get_db_type", lambda: "postgres")
+    monkeypatch.setattr(ai_diary, "_fetchall", fake_fetchall)
+    monkeypatch.setattr(ai_diary, "_run", lambda coro: asyncio.run(coro))
+
+    assert ai_diary.get_entries_by_tags(["food"], limit=5) == []
+    assert "::jsonb ? %s" in str(captured["query"])
+    assert "JSON_CONTAINS" not in str(captured["query"])
+    assert captured["params"] == ("food", 5)
+
+
+def test_get_entries_with_person_uses_postgres_jsonb(monkeypatch):
+    captured: dict[str, object] = {}
+
+    async def fake_fetchall(query, params=None):
+        captured["query"] = query
+        captured["params"] = params
+        return []
+
+    monkeypatch.setattr(ai_diary, "_get_db_type", lambda: "postgres")
+    monkeypatch.setattr(ai_diary, "_fetchall", fake_fetchall)
+    monkeypatch.setattr(ai_diary, "_run", lambda coro: asyncio.run(coro))
+
+    assert ai_diary.get_entries_with_person("Scar", limit=5) == []
+    assert "::jsonb ? %s" in str(captured["query"])
+    assert "JSON_CONTAINS" not in str(captured["query"])
+    assert captured["params"] == ("Scar", 5)
 
 
 def test_clip_for_column_noop_when_under_limit():
@@ -186,70 +247,182 @@ async def test_upsert_retries_insert_when_user_message_overflows(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_on_debrief_uses_postgres_string_agg(monkeypatch):
-    captured: dict[str, object] = {}
+async def test_upsert_refreshes_origin_fields_from_real_message_context(monkeypatch):
+    class UpdateOriginCursor:
+        def __init__(self):
+            self.executed = []
+            self._last_query = ""
 
-    async def fake_fetchall(query, params=None):
-        captured["query"] = query
-        captured["params"] = params
-        return []
+        async def execute(self, q, params=None):
+            self._last_query = q
+            self.executed.append((q, params))
 
-    ai_diary.PLUGIN_ENABLED = True
-    monkeypatch.setattr(ai_diary, "_get_db_type", lambda: "postgres")
-    monkeypatch.setattr(ai_diary, "_fetchall", fake_fetchall)
+        async def fetchone(self):
+            if "INFORMATION_SCHEMA.COLUMNS" in self._last_query:
+                return ("text", None)
+            if "FROM ai_diary WHERE DATE(timestamp) = CURDATE()" in self._last_query:
+                return (
+                    99,
+                    "existing content",
+                    "existing thought",
+                    "existing summary",
+                    "existing user",
+                    "[]",
+                    "[]",
+                    "[]",
+                    "grillo",
+                    "-1",
+                    None,
+                )
+            return None
 
-    plugin = object.__new__(ai_diary.DiaryPlugin)
-    await plugin.on_debrief([], [], [], {}, object())
+    class UpdateOriginConn:
+        def __init__(self, cursor):
+            self._cursor = cursor
+            self.commits = 0
 
-    assert "string_agg" in str(captured["query"])
-    assert "GROUP_CONCAT" not in str(captured["query"])
+        async def cursor(self):
+            return self._cursor
+
+        async def commit(self):
+            self.commits += 1
+
+    class UpdateOriginCtx:
+        def __init__(self):
+            self.cursor = UpdateOriginCursor()
+            self.conn = UpdateOriginConn(self.cursor)
+
+        async def __aenter__(self):
+            return self.conn
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    ctx = UpdateOriginCtx()
+    monkeypatch.setattr(ai_diary, "get_db", lambda: ctx)
+
+    entry_id = await ai_diary._upsert_diary_impl(
+        content="content",
+        personal_thought="thought",
+        emotions=[],
+        interaction_summary="summary",
+        user_message="user",
+        context_tags=[],
+        involved_users=[],
+        interface="telegram_bot",
+        chat_id="123",
+        thread_id="777",
+    )
+
+    assert entry_id == 99
+    update_calls = [
+        params for q, params in ctx.cursor.executed if "UPDATE ai_diary" in q
+    ]
+    assert len(update_calls) == 1
+    assert update_calls[0][7] == "telegram_bot"
+    assert update_calls[0][8] == "123"
+    assert update_calls[0][9] == "777"
+    assert ctx.conn.commits == 1
 
 
 @pytest.mark.asyncio
-async def test_on_debrief_enqueues_merge_source_ids(monkeypatch):
-    captured: dict[str, object] = {}
+async def test_upsert_does_not_replace_real_interface_with_diary_merge(monkeypatch):
+    class UpdateOriginCursor:
+        def __init__(self):
+            self.executed = []
+            self._last_query = ""
 
-    async def fake_fetchall(query, params=None):
-        return [
-            {
-                "id": 42,
-                "combined": "one\n\n---\n\ntwo",
-                "row_count": 2,
-                "source_ids": "41,42",
-                "first_timestamp": "2026-04-18T21:00:00+00:00",
-            }
-        ]
+        async def execute(self, q, params=None):
+            self._last_query = q
+            self.executed.append((q, params))
 
-    async def fake_enqueue_low_priority(
-        _priority,
-        _message,
-        context_memory=None,
-        interface_id=None,
-        original_message=None,
-    ):
-        captured["context_memory"] = context_memory
-        captured["interface_id"] = interface_id
+        async def fetchone(self):
+            if "INFORMATION_SCHEMA.COLUMNS" in self._last_query:
+                return ("text", None)
+            if "FROM ai_diary WHERE DATE(timestamp) = CURDATE()" in self._last_query:
+                return (
+                    99,
+                    "existing content",
+                    "existing thought",
+                    "existing summary",
+                    "existing user",
+                    "[]",
+                    "[]",
+                    "[]",
+                    "telegram_bot",
+                    "123",
+                    "777",
+                )
+            return None
 
+    class UpdateOriginConn:
+        def __init__(self, cursor):
+            self._cursor = cursor
+            self.commits = 0
+
+        async def cursor(self):
+            return self._cursor
+
+        async def commit(self):
+            self.commits += 1
+
+    class UpdateOriginCtx:
+        def __init__(self):
+            self.cursor = UpdateOriginCursor()
+            self.conn = UpdateOriginConn(self.cursor)
+
+        async def __aenter__(self):
+            return self.conn
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    ctx = UpdateOriginCtx()
+    monkeypatch.setattr(ai_diary, "get_db", lambda: ctx)
+
+    entry_id = await ai_diary._upsert_diary_impl(
+        content="merged content",
+        personal_thought="thought",
+        emotions=[],
+        interaction_summary="summary",
+        user_message="user",
+        context_tags=[],
+        involved_users=[],
+        interface="diary_merge",
+        chat_id="123",
+        thread_id="777",
+    )
+
+    assert entry_id == 99
+    update_calls = [
+        params for q, params in ctx.cursor.executed if "UPDATE ai_diary" in q
+    ]
+    assert len(update_calls) == 1
+    assert update_calls[0][7] == "telegram_bot"
+    assert update_calls[0][8] == "123"
+    assert update_calls[0][9] == "777"
+
+
+@pytest.mark.asyncio
+async def test_on_debrief_is_now_noop(monkeypatch):
+    """on_debrief is now a no-op — consolidation is handled by GrilloDiaryConsolidatorPlugin.
+
+    The only remaining logic is the ``diary_merge_beat`` guard which prevents
+    recursive loops when the consolidation beat's own response goes through debrief.
+    """
     ai_diary.PLUGIN_ENABLED = True
-    monkeypatch.setattr(ai_diary, "_get_db_type", lambda: "postgres")
-    monkeypatch.setattr(ai_diary, "_fetchall", fake_fetchall)
-    monkeypatch.setattr(
-        "core.message_queue.enqueue_low_priority",
-        fake_enqueue_low_priority,
-    )
 
+    # Verify normal calls do nothing (no query executed, no beat enqueued)
     plugin = object.__new__(ai_diary.DiaryPlugin)
-    await plugin.on_debrief([], [], [], {}, object())
+    result = await plugin.on_debrief([], [], [], {}, object())
+    assert result is None  # no-op returns None
 
-    assert captured["interface_id"] == "diary_merge"
-    assert captured["context_memory"]["diary_merge_source_ids"] == [41, 42]
-    assert (
-        captured["context_memory"]["diary_merge_timestamp"]
-        == "2026-04-18T21:00:00+00:00"
-    )
+    # Verify the diary_merge_beat guard still works
+    result = await plugin.on_debrief([], [], [], {"diary_merge_beat": True}, object())
+    assert result is None  # short-circuits on merge beat
 
 
-def test_update_diary_entry_archives_merged_source_rows(monkeypatch):
+async def test_update_diary_entry_archives_merged_source_rows(monkeypatch):
     executed: list[tuple[str, tuple]] = []
     archived: dict[str, object] = {}
 
@@ -258,7 +431,6 @@ def test_update_diary_entry_archives_merged_source_rows(monkeypatch):
         return None
 
     monkeypatch.setattr(ai_diary, "_execute", fake_execute)
-    monkeypatch.setattr(ai_diary, "_run", lambda coro: asyncio.run(coro))
 
     def fake_archive_diary_entries(entry_ids):
         archived["ids"] = list(entry_ids)
@@ -267,7 +439,7 @@ def test_update_diary_entry_archives_merged_source_rows(monkeypatch):
     monkeypatch.setattr(ai_diary, "archive_diary_entries", fake_archive_diary_entries)
 
     plugin = object.__new__(ai_diary.DiaryPlugin)
-    result = plugin.execute_action(
+    result = await plugin.execute_action(
         {
             "type": "update_diary_entry",
             "payload": {"id": 42, "content": "merged prose"},

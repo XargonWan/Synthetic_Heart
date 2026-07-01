@@ -4,7 +4,8 @@ import asyncio
 import json
 import re
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 from core.logging_utils import log_debug, log_error, log_info, log_warning
@@ -19,7 +20,13 @@ from core.soul.compiler import (
 )
 from core.soul.fastembed_embedder import FastEmbedder
 from core.soul.emotion_engine import EmotionalEngine
-from core.soul.models import EmotionalEvent, EmotionalState, MemCell, MemCellRecall
+from core.soul.models import (
+    EmotionalEvent,
+    EmotionalProfile,
+    EmotionalState,
+    MemCell,
+    MemCellRecall,
+)
 from core.soul.repository import (
     InMemorySoulRepository,
     PostgresSoulRepository,
@@ -66,18 +73,18 @@ register_exposed_var(
     default="memory",
     value_type=str,
     ui_type="text",
-    description="SOUL persistence backend: memory or postgres.",
+    description="Legacy compatibility flag. When the main runtime DB is PostgreSQL, SOUL uses that Postgres backend automatically.",
     scope="plugins",
     component="soul_plugin",
 )
 
 register_exposed_var(
     "SOUL_POSTGRES_DSN",
-    label="SOUL Postgres DSN",
+    label="Legacy SOUL Postgres DSN",
     default="",
     value_type=str,
     ui_type="text",
-    description="PostgreSQL DSN used when SOUL_REPOSITORY_BACKEND=postgres.",
+    description="Legacy SOUL PostgreSQL source DSN used only for one-time migration into the main runtime Postgres.",
     scope="plugins",
     component="soul_plugin",
 )
@@ -111,7 +118,7 @@ class SoulPlugin(PluginBase):
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         super().__init__(config)
         self._repo = self._build_repository()
-        self._emotion_engine = EmotionalEngine()
+        self._emotion_engine = self._build_emotion_engine()
         self._compiler = SoulCompiler(
             repository=self._repo,
             memcell_extractor=RuleBasedMemCellExtractor(),
@@ -128,14 +135,8 @@ class SoulPlugin(PluginBase):
 
     def _build_embedder(self) -> Any:
         from importlib.util import find_spec
-        from core.config_manager import config_registry
 
-        backend = str(
-            config_registry.get_value(
-                "SOUL_REPOSITORY_BACKEND", "memory", value_type=str
-            )
-            or "memory"
-        )
+        backend = self._get_repository_backend()
         if backend == "postgres":
             model_id = "BAAI/bge-base-en-v1.5"
             try:
@@ -149,6 +150,28 @@ class SoulPlugin(PluginBase):
                 )
         return NoopEmbedder()
 
+    def _build_emotion_engine(self) -> EmotionalEngine:
+        return EmotionalEngine(profile=self._load_emotional_profile())
+
+    @staticmethod
+    def _load_emotional_profile() -> EmotionalProfile:
+        try:
+            from core.config_manager import config_registry
+
+            skin = str(
+                config_registry.get_value("SYNTH_NAME", "SyntH", value_type=str)
+                or "SyntH"
+            )
+            persona_path = Path("skins") / skin / "persona.json"
+            if persona_path.is_file():
+                data = json.loads(persona_path.read_text(encoding="utf-8"))
+                ep_data = data.get("emotional_profile")
+                if isinstance(ep_data, dict):
+                    return EmotionalProfile.from_dict(ep_data)
+        except Exception:
+            pass
+        return EmotionalProfile()
+
     async def start(self) -> None:
         if not self._is_enabled():
             log_info("[soul_plugin] Disabled by config")
@@ -156,6 +179,7 @@ class SoulPlugin(PluginBase):
         if self._scheduler_task and not self._scheduler_task.done():
             return
         self._scheduler_task = asyncio.create_task(self._scheduler_loop())
+        asyncio.create_task(self._run_curator_background())
         log_info("[soul_plugin] Started")
 
     async def stop(self) -> None:
@@ -196,7 +220,17 @@ class SoulPlugin(PluginBase):
                 "required_params": {},
                 "optional_params": {},
             },
+            "soul_run_curator": {
+                "description": "Run the Memory Curator to prune outdated or low-value MemCells",
+                "required_params": {},
+                "optional_params": {
+                    "max_memories": "Maximum number of MemCells to retain (default 500)"
+                },
+            },
         }
+
+    def is_enabled(self) -> bool:
+        return self._is_enabled()
 
     async def execute_action(
         self,
@@ -217,6 +251,9 @@ class SoulPlugin(PluginBase):
             return await self._run_rollup_now()
         if action_type == "soul_get_status":
             return await self._get_status()
+        if action_type == "soul_run_curator":
+            max_memories = int(payload.get("max_memories") or 500)
+            return await self._run_curator_now(max_memories=max_memories)
         return None
 
     async def get_static_injection(
@@ -227,10 +264,7 @@ class SoulPlugin(PluginBase):
 
         interface_path = self._extract_interface_path(message, context_memory)
         if interface_path.startswith("grillo/"):
-            log_debug(
-                "[soul_plugin] Skipping SOUL static injection for internal Grillo interface"
-            )
-            return {}
+            return await self._get_grillo_beat_context(message)
 
         now = datetime.now(timezone.utc)
 
@@ -294,6 +328,65 @@ class SoulPlugin(PluginBase):
             else "<user_profile>No profile compiled yet.</user_profile>",
             "soul_session_state": session_state,
             "soul_turn_emotion_delta": json.dumps(turn_delta),
+            "soul_active_foresight": [
+                {
+                    "content": signal.content,
+                    "valid_until": signal.valid_until.isoformat(),
+                    "trigger": signal.trigger,
+                }
+                for signal in foresight[:8]
+            ],
+            "soul_recalled_memories": recalled_memories,
+        }
+
+    async def _get_grillo_beat_context(self, message: Any) -> dict[str, object]:
+        """Return passive SOUL context for Grillo beats.
+
+        Provides recalled memories and DSP without session side-effects:
+        no buffer append, no emotional tracking, no session mutation.
+        """
+        active_dsp = None
+        recalled_memories: list[str] = []
+        foresight: list[Any] = []
+
+        try:
+            active_dsp = await self._repo.get_active_dsp()
+        except Exception:
+            pass
+
+        try:
+            foresight = await self._repo.list_active_foresight_signals(
+                datetime.now(timezone.utc).date()
+            )
+        except Exception:
+            pass
+
+        incoming_text = self._extract_message_text(message)
+        if incoming_text:
+            try:
+                recalled_memories = await self._recall_memories(
+                    interface_path="grillo/beat",
+                    incoming_text=incoming_text,
+                    session=_SessionState(),
+                )
+            except Exception as exc:
+                log_debug(f"[soul_plugin] Grillo beat memory recall failed: {exc}")
+
+        foresight_lines = [
+            f"- {signal.content} (until {signal.valid_until.isoformat()})"
+            for signal in foresight[:8]
+        ]
+        foresight_text = "\n".join(foresight_lines) if foresight_lines else "- None"
+
+        return {
+            "soul_user_profile": active_dsp.content
+            if active_dsp
+            else "<user_profile>No profile compiled yet.</user_profile>",
+            "soul_session_state": (
+                "<session_state>\ninterface_path: grillo/beat\n"
+                f"active_foresight:\n{foresight_text}\n</session_state>"
+            ),
+            "soul_turn_emotion_delta": "{}",
             "soul_active_foresight": [
                 {
                     "content": signal.content,
@@ -403,6 +496,30 @@ class SoulPlugin(PluginBase):
         log_info(f"[soul_plugin] Nightly rollup result: {result}")
         return result
 
+    async def _run_curator_now(self, *, max_memories: int = 500) -> dict[str, int]:
+        result = await self._compiler.run_curator(
+            current_date=datetime.now(timezone.utc).date(),
+            max_memories=max_memories,
+        )
+        log_info(
+            f"[soul_plugin] Memory Curator: inspected={result.inspected} "
+            f"removed={result.removed} retained={result.retained} "
+            f"(future={result.kept_future} important={result.kept_important})"
+        )
+        return {
+            "inspected": result.inspected,
+            "removed": result.removed,
+            "retained": result.retained,
+            "kept_future": result.kept_future,
+            "kept_important": result.kept_important,
+        }
+
+    async def _run_curator_background(self) -> None:
+        try:
+            await self._run_curator_now()
+        except Exception as exc:
+            log_warning(f"[soul_plugin] Background curator run failed: {exc}")
+
     async def _get_status(self) -> dict[str, object]:
         dsp = await self._repo.get_active_dsp()
         return {
@@ -419,19 +536,31 @@ class SoulPlugin(PluginBase):
 
     async def _build_daily_transcript(self) -> str:
         try:
+            cutoff = datetime.now(timezone.utc) - timedelta(days=1)
             async with get_conn_ctx() as conn:
                 async with conn.cursor() as cur:
                     await cur.execute(
                         """
-                        SELECT message_text
+                        SELECT sender_name, sender_id, message_text, timestamp
                         FROM chat_history_cache
-                        WHERE timestamp >= (UTC_TIMESTAMP() - INTERVAL 1 DAY)
+                        WHERE timestamp >= %s
                         ORDER BY timestamp ASC
                         LIMIT 500
-                        """
+                        """,
+                        (cutoff,),
                     )
                     rows = await cur.fetchall()
-                    parts = [str(r[0]) for r in rows if r and r[0]]
+                    parts: list[str] = []
+                    for row in rows:
+                        if not row or not row[2]:
+                            continue
+                        speaker = str(row[0] or row[1] or "user").strip() or "user"
+                        message_text = " ".join(str(row[2]).split())
+                        timestamp = row[3]
+                        prefix = f"[{timestamp.isoformat()}] " if timestamp else ""
+                        parts.append(
+                            f"{prefix}{speaker}: {json.dumps(message_text, ensure_ascii=False)}"
+                        )
                     return "\n".join(parts)
         except Exception as exc:
             log_debug(f"[soul_plugin] Falling back to buffered transcript: {exc}")
@@ -516,6 +645,16 @@ class SoulPlugin(PluginBase):
         trace = " ".join(str(cell.episodic_trace or "").split()).lower()
 
         if session_id == "nightly" or session_id.startswith("diary_merge:"):
+            return True
+
+        # Grillo self-initiated outreach entries store the routing preamble as
+        # the episodic trace. That preamble is pure system noise — it contains
+        # no conversation memory. Any real content from those sessions is
+        # captured by normal diary entries from the same turn.
+        # Two preamble formats exist (pre/post rename of the outreach plugin).
+        if trace.startswith("[self-initiated outreach]") or trace.startswith(
+            "[g.r.i.l.l.o. outreach]"
+        ):
             return True
 
         return (
@@ -672,7 +811,7 @@ class SoulPlugin(PluginBase):
             if dsn:
                 return PostgresSoulRepository(dsn=dsn)
             log_warning(
-                "[soul_plugin] SOUL_REPOSITORY_BACKEND=postgres but SOUL_POSTGRES_DSN is empty; falling back to memory"
+                "[soul_plugin] Runtime Postgres DSN is empty; falling back to memory"
             )
         return InMemorySoulRepository()
 
@@ -718,31 +857,25 @@ class SoulPlugin(PluginBase):
     @staticmethod
     def _get_repository_backend() -> str:
         try:
-            from core.config_manager import config_registry
+            from core.db import _get_db_type
 
-            value = str(
-                config_registry.get_value(
-                    "SOUL_REPOSITORY_BACKEND", "memory", value_type=str
-                )
-                or "memory"
-            )
-            value = value.strip().lower()
-            if value in {"memory", "postgres"}:
-                return value
-            return "memory"
+            return "postgres" if _get_db_type() == "postgres" else "memory"
         except Exception:
             return "memory"
 
     @staticmethod
     def _get_postgres_dsn() -> str:
         try:
-            from core.config_manager import config_registry
+            from core.db import build_runtime_postgres_dsn
 
-            return str(
-                config_registry.get_value("SOUL_POSTGRES_DSN", "", value_type=str) or ""
-            )
+            return build_runtime_postgres_dsn()
         except Exception:
-            return ""
+            try:
+                from core.db import build_runtime_postgres_dsn
+
+                return build_runtime_postgres_dsn()
+            except Exception:
+                return ""
 
 
 PLUGIN_CLASS = SoulPlugin

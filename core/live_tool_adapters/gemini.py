@@ -16,7 +16,7 @@ import logging
 from typing import Any
 
 from core.logging_utils import log_info, log_warning
-from core.live_tool_registry import ToolManifest
+from core.live_tool_registry import ToolManifest, tool_parameter_schema
 
 logger = logging.getLogger(__name__)
 
@@ -71,14 +71,9 @@ class GeminiToolAdapter:
             required_fields: list[str] = []
 
             for param in manifest.parameters:
-                prop: dict[str, Any] = {
-                    "type": _TYPE_MAP.get(param.type, param.type.upper()),
-                }
-                if param.description:
-                    prop["description"] = param.description
-                if param.enum:
-                    prop["enum"] = param.enum
-                properties[param.name] = prop
+                properties[param.name] = tool_parameter_schema(
+                    param, uppercase_types=True
+                )
                 if param.required:
                     required_fields.append(param.name)
 

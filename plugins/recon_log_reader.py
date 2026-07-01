@@ -83,6 +83,7 @@ class ReconLogReaderPlugin:
         tags: List[str] | None = None,
         keywords: List[str] | None = None,
         max_results: int = 5,
+        _raw_llm_text: str | None = None,
     ) -> list[dict]:
         if not text or not isinstance(text, str) or not text.strip():
             return []

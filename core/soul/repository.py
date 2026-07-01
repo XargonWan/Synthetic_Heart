@@ -16,6 +16,7 @@ from .models import (
     KgTriple,
     MemCell,
     MemCellRecall,
+    MemCellSummary,
     MemScene,
     compute_memcell_salience,
 )
@@ -159,6 +160,12 @@ class SoulRepository(Protocol):
 
     async def set_active_dsp(self, dsp: DspVersion) -> None: ...
 
+    async def list_memcell_summaries(
+        self, *, today: date, limit: int = 5000
+    ) -> list[MemCellSummary]: ...
+
+    async def delete_memcells(self, ids: list[str]) -> int: ...
+
 
 @dataclass(slots=True)
 class InMemorySoulRepository:
@@ -268,6 +275,34 @@ class InMemorySoulRepository:
             self.active_dsp.archived_at = dsp.created_at
         self.active_dsp = dsp
 
+    async def list_memcell_summaries(
+        self, *, today: date, limit: int = 5000
+    ) -> list[MemCellSummary]:
+        summaries: list[MemCellSummary] = []
+        for cell in self.memcells.values():
+            has_foresight = any(s.valid_until >= today for s in cell.foresight_signals)
+            summaries.append(
+                MemCellSummary(
+                    id=cell.id,
+                    episodic_trace=cell.episodic_trace[:200],
+                    timestamp=cell.timestamp,
+                    retrieval_count=cell.retrieval_count,
+                    explicit_importance=cell.explicit_importance,
+                    emotional_intensity=abs(cell.emotional_tag.intensity),
+                    has_active_foresight=has_foresight,
+                )
+            )
+        summaries.sort(key=lambda s: s.timestamp)
+        return summaries[:limit]
+
+    async def delete_memcells(self, ids: list[str]) -> int:
+        removed = 0
+        for cell_id in ids:
+            if cell_id in self.memcells:
+                del self.memcells[cell_id]
+                removed += 1
+        return removed
+
 
 @dataclass(slots=True)
 class PostgresSoulRepository:
@@ -284,17 +319,23 @@ class PostgresSoulRepository:
     _pool: Any | None = field(default=None, init=False, repr=False)
     _schema_bootstrapped: bool = field(default=False, init=False, repr=False)
 
+    def _pool_key(self) -> str:
+        return (
+            f"soul:{self.schema}:{self.min_pool_size}:{self.max_pool_size}:"
+            f"{abs(hash(self.dsn))}"
+        )
+
     async def _get_pool(self) -> Any:
         if self._pool is not None:
             return self._pool
 
-        from importlib import import_module
+        from core.db import get_named_postgres_pool
 
-        asyncpg = import_module("asyncpg")
-        self._pool = await asyncpg.create_pool(
+        self._pool = await get_named_postgres_pool(
+            pool_key=self._pool_key(),
             dsn=self.dsn,
-            min_size=self.min_pool_size,
-            max_size=self.max_pool_size,
+            minsize=self.min_pool_size,
+            maxsize=self.max_pool_size,
             server_settings={"search_path": self.schema},
         )
         await self._ensure_schema(self._pool)
@@ -776,15 +817,23 @@ class PostgresSoulRepository:
         async with pool.acquire() as conn:
             vector_rows = await conn.fetch(
                 """
+                WITH vector_candidates AS (
+                    SELECT
+                        v.mem_cell_id,
+                        (1 - (v.embedding <=> $1::vector)) AS vector_similarity
+                    FROM mem_cell_vectors v
+                    ORDER BY v.embedding <=> $1::vector ASC
+                    LIMIT $2
+                )
                 SELECT
                     c.id, c.session_id, c.episodic_trace, c.atomic_facts, c.emotional_tag,
                     c.foresight_signals, c.timestamp, c.retrieval_count, c.explicit_importance,
                     c.consolidated, c.scene_id,
-                    (1 - (v.embedding <=> $1::vector)) AS vector_similarity
-                FROM mem_cells c
-                JOIN mem_cell_vectors v ON v.mem_cell_id = c.id
+                    vc.vector_similarity
+                FROM vector_candidates vc
+                JOIN mem_cells c ON c.id = vc.mem_cell_id
                 WHERE c.episodic_trace <> ''
-                ORDER BY v.embedding <=> $1::vector ASC, c.timestamp DESC
+                ORDER BY vc.vector_similarity DESC, c.timestamp DESC
                 LIMIT $2
                 """,
                 vector_literal,
@@ -792,7 +841,7 @@ class PostgresSoulRepository:
             )
 
             text_rows: list[Any] = []
-            if len(normalized_query) >= 3:
+            if len(vector_rows) < candidate_cap and len(normalized_query) >= 3:
                 text_rows = list(
                     await conn.fetch(
                         # Keep SQL candidate selection on indexed episodic-trace
@@ -882,6 +931,60 @@ class PostgresSoulRepository:
             created_at=row["created_at"],
             archived_at=row["archived_at"],
         )
+
+    async def list_memcell_summaries(
+        self, *, today: date, limit: int = 5000
+    ) -> list[MemCellSummary]:
+        pool = await self._get_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT
+                    c.id,
+                    LEFT(c.episodic_trace, 200) AS episodic_trace,
+                    c.timestamp,
+                    c.retrieval_count,
+                    c.explicit_importance,
+                    COALESCE((c.emotional_tag->>'intensity')::REAL, 0.0)
+                        AS emotional_intensity,
+                    EXISTS (
+                        SELECT 1
+                        FROM jsonb_array_elements(c.foresight_signals) AS fs
+                        WHERE (fs->>'valid_until')::DATE >= $2
+                    ) AS has_active_foresight
+                FROM mem_cells c
+                ORDER BY c.timestamp ASC
+                LIMIT $1
+                """,
+                limit,
+                today,
+            )
+        return [
+            MemCellSummary(
+                id=str(row["id"]),
+                episodic_trace=str(row["episodic_trace"]),
+                timestamp=row["timestamp"],
+                retrieval_count=int(row["retrieval_count"]),
+                explicit_importance=float(row["explicit_importance"]),
+                emotional_intensity=abs(float(row["emotional_intensity"])),
+                has_active_foresight=bool(row["has_active_foresight"]),
+            )
+            for row in rows
+        ]
+
+    async def delete_memcells(self, ids: list[str]) -> int:
+        if not ids:
+            return 0
+        pool = await self._get_pool()
+        async with pool.acquire() as conn:
+            status = await conn.execute(
+                "DELETE FROM mem_cells WHERE id = ANY($1::text[])",
+                ids,
+            )
+        parts = str(status).split()
+        if len(parts) == 2 and parts[0].upper() == "DELETE":
+            return int(parts[1])
+        return 0
 
     async def set_active_dsp(self, dsp: DspVersion) -> None:
         pool = await self._get_pool()

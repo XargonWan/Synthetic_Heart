@@ -67,6 +67,12 @@ def get_current_aliases() -> list[str]:
         key = str(alias).strip()
         if not key:
             continue
+        # Filter out single-character aliases (corrupted data from repr() serialization bug)
+        if len(key) < 2:
+            continue
+        # Filter out punctuation-only aliases (artifacts of corrupted array storage)
+        if key in ("[", "]", "'", '"', ",", " "):
+            continue
         if key in seen:
             continue
         seen.add(key)

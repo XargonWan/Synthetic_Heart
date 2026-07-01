@@ -78,6 +78,18 @@ try:
         needs_component_reload=False,
     )
     register_exposed_var(
+        "OPENROUTER_DISABLE_TOOLS",
+        label="Disable Tools",
+        default=False,
+        value_type=bool,
+        ui_type="bool",
+        description="Disable tool-calling (function calling) in API requests. Forces text-based prompt instructions instead.",
+        scope="llm",
+        component="openrouter",
+        tags=["cortex_engine"],
+        needs_component_reload=True,
+    )
+    register_exposed_var(
         "OPENROUTER_SITE_URL",
         label="Site URL (Referer)",
         default="",
@@ -162,6 +174,17 @@ OPENROUTER_DEFAULT_MODEL = config_registry.get_var(
     description="Default OpenRouter model.",
     group="llm",
     component="openrouter",
+)
+
+OPENROUTER_DISABLE_TOOLS = config_registry.get_var(
+    "OPENROUTER_DISABLE_TOOLS",
+    False,
+    label="Disable Tools",
+    description="Disable tool-calling in API requests.",
+    value_type=bool,
+    group="llm",
+    component="openrouter",
+    advanced=True,
 )
 
 OPENROUTER_SITE_URL = config_registry.get_var(
@@ -676,9 +699,17 @@ class OpenRouterPlugin(AIPluginBase):
                 )
                 _model = self._resolve_model(scope=_scope)
                 _model_info = _catalog.get(_model)
-                _pr.supports_tool_calling = (
-                    _model_info.supports_tool_use if _model_info else False
+                disable_tools = (
+                    OPENROUTER_DISABLE_TOOLS.value
+                    if hasattr(OPENROUTER_DISABLE_TOOLS, "value")
+                    else bool(OPENROUTER_DISABLE_TOOLS)
                 )
+                if disable_tools:
+                    _pr.supports_tool_calling = False
+                else:
+                    _pr.supports_tool_calling = (
+                        _model_info.supports_tool_use if _model_info else False
+                    )
                 _mm_parts = self._extract_multimodal_parts(prompt)
                 renderer = OpenAIRenderer(_pr)
                 _model_vis = _model_info.supports_vision if _model_info else False

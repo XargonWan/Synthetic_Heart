@@ -821,39 +821,56 @@ class ConfigRegistry:
                         if not row:
                             recreated = True
 
-                    log_debug(
-                        f"[config] Executing REPLACE for key='{key}' (value_len={len(value) if value else 0})"
-                    )
-                    try:
+                    # Use DB-native upsert syntax to avoid SQL translation issues on Postgres
+                    db_type = getattr(db_module, "_get_db_type", lambda: "mariadb")()
+                    if db_type == "postgres":
+                        sql = "INSERT INTO config (config_key, value) VALUES (%s, %s) ON CONFLICT (config_key) DO UPDATE SET value = EXCLUDED.value"
+                        log_debug(
+                            f"[config] Executing Postgres upsert for key='{key}' (value_len={len(value) if value else 0})"
+                        )
                         async with conn.cursor() as cur:
-                            await cur.execute(
-                                "REPLACE INTO config (config_key, value) VALUES (%s, %s)",
-                                (key, value),
-                            )
+                            await cur.execute(sql, (key, value))
                             await conn.commit()
-                        log_debug(f"[config] REPLACE succeeded for key='{key}'")
+                        log_debug(f"[config] Postgres upsert succeeded for key='{key}'")
                         if recreated:
                             log_warning(
                                 f"[config] Config key '{key}' was missing from DB and has been recreated with the new value"
                             )
                         return True
-                    except Exception:
-                        # Some MySQL variants or permissions could reject REPLACE; try robust fallback
+                    else:
+                        sql = "REPLACE INTO config (config_key, value) VALUES (%s, %s)"
                         log_debug(
-                            f"[config] REPLACE failed for key='{key}', attempting INSERT ... ON DUPLICATE KEY UPDATE fallback"
+                            f"[config] Executing REPLACE for key='{key}' (value_len={len(value) if value else 0})"
                         )
-                        async with conn.cursor() as cur:
-                            await cur.execute(
-                                "INSERT INTO config (config_key, value) VALUES (%s, %s) ON DUPLICATE KEY UPDATE value = VALUES(value)",
-                                (key, value),
+                        try:
+                            async with conn.cursor() as cur:
+                                await cur.execute(sql, (key, value))
+                                await conn.commit()
+                            log_debug(f"[config] REPLACE succeeded for key='{key}'")
+                            if recreated:
+                                log_warning(
+                                    f"[config] Config key '{key}' was missing from DB and has been recreated with the new value"
+                                )
+                            return True
+                        except Exception:
+                            # Some MySQL variants or permissions could reject REPLACE; try robust fallback
+                            log_debug(
+                                f"[config] REPLACE failed for key='{key}', attempting INSERT ... ON DUPLICATE KEY UPDATE fallback"
                             )
-                            await conn.commit()
-                        log_debug(f"[config] Fallback INSERT succeeded for key='{key}'")
-                        if recreated:
-                            log_warning(
-                                f"[config] Config key '{key}' was missing from DB and has been recreated with the new value (fallback path)"
+                            async with conn.cursor() as cur:
+                                await cur.execute(
+                                    "INSERT INTO config (config_key, value) VALUES (%s, %s) ON DUPLICATE KEY UPDATE value = VALUES(value)",
+                                    (key, value),
+                                )
+                                await conn.commit()
+                            log_debug(
+                                f"[config] Fallback INSERT succeeded for key='{key}'"
                             )
-                        return True
+                            if recreated:
+                                log_warning(
+                                    f"[config] Config key '{key}' was missing from DB and has been recreated with the new value (fallback path)"
+                                )
+                            return True
                 except Exception as e:
                     # If schema error (missing table/column), attempt an idempotent
                     # ensure_core_tables() and retry the REPLACE/INSERT once.
@@ -884,39 +901,60 @@ class ConfigRegistry:
                                 if not row:
                                     recreated = True
 
-                            try:
+                            # Use DB-native upsert syntax for retry as well
+                            db_type_retry = getattr(
+                                db_module, "_get_db_type", lambda: "mariadb"
+                            )()
+                            if db_type_retry == "postgres":
+                                sql_retry = "INSERT INTO config (config_key, value) VALUES (%s, %s) ON CONFLICT (config_key) DO UPDATE SET value = EXCLUDED.value"
+                                log_debug(
+                                    f"[config] Executing Postgres upsert (retry) for key='{key}'"
+                                )
                                 async with conn.cursor() as cur:
-                                    await cur.execute(
-                                        "REPLACE INTO config (config_key, value) VALUES (%s, %s)",
-                                        (key, value),
-                                    )
+                                    await cur.execute(sql_retry, (key, value))
                                     await conn.commit()
                                 log_debug(
-                                    f"[config] REPLACE (retry) succeeded for key='{key}'"
+                                    f"[config] Postgres upsert (retry) succeeded for key='{key}'"
                                 )
                                 if recreated:
                                     log_warning(
                                         f"[config] Config key '{key}' was missing and has been recreated on retry"
                                     )
                                 return True
-                            except Exception:
-                                log_debug(
-                                    f"[config] REPLACE (retry) failed for key='{key}', attempting INSERT fallback"
-                                )
-                                async with conn.cursor() as cur:
-                                    await cur.execute(
-                                        "INSERT INTO config (config_key, value) VALUES (%s, %s) ON DUPLICATE KEY UPDATE value = VALUES(value)",
-                                        (key, value),
+                            else:
+                                try:
+                                    async with conn.cursor() as cur:
+                                        await cur.execute(
+                                            "REPLACE INTO config (config_key, value) VALUES (%s, %s)",
+                                            (key, value),
+                                        )
+                                        await conn.commit()
+                                    log_debug(
+                                        f"[config] REPLACE (retry) succeeded for key='{key}'"
                                     )
-                                    await conn.commit()
-                                log_debug(
-                                    f"[config] Fallback INSERT (retry) succeeded for key='{key}'"
-                                )
-                                if recreated:
-                                    log_warning(
-                                        f"[config] Config key '{key}' was missing and has been recreated on retry (fallback path)"
+                                    if recreated:
+                                        log_warning(
+                                            f"[config] Config key '{key}' was missing and has been recreated on retry"
+                                        )
+                                    return True
+                                except Exception:
+                                    log_debug(
+                                        f"[config] REPLACE (retry) failed for key='{key}', attempting INSERT fallback"
                                     )
-                                return True
+                                    async with conn.cursor() as cur:
+                                        await cur.execute(
+                                            "INSERT INTO config (config_key, value) VALUES (%s, %s) ON DUPLICATE KEY UPDATE value = VALUES(value)",
+                                            (key, value),
+                                        )
+                                        await conn.commit()
+                                    log_debug(
+                                        f"[config] Fallback INSERT (retry) succeeded for key='{key}'"
+                                    )
+                                    if recreated:
+                                        log_warning(
+                                            f"[config] Config key '{key}' was missing and has been recreated on retry (fallback path)"
+                                        )
+                                    return True
                         except Exception as retry_exc:
                             import traceback
 
@@ -989,18 +1027,31 @@ class ConfigRegistry:
     def _serialize_value(self, definition: ConfigDefinition, value: Any) -> str:
         if value is None:
             return ""
-        if definition.value_type is bool:
-            return "true" if bool(value) else "false"
-        if definition.value_type is int:
-            if value == "":
-                return ""
-            return str(int(value))
-        if definition.value_type is float:
-            return str(float(value))
+        # Handle JSON types BEFORE converting to string to avoid
+        # corrupting Python lists/dicts into Python repr strings.
         if definition.value_type == "json":
             import json
 
             return json.dumps(value)
+        raw = str(value)
+        # Strip inline comments and trailing whitespace to prevent corruption
+        # like "Asia/Tokyo # Timezone for scheduled events..."
+        if "\n" not in raw:
+            raw = raw.split("#")[0].strip()
+        if definition.value_type is bool:
+            if isinstance(value, bool):
+                return "true" if value else "false"
+            return (
+                "true"
+                if str(value).strip().lower() in {"1", "true", "yes", "on"}
+                else "false"
+            )
+        if definition.value_type is int:
+            if raw == "":
+                return ""
+            return str(int(raw))
+        if definition.value_type is float:
+            return str(float(raw))
         if callable(definition.value_type) and definition.value_type not in (
             bool,
             int,
@@ -1008,9 +1059,9 @@ class ConfigRegistry:
             str,
         ):
             converter = cast(Callable[[Any], Any], definition.value_type)
-            converted = converter(value)
+            converted = converter(raw)
             return str(converted)
-        return str(value)
+        return raw
 
     def _convert_value(self, definition: ConfigDefinition, raw_value: str) -> Any:
         if definition.key == "SYNTH_ALIASES":

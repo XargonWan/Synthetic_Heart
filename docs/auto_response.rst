@@ -238,6 +238,49 @@ To add auto-response to a new interface:
 
    Replace direct ``bot.send_message()`` calls with auto-response requests
 
+Plugin-Side Delivery: ``deliver_to_llm``
+----------------------------------------
+
+Interfaces call ``request_llm_delivery`` explicitly (above). Plugins have a
+simpler opt-in path for **fetch-only actions** — actions whose answer *is* the
+reply (e.g. ``recall_last_dream``): the action fetches data but has no message
+to send on its own, and the user should get an in-character recount rather than
+nothing.
+
+A plugin's ``execute_action`` only needs to return a result dict tagged with
+``deliver_to_llm: True``:
+
+.. code-block:: python
+
+    async def execute_action(self, action, context, bot, original_message):
+        if action.get("type") == "recall_last_dream":
+            return {
+                "status": "success",
+                "dream_content": dream_text,
+                "message": f"Recalled dream from {when}",
+                "deliver_to_llm": True,  # ← feed this back to the LLM to voice
+            }
+
+``core.action_parser.run_actions`` captures any such result into its
+``action_outputs`` list (an additive branch beside the existing ``terminal``
+handling), strips the ``deliver_to_llm`` control flag, stamps the action
+``type``, and routes the collected outputs through the same generic
+``request_llm_delivery`` delivery block. The LLM then composes the user-facing
+message. The loop-prevention instruction names the real action type, so the
+model is told *"DO NOT call 'recall_last_dream' again"* and simply voices the
+data.
+
+Two consequences worth knowing:
+
+* Unlike ``terminal``, a ``deliver_to_llm`` result does **not** halt the rest of
+  the action batch — sibling actions in the same response keep executing.
+* The delivery follow-up *is* the user's reply, so the missing-reply corrector
+  in ``core.message_chain.handle_incoming_message`` is suppressed whenever
+  ``run_actions`` returned non-empty ``action_outputs`` (otherwise the corrector
+  and the delivery would both fire, producing a double reply). Do **not** add
+  these fetch-only actions to ``USER_OUTPUT_ACTION_TYPES`` — that config is for
+  actions that reply *synchronously* on their own.
+
 Testing
 -------
 

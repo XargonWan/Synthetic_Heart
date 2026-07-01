@@ -13,18 +13,23 @@ services:
       - synth_data:/config
       - synth_skins:/app/skins
       - synth_logs:/app/logs
+      - ./backups:/app/backups
     environment:
-      - TZ=${TZ:-Asia/Tokyo}
+      - TZ=${TZ}
       - PUID=${PUID:-1000}
       - PGID=${PGID:-1000}
       - DB_HOST=${DB_HOST:-synth-db}
-      - DB_PORT=${DB_PORT:-3306}
+      - DB_PORT=${DB_PORT:-5432}
       - DB_USER=${DB_USER:-synth}
       - DB_PASS=${DB_PASS:-synth}
       - DB_NAME=${DB_NAME:-synth}
-      - DB_ROOT_PASS=${DB_ROOT_PASS:-root}
-      - SOUL_REPOSITORY_BACKEND=${SOUL_REPOSITORY_BACKEND:-memory}
       - SOUL_POSTGRES_DSN=${SOUL_POSTGRES_DSN:-}
+      - SOURCE_DB_TYPE=${SOURCE_DB_TYPE:-mariadb}
+      - SOURCE_DB_HOST=${SOURCE_DB_HOST:-synth-legacy-db}
+      - SOURCE_DB_PORT=${SOURCE_DB_PORT:-3306}
+      - SOURCE_DB_USER=${SOURCE_DB_USER:-synth}
+      - SOURCE_DB_PASSWORD=${SOURCE_DB_PASSWORD:-synth}
+      - SOURCE_DB_NAME=${SOURCE_DB_NAME:-synth}
       - ROOT_PASSWORD=${ROOT_PASSWORD:-"password"}
       - SYNTH_WEBUI_HTTPS_PORT=${SYNTH_WEBUI_HTTPS_PORT:-8000}
       - SYNTH_WEBUI_HTTP_PORT=${SYNTH_WEBUI_HTTP_PORT:-8080}
@@ -39,64 +44,18 @@ services:
   synth-db:
     container_name: synth-db
     hostname: synth-db
-    image: mariadb:11
-    ports:
-      - "${EXT_DB_PORT:-3306}:3306"
-    environment:
-      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASS:-root}
-      MYSQL_DATABASE: ${DB_NAME:-synth}
-      MYSQL_USER: ${DB_USER:-synth}
-      MYSQL_PASSWORD: ${DB_PASS:-synth}
-      MARIADB_AUTO_UPGRADE: 1
-    command: --max-connections=200
-    volumes:
-      - synth_db_data:/var/lib/mysql
-      - ./init-db.sql:/docker-entrypoint-initdb.d/init-db.sql
-    restart: unless-stopped
-    networks:
-      - synth_network
-
-  synth-db-backup:
-    container_name: synth-db-backup
-    image: tiredofit/db-backup
-    depends_on:
-      - synth-db
-    environment:
-      DB_TYPE: mysql
-      DB_HOST: ${DB_HOST:-synth-db}
-      DB_NAME: ${DB_NAME:-synth}
-      DB_USER: ${DB_USER:-synth}
-      DB_PASS: ${DB_PASS:-synth}
-      DB_DUMP_FREQ: 60
-      DB_CLEANUP_TIME: 1440
-      CONTAINER_TIMEZONE: ${TZ:-UTC}
-      COMPRESSION: GZ
-      DB_DUMP_TARGET: /backup
-    volumes:
-      - ./backups:/backup
-    restart: unless-stopped
-    networks:
-      - synth_network
-
-  # Optional SOUL memory store (PostgreSQL + pgvector)
-  # Enable it by setting:
-  # SOUL_REPOSITORY_BACKEND=postgres
-  # SOUL_POSTGRES_DSN=postgresql://soul:soul@synth-soul-db:5432/soul_memory
-  synth-soul-db:
-    container_name: synth-soul-db
-    hostname: synth-soul-db
     image: pgvector/pgvector:pg16
     ports:
-      - "${EXT_SOUL_DB_PORT:-5432}:5432"
+      - "${EXT_DB_PORT:-5432}:5432"
     environment:
-      POSTGRES_DB: ${SOUL_PG_DB:-soul_memory}
-      POSTGRES_USER: ${SOUL_PG_USER:-soul}
-      POSTGRES_PASSWORD: ${SOUL_PG_PASSWORD:-soul}
+      POSTGRES_DB: ${DB_NAME:-synth}
+      POSTGRES_USER: ${DB_USER:-synth}
+      POSTGRES_PASSWORD: ${DB_PASS:-synth}
     volumes:
-      - synth_soul_db_data:/var/lib/postgresql/data
-      - ./scripts/sql/soul_memory_postgres.sql:/docker-entrypoint-initdb.d/10-soul-memory.sql:ro
+      - synth_pg_data:/var/lib/postgresql/data
+      - ./scripts/sql/app_main_postgres.sql:/docker-entrypoint-initdb.d/10-app-main.sql:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${SOUL_PG_USER:-soul} -d ${SOUL_PG_DB:-soul_memory}"]
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-synth} -d ${DB_NAME:-synth}"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -104,11 +63,30 @@ services:
     networks:
       - synth_network
 
+# Enable this only if you want to migrate from a legacy MariaDB database. Otherwise, you can disable it to save resources.
+  # synth-legacy-db:
+  #   container_name: synth-legacy-db
+  #   hostname: synth-legacy-db
+  #   image: mariadb:11
+  #   environment:
+  #     MYSQL_ROOT_PASSWORD: ${SOURCE_DB_ROOT_PASS:-root}
+  #     MYSQL_DATABASE: ${SOURCE_DB_NAME:-synth}
+  #     MYSQL_USER: ${SOURCE_DB_USER:-synth}
+  #     MYSQL_PASSWORD: ${SOURCE_DB_PASSWORD:-synth}
+  #     MARIADB_AUTO_UPGRADE: 1
+  #   command: --max-connections=100
+  #   volumes:
+  #     - synth_db_data:/var/lib/mysql
+  #     - ./init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro
+  #   restart: unless-stopped
+  #   networks:
+  #     - synth_network
+
   # Selenium‑LLM Engine, you can disable this if you want to use a different endpoint
   # such as an API provider or a local LLM running in another container
   synth-selenium-llm-engine:
-    # image: xargonwan/selenium-llm-engine:latest
-    build: ../selenium-llm-engine
+    image: xargonwan/selenium-llm-engine:latest
+    # build: ../selenium-llm-engine
     container_name: synth-selenium-llm-engine
     hostname: synth-selenium-llm-engine
     env_file:
@@ -126,7 +104,7 @@ services:
 
 volumes:
   synth_db_data:
-  synth_soul_db_data:
+  synth_pg_data:
   synth_data:
   synth_logs:
   synth_skins:

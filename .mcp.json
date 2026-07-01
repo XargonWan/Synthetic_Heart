@@ -1,8 +1,21 @@
 {
   "mcpServers": {
     "gemini-api-docs-mcp": {
-      "type": "http",
-      "url": "https://gemini-api-docs-mcp.dev"
+      "command": "uvx",
+      "args": [
+        "--from",
+        "git+https://github.com/philschmid/gemini-api-docs-mcp",
+        "gemini-docs-mcp"
+      ]
+    },
+    "grok-api-docs": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["d:/dev/13/synthetic_heart/mcp_servers/grok-api-mcp/dist/index.js"]
+    },
+    "xai-docs-official": {
+      "type": "sse",
+      "url": "https://docs.x.ai/api/mcp"
     },
     "gitnexus": {
       "type": "stdio",
@@ -17,15 +30,7 @@
     "synth-db": {
       "type": "stdio",
       "command": "uv",
-      "args": ["run", "python", "mcp_servers/synth_db.py"],
-      "env": {
-        "DB_TYPE": "mariadb",
-        "DB_HOST": "192.168.1.13",
-        "DB_PORT": "3307",
-        "DB_USER": "synth",
-        "DB_PASS": "synth",
-        "DB_NAME": "synth"
-      }
+      "args": ["run", "python", "mcp_servers/synth_db.py"]
     },
     "synth-cortex": {
       "type": "stdio",
