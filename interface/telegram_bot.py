@@ -1910,6 +1910,16 @@ async def start_bot() -> bool:
             .read_timeout(30.0)
             .write_timeout(30.0)
             .pool_timeout(10.0)
+            # PTB defaults the get_updates connection pool to a single
+            # connection with a 1s pool_timeout. On shutdown/restart, the
+            # in-flight long-poll connection may still be tearing down when
+            # PTB's own cleanup call tries to ack the last batch of updates,
+            # so that single slot isn't free yet -> PoolTimeout, and the
+            # updates get suppressed-but-unacked (re-delivered on next
+            # start). Give the updates pool room to hold a second connection
+            # so cleanup never has to wait on the poll connection to close.
+            .get_updates_connection_pool_size(4)
+            .get_updates_pool_timeout(10.0)
             .build()
         )
         log_info("[telegram_bot] Telegram application built successfully")
