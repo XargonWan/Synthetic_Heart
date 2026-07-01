@@ -1365,13 +1365,70 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         log_debug("Not a trainer reply - continuing to queue forwarding")
 
+    # === PRIORITY 4 (defined early so PRIORITY 3.5's relay wait can defer to
+    # it in the background): Forward to centralized queue (default behavior).
+    async def _forward_to_queue() -> None:
+        log_debug(
+            f"🔴 [PRIORITY 4 START] About to forward message to queue: '{text}' from user {user_id}"
+        )
+        log_debug("🔴 [PRIORITY 4] Checking message_queue module availability")
+
+        # NOTE: Do NOT modify message.thread_id - Message objects are immutable in python-telegram-bot
+        # The message_queue.enqueue() function will extract message_thread_id directly
+        log_debug(
+            f"🔴 [PRIORITY 4] Message has message_thread_id={getattr(message, 'message_thread_id', None)}"
+        )
+
+        log_debug("🔴 [PRIORITY 4] About to call message_queue.enqueue()...")
+        try:
+            log_debug("🔴 [PRIORITY 4] Calling message_queue.enqueue now...")
+
+            # Wrap message to add wake/sleep flag for prompt engine.
+            # Pass `text` explicitly so media captions survive: a Telegram photo/
+            # video stores its caption in `.caption`, not `.text`, so without this
+            # the current turn would look caption-less downstream (the `text` local
+            # above already resolves `message.text or message.caption`).
+            wrapped_message = MessageWrapper(
+                message,
+                text=text,
+                is_wake_sleep_command=is_wake_sleep_command,
+                # Flag: tells message_chain to auto-inject TTS only for voice-originated messages.
+                is_voice_input=bool(
+                    getattr(message, "voice", None)
+                    or getattr(message, "video_note", None)
+                ),
+            )
+
+            await message_queue.enqueue(
+                context.bot,
+                wrapped_message,
+                interface_id="telegram_bot",
+                original_message=message,
+                skip_mention_check=directed,
+            )
+
+            log_debug(
+                "🔴 [PRIORITY 4 SUCCESS] Message successfully enqueued - processing should continue in queue"
+            )
+
+        except Exception as e:
+            log_error(
+                f"🔴 [PRIORITY 4 ERROR] message_queue enqueue failed: {repr(e)}", e
+            )
+            log_error(f"🔴 [PRIORITY 4 ERROR] Exception type: {type(e)}", e)
+            import traceback
+
+            log_error(f"🔴 [PRIORITY 4 ERROR] Traceback: {traceback.format_exc()}", e)
+            await message.reply_text("⚠️ Error processing message.")
+
     # === PRIORITY 3.5: Peer turn coordination / mention-order relay (shared group RP) ===
     # Two distinct mechanisms, both gated on peer mode + configured peer IDs:
     #
     # 1. Mention-order relay: if this message explicitly addresses another
     #    SyntH before this one (e.g. "2B, ... 2D, ..."), wait for that peer to
     #    actually post their reply before proceeding, so it's already in this
-    #    instance's own chat history by the time this instance responds.
+    #    instance's own chat history by the time this instance responds. This
+    #    wait is backgrounded (see below) rather than inline.
     #
     # 2. Turn floor (fallback when no explicit relay ordering is present):
     #    set SYNTH_PEER_TURN_FLOOR_SECONDS=0 on the primary instance (responds
@@ -1392,12 +1449,29 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if is_peer_mode_enabled() and get_peer_ids():
                 _relay_peer = get_relay_wait_peer(text) if text else None
                 if _relay_peer is not None:
+                    # python-telegram-bot processes updates sequentially by
+                    # default (no concurrent_updates here) -- an inline
+                    # `await wait_for_peer_reply(...)` would block this same
+                    # dispatch loop from ever receiving the peer's actual
+                    # reply, so the wait could only ever resolve by timing
+                    # out, never by detecting the reply early. Backgrounding
+                    # it frees the loop to process the peer's reply update
+                    # right away, which fires notify_message_arrived() and
+                    # wakes this task almost immediately.
                     log_debug(
-                        f"[telegram_bot] Relay ordering: waiting for peer {_relay_peer} to reply first"
+                        f"[telegram_bot] Relay ordering: peer {_relay_peer} must reply "
+                        "first -- backgrounding the wait so it doesn't block this "
+                        "bot's own update dispatch"
                     )
-                    await wait_for_peer_reply(
-                        interface_path, _relay_peer, since=message.date
-                    )
+
+                    async def _wait_then_forward(_peer: int = _relay_peer) -> None:
+                        await wait_for_peer_reply(
+                            interface_path, _peer, since=message.date
+                        )
+                        await _forward_to_queue()
+
+                    asyncio.create_task(_wait_then_forward())
+                    return
                 else:
                     _floor = float(
                         config_registry.get_value("SYNTH_PEER_TURN_FLOOR_SECONDS", 0.0)
@@ -1419,56 +1493,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"[telegram_bot] Peer turn coordination skipped (non-fatal): {_peer_turn_err}"
             )
 
-    # === PRIORITY 4: Forward to centralized queue (default behavior) ===
-    log_debug(
-        f"🔴 [PRIORITY 4 START] About to forward message to queue: '{text}' from user {user_id}"
-    )
-    log_debug("🔴 [PRIORITY 4] Checking message_queue module availability")
-
-    # NOTE: Do NOT modify message.thread_id - Message objects are immutable in python-telegram-bot
-    # The message_queue.enqueue() function will extract message_thread_id directly
-    log_debug(
-        f"🔴 [PRIORITY 4] Message has message_thread_id={getattr(message, 'message_thread_id', None)}"
-    )
-
-    log_debug("🔴 [PRIORITY 4] About to call message_queue.enqueue()...")
-    try:
-        log_debug("🔴 [PRIORITY 4] Calling message_queue.enqueue now...")
-
-        # Wrap message to add wake/sleep flag for prompt engine.
-        # Pass `text` explicitly so media captions survive: a Telegram photo/
-        # video stores its caption in `.caption`, not `.text`, so without this
-        # the current turn would look caption-less downstream (the `text` local
-        # above already resolves `message.text or message.caption`).
-        wrapped_message = MessageWrapper(
-            message,
-            text=text,
-            is_wake_sleep_command=is_wake_sleep_command,
-            # Flag: tells message_chain to auto-inject TTS only for voice-originated messages.
-            is_voice_input=bool(
-                getattr(message, "voice", None) or getattr(message, "video_note", None)
-            ),
-        )
-
-        await message_queue.enqueue(
-            context.bot,
-            wrapped_message,
-            interface_id="telegram_bot",
-            original_message=message,
-            skip_mention_check=directed,
-        )
-
-        log_debug(
-            "🔴 [PRIORITY 4 SUCCESS] Message successfully enqueued - processing should continue in queue"
-        )
-
-    except Exception as e:
-        log_error(f"🔴 [PRIORITY 4 ERROR] message_queue enqueue failed: {repr(e)}", e)
-        log_error(f"🔴 [PRIORITY 4 ERROR] Exception type: {type(e)}", e)
-        import traceback
-
-        log_error(f"🔴 [PRIORITY 4 ERROR] Traceback: {traceback.format_exc()}", e)
-        await message.reply_text("⚠️ Error processing message.")
+    await _forward_to_queue()
 
 
 async def handle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
