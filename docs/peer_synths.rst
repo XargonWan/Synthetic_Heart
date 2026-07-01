@@ -35,10 +35,12 @@ How It Works
 When a message arrives in a Telegram group:
 
 1. ``mention_utils`` checks whether the sender is a known peer bot
-   (``SYNTH_PEER_IDS`` + ``SYNTH_PEER_ENABLED``).
+   (``SYNTH_PEERS`` + ``SYNTH_PEER_ENABLED``).
 2. If it is, ``should_respond_to_peer()`` evaluates the active policy and
    either allows the message through or suppresses it (returns
-   ``"peer_synth"`` so the bot stays silent).
+   ``"peer_synth"`` so the bot stays silent). This check always runs first,
+   before any alias/mention/attention-window logic — see `Interaction With
+   the Attention Window`_ below.
 3. The message is **always saved to context** regardless of suppression, so
    each instance stays aware of what the others said.
 4. When the message does reach the LLM, ``build_prompt_request`` appends a
@@ -75,10 +77,11 @@ For every SyntH in the group, open **WebUI → Settings → Peer Policy** and fi
      - Value
    * - **Enable Peer SyntH Mode**
      - Toggle on.
-   * - **Peer SyntH Bot IDs**
-     - JSON array of the *other* bots' IDs. Do **not** include your own. Example: ``[8243553794, 1122334455]``
-   * - **Peer SyntH Names**
-     - JSON object mapping each ID to their SyntH display name. Example: ``{"8243553794": "Aria", "1122334455": "Sol"}``
+   * - **Peer SyntHs**
+     - One row per *other* bot in the group: its numeric bot ID and the
+       display name to use for it. Do **not** add a row for your own bot.
+       Use **+ Add peer SyntH** to add a row and **Remove** to drop one — no
+       manual JSON editing needed.
    * - **Peer SyntH Response Policy**
      - See policy reference below. Start with ``mention_only``.
    * - **Peer Turn Floor (seconds)**
@@ -86,12 +89,12 @@ For every SyntH in the group, open **WebUI → Settings → Peer Policy** and fi
        set to a value above your typical LLM response time on every secondary
        instance (e.g. ``20`` for a 7–12 s LLM).
 
-Example for a three-SyntH group (configuring **Aria**):
+Example for a three-SyntH group (configuring **Aria**), shown as the
+underlying JSON the repeater field stores:
 
 .. code-block:: json
 
-   SYNTH_PEER_IDS    = [8243553794, 1122334455]
-   SYNTH_PEER_NAMES  = {"8243553794": "Sol", "1122334455": "Nova"}
+   SYNTH_PEERS       = [{"id": 8243553794, "name": "Sol"}, {"id": 1122334455, "name": "Nova"}]
    SYNTH_PEER_POLICY = mention_only
 
 Repeat for every instance with the other bots' IDs.
@@ -225,10 +228,49 @@ that should respond immediately. Only secondary instances need a non-zero value.
    Private chats and other interfaces are not affected.
 
 
+Attention Window (Staying in the Conversation)
+-----------------------------------------------
+
+Normally a SyntH only responds to a group message that mentions its alias or
+``@handle``. That's tedious in an active roleplay scene where the alias would
+otherwise need to be repeated on every line. **Attention Window** relaxes
+this: once the alias/mention triggers a response, the chat is considered
+*engaged* for a configurable number of seconds, and messages during that
+window are treated as directed to the bot without needing the alias again.
+Every directed reply refreshes the window, so an active conversation stays
+alive; it lapses on its own once the chat goes quiet.
+
+Configure it via **WebUI → Settings → Chat Attention → Attention Window
+(seconds)** (``CHAT_ATTENTION_WINDOW_SECONDS``). Set to ``0`` to disable
+(default) — the alias/mention is then required on every message, as before.
+
+.. _Interaction With the Attention Window:
+
+Interaction With Peer Suppression
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The attention window cannot be used to bypass peer suppression. The check
+order in ``mention_utils.is_message_for_bot`` is fixed:
+
+1. **Peer suppression** (unconditional, runs first) — if the sender is a
+   known peer SyntH bot ID and the active ``SYNTH_PEER_POLICY`` doesn't
+   allow a response, the message is rejected immediately regardless of any
+   attention window.
+2. Private chat / sleep-wake / reply / @mention / alias / persona checks.
+3. **Attention window** — only reached if none of the above already decided
+   the message, and only ever applies to messages whose sender is **not** a
+   bot. A peer SyntH's message can never seed or extend, nor benefit from,
+   this chat's attention window.
+
+In practice: a human mentioning SyntH A keeps A "in" the conversation for a
+while, but SyntH B's messages still need to satisfy B's own peer policy on
+every single message, exactly as if the attention window didn't exist.
+
+
 Disabling
 ---------
 
 Toggle **Enable Peer SyntH Mode** off in the WebUI. The peer bot IDs are
 treated as ordinary users, all suppression is lifted, and no instruction block
-is injected. The ``SYNTH_PEER_IDS`` and ``SYNTH_PEER_NAMES`` values are
-preserved so you can re-enable without reconfiguring.
+is injected. The ``SYNTH_PEERS`` value is preserved so you can re-enable
+without reconfiguring.

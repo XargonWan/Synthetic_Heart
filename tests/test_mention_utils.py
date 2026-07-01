@@ -17,9 +17,10 @@ class DummyChat:
 
 
 class DummyUser:
-    def __init__(self, username=None, id=1):
+    def __init__(self, username=None, id=1, is_bot=False):
         self.username = username
         self.id = id
+        self.is_bot = is_bot
 
 
 class DummyMessage:
@@ -141,3 +142,67 @@ async def test_chat_asleep_wake_message(monkeypatch):
     assert directed is True
     # Restore attention for isolation
     chat_attention.set_attention(9998, True)
+
+
+@pytest.mark.asyncio
+async def test_attention_window_grants_directed_without_alias(monkeypatch):
+    """A non-bot sender in an engaged chat gets a reply even with no alias/mention."""
+    monkeypatch.setattr("core.chat_attention.is_engaged", lambda scope_id: True)
+    msg = DummyMessage(
+        text="just a plain follow-up, no alias here",
+        chat=DummyChat(type="group", id=7001),
+    )
+    bot = DummyBot()
+    directed, reason = await is_message_for_bot(msg, bot)
+    assert directed is True
+
+
+@pytest.mark.asyncio
+async def test_attention_window_disabled_falls_through_to_normal_gating(monkeypatch):
+    """When the window isn't engaged, a plain follow-up is still not directed."""
+    monkeypatch.setattr("core.chat_attention.is_engaged", lambda scope_id: False)
+    msg = DummyMessage(
+        text="just a plain follow-up, no alias here",
+        chat=DummyChat(type="group", id=7002),
+    )
+    bot = DummyBot()
+    directed, reason = await is_message_for_bot(msg, bot)
+    assert directed is False
+
+
+@pytest.mark.asyncio
+async def test_attention_window_does_not_bypass_peer_suppression(monkeypatch):
+    """Even with an active attention window, a peer SyntH message under a
+    'silent' policy must still be suppressed -- peer suppression runs first
+    and unconditionally, before the attention window is ever consulted."""
+    monkeypatch.setattr("core.chat_attention.is_engaged", lambda scope_id: True)
+    monkeypatch.setattr("core.peer_policy.is_peer_mode_enabled", lambda: True)
+    monkeypatch.setattr(
+        "core.peer_policy.is_peer_synth", lambda user_id: user_id == 555
+    )
+    monkeypatch.setattr("core.peer_policy.get_peer_policy", lambda: "silent")
+
+    msg = DummyMessage(
+        text="just chattering along, not addressing anyone in particular",
+        chat=DummyChat(type="group", id=7004),
+        from_user=DummyUser(username="peer_bot", id=555, is_bot=True),
+    )
+    bot = DummyBot()
+    directed, reason = await is_message_for_bot(msg, bot)
+    assert directed is False
+    assert reason == "peer_synth"
+
+
+@pytest.mark.asyncio
+async def test_attention_window_never_applies_to_bot_sender(monkeypatch):
+    """Cascade safety: engagement must never grant a free pass to a bot sender,
+    even if the attention window is active for that chat."""
+    monkeypatch.setattr("core.chat_attention.is_engaged", lambda scope_id: True)
+    msg = DummyMessage(
+        text="just chattering along, not addressing anyone in particular",
+        chat=DummyChat(type="group", id=7003),
+        from_user=DummyUser(username="peer_bot", id=555, is_bot=True),
+    )
+    bot = DummyBot()
+    directed, reason = await is_message_for_bot(msg, bot)
+    assert directed is False

@@ -423,6 +423,30 @@ async def is_message_for_bot(
         except Exception as e:
             log_debug(f"[mention] Error checking persona triggers: {e}")
 
+    # Priority 4d: Attention window — if this chat was recently engaged via an
+    # explicit trigger (alias/mention/reply/persona), keep responding without
+    # requiring the alias again until the window expires (CHAT_ATTENTION_WINDOW_SECONDS,
+    # default 0/disabled). Explicitly guarded to never fire for bot senders: peer
+    # SyntH messages are already fully gated above (Priority 0) and must continue
+    # to satisfy their own peer-policy check on every message, never inherit this
+    # chat's attention window.
+    if message_text:
+        sender = getattr(message, "from_user", None)
+        sender_is_bot = bool(getattr(sender, "is_bot", False))
+        if not sender_is_bot:
+            try:
+                from core.chat_attention import is_engaged
+
+                chat_id = getattr(message.chat, "id", None)
+                if is_engaged(chat_id):
+                    log_debug("[mention] match_reason=attention_window")
+                    log_debug(
+                        "[mention] ✅ Chat within attention window - PRIORITY 4d - message is for bot"
+                    )
+                    return True, None
+            except Exception as e:
+                log_debug(f"[mention] Error checking attention window: {e}")
+
     # Priority 5: Check for chat 1:1 using human count (fallback)
     if human_count is not None and human_count == 1:
         log_debug("[mention] match_reason=single_human")

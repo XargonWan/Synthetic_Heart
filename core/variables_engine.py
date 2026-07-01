@@ -891,16 +891,17 @@ def register_all():
 
     # --- Multi-instance peer coordination ---
     register_exposed_var(
-        "SYNTH_PEER_IDS",
-        label="Peer SyntH Bot IDs",
+        "SYNTH_PEERS",
+        label="Peer SyntHs",
         default=[],
         value_type="json",
-        ui_type="string",
+        ui_type="peer-list",
         description=(
-            "JSON array of Telegram user IDs of other SyntH instances that share "
-            "groups with this one. Messages from these bots are handled according "
-            "to SYNTH_PEER_POLICY to prevent infinite response cascades. "
-            "Example: [1234567, 8901234]."
+            "The other SyntH instances that share groups with this one. Each row is "
+            "the peer's Telegram bot user ID (not @username) and the display name to "
+            "use for them in the prompt instruction block. Messages from these bot IDs "
+            "are handled according to SYNTH_PEER_POLICY to prevent infinite response "
+            'cascades. Stored as JSON, e.g. [{"id": 8243553794, "name": "Aria"}].'
         ),
         scope="interface",
         component="peer_policy",
@@ -953,22 +954,6 @@ def register_all():
             "Enable peer-awareness mode for shared group spaces. When on, peer SyntH "
             "messages are filtered per SYNTH_PEER_POLICY and an instruction block is "
             "injected into every prompt so this instance knows who the other SyntHs are."
-        ),
-        scope="interface",
-        component="peer_policy",
-        tags=["multi-instance"],
-    )
-
-    register_exposed_var(
-        "SYNTH_PEER_NAMES",
-        label="Peer SyntH Names",
-        default="{}",
-        value_type=str,
-        ui_type="string",
-        description=(
-            "JSON object mapping each peer bot ID to their SyntH display name. "
-            'Example: {"8243553794": "Aria", "1122334455": "Sol"}. '
-            "Used to identify peers by name in the prompt instruction block."
         ),
         scope="interface",
         component="peer_policy",

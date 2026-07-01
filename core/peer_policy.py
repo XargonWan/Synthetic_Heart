@@ -7,9 +7,10 @@ matching in the other, causing an infinite response chain. This module
 intercepts those messages at the middleware layer — the LLM is never invoked.
 
 Config keys (set via WebUI or DB):
-  SYNTH_PEER_IDS    JSON array of integer Telegram user IDs belonging to
-                    other SyntH instances sharing spaces with this one.
-                    Example: [1234567, 8901234]
+  SYNTH_PEERS       JSON array of {"id": <telegram user id>, "name": <display
+                    name>} objects, one per other SyntH instance sharing spaces
+                    with this one. Example:
+                    [{"id": 1234567, "name": "Aria"}, {"id": 8901234, "name": "Sol"}]
 
   SYNTH_PEER_POLICY How to handle messages *from* those peer bots:
                       "silent"       – suppress all responses; peer messages
@@ -55,47 +56,52 @@ def is_peer_mode_enabled() -> bool:
     return bool(_read_config("SYNTH_PEER_ENABLED", False))
 
 
-def get_peer_ids() -> frozenset[int]:
-    """Return the configured set of peer SyntH bot user IDs."""
-    raw = _read_config("SYNTH_PEER_IDS", [])
-    if isinstance(raw, str):
-        try:
-            raw = json.loads(raw)
-        except Exception:
-            log_warning(f"[peer_policy] SYNTH_PEER_IDS is not valid JSON: {raw!r}")
-            return frozenset()
-    if not isinstance(raw, list):
-        return frozenset()
-    result: set[int] = set()
-    for item in raw:
-        try:
-            result.add(int(item))
-        except (TypeError, ValueError):
-            log_warning(f"[peer_policy] Skipping non-integer peer ID: {item!r}")
-    return frozenset(result)
+def _get_peer_rows() -> list[dict[str, Any]]:
+    """Return the raw configured peer rows from ``SYNTH_PEERS``.
 
-
-def get_peer_names() -> dict[int, str]:
-    """Return configured mapping of peer bot IDs to their SyntH display names.
-
-    Expects ``SYNTH_PEER_NAMES`` to be a JSON object e.g. ``{"8243553794": "Aria"}``.
-    Falls back gracefully to an empty dict on parse errors.
+    Expects a JSON array of ``{"id": <int>, "name": <str>}`` objects. Falls
+    back gracefully to an empty list on parse errors.
     """
-    raw = _read_config("SYNTH_PEER_NAMES", {})
+    raw = _read_config("SYNTH_PEERS", [])
     if isinstance(raw, str) and raw.strip():
         try:
             raw = json.loads(raw)
         except Exception:
-            log_warning(f"[peer_policy] SYNTH_PEER_NAMES is not valid JSON: {raw!r}")
-            return {}
-    if not isinstance(raw, dict):
-        return {}
-    result: dict[int, str] = {}
-    for k, v in raw.items():
+            log_warning(f"[peer_policy] SYNTH_PEERS is not valid JSON: {raw!r}")
+            return []
+    if not isinstance(raw, list):
+        return []
+    return [row for row in raw if isinstance(row, dict)]
+
+
+def get_peer_ids() -> frozenset[int]:
+    """Return the configured set of peer SyntH bot user IDs."""
+    result: set[int] = set()
+    for row in _get_peer_rows():
+        raw_id = row.get("id")
+        if raw_id is None:
+            continue
         try:
-            result[int(k)] = str(v)
+            result.add(int(raw_id))
         except (TypeError, ValueError):
-            log_warning(f"[peer_policy] Skipping invalid peer name entry: {k!r}={v!r}")
+            log_warning(f"[peer_policy] Skipping non-integer peer ID: {raw_id!r}")
+    return frozenset(result)
+
+
+def get_peer_names() -> dict[int, str]:
+    """Return configured mapping of peer bot IDs to their SyntH display names."""
+    result: dict[int, str] = {}
+    for row in _get_peer_rows():
+        raw_id = row.get("id")
+        if raw_id is None:
+            continue
+        try:
+            peer_id = int(raw_id)
+        except (TypeError, ValueError):
+            continue
+        name = row.get("name")
+        if name:
+            result[peer_id] = str(name)
     return result
 
 

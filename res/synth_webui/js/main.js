@@ -1341,6 +1341,106 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                             fileWrap.appendChild(uploadBtn);
 
                             inputEl = fileWrap;
+
+                        // --- Peer SyntH list: repeatable [Bot ID, Display Name] rows ---
+                        } else if (item.ui_type === 'peer-list') {
+                            const wrap = document.createElement('div');
+                            wrap.className = 'repeatable-list';
+                            skipAutoSave = true;
+
+                            const parsePeers = () => {
+                                if (Array.isArray(value)) return value.filter((row) => row && typeof row === 'object');
+                                if (typeof value === 'string' && value.trim()) {
+                                    try {
+                                        const parsed = JSON.parse(value);
+                                        if (Array.isArray(parsed)) return parsed.filter((row) => row && typeof row === 'object');
+                                    } catch (e) {}
+                                }
+                                return [];
+                            };
+
+                            let peers = parsePeers();
+                            const list = document.createElement('div');
+                            list.className = 'repeatable-list-rows';
+
+                            const emptyNote = document.createElement('div');
+                            emptyNote.className = 'meta';
+                            emptyNote.textContent = 'Add the bot ID + display name of each peer SyntH.';
+
+                            const addBtn = document.createElement('button');
+                            addBtn.type = 'button';
+                            addBtn.className = 'btn-ghost';
+                            addBtn.textContent = '+ Add peer SyntH';
+                            addBtn.disabled = !isEditable;
+
+                            const serializePeers = () => peers.filter((p) => p && p.id !== '' && p.id !== null && p.id !== undefined);
+
+                            const renderRows = () => {
+                                list.innerHTML = '';
+                                if (!peers.length) {
+                                    list.appendChild(emptyNote);
+                                }
+                                peers.forEach((peer, idx) => {
+                                    const rowEl = document.createElement('div');
+                                    rowEl.className = 'repeatable-row';
+
+                                    const idInput = document.createElement('input');
+                                    idInput.type = 'text';
+                                    idInput.inputMode = 'numeric';
+                                    idInput.autocomplete = 'off';
+                                    idInput.placeholder = 'Bot ID (e.g. 8243553794)';
+                                    idInput.value = peer && peer.id !== undefined && peer.id !== null ? String(peer.id) : '';
+                                    idInput.disabled = !isEditable;
+
+                                    const nameInput = document.createElement('input');
+                                    nameInput.type = 'text';
+                                    nameInput.autocomplete = 'off';
+                                    nameInput.placeholder = 'Display name (e.g. Aria)';
+                                    nameInput.value = peer && peer.name ? peer.name : '';
+                                    nameInput.disabled = !isEditable;
+
+                                    const removeBtn = document.createElement('button');
+                                    removeBtn.type = 'button';
+                                    removeBtn.className = 'btn-ghost';
+                                    removeBtn.textContent = 'Remove';
+                                    removeBtn.disabled = !isEditable;
+
+                                    const commit = () => {
+                                        const rawId = idInput.value.trim();
+                                        const parsedId = rawId && /^-?\d+$/.test(rawId) ? parseInt(rawId, 10) : rawId;
+                                        peers[idx] = { id: parsedId, name: nameInput.value.trim() };
+                                        persistValue(serializePeers(), [idInput, nameInput, removeBtn, addBtn]);
+                                    };
+
+                                    idInput.addEventListener('blur', commit);
+                                    nameInput.addEventListener('blur', commit);
+
+                                    removeBtn.addEventListener('click', () => {
+                                        peers.splice(idx, 1);
+                                        renderRows();
+                                        persistValue(serializePeers(), [idInput, nameInput, removeBtn, addBtn]);
+                                    });
+
+                                    rowEl.appendChild(idInput);
+                                    rowEl.appendChild(nameInput);
+                                    rowEl.appendChild(removeBtn);
+                                    list.appendChild(rowEl);
+                                });
+                            };
+
+                            addBtn.addEventListener('click', () => {
+                                peers.push({ id: '', name: '' });
+                                renderRows();
+                                const lastInput = list.querySelector('.repeatable-row:last-child input');
+                                try { if (lastInput) { lastInput.focus(); } } catch (e) {}
+                                // Do NOT persist until the user fills in an ID (persist happens on blur)
+                            });
+
+                            renderRows();
+                            wrap.appendChild(list);
+                            wrap.appendChild(addBtn);
+                            inputEl = wrap;
+
                         } else if (item.ui_type === 'textarea' || (item.value_type === 'json' && item.ui_type !== 'tags' && item.ui_type !== 'tag-combobox')) {
                             const textarea = document.createElement('textarea');
                             textarea.rows = 3;
