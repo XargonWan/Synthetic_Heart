@@ -224,6 +224,36 @@ class CoreInitializer:
                 "[core_initializer] ✅ _register_component_validation_rules() completed"
             )
 
+            # 2.5.5. Load all configurations from DB BEFORE starting async plugins.
+            # This ensures plugins start with correct DB values, not hardcoded defaults.
+            # The weather plugin's daily report flag is a prime example: if the weather
+            # loop starts before DB configs are loaded, it uses the default (False) and
+            # the daily report never fires even though the user set it to True in the UI.
+            log_info(
+                "[core_initializer] Loading configurations from DB (pre-plugin-start)..."
+            )
+            try:
+                from core.config_manager import config_registry
+
+                await config_registry.load_all_from_db()
+                log_info(
+                    "[core_initializer] ✅ Configurations loaded from DB (pre-plugin-start)"
+                )
+
+                # Notify all listeners so components can update their instance variables
+                # before their async loops start running.
+                log_info(
+                    "[core_initializer] Notifying all config listeners (pre-plugin-start)..."
+                )
+                config_registry.notify_all_listeners()
+                log_info(
+                    "[core_initializer] ✅ All config listeners notified (pre-plugin-start)"
+                )
+            except Exception as load_exc:
+                log_warning(
+                    f"[core_initializer] Failed to load configurations from DB (pre-plugin-start): {load_exc}"
+                )
+
             # 2.6. Start any async plugins that were deferred due to no running event loop
             try:
                 await self.start_pending_async_plugins()

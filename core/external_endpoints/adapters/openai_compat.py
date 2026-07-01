@@ -372,11 +372,11 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
         # Some OpenAI-compatible endpoints return dict-like entries, others
         # return SDK model objects. Support both.
         if isinstance(entry, dict):
-            entry_id = str(entry.get("id", ""))
+            entry_id = str(entry.get("id", "") or entry.get("model_id", "") or "")
             capabilities = self._normalize_capabilities(entry.get("capabilities", {}))
             return ModelInfo(
                 id=entry_id,
-                name=str(entry.get("name", entry_id)),
+                name=str(entry.get("name", entry_id) or entry.get("display_name", entry_id)),
                 owned_by=str(entry.get("owned_by", "")),
                 capabilities=capabilities,
             )

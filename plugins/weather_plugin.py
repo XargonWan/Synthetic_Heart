@@ -11,7 +11,7 @@ import concurrent.futures
 from core.core_initializer import register_plugin
 from core.logging_utils import log_debug, log_info, log_warning, log_error
 from core.time_zone_utils import get_local_location, utc_to_local
-from core.config_manager import config_registry
+from core.config_manager import config_registry, ConfigVar
 from core.variables_engine import register_exposed_var
 
 # Injection priority for weather information
@@ -107,10 +107,33 @@ class WeatherPlugin:
         self._last_fetch: float = 0.0
         self._update_task: Optional[asyncio.Task] = None
 
-        # Register configuration with config_registry
-        self.fetch_minutes = config_registry.get_value(
+        # Use ConfigVar for always-fresh reads from config_registry.
+        # ConfigVar fetches the latest value on every access, so it never
+        # goes out of sync — even if the value is updated in the DB after
+        # the plugin starts. This replaces the fragile listener-based pattern
+        # that could miss updates due to startup timing.
+        self._fetch_minutes_var = ConfigVar(
+            "WEATHER_FETCH_TIME", registry=config_registry
+        )
+        self._daily_report_enabled_var = ConfigVar(
+            "WEATHER_DAILY_REPORT_ENABLED", registry=config_registry
+        )
+        self._daily_report_time_var = ConfigVar(
+            "WEATHER_DAILY_REPORT_TIME", registry=config_registry
+        )
+        self._daily_report_language_var = ConfigVar(
+            "WEATHER_DAILY_REPORT_LANGUAGE", registry=config_registry
+        )
+        self._daily_report_interface_var = ConfigVar(
+            "WEATHER_DAILY_REPORT_INTERFACE", registry=config_registry
+        )
+
+        # Ensure these vars are registered in config_registry with proper defaults
+        # (ConfigVar only reads, doesn't register — so we do a get_value call to
+        # ensure each key is defined before any ConfigVar tries to read it).
+        config_registry.get_value(
             "WEATHER_FETCH_TIME",
-            60,  # Default 60 minutes as requested
+            60,
             label="Weather Fetch Interval",
             description="Minutes between weather data fetches",
             value_type=int,
@@ -118,7 +141,7 @@ class WeatherPlugin:
             component="weather_plugin",
             advanced=False,
         )
-        self.daily_report_enabled = config_registry.get_value(
+        config_registry.get_value(
             "WEATHER_DAILY_REPORT_ENABLED",
             False,
             label="Daily Weather Report",
@@ -128,7 +151,7 @@ class WeatherPlugin:
             component="weather_plugin",
             advanced=False,
         )
-        self.daily_report_time = config_registry.get_value(
+        config_registry.get_value(
             "WEATHER_DAILY_REPORT_TIME",
             "06:00",
             label="Daily Weather Report Time",
@@ -138,7 +161,7 @@ class WeatherPlugin:
             component="weather_plugin",
             advanced=False,
         )
-        self.daily_report_language = config_registry.get_value(
+        config_registry.get_value(
             "WEATHER_DAILY_REPORT_LANGUAGE",
             "",
             label="Daily Weather Report Language",
@@ -148,7 +171,7 @@ class WeatherPlugin:
             component="weather_plugin",
             advanced=False,
         )
-        self.daily_report_interface = config_registry.get_value(
+        config_registry.get_value(
             "WEATHER_DAILY_REPORT_INTERFACE",
             "synth_webui",
             label="Daily Weather Report Interface",
@@ -159,65 +182,6 @@ class WeatherPlugin:
             advanced=True,
         )
 
-        # Add listener to update fetch_minutes when config changes
-        def _update_fetch_minutes(value):
-            try:
-                self.fetch_minutes = int(value) if value is not None else 60
-                log_info(
-                    f"[weather_plugin] Fetch interval updated to {self.fetch_minutes} minutes"
-                )
-            except (ValueError, TypeError):
-                log_warning(
-                    f"[weather_plugin] Invalid WEATHER_FETCH_TIME value: {value}, using default 60"
-                )
-                self.fetch_minutes = 60
-
-        config_registry.add_listener("WEATHER_FETCH_TIME", _update_fetch_minutes)
-
-        def _update_daily_report_enabled(value):
-            try:
-                self.daily_report_enabled = bool(value)
-                log_info(
-                    f"[weather_plugin] Daily report enabled: {self.daily_report_enabled}"
-                )
-            except Exception:
-                self.daily_report_enabled = False
-
-        def _update_daily_report_interface(value):
-            try:
-                self.daily_report_interface = str(value) if value else ""
-                log_info(
-                    f"[weather_plugin] Daily report interface set to: {self.daily_report_interface or 'none'}"
-                )
-            except Exception:
-                self.daily_report_interface = ""
-
-        def _update_daily_report_time(value):
-            try:
-                self.daily_report_time = str(value) if value else "06:00"
-            except Exception:
-                self.daily_report_time = "06:00"
-            self._apply_daily_report_time()
-
-        def _update_daily_report_language(value):
-            try:
-                self.daily_report_language = str(value) if value else ""
-            except Exception:
-                self.daily_report_language = ""
-
-        config_registry.add_listener(
-            "WEATHER_DAILY_REPORT_ENABLED", _update_daily_report_enabled
-        )
-        config_registry.add_listener(
-            "WEATHER_DAILY_REPORT_INTERFACE", _update_daily_report_interface
-        )
-        config_registry.add_listener(
-            "WEATHER_DAILY_REPORT_TIME", _update_daily_report_time
-        )
-        config_registry.add_listener(
-            "WEATHER_DAILY_REPORT_LANGUAGE", _update_daily_report_language
-        )
-
         # Use a dedicated executor so we don't depend on the event loop's default executor
         # which may be shut down during interpreter shutdown.
         self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
@@ -225,32 +189,36 @@ class WeatherPlugin:
         self._scheduler_task = None
         self._scheduler_running = False
         self._last_daily_report_date = None
-        self._daily_report_hour = 6
-        self._daily_report_minute = 0
-        self._apply_daily_report_time()
 
-    def _apply_daily_report_time(self) -> None:
-        raw = str(self.daily_report_time or "").strip()
-        hour = 6
-        minute = 0
-        if raw:
-            try:
-                parts = raw.split(":")
-                if len(parts) >= 2:
-                    hour = int(parts[0])
-                    minute = int(parts[1])
-                elif len(parts) == 1:
-                    hour = int(parts[0])
-                    minute = 0
-            except Exception:
-                hour = 6
-                minute = 0
-        if hour < 0 or hour > 23:
-            hour = 6
-        if minute < 0 or minute > 59:
-            minute = 0
-        self._daily_report_hour = hour
-        self._daily_report_minute = minute
+    @property
+    def fetch_minutes(self) -> int:
+        """Return fetch interval in minutes, always fresh from registry."""
+        raw = str(self._fetch_minutes_var.value or "60")
+        try:
+            return int(raw)
+        except (ValueError, TypeError):
+            return 60
+
+    @property
+    def daily_report_enabled(self) -> bool:
+        """Return whether daily report is enabled, always fresh from registry."""
+        raw = str(self._daily_report_enabled_var.value or "false")
+        return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+    @property
+    def daily_report_time(self) -> str:
+        """Return daily report time, always fresh from registry."""
+        return str(self._daily_report_time_var.value or "06:00")
+
+    @property
+    def daily_report_language(self) -> str:
+        """Return daily report language hint, always fresh from registry."""
+        return str(self._daily_report_language_var.value or "")
+
+    @property
+    def daily_report_interface(self) -> str:
+        """Return daily report interface ID, always fresh from registry."""
+        return str(self._daily_report_interface_var.value or "")
 
     # Plugin action registration
     def get_supported_action_types(self):
@@ -562,12 +530,26 @@ class WeatherPlugin:
                 try:
                     await self._ensure_weather()
                     if self.daily_report_enabled:
-                        self._apply_daily_report_time()
+                        report_time_str = self.daily_report_time
+                        report_hour, report_minute = 6, 0
+                        if report_time_str:
+                            try:
+                                parts = report_time_str.split(":")
+                                if len(parts) >= 2:
+                                    report_hour = int(parts[0])
+                                    report_minute = int(parts[1])
+                                elif len(parts) == 1:
+                                    report_hour = int(parts[0])
+                            except Exception:
+                                pass
+                        report_hour = max(0, min(23, report_hour))
+                        report_minute = max(0, min(59, report_minute))
+
                         now_local = utc_to_local(datetime.utcnow())
                         today_key = now_local.date().isoformat()
                         if (
-                            now_local.hour == self._daily_report_hour
-                            and now_local.minute == self._daily_report_minute
+                            now_local.hour == report_hour
+                            and now_local.minute == report_minute
                         ):
                             if self._last_daily_report_date != today_key:
                                 if await self._trigger_daily_report():
