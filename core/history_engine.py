@@ -238,6 +238,26 @@ def _entry_to_text(entry: HistoryEntry) -> str:
     return f'[{_format_ts(ts)}] {sender}{reply_suffix}: "{safe_text}"'.strip()
 
 
+def _friendly_interface_label(path: str) -> str:
+    """Best-effort human-readable label for a cross-chat source path.
+
+    Telegram chat IDs are negative for groups/supergroups and positive for
+    private chats -- a reliable signal that's already on every interface_path,
+    letting us say *where* an injected entry came from without needing to
+    track chat titles (nothing in the codebase populates those). Falls back
+    to the raw path for non-Telegram interfaces, where this convention
+    doesn't apply.
+    """
+    parts = path.split("/")
+    if len(parts) >= 2 and parts[0] == "telegram_bot":
+        try:
+            chat_id = int(parts[1])
+        except ValueError:
+            return path
+        return "the group chat" if chat_id < 0 else "your DM"
+    return path
+
+
 def _source_label(
     entry: HistoryEntry, current_interface_path: str | None = None
 ) -> str | None:
@@ -251,7 +271,7 @@ def _source_label(
     pretty = entry.get("interface_path_pretty")
     if pretty:
         return str(pretty)
-    return str(entry_path)
+    return _friendly_interface_label(str(entry_path))
 
 
 def _entry_to_text_with_source(

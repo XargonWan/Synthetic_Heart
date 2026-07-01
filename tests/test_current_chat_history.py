@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from typing import Any
 
 
-from core import prompt_engine
+from core import history_engine, prompt_engine
 
 
 async def _dummy_gather(message, ctx):
@@ -458,3 +458,50 @@ def test_load_chat_history_for_guild_queries(monkeypatch):
     assert "timestamp > %s" in cur2.last_query
     assert cur2.last_params[1] == "2026-02-01T00:00:00"
     assert cur2.last_params[-1] == 2
+
+
+def test_cross_chat_source_label_tags_telegram_group_vs_dm():
+    """Cross-chat history entries must be tagged with a readable room label,
+    not the raw interface_path -- otherwise the model has no way to tell
+    where an injected entry came from. Telegram group chat IDs are negative,
+    private chat IDs are positive; use that to say which room without
+    needing any chat-title tracking (nothing populates interface_path_pretty)."""
+    group_entry = {
+        "interface_path": "telegram_bot/-5408266521",
+        "sender_name": "2B",
+        "text": "hello from the group",
+        "timestamp": "2026-07-01T18:00:00+00:00",
+    }
+    dm_entry = {
+        "interface_path": "telegram_bot/5208932647",
+        "sender_name": "Scar",
+        "text": "hello from the dm",
+        "timestamp": "2026-07-01T18:00:00+00:00",
+    }
+
+    group_line = history_engine._entry_to_text_with_source(
+        group_entry, current_interface_path="telegram_bot/5208932647"
+    )
+    dm_line = history_engine._entry_to_text_with_source(
+        dm_entry, current_interface_path="telegram_bot/-5408266521"
+    )
+
+    assert "[from the group chat]" in group_line
+    assert "telegram_bot/-5408266521" not in group_line
+    assert "[from your DM]" in dm_line
+    assert "telegram_bot/5208932647" not in dm_line
+
+
+def test_source_label_is_none_for_current_chat():
+    """An entry from the chat we're already building a prompt for shouldn't
+    get a redundant '[from ...]' tag."""
+    entry = {
+        "interface_path": "telegram_bot/-5408266521",
+        "sender_name": "2B",
+        "text": "hi",
+        "timestamp": "2026-07-01T18:00:00+00:00",
+    }
+    line = history_engine._entry_to_text_with_source(
+        entry, current_interface_path="telegram_bot/-5408266521"
+    )
+    assert "[from" not in line
