@@ -498,6 +498,36 @@ _NUMERIC_PARAM_FIELDS = {
 }
 
 
+# Field names small/local models substitute for the required ``text`` field
+# on message_* actions (telegram, discord, matrix, reddit, x, ...). Order is
+# priority — first match wins if a model somehow emits more than one.
+_TEXT_FIELD_ALIASES = ("message_text", "content", "message", "reply", "speech", "body")
+
+
+def _normalize_text_field_alias(action_type: str, payload: dict) -> None:
+    """Rename a misnamed text field to ``text`` in-place for message_* actions.
+
+    Local models frequently emit ``message_text``/``content``/``message`` instead
+    of the required ``text`` key. The JSON itself is valid, so this isn't a parse
+    error — it's a field-naming mismatch that would otherwise round-trip through
+    a full LLM correction call just to rename a key. Fixing it here avoids that
+    wasted correction turn.
+    """
+    if not action_type.startswith("message_"):
+        return
+    if payload.get("text"):
+        return
+    for alias in _TEXT_FIELD_ALIASES:
+        value = payload.get(alias)
+        if isinstance(value, str) and value.strip():
+            payload["text"] = payload.pop(alias)
+            log_debug(
+                f"[action_parser] Normalized {action_type}.payload: "
+                f"renamed '{alias}' -> 'text'"
+            )
+            return
+
+
 def _normalize_payload(action_type: str, payload: dict) -> None:
     """Normalize a payload in-place so quoted numbers become real numbers.
 
@@ -515,6 +545,8 @@ def _normalize_payload(action_type: str, payload: dict) -> None:
     Non-numeric strings, already-numeric values, and string-typed fields such as
     the Telegram ``target`` id are left untouched.
     """
+
+    _normalize_text_field_alias(action_type, payload)
 
     def _coerce_int(value):
         """Convert a clean integer string to ``int``; otherwise return as-is."""
