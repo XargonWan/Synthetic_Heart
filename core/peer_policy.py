@@ -12,6 +12,12 @@ Config keys (set via WebUI or DB):
                     with this one. Example:
                     [{"id": 1234567, "name": "Aria"}, {"id": 8901234, "name": "Sol"}]
 
+  NOTE: for a peer bot's messages to reach this instance at all, "Bot-to-Bot
+  Communication Mode" must be enabled for both bots in BotFather, AND this
+  bot must have Group Privacy Mode disabled (or admin rights) in the shared
+  group -- otherwise Telegram never delivers the peer's messages here in the
+  first place, and everything below is moot. See docs/peer_synths.rst.
+
   SYNTH_PEER_POLICY How to handle messages *from* those peer bots:
                       "silent"       – suppress all responses; peer messages
                                        still reach context so this bot stays

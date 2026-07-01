@@ -901,7 +901,11 @@ def register_all():
             "the peer's Telegram bot user ID (not @username) and the display name to "
             "use for them in the prompt instruction block. Messages from these bot IDs "
             "are handled according to SYNTH_PEER_POLICY to prevent infinite response "
-            'cascades. Stored as JSON, e.g. [{"id": 8243553794, "name": "Aria"}].'
+            "cascades. NOTE: for a peer's messages to reach this instance at all, "
+            "'Bot-to-Bot Communication Mode' must be enabled for both bots in BotFather, "
+            "AND this bot needs Group Privacy Mode disabled (or admin rights) in the "
+            "shared group -- see docs/peer_synths.rst. "
+            'Stored as JSON, e.g. [{"id": 8243553794, "name": "Aria"}].'
         ),
         scope="interface",
         component="peer_policy",

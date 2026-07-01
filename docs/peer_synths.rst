@@ -25,8 +25,18 @@ Each instance needs to be told:
 * **How to respond to them** — the active policy.
 
 Regular human users are **never affected** by peer settings. The policy gates
-only apply to messages from bot IDs listed in ``SYNTH_PEER_IDS``. Humans talk
+only apply to messages from bot IDs listed in ``SYNTH_PEERS``. Humans talk
 to any SyntH as normal.
+
+.. important::
+
+   **By default, Telegram bots cannot see messages from other bots** — a
+   platform-level anti-loop safeguard. Before any of the peer settings below
+   do anything useful, you must enable **Bot-to-Bot Communication Mode** for
+   each bot in BotFather, in addition to Group Privacy Mode being disabled
+   (or the bot having admin rights) in the shared group. See
+   `Bot-to-Bot Communication Mode`_ below — this is a one-time Telegram
+   setting, not something configured in this codebase.
 
 
 How It Works
@@ -42,7 +52,9 @@ When a message arrives in a Telegram group:
    before any alias/mention/attention-window logic — see `Interaction With
    the Attention Window`_ below.
 3. The message is **always saved to context** regardless of suppression, so
-   each instance stays aware of what the others said.
+   each instance stays aware of what the others said — **once Bot-to-Bot
+   Communication Mode is enabled** per the note above. Without it, a peer's
+   messages never arrive at all, so this never has anything to save.
 4. When the message does reach the LLM, ``build_prompt_request`` appends a
    ``=== PEER SYNTHS ===`` instruction block to the prompt explaining who the
    other SyntHs are and what the current policy means. This block is injected
@@ -50,11 +62,61 @@ When a message arrives in a Telegram group:
    interfaces are unaffected.
 
 
+Bot-to-Bot Communication Mode (Required Telegram Setting)
+------------------------------------------------------------
+
+This is a **Telegram-side setting**, not something in this codebase — but
+without it, nothing below this point does anything, because a peer's
+messages never reach this instance in the first place.
+
+**Why**
+
+By default, a Telegram bot cannot see messages sent by other bots in a
+group at all, regardless of its own Group Privacy Mode setting. This is
+intentional (anti-loop safeguard), separate from the human-message privacy
+behavior. Telegram added an opt-in mode specifically to lift this for
+legitimate bot-to-bot use cases.
+
+**How to enable it**
+
+1. Open a chat with `@BotFather <https://t.me/botfather>`_ for **each** bot
+   in the group.
+2. Open that bot's settings (via BotFather's menu/MiniApp) and enable
+   **Bot-to-Bot Communication Mode**.
+3. Additionally, **each** bot needs either Group Privacy Mode disabled
+   (``/setprivacy`` → Disable) or admin rights in the shared group — the
+   communication mode alone only unlocks explicit ``/command@OtherBot``
+   mentions and direct replies to that bot's messages; full message
+   visibility (plain conversational text, no command/reply) still requires
+   privacy-disabled-or-admin on top of it.
+4. Repeat for every bot that needs to see the others' messages.
+
+Once this is set, a peer's replies arrive as normal Telegram updates and are
+saved to this instance's own ``chat_history_cache`` exactly like a human
+message — no further code-level configuration is needed for that part.
+
+.. note::
+
+   Peer suppression and policy checks (``SYNTH_PEER_POLICY`` /
+   ``should_respond_to_peer``) work regardless of this setting — they were
+   already correctly gating *whether to respond*. What was missing was the
+   underlying delivery: without this BotFather setting, a peer's message
+   never arrives to be gated in the first place, so this instance's own
+   ``chat_history_cache`` would show zero rows for that peer's sender ID no
+   matter how the code is tuned.
+
+
 Setup
 -----
 
 Each SyntH instance must be configured independently. The settings are per-instance
 in the WebUI under **Peer Policy**.
+
+.. note::
+
+   Do `Bot-to-Bot Communication Mode`_ above **first**, for every bot
+   involved — the settings below configure this codebase's *policy*, but
+   Telegram won't deliver a peer's messages here at all until that's done.
 
 Step 1 — Find every peer's Telegram bot user ID
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -88,6 +150,11 @@ For every SyntH in the group, open **WebUI → Settings → Peer Policy** and fi
      - See turn coordination below. Set to ``0`` on the primary instance;
        set to a value above your typical LLM response time on every secondary
        instance (e.g. ``20`` for a 7–12 s LLM).
+   * - **Peer Relay Timeout (seconds)**
+     - See `Mention-Order Relay`_. Default ``60``; lower it if you'd rather
+       give up sooner on a slow/unresponsive peer. Requires
+       `Bot-to-Bot Communication Mode`_ to be enabled — otherwise the peer's
+       reply never arrives and this always times out.
 
 Example for a three-SyntH group (configuring **Aria**), shown as the
 underlying JSON the repeater field stores:
