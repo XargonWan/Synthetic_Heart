@@ -111,8 +111,6 @@ async def save_chat_message(
 
         async with get_conn_ctx() as conn:
             async with conn.cursor() as cur:
-                history_limit = _get_history_limit(50)
-
                 # Deduplication: Check for identical message text within last 5 seconds for this interface
                 # This prevents double-logging from different pipeline stages (e.g. generation vs dispatch)
                 try:
@@ -175,22 +173,18 @@ async def save_chat_message(
                         ),
                     )
 
-                # Clean up old messages beyond CHAT_HISTORY_LIMIT
-                await cur.execute(
-                    """
-                    DELETE FROM chat_history_cache
-                    WHERE interface_path = %s
-                    AND id NOT IN (
-                        SELECT id FROM (
-                            SELECT id FROM chat_history_cache
-                            WHERE interface_path = %s
-                            ORDER BY timestamp DESC
-                            LIMIT %s
-                        ) AS temp
-                    )
-                """,
-                    (interface_path, interface_path, history_limit),
-                )
+                # NOTE: chat_history_cache is a permanent log, not a rolling
+                # window -- it previously trimmed each interface_path down to
+                # CONTEXT_VERBOSITY rows on every write, which conflated "how
+                # much history to show the LLM per turn" with "how much raw
+                # history to keep at all". A busy chat (e.g. a shared group)
+                # would get evicted to just a handful of rows within seconds,
+                # so cross-chat continuity (group <-> DM) had nothing left to
+                # draw on by the time you switched contexts. Prompt-time
+                # verbosity (CONTEXT_VERBOSITY / LITE_MODE_HISTORY_LIMIT) is
+                # applied purely at read time (see history_engine.py), so
+                # removing the write-time DELETE here doesn't affect how much
+                # gets injected into any given prompt.
 
                 log_debug(
                     f"[chat_history_cache] Saved message for interface_path {interface_path}, sender={sender_name}, timestamp={timestamp}"

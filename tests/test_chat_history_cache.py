@@ -242,6 +242,53 @@ async def test_save_chat_message_uses_parametrized_dedup_cutoff(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_save_chat_message_never_evicts_old_rows(monkeypatch):
+    """chat_history_cache is a permanent log, not a rolling window -- a
+    write must never delete older rows for the same interface_path. This
+    used to trim each chat down to CONTEXT_VERBOSITY rows on every message,
+    which silently destroyed cross-chat history (e.g. a busy group chat's
+    log would get evicted to a handful of rows within seconds, leaving
+    nothing for a later group<->DM context merge to draw on)."""
+    executed: list[str] = []
+
+    class DummyCursor:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            pass
+
+        async def execute(self, q, params=None):
+            executed.append(q)
+
+        async def fetchone(self):
+            return None
+
+    class DummyConn:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            pass
+
+        def cursor(self):
+            return DummyCursor()
+
+    monkeypatch.setattr(chat_history_cache, "get_conn_ctx", lambda: DummyConn())
+
+    result = await chat_history_cache.save_chat_message(
+        interface_path="telegram_bot/-999",
+        message_text="keep me forever",
+        sender_name="Alice",
+        sender_id="alice123",
+        timestamp=datetime.now(UTC),
+    )
+
+    assert result is True
+    assert not any("DELETE" in q.upper() for q in executed)
+
+
+@pytest.mark.asyncio
 async def test_load_chat_history_returns_latest_rows_in_chronological_order(
     monkeypatch,
 ):
