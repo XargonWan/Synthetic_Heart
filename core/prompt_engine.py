@@ -602,6 +602,17 @@ def _history_to_turns(
     # "self" is the canonical sender_name for the AI in history format
     all_synth_names = synth_names | {"self"}
 
+    # A peer SyntH's messages land in this bot's own history (see
+    # peer_synths.rst) with their own sender_name, which never matches this
+    # bot's own synth_names -- without this, they'd silently fall into the
+    # "user" bucket below with no way to tell them apart from the human.
+    try:
+        from core.peer_policy import get_peer_names
+
+        peer_names_lower = {name.lower(): name for name in get_peer_names().values()}
+    except Exception:
+        peer_names_lower = {}
+
     turns: list[Turn] = []
     for line in history_lines:
         if not isinstance(line, str):
@@ -611,7 +622,18 @@ def _history_to_turns(
             continue
         sender = m.group(1).strip()
         content = m.group(2)
-        role = "assistant" if sender.lower() in all_synth_names else "user"
+        sender_lower = sender.lower()
+        if sender_lower in all_synth_names:
+            role = "assistant"
+        else:
+            role = "user"
+            peer_name = peer_names_lower.get(sender_lower)
+            if peer_name:
+                # Tag so the model can tell this was a peer SyntH speaking,
+                # not the human -- role must still be "user" (no third
+                # role in the chat protocol), so attribution has to live
+                # in the content itself.
+                content = f"[{peer_name}]: {content}"
         turns.append(Turn(role=role, content=content))
 
     if not turns:

@@ -760,3 +760,47 @@ class TestHistoryToTurns:
         assert [turn.role for turn in turns] == ["user", "assistant"]
         assert turns[0].content == "First part\n\nSecond part"
         assert turns[1].content == "First answer\n\nSecond answer"
+
+    def test_peer_synth_sender_tagged_not_collapsed_into_anonymous_user(
+        self, monkeypatch
+    ) -> None:
+        """A peer SyntH's message must stay attributable, not silently look
+        like it came from the human -- see AGENTS.md 'Telegram bots can't
+        see each other's messages...' entry."""
+        monkeypatch.setattr(
+            "core.peer_policy.get_peer_names", lambda: {8750153272: "2D"}
+        )
+        lines = ['[13/04/26:0924] 2D: "I bounce on my toes, so excited!"']
+
+        turns = self._call(lines, {"2b"})
+
+        assert len(turns) == 1
+        assert turns[0].role == "user"
+        assert turns[0].content == "[2D]: I bounce on my toes, so excited!"
+
+    def test_human_sender_not_tagged_even_with_peer_mode_configured(
+        self, monkeypatch
+    ) -> None:
+        monkeypatch.setattr(
+            "core.peer_policy.get_peer_names", lambda: {8750153272: "2D"}
+        )
+        lines = ['[13/04/26:0924] Scar: "Hey there"']
+
+        turns = self._call(lines, {"2b"})
+
+        assert len(turns) == 1
+        assert turns[0].role == "user"
+        assert turns[0].content == "Hey there"
+
+    def test_peer_lookup_failure_falls_back_to_plain_user(self, monkeypatch) -> None:
+        def _raise():
+            raise RuntimeError("config unavailable")
+
+        monkeypatch.setattr("core.peer_policy.get_peer_names", _raise)
+        lines = ['[13/04/26:0924] 2D: "Still works without peer config"']
+
+        turns = self._call(lines, {"2b"})
+
+        assert len(turns) == 1
+        assert turns[0].role == "user"
+        assert turns[0].content == "Still works without peer config"
