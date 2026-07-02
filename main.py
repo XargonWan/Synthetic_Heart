@@ -52,6 +52,18 @@ _restart_event = None
 # Global flag to preserve dev components state across restarts
 _dev_components_enabled = False
 
+# Set by signal_handler, awaited by the main loop to perform an orderly shutdown.
+# Deliberately NOT handled by raising SystemExit inside the raw OS signal frame:
+# uvicorn (interface/ollama_compat_server.py) installs its own SIGINT/SIGTERM capture
+# around `await server.serve()` and re-raises the signal to whatever handler was
+# previously registered once it unwinds, so a synchronous sys.exit() here fires deep
+# inside that task's stack. SystemExit is a BaseException, so it isn't caught by
+# asyncio's per-task handling and blows straight out of run_forever() instead of
+# letting asyncio.run()'s normal _cancel_all_tasks() sweep cancel every background
+# task in one clean, orderly pass.
+_shutdown_event = None
+_main_event_loop = None
+
 
 def request_restart():
     """Request a graceful restart of the application."""
@@ -101,14 +113,19 @@ def cleanup_components():
 
 
 def signal_handler(signum, frame):
-    """Handle termination signals gracefully."""
-    log_info(f"[main] Received signal {signum}, shutting down gracefully...")
+    """Request a graceful shutdown; never blocks or exits from this raw signal frame.
 
-    # Clean up all components generically
-    cleanup_components()
+    See the `_shutdown_event` comment above for why this can't just call
+    cleanup_components()/sys.exit() directly.
+    """
+    log_info(f"[main] Received signal {signum}, requesting graceful shutdown...")
 
-    log_info("[main] Shutdown complete")
-    sys.exit(0)
+    if _main_event_loop is not None and _shutdown_event is not None:
+        _main_event_loop.call_soon_threadsafe(_shutdown_event.set)
+    else:
+        # Signal arrived before the event loop was up (e.g. during early startup) -
+        # nothing async is running yet, so an immediate exit is safe here.
+        sys.exit(0)
 
 
 async def initialize_database():
@@ -199,7 +216,7 @@ if __name__ == "__main__":
 
     async def start_application():
         """Start the application and handle restart requests."""
-        global _restart_requested, _restart_event
+        global _restart_requested, _restart_event, _shutdown_event, _main_event_loop
 
         # Test DB connectivity and initialize tables with retry mechanism
         # This must be done in the main event loop to avoid creating separate pools
@@ -209,6 +226,8 @@ if __name__ == "__main__":
 
         loop = asyncio.get_running_loop()
         _set_main_loop(loop)
+        _main_event_loop = loop
+        _shutdown_event = asyncio.Event()
 
         max_retries = 30
         retry_delay = 2
@@ -372,8 +391,24 @@ if __name__ == "__main__":
                 "[main] Application startup completed successfully - entering main loop"
             )
             try:
-                # Wait for restart event or keyboard interrupt
-                await _restart_event.wait()
+                # Wait for a restart request or a graceful shutdown request,
+                # whichever comes first.
+                restart_wait = asyncio.create_task(_restart_event.wait())
+                shutdown_wait = asyncio.create_task(_shutdown_event.wait())
+                try:
+                    done, pending = await asyncio.wait(
+                        {restart_wait, shutdown_wait},
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                finally:
+                    for task in pending:
+                        task.cancel()
+
+                if shutdown_wait in done:
+                    log_info("[main] Shutdown requested - cleaning up...")
+                    cleanup_components()
+                    log_info("[main] Shutdown cleanup complete - exiting...")
+                    break
 
                 if _restart_requested:
                     log_info(
@@ -404,6 +439,7 @@ if __name__ == "__main__":
 
             except KeyboardInterrupt:
                 log_info("[main] Received shutdown signal, exiting...")
+                cleanup_components()
                 break
 
     # Run the async application
