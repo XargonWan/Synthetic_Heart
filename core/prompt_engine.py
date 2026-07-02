@@ -605,7 +605,10 @@ def _history_to_turns(
     # A peer SyntH's messages land in this bot's own history (see
     # peer_synths.rst) with their own sender_name, which never matches this
     # bot's own synth_names -- without this, they'd silently fall into the
-    # "user" bucket below with no way to tell them apart from the human.
+    # "user" bucket below with no way to tell them apart from the human. Role
+    # still ends up "user" for peers (no third role in the chat protocol), but
+    # each turn also carries an `is_peer` marker so the coalescing pass below
+    # never blends a peer's lines into a genuine human turn (or vice versa).
     try:
         from core.peer_policy import get_peer_names
 
@@ -613,7 +616,9 @@ def _history_to_turns(
     except Exception:
         peer_names_lower = {}
 
-    turns: list[Turn] = []
+    # Entries are (Turn, is_peer) pairs. is_peer is only meaningful for
+    # role == "user" turns; it is always False for "assistant" turns.
+    entries: list[tuple[Turn, bool]] = []
     for line in history_lines:
         if not isinstance(line, str):
             continue
@@ -623,6 +628,7 @@ def _history_to_turns(
         sender = m.group(1).strip()
         content = m.group(2)
         sender_lower = sender.lower()
+        is_peer = False
         if sender_lower in all_synth_names:
             role = "assistant"
         else:
@@ -634,36 +640,45 @@ def _history_to_turns(
                 # role in the chat protocol), so attribution has to live
                 # in the content itself.
                 content = f"[{peer_name}]: {content}"
-        turns.append(Turn(role=role, content=content))
+                is_peer = True
+        entries.append((Turn(role=role, content=content), is_peer))
 
-    if not turns:
+    if not entries:
         return []
 
     # If the visible history window starts mid-conversation, it can begin with
     # stale assistant-only turns (for example repeated outreach messages). When
     # a user turn exists later in the window, drop the unmatched leading
     # assistant turns so the model does not anchor on an orphaned monologue.
-    if any(turn.role == "user" for turn in turns):
-        while turns and turns[0].role == "assistant":
-            turns.pop(0)
+    if any(turn.role == "user" for turn, _ in entries):
+        while entries and entries[0][0].role == "assistant":
+            entries.pop(0)
 
-    if not turns:
+    if not entries:
         return []
 
     # Coalesce consecutive same-role turns to keep provider history well-formed
     # even when the source chat log contains streaks of outreach or split user
-    # messages.
-    normalized_turns: list[Turn] = []
-    for turn in turns:
-        if normalized_turns and normalized_turns[-1].role == turn.role:
-            normalized_turns[-1] = Turn(
-                role=turn.role,
-                content=f"{normalized_turns[-1].content}\n\n{turn.content}",
-            )
-            continue
-        normalized_turns.append(turn)
+    # messages. Peer-tagged turns only coalesce with other peer-tagged turns,
+    # and genuine human turns only coalesce with other genuine human turns --
+    # otherwise a real human line sandwiched between peer lines would get
+    # blended into one indistinguishable "user" block.
+    normalized_entries: list[tuple[Turn, bool]] = []
+    for turn, is_peer in entries:
+        if normalized_entries:
+            prev_turn, prev_is_peer = normalized_entries[-1]
+            if prev_turn.role == turn.role and prev_is_peer == is_peer:
+                normalized_entries[-1] = (
+                    Turn(
+                        role=turn.role,
+                        content=f"{prev_turn.content}\n\n{turn.content}",
+                    ),
+                    is_peer,
+                )
+                continue
+        normalized_entries.append((turn, is_peer))
 
-    return normalized_turns
+    return [turn for turn, _ in normalized_entries]
 
 
 def _build_pr_attachments(

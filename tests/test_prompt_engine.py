@@ -804,3 +804,50 @@ class TestHistoryToTurns:
         assert len(turns) == 1
         assert turns[0].role == "user"
         assert turns[0].content == "Still works without peer config"
+
+    def test_peer_and_human_turns_not_coalesced_together(self, monkeypatch) -> None:
+        """Reproduces the Langfuse trace bug (ff4e648f-fb13-47f9-b7ca-85828d987832,
+        blocks 1 and 3): a human line sandwiched between two peer lines must not
+        get squashed into one "user" blob -- each stays a standalone turn so the
+        peer attribution and the human's real words are never blended."""
+        monkeypatch.setattr("core.peer_policy.get_peer_names", lambda: {99: "2B"})
+        lines = [
+            '[02/07/26:2045] 2B: "peer line one"',
+            '[02/07/26:2046] Scar: "genuine human line"',
+            '[02/07/26:2047] 2B: "peer line two"',
+        ]
+
+        turns = self._call(lines, {"synth"})
+
+        assert [turn.role for turn in turns] == ["user", "user", "user"]
+        assert turns[0].content == "[2B]: peer line one"
+        assert turns[1].content == "genuine human line"
+        assert turns[2].content == "[2B]: peer line two"
+
+    def test_consecutive_peer_turns_still_coalesce(self, monkeypatch) -> None:
+        monkeypatch.setattr("core.peer_policy.get_peer_names", lambda: {99: "2B"})
+        lines = [
+            '[02/07/26:2045] 2B: "peer line one"',
+            '[02/07/26:2046] 2B: "peer line two"',
+        ]
+
+        turns = self._call(lines, {"synth"})
+
+        assert len(turns) == 1
+        assert turns[0].role == "user"
+        assert turns[0].content == "[2B]: peer line one\n\n[2B]: peer line two"
+
+    def test_consecutive_human_turns_still_coalesce_with_peer_configured(
+        self, monkeypatch
+    ) -> None:
+        monkeypatch.setattr("core.peer_policy.get_peer_names", lambda: {99: "2B"})
+        lines = [
+            '[02/07/26:2045] Scar: "First part"',
+            '[02/07/26:2046] Scar: "Second part"',
+        ]
+
+        turns = self._call(lines, {"synth"})
+
+        assert len(turns) == 1
+        assert turns[0].role == "user"
+        assert turns[0].content == "First part\n\nSecond part"

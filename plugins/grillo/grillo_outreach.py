@@ -469,9 +469,13 @@ class GrilloOutreachPlugin:
         the model speaks in its own voice to the recipient instead of replying
         to the beat scheduler (the historical "detached" outreach failure mode).
 
-        The prompt is split into two clearly-labelled sections so the model
-        knows to ground the outreach in the *actual conversation thread* rather
-        than falling back to generic emotional content from older diary entries.
+        The real conversation thread is already injected upstream as proper
+        turn-by-turn messages (see ``core.prompt_engine``'s ``conversation_history``
+        handling — outreach beats are deliberately excluded from the
+        "grillo internal" bucket so that history still gets attached). This
+        prompt therefore only *points* the model at that history (or explains
+        there is none) rather than re-embedding it, to avoid showing the model
+        the same recent messages twice under two different labelling schemes.
         """
         action_type = f"message_{interface}"
         interface_path_example = f"{interface}/{chat_id}" if chat_id else interface
@@ -479,9 +483,10 @@ class GrilloOutreachPlugin:
         recipient_label = recipient or "the person you have been talking with here"
 
         if chat_turns:
-            chat_text = "\n".join(f"  {t}" for t in chat_turns)
             thread_section = (
-                f"Your recent conversation with {recipient_label}:\n{chat_text}"
+                "The conversation history just above shows what you and "
+                f"{recipient_label} have actually been talking about — ground "
+                "the outreach in that instead of something generic."
             )
         else:
             thread_section = (
