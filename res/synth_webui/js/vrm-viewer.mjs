@@ -1119,6 +1119,15 @@ class AnimationHandler {
             if (prev !== this._lipsyncEnabled) {
                 try { window.dispatchEvent(new CustomEvent('synth_animation_lipsync_changed', { detail: { lipsync: this._lipsyncEnabled } })); } catch (e) { }
             }
+            // Re-apply the last server-sent emotion face values under the new
+            // action/lipsync state so idle attenuation and talk full-intensity
+            // track state transitions without waiting for a fresh WS update.
+            try {
+                if (this._lastRemoteFaceValues && typeof this._lastRemoteFaceValues === 'object'
+                    && Object.keys(this._lastRemoteFaceValues).length) {
+                    this._reapplyRemoteFaceValues();
+                }
+            } catch (e) { /* ignore */ }
             // manage blink/eye managers according to lipsync flag and persona defaults
             try {
                 this._loadPersonaForSkin(window.activeSkinName ? window.activeSkinName.split('/').pop().replace('.vrm', '') : 'Rei')
@@ -1413,11 +1422,14 @@ class AnimationHandler {
 
             if (!dominantKey || dominantValue < 0.08) return null;
 
-            const subtleFloor = (dominantKey === 'relaxed') ? 0.05 : 0.07;
-            const subtleCeil = (dominantKey === 'relaxed') ? 0.14 : 0.18;
+            // 'relaxed' maps to a VRM preset that partially opens the mouth on this
+            // model, which looks unnatural at rest. Keep its idle contribution very
+            // minimal so the resting mouth stays essentially closed.
+            const subtleFloor = (dominantKey === 'relaxed') ? 0.02 : 0.07;
+            const subtleCeil = (dominantKey === 'relaxed') ? 0.06 : 0.18;
             const subtleIntensity = Math.min(
                 subtleCeil,
-                subtleFloor + dominantValue * ((dominantKey === 'relaxed') ? 0.07 : 0.12),
+                subtleFloor + dominantValue * ((dominantKey === 'relaxed') ? 0.03 : 0.12),
             );
 
             return { [dominantKey]: subtleIntensity };
@@ -1437,8 +1449,60 @@ class AnimationHandler {
                 try { if (this._faceValueCache) delete this._faceValueCache[String(key)]; } catch (e) { /* ignore */ }
             });
             this._remoteFaceValueKeys = new Set();
+            this._lastRemoteFaceValues = null;
             try { this._flushFaceNow(); } catch (e) { /* ignore */ }
         } catch (e) { /* ignore */ }
+    }
+
+    // Blendshape keys that are phonetic (visemes) or ocular, NOT emotional.
+    // These drive mouth shapes and blinks and must never be scaled down for
+    // idle micro-expression gating — only emotion presets are attenuated.
+    _isNonEmotionalFaceKey(name) {
+        try {
+            const k = String(name || '').toLowerCase();
+            if (!k) return true;
+            // Visemes (phonemes) and neutral/eye keys — driven by lipsync/blink.
+            const nonEmotional = new Set([
+                'aa', 'ih', 'ou', 'ee', 'oh',
+                'neutral',
+                'blink', 'blinkleft', 'blinkright',
+                'eyes_closed', 'eyesclosed',
+                'lookup', 'lookdown', 'lookleft', 'lookright',
+            ]);
+            return nonEmotional.has(k);
+        } catch (e) { return false; }
+    }
+
+    // Scale a server-sent emotion value for the resting (idle) state so that
+    // emotions read as subtle micro-expressions instead of a maxed-out face.
+    // While speaking (talk / lipsync) the full value is preserved so Synth can
+    // be more expressive. Gating is purely action-state based (no keywords).
+    _scaleRemoteEmotionForState(name, value) {
+        try {
+            const v = Math.max(0, Math.min(1, Number(value) || 0));
+            if (v <= 0) return v;
+            if (this._isNonEmotionalFaceKey(name)) return v;
+
+            const currentActionKey = (this.currentActionName && typeof this.currentActionName === 'string')
+                ? String(this.currentActionName).toLowerCase()
+                : (this.currentActionKey ? String(this.currentActionKey).toLowerCase() : null);
+            const isSpeaking = !!this._lipsyncEnabled || currentActionKey === 'talk';
+            const isIdleLike = !currentActionKey || currentActionKey === 'idle';
+
+            // Speaking: keep full expressiveness.
+            if (isSpeaking) return v;
+            // Only attenuate at rest; non-idle non-speaking states pass through.
+            if (!isIdleLike) return v;
+
+            // Idle micro-expression: keep the emotion perceptible but subtle.
+            // 'relaxed' partially opens the mouth on this model, so cap it lower.
+            const k = String(name || '').toLowerCase();
+            const subtleCeil = (k === 'relaxed') ? 0.06 : 0.18;
+            const subtleFloor = (k === 'relaxed') ? 0.02 : 0.05;
+            return Math.min(subtleCeil, subtleFloor + v * (subtleCeil - subtleFloor));
+        } catch (e) {
+            return Math.max(0, Math.min(1, Number(value) || 0));
+        }
     }
 
     applyRemoteFaceValues(values) {
@@ -1455,11 +1519,15 @@ class AnimationHandler {
                 try { if (this._faceValueCache) delete this._faceValueCache[String(key)]; } catch (e) { /* ignore */ }
             });
 
+            // Remember the raw remote values so gating can be re-applied when the
+            // action state changes (idle -> talk) without a new server update.
+            this._lastRemoteFaceValues = Object.assign({}, incoming);
+
             this._remoteFaceValueKeys = new Set();
             Object.entries(incoming).forEach(([key, rawValue]) => {
                 const name = String(key || '');
                 if (!name) return;
-                const value = Math.max(0, Math.min(1, Number(rawValue) || 0));
+                const value = this._scaleRemoteEmotionForState(name, rawValue);
                 try { this._setFaceValue(name, value); } catch (e) { /* ignore */ }
                 if (value > 0) {
                     this._remoteFaceValueKeys.add(name);
@@ -1470,6 +1538,27 @@ class AnimationHandler {
         } catch (e) {
             console.warn('[AnimationHandler] applyRemoteFaceValues failed:', e);
         }
+    }
+
+    // Re-apply the last raw server-sent face values through the current
+    // action-state gating. Called on state transitions so idle/talk scaling
+    // updates even when the server has not sent a new vrm_face payload.
+    _reapplyRemoteFaceValues() {
+        try {
+            const raw = this._lastRemoteFaceValues;
+            if (!raw || typeof raw !== 'object') return;
+            Object.entries(raw).forEach(([key, rawValue]) => {
+                const name = String(key || '');
+                if (!name) return;
+                const value = this._scaleRemoteEmotionForState(name, rawValue);
+                try { this._setFaceValue(name, value); } catch (e) { /* ignore */ }
+                if (value > 0) {
+                    if (!(this._remoteFaceValueKeys instanceof Set)) this._remoteFaceValueKeys = new Set();
+                    this._remoteFaceValueKeys.add(name);
+                }
+            });
+            try { this._flushFaceNow(); } catch (e) { /* ignore */ }
+        } catch (e) { /* ignore */ }
     }
 
     resetBootstrapState() {

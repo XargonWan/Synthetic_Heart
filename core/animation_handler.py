@@ -1530,18 +1530,32 @@ class KaradaStateServer:
                 f"[KaradaStateServer] Playing {resolved_state.value} animation: {selected_animation}"
             )
 
+            # Step 3: Update context tracking
+            _KARADA_AUTO_CTX = "__karada_auto"
+
             # Step 2: Compute should_update_state
+            #
+            # Priority comparison must only guard against a *different*, explicit
+            # context (e.g. a plugin-driven touch/emote overlay). Successive
+            # lifecycle phases (think -> write -> idle) all arrive as the
+            # auto-context with no explicit context_id: they are sequential
+            # phases of the same flow, not competing overlays, so a later phase
+            # must always replace the previous one regardless of its nominal
+            # priority. Otherwise a lower-priority phase (e.g. write, priority 3)
+            # would be deferred behind the still-active higher-priority phase
+            # (think, priority 10), freezing the avatar on the earlier state.
             should_update_state = True
+            is_auto_request = context_id is None
+            current_is_auto = self._current_context_id == _KARADA_AUTO_CTX
+            same_lifecycle_lane = is_auto_request and current_is_auto
             if (
-                self._current_context_id
+                not same_lifecycle_lane
+                and self._current_context_id
                 and self._current_context_id in self._active_tasks
             ):
                 current_priority = self._active_tasks.get(self._current_context_id) or 0
                 if priority < current_priority:
                     should_update_state = False
-
-            # Step 3: Update context tracking
-            _KARADA_AUTO_CTX = "__karada_auto"
 
             # Create context metadata with FINALIZED resolved_state
             context_meta = {

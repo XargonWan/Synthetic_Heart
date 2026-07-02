@@ -364,7 +364,15 @@ function _forwardDescriptorExpressions(stateName, descriptor, startedAt) {
                 time_in_clip: 0,
                 current_frame: 0,
             },
-            expressions: Array.isArray(descriptor.expressions) ? descriptor.expressions : null,
+            // Clone the descriptor's expressions array (shallow-copy each entry too).
+            // applyAnimationState mutates state.expressions in place when it appends
+            // persona_override entries; without this copy those overrides would be
+            // pushed onto the shared, cached descriptor array and accumulate on every
+            // replay (intro->loop, re-trigger), producing duplicate eyes_closed /
+            // mouth_O entries and erratic facial state.
+            expressions: Array.isArray(descriptor.expressions)
+                ? descriptor.expressions.map(e => Object.assign({}, e))
+                : null,
             blink: descriptor.blink || null,
             eye_movement: descriptor.eye_movement || null,
             lipsync: (typeof descriptor.lipsync === 'boolean') ? descriptor.lipsync : false,
