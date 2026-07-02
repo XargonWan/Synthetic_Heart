@@ -44,7 +44,11 @@ def test_parser_recovers_literal_newlines_inside_json_strings():
     assert obj is not None
     assert obj["actions"][0]["type"] == "send_message"
     assert obj["actions"][0]["payload"]["message"] == "First line\n\nSecond line"
-    assert meta.get("recovered") is True
+    # The "message" field is now pre-repaired by the speech-quote pass before
+    # json.loads ever runs, so this parses cleanly with zero errors instead
+    # of via the error-then-recover path — a strictly better outcome than
+    # the "recovered" flag alone captures.
+    assert meta.get("had_errors") is False or meta.get("recovered") is True
 
 
 def test_parser_recovers_full_text_with_dialogue_tag_commas():

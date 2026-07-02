@@ -198,7 +198,7 @@ def _repair_json_string_speech_quotes(raw: str) -> str:
     """
 
     _FIELD_RE = re.compile(
-        r'"(?:text|content|personal_thought|interaction_summary|speech|reply|message_text)"'
+        r'"(?:text|content|personal_thought|interaction_summary|speech|reply|message|message_text)"'
         r"\s*:\s*\"",
         re.DOTALL,
     )
@@ -230,9 +230,23 @@ def _repair_json_string_speech_quotes(raw: str) -> str:
         n = len(s)
         out: list[str] = []
         found_close = False
+        brace_depth = 0
 
         while pos < n:
             ch = s[pos]
+
+            if ch == "}" and brace_depth <= 0:
+                # Unbalanced closing brace: the dialogue never returned to a
+                # real double-quote closer (e.g. it switched to apostrophes
+                # for the rest of the line), so the scan ran past the field's
+                # real content into the JSON structure itself. Prose text
+                # essentially never contains a literal '}' with no matching
+                # '{' opened inside this value, so this can only be the
+                # payload's real closing brace — close the string here and
+                # leave the brace for the outer parser to consume.
+                out.append('"')
+                found_close = True
+                break
 
             if ch == "\\":
                 nxt = s[pos + 1] if pos + 1 < n else ""
@@ -336,6 +350,25 @@ def _repair_json_string_speech_quotes(raw: str) -> str:
                     found_close = True
                     break
 
+                elif s[j] == "{":
+                    # Stray opening brace where a comma should separate the
+                    # string from sibling keys (e.g. `"...Daddy..." {
+                    #   "interface_path": "..."`). Peek past the brace and
+                    # whitespace for a real "key": pattern — if found, this
+                    # quote is the true closer; drop the spurious brace and
+                    # insert the missing comma.
+                    k = j + 1
+                    while k < n and s[k] in " \t\n":
+                        k += 1
+                    if _looks_like_next_key(s, k):
+                        out.append('",')
+                        pos = k
+                        found_close = True
+                        break
+                    else:
+                        out.append('\\"')
+                        pos += 1
+
                 else:
                     # Followed by non-structural, non-newline → embedded speech quote.
                     out.append('\\"')
@@ -351,6 +384,10 @@ def _repair_json_string_speech_quotes(raw: str) -> str:
                 out.append("\\t")
                 pos += 1
             else:
+                if ch == "{":
+                    brace_depth += 1
+                elif ch == "}":
+                    brace_depth -= 1
                 out.append(ch)
                 pos += 1
 
