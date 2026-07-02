@@ -191,6 +191,12 @@ def get_peer_context_block() -> str | None:
         "You are sharing this space with other SyntH instances. They are autonomous "
         "digital beings like you — not users, not bots, not assistants.\n\n"
         f"Known peers:\n{name_list}\n\n"
+        "There is no separate channel for them: a peer's turn arrives in the same "
+        "message flow as your trainer's and is marked with a `[PeerName]: ` prefix "
+        "at the very start of the message (e.g. `[2B]: ...`). That prefix always "
+        "means the named peer said it — never your trainer — even though it shares "
+        "the same message channel. A message with no such prefix is your trainer "
+        "speaking directly.\n\n"
         f"{policy_note}"
     )
 
