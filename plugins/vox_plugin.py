@@ -431,7 +431,99 @@ class VoxPlugin(AIPluginBase):
         }
         if audio_duration_s is not None:
             result["audio_duration_s"] = audio_duration_s
+        if lipsync_data is not None:
+            result["lipsync_data"] = lipsync_data
         return result
+
+    # ------------------------------------------------------------------
+    # WebUI broadcast for already-generated audio (e.g. radio host)
+    # ------------------------------------------------------------------
+
+    async def broadcast_audio_to_webui(
+        self,
+        audio_path: str,
+        text: str | None = None,
+        engine_name: str | None = None,
+    ) -> bool:
+        """Broadcast an already-generated TTS audio file to every connected
+        Synth WebUI client so spectators *see and hear* the avatar speak.
+
+        This is used by internal callers such as the radio host, which
+        generate audio with ``speak(generate_only=True)`` and stream it to an
+        external service (AzuraCast).  Calling this makes the shared avatar on
+        the WebUI play the same voice, with lip-sync and the correct talking
+        animation state — exactly as a normal voice message does.
+
+        Args:
+            audio_path:  Filesystem path to the audio file to broadcast.
+            text:        Optional caption text shown as a chat bubble.
+            engine_name: Optional Vox engine name used to derive lip-sync data.
+
+        Returns:
+            ``True`` if the audio was delivered to at least one client.
+        """
+        webui = INTERFACE_REGISTRY.get("synth_webui")
+        if not webui or not hasattr(webui, "send_tts_audio"):
+            return False
+
+        path = Path(audio_path)
+        if not path.exists():
+            log_warning(
+                f"[vox_plugin] broadcast_audio_to_webui: file not found: {audio_path}"
+            )
+            return False
+
+        # Derive lip-sync metadata from the audio bytes using the active engine.
+        lipsync_data: dict | None = None
+        try:
+            engine = VOX_REGISTRY.load_engine(
+                engine_name or self._active_engine_name
+            )
+            get_ls = getattr(engine, "get_lipsync_data", None)
+            if callable(get_ls):
+                lipsync_data = get_ls(path.read_bytes())
+        except Exception:
+            pass
+
+        audio_duration_s = _get_wav_duration(path)
+
+        # Reach every connected session so all spectators see/hear the avatar.
+        sessions = list(getattr(webui, "connections", {}) or {})
+        if not sessions:
+            log_debug(
+                "[vox_plugin] broadcast_audio_to_webui: no connected WebUI clients."
+            )
+            return False
+
+        delivered = False
+        for sid in sessions:
+            send_kwargs: dict[str, Any] = {
+                "session_id": sid,
+                "audio_path": str(path),
+                "text": text,
+                "lipsync_data": lipsync_data,
+            }
+            if audio_duration_s is not None:
+                send_kwargs["audio_duration_s"] = audio_duration_s
+            try:
+                ok = await webui.send_tts_audio(**send_kwargs)
+                delivered = delivered or bool(ok)
+            except TypeError as exc:
+                if "audio_duration_s" not in str(exc):
+                    raise
+                send_kwargs.pop("audio_duration_s", None)
+                ok = await webui.send_tts_audio(**send_kwargs)
+                delivered = delivered or bool(ok)
+            except Exception as exc:
+                log_warning(
+                    f"[vox_plugin] broadcast_audio_to_webui failed for {sid}: {exc}"
+                )
+            # send_tts_audio itself broadcasts to all clients, so one
+            # successful call is sufficient.
+            if delivered:
+                break
+
+        return delivered
 
     # ------------------------------------------------------------------
     # Language detection helper (used by recon and other components)

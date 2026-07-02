@@ -824,6 +824,12 @@ class RadioHostPlugin:
             pre_generated_audio_path=banter_to_inject.get("audio_path"),
             synth_name=self._get_synth_name(),
         )
+        # Mirror the same voice to the WebUI avatar so any connected spectator
+        # sees and hears the synth speaking on air (lip-sync + expressions).
+        await self._broadcast_to_webui(
+            result.get("audio_path") or banter_to_inject.get("audio_path"),
+            banter_to_inject["text"],
+        )
         self._set_animation("idle")
         await self._log_activity(
             curr_title,
@@ -1099,6 +1105,11 @@ class RadioHostPlugin:
                 gain_db=self._gain_db,
             )
 
+            # Mirror the same voice to the WebUI avatar so any connected
+            # spectator sees and hears the synth speaking on air (lip-sync +
+            # facial expressions), synced with the radio broadcast.
+            await self._broadcast_to_webui(audio_path, banter_to_inject["text"])
+
             await self._log_activity(
                 curr_title,
                 curr_artist,
@@ -1180,6 +1191,42 @@ class RadioHostPlugin:
         pm = get_persona_manager()
         if pm:
             asyncio.create_task(pm.set_animation_state(state, session_id=None))
+
+    async def _broadcast_to_webui(self, audio_path: str | None, text: str) -> None:
+        """Mirror the radio banter to the WebUI so connected spectators see and
+        hear the avatar speak (lip-sync + facial expressions), exactly like a
+        normal voice message.  When the synth speaks on air it *is* a voice
+        message: anyone in the room should see her talking.
+
+        Best-effort — never blocks or fails the radio broadcast.
+        """
+        if not audio_path:
+            return
+        try:
+            from core.core_initializer import PLUGIN_REGISTRY
+
+            vox = PLUGIN_REGISTRY.get("vox_plugin") or PLUGIN_REGISTRY.get("vox")
+            if vox is None or not hasattr(vox, "broadcast_audio_to_webui"):
+                return
+            engine_override = (
+                str(
+                    config_registry.get_value(
+                        "RADIO_HOST_VOX_ENGINE",
+                        "",
+                        value_type=str,
+                        group="plugins",
+                        component="radio_host",
+                    )
+                )
+                or None
+            )
+            await vox.broadcast_audio_to_webui(
+                audio_path=audio_path,
+                text=text,
+                engine_name=engine_override,
+            )
+        except Exception as exc:
+            log_warning(f"[radio_host] WebUI mirror failed: {exc}")
 
     async def _enqueue_banter_generation(
         self,
@@ -1561,7 +1608,16 @@ class RadioHostPlugin:
                 return {"status": "stored", "output": text}
 
             # Normal: TTS + upload + log
-            injector_result = await self._injector.inject_banter(text, style)
+            self._set_animation("speak")
+            try:
+                injector_result = await self._injector.inject_banter(text, style)
+                # Mirror the same voice to the WebUI avatar so any connected
+                # spectator sees and hears the synth speaking on air.
+                await self._broadcast_to_webui(
+                    injector_result.get("audio_path"), text
+                )
+            finally:
+                self._set_animation("idle")
             await self._log_activity(
                 context.get("current_track_title", ""),
                 context.get("current_track_artist", ""),
