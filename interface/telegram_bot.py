@@ -1801,6 +1801,37 @@ def _schedule_start_bot_retry(delay_seconds: float = 30.0) -> None:
     )
 
 
+async def stop_bot() -> None:
+    """Stop the Telegram polling task in a controlled, isolated sequence.
+
+    Cancelling and awaiting our own wrapper task here - instead of leaving it to
+    asyncio.run()'s blanket task cancellation - lets python-telegram-bot's own
+    app.stop()/updater.stop() sequence (invoked from _run_polling_loop's finally
+    block) finish before its internal fetcher task can be independently cancelled
+    by that same blanket sweep. Otherwise app.stop() ends up collecting a fetcher
+    task result that was torn down out from under it, which PTB logs as a noisy
+    (but harmless) CancelledError traceback.
+    """
+    global _polling_task, _bot_retry_task, _bot_started
+
+    if _bot_retry_task is not None and not _bot_retry_task.done():
+        _bot_retry_task.cancel()
+        try:
+            await _bot_retry_task
+        except asyncio.CancelledError:
+            pass
+    _bot_retry_task = None
+
+    if _polling_task is not None and not _polling_task.done():
+        _polling_task.cancel()
+        try:
+            await _polling_task
+        except asyncio.CancelledError:
+            pass
+    _polling_task = None
+    _bot_started = False
+
+
 def _is_transient_startup_error(exc: Exception) -> bool:
     if isinstance(exc, (TimedOut, TimeoutError, asyncio.TimeoutError, OSError)):
         return True
@@ -2213,6 +2244,14 @@ class TelegramInterface:
             log_warning(
                 f"[telegram_interface] Telegram interface not ready: {self.disabled_reason}"
             )
+
+    async def stop(self) -> None:
+        """Stop the Telegram interface in an orderly, isolated sequence.
+
+        See stop_bot() for why this must run to completion before asyncio.run()'s
+        blanket task cancellation, rather than being left to it.
+        """
+        await stop_bot()
 
     def _disable(self, reason: str) -> None:
         """Mark interface as disabled with a reason."""

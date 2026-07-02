@@ -112,6 +112,34 @@ def cleanup_components():
         log_warning(f"[main] Component cleanup failed: {e}")
 
 
+async def stop_interfaces() -> None:
+    """Give each interface a chance to stop its own background tasks in an
+    orderly, isolated sequence before asyncio.run()'s blanket task cancellation
+    fires. Without this, an interface's own cleanup (e.g. python-telegram-bot's
+    app.stop() awaiting its internal fetcher task) races against that same
+    blanket sweep independently cancelling the same tasks, producing noisy but
+    harmless CancelledError tracebacks. A per-interface timeout keeps one stuck
+    interface from stalling the rest of shutdown.
+    """
+    import inspect
+
+    from core.core_initializer import INTERFACE_REGISTRY
+
+    for name, interface_instance in list(INTERFACE_REGISTRY.items()):
+        stop_method = getattr(interface_instance, "stop", None)
+        if not callable(stop_method):
+            continue
+        try:
+            result = stop_method()
+            if inspect.isawaitable(result):
+                await asyncio.wait_for(result, timeout=10)
+            log_debug(f"[main] Stopped interface: {name}")
+        except TimeoutError:
+            log_warning(f"[main] Interface '{name}' did not stop within 10s")
+        except Exception as e:
+            log_warning(f"[main] Error stopping interface '{name}': {e}")
+
+
 def signal_handler(signum, frame):
     """Request a graceful shutdown; never blocks or exits from this raw signal frame.
 
@@ -406,6 +434,7 @@ if __name__ == "__main__":
 
                 if shutdown_wait in done:
                     log_info("[main] Shutdown requested - cleaning up...")
+                    await stop_interfaces()
                     cleanup_components()
                     log_info("[main] Shutdown cleanup complete - exiting...")
                     break
@@ -439,6 +468,7 @@ if __name__ == "__main__":
 
             except KeyboardInterrupt:
                 log_info("[main] Received shutdown signal, exiting...")
+                await stop_interfaces()
                 cleanup_components()
                 break
 
