@@ -371,6 +371,14 @@ docker exec synth-dev tail -f /app/logs/synth.log | grep -E "\[grillo\]|grillo"
 
 ---
 
+### GitNexus index points at a different clone of this repo — `gitnexus_detect_changes` silently reports "No changes detected"  <!-- 2026-07-02 -->
+**Symptom:** After editing files under `D:\dev\D15\synthetic_heart` and calling `gitnexus_detect_changes({scope: "unstaged"/"all"/"compare"})`, the tool returns "No changes detected" even though `git diff --stat` clearly shows edited files.
+**Location:** MCP tool config / `.gitnexus` index, not this repo's code.
+**Status:** known, not fixed (informational only — no code change needed).
+**Notes:** `mcp__gitnexus__list_repos()` shows the only indexed `synthetic_heart` repo is at `D:\dev\13\synthetic_heart` (a **different clone**, indexed at an older commit) — not the working directory used in this session (`D:\dev\D15\synthetic_heart`). `detect_changes` diffs git state at whatever path the index points to, so it silently checks the wrong clone's git state and finds nothing. If you hit this, don't assume your edits are somehow invisible/reverted — cross-check with plain `git diff`/`git status` in the actual working directory instead of trusting `detect_changes`. Fix (not yet done): either re-run `npx gitnexus analyze` from `D:\dev\D15\synthetic_heart` to point the index at the right clone, or confirm with the user which clone is canonical if both are in active use.
+
+---
+
 ### `cortex_api.log` never logs the actual system prompt content — can't verify context injection from logs alone  <!-- 2026-07-01 -->
 **Symptom:** Every request entry in `cortex_api.log` (and the `cortex_read`/`cortex_analyze` MCP tools built on it) shows the system message as a placeholder, e.g. `"content": "<string: 16146 chars>"` — the real text is never written to the log, only its length. `cortex_search`'s payload/response text search therefore also cannot match anything inside the system prompt (it only sees the placeholder).
 **Location:** whatever call in `core/cortex_api_logger.py` serializes the outbound request before writing it (the truncation happens before the write, not in a display layer — confirmed by reading the raw log file directly, not just the MCP tool output).
