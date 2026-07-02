@@ -40,6 +40,7 @@ class RuntimeContext:
 
     interface_name: str | None = None
     interface_path: str | None = None
+    chat_type: str | None = None  # "group" | "dm", when derivable from interface_path
     message_id: int | None = None
     username: str | None = None
     usertag: str | None = None

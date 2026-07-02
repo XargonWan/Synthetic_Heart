@@ -62,6 +62,8 @@ def _build_runtime_prefix(ctx: RuntimeContext) -> str:
         parts.append(f"from:{ctx.username}")
     if ctx.usertag:
         parts.append(f"tag:{ctx.usertag}")
+    if ctx.chat_type:
+        parts.append(f"chat:{ctx.chat_type}")
     if ctx.interface_path:
         parts.append(f"path:{ctx.interface_path}")
     if ctx.is_grillo_beat:

@@ -238,23 +238,36 @@ def _entry_to_text(entry: HistoryEntry) -> str:
     return f'[{_format_ts(ts)}] {sender}{reply_suffix}: "{safe_text}"'.strip()
 
 
-def _friendly_interface_label(path: str) -> str:
-    """Best-effort human-readable label for a cross-chat source path.
+def telegram_chat_kind(path: str) -> str | None:
+    """Return ``"group"`` or ``"dm"`` for a telegram_bot interface_path.
 
     Telegram chat IDs are negative for groups/supergroups and positive for
     private chats -- a reliable signal that's already on every interface_path,
-    letting us say *where* an injected entry came from without needing to
-    track chat titles (nothing in the codebase populates those). Falls back
-    to the raw path for non-Telegram interfaces, where this convention
-    doesn't apply.
+    with no need to track chat titles (nothing in the codebase populates
+    those). Returns ``None`` for non-Telegram interfaces or an unparseable
+    chat id, where this convention doesn't apply.
     """
     parts = path.split("/")
     if len(parts) >= 2 and parts[0] == "telegram_bot":
         try:
             chat_id = int(parts[1])
         except ValueError:
-            return path
-        return "the group chat" if chat_id < 0 else "your DM"
+            return None
+        return "group" if chat_id < 0 else "dm"
+    return None
+
+
+def _friendly_interface_label(path: str) -> str:
+    """Best-effort human-readable label for a cross-chat source path.
+
+    Falls back to the raw path when :func:`telegram_chat_kind` can't
+    classify it (non-Telegram interfaces, unparseable chat id).
+    """
+    kind = telegram_chat_kind(path)
+    if kind == "group":
+        return "the group chat"
+    if kind == "dm":
+        return "your DM"
     return path
 
 

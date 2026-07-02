@@ -1025,9 +1025,19 @@ def _assemble_prompt_request(  # noqa: PLR0913
     # Effective scope: use context_section's recorded scope or default to "local"
     scope: str = str(context_section.get("history_scope") or "local")
 
+    chat_type: str | None = None
+    if interface_path:
+        try:
+            from core.history_engine import telegram_chat_kind
+
+            chat_type = telegram_chat_kind(interface_path)
+        except Exception:
+            chat_type = None
+
     runtime_ctx = RuntimeContext(
         interface_name=interface_name,
         interface_path=interface_path,
+        chat_type=chat_type,
         message_id=runtime_message_id,
         username=username,
         usertag=usertag,

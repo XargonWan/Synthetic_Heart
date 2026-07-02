@@ -156,6 +156,23 @@ class TestOpenAIRenderer:
 
         assert "time_of_day:evening" in messages[-1]["content"]
 
+    def test_runtime_prefix_includes_chat_type(self) -> None:
+        req = _basic_request()
+        req.runtime_ctx.chat_type = "dm"
+        renderer = OpenAIRenderer(req)
+
+        messages = renderer.render()
+
+        assert "chat:dm" in messages[-1]["content"]
+
+    def test_runtime_prefix_omits_chat_type_when_unset(self) -> None:
+        req = _basic_request()
+        renderer = OpenAIRenderer(req)
+
+        messages = renderer.render()
+
+        assert "chat:" not in messages[-1]["content"]
+
     def test_runtime_prefix_separated_from_text_by_newline(self) -> None:
         req = _basic_request()
         renderer = OpenAIRenderer(req)

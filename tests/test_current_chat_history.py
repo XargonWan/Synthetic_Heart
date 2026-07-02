@@ -492,6 +492,20 @@ def test_cross_chat_source_label_tags_telegram_group_vs_dm():
     assert "telegram_bot/5208932647" not in dm_line
 
 
+def test_telegram_chat_kind_classifies_group_and_dm():
+    """telegram_chat_kind is the reusable primitive behind the cross-chat
+    label above -- also consumed directly by prompt_engine to tell the model
+    whether the *current* turn itself is happening in the group or a DM."""
+    assert history_engine.telegram_chat_kind("telegram_bot/-5408266521") == "group"
+    assert history_engine.telegram_chat_kind("telegram_bot/5208932647") == "dm"
+
+
+def test_telegram_chat_kind_none_for_non_telegram_or_unparseable():
+    assert history_engine.telegram_chat_kind("discord_bot/123456") is None
+    assert history_engine.telegram_chat_kind("telegram_bot/not_a_number") is None
+    assert history_engine.telegram_chat_kind("telegram_bot") is None
+
+
 def test_source_label_is_none_for_current_chat():
     """An entry from the chat we're already building a prompt for shouldn't
     get a redundant '[from ...]' tag."""
