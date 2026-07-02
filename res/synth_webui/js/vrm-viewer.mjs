@@ -2828,6 +2828,36 @@ class AnimationHandler {
         }
     }
 
+    // Fade out then unconditionally stop a finished intro action once we have
+    // transitioned to its loop/outro. Unlike _safeFadeStop this does NOT skip
+    // the stop when the action belongs to currentStructuredAction — a finished
+    // intro must never keep running, otherwise a clamped LoopOnce clip re-fires
+    // 'finished' on every mixer update, flooding the event handlers.
+    _stopIntroAfterCrossFade(introAction, fadeSec = 0.3) {
+        try {
+            if (!introAction) return;
+            try {
+                if (introAction.__synthFadeStopTimer) {
+                    clearTimeout(introAction.__synthFadeStopTimer);
+                    introAction.__synthFadeStopTimer = null;
+                }
+            } catch (e) { /* ignore */ }
+            try { introAction.fadeOut(fadeSec); } catch (e) { /* ignore */ }
+            const stopTimer = setTimeout(() => {
+                try {
+                    if (introAction.__synthFadeStopTimer !== stopTimer) return;
+                    introAction.__synthFadeStopTimer = null;
+                } catch (e) { /* ignore */ }
+                try { introAction.stop(); } catch (e) { /* ignore */ }
+                try { introAction.reset(); } catch (e) { /* ignore */ }
+                try { introAction.enabled = false; } catch (e) { /* ignore */ }
+            }, Math.round(fadeSec * 1000) + 60);
+            try { introAction.__synthFadeStopTimer = stopTimer; } catch (e) { /* ignore */ }
+        } catch (e) {
+            /* ignore */
+        }
+    }
+
     _playActionWithCrossFade(action, prevAction = null, fadeSec = 0.3) {
         try {
             if (!action) return false;
@@ -4747,6 +4777,13 @@ class AnimationHandler {
                                             }
                                         } catch (_e) { /* ignore */ }
                                         this._playActionWithCrossFade(candidate.outro, candidate.intro, 0.3);
+                                        // Hard-stop the finished intro so the mixer stops updating
+                                        // it. A clamped LoopOnce intro left enabled re-fires
+                                        // 'finished' on every mixer update (event storm that floods
+                                        // the console and degrades the frontend). We cannot use
+                                        // _safeFadeStop here: it skips the stop when the action is
+                                        // part of currentStructuredAction, which intro still is.
+                                        this._stopIntroAfterCrossFade(candidate.intro, 0.3);
                                         this.currentAction = candidate.outro;
                                         this.currentActionName = logicalName;
                                         this.currentActionKey = key;
@@ -4760,6 +4797,13 @@ class AnimationHandler {
                                         try { candidate.loop.setLoop(THREE.LoopRepeat); } catch (e) { }
                                         try { candidate.loop.clampWhenFinished = false; } catch (e) { }
                                         try { this._playActionWithCrossFade(candidate.loop, candidate.intro, 0.3); } catch (e) { }
+                                        // Hard-stop the finished intro so the mixer stops updating
+                                        // it. A clamped LoopOnce intro left enabled re-fires
+                                        // 'finished' on every mixer update (event storm that floods
+                                        // the console and degrades the frontend). We cannot use
+                                        // _safeFadeStop here: it skips the stop when the action is
+                                        // part of currentStructuredAction, which intro still is.
+                                        this._stopIntroAfterCrossFade(candidate.intro, 0.3);
                                         this.currentAction = candidate.loop;
                                         this.currentActionName = logicalName;
                                         this.currentActionKey = key;

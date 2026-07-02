@@ -1303,7 +1303,11 @@ export function initChatUI() {
                                 descriptorData = resolvedEntry ? (resolvedEntry.descriptor_data || null) : null;
                             } catch (e) { /* ignore */ }
 
-                            // Get the pre-loaded clip from VRMAnimations cache
+                            // Get the pre-loaded clip from the cache. If it isn't ready
+                            // yet (e.g. the preload for this state hasn't finished), load
+                            // it on demand via the Karada v2 handler and play once ready.
+                            // The Karada v2 engine is authoritative — there is no legacy
+                            // renderer fallback.
                             let clip = null;
                             try {
                                 if (window.VRMAnimations && typeof window.VRMAnimations._getCachedAnimation === 'function') {
@@ -1311,7 +1315,15 @@ export function initChatUI() {
                                 }
                             } catch (e) { /* ignore */ }
 
-                            // Call Karada v2 engine
+                            if (!clip && animationRef && window.animationHandler
+                                && typeof window.animationHandler._awaitAnimationReady === 'function') {
+                                try {
+                                    clip = await window.animationHandler._awaitAnimationReady(
+                                        data.state, animationRef, 8000,
+                                    );
+                                } catch (e) { /* ignore */ }
+                            }
+
                             if (clip && window.karadaPlayAnimation) {
                                 window.karadaPlayAnimation({
                                     state: data.state,
@@ -1322,17 +1334,7 @@ export function initChatUI() {
                                     clip: clip,
                                 });
                             } else {
-                                // Fallback: use legacy handler if engine not ready
-                                console.warn('[chat-window] Karada v2 clip not ready, using renderer fallback');
-                                try {
-                                    if (window.VRMAnimations && typeof window.VRMAnimations.play === 'function') {
-                                        window.VRMAnimations.play(data.state, {
-                                            animation: animationRef,
-                                            playOnce: !!(descriptorData && descriptorData.play_once),
-                                            descriptor: descriptorData,
-                                        });
-                                    }
-                                } catch (e) { /* ignore */ }
+                                console.warn('[chat-window] Karada v2 clip unavailable, skipping animation:', data.state, animationRef);
                             }
 
                             // Track the canonical tuple for restore deduplication and debug resyncs.
