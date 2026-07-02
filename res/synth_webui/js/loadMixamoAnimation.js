@@ -1,6 +1,24 @@
-import * as THREE from 'three';
-import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
-import { mixamoVRMRigMap } from './mixamoVRMRigMap.js';
+import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js';
+import { FBXLoader } from 'https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/loaders/FBXLoader.js';
+import { mixamoVRMRigMap } from '/js/mixamoVRMRigMap.js';
+
+function isQuaternionTrackLike(track, propertyName) {
+	return (
+		track instanceof THREE.QuaternionKeyframeTrack
+		|| track?.ValueTypeName === 'quaternion'
+		|| track?.constructor?.name === 'QuaternionKeyframeTrack'
+		|| (propertyName === 'quaternion' && typeof track?.getValueSize === 'function' && track.getValueSize() === 4)
+	);
+}
+
+function isPositionTrackLike(track, propertyName) {
+	return (
+		track instanceof THREE.VectorKeyframeTrack
+		|| (propertyName === 'position' && track?.ValueTypeName === 'vector')
+		|| (propertyName === 'position' && track?.constructor?.name === 'VectorKeyframeTrack')
+		|| (propertyName === 'position' && typeof track?.getValueSize === 'function' && track.getValueSize() === 3)
+	);
+}
 
 /**
  * Load Mixamo animation, convert for three-vrm use, and return it.
@@ -31,9 +49,45 @@ export function loadMixamoAnimation( url, vrm ) {
 			console.log(`[loadMixamoAnimation] Loaded FBX from ${url}, clip name: ${clip?.name}, duration: ${clip?.duration}`);
 			console.log(`[loadMixamoAnimation] Clip has ${clip?.tracks?.length || 0} original tracks`);
 			console.log(`[loadMixamoAnimation] VRM humanoid available: ${vrm.humanoid ? 'YES' : 'NO'}`);
+			// Debug: check if VRM normalized bones are in the scene hierarchy
 			if (vrm.humanoid) {
 				const hips = vrm.humanoid.getNormalizedBoneNode('hips');
-				console.log(`[loadMixamoAnimation] VRM hips bone: ${hips ? 'FOUND' : 'MISSING'}`);
+				console.log(`[loadMixamoAnimation] VRM hips node:`, hips ? `FOUND, name="${hips.name}", inScene=${hips.parent ? 'YES' : 'NO'}` : 'MISSING');
+				
+				// Check if the normalized bone node is actually in vrm.scene
+				let foundInScene = false;
+				if (hips) {
+					vrm.scene.traverse((obj) => {
+						if (obj === hips) foundInScene = true;
+					});
+				}
+				console.log(`[loadMixamoAnimation] Hips node in vrm.scene: ${foundInScene ? 'YES' : 'NO'}`);
+				
+				// Log a few bone names for debugging
+				const testBones = ['hips', 'spine', 'chest', 'neck', 'head', 'leftUpperArm', 'rightUpperArm'];
+				const boneInfo = [];
+				for (const b of testBones) {
+					const node = vrm.humanoid.getNormalizedBoneNode(b);
+					boneInfo.push(`${b} -> ${node ? `"${node.name}"` : 'MISSING'}`);
+				}
+				console.log(`[loadMixamoAnimation] VRM bone name mapping:`, boneInfo);
+			}
+			
+			// Debug: show VRM normalized bone names available
+			if (vrm.humanoid) {
+				const boneNames = [];
+				try {
+					const rawBones = vrm.humanoid._rawHumanBones?.humanBones || {};
+					for (const [key, bone] of Object.entries(rawBones)) {
+						if (bone?.node) boneNames.push(`${key} -> "${bone.node.name}"`);
+					}
+				} catch(e) {}
+				console.log(`[loadMixamoAnimation] VRM bone name mapping:`, boneNames.slice(0, 10));
+			}
+			
+			// Debug: show first few Mixamo track names
+			if (clip?.tracks?.length > 0) {
+				console.log(`[loadMixamoAnimation] First 5 Mixamo track names:`, clip.tracks.slice(0, 5).map(t => t.name));
 			}
 			
 			if (!clip) {
@@ -66,19 +120,21 @@ export function loadMixamoAnimation( url, vrm ) {
 				const trackSplitted = track.name.split( '.' );
 				const mixamoRigName = trackSplitted[ 0 ];
 				const vrmBoneName = mixamoVRMRigMap[ mixamoRigName ];
-				const vrmNodeName = vrm.humanoid?.getNormalizedBoneNode( vrmBoneName )?.name;
+				const vrmNode = vrm.humanoid?.getNormalizedBoneNode( vrmBoneName );
+				const vrmNodeName = vrmNode?.name;
 				const mixamoRigNode = asset.getObjectByName( mixamoRigName );
+				const propertyName = trackSplitted[ 1 ];
 
 				if ( vrmNodeName != null ) {
 					processedBones++;
-
-					const propertyName = trackSplitted[ 1 ];
 
 					// Store rotations of rest-pose.
 					mixamoRigNode.getWorldQuaternion( restRotationInverse ).invert();
 					mixamoRigNode.parent.getWorldQuaternion( parentRestWorldRotation );
 
-					if ( track instanceof THREE.QuaternionKeyframeTrack ) {
+					// Browser module graphs can load track classes from a different THREE module
+					// instance than the one used here, so avoid relying on instanceof alone.
+					if ( isQuaternionTrackLike( track, propertyName ) ) {
 
 						// Retarget rotation of mixamoRig to NormalizedBone.
 						for ( let i = 0; i < track.values.length; i += 4 ) {
@@ -110,10 +166,15 @@ export function loadMixamoAnimation( url, vrm ) {
 							),
 						);
 
-					} else if ( track instanceof THREE.VectorKeyframeTrack ) {
+					} else if ( isPositionTrackLike( track, propertyName ) ) {
 
 						const value = track.values.map( ( v, i ) => ( vrm.meta?.metaVersion === '0' && i % 3 !== 1 ? - v : v ) * hipsPositionScale );
 						tracks.push( new THREE.VectorKeyframeTrack( `${vrmNodeName}.${propertyName}`, track.times, value ) );
+
+					} else {
+						console.warn(
+							`[loadMixamoAnimation] WARNING: Unsupported track type for "${track.name}" (property="${propertyName}", constructor="${track?.constructor?.name}", valueType="${track?.ValueTypeName}")`,
+						);
 
 					}
 
@@ -125,6 +186,23 @@ export function loadMixamoAnimation( url, vrm ) {
 			} );
 
 			console.log(`[loadMixamoAnimation] Converted ${tracks.length} tracks for VRM animation (processed: ${processedBones}, skipped: ${skippedBones})`);
+			if (tracks.length > 0) {
+				console.log(`[loadMixamoAnimation] First 3 VRM track names:`, tracks.slice(0, 3).map(t => t.name));
+				// Check if track node names exist in vrm.scene
+				const trackNodeNames = new Set(tracks.slice(0, 5).map(t => t.name.split('.')[0]));
+				const sceneNodeNames = new Set();
+				vrm.scene.traverse((obj) => sceneNodeNames.add(obj.name));
+				const missing = [...trackNodeNames].filter(n => !sceneNodeNames.has(n));
+				if (missing.length > 0) {
+					console.warn(`[loadMixamoAnimation] WARNING: Track nodes NOT in scene:`, missing);
+					console.warn(`[loadMixamoAnimation] Scene node samples:`, [...sceneNodeNames].slice(0, 15));
+				} else {
+					console.log(`[loadMixamoAnimation] All tested track nodes found in scene`);
+				}
+			}
+			if (tracks.length === 0) {
+				console.error(`[loadMixamoAnimation] CRITICAL: Zero tracks converted! VRM will be in T-pose.`);
+			}
 			// Use a meaningful clip name derived from the source file to avoid multiple
 			// clips all being named 'vrmAnimation' which confuses mixer finished events.
 			const srcName = (new URL(url, window.location.href).pathname.split('/').pop() || 'vrmAnimation');

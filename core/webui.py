@@ -744,37 +744,21 @@ class SynthWebUIInterface:
         # Provide an internal endpoint implementation that doesn't rely on a
         # bound `get_animation_state` method at init time. This avoids
         # AttributeError in environments with dynamic reloads.
-        async def _animation_state_endpoint(request: Request = None):
+        async def _animation_state_endpoint():
             try:
                 if not getattr(self, "animation_handler", None):
                     return JSONResponse(
-                        {"state": "idle", "animation": None, "descriptor": None}
+                        {"state": "idle", "descriptor": None, "started_at": None}
                     )
 
                 current = self.animation_handler.get_current_animation_state()
-                animation_file = current.get("animation_file")
-                resolved = None
-                if animation_file:
-                    try:
-                        resolved, _ = (
-                            self.animation_handler._resolve_animation_descriptor(
-                                animation_file
-                            )
-                        )
-                    except Exception:
-                        resolved = animation_file
-
-                payload = {
-                    "state": current.get("state"),
-                    "animation": resolved,
-                    "descriptor": current.get("descriptor"),
-                    "play_section": current.get("play_section"),
-                    "frame_range": current.get("frame_range"),
-                    "phase_authoritative": current.get("phase_authoritative", False),
-                    "animation_state": current.get("animation_state"),
-                    "animation_id": current.get("animation_id"),
-                }
-                return JSONResponse(payload)
+                return JSONResponse(
+                    {
+                        "state": current.get("state"),
+                        "descriptor": current.get("descriptor"),
+                        "started_at": current.get("started_at"),
+                    }
+                )
             except Exception as exc:
                 log_error(f"{LOG_PREFIX} animation_state endpoint failed: {exc}")
                 raise HTTPException(
@@ -1899,7 +1883,15 @@ class SynthWebUIInterface:
 
         delivered = 0
         errors: List[str] = []
-        for session_id in list(self.connections.keys()):
+        # Deduplicate on the *logical* session id: several spectator sockets may
+        # share one session (Karada v2), but the action pipeline must run once
+        # per logical session, not once per physical socket.
+        logical_sessions = list(
+            dict.fromkeys(
+                self._logical_session_id(key) for key in self.connections.keys()
+            )
+        )
+        for session_id in logical_sessions:
             interface_path = f"{INTERFACE_NAME}/{session_id}"
 
             # Build the action list.  Use clean_text (tags already stripped).
@@ -2211,7 +2203,19 @@ class SynthWebUIInterface:
             # history survives container restarts without any file/DB dependency.
             session_id = "webui_default"
             self.session_id = session_id
-        self.connections[session_id] = websocket
+        # Karada v2 shared-state model: every connected client is a *spectator*
+        # of the same unique Synth character. The logical ``session_id`` (chat
+        # history / interface_path identity) is intentionally shared in
+        # single-session mode, but each physical socket must be registered under
+        # a *unique* connection key — otherwise a second WebUI overwrites the
+        # first in ``self.connections`` and only the last client receives
+        # animation/face/expression broadcasts. In multi-session mode the two
+        # values coincide (unique UUID per client).
+        if self._multi_session_enabled():
+            conn_key = session_id
+        else:
+            conn_key = f"{session_id}:{uuid.uuid4().hex}"
+        self.connections[conn_key] = websocket
         self.message_history.setdefault(session_id, deque(maxlen=self.max_history))
         await websocket.send_json({"type": "session", "session_id": session_id})
         # Ensure persisted history is loaded into memory and replayed
@@ -2221,7 +2225,9 @@ class SynthWebUIInterface:
             log_debug(
                 f"{LOG_PREFIX} Failed to load persisted history for {session_id}: {e}"
             )
-        await self._replay_history(session_id)
+        # Replay only to *this* freshly connected socket so already-connected
+        # spectators of the shared session don't receive duplicate history.
+        await self._replay_history(session_id, websocket=websocket)
 
         # ------------------------------------------------------------------
         # Hello handshake: wait briefly for the client to declare its
@@ -2282,21 +2288,13 @@ class SynthWebUIInterface:
 
                 # 2) Current animation (if any)
                 anim = full_state.get("animation", {})
-                if anim.get("file"):
+                if anim.get("descriptor"):
                     await websocket.send_json(
                         {
-                            "type": "vrm_animation",
-                            "file": anim.get("url") or anim.get("file"),
+                            "type": "vrm_animation_v2",
                             "state": anim.get("state", "idle"),
-                            "loop": anim.get("loop", True),
-                            "play_section": anim.get("play_section"),
-                            "frame_range": anim.get("frame_range"),
-                            "phase_authoritative": anim.get(
-                                "phase_authoritative", False
-                            ),
                             "descriptor": anim.get("descriptor"),
-                            "animation_state": anim.get("animation_state"),
-                            "animation_id": anim.get("animation_id"),
+                            "started_at": anim.get("started_at"),
                             "restore": True,
                         }
                     )
@@ -2310,7 +2308,7 @@ class SynthWebUIInterface:
                     await websocket.send_json({"type": "vrm_face", "values": face})
 
                 # 5) If no animation is set yet, start idle
-                if not anim.get("file") and self.persona_manager:
+                if not anim.get("descriptor") and self.persona_manager:
                     await self.persona_manager.set_animation_state("idle")
                     log_debug(f"{LOG_PREFIX} Started idle animation for first session")
         except Exception as push_exc:
@@ -2365,12 +2363,22 @@ class SynthWebUIInterface:
                     )
                 )
         except WebSocketDisconnect:
-            log_info(f"{LOG_PREFIX} Client disconnected: {session_id}")
+            log_info(
+                f"{LOG_PREFIX} Client disconnected: {session_id} (conn={conn_key})"
+            )
         except Exception as exc:  # pragma: no cover - runtime issues
             log_error(f"{LOG_PREFIX} websocket error: {exc}")
         finally:
-            self.connections.pop(session_id, None)
-            self.message_history.pop(session_id, None)
+            # Remove only this physical socket. In single-session mode the
+            # logical history is shared across all spectator clients, so only
+            # drop it once the last connection for this session_id is gone.
+            self.connections.pop(conn_key, None)
+            still_connected = any(
+                key == session_id or key.startswith(f"{session_id}:")
+                for key in self.connections
+            )
+            if not still_connected:
+                self.message_history.pop(session_id, None)
 
     async def logs_ws_endpoint(
         self, websocket: WebSocket
@@ -3233,30 +3241,23 @@ class SynthWebUIInterface:
             except Exception:
                 current = {}
 
-        animation_state = dict(current.get("animation_state") or {})
-        if not animation_state:
-            animation_state = {
-                "action": getattr(state, "value", state),
-                "phase": "loop",
-                "animation": current.get("animation") or animation_file,
-                "descriptor": descriptor,
-                "timing": None,
-                "expressions": descriptor.get("expressions")
-                if isinstance(descriptor, dict)
-                else None,
-                "blink": descriptor.get("blink")
-                if isinstance(descriptor, dict)
-                else None,
-                "eye_movement": descriptor.get("eye_movement")
-                if isinstance(descriptor, dict)
-                else None,
-                "emotions": None,
-                "lipsync": (
-                    descriptor.get("lipsync")
-                    if isinstance(descriptor, dict) and "lipsync" in descriptor
-                    else False
-                ),
-            }
+        animation_state = {
+            "descriptor": current.get("descriptor"),
+            "started_at": current.get("started_at"),
+            "expressions": descriptor.get("expressions")
+            if isinstance(descriptor, dict)
+            else None,
+            "blink": descriptor.get("blink") if isinstance(descriptor, dict) else None,
+            "eye_movement": (
+                descriptor.get("eye_movement") if isinstance(descriptor, dict) else None
+            ),
+            "emotions": None,
+            "lipsync": (
+                descriptor.get("lipsync")
+                if isinstance(descriptor, dict) and "lipsync" in descriptor
+                else False
+            ),
+        }
 
         emotions = None
         try:
@@ -3321,8 +3322,8 @@ class SynthWebUIInterface:
         message = {
             "type": "animation_state",
             "state": current.get("state") or getattr(state, "value", state),
-            "animation": current.get("animation") or animation_file,
-            "descriptor": current.get("descriptor") or descriptor,
+            "descriptor": current.get("descriptor"),
+            "started_at": current.get("started_at"),
             "animation_state": animation_state,
         }
 
@@ -3338,33 +3339,19 @@ class SynthWebUIInterface:
         """HTTP endpoint that returns a lightweight animation state summary.
 
         This endpoint is used by clients to query the current canonical
-        animation state (state name, resolved animation path and descriptor).
+        animation state tuple (state name, descriptor id, started_at).
         """
         try:
             if not self.animation_handler:
                 return JSONResponse(
-                    {"state": "idle", "animation": None, "descriptor": None}
+                    {"state": "idle", "descriptor": None, "started_at": None}
                 )
 
             current = self.animation_handler.get_current_animation_state()
-            animation_file = current.get("animation_file")
-            resolved = None
-            if animation_file:
-                try:
-                    resolved, _ = self.animation_handler._resolve_animation_descriptor(
-                        animation_file
-                    )
-                except Exception:
-                    resolved = animation_file
-
             payload = {
                 "state": current.get("state"),
-                "animation": resolved,
                 "descriptor": current.get("descriptor"),
-                "play_section": current.get("play_section"),
-                "frame_range": current.get("frame_range"),
-                "phase_authoritative": current.get("phase_authoritative", False),
-                "animation_state": current.get("animation_state"),
+                "started_at": current.get("started_at"),
             }
             return JSONResponse(payload)
         except Exception as exc:
@@ -3611,14 +3598,24 @@ class SynthWebUIInterface:
                     f"{LOG_PREFIX} Failed to send response to session {session_id}: {send_exc}"
                 )
 
-    async def _replay_history(self, session_id: str) -> None:
+    async def _replay_history(
+        self, session_id: str, websocket: Optional["WebSocket"] = None
+    ) -> None:
         history = self.message_history.get(session_id)
         if not history:
             log_debug(
                 f"{LOG_PREFIX} _replay_history: no history for session {session_id}"
             )
             return
-        websocket = self.connections.get(session_id)
+        # A single logical session may be watched by several spectator sockets
+        # registered under keys like ``webui_default:<hex>`` (single-session
+        # mode). ``self.connections.get(session_id)`` would miss those, so when
+        # no explicit socket is supplied resolve the first live socket for the
+        # logical session. Replay is per-connection to avoid duplicating the
+        # history on clients that are already connected.
+        if websocket is None:
+            targets = self._sockets_for_session(session_id)
+            websocket = targets[0][1] if targets else None
         if not websocket:
             log_debug(
                 f"{LOG_PREFIX} _replay_history: no websocket for session {session_id}"
@@ -3745,6 +3742,32 @@ class SynthWebUIInterface:
                 log_debug(
                     f"{LOG_PREFIX} Failed to persist chat message for {session_id}: {e}"
                 )
+
+    def _logical_session_id(self, conn_key: str) -> str:
+        """Map a physical connection key back to its logical session id.
+
+        In single-session mode a socket is registered under a composite key
+        ``"<session_id>:<socket-uuid>"`` so that multiple spectator clients can
+        coexist without overwriting each other (Karada v2 shared-state model).
+        This strips the ``:<socket-uuid>`` suffix to recover the shared logical
+        ``session_id`` used for chat history / interface_path. In multi-session
+        mode keys have no suffix and are returned unchanged.
+        """
+        return conn_key.split(":", 1)[0] if ":" in conn_key else conn_key
+
+    def _sockets_for_session(self, session_id: str) -> "list[tuple[str, WebSocket]]":
+        """Return all live ``(conn_key, websocket)`` pairs for a logical session.
+
+        A logical session may be observed by several spectator clients that each
+        hold their own physical socket. Outbound messages for a shared avatar
+        (text, audio, animation) must reach every one of them, so callers should
+        iterate this list instead of doing a single ``connections.get(id)``.
+        """
+        return [
+            (key, ws)
+            for key, ws in self.connections.items()
+            if self._logical_session_id(key) == session_id
+        ]
 
     def _multi_session_enabled(self) -> bool:
         """Return True if the experimental multi-session flag is active.
@@ -3954,7 +3977,11 @@ class SynthWebUIInterface:
                 chat_id = session_id
 
         session_id = str(chat_id)
-        websocket = self.connections.get(session_id)
+        # Karada v2 shared-state: a logical session may be watched by several
+        # spectator sockets. Collect *all* of them so the message reaches every
+        # viewer, not just the one whose key happens to equal session_id.
+        targets = self._sockets_for_session(session_id)
+        websocket = targets[0][1] if targets else None
         if not websocket:
             try:
                 from core.config_manager import config_registry
@@ -3977,8 +4004,9 @@ class SynthWebUIInterface:
                             log_debug(
                                 f"{LOG_PREFIX} 🔀 Alias redirect: {session_id} -> {candidate}"
                             )
-                            websocket = self.connections[candidate]
-                            session_id = candidate
+                            session_id = self._logical_session_id(candidate)
+                            targets = self._sockets_for_session(session_id)
+                            websocket = targets[0][1] if targets else None
                             break
             except Exception as e:
                 log_debug(f"{LOG_PREFIX} Alias resolution check failed: {e}")
@@ -4013,32 +4041,34 @@ class SynthWebUIInterface:
         # Normalize metadata before websocket/history/DB use to avoid serialization errors.
         safe_metadata = self._clean_for_json(metadata) if metadata is not None else None
 
-        # If websocket is present attempt to send; otherwise persist for later replay
+        # If websocket is present attempt to send; otherwise persist for later replay.
+        # Broadcast to every spectator socket of this logical session so all
+        # viewers of the shared avatar see the same message bubble.
         if websocket:
-            try:
-                payload: Dict[str, Any] = {
-                    "type": "message",
-                    "sender": "synth",
-                    "text": text,
-                }
-                # Forward attachments if present so the WebUI can render them.
-                if metadata and isinstance(metadata.get("attachments"), list):
-                    payload["attachments"] = metadata["attachments"]
-                    # Keep attachments accessible under `data` for compatibility.
-                    payload.setdefault("data", {})["attachments"] = metadata[
-                        "attachments"
-                    ]
+            payload: Dict[str, Any] = {
+                "type": "message",
+                "sender": "synth",
+                "text": text,
+            }
+            # Forward attachments if present so the WebUI can render them.
+            if metadata and isinstance(metadata.get("attachments"), list):
+                payload["attachments"] = metadata["attachments"]
+                # Keep attachments accessible under `data` for compatibility.
+                payload.setdefault("data", {})["attachments"] = metadata["attachments"]
 
-                # Forward metadata fields that the client can use (e.g. tts_url).
-                if safe_metadata and safe_metadata.get("tts_url"):
-                    payload["tts_url"] = safe_metadata["tts_url"]
-                    payload.setdefault("data", {})["tts_url"] = safe_metadata["tts_url"]
+            # Forward metadata fields that the client can use (e.g. tts_url).
+            if safe_metadata and safe_metadata.get("tts_url"):
+                payload["tts_url"] = safe_metadata["tts_url"]
+                payload.setdefault("data", {})["tts_url"] = safe_metadata["tts_url"]
 
-                await websocket.send_json(self._clean_for_json(payload))
-            except Exception as e:
-                log_warning(
-                    f"{LOG_PREFIX} Failed to send websocket message to {session_id}: {e}"
-                )
+            clean_payload = self._clean_for_json(payload)
+            for target_key, target_ws in targets:
+                try:
+                    await target_ws.send_json(clean_payload)
+                except Exception as e:
+                    log_warning(
+                        f"{LOG_PREFIX} Failed to send websocket message to {target_key}: {e}"
+                    )
 
         # Append to in-memory history so reconnect will replay it
         await self._append_history(
@@ -4150,21 +4180,9 @@ class SynthWebUIInterface:
             if len(parts) >= 2 and parts[0] == INTERFACE_NAME:
                 sid = parts[1]
 
-        websocket = self.connections.get(sid)
-        if not websocket:
+        if not self._sockets_for_session(sid):
             log_warning(f"{LOG_PREFIX} send_tts_audio: no websocket for session {sid}")
             return False
-
-        # Deliver the caption as a regular chat message so that it is persisted
-        # in the DB, appears in the in-memory history (replay on reconnect) and
-        # shows as a visible text bubble on clients that may not support audio.
-        if text:
-            try:
-                await self.send_message(sid, text=text)
-            except Exception as exc:
-                log_warning(
-                    f"{LOG_PREFIX} send_tts_audio: failed to send caption message for session {sid}: {exc}"
-                )
 
         # Derive a client-accessible URL from the filesystem path.
         # Audio is stored under the /static mount, e.g.
@@ -4181,6 +4199,21 @@ class SynthWebUIInterface:
                 url = "/static/audio/tts/" + p.name
         except Exception:
             url = "/static/audio/tts/" + str(audio_path).rsplit("/", 1)[-1]
+
+        # Deliver the caption as a regular chat message so that it is persisted
+        # in the DB, appears in the in-memory history (replay on reconnect) and
+        # shows as a visible text bubble on clients that may not support audio.
+        # Attach ``tts_url`` in the metadata so the click-to-replay audio icon
+        # is bound directly to the bubble on *every* spectator client (and
+        # restored on reconnect) without depending on the transient
+        # ``tts-play`` event race.
+        if text:
+            try:
+                await self.send_message(sid, text=text, metadata={"tts_url": url})
+            except Exception as exc:
+                log_warning(
+                    f"{LOG_PREFIX} send_tts_audio: failed to send caption message for session {sid}: {exc}"
+                )
 
         payload: Dict[str, Any] = {"type": "tts-play", "url": url}
         if text is not None:
@@ -10497,6 +10530,9 @@ class SynthWebUIInterface:
 
 async def start_server() -> None:
     """Compatibility helper to run the Synthetic Heart Web UI server in the foreground."""
+    if synth_webui_interface is None:
+        raise RuntimeError("WebUI interface is not initialized")
+
     if not synth_webui_interface.autostart:
         await synth_webui_interface._run_server()
         return

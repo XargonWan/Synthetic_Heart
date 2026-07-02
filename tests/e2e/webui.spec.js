@@ -1,6 +1,8 @@
 const { test, expect } = require('@playwright/test');
 
-const BASE = process.env.WEBUI_BASE || 'http://127.0.0.1:8000';
+test.use({ ignoreHTTPSErrors: true });
+
+const BASE = process.env.WEBUI_BASE || 'https://127.0.0.1:8000';
 
 test('page loads and exposes config', async ({ page }) => {
   await page.goto(BASE, { waitUntil: 'networkidle' });

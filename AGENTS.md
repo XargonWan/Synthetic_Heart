@@ -582,6 +582,22 @@ docker exec synth-dev tail -f /app/logs/synth.log | grep -E "\[grillo\]|grillo"
 
 ---
 
+### `vrm-viewer.mjs` fails standalone `node --check` near idle-finish handler  <!-- 2026-05-12 -->
+**Symptom:** Running `node --check res/synth_webui/js/vrm-viewer.mjs` reports `SyntaxError: Unexpected token '{'` at `stopAction(actionName)`, after source text around `Finished idle animation -> starting next:` appears structurally corrupted.
+**Location:** `res/synth_webui/js/vrm-viewer.mjs`, idle-finish / `stopAction` boundary around the `Finished idle animation -> starting next` block.
+**Status:** fixed.
+**Notes:** The corruption was in the tail of `startAction()`: the idle-finish handler lost its closing control-flow and overwrote the single-clip action path before `stopAction()`. The block was reconstructed and `node --check res/synth_webui/js/vrm-viewer.mjs` now passes again on `feat/karada-v2`.
+
+---
+
+### WebUI phase logs could hide valid THINKING/WRITING transitions  <!-- 2026-04-22 -->
+**Symptom:** During debugging it could look like WebUI never entered `THINKING` / `WRITING`, because the browser console only logged `vrm_animation` messages and the backend phase-promotion log could misleadingly print `WRITING -> WRITING` even when the real transition was `THINKING -> WRITING`.
+**Location:** `core/action_state_manager.py`, `res/synth_webui/js/chat-window.mjs`
+**Status:** fixed.
+**Notes:** `ActionStateManager.update_phase()` now snapshots the old phase before mutation, and the chat window now logs incoming `action_state` WebSocket events so frontend and backend traces can be correlated directly.
+
+---
+
 ### Stale `synth` image after branch switch can keep the old MySQL code path  <!-- 2026-05-11 -->
 **Symptom:** On `feat/postgres-migration`, `synth-db` (Postgres) is healthy and `docker compose config` resolves `DB_HOST=synth-db` / `DB_PORT=5432`, but WebUI still fails with TLS EOF and `synth` logs show `aiomysql` errors such as `OperationalError(2013, 'Lost connection to MySQL server during query')` or `Can't connect to MySQL server on 'synth-db'`.
 **Location:** Docker runtime / rebuilt state of the `synth` application container after changing branches.
@@ -675,6 +691,22 @@ docker exec synth-dev tail -f /app/logs/synth.log | grep -E "\[grillo\]|grillo"
 **Location:** `core/message_chain.py` (correction loop, line ~2365).
 **Status:** fixed.
 **Notes:** The fix adds a pre-check in the correction loop: if the LLM return text contains a known server-error marker (`logprobs not supported`, `internal server error`, `service unavailable`, `5xx` gateway errors), skip directly to the fallback message. The `Logprobs not supported` error itself comes from the selenium-llm-engine (not SyntH) — the OpenAI SDK it uses internally sends `logprobs` to Gemini, which rejects it. Fix the selenium-llm-engine to strip/not-set `logprobs` in its OpenAI-compatible adapter.
+
+---
+
+### `KaradaStateServer.ensure_idle_preloaded` can emit an unawaited coroutine warning  <!-- 2026-05-12 -->
+**Symptom:** Runtime startup can log `RuntimeWarning: coroutine 'KaradaStateServer.ensure_idle_preloaded' was never awaited` during WebUI initialization, even when the rest of the UI continues booting.
+**Location:** `core/webui.py` around the Karada API / preload setup path, plus `core/animation_handler.py` (`KaradaStateServer.ensure_idle_preloaded`).
+**Status:** known, not fixed.
+**Notes:** Observed while smoke-running `scripts/run_webui.py` on `feat/karada-v2`. The warning appears before server bind and suggests a preload helper is being called like a sync function somewhere in WebUI startup.
+
+---
+
+### Docker-served WebUI can keep stale static JS after host-side edits  <!-- 2026-05-13 -->
+**Symptom:** Browser validation against `https://localhost:8000` can keep showing old WebUI behavior and old console logs even after editing files under `res/synth_webui/js/` in the host repo.
+**Location:** Docker runtime / `synth` container image contents vs host workspace files.
+**Status:** known, workflow workaround in use.
+**Notes:** The default Docker stack serves WebUI assets from the built image, not a live bind-mount of the repo JS. Host-side edits do not reach the running browser until the `synth` container is rebuilt/recreated or the changed asset is copied into the container manually (for example `docker cp res/synth_webui/js/loadMixamoAnimation.js synth:/app/res/synth_webui/js/loadMixamoAnimation.js`). When browser logs seem to ignore a local JS patch, verify the file inside the container before debugging the code itself.
 
 ---
 

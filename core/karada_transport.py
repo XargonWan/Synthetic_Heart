@@ -32,9 +32,8 @@ class KaradaTransport(ABC):
         """Push an animation command to every connected client.
 
         Args:
-            payload: Dict with at least ``type``, ``file``, ``loop``, ``state``,
-                     ``animation_id``, and optionally ``descriptor``,
-                     ``animation_state``, ``play_section``, ``priority``, ``source``.
+            payload: Dict with at least ``type``, ``state``, ``descriptor``,
+                     and ``started_at`` for the Karada v2 tuple.
         """
 
     @abstractmethod

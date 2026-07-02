@@ -114,7 +114,14 @@ frontends).
   active skin (or ``null`` when a custom/uploaded VRM is in use).  Clients can
   call this before hitting the `/api/animations/{skin}/…` endpoints.
 - **GET** `/api/animation_state` – query the current centralized animation state.
-  Returns ``{state, animation, descriptor, animation_id}``.
+  Returns the Karada v2 tuple ``{state, descriptor, started_at}``.
+- **GET** `/api/karada/state` – fetch the full Karada bootstrap state
+  ``{vrm_model, animation, face_values, audio}``, where ``animation`` is also a
+  tuple-based object containing ``state``, ``descriptor``, and ``started_at``.
+- **GET** `/api/karada/animations/manifest` – list reusable descriptor ids with
+  their resolved animation URLs and descriptor metadata.
+- **GET** `/api/karada/animations/resolve?descriptor_id=...` – resolve one
+  descriptor id into ``animation_url`` plus ``descriptor_data`` for client-side playback.
 - **POST** `/api/animation_state` – request a centralized animation state change.
   Body: ``{state, session_id?, loop?, context_id?, source?}``.
 - **GET** `/api/emotion_state` – retrieve current facial/emotion blendshape
