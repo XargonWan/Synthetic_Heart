@@ -34,7 +34,14 @@ if TYPE_CHECKING:
 def _build_runtime_prefix(ctx: RuntimeContext) -> str:
     """Compact runtime context prefix injected at the start of the current turn.
 
-    Example output: ``[2026-04-13 15:30 | scope:local | lang:en | from:Scarlet]``
+    Example output: ``[scope:local | lang:en | time_of_day:evening | from:Scarlet]``
+    followed by a newline, so the metadata bracket reads as a distinct line
+    from the actual message text rather than running straight into it --
+    the exact clock timestamp is deliberately excluded (see
+    ``test_runtime_prefix_omits_exact_timestamp_from_current_turn``); this is
+    only the coarse time-of-day bucket, which doesn't carry the same
+    stale-quote risk and helps ground turn-of-day judgment right at the
+    point of generation.
     """
     parts: list[str] = []
     if ctx.scope and ctx.scope != "local":
@@ -43,6 +50,8 @@ def _build_runtime_prefix(ctx: RuntimeContext) -> str:
         parts.append(f"lang:{ctx.language}")
     if ctx.tone:
         parts.append(f"tone:{ctx.tone}")
+    if ctx.time_of_day:
+        parts.append(f"time_of_day:{ctx.time_of_day}")
     if ctx.emotions:
         parts.append(f"emotions:{ctx.emotions}")
     if ctx.input_source == "voice":
@@ -61,7 +70,7 @@ def _build_runtime_prefix(ctx: RuntimeContext) -> str:
         parts.append(f"beat:{ctx.beat_type}")
     if not parts:
         return ""
-    return "[" + " | ".join(parts) + "] "
+    return "[" + " | ".join(parts) + "]\n"
 
 
 def _build_multimodal_turn_text(
