@@ -7421,7 +7421,25 @@ try {
             return { label: 'unknown', confidence: 0 };
         }
 
+        // A tap should only count as a model/scene interaction when the pointer
+        // actually lands on the bare canvas. Overlay UI (the WinBox chat window,
+        // debug panels, dropdowns, etc.) is stacked above the canvas, and its
+        // pointer events can still bubble/hit-test through to the canvas, which
+        // previously triggered a spurious 'touch' animation when clicking the
+        // chat input. Verify the top-most element under the cursor is the canvas.
+        function _pointerIsOnCanvas(ev) {
+            try {
+                const top = document.elementFromPoint(ev.clientX, ev.clientY);
+                return top === canvas;
+            } catch (_e) {
+                // If we cannot resolve the hit-test, fall back to the event target
+                // so we never silently break touch on browsers without the API.
+                return ev.target === canvas;
+            }
+        }
+
         canvas.addEventListener('pointerdown', (ev) => {
+            if (!_pointerIsOnCanvas(ev)) { pointerDownInfo = null; return; }
             pointerDownInfo = { x: ev.clientX, y: ev.clientY, t: Date.now() };
             isDragging = false;
             // User gesture: kick off SFX decode in background to avoid stutter on first knock.
@@ -7442,6 +7460,9 @@ try {
                 const down = pointerDownInfo;
                 pointerDownInfo = null;
                 if (!down) return;
+                // Ignore if the pointer was released over an overlay UI element
+                // rather than the bare canvas (e.g. the chat window on top).
+                if (!_pointerIsOnCanvas(ev)) return;
                 const dt = Date.now() - down.t;
                 if (isDragging || dt > 1000) return; // treat as drag or long press
 
