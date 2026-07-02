@@ -274,7 +274,7 @@ affine-mcp doctor
 1. `uv run ruff format .`
 2. `uv run ruff check --fix .`
 3. `uv run ty check <files_you_edited>` — scoped only, never the whole repo.
-4. `uv run pytest`
+4. `uv run pytest tests/<tests_covering_what_you_touched>` — scoped only, **never the bare full suite** (see §9).
 
 If any step fails, fix it before proceeding.
 
@@ -286,7 +286,7 @@ If any step fails, fix it before proceeding.
   `"⚠️ Stuck on [Error]. Requesting human or advanced model intervention."`
 - **Type hints required.** All Python functions need complete annotations (params + return).
 - **Cross-platform policy.** Default runtime is Linux containers. No Windows/macOS-specific primary code paths. Platform-specific logic only as a secondary, guarded case (`sys.platform`).
-- **Read logs if a bug fix is requested**": always read container logs or logs folder if some issue raises and the user asks your bug fixing in order to find the real cause of the issue, do not reply with guesses but with a real analisys of the logs and the code
+- **Read logs if a bug fix is requested:** always read container logs or the logs folder when the user asks for a bug fix, in order to find the real cause of the issue. Do not reply with guesses — base conclusions on a real analysis of the logs and the code.
 - **No keyword-based implementations.**
   Never design or implement features whose behavior depends primarily on detecting specific words, phrases, trigger terms, or regular expression matches, as this won't work in a multi language environment.
   Avoid logic such as:
@@ -302,7 +302,28 @@ If any step fails, fix it before proceeding.
 
 - All persistent tests go in `tests/`. Throwaway tests may live at the repo root but must be deleted when done.
 - Config: `pytest.ini` — `asyncio_mode = auto`, markers: `asyncio`, `slow`, `integration`.
-- Run: `uv run pytest`
+
+### Run scoped tests — never the bare full suite
+
+**Default: run only the test files covering what you changed:**
+
+```bash
+uv run pytest tests/test_<area_you_touched>.py
+```
+
+Do **not** run a bare `uv run pytest`. Three reasons:
+
+1. **It takes ~5 minutes** and adds no signal for a scoped change.
+2. **Selenium is not installed or configured in this workspace.** `tests/plugins/test_selenium_ttsfree.py` fails at *collection* with `ModuleNotFoundError: No module named 'selenium'` — there is no way to make it pass here, so it must always be excluded.
+3. **The full ordering has ~3 known order-dependent failures** from `config_registry` singleton pollution (see §12, "Order-dependent test failures in full pytest runs") that are not caused by your change.
+
+If a broad regression sweep is explicitly requested, run:
+
+```bash
+uv run pytest --ignore=tests/plugins/test_selenium_ttsfree.py
+```
+
+and triage any order-dependent failures against §12 (re-run the failing file alone, or `git stash` A/B) before assuming a regression.
 
 ### Testing via Ollama API
 
@@ -326,7 +347,7 @@ Monitor: `docker exec synth-dev tail -f /app/logs/synth.log | grep -E "run_actio
 ---
 
 ## 10. Documentation
-After any substatnial code change or feature addition evaluate a documentation update.
+After any substantial code change or feature addition evaluate a documentation update.
 
 - Location of Wiki/Documentation: `docs/` (Sphinx, ReadTheDocs format, English).
 - README.md is located in the project root
@@ -343,7 +364,7 @@ docker compose up -d --build
 ```
 
 **Dev container restart:**
-Some devs might want to have a developemnt deploy, usually called `docker-compose-dev.yml`
+Some devs might want to have a development deploy, usually called `docker-compose-dev.yml`
 ```bash
 docker compose -f docker-compose-dev.yml --env-file .env-dev up -d --build && rm -rf logs/dev/*
 ```
@@ -395,11 +416,11 @@ docker exec synth-dev tail -f /app/logs/synth.log | grep -E "\[grillo\]|grillo"
 
 ---
 
-### Full test suite has 3 pre-existing order-dependent failures (`config_registry` singleton pollution)  <!-- 2026-07-01 -->
-**Symptom:** Running `uv run pytest tests/ -k "not selenium"` (the full suite) fails `test_vox_defaults.py::test_active_vox_engine_default_is_kitten`, `test_vox_plugin.py::test_active_vox_engine_default_is_kitten`, and a third test that varies by run/ordering — seen as `test_grillo_prevent_duplicates.py::test_grillo_suppresses_when_last_is_synth` in one run and `test_db_cutover.py::test_cutover_runs_backup_and_migration` in another. All fail only in the full-suite ordering and pass in isolation or in small groups.
-**Location:** `core/config_manager.py` (`config_registry` is a process-wide singleton); the vox assertions read `config_registry.get_value("ACTIVE_VOX_ENGINE", None)` and expect the hard-coded default `"kitten"`.
-**Status:** known, pre-existing — confirmed via `git stash` (twice now, on commit `e4558376` and again on `afdaea0`) that the vox pair fails identically on unmodified `develop`, so it is not caused by any specific feature change; whichever test runs first in the full ordering leaks the *real* DB-loaded value (`"disabled"`, per the live config table) into `config_registry._definitions["ACTIVE_VOX_ENGINE"]`, and it's never reset before the default-expecting test runs. The third slot appears to be a different, similarly order-dependent leak (exact culprit not identified) rather than a fixed single test.
-**Notes:** Don't waste a debugging session re-diagnosing this if the full suite shows exactly 3 failures matching this pattern (2 vox + 1 other) — verify first with `git stash` whether they reproduce on unmodified code before assuming a regression. Real fix would be giving `config_registry` (or at least the affected definitions) a per-test reset/fixture instead of relying on process-wide state; out of scope for whatever unrelated change surfaced this note.
+### Order-dependent test failures in full pytest runs (`config_registry` / global-state pollution)  <!-- 2026-06-11, updated 2026-07-01 -->
+**Symptom:** A full `uv run pytest` run fails a small, shifting set of tests that all pass when their file is run in isolation. Recurring offenders: `test_vox_defaults.py::test_active_vox_engine_default_is_kitten` and `test_vox_plugin.py::test_active_vox_engine_default_is_kitten` (e.g. `assert 'disabled' == 'kitten'`), plus a third slot that varies by run/ordering — observed as `test_db_cutover::test_cutover_runs_backup_and_migration`, `test_grillo_prevent_duplicates::test_grillo_suppresses_when_last_is_synth`, `test_grillo_beat_system::test_grillo_beat_types_exist`, `test_exposed_variables_static::test_no_direct_getenv_for_exposed_vars`, and `test_exposed_variables_style::test_exposed_variable_label_and_description_style` at various times.
+**Location:** `core/config_manager.py` (`config_registry` is a process-wide singleton) and the exposed-variable registry; global state leaking between test modules.
+**Status:** known, pre-existing — confirmed via `git stash` A/B (on commits `e4558376` and `afdaea0`) that the vox pair fails identically on unmodified `develop`, so it is not caused by any specific feature change.
+**Notes:** Whichever test runs first in the full ordering leaks the *real* DB-loaded value (`ACTIVE_VOX_ENGINE = "disabled"`, per the live config table) into `config_registry._definitions`, and it's never reset before the default-expecting test runs. When triaging a full-suite run, re-run the failing file alone (and/or `git stash` A/B) before assuming a regression. Related leaks: local `.env` values (e.g. `SYNTH_PRIMARY_DB=soul`) bleed into tests that don't pin them — `tests/test_db_preflight.py` monkeypatches `core.db._get_db_type` for this reason — and `tests/test_message_queue.py` `test_enqueue_*` tests hit the live DB configured in `.env` and time out when it is slow/unreachable (verified unrelated to code changes via stash A/B). Real fix would be a per-test reset/fixture for `config_registry` (or at least the affected definitions) instead of process-wide state; out of scope so far.
 
 ---
 
@@ -423,14 +444,6 @@ docker exec synth-dev tail -f /app/logs/synth.log | grep -E "\[grillo\]|grillo"
 **What:** `force_action_grammar: true` in an openai_compat endpoint's `extra_config` makes `cortex_bridge` auto-build a GBNF grammar (`core/external_endpoints/action_grammar.py:build_actions_gbnf`) whose `type` enum is the exact set of actions offered for the request, and send it via `extra_body.grammar`. llama.cpp then constrains decoding so the model can only emit one well-formed `{"actions":[{"type":<known>,"payload":{...}}]}` object — no `<think>`/`<thought>` preamble (output must start with `{`), no malformed JSON, no invented/combined/duplicated types, and generation stops after the first object (kills the repetition cascade). This is the real fix for the whole class of local-model output failures; `force_json_object` is best-effort and silently ignored by many llama.cpp builds.
 **Scope/safety:** opt-in per endpoint and only wired through the OPENAI-protocol path — other engines (gemini/anthropic/xai) are untouched. Implies the in-prompt protocol (`_disable_tools()` returns true for it, since a grammar constrains *content*, not tool_calls). A manual `extra_config.grammar` takes precedence; `response_format` is dropped when a grammar is present (redundant/conflicting). Payload schemas are intentionally NOT encoded (only `payload ::= object`) — encoding all 49 action schemas would be enormous/brittle.
 **Caveat:** the grammar is generated, not validated against a live llama.cpp here. If a malformed grammar ever slips in, the server rejects the request and the turn fails — remove `force_action_grammar` to fall back. The builder fails safe (returns `None` → no grammar) on any internal error.
-
----
-
-### Local model 20-min runaway + leaked `<thought>` (json_object not enforced)  <!-- 2026-06-21 -->
-**Symptom:** A single chat turn took ~20 min and logged a malformed thinking tag plus cascading repeated `message_telegram_bot` outputs; only the first message was delivered. Trace: 1240s elapsed, `prompt 4887 + completion 27881 ≈ 32768` — the model generated until it **filled its entire 32k context window**.
-**Location:** `core/external_endpoints/adapters/openai_compat.py` (`_strip_thinking`, `chat_completion`); `core/external_endpoints/bridges/cortex_bridge.py` (`_extra_api_kwargs`).
-**Status:** mitigated (2026-06-21).
-**Notes:** Two independent causes. (1) The model ignored `enable_thinking=False` and emitted reasoning terminated by `</thought>`; `_strip_thinking` only matched `<think>`/`<thinking>`, not `<thought>`, nor a dangling closing tag (open tag dropped), so it leaked into content (JSON was still extracted after it, so the first reply went out). Fixed: regex now covers `thought` and a leading `^.*?</…>` dangling close. (2) **`response_format: json_object` is NOT enforced by this llama.cpp/model** — the output contained reasoning + prose + repeated JSON objects, i.e. free-form, so `force_json_object` is effectively a no-op here. With **no `max_tokens`**, a repetition loop ran to the context limit. Fixed: a default `max_tokens` (4096) is applied by `cortex_bridge._extra_api_kwargs()` — **only for local-model endpoints** (`disable_tools` / `force_action_grammar`); an explicit `extra_config.max_tokens` always wins, and cloud openai endpoints (xai, openrouter) stay uncapped (scoping tightened 2026-06-21 — every endpoint here is `protocol: openai`, so the blanket adapter default was wrong). The only *hard* JSON constraint for this server remains a GBNF `grammar` (already forwardable via `extra_config.grammar`); `json_object` should be treated as best-effort on local backends.
 
 ---
 
@@ -503,14 +516,6 @@ docker exec synth-dev tail -f /app/logs/synth.log | grep -E "\[grillo\]|grillo"
 
 ---
 
-### Order-dependent test failures in full pytest runs  <!-- 2026-06-11 -->
-**Symptom:** `test_db_cutover::test_cutover_runs_backup_and_migration`, `test_exposed_variables_static::test_no_direct_getenv_for_exposed_vars`, `test_exposed_variables_style::test_exposed_variable_label_and_description_style`, `test_vox_defaults::test_active_vox_engine_default_is_kitten`, and `test_vox_plugin::test_active_vox_engine_default_is_kitten` fail in a full `uv run pytest` run (e.g. `assert 'disabled' == 'kitten'`) but all pass when their files are run in isolation. The affected set shifts slightly between runs (`test_grillo_beat_system::test_grillo_beat_types_exist` has also tripped this way).
-**Location:** `tests/` (config-registry / exposed-vars global state leaking between test modules)
-**Status:** known — pre-existing, not tied to any single commit.
-**Notes:** The `config_registry` and exposed-variable registry are process-global; earlier tests register or mutate vars (e.g. `ACTIVE_VOX_ENGINE` ends up `'disabled'`) that later default-assertion tests then see. When triaging a full-suite run, re-run the failing file alone before assuming a regression. Also note: local `.env` values (e.g. `SYNTH_PRIMARY_DB=soul`) leak into tests that don't pin them — `tests/test_db_preflight.py` now monkeypatches `core.db._get_db_type` for this reason. The reverse also happens: `tests/test_message_queue.py` `test_enqueue_*` tests hit the live DB configured in `.env` and time out when it is slow/unreachable (they pass standalone only with a responsive DB; verified unrelated to code changes via stash A/B).
-
----
-
 ### `ai_diary` — user_message column overflow  <!-- 2026-04-13 -->
 **Symptom:** `(1406, "Data too long for column 'user_message' at row 1")` appearing repeatedly in `synth.log`, originating from `ai_diary.py` `_upsert_diary_impl`.
 **Location:** `plugins/ai_diary.py`, `init-db.sql` (`ai_diary` table, `user_message` column)
@@ -530,8 +535,8 @@ docker exec synth-dev tail -f /app/logs/synth.log | grep -E "\[grillo\]|grillo"
 ### `cortex_api.log` is section-format, not standard  <!-- 2026-04-13 -->
 **Symptom:** Searching `cortex_api` via MCP returns truncated banner lines only; full LLM payloads are cut at 400 chars.
 **Location:** `logs/cortex_api.log`, `mcp_servers/synth_logs.py` (`_LARGE_PAYLOAD_FILES`)
-**Status:** known limitation — no structured parser tool exists yet for this format.
-**Notes:** The file uses `==` and `--` banner sections (`REQUEST`, `RESPONSE`, `SEND`, `RECV`). Level/time filters don't work on it. For LLM debugging, search for the banner headers (e.g. `search_logs("REQUEST", log_files=["cortex_api"])`) to find timestamps, then correlate with `synth.log` by time.
+**Status:** mitigated — the `synth-cortex` MCP server now parses this format into structured sessions.
+**Notes:** The file uses `==` and `--` banner sections (`REQUEST`, `RESPONSE`, `SEND`, `RECV`). Level/time filters in `synth-logs` still don't work on it. For LLM debugging, use the `synth-cortex` MCP tools (`cortex_sessions` / `cortex_analyze` / `cortex_read` / `cortex_search`) instead of grepping the raw file. Caveat: the system prompt content is never written to this log — only its length (see the dedicated §12 entry).
 
 ---
 
@@ -582,27 +587,11 @@ docker exec synth-dev tail -f /app/logs/synth.log | grep -E "\[grillo\]|grillo"
 
 ---
 
-### `schedule_message send_at` path imports missing `get_local_tz` helper  <!-- 2026-04-18 -->
-**Symptom:** Absolute-time reminders can fail before scheduling with an import error when `schedule_message.payload.send_at` is used.
-**Location:** `plugins/event_plugin.py` (`_handle_schedule_message_payload`, import `from core.time_zone_utils import get_local_tz`).
-**Status:** known, not fixed.
-**Notes:** There is no `get_local_tz` symbol in `core.time_zone_utils`. Relative-delay scheduling (`send_in`) is unaffected, but `send_at` parsing needs to use an existing timezone helper or inline timezone resolution.
-
----
-
-### `event_plugin` interface-path reminder delivery still calls stale `run_action` signature  <!-- 2026-04-18 -->
-**Symptom:** Reminder delivery via `interface_path` can log a `run_action()` argument error instead of sending the message.
-**Location:** `plugins/event_plugin.py` (`_send_via_interface_path`) vs `core/action_parser.py` (`run_action(action, context, bot, original_message)`).
-**Status:** known, not fixed.
-**Notes:** The call site still uses the old two-argument form (`run_action(action, message)`). This path needs the same context/bot/original-message signature update that other callers already received.
-
----
-
 ### `test_selenium_ttsfree.py` blocks broad pytest without optional Selenium dependency  <!-- 2026-04-18 -->
 **Symptom:** `uv run pytest` can fail during collection with `ModuleNotFoundError: No module named 'selenium'` from `tests/plugins/test_selenium_ttsfree.py` after it falls back to `plugins_dev.selenium_ttsfree`.
 **Location:** `tests/plugins/test_selenium_ttsfree.py`, `plugins_dev/selenium_ttsfree.py`
-**Status:** known, not fixed.
-**Notes:** Environments without the optional Selenium package cannot collect this test module. For broad regression sweeps, either install `selenium` or ignore this file explicitly (for example `uv run pytest --ignore=tests/plugins/test_selenium_ttsfree.py`).
+**Status:** known, not fixed — and Selenium is deliberately **not installed/configured in this workspace**, so this test can never pass here.
+**Notes:** Environments without the optional Selenium package cannot collect this test module. Always exclude it (`uv run pytest --ignore=tests/plugins/test_selenium_ttsfree.py`) — but prefer scoped test runs in the first place, per §9.
 
 ---
 
@@ -695,56 +684,11 @@ docker exec synth-dev tail -f /app/logs/synth.log | grep -E "\[grillo\]|grillo"
 
 ---
 
-### Gemma-4 missing closing `}` for action dict → diary payload selected as `parsed`  <!-- 2026-06-26 -->
-**Symptom:** message_chain logs `Normalizing action-key dictionary format` + `Added 6 synthetic action(s) for unregistered top-level key(s): interaction_summary, content, personal_thought, emotions, context_tags, involved_users` (the diary payload's own fields). Immediately followed by 12 unsupported action types, a correction, and eventual delivery. Trace: `ab6930e3-1689-48c6-a284-ea927c31695a`.
-**Location:** `core/transport_layer.py` `extract_json_from_text`; triggered by gemma-4-uncensored (Venice) output.
-**Root cause:** Gemma-4 sometimes emits the diary action dict without its closing `}`, so the outer `{"actions": [...], "type": "message_telegram_bot", ...}` is also malformed. The raw_decode scan falls back to the diary *payload* dict (minimum extra-chars parseable candidate). That dict has no `actions` key → message_chain normalizes its 6 fields as fake action types, then the unregistered-top-level-keys block doubles them to 12 → correction fires.
-**Status:** fixed 2026-06-26 — `json_repair` now also runs when `found_json` is a dict without `"actions"` (not just when nothing is found). It fixes the missing brace, json_repair returns a list `[outer_with_actions, use_animation]`, the list is detected and merged back into a single dict with `"actions"` containing all recovered actions. `syntax_repaired=True` in metadata; `had_errors=False`; no correction needed.
-**Notes:** The fix is in `extract_json_from_text` — the `_json_repair_needed` condition block at the bottom of the outer scan loop (outside all `if not found_json:` guards). Also: `json_repair` was NOT the cause of this trace (confirmed — no `json_repair` log entry exists; the bug predates the json_repair integration).
-
----
-
 ### Admin/maintenance actions leak into non-lite in-prompt catalogs for local endpoints  <!-- 2026-06-27 -->
 **Symptom:** When `PROMPT_LITE_MODE=false` and a local endpoint uses `disable_tools: true` or `force_action_grammar: true`, the `=== AVAILABLE ACTIONS ===` block injected by `_inject_actions_into_prompt` contains ~44 actions including admin/maintenance ones that should never appear in a normal chat prompt: `soul_force_compile`, `soul_force_rollup`, `soul_get_status`, `soul_run_curator`, `bio_full_request`, `bio_update`, `block_user`, `unblock_user`, `cleanup_old_chats`, `cleanup_old_mappings`, `compact_now`, `ensure_chat`, `resolve_chat`, `get_recent_chats`, `list_chats`, `decay_emotions`, `set_emotion`, `sync_emotions_from_all_sources`, `update_emotion_from_tags`, `static_inject`, `send_mate_message`, `trigger_weather_report`, `schedule_message`, and others.
 **Location:** `core/external_endpoints/bridges/cortex_bridge.py` `_inject_actions_into_prompt`; `core/prompt_engine.py` `_derive_default_prompt_action_types`, `_is_non_user_facing_action`.
 **Status:** known — cross-interface `message_*` leak and `PROMPT_LITE_MODE` bypass both fixed 2026-06-27; admin action leak in non-lite mode is open.
 **Notes:** The pre-filter (`_derive_default_prompt_action_types`) only excludes actions whose source matches a *registered* interface name. Plugin-provided actions (sources: `soul`, `bio`, `blocklist`, etc.) have no matching interface, so they pass through for every interface. `_is_non_user_facing_action` can exclude them if their brief/description contains "admin only", "deprecated", or "internal" — but most admin actions don't use those keywords. Two fix approaches: **(A) Tag at the plugin level** — add `"admin only"` to the brief of admin actions in each plugin's `get_supported_actions()`, so the existing guard in `_is_non_user_facing_action` catches them with zero new plumbing. **(B) Add an `admin_only` flag** to the action schema contract and update `_is_non_user_facing_action` to check it — cleaner but requires a schema change. Approach (A) is simpler. `PROMPT_LITE_MODE=true` already filters all these actions — the issue only affects non-lite local endpoints.
-
----
-
-### Recon `parse_recon_response` missing `_raw_llm_text` on 4 plugins  <!-- 2026-06-27 -->
-**Symptom:** `Recon plugin ReconMemoryRecollectorPlugin parse failed: parse_recon_response() got an unexpected keyword argument '_raw_llm_text'` — and same for log_reader, tone_evaluator, language_evaluator. Crashes the entire recon dispatch for that plugin group, producing zero recon contributions.
-**Location:** `plugins/recon_memory_recollector.py`, `plugins/recon_log_reader.py`, `plugins/recon_tone_evaluator.py`, `plugins/recon_language_evaluator.py` — all `parse_recon_response()` signatures.
-**Status:** fixed.
-**Notes:** `core/recon.py:747` passes `_raw_llm_text=llm_text` as a keyword arg to all recon plugins. Four plugins didn't accept it. `recon_web_search.py` already had it (was fixed earlier). The fix adds `_raw_llm_text: str | None = None` as the last keyword parameter.
-
-### Server-side LLM errors skip correction loop  <!-- 2026-06-27 -->
-**Symptom:** When the LLM engine returns a non-recoverable error (e.g. `Logprobs not supported` from selenium-llm-engine proxying Gemini), the correction loop in `message_chain.py` would call the corrector 2+ times, each hitting the same dead engine and waiting for timeout (~120s each), before finally sending a fallback message.
-**Location:** `core/message_chain.py` (correction loop, line ~2365).
-**Status:** fixed.
-**Notes:** The fix adds a pre-check in the correction loop: if the LLM return text contains a known server-error marker (`logprobs not supported`, `internal server error`, `service unavailable`, `5xx` gateway errors), skip directly to the fallback message. The `Logprobs not supported` error itself comes from the selenium-llm-engine (not SyntH) — the OpenAI SDK it uses internally sends `logprobs` to Gemini, which rejects it. Fix the selenium-llm-engine to strip/not-set `logprobs` in its OpenAI-compatible adapter.
-
----
-
-### `timestamptz`-as-column-name "fix" (ff9c4d7) was based on a false premise — reverted  <!-- 2026-06-30 -->
-**Symptom:** Commit `ff9c4d7` (2026-06-29) rewrote all SQL in `emotion_manager.py`, `ai_diary.py`, `grillo_outreach.py`, `chat_update_checker.py`, `chat_history_cache.py` to reference a column literally named `timestamptz`, on the claim that "the live DB uses `timestamptz` as the column identifier." This was wrong: every affected table (`emotion_state`, `ai_diary`, `ai_diary_archive`, `chat_history_cache`, `emotion_diary`) actually has a column named `timestamp` of type `timestamp with time zone` (i.e. the Postgres *type* is TIMESTAMPTZ, the *column* is `timestamp`) — confirmed live via `describe_table`. The commit conflated the type name with the column name. Result: constant `column "timestamptz" does not exist` errors across emotion state, diary, and chat history reads/writes — including history injection silently failing.
-**Location:** same files as above.
-**Status:** fixed (2026-06-30) — reverted `ff9c4d7`'s column renames back to `timestamp`. The MariaDB→Postgres syntax conversions bundled into that commit (`ON DUPLICATE KEY UPDATE`→`ON CONFLICT`, `UTC_TIMESTAMP()`→`NOW()`, `CURDATE()`→`CURRENT_DATE`) were also reverted because they're redundant: `core/db_backends.py` `translate_postgres_sql()` already auto-translates this MySQL syntax for every query that goes through `PostgresCompatCursor`, and `DATE(col)` is valid Postgres syntax natively.
-**Notes:** Before assuming a live schema differs from the code, verify with `describe_table` (synth-db MCP) rather than trusting an error-hint string or a guess — and check whether the existing DB compat layer already handles the apparent mismatch before hand-editing SQL strings across multiple files.
-
----
-
-### `grillo_activity_log` table — previously reported missing, now exists  <!-- 2026-06-30 -->
-**Status:** resolved/stale — `describe_table`/`list_tables` confirm `grillo_activity_log` exists on the live DB (7474+ rows as of 2026-06-30). The 2026-06-29 entry claiming it was missing no longer applies; table was presumably created by a subsequent migration.
-
----
-
-### `BOTFATHER_TOKEN` silently disabled when `load_all_from_db` runs before ConfigVar is evaluated  <!-- 2026-06-30 -->
-**Symptom:** `[telegram_interface] Interface loaded in disabled state: BOTFATHER_TOKEN not configured` at startup even though the token is present in `.env`. Bot never starts; recovery path also reports "BOTFATHER_TOKEN not configured".
-**Location:** `interface/telegram_bot.py` module-level autostart block (~line 2893); `core/config_manager.py` `load_all_from_db` / `_load_definition_sync`.
-**Status:** fixed (2026-06-30) — see [interface/telegram_bot.py](interface/telegram_bot.py) legacy autostart block.
-**Root cause:** `ConfigVar` is lazy — it only reads `os.getenv` the FIRST time `bool()` is called on it (`_load_definition_sync`). If something blocks that first call until AFTER `load_all_from_db` has run, `load_all_from_db` marks the definition `loaded=True, value=None` (not in DB → default=None). Subsequent `_load_definition_sync` calls then return early and never read env. Concretely: the legacy autostart condition previously evaluated `BOTFATHER_TOKEN` as part of its `if` clause, which forced env-loading before `load_all_from_db`. Adding any short-circuit before that `BOTFATHER_TOKEN` check (e.g. `_under_pytest` guard) can prevent the early eval, letting `load_all_from_db` eat the definition first.
-**Fix:** Evaluate `_botfather_configured = bool(BOTFATHER_TOKEN)` unconditionally at module level before the autostart `if` block. This forces `env_override=True` onto the definition, causing `load_all_from_db` to skip it. The `_under_pytest` guard (to prevent `initialize_interface()` from touching a live token during tests) must come AFTER this early eval — not before it. Also: only check `"pytest" in sys.modules` for the pytest guard, NOT `"unittest"` — the latter can appear in production if any dep imports `unittest.mock`.
 
 ---
 

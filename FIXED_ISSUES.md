@@ -23,6 +23,64 @@
 **Status:** fixed (2026-07-01).
 **Notes:** Fix had two parts: (1) made the two regexes case-sensitive (codebase convention: SQL type keywords are always UPPERCASE, identifiers always lowercase — verified no collisions exist for `LONGTEXT`/`DOUBLE`/`JSON`/etc.), so the type gets translated but a same-spelled lowercase column name doesn't. (2) Fixing the translator does **not** repair tables already created with the bad name (`CREATE TABLE IF NOT EXISTS` is a no-op against an existing table) — added `core/db.py:_heal_legacy_timestamptz_columns()`, called from `init_db()`'s Postgres branch, which does an idempotent `ALTER TABLE … RENAME COLUMN "timestamptz" TO "timestamp"` for the 7 affected tables (`ai_diary`, `ai_diary_archive`, `chat_history_cache`, `emotion_diary`, `emotion_state`, `memories`, `message_map`), skipping any table that already has a proper `timestamp` column. **Requires an app restart to take effect** (runs once at `init_db()` time). `radio_activity_log` was deliberately excluded from the heal list — it independently self-healed via `plugins/radio_host/db.py`'s own schema guard (`ADD COLUMN IF NOT EXISTS timestamp …`), so it now has *both* a stale unused `timestamptz` column and a working `timestamp` column; the dead column is harmless and was left alone (cleanup is a separate, not-yet-requested task).
 
+---
+
+### `BOTFATHER_TOKEN` silently disabled when `load_all_from_db` runs before ConfigVar is evaluated  <!-- 2026-06-30 -->
+**Symptom:** `[telegram_interface] Interface loaded in disabled state: BOTFATHER_TOKEN not configured` at startup even though the token is present in `.env`. Bot never starts; recovery path also reports "BOTFATHER_TOKEN not configured".
+**Location:** `interface/telegram_bot.py` module-level autostart block (~line 2893); `core/config_manager.py` `load_all_from_db` / `_load_definition_sync`.
+**Status:** fixed (2026-06-30) — see `interface/telegram_bot.py` legacy autostart block.
+**Root cause:** `ConfigVar` is lazy — it only reads `os.getenv` the FIRST time `bool()` is called on it (`_load_definition_sync`). If something blocks that first call until AFTER `load_all_from_db` has run, `load_all_from_db` marks the definition `loaded=True, value=None` (not in DB → default=None). Subsequent `_load_definition_sync` calls then return early and never read env. Concretely: the legacy autostart condition previously evaluated `BOTFATHER_TOKEN` as part of its `if` clause, which forced env-loading before `load_all_from_db`. Adding any short-circuit before that `BOTFATHER_TOKEN` check (e.g. `_under_pytest` guard) can prevent the early eval, letting `load_all_from_db` eat the definition first.
+**Fix:** Evaluate `_botfather_configured = bool(BOTFATHER_TOKEN)` unconditionally at module level before the autostart `if` block. This forces `env_override=True` onto the definition, causing `load_all_from_db` to skip it. The `_under_pytest` guard (to prevent `initialize_interface()` from touching a live token during tests) must come AFTER this early eval — not before it. Also: only check `"pytest" in sys.modules` for the pytest guard, NOT `"unittest"` — the latter can appear in production if any dep imports `unittest.mock`.
+
+---
+
+### `timestamptz`-as-column-name "fix" (ff9c4d7) was based on a false premise — reverted  <!-- 2026-06-30 -->
+**Symptom:** Commit `ff9c4d7` (2026-06-29) rewrote all SQL in `emotion_manager.py`, `ai_diary.py`, `grillo_outreach.py`, `chat_update_checker.py`, `chat_history_cache.py` to reference a column literally named `timestamptz`, on the claim that "the live DB uses `timestamptz` as the column identifier." This was wrong: every affected table (`emotion_state`, `ai_diary`, `ai_diary_archive`, `chat_history_cache`, `emotion_diary`) actually has a column named `timestamp` of type `timestamp with time zone` (i.e. the Postgres *type* is TIMESTAMPTZ, the *column* is `timestamp`) — confirmed live via `describe_table`. The commit conflated the type name with the column name. Result: constant `column "timestamptz" does not exist` errors across emotion state, diary, and chat history reads/writes — including history injection silently failing.
+**Location:** same files as above.
+**Status:** fixed (2026-06-30) — reverted `ff9c4d7`'s column renames back to `timestamp`. The MariaDB→Postgres syntax conversions bundled into that commit (`ON DUPLICATE KEY UPDATE`→`ON CONFLICT`, `UTC_TIMESTAMP()`→`NOW()`, `CURDATE()`→`CURRENT_DATE`) were also reverted because they're redundant: `core/db_backends.py` `translate_postgres_sql()` already auto-translates this MySQL syntax for every query that goes through `PostgresCompatCursor`, and `DATE(col)` is valid Postgres syntax natively.
+**Notes:** Before assuming a live schema differs from the code, verify with `describe_table` (synth-db MCP) rather than trusting an error-hint string or a guess — and check whether the existing DB compat layer already handles the apparent mismatch before hand-editing SQL strings across multiple files.
+
+---
+
+### `grillo_activity_log` table — previously reported missing, now exists  <!-- 2026-06-30 -->
+**Status:** resolved/stale — `describe_table`/`list_tables` confirm `grillo_activity_log` exists on the live DB (7474+ rows as of 2026-06-30). The 2026-06-29 entry claiming it was missing no longer applies; table was presumably created by a subsequent migration.
+**Note:** a separate, newer 2026-07-01 entry in `AGENTS.md` §12 reports `grillo_activity_log` absent on the **Postgres "soul"** backend specifically — that is a different DB target and remains open.
+
+---
+
+### Recon `parse_recon_response` missing `_raw_llm_text` on 4 plugins  <!-- 2026-06-27 -->
+**Symptom:** `Recon plugin ReconMemoryRecollectorPlugin parse failed: parse_recon_response() got an unexpected keyword argument '_raw_llm_text'` — and same for log_reader, tone_evaluator, language_evaluator. Crashes the entire recon dispatch for that plugin group, producing zero recon contributions.
+**Location:** `plugins/recon_memory_recollector.py`, `plugins/recon_log_reader.py`, `plugins/recon_tone_evaluator.py`, `plugins/recon_language_evaluator.py` — all `parse_recon_response()` signatures.
+**Status:** fixed (2026-06-27).
+**Notes:** `core/recon.py:747` passes `_raw_llm_text=llm_text` as a keyword arg to all recon plugins. Four plugins didn't accept it. `recon_web_search.py` already had it (was fixed earlier). The fix adds `_raw_llm_text: str | None = None` as the last keyword parameter.
+
+---
+
+### Server-side LLM errors skip correction loop  <!-- 2026-06-27 -->
+**Symptom:** When the LLM engine returns a non-recoverable error (e.g. `Logprobs not supported` from selenium-llm-engine proxying Gemini), the correction loop in `message_chain.py` would call the corrector 2+ times, each hitting the same dead engine and waiting for timeout (~120s each), before finally sending a fallback message.
+**Location:** `core/message_chain.py` (correction loop, line ~2365).
+**Status:** fixed (2026-06-27).
+**Notes:** The fix adds a pre-check in the correction loop: if the LLM return text contains a known server-error marker (`logprobs not supported`, `internal server error`, `service unavailable`, `5xx` gateway errors), skip directly to the fallback message. The `Logprobs not supported` error itself comes from the selenium-llm-engine (not SyntH) — the OpenAI SDK it uses internally sends `logprobs` to Gemini, which rejects it. Fix the selenium-llm-engine to strip/not-set `logprobs` in its OpenAI-compatible adapter.
+
+---
+
+### Gemma-4 missing closing `}` for action dict → diary payload selected as `parsed`  <!-- 2026-06-26 -->
+**Symptom:** message_chain logs `Normalizing action-key dictionary format` + `Added 6 synthetic action(s) for unregistered top-level key(s): interaction_summary, content, personal_thought, emotions, context_tags, involved_users` (the diary payload's own fields). Immediately followed by 12 unsupported action types, a correction, and eventual delivery. Trace: `ab6930e3-1689-48c6-a284-ea927c31695a`.
+**Location:** `core/transport_layer.py` `extract_json_from_text`; triggered by gemma-4-uncensored (Venice) output.
+**Root cause:** Gemma-4 sometimes emits the diary action dict without its closing `}`, so the outer `{"actions": [...], "type": "message_telegram_bot", ...}` is also malformed. The raw_decode scan falls back to the diary *payload* dict (minimum extra-chars parseable candidate). That dict has no `actions` key → message_chain normalizes its 6 fields as fake action types, then the unregistered-top-level-keys block doubles them to 12 → correction fires.
+**Status:** fixed (2026-06-26) — `json_repair` now also runs when `found_json` is a dict without `"actions"` (not just when nothing is found). It fixes the missing brace, json_repair returns a list `[outer_with_actions, use_animation]`, the list is detected and merged back into a single dict with `"actions"` containing all recovered actions. `syntax_repaired=True` in metadata; `had_errors=False`; no correction needed.
+**Notes:** The fix is in `extract_json_from_text` — the `_json_repair_needed` condition block at the bottom of the outer scan loop (outside all `if not found_json:` guards). Also: `json_repair` was NOT the cause of this trace (confirmed — no `json_repair` log entry exists; the bug predates the json_repair integration).
+
+---
+
+### Local model 20-min runaway + leaked `<thought>` (json_object not enforced)  <!-- 2026-06-21 -->
+**Symptom:** A single chat turn took ~20 min and logged a malformed thinking tag plus cascading repeated `message_telegram_bot` outputs; only the first message was delivered. Trace: 1240s elapsed, `prompt 4887 + completion 27881 ≈ 32768` — the model generated until it **filled its entire 32k context window**.
+**Location:** `core/external_endpoints/adapters/openai_compat.py` (`_strip_thinking`, `chat_completion`); `core/external_endpoints/bridges/cortex_bridge.py` (`_extra_api_kwargs`).
+**Status:** mitigated (2026-06-21) — both causes addressed; archived here since nothing actionable remains.
+**Notes:** Two independent causes. (1) The model ignored `enable_thinking=False` and emitted reasoning terminated by `</thought>`; `_strip_thinking` only matched `<think>`/`<thinking>`, not `<thought>`, nor a dangling closing tag (open tag dropped), so it leaked into content (JSON was still extracted after it, so the first reply went out). Fixed: regex now covers `thought` and a leading `^.*?</…>` dangling close. (2) **`response_format: json_object` is NOT enforced by this llama.cpp/model** — the output contained reasoning + prose + repeated JSON objects, i.e. free-form, so `force_json_object` is effectively a no-op here. With **no `max_tokens`**, a repetition loop ran to the context limit. Fixed: a default `max_tokens` (4096) is applied by `cortex_bridge._extra_api_kwargs()` — **only for local-model endpoints** (`disable_tools` / `force_action_grammar`); an explicit `extra_config.max_tokens` always wins, and cloud openai endpoints (xai, openrouter) stay uncapped (scoping tightened 2026-06-21 — every endpoint here is `protocol: openai`, so the blanket adapter default was wrong). The only *hard* JSON constraint for this server remains a GBNF `grammar` (already forwardable via `extra_config.grammar`); `json_object` should be treated as best-effort on local backends.
+
+---
+
 ### Local tool-calling models drop the chat reply → "missing reply" correction loop  <!-- 2026-06-20 -->
 **Symptom:** With native tool-calling models on llama.cpp (Qwen3.5, Gemma) the chat works for a turn or two, then every turn gets caught by the corrector (`⚠️ LLM generated no outbound message action … triggering corrector for missing reply`, `message_chain.py:2298`) and sometimes echoes the user's own message / ends in the 😵 fallback. Cloud models and non-tool-calling local quants are unaffected.
 **Location:** `core/prompt_renderers.py` (`OpenAIRenderer.parse_tool_call_response`), `core/external_endpoints/adapters/openai_compat.py` (`_extract_tool_call_actions`), `core/prompt_engine.py` (`_derive_default_prompt_action_types`).
@@ -61,6 +119,20 @@ To add another fetch-only action: return `deliver_to_llm: True` from its `execut
 **Location:** `core/external_endpoints/bridges/cortex_bridge.py` `_get_request_timeout()` (was `return 120.0`), applied both as the OpenAI SDK per-request `timeout` (httpx socket) *and* `asyncio.wait_for` around `chat_completion` (~lines 462/467).
 **Status:** fixed (2026-06-20).
 **Notes:** The trap that makes this hard to fix once: **multiple independent timeouts wrap the generation and the smallest binds**, so fixing one just exposes the next. Order (innermost→outermost) and the new generous defaults: generation `LLM_GENERATION_TIMEOUT_SEC` **1800** (new `core/config.py` var, `.env`/WebUI tunable, default for the bridge; per-endpoint `extra_config["timeout"]` still overrides) < `RESPONSE_TIMEOUT` 300→**2100** (`core/message_chain.py`) ≤ `AWAIT_RESPONSE_TIMEOUT` 600→**2400** (`core/transport_layer.py`) ≤ `LLM_CHAIN_LEASE_TIMEOUT_SEC` 600→**2400** (`core/plugin_instance.py`, registration + getter; only force-releases the lock, never cancels the gen). The adapter `__init__` default (60s, `openai_compat.py`) is overridden per-request by the bridge, so it doesn't bind on the cortex path. `RESPONSE_TIMEOUT`/`LLM_CHAIN_LEASE_TIMEOUT_SEC` were absent from the runtime DB (code default applies); `AWAIT_RESPONSE_TIMEOUT` was persisted at 600 and was bumped to 2400 in the DB. **External, not in code:** llama.cpp's own `--timeout` server arg — raise it to match for very long gens or the server cancels first. Invariant to preserve if you touch these: keep generation < all outer guards.
+
+---
+
+### `schedule_message send_at` path imported missing `get_local_tz` helper  <!-- 2026-04-18, fixed 2026-06-12 -->
+**Symptom:** Absolute-time reminders could fail before scheduling with an import error when `schedule_message.payload.send_at` was used (`from core.time_zone_utils import get_local_tz` — a symbol that never existed). Relative-delay scheduling (`send_in`) was unaffected.
+**Location:** `plugins/event_plugin.py` (`_handle_schedule_message_payload`).
+**Status:** fixed (2026-06-12 audit) — verified 2026-07-03: the phantom import is gone from `plugins/event_plugin.py`.
+
+---
+
+### `event_plugin` interface-path reminder delivery called stale `run_action` signature  <!-- 2026-04-18, fixed 2026-06-12 -->
+**Symptom:** Reminder delivery via `interface_path` could log a `run_action()` argument error instead of sending the message — the call site still used the old two-argument form (`run_action(action, message)`).
+**Location:** `plugins/event_plugin.py` (`_send_via_interface_path`) vs `core/action_parser.py` (`run_action(action, context, bot, original_message)`).
+**Status:** fixed (2026-06-12 audit) — verified 2026-07-03: the call site now uses `run_action(action, context, None, message)`.
 
 ---
 

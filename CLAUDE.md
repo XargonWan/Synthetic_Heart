@@ -17,10 +17,12 @@ You are a Senior Python Architect working on SyntH, a modular AI persona system.
 uv run ruff format .
 uv run ruff check --fix .
 uv run ty check path/to/files_you_edited.py   # scoped — never the whole repo
-uv run pytest # Ignore all selenium tests
+uv run pytest tests/test_<area_you_touched>.py   # scoped — NEVER the bare full suite (see AGENTS.md §9)
 ```
 
 Fix failures before moving on.
+
+**Never run a bare `uv run pytest`:** it takes ~5 minutes, has ~3 known order-dependent failures (`config_registry` pollution, AGENTS.md §12), and `tests/plugins/test_selenium_ttsfree.py` fails at collection because Selenium is not installed in this workspace. Run only the tests covering your change; if a full sweep is explicitly requested, add `--ignore=tests/plugins/test_selenium_ttsfree.py`.
 
 ## Git & Commits
 
@@ -167,6 +169,7 @@ Always follow this order — it prevents reading code you don't need:
 - Don't read all of `init-db.sql` — grep for the specific `CREATE TABLE <name>`, or see AGENTS.md §13
 - Don't read full active `synth.log` — it rotates constantly, use MCP tools
 - Don't run `uv run ty check .` on the whole repo — scope to edited files only
+- Don't run the full pytest suite — ~5 min, known unrelated failures; scope to the tests for what you touched (AGENTS.md §9)
 
 ## Architecture TL;DR
 
