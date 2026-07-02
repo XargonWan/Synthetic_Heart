@@ -203,16 +203,23 @@ When `eyes_closed > 0.5`, blink and saccade loops are automatically suspended un
 
 ## 8. Development Workflow
 
-### First-time setup after cloning
+### First-time setup after cloning (per workspace)
+
+This repo is routinely checked out in **parallel workspaces** (e.g. `D:\dev\D15` and `D:\dev\B15`, one SyntH instance each). Everything machine- or instance-specific is deliberately per-workspace: `.env` (all API keys/DB config), `.gitnexus/` + `.gitnexus-home/` (code-intelligence index + registry), and `mcp_servers/grok-api-mcp/node_modules/`. None of these travel through git, so each fresh clone (or a clone that never ran setup) needs:
 
 ```bash
-uv sync                   # install all dependencies including MCP server deps
-npx gitnexus analyze      # build the code intelligence index (one-time, ~1-2 min)
+uv sync                                              # 1. python deps, incl. MCP server deps
+GITNEXUS_HOME=.gitnexus-home npx gitnexus analyze --skip-agents-md   # 2. build THIS workspace's code index (~1 min)
+cd mcp_servers/grok-api-mcp && npm ci --omit=dev && cd ../..          # 3. grok-api-docs runtime deps (dist/ is committed prebuilt)
 ```
 
-MCP servers (`synth-logs`, `synth-db`, `synth-cortex`, `gitnexus`, `affine`) are pre-configured in `.mcp.json` and `.vscode/mcp.json` — no manual setup needed after the above two commands.
+PowerShell variant for step 2: `$env:GITNEXUS_HOME=".gitnexus-home"; npx gitnexus analyze --skip-agents-md`
 
-> **Affine MCP one-time credential setup:** credentials are stored in `~/.config/affine-mcp/config`, not in the repo. If running on a new machine, write the file (see §8a below).
+Why the env var: GitNexus keys repos by **folder basename** in a registry, and by default that registry is global (`~/.gitnexus/registry.json`) — two clones both named `synthetic_heart` collide there and tools silently resolve to whichever clone registered first. `.mcp.json` therefore launches the gitnexus MCP with `GITNEXUS_HOME=.gitnexus-home` (a workspace-local registry holding exactly this clone), and every manual `gitnexus` CLI run must set the same variable or it will read/write the wrong registry. Always pass `--skip-agents-md` too: the gitnexus sections in AGENTS.md/CLAUDE.md are maintained by hand (the tool would inject volatile symbol counts that churn on every reindex — its `--no-stats` flag is broken, the code reads `noStats` but commander sets `stats`).
+
+MCP servers (`synth-logs`, `synth-db`, `synth-cortex`, `synth-langfuse`, `gitnexus`, `grok-api-docs`, `langfuse`, `affine`) are all pre-configured in `.mcp.json` with workspace-relative paths — after the three commands above everything works. The `langfuse`/`synth-langfuse` servers read `LANGFUSE_HOST` + `LANGFUSE_PUBLIC_KEY` + `LANGFUSE_SECRET_KEY` from this workspace's `.env`.
+
+> **Affine MCP one-time credential setup:** credentials are stored in `~/.config/affine-mcp/config`, not in the repo (per-machine, shared by all workspaces). If running on a new machine, write the file (see §8a below).
 
 ### §8a. Affine MCP — Project Planning Board
 
@@ -389,14 +396,6 @@ docker exec synth-dev tail -f /app/logs/synth.log | grep -E "\[grillo\]|grillo"
 > ```
 
 > Resolved issues (Status: fixed) have been moved to [`FIXED_ISSUES.md`](FIXED_ISSUES.md).
-
----
-
-### GitNexus index points at a different clone of this repo — `gitnexus_detect_changes` silently reports "No changes detected"  <!-- 2026-07-02 -->
-**Symptom:** After editing files under `D:\dev\D15\synthetic_heart` and calling `gitnexus_detect_changes({scope: "unstaged"/"all"/"compare"})`, the tool returns "No changes detected" even though `git diff --stat` clearly shows edited files.
-**Location:** MCP tool config / `.gitnexus` index, not this repo's code.
-**Status:** known, not fixed (informational only — no code change needed).
-**Notes:** `mcp__gitnexus__list_repos()` shows the only indexed `synthetic_heart` repo is at `D:\dev\13\synthetic_heart` (a **different clone**, indexed at an older commit) — not the working directory used in this session (`D:\dev\D15\synthetic_heart`). `detect_changes` diffs git state at whatever path the index points to, so it silently checks the wrong clone's git state and finds nothing. If you hit this, don't assume your edits are somehow invisible/reverted — cross-check with plain `git diff`/`git status` in the actual working directory instead of trusting `detect_changes`. Fix (not yet done): either re-run `npx gitnexus analyze` from `D:\dev\D15\synthetic_heart` to point the index at the right clone, or confirm with the user which clone is canonical if both are in active use.
 
 ---
 
@@ -788,9 +787,9 @@ All keys stored in the `config` table and accessible via `config_registry.get_va
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **synthetic_heart** (10324 symbols, 33256 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **synthetic_heart**. Use the GitNexus MCP tools to understand code, assess impact, and navigate safely. The index and registry are **per-workspace** (`.gitnexus/` + `.gitnexus-home/`, both gitignored) — see §8 for the one-time setup each clone needs.
 
-> If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
+> If any GitNexus tool warns the index is stale (or errors with "No indexed repositories"), re-run the per-workspace analyze command from §8 first.
 
 ## Always Do
 
@@ -858,21 +857,17 @@ Before completing any code modification task, verify:
 
 ## Keeping the Index Fresh
 
-After committing code changes, the GitNexus index becomes stale. Re-run analyze to update it:
+After committing code changes, the GitNexus index becomes stale. Re-run analyze to update it — **always with the per-workspace registry and `--skip-agents-md`** (see §8 for why):
 
 ```bash
-npx gitnexus analyze
+GITNEXUS_HOME=.gitnexus-home npx gitnexus analyze --skip-agents-md
 ```
 
-If the index previously included embeddings, preserve them by adding `--embeddings`:
+PowerShell: `$env:GITNEXUS_HOME=".gitnexus-home"; npx gitnexus analyze --skip-agents-md`
 
-```bash
-npx gitnexus analyze --embeddings
-```
+If the index previously included embeddings, preserve them by adding `--embeddings`. To check whether embeddings exist, inspect `.gitnexus/meta.json` — the `stats.embeddings` field shows the count (0 means no embeddings). **Running analyze without `--embeddings` will delete any previously generated embeddings.**
 
-To check whether embeddings exist, inspect `.gitnexus/meta.json` — the `stats.embeddings` field shows the count (0 means no embeddings). **Running analyze without `--embeddings` will delete any previously generated embeddings.**
-
-> Claude Code users: A PostToolUse hook handles this automatically after `git commit` and `git merge`.
+> There is no automatic reindex hook in these workspaces — re-run the command above manually after committing.
 
 ## CLI
 

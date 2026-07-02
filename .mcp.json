@@ -12,7 +12,7 @@
       "type": "stdio",
       "command": "node",
       "args": [
-        "d:/dev/13/synthetic_heart/mcp_servers/grok-api-mcp/dist/index.js"
+        "mcp_servers/grok-api-mcp/dist/index.js"
       ]
     },
     "xai-docs-official": {
@@ -25,7 +25,10 @@
       "args": [
         "gitnexus",
         "mcp"
-      ]
+      ],
+      "env": {
+        "GITNEXUS_HOME": ".gitnexus-home"
+      }
     },
     "synth-logs": {
       "type": "stdio",
@@ -52,6 +55,15 @@
         "run",
         "python",
         "mcp_servers/synth_cortex.py"
+      ]
+    },
+    "synth-langfuse": {
+      "type": "stdio",
+      "command": "uv",
+      "args": [
+        "run",
+        "python",
+        "mcp_servers/synth_langfuse.py"
       ]
     },
     "affine": {

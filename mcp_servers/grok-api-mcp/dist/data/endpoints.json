@@ -1,0 +1,337 @@
+{
+  "endpoints": [
+    {
+      "method": "POST",
+      "path": "/v1/responses",
+      "description": "Create new responses (preferred method)",
+      "category": "chat",
+      "api": "inference"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/responses/{response_id}",
+      "description": "Retrieve a specific response by ID",
+      "category": "chat",
+      "api": "inference"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/chat/completions",
+      "description": "Chat completion (legacy, OpenAI-compatible)",
+      "category": "chat",
+      "api": "inference"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/images/generations",
+      "description": "Generate images from text prompts",
+      "category": "images",
+      "api": "inference"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/images/edits",
+      "description": "Edit existing images",
+      "category": "images",
+      "api": "inference"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/videos/generations",
+      "description": "Generate videos from text prompts",
+      "category": "videos",
+      "api": "inference"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/videos/{request_id}",
+      "description": "Retrieve video generation result",
+      "category": "videos",
+      "api": "inference"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/models",
+      "description": "List all available models",
+      "category": "models",
+      "api": "inference"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/language-models",
+      "description": "List available language models",
+      "category": "models",
+      "api": "inference"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/models/{model_id}",
+      "description": "Get details about a specific model",
+      "category": "models",
+      "api": "inference"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/files",
+      "description": "Upload a file for use in conversations",
+      "category": "files",
+      "api": "inference"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/files",
+      "description": "List all uploaded files",
+      "category": "files",
+      "api": "inference"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/files/{file_id}",
+      "description": "Get file metadata",
+      "category": "files",
+      "api": "inference"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/files/{file_id}/content",
+      "description": "Download file content",
+      "category": "files",
+      "api": "inference"
+    },
+    {
+      "method": "DELETE",
+      "path": "/v1/files/{file_id}",
+      "description": "Delete a file",
+      "category": "files",
+      "api": "inference"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/tokenize-text",
+      "description": "Convert text to tokens",
+      "category": "chat",
+      "api": "inference"
+    },
+    {
+      "method": "WSS",
+      "path": "/v1/realtime",
+      "description": "WebSocket endpoint for real-time voice conversations (Voice Agent API)",
+      "category": "voice",
+      "api": "inference"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/realtime/client_secrets",
+      "description": "Get ephemeral token for client-side voice authentication",
+      "category": "voice",
+      "api": "inference"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/batches",
+      "description": "Create a new batch for processing",
+      "category": "batch",
+      "api": "inference"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/batches",
+      "description": "List all batches",
+      "category": "batch",
+      "api": "inference"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/batches/{batch_id}",
+      "description": "Get details of a specific batch",
+      "category": "batch",
+      "api": "inference"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/batches/{batch_id}/requests",
+      "description": "List all requests in a batch",
+      "category": "batch",
+      "api": "inference"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/batches/{batch_id}/requests",
+      "description": "Add requests to a batch",
+      "category": "batch",
+      "api": "inference"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/batches/{batch_id}/results",
+      "description": "Get results of completed batch requests",
+      "category": "batch",
+      "api": "inference"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/batches/{batch_id}/cancel",
+      "description": "Cancel processing of a batch",
+      "category": "batch",
+      "api": "inference"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/collections",
+      "description": "Create a new collection for document storage",
+      "category": "collections",
+      "api": "management"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/collections",
+      "description": "List all collections",
+      "category": "collections",
+      "api": "management"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/collections/{collection_id}",
+      "description": "Get collection details",
+      "category": "collections",
+      "api": "management"
+    },
+    {
+      "method": "PATCH",
+      "path": "/v1/collections/{collection_id}",
+      "description": "Update collection name or description",
+      "category": "collections",
+      "api": "management"
+    },
+    {
+      "method": "DELETE",
+      "path": "/v1/collections/{collection_id}",
+      "description": "Delete a collection",
+      "category": "collections",
+      "api": "management"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/collections/{collection_id}/documents",
+      "description": "Upload a document to a collection",
+      "category": "collections",
+      "api": "management"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/collections/{collection_id}/documents",
+      "description": "List documents in a collection",
+      "category": "collections",
+      "api": "management"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/collections/{collection_id}/documents/{document_id}",
+      "description": "Get document details",
+      "category": "collections",
+      "api": "management"
+    },
+    {
+      "method": "DELETE",
+      "path": "/v1/collections/{collection_id}/documents/{document_id}",
+      "description": "Delete a document from a collection",
+      "category": "collections",
+      "api": "management"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/api-keys",
+      "description": "List all API keys",
+      "category": "api-keys",
+      "api": "management"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/api-keys",
+      "description": "Create a new API key",
+      "category": "api-keys",
+      "api": "management"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/api-keys/{key_id}",
+      "description": "Get API key details",
+      "category": "api-keys",
+      "api": "management"
+    },
+    {
+      "method": "PATCH",
+      "path": "/v1/api-keys/{key_id}",
+      "description": "Update API key settings",
+      "category": "api-keys",
+      "api": "management"
+    },
+    {
+      "method": "DELETE",
+      "path": "/v1/api-keys/{key_id}",
+      "description": "Delete an API key",
+      "category": "api-keys",
+      "api": "management"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/billing/credits",
+      "description": "Get prepaid credit balance",
+      "category": "billing",
+      "api": "management"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/billing/usage",
+      "description": "Get usage summary with cost breakdown",
+      "category": "billing",
+      "api": "management"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/team",
+      "description": "Get team information",
+      "category": "team",
+      "api": "management"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/team/members",
+      "description": "List team members",
+      "category": "team",
+      "api": "management"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/team/invitations",
+      "description": "Invite a new team member",
+      "category": "team",
+      "api": "management"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/audit-logs",
+      "description": "List audit log events",
+      "category": "audit",
+      "api": "management"
+    }
+  ],
+  "apiBaseUrls": {
+    "inference": "https://api.x.ai",
+    "management": "https://management-api.x.ai"
+  },
+  "categories": {
+    "chat": "Chat completions and responses",
+    "images": "Image generation and editing",
+    "videos": "Video generation",
+    "voice": "Real-time voice conversations",
+    "models": "Model information",
+    "files": "File upload and management",
+    "batch": "Batch processing",
+    "collections": "Document collections for RAG",
+    "api-keys": "API key management",
+    "billing": "Credits and usage",
+    "team": "Team management",
+    "audit": "Audit logs"
+  }
+}

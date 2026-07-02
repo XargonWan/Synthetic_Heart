@@ -17,6 +17,14 @@
 
 ---
 
+### GitNexus index pointed at a different clone of this repo — tools silently ran against the wrong workspace  <!-- 2026-07-02, fixed 2026-07-03 -->
+**Symptom:** From `D:\dev\D15\synthetic_heart`, `gitnexus_detect_changes` returned "No changes detected" despite real edits, and every gitnexus tool actually queried another clone's index. `mcp__gitnexus__list_repos()` showed the indexed `synthetic_heart` repos at `D:\dev\13` and `D:\dev\B15` — never D15.
+**Location:** GitNexus global registry (`~/.gitnexus/registry.json`), not this repo's code.
+**Status:** fixed (2026-07-03).
+**Notes:** Root cause: GitNexus keys repos by **folder basename** and its MCP resolves the `repo` name parameter by first match — with multiple clones all named `synthetic_heart` in the shared global registry, whichever clone registered first won, and D15 had never been indexed at all. Fix: per-workspace isolation via `GITNEXUS_HOME` (the registry-path env override in gitnexus's `repo-manager.js`). `.mcp.json` now launches the gitnexus MCP with `GITNEXUS_HOME=.gitnexus-home` (gitignored, one registry per workspace containing exactly that clone, which also makes single-repo auto-resolution work — no `repo` param needed), the stale `D:\dev\13` entry was removed from the global registry, and AGENTS.md §8 documents the per-workspace analyze command (`GITNEXUS_HOME=.gitnexus-home npx gitnexus analyze --skip-agents-md`). Each workspace must run that once — until it does, gitnexus tools error with "No indexed repositories" instead of silently using the wrong clone, which is the intended failure mode.
+
+---
+
 ### Postgres DDL translator silently renamed the `timestamp` column itself, not just its type  <!-- 2026-07-01 -->
 **Symptom:** `column "timestamp" does not exist … HINT: Perhaps you meant to reference the column "emotion_state.timestamptz"` recurring across `emotion_manager`, `ai_diary`, `chat_history_cache`, `grillo_outreach`, `webui`, etc., even after the source SQL/Python were confirmed to say `timestamp` everywhere (not `timestamptz`).
 **Location:** `core/db_backends.py` `_translate_create_table()` — the `\bDATETIME\b`/`\bTIMESTAMP\b` → `TIMESTAMPTZ` regexes ran with `re.IGNORECASE`. Every column literally named `timestamp` (lowercase, as this codebase always writes identifiers) sits at a word boundary just like the uppercase `TIMESTAMP`/`DATETIME` type keyword it follows, so the case-insensitive match renamed the **column itself** to `timestamptz` on every `CREATE TABLE` that went through `translate_postgres_sql()` on the Postgres ("soul") backend — including `core/db.py:init_db()`'s own native-Postgres schema load from `scripts/sql/app_main_postgres.sql`, which already spelled the column correctly.

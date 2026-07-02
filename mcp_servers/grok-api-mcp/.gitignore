@@ -1,4 +1,5 @@
 node_modules/
-dist/
+# dist/ is committed on purpose: prebuilt so parallel workspaces (D15/B15)
+# only need `npm ci --omit=dev` here, no cross-platform build step.
 *.log
 .DS_Store

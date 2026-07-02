@@ -132,6 +132,18 @@ call `cortex_sessions()` first to get current IDs.
 **Token-efficiency tip:** `cortex_analyze` gives the full diagnostic picture in
 one call. Only use `cortex_read` when you need to see the literal prompt text.
 
+### synth-langfuse — full-verbosity trace payloads
+
+In-repo server (`mcp_servers/synth_langfuse.py`); credentials come from this workspace's `.env`. Use it whenever you need the **actual prompt/response text** of a trace — the third-party `langfuse` server's `get_trace_detail` strips payloads entirely and `get_observations` caps them at 2000 chars, and `cortex_api.log` never contains the system prompt at all (see AGENTS.md §12).
+
+| Tool | What it shows |
+|------|--------------|
+| `traces_recent(limit=20, minutes=0)` | Compact newest-first list with trace ids |
+| `trace_full(trace_id)` | Trace + every observation **with full input/output** (per-field truncation only past 30k chars, always explicitly marked; `max_chars_per_field=0` = unlimited) |
+| `observation_full(observation_id)` | One observation, raw and complete |
+
+Keep using the `langfuse` server for metrics, costs, and aggregate queries — this one is for reading payloads.
+
 ### gitnexus — code intelligence
 
 | Task | Call |
@@ -156,10 +168,11 @@ Always follow this order — it prevents reading code you don't need:
 1. `get_recent_errors(minutes=60)` — what actually failed
 2. `tail_log("synth", lines=100)` — surrounding context
 3. `cortex_sessions(limit=20)` then `cortex_analyze(N)` — inspect prompt assembly + LLM actions
-4. `get_config()` / `get_emotion_state()` / `get_memories()` — inspect live DB state if relevant
-5. `gitnexus_query("<error keyword or symptom>")` — find the relevant execution flow
-6. `gitnexus_context("<suspect function>")` — full caller/callee map before touching anything
-7. Read source files last, scoped only to what the above pointed at
+4. `traces_recent()` then `trace_full(id)` (synth-langfuse) — when you need the literal prompt/response text, including the system prompt that `cortex_api.log` never records
+5. `get_config()` / `get_emotion_state()` / `get_memories()` — inspect live DB state if relevant
+6. `gitnexus_query("<error keyword or symptom>")` — find the relevant execution flow
+7. `gitnexus_context("<suspect function>")` — full caller/callee map before touching anything
+8. Read source files last, scoped only to what the above pointed at
 
 ## Token Traps — Never Do These
 
@@ -184,9 +197,9 @@ See `AGENTS.md` for the full architecture reference, animation system details, p
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **synthetic_heart** (10324 symbols, 33256 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **synthetic_heart**. Use the GitNexus MCP tools to understand code, assess impact, and navigate safely. The index and registry are **per-workspace** (`.gitnexus/` + `.gitnexus-home/`, both gitignored) — see AGENTS.md §8 for the one-time setup each clone needs.
 
-> If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
+> If any GitNexus tool warns the index is stale (or errors with "No indexed repositories"), re-run the per-workspace analyze command from AGENTS.md §8 first.
 
 ## Always Do
 
@@ -254,21 +267,17 @@ Before completing any code modification task, verify:
 
 ## Keeping the Index Fresh
 
-After committing code changes, the GitNexus index becomes stale. Re-run analyze to update it:
+After committing code changes, the GitNexus index becomes stale. Re-run analyze to update it — **always with the per-workspace registry and `--skip-agents-md`** (see AGENTS.md §8 for why):
 
 ```bash
-npx gitnexus analyze
+GITNEXUS_HOME=.gitnexus-home npx gitnexus analyze --skip-agents-md
 ```
 
-If the index previously included embeddings, preserve them by adding `--embeddings`:
+PowerShell: `$env:GITNEXUS_HOME=".gitnexus-home"; npx gitnexus analyze --skip-agents-md`
 
-```bash
-npx gitnexus analyze --embeddings
-```
+If the index previously included embeddings, preserve them by adding `--embeddings`. To check whether embeddings exist, inspect `.gitnexus/meta.json` — the `stats.embeddings` field shows the count (0 means no embeddings). **Running analyze without `--embeddings` will delete any previously generated embeddings.**
 
-To check whether embeddings exist, inspect `.gitnexus/meta.json` — the `stats.embeddings` field shows the count (0 means no embeddings). **Running analyze without `--embeddings` will delete any previously generated embeddings.**
-
-> Claude Code users: A PostToolUse hook handles this automatically after `git commit` and `git merge`.
+> There is no automatic reindex hook in these workspaces — re-run the command above manually after committing.
 
 ## CLI
 
