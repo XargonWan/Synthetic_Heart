@@ -1883,7 +1883,15 @@ class SynthWebUIInterface:
 
         delivered = 0
         errors: List[str] = []
-        for session_id in list(self.connections.keys()):
+        # Deduplicate on the *logical* session id: several spectator sockets may
+        # share one session (Karada v2), but the action pipeline must run once
+        # per logical session, not once per physical socket.
+        logical_sessions = list(
+            dict.fromkeys(
+                self._logical_session_id(key) for key in self.connections.keys()
+            )
+        )
+        for session_id in logical_sessions:
             interface_path = f"{INTERFACE_NAME}/{session_id}"
 
             # Build the action list.  Use clean_text (tags already stripped).
@@ -2195,7 +2203,19 @@ class SynthWebUIInterface:
             # history survives container restarts without any file/DB dependency.
             session_id = "webui_default"
             self.session_id = session_id
-        self.connections[session_id] = websocket
+        # Karada v2 shared-state model: every connected client is a *spectator*
+        # of the same unique Synth character. The logical ``session_id`` (chat
+        # history / interface_path identity) is intentionally shared in
+        # single-session mode, but each physical socket must be registered under
+        # a *unique* connection key — otherwise a second WebUI overwrites the
+        # first in ``self.connections`` and only the last client receives
+        # animation/face/expression broadcasts. In multi-session mode the two
+        # values coincide (unique UUID per client).
+        if self._multi_session_enabled():
+            conn_key = session_id
+        else:
+            conn_key = f"{session_id}:{uuid.uuid4().hex}"
+        self.connections[conn_key] = websocket
         self.message_history.setdefault(session_id, deque(maxlen=self.max_history))
         await websocket.send_json({"type": "session", "session_id": session_id})
         # Ensure persisted history is loaded into memory and replayed
@@ -2341,12 +2361,22 @@ class SynthWebUIInterface:
                     )
                 )
         except WebSocketDisconnect:
-            log_info(f"{LOG_PREFIX} Client disconnected: {session_id}")
+            log_info(
+                f"{LOG_PREFIX} Client disconnected: {session_id} (conn={conn_key})"
+            )
         except Exception as exc:  # pragma: no cover - runtime issues
             log_error(f"{LOG_PREFIX} websocket error: {exc}")
         finally:
-            self.connections.pop(session_id, None)
-            self.message_history.pop(session_id, None)
+            # Remove only this physical socket. In single-session mode the
+            # logical history is shared across all spectator clients, so only
+            # drop it once the last connection for this session_id is gone.
+            self.connections.pop(conn_key, None)
+            still_connected = any(
+                key == session_id or key.startswith(f"{session_id}:")
+                for key in self.connections
+            )
+            if not still_connected:
+                self.message_history.pop(session_id, None)
 
     async def logs_ws_endpoint(
         self, websocket: WebSocket
@@ -3701,6 +3731,32 @@ class SynthWebUIInterface:
                     f"{LOG_PREFIX} Failed to persist chat message for {session_id}: {e}"
                 )
 
+    def _logical_session_id(self, conn_key: str) -> str:
+        """Map a physical connection key back to its logical session id.
+
+        In single-session mode a socket is registered under a composite key
+        ``"<session_id>:<socket-uuid>"`` so that multiple spectator clients can
+        coexist without overwriting each other (Karada v2 shared-state model).
+        This strips the ``:<socket-uuid>`` suffix to recover the shared logical
+        ``session_id`` used for chat history / interface_path. In multi-session
+        mode keys have no suffix and are returned unchanged.
+        """
+        return conn_key.split(":", 1)[0] if ":" in conn_key else conn_key
+
+    def _sockets_for_session(self, session_id: str) -> "list[tuple[str, WebSocket]]":
+        """Return all live ``(conn_key, websocket)`` pairs for a logical session.
+
+        A logical session may be observed by several spectator clients that each
+        hold their own physical socket. Outbound messages for a shared avatar
+        (text, audio, animation) must reach every one of them, so callers should
+        iterate this list instead of doing a single ``connections.get(id)``.
+        """
+        return [
+            (key, ws)
+            for key, ws in self.connections.items()
+            if self._logical_session_id(key) == session_id
+        ]
+
     def _multi_session_enabled(self) -> bool:
         """Return True if the experimental multi-session flag is active.
 
@@ -3909,7 +3965,11 @@ class SynthWebUIInterface:
                 chat_id = session_id
 
         session_id = str(chat_id)
-        websocket = self.connections.get(session_id)
+        # Karada v2 shared-state: a logical session may be watched by several
+        # spectator sockets. Collect *all* of them so the message reaches every
+        # viewer, not just the one whose key happens to equal session_id.
+        targets = self._sockets_for_session(session_id)
+        websocket = targets[0][1] if targets else None
         if not websocket:
             try:
                 from core.config_manager import config_registry
@@ -3932,8 +3992,9 @@ class SynthWebUIInterface:
                             log_debug(
                                 f"{LOG_PREFIX} 🔀 Alias redirect: {session_id} -> {candidate}"
                             )
-                            websocket = self.connections[candidate]
-                            session_id = candidate
+                            session_id = self._logical_session_id(candidate)
+                            targets = self._sockets_for_session(session_id)
+                            websocket = targets[0][1] if targets else None
                             break
             except Exception as e:
                 log_debug(f"{LOG_PREFIX} Alias resolution check failed: {e}")
@@ -3968,32 +4029,34 @@ class SynthWebUIInterface:
         # Normalize metadata before websocket/history/DB use to avoid serialization errors.
         safe_metadata = self._clean_for_json(metadata) if metadata is not None else None
 
-        # If websocket is present attempt to send; otherwise persist for later replay
+        # If websocket is present attempt to send; otherwise persist for later replay.
+        # Broadcast to every spectator socket of this logical session so all
+        # viewers of the shared avatar see the same message bubble.
         if websocket:
-            try:
-                payload: Dict[str, Any] = {
-                    "type": "message",
-                    "sender": "synth",
-                    "text": text,
-                }
-                # Forward attachments if present so the WebUI can render them.
-                if metadata and isinstance(metadata.get("attachments"), list):
-                    payload["attachments"] = metadata["attachments"]
-                    # Keep attachments accessible under `data` for compatibility.
-                    payload.setdefault("data", {})["attachments"] = metadata[
-                        "attachments"
-                    ]
+            payload: Dict[str, Any] = {
+                "type": "message",
+                "sender": "synth",
+                "text": text,
+            }
+            # Forward attachments if present so the WebUI can render them.
+            if metadata and isinstance(metadata.get("attachments"), list):
+                payload["attachments"] = metadata["attachments"]
+                # Keep attachments accessible under `data` for compatibility.
+                payload.setdefault("data", {})["attachments"] = metadata["attachments"]
 
-                # Forward metadata fields that the client can use (e.g. tts_url).
-                if safe_metadata and safe_metadata.get("tts_url"):
-                    payload["tts_url"] = safe_metadata["tts_url"]
-                    payload.setdefault("data", {})["tts_url"] = safe_metadata["tts_url"]
+            # Forward metadata fields that the client can use (e.g. tts_url).
+            if safe_metadata and safe_metadata.get("tts_url"):
+                payload["tts_url"] = safe_metadata["tts_url"]
+                payload.setdefault("data", {})["tts_url"] = safe_metadata["tts_url"]
 
-                await websocket.send_json(self._clean_for_json(payload))
-            except Exception as e:
-                log_warning(
-                    f"{LOG_PREFIX} Failed to send websocket message to {session_id}: {e}"
-                )
+            clean_payload = self._clean_for_json(payload)
+            for target_key, target_ws in targets:
+                try:
+                    await target_ws.send_json(clean_payload)
+                except Exception as e:
+                    log_warning(
+                        f"{LOG_PREFIX} Failed to send websocket message to {target_key}: {e}"
+                    )
 
         # Append to in-memory history so reconnect will replay it
         await self._append_history(
@@ -4105,8 +4168,7 @@ class SynthWebUIInterface:
             if len(parts) >= 2 and parts[0] == INTERFACE_NAME:
                 sid = parts[1]
 
-        websocket = self.connections.get(sid)
-        if not websocket:
+        if not self._sockets_for_session(sid):
             log_warning(f"{LOG_PREFIX} send_tts_audio: no websocket for session {sid}")
             return False
 

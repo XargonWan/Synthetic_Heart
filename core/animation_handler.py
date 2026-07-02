@@ -150,6 +150,11 @@ class KaradaStateServer:
         # range and reused for reconnect/full-state sync.
         self._current_face_values: Dict[str, float] = {}
         self._face_values_initialized: bool = False
+        # Active transient facial expression (from [em_*] timeline). This is the
+        # authoritative snapshot re-sent to late-joining clients and by the
+        # periodic state refresh so every viewer of the shared avatar converges
+        # on the same expression. ``None`` means no expression override active.
+        self._current_expression: Optional[Dict[str, Any]] = None
 
         # Priority registration: maps state names to their priority values.
         # Starts from ANIMATION_STATE_PRIORITIES and can be extended at runtime.
@@ -159,6 +164,11 @@ class KaradaStateServer:
 
         # Watchdog: periodic background task to detect stuck states
         self._watchdog_task: Optional[asyncio.Task] = None
+        # Periodic state refresh: re-broadcasts the authoritative face /
+        # expression snapshot so every connected client (shared "single body")
+        # converges even after dropped packets or a mid-timeline join.
+        self._state_refresh_task: Optional[asyncio.Task] = None
+        self._state_refresh_interval: float = 5.0
 
     def set_webui(self, webui: SynthWebUIInterface) -> None:
         """Set or update the WebUI reference.
@@ -235,9 +245,11 @@ class KaradaStateServer:
 
         self._transports.append(transport)
         log_debug(f"[KaradaStateServer] Transport added: {type(transport).__name__}")
-        # Start the watchdog when the first transport arrives
+        # Start the watchdog and periodic state refresh when the first
+        # transport arrives.
         if len(self._transports) == 1:
             self.start_watchdog()
+            self.start_state_refresh()
 
     def remove_transport(self, transport: KaradaTransport) -> None:
         """Un-register a previously added transport."""
@@ -336,8 +348,6 @@ class KaradaStateServer:
         When *targets* is ``None`` the bare *name* and *intensity* are
         forwarded as a backward-compatible fallback.
         """
-        if not self._has_any_transport():
-            return
         payload: Dict[str, Any]
         if not name:
             payload = {"type": "vrm_expression_clear"}
@@ -349,6 +359,12 @@ class KaradaStateServer:
                 "name": name,
                 "intensity": intensity,
             }
+        # Remember the active expression so late-joining clients and the
+        # periodic refresh can reproduce it (shared "single body" state).
+        # A clear resets the override to None.
+        self._current_expression = None if not name else dict(payload)
+        if not self._has_any_transport():
+            return
         for transport in self._transports:
             try:
                 await transport.broadcast_expression(payload)
@@ -852,12 +868,17 @@ class KaradaStateServer:
                 self._current_face_values = {}
                 self._face_values_initialized = True
 
-        return {
+        state: Dict[str, Any] = {
             "vrm_model": vrm_model,
             "animation": animation,
             "face_values": face_values,
             "audio": self.get_current_audio(),
         }
+        # Active transient expression override, if any, so a late-joining
+        # client renders the same face as everyone else.
+        if self._current_expression:
+            state["expression"] = dict(self._current_expression)
+        return state
 
     async def set_vrm_model(
         self,
@@ -2126,6 +2147,69 @@ class KaradaStateServer:
             self._watchdog_task = loop.create_task(self._watchdog_loop())
         except RuntimeError:
             pass
+
+    def start_state_refresh(self) -> None:
+        """Start a periodic broadcast that re-syncs face/expression state.
+
+        Karada v2 treats the avatar as a single shared "body": every connected
+        client must converge on the same face values and active expression.
+        Transient expression packets (from ``[em_*]`` timelines) can be missed
+        by a client that joined mid-timeline or dropped a frame, so this task
+        periodically re-broadcasts the authoritative face snapshot and the
+        active expression override to all transports. Packets reuse the same
+        message types the client already handles (``vrm_face``,
+        ``vrm_expression_set``/``vrm_expression_clear``), so no frontend change
+        is required.
+        """
+        if self._state_refresh_task and not self._state_refresh_task.done():
+            return  # already running
+        try:
+            loop = asyncio.get_running_loop()
+            self._state_refresh_task = loop.create_task(self._state_refresh_loop())
+        except RuntimeError:
+            pass
+
+    async def _state_refresh_loop(self) -> None:
+        """Every ``_state_refresh_interval`` s, re-broadcast face state."""
+        try:
+            while True:
+                await asyncio.sleep(self._state_refresh_interval)
+                if not self._has_any_transport():
+                    continue
+                await self._broadcast_current_face_state()
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:  # pragma: no cover - best effort
+            log_warning(f"[KaradaStateServer] State refresh error: {exc}")
+
+    async def _broadcast_current_face_state(self) -> None:
+        """Re-broadcast the authoritative face values + active expression.
+
+        Sends the current ``vrm_face`` snapshot to every transport, then the
+        active expression override (or a clear if none is active) so all
+        clients converge on the same shared-avatar face.
+        """
+        face_payload = {"type": "vrm_face", "values": dict(self._current_face_values)}
+        expr_payload = (
+            dict(self._current_expression)
+            if self._current_expression
+            else {"type": "vrm_expression_clear"}
+        )
+        for transport in self._transports:
+            try:
+                await transport.broadcast_face(face_payload)
+            except Exception as exc:  # pragma: no cover - best effort
+                log_warning(
+                    f"[KaradaStateServer] refresh face_values failed via "
+                    f"{type(transport).__name__}: {exc}"
+                )
+            try:
+                await transport.broadcast_expression(expr_payload)
+            except Exception as exc:  # pragma: no cover - best effort
+                log_warning(
+                    f"[KaradaStateServer] refresh expression failed via "
+                    f"{type(transport).__name__}: {exc}"
+                )
 
     async def _watchdog_loop(self) -> None:
         """Every 10 s, verify state coherence and force-reset to IDLE if stuck."""
