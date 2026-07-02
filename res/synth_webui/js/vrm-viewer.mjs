@@ -1132,6 +1132,17 @@ class AnimationHandler {
             try {
                 this._loadPersonaForSkin(window.activeSkinName ? window.activeSkinName.split('/').pop().replace('.vrm', '') : 'Rei')
                     .then(persona => {
+                        // Guard against a stale-state race: this persona load is async, so a
+                        // newer animation state may have arrived (and replaced
+                        // this._lastAnimationState) before this .then() runs. If that happened,
+                        // abort — otherwise the code below re-writes this._lastAnimationState with
+                        // THIS (now obsolete) `state` and re-applies its persona_override
+                        // expressions (e.g. think's persistent eyes_closed), leaving the eyes shut
+                        // during the newer state (write/idle). This is the "fast animations" bug.
+                        if (this._lastAnimationState !== state) {
+                            console.debug('[AnimationHandler] persona load resolved for a superseded state; skipping override re-apply');
+                            return;
+                        }
                         console.debug('[AnimationHandler] persona loaded', persona && persona.name ? persona.name : '(unknown)');
                         const effectivePersona = this._getEffectivePersona();
                         const pdefaults = (effectivePersona && effectivePersona.defaults) ? effectivePersona.defaults : {};
@@ -1219,8 +1230,14 @@ class AnimationHandler {
                         this._eyeAutoEnabled = (!!eyeCfg.auto) && !this._lipsyncEnabled;
                         this._saccadeRateS = eyeCfg.saccade_rate_s || 2;
 
-                        if (this._blinkAutoEnabled) this._startBlinkLoop(); else this._stopBlinkLoop();
-                        if (this._eyeAutoEnabled) this._startEyeMovement(); else this._stopEyeMovement();
+                        // If this state holds the eyes closed for its whole span (e.g. the
+                        // 'think' descriptor + persona overrides), do NOT (re)start the
+                        // autoblink loop here. The per-frame expression ticker owns the eyes
+                        // in that case and would otherwise be fought by an autoblink loop
+                        // restarted on every state broadcast, re-opening the eyes.
+                        const holdsEyesClosed = this._stateHasPersistentEyesClosed(state);
+                        if (this._blinkAutoEnabled && !holdsEyesClosed) this._startBlinkLoop(); else this._stopBlinkLoop();
+                        if (this._eyeAutoEnabled && !holdsEyesClosed) this._startEyeMovement(); else this._stopEyeMovement();
                         // If we transitioned out of 'think' and persona overrides applied
                         // after the async persona load, ensure eyes are open now to avoid
                         // persona_override re-closing them after a force-open earlier.
@@ -1487,14 +1504,15 @@ class AnimationHandler {
                 ? String(this.currentActionName).toLowerCase()
                 : (this.currentActionKey ? String(this.currentActionKey).toLowerCase() : null);
             const isSpeaking = !!this._lipsyncEnabled || currentActionKey === 'talk';
-            const isIdleLike = !currentActionKey || currentActionKey === 'idle';
 
-            // Speaking: keep full expressiveness.
+            // Speaking: keep full expressiveness so Synth can emote while talking.
             if (isSpeaking) return v;
-            // Only attenuate at rest; non-idle non-speaking states pass through.
-            if (!isIdleLike) return v;
+            // Every non-speaking state (idle, think, write, touch, ...) shows the
+            // base emotion only as a subtle micro-expression. Passing the full
+            // value through for non-idle states (e.g. 'write') let 'relaxed' open
+            // the mouth at full intensity, producing an unnatural face while typing.
 
-            // Idle micro-expression: keep the emotion perceptible but subtle.
+            // Micro-expression: keep the emotion perceptible but subtle.
             // 'relaxed' partially opens the mouth on this model, so cap it lower.
             const k = String(name || '').toLowerCase();
             const subtleCeil = (k === 'relaxed') ? 0.06 : 0.18;
@@ -1959,9 +1977,30 @@ class AnimationHandler {
             // If eyes are intentionally held closed, suppress any blink targets that are NOT
             // being used as the actual eyelid closure mapping for eyes_closed.
             // This prevents the blink loop (or unrelated expression aliases) from fighting the pose.
+            //
+            // IMPORTANT: several suppression aliases (e.g. 'Blink', 'blinkLeft') resolve to the
+            // SAME concrete VRM expression as a protected eyes_closed target (e.g. 'blink'). A
+            // naive per-alias string check (eyesClosedResolvedTargets.has(k)) would zero those
+            // aliases, and because they map back to the same VRM key, _setFaceValue would then
+            // overwrite the intended closure with 0 — leaving the eyes open. To avoid this we
+            // resolve BOTH sides to concrete VRM keys and only suppress an alias whose resolved
+            // keys do not overlap the protected closure keys.
             if (eyesClosedRequestedMax > 0.5) {
+                const resolveConcrete = (key) => {
+                    try {
+                        const r = this._resolveFaceKeys ? this._resolveFaceKeys(key) : null;
+                        return Array.isArray(r) ? r : (r ? [r] : [key]);
+                    } catch (e) { return [key]; }
+                };
+                // Concrete VRM keys that MUST stay driven (the actual eyelid closure morphs).
+                const protectedConcrete = new Set();
+                eyesClosedResolvedTargets.forEach(t => resolveConcrete(t).forEach(ck => protectedConcrete.add(ck)));
                 ['eye_blink_left', 'eye_blink_right', 'blink', 'blinkLeft', 'blinkRight', 'eyeBlinkLeft', 'eyeBlinkRight', 'Blink', 'BlinkLeft', 'BlinkRight'].forEach(k => {
-                    if (!eyesClosedResolvedTargets.has(k)) desired[k] = 0;
+                    if (eyesClosedResolvedTargets.has(k)) return;
+                    // Skip suppression if this alias resolves to a protected closure morph.
+                    const overlapsProtected = resolveConcrete(k).some(ck => protectedConcrete.has(ck));
+                    if (overlapsProtected) return;
+                    desired[k] = 0;
                 });
             }
 
@@ -2177,9 +2216,16 @@ class AnimationHandler {
             }
             try { window.dispatchEvent(new CustomEvent('synth_eyes_state_changed', { detail: { value: this._eyesState.value, source: this._eyesState.source } })); } catch (e) { }
 
-            // Safety: if persistent close lasts too long, force reopen after timeout (30s)
+            // Safety: if a closure lasts too long, force reopen after a timeout.
+            // Transient closures use a 30s failsafe. A *persistent* closure (long
+            // explicit duration — e.g. a descriptor/persona eyes_closed span that
+            // must hold for the whole think phase) uses its declared duration so the
+            // failsafe never fights a legitimate long hold. The per-frame ticker
+            // re-calls _setEyesState (refreshing `since`) while the state is active,
+            // so this timer only fires once the closure truly stops being requested.
             if (this._eyesState.locked) {
-                const timeoutMs = 30000;
+                const persistentClosure = (typeof this._eyesState.duration === 'number' && this._eyesState.duration >= 3600000);
+                const timeoutMs = persistentClosure ? this._eyesState.duration : 30000;
                 if (this._eyesStateTimeout) { try { clearTimeout(this._eyesStateTimeout); } catch (e) { } }
                 this._eyesStateTimeout = setTimeout(() => {
                     try {
@@ -2379,8 +2425,12 @@ class AnimationHandler {
 
             for (const e of exprs) {
                 if (!e || typeof e !== 'object') continue;
-                // Persistent = no explicit end_frame.
-                const persistent = (e.end_frame === undefined || e.end_frame === null);
+                // Persistent = no explicit end_frame, or an end_frame that spans
+                // effectively the whole clip (e.g. persona overrides normalized to
+                // 1000000000). Keep this in sync with isPersistentExpr() in
+                // applyExpressionsForFrame().
+                const persistent = (e.end_frame === undefined || e.end_frame === null)
+                    || (Number(e.end_frame) >= 100000000);
                 if (!persistent) continue;
                 const targets = (e.targets && typeof e.targets === 'object') ? e.targets : null;
                 if (!targets) continue;

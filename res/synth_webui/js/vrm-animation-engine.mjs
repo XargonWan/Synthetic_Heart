@@ -347,11 +347,41 @@ function _forwardDescriptorExpressions(stateName, descriptor, startedAt) {
                 || typeof descriptor.lipsync === 'boolean'
             )
         );
-        if (!hasRich) return;
 
         // Anchor the expression timeline to the same clock the engine uses.
         const startedAtMs = animationStartedAt || Date.now();
         const startedAtIso = new Date(startedAtMs).toISOString();
+
+        // States without a rich descriptor (e.g. `write`, which has no .fbx.json,
+        // or a bare `idle`) still MUST reach the handler. Otherwise a previous
+        // state that locked a persistent expression (e.g. think's eyes_closed,
+        // which sets _eyesState.locked with a huge duration and suppresses the
+        // blink loop) is never cleared: _lastAnimationState stays stuck on the
+        // old state and the eyes remain shut during the new one. Forward a
+        // minimal, expression-free state so applyAnimationState updates
+        // _lastAnimationState to the new action and runs its smooth eyes reset
+        // (the new state declares no eyes_closed, so the reset reopens them).
+        if (!hasRich) {
+            const minimalState = {
+                action: stateName,
+                animation: currentClip ? currentClip.name : null,
+                phase: currentSection || 'loop',
+                descriptor: (descriptor && typeof descriptor === 'object') ? descriptor : null,
+                clip: { fps: (descriptor && descriptor.fps) ? descriptor.fps : 30 },
+                timing: {
+                    started_at: startedAtIso,
+                    time_in_clip: 0,
+                    current_frame: 0,
+                },
+                expressions: [],
+                blink: null,
+                eye_movement: null,
+                lipsync: false,
+                source: 'karada_engine_descriptor',
+            };
+            handler.applyAnimationState(minimalState);
+            return;
+        }
 
         const richState = {
             action: stateName,
