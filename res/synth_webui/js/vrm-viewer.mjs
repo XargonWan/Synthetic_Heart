@@ -17,7 +17,7 @@ import {
     setOnStateChange,
     setOnSectionChange,
     getAnimationTime,
-} from '/js/vrm-animation-engine.mjs';
+} from '/js/vrm-animation-engine.mjs?v=20260703-descriptor-facial';
 
 
 // Module-scoped variables (initialized when the canvas is available)
@@ -1056,9 +1056,18 @@ class AnimationHandler {
                     this._emotionOverlay = null;
 
                     // On action change, perform a smooth eyes reset so that
-                    // persistent eye-closed flags are removed in a non-abrupt way
+                    // persistent eye-closed flags are removed in a non-abrupt way.
+                    //
+                    // BUT skip the reset when the incoming state itself declares a
+                    // persistent eyes-closed expression (e.g. the THINK descriptor's
+                    // `eyes_closed`). Otherwise this setTimeout-driven ramp writes
+                    // blink -> 0 and calls _clearEyesState()/_startBlinkLoop() a few
+                    // hundred ms after the state is applied, fighting the per-frame
+                    // expression ticker that is trying to hold the eyes closed. The
+                    // result is that the descriptor's eyes_closed never renders.
+                    const incomingHoldsEyesClosed = this._stateHasPersistentEyesClosed(state);
                     try {
-                        if (typeof this._resetEyesSmoothly === 'function') {
+                        if (!incomingHoldsEyesClosed && typeof this._resetEyesSmoothly === 'function') {
                             this._resetEyesSmoothly(220);
                         }
                     } catch (e) { /* ignore */ }
@@ -1726,7 +1735,21 @@ class AnimationHandler {
             // Also maintain a richer eyesState so we can distinguish persistent
             // closures (persona/animation) from transient blinks (autoblink).
             let eyesClosedRequestedMax = 0;
+            // Track whether the active eyes_closed request comes from a *persistent*
+            // expression (e.g. a descriptor closure with only a start_frame, or a very
+            // large end_frame). Persistent closures must lock the eyes so the autoblink
+            // loop does not fight and reset the pose every ~120ms.
+            let eyesClosedPersistent = false;
             const eyesClosedResolvedTargets = new Set();
+            // A closure is "persistent" when the expression has no end bound, or spans
+            // effectively the whole clip (very large end_frame).
+            const isPersistentExpr = (expr) => {
+                try {
+                    if (!expr || typeof expr !== 'object') return false;
+                    if (expr.end_frame === undefined || expr.end_frame === null) return true;
+                    return Number(expr.end_frame) >= 100000000;
+                } catch (e) { return false; }
+            };
 
             exprs.forEach(expr => {
                 if (!evaluateFrame(expr)) return;
@@ -1737,6 +1760,7 @@ class AnimationHandler {
                     const nkey = normalizeKey(key);
                     if (isEyesClosedLogicalKey(key) || isEyesClosedLogicalKey(nkey)) {
                         eyesClosedRequestedMax = Math.max(eyesClosedRequestedMax, intensity);
+                        if (intensity > 0.5 && isPersistentExpr(expr)) eyesClosedPersistent = true;
                     }
                     // Resolve mapping: support flat maps or grouped maps (emotions, visemes, expressions)
                     const flat = (blendMap && typeof blendMap[key] === 'string') ? blendMap[key]
@@ -1859,8 +1883,15 @@ class AnimationHandler {
                 const nowEyesClosed = eyesClosedRequestedMax > 0.5;
                 // If an expression is requesting eyes closed, set a persistent eyesState
                 if (nowEyesClosed) {
-                    // source 'expression' indicates a persistent request coming from expressions/persona
-                    this._setEyesState({ value: eyesClosedRequestedMax, source: 'expression' });
+                    // source 'expression' indicates a request coming from expressions/persona.
+                    // A persistent descriptor closure (no end bound / whole-clip span) must
+                    // LOCK the eyes so the autoblink loop stops fighting the pose. Pass a
+                    // long duration so _setEyesState treats it as a persistent closure.
+                    this._setEyesState({
+                        value: eyesClosedRequestedMax,
+                        source: 'expression',
+                        duration: eyesClosedPersistent ? 3600000 : null,
+                    });
                 } else {
                     // clear expression-based eyes state if present
                     if (this._eyesState && this._eyesState.source === 'expression') this._clearEyesState();
@@ -2218,6 +2249,63 @@ class AnimationHandler {
             // Clear any persistent eyesState when forcing open.
             try { if (this._eyesState) this._clearEyesState(); } catch (e) { }
         } catch (e) { /* ignore */ }
+    }
+
+    // Returns true when an incoming animation state declares a persistent
+    // eyes-closed expression (no end_frame => held for the whole clip), either
+    // directly as an `eyes_closed`-family target or via a blink target that the
+    // persona maps eyes_closed onto. Used to avoid running the on-action-change
+    // eyes reset (which would fight the per-frame ticker and re-open the eyes).
+    _stateHasPersistentEyesClosed(state) {
+        try {
+            if (!state || typeof state !== 'object') return false;
+            const exprs = Array.isArray(state.expressions) ? state.expressions : null;
+            if (!exprs || exprs.length === 0) return false;
+
+            const norm = (k) => String(k || '').toLowerCase().replace(/[\s.\-]+/g, '_');
+            const isEyesClosedKey = (k) => {
+                const n = norm(k);
+                return n === 'eyes_closed' || n === 'eyesclosed' || n === 'eye_closed';
+            };
+            const isBlinkKey = (k) => {
+                const n = norm(k);
+                return n === 'blink' || n === 'blinkleft' || n === 'blinkright'
+                    || n === 'blink_left' || n === 'blink_right';
+            };
+
+            // Persona map: eyes_closed may be expressed directly, or routed to blink.
+            let mapsBlinkToEyes = false;
+            try {
+                const persona = this._getEffectivePersona();
+                const bm = persona && persona.blendshape_map;
+                if (bm) {
+                    Object.keys(bm).forEach((src) => {
+                        const dst = bm[src];
+                        if (isEyesClosedKey(src) && typeof dst === 'string' && isBlinkKey(dst)) {
+                            mapsBlinkToEyes = true;
+                        }
+                    });
+                }
+            } catch (e) { /* ignore */ }
+
+            for (const e of exprs) {
+                if (!e || typeof e !== 'object') continue;
+                // Persistent = no explicit end_frame.
+                const persistent = (e.end_frame === undefined || e.end_frame === null);
+                if (!persistent) continue;
+                const targets = (e.targets && typeof e.targets === 'object') ? e.targets : null;
+                if (!targets) continue;
+                for (const tk of Object.keys(targets)) {
+                    const tv = Number(targets[tk]) || 0;
+                    if (tv <= 0.5) continue;
+                    if (isEyesClosedKey(tk)) return true;
+                    if (mapsBlinkToEyes && isBlinkKey(tk)) return true;
+                }
+            }
+            return false;
+        } catch (e) {
+            return false;
+        }
     }
 
     // Smoothly reset eyes over a short duration (ms). This will interpolate
@@ -3993,7 +4081,18 @@ class AnimationHandler {
         // If we got a descriptorOverride but no explicit rich animation_state, apply a minimal
         // state so expression/blink configs are consistent across transitions.
         try {
-            const desc = descriptorOverride || null;
+            let desc = descriptorOverride || null;
+            // Fallback: when no explicit descriptorOverride was supplied (e.g. the action
+            // was started via applyAnimationState('think') or a backend WS command that
+            // did not embed the descriptor), resolve the on-disk descriptor so its
+            // facial expressions (e.g. eyes_closed), blink and eye_movement configs are
+            // still applied. Without this, descriptor-defined expressions never reach
+            // applyExpressionsForFrame and the face stays neutral (eyes open).
+            if (!desc && typeof this.loadDescriptor === 'function') {
+                try {
+                    desc = await this.loadDescriptor(actionName, animationFile);
+                } catch (e) { desc = null; }
+            }
             const hasRichFromDesc = !!(desc && (desc.expressions || desc.blink || desc.eye_movement || (typeof desc.lipsync === 'boolean')));
             if (hasRichFromDesc && typeof this.applyAnimationState === 'function') {
                 const phase = (playSection != null) ? playSection : (playOnce ? 'clip' : 'loop');
@@ -5705,6 +5804,22 @@ async function loadVRM(url, name, { isObjectUrl = false } = {}) {
             // Initialize Karada v2 Animation Engine
             initAnimationEngine(currentMixer);
             console.log('[synth_webui] Karada v2 Animation Engine initialized');
+
+            // Keep the AnimationHandler's expression clock in sync with the
+            // engine's descriptor state machine. When the engine advances from
+            // intro -> loop -> outro, the handler must evaluate descriptor
+            // expressions against the frame window of the CURRENT section, so
+            // update the last animation state's phase on each section change.
+            try {
+                setOnSectionChange((section) => {
+                    try {
+                        if (animationHandler && animationHandler._lastAnimationState
+                            && animationHandler._lastAnimationState.source === 'karada_engine_descriptor') {
+                            animationHandler._lastAnimationState.phase = section || 'loop';
+                        }
+                    } catch (e) { /* ignore */ }
+                });
+            } catch (e) { /* ignore */ }
 
             console.log('[synth_webui] Loading default animations (pre-add)...');
             // Load and start idle/talk/think/write actions before adding to scene

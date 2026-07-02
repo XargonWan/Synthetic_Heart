@@ -37,7 +37,12 @@ _queue_loop: asyncio.AbstractEventLoop | None = None
 _lock: asyncio.Lock | None = None
 _lock_loop: asyncio.AbstractEventLoop | None = None
 _consumer_task: asyncio.Task | None = None
+_supervisor_task: asyncio.Task | None = None
+_shutdown_requested: bool = False  # True only when a deliberate stop() was called
 _counter = 0  # Monotonic counter to prevent dict comparison when priorities are equal
+
+# Watchdog: how often the supervisor checks the consumer is still alive.
+_SUPERVISOR_INTERVAL_SECONDS = 5.0
 
 
 @dataclass(slots=True)
@@ -1621,8 +1626,18 @@ async def _consumer_loop() -> None:
                 for _ in batch:
                     _get_queue().task_done()
         except asyncio.CancelledError:
-            log_info("[QUEUE] Consumer loop cancelled")
-            break
+            if _shutdown_requested:
+                log_info("[QUEUE] Consumer loop cancelled (deliberate shutdown)")
+                break
+            # An *accidental* cancellation (e.g. a per-message timeout cancel that
+            # propagated up, or a structured-concurrency parent cancel) must NOT
+            # silently kill the consumer forever. Re-raise so the supervisor
+            # watchdog detects the dead task and restarts it.
+            log_warning(
+                "[QUEUE] Consumer loop received an unexpected cancellation; "
+                "re-raising so the supervisor can restart it"
+            )
+            raise
         except Exception as e:
             log_error(
                 f"[QUEUE] Unexpected error in consumer loop: {repr(e)}\n{traceback.format_exc()}"
@@ -1676,17 +1691,96 @@ async def enqueue_event(bot, prompt_data, event_id: int = None) -> None:
     log_debug(f"[QUEUE] Current queue state: {list(_get_queue()._queue)}")
 
 
-async def run() -> None:
-    """Convenience wrapper to launch the consumer task if not running."""
-    global _consumer_task, _queue, _lock
+def _start_consumer_task() -> None:
+    """(Re)create the consumer task if it is missing or finished."""
+    global _consumer_task
 
     if _consumer_task and not _consumer_task.done():
-        log_debug("[QUEUE] Consumer already running")
         return
-
-    # Ensure the queue primitives are initialized on the active event loop.
-    _get_queue()
-    _get_lock()
 
     _consumer_task = asyncio.create_task(_consumer_loop())
     log_info("[QUEUE] Consumer task started")
+
+
+async def _supervisor_loop() -> None:
+    """Watchdog that keeps the consumer alive.
+
+    A single hung LLM generation (e.g. a Selenium engine that stalls) can trigger
+    a per-message timeout whose cancellation propagates up and kills the consumer
+    task. Without supervision the consumer never restarts, so every subsequent
+    message queues silently and is never processed. This loop detects a dead
+    consumer and restarts it, unless a deliberate shutdown was requested.
+    """
+    log_info("[QUEUE] Consumer supervisor started")
+    while not _shutdown_requested:
+        try:
+            await asyncio.sleep(_SUPERVISOR_INTERVAL_SECONDS)
+        except asyncio.CancelledError:
+            break
+
+        if _shutdown_requested:
+            break
+
+        task = _consumer_task
+        if task is None or task.done():
+            # Surface why the previous consumer died, for diagnostics.
+            if task is not None:
+                try:
+                    exc = task.exception()
+                    if exc is not None:
+                        log_warning(
+                            f"[QUEUE] Supervisor: consumer task died with {exc!r}; restarting"
+                        )
+                    else:
+                        log_warning(
+                            "[QUEUE] Supervisor: consumer task exited unexpectedly; restarting"
+                        )
+                except asyncio.CancelledError:
+                    log_warning(
+                        "[QUEUE] Supervisor: consumer task was cancelled; restarting"
+                    )
+                except asyncio.InvalidStateError:
+                    # Should not happen (task.done() is True), guard anyway.
+                    pass
+            _start_consumer_task()
+
+    log_info("[QUEUE] Consumer supervisor stopped")
+
+
+async def run() -> None:
+    """Convenience wrapper to launch the consumer task if not running."""
+    global _supervisor_task, _shutdown_requested
+
+    # A fresh run() clears any previous shutdown request.
+    _shutdown_requested = False
+
+    if _consumer_task and not _consumer_task.done():
+        log_debug("[QUEUE] Consumer already running")
+    else:
+        # Ensure the queue primitives are initialized on the active event loop.
+        _get_queue()
+        _get_lock()
+        _start_consumer_task()
+
+    # Launch the supervisor watchdog once.
+    if _supervisor_task is None or _supervisor_task.done():
+        _supervisor_task = asyncio.create_task(_supervisor_loop())
+
+
+async def stop() -> None:
+    """Deliberately stop the consumer and supervisor (e.g. on shutdown)."""
+    global _shutdown_requested, _consumer_task, _supervisor_task
+
+    _shutdown_requested = True
+
+    for task in (_supervisor_task, _consumer_task):
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await asyncio.wait_for(asyncio.shield(task), timeout=5)
+            except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+                pass
+
+    _consumer_task = None
+    _supervisor_task = None
+    log_info("[QUEUE] Consumer and supervisor stopped")

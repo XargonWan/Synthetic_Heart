@@ -310,8 +310,70 @@ function playAnimation(params) {
         currentSection = 'loop';
     }
 
+    // Karada v2: the engine owns the skeletal clip, but facial expressions
+    // (eyes_closed, blink, eye_movement, lipsync) declared in the descriptor
+    // are driven by the AnimationHandler's per-frame expression ticker. Forward
+    // the resolved descriptor as a rich animation state so the handler injects
+    // and evaluates those expressions against the local animation clock. Without
+    // this, the descriptor's `expressions` never reach the VRM blendshapes.
+    _forwardDescriptorExpressions(state, descriptor, startedAt);
+
     if (onStateChangeCallback) {
-        onStateChangeCallback(state, animationId);
+        onStateChangeCallback(state, descriptorId || null);
+    }
+}
+
+/**
+ * Forward a resolved descriptor's facial data to the AnimationHandler so its
+ * per-frame expression ticker applies eyes_closed / blink / eye_movement /
+ * lipsync to the VRM. This is the single point where every play path (WS,
+ * bootstrap, debug) converges with the resolved state + descriptor.
+ * @param {string} stateName - Logical animation state (e.g. 'think')
+ * @param {Object} descriptor - Resolved descriptor (.fbx.json contents)
+ * @param {string|number} startedAt - Server started_at for the animation clock
+ */
+function _forwardDescriptorExpressions(stateName, descriptor, startedAt) {
+    try {
+        const handler = (typeof window !== 'undefined') ? window.animationHandler : null;
+        if (!handler || typeof handler.applyAnimationState !== 'function') return;
+
+        const hasRich = !!(
+            descriptor
+            && typeof descriptor === 'object'
+            && (
+                Array.isArray(descriptor.expressions)
+                || descriptor.blink
+                || descriptor.eye_movement
+                || typeof descriptor.lipsync === 'boolean'
+            )
+        );
+        if (!hasRich) return;
+
+        // Anchor the expression timeline to the same clock the engine uses.
+        const startedAtMs = animationStartedAt || Date.now();
+        const startedAtIso = new Date(startedAtMs).toISOString();
+
+        const richState = {
+            action: stateName,
+            animation: currentClip ? currentClip.name : null,
+            phase: currentSection || 'loop',
+            descriptor: descriptor,
+            clip: { fps: descriptor.fps || 30 },
+            timing: {
+                started_at: startedAtIso,
+                time_in_clip: 0,
+                current_frame: 0,
+            },
+            expressions: Array.isArray(descriptor.expressions) ? descriptor.expressions : null,
+            blink: descriptor.blink || null,
+            eye_movement: descriptor.eye_movement || null,
+            lipsync: (typeof descriptor.lipsync === 'boolean') ? descriptor.lipsync : false,
+            source: 'karada_engine_descriptor',
+        };
+
+        handler.applyAnimationState(richState);
+    } catch (e) {
+        console.warn('[KaradaEngine] Failed to forward descriptor expressions:', e);
     }
 }
 
