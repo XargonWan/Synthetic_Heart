@@ -239,13 +239,28 @@ async def save_chat_message(
         return False
 
 
-async def load_chat_history(interface_path: str, limit: int | None = None) -> deque:
+async def load_chat_history(
+    interface_path: str,
+    limit: int | None = None,
+    match_chat_level: bool = False,
+) -> deque:
     """Load chat history from cache for a specific interface path.
 
     Args:
         interface_path: The interface path (e.g., telegram_bot/123456/2)
         limit: Optional explicit row limit. When omitted, uses the configured
             history limit for the calling subsystem.
+        match_chat_level: When False (default), matches ``interface_path``
+            exactly -- byte-identical to the original query, so all existing
+            callers are unaffected. When True, also includes rows whose
+            ``interface_path`` is a thread-suffixed variant of the same chat
+            (e.g. ``telegram_bot/123/456`` when loading
+            ``telegram_bot/123``). Some messages in a conversation -- e.g. a
+            Telegram reply-in-thread -- get persisted with a thread-ID suffix
+            appended to the bare chat path, so an exact match alone silently
+            drops otherwise-legitimate turns from that conversation. Uses the
+            same chat-level key convention as ``peer_policy._chat_key``
+            (first two ``/``-separated segments).
 
     Returns:
         deque of message objects in chronological order
@@ -261,20 +276,38 @@ async def load_chat_history(interface_path: str, limit: int | None = None) -> de
                 )
                 # Fetch the most recent N rows, then reorder them chronologically
                 # for downstream consumers such as WebUI replay and prompt context.
-                await cur.execute(
-                    """
-                    SELECT sender_name, sender_id, message_text, timestamp, interface_path, metadata
-                    FROM (
-                        SELECT sender_name, sender_id, message_text, timestamp, interface_path, metadata, id
-                        FROM chat_history_cache
-                        WHERE interface_path = %s
-                        ORDER BY timestamp DESC, id DESC
-                        LIMIT %s
-                    ) AS recent_messages
-                    ORDER BY timestamp ASC, id ASC
-                """,
-                    (interface_path, history_limit),
-                )
+                chat_key_parts = interface_path.split("/")
+                if match_chat_level and len(chat_key_parts) >= 2:
+                    chat_key = "/".join(chat_key_parts[:2])
+                    await cur.execute(
+                        """
+                        SELECT sender_name, sender_id, message_text, timestamp, interface_path, metadata
+                        FROM (
+                            SELECT sender_name, sender_id, message_text, timestamp, interface_path, metadata, id
+                            FROM chat_history_cache
+                            WHERE (interface_path = %s OR interface_path LIKE %s)
+                            ORDER BY timestamp DESC, id DESC
+                            LIMIT %s
+                        ) AS recent_messages
+                        ORDER BY timestamp ASC, id ASC
+                    """,
+                        (interface_path, f"{chat_key}/%", history_limit),
+                    )
+                else:
+                    await cur.execute(
+                        """
+                        SELECT sender_name, sender_id, message_text, timestamp, interface_path, metadata
+                        FROM (
+                            SELECT sender_name, sender_id, message_text, timestamp, interface_path, metadata, id
+                            FROM chat_history_cache
+                            WHERE interface_path = %s
+                            ORDER BY timestamp DESC, id DESC
+                            LIMIT %s
+                        ) AS recent_messages
+                        ORDER BY timestamp ASC, id ASC
+                    """,
+                        (interface_path, history_limit),
+                    )
 
                 rows = await cur.fetchall()
 

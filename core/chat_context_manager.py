@@ -248,7 +248,7 @@ async def load_chat_history(interface_path: str) -> None:
         from core.chat_history_cache import load_chat_history as cache_load
 
         interface_path = _resolve_context_path(interface_path)
-        history = await cache_load(interface_path)
+        history = await cache_load(interface_path, match_chat_level=True)
         context = get_or_create_chat_context(interface_path)
         # IMPORTANT: This function is used to rehydrate memory from persistence.
         # It must be idempotent (e.g., WebUI refresh/reconnect calls it again).

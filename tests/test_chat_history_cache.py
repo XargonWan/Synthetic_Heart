@@ -382,3 +382,138 @@ async def test_load_chat_history_uses_explicit_limit(monkeypatch):
     assert isinstance(history, deque)
     _, params = executed[0]
     assert params == ("synth_webui/webui_default", 37)
+
+
+@pytest.mark.asyncio
+async def test_load_chat_history_default_match_chat_level_false_is_exact_match_only(
+    monkeypatch,
+):
+    """Regression guard: the default behaviour must stay byte-identical to the
+    original exact-match query so the 13 existing callers are unaffected."""
+    executed: list[tuple[str, tuple[object, ...] | None]] = []
+
+    class DummyCursor:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            pass
+
+        async def execute(self, query, params=None):
+            executed.append((query, params))
+
+        async def fetchall(self):
+            return []
+
+    class DummyConn:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            pass
+
+        def cursor(self):
+            return DummyCursor()
+
+    monkeypatch.setattr(chat_history_cache, "get_conn_ctx", lambda: DummyConn())
+    monkeypatch.setattr(chat_history_cache, "_get_history_limit", lambda default=10: 10)
+
+    await chat_history_cache.load_chat_history("telegram_bot/-5408266521")
+
+    query, params = executed[0]
+    assert "LIKE" not in query
+    assert "WHERE interface_path = %s" in query
+    assert params == ("telegram_bot/-5408266521", 10)
+
+
+@pytest.mark.asyncio
+async def test_load_chat_history_match_chat_level_broadens_to_thread_suffixes(
+    monkeypatch,
+):
+    """With match_chat_level=True, the WHERE clause must also match thread-
+    suffixed variants of the same chat (e.g. telegram_bot/-5408266521/237093590),
+    using the same chat-key convention as peer_policy._chat_key."""
+    executed: list[tuple[str, tuple[object, ...] | None]] = []
+
+    class DummyCursor:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            pass
+
+        async def execute(self, query, params=None):
+            executed.append((query, params))
+
+        async def fetchall(self):
+            return []
+
+    class DummyConn:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            pass
+
+        def cursor(self):
+            return DummyCursor()
+
+    monkeypatch.setattr(chat_history_cache, "get_conn_ctx", lambda: DummyConn())
+    monkeypatch.setattr(chat_history_cache, "_get_history_limit", lambda default=10: 10)
+
+    await chat_history_cache.load_chat_history(
+        "telegram_bot/-5408266521", match_chat_level=True
+    )
+
+    query, params = executed[0]
+    assert "WHERE (interface_path = %s OR interface_path LIKE %s)" in query
+    assert params == (
+        "telegram_bot/-5408266521",
+        "telegram_bot/-5408266521/%",
+        10,
+    )
+
+
+@pytest.mark.asyncio
+async def test_load_chat_history_match_chat_level_short_path_skips_broadening(
+    monkeypatch,
+):
+    """A path with no chat_id segment (no '/') has no meaningful chat-key to
+    broaden to -- it must fall back to exact-match only, not crash."""
+    executed: list[tuple[str, tuple[object, ...] | None]] = []
+
+    class DummyCursor:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            pass
+
+        async def execute(self, query, params=None):
+            executed.append((query, params))
+
+        async def fetchall(self):
+            return []
+
+    class DummyConn:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            pass
+
+        def cursor(self):
+            return DummyCursor()
+
+    monkeypatch.setattr(chat_history_cache, "get_conn_ctx", lambda: DummyConn())
+    monkeypatch.setattr(chat_history_cache, "_get_history_limit", lambda default=10: 10)
+
+    history = await chat_history_cache.load_chat_history(
+        "standalone", match_chat_level=True
+    )
+
+    assert isinstance(history, deque)
+    query, params = executed[0]
+    assert "LIKE" not in query
+    assert "WHERE interface_path = %s" in query
+    assert params == ("standalone", 10)

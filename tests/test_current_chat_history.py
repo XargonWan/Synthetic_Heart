@@ -31,7 +31,7 @@ def test_format_current_chat_history(monkeypatch):
     interface = "telegram_bot/123"
     context_memory = {interface: deque([])}
 
-    async def _fake_cache_load(ip):
+    async def _fake_cache_load(ip, match_chat_level: bool = False):
         assert ip == interface
         return deque([msg1, msg2])
 
@@ -75,7 +75,7 @@ def test_current_chat_history_respects_last_n(monkeypatch):
     context_memory = {interface: deque([])}
 
     # Force loader to return our two messages and let last_n=1 be applied
-    async def _fake_cache_load(ip):
+    async def _fake_cache_load(ip, match_chat_level: bool = False):
         assert ip == interface
         return deque([msg1, msg2])
 
@@ -127,7 +127,7 @@ def test_lite_mode_history_limit_overrides_context_verbosity(monkeypatch):
     interface = "telegram_bot/999"
     context_memory = {interface: deque([])}
 
-    async def _fake_cache_load(ip):
+    async def _fake_cache_load(ip, match_chat_level: bool = False):
         assert ip == interface
         return deque(msgs)
 
@@ -201,7 +201,7 @@ def test_local_global_separation(monkeypatch):
     # in-memory chat_map contains the local message
     context_memory = {interface: deque([local_msg])}
 
-    async def _fake_cache_load(ip):
+    async def _fake_cache_load(ip, match_chat_level: bool = False):
         assert ip == interface
         return deque([local_msg])
 
@@ -257,7 +257,7 @@ def test_history_scope_local_only(monkeypatch):
     interface = "telegram_bot/555"
     context_memory = {interface: deque([local_msg])}
 
-    async def _fake_cache_load(ip):
+    async def _fake_cache_load(ip, match_chat_level: bool = False):
         return deque([local_msg])
 
     async def _fake_global_load(limit=10):
@@ -327,7 +327,7 @@ def test_unified_history_keeps_local_messages_when_global_tail_is_busy(monkeypat
         "discord_bot/3": deque([{**other_3, "interface_path": "discord_bot/3"}]),
     }
 
-    async def _fake_cache_load(ip):
+    async def _fake_cache_load(ip, match_chat_level: bool = False):
         assert ip == interface
         return deque([local_old, local_mid, local_new])
 

@@ -468,7 +468,7 @@ class HistoryEngine:
                             load_chat_history as cache_load,
                         )
 
-                        cached = await cache_load(interface_path)
+                        cached = await cache_load(interface_path, match_chat_level=True)
                         combined = list(msgs) + list(cached)
                         msgs = combined[-verbosity:]
                     except Exception as e:
