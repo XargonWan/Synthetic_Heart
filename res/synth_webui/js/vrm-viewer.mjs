@@ -1487,14 +1487,15 @@ class AnimationHandler {
                 ? String(this.currentActionName).toLowerCase()
                 : (this.currentActionKey ? String(this.currentActionKey).toLowerCase() : null);
             const isSpeaking = !!this._lipsyncEnabled || currentActionKey === 'talk';
-            const isIdleLike = !currentActionKey || currentActionKey === 'idle';
 
-            // Speaking: keep full expressiveness.
+            // Speaking: keep full expressiveness so Synth can emote while talking.
             if (isSpeaking) return v;
-            // Only attenuate at rest; non-idle non-speaking states pass through.
-            if (!isIdleLike) return v;
+            // Every non-speaking state (idle, think, write, touch, ...) shows the
+            // base emotion only as a subtle micro-expression. Passing the full
+            // value through for non-idle states (e.g. 'write') let 'relaxed' open
+            // the mouth at full intensity, producing an unnatural face while typing.
 
-            // Idle micro-expression: keep the emotion perceptible but subtle.
+            // Micro-expression: keep the emotion perceptible but subtle.
             // 'relaxed' partially opens the mouth on this model, so cap it lower.
             const k = String(name || '').toLowerCase();
             const subtleCeil = (k === 'relaxed') ? 0.06 : 0.18;
