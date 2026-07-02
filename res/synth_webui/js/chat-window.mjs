@@ -936,6 +936,28 @@ export function initChatUI() {
             }
         }
 
+        // Show a transient, non-blocking notice near the composer so a
+        // silent getUserMedia() failure (permission denied / no device) does
+        // not look like a broken button.
+        function _showMicNotice(msg) {
+            try {
+                const footer = sendBtn && sendBtn.closest('.synth-chat-footer');
+                const host = footer || (sendBtn && sendBtn.parentElement);
+                if (!host) { console.warn('[chat-window]', msg); return; }
+                let notice = host.querySelector('.synth-mic-notice');
+                if (!notice) {
+                    notice = document.createElement('div');
+                    notice.className = 'synth-mic-notice';
+                    notice.setAttribute('role', 'status');
+                    notice.style.cssText = 'margin:0.2rem 1rem 0.4rem; padding:0.4rem 0.65rem; font-size:0.85rem; line-height:1.3; color:#f8d7da; background:rgba(180,40,40,0.18); border:1px solid rgba(230,60,30,0.4); border-radius:10px;';
+                    host.insertBefore(notice, host.firstChild);
+                }
+                notice.textContent = msg;
+                clearTimeout(notice._hideTimer);
+                notice._hideTimer = setTimeout(() => { try { notice.remove(); } catch (_) { /* ignore */ } }, 6000);
+            } catch (_) { console.warn('[chat-window]', msg); }
+        }
+
         async function _ensureMicStream() {
             if (micStream && micStream.active) return micStream;
             try {
@@ -943,7 +965,18 @@ export function initChatUI() {
                 micStream = stream;
                 _startVADLoop(stream);
                 return stream;
-            } catch (e) { console.warn('[chat-window] Mic permission denied:', e); return null; }
+            } catch (e) {
+                console.warn('[chat-window] getUserMedia failed:', e);
+                const name = e && e.name;
+                if (name === 'NotAllowedError' || name === 'SecurityError') {
+                    _showMicNotice('🎤 Microphone blocked. Allow microphone access in your site settings and reload the page.');
+                } else if (name === 'NotFoundError' || name === 'OverconstrainedError') {
+                    _showMicNotice('🎤 No microphone detected. Connect an audio device and try again.');
+                } else {
+                    _showMicNotice('🎤 Unable to access the microphone: ' + (name || (e && e.message) || 'unknown error') + '.');
+                }
+                return null;
+            }
         }
 
         // ── Recording ─────────────────────────────────────────────────
