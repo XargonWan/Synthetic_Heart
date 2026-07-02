@@ -78,7 +78,7 @@ opencode.json
 .gemini
 .vscode
 .zed
-
+api.py
 # Local installer outputs and downloaded packaging dependencies
 installer/Output/
 installer/vendor/*.msi
