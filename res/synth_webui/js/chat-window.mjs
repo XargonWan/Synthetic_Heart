@@ -936,6 +936,28 @@ export function initChatUI() {
             }
         }
 
+        // Show a transient, non-blocking notice near the composer so a
+        // silent getUserMedia() failure (permission denied / no device) does
+        // not look like a broken button.
+        function _showMicNotice(msg) {
+            try {
+                const footer = sendBtn && sendBtn.closest('.synth-chat-footer');
+                const host = footer || (sendBtn && sendBtn.parentElement);
+                if (!host) { console.warn('[chat-window]', msg); return; }
+                let notice = host.querySelector('.synth-mic-notice');
+                if (!notice) {
+                    notice = document.createElement('div');
+                    notice.className = 'synth-mic-notice';
+                    notice.setAttribute('role', 'status');
+                    notice.style.cssText = 'margin:0.2rem 1rem 0.4rem; padding:0.4rem 0.65rem; font-size:0.85rem; line-height:1.3; color:#f8d7da; background:rgba(180,40,40,0.18); border:1px solid rgba(230,60,30,0.4); border-radius:10px;';
+                    host.insertBefore(notice, host.firstChild);
+                }
+                notice.textContent = msg;
+                clearTimeout(notice._hideTimer);
+                notice._hideTimer = setTimeout(() => { try { notice.remove(); } catch (_) { /* ignore */ } }, 6000);
+            } catch (_) { console.warn('[chat-window]', msg); }
+        }
+
         async function _ensureMicStream() {
             if (micStream && micStream.active) return micStream;
             try {
@@ -943,7 +965,18 @@ export function initChatUI() {
                 micStream = stream;
                 _startVADLoop(stream);
                 return stream;
-            } catch (e) { console.warn('[chat-window] Mic permission denied:', e); return null; }
+            } catch (e) {
+                console.warn('[chat-window] getUserMedia failed:', e);
+                const name = e && e.name;
+                if (name === 'NotAllowedError' || name === 'SecurityError') {
+                    _showMicNotice('🎤 Microphone blocked. Allow microphone access in your site settings and reload the page.');
+                } else if (name === 'NotFoundError' || name === 'OverconstrainedError') {
+                    _showMicNotice('🎤 No microphone detected. Connect an audio device and try again.');
+                } else {
+                    _showMicNotice('🎤 Unable to access the microphone: ' + (name || (e && e.message) || 'unknown error') + '.');
+                }
+                return null;
+            }
         }
 
         // ── Recording ─────────────────────────────────────────────────
@@ -1220,7 +1253,7 @@ export function initChatUI() {
                     updateButtonMode();
                 };
                 window.pendingAnimationCommands = window.pendingAnimationCommands || window.pendingAnimationCommands;
-                ws.onmessage = (event) => {
+                ws.onmessage = async (event) => {
                     try {
                         const data = JSON.parse(event.data);
 
@@ -1286,54 +1319,74 @@ export function initChatUI() {
                                     }
                                 }, 600);
                             }
-                        } else if (data && (data.type === 'vrm_animation' || data.type === 'animation')) {
-                            // Canonical animation command from VRMStateServer.
-                            // Legacy type 'animation' is also accepted for backward compat.
-                            const animFile = data.file || data.animation || null;
-                            const animId = data.animation_id || null;
-                            // If this is a state-restore on reconnect and the same animation is already
-                            // running (same animation_id), skip play() to avoid restarting from frame 0.
-                            // Any interface connecting after the animation started must see the same
-                            // logical state without triggering a visible restart.
-                            const isRestoreSkip = !!(data.restore && animId && window.__synth_current_animation_id === animId);
-                            console.log('[chat-window] vrm_animation received:', data.state, animFile, isRestoreSkip ? '(restore-skip)' : '');
-                            if (!isRestoreSkip) {
-                                try {
-                                    if (window.VRMAnimations && typeof window.VRMAnimations.play === 'function') {
-                                        window.VRMAnimations.play(data.state, {
-                                            animation: animFile,
-                                            playOnce: data.loop === false,
-                                            playSection: data.play_section,
-                                            descriptor: data.descriptor,
-                                            frameRange: data.frame_range,
-                                            phaseAuthoritative: !!data.phase_authoritative
-                                        });
-                                    }
-                                } catch (e) { /* ignore */ }
-                                // Track the animation_id so future restores can be deduplicated
-                                try { if (animId) window.__synth_current_animation_id = animId; } catch (e) { /* ignore */ }
-                            }
-                            // Apply rich animation_state payload (blink, expressions, lipsync, eye_movement)
-                            // even on restore, so blend-shapes are always up-to-date.
+                        } else if (data && data.type === 'vrm_animation_v2') {
+                            // Karada v2 Protocol - Server ONLY sends: state + descriptor + started_at
+                            // NO phase control, NO timing control, NO frame-level logic
+                            // Client handles intro→loop→outro locally using descriptor + local clock
+                            console.log('[chat-window] vrm_animation_v2 received:', data.state, data.descriptor);
+
+                            let resolvedEntry = null;
+                            let animationRef = null;
+                            let descriptorData = null;
                             try {
-                                if (data.animation_state && window.animationHandler && typeof window.animationHandler.applyAnimationState === 'function') {
-                                    window.animationHandler.applyAnimationState(data.animation_state);
+                                if (data.descriptor && window.karadaResolveAnimationDescriptor) {
+                                    resolvedEntry = await window.karadaResolveAnimationDescriptor(data.descriptor);
+                                }
+                                animationRef = resolvedEntry ? (resolvedEntry.animation_url || null) : null;
+                                descriptorData = resolvedEntry ? (resolvedEntry.descriptor_data || null) : null;
+                            } catch (e) { /* ignore */ }
+
+                            // Get the pre-loaded clip from the cache. If it isn't ready
+                            // yet (e.g. the preload for this state hasn't finished), load
+                            // it on demand via the Karada v2 handler and play once ready.
+                            // The Karada v2 engine is authoritative — there is no legacy
+                            // renderer fallback.
+                            let clip = null;
+                            try {
+                                if (window.VRMAnimations && typeof window.VRMAnimations._getCachedAnimation === 'function') {
+                                    clip = window.VRMAnimations._getCachedAnimation(data.state, animationRef);
                                 }
                             } catch (e) { /* ignore */ }
-                            // Cache animation state for VRM reload recovery
+
+                            if (!clip && animationRef && window.animationHandler
+                                && typeof window.animationHandler._awaitAnimationReady === 'function') {
+                                try {
+                                    clip = await window.animationHandler._awaitAnimationReady(
+                                        data.state, animationRef, 8000,
+                                    );
+                                } catch (e) { /* ignore */ }
+                            }
+
+                            if (clip && window.karadaPlayAnimation) {
+                                window.karadaPlayAnimation({
+                                    state: data.state,
+                                    animationFile: animationRef,
+                                    descriptor: descriptorData,
+                                    descriptorId: data.descriptor || null,
+                                    startedAt: data.started_at,
+                                    clip: clip,
+                                });
+                            } else {
+                                console.warn('[chat-window] Karada v2 clip unavailable, skipping animation:', data.state, animationRef);
+                            }
+
+                            // Track the canonical tuple for restore deduplication and debug resyncs.
+                            try {
+                                if (data.state && data.descriptor && data.started_at != null) {
+                                    window.__synth_current_animation_id = `${data.state}|${data.descriptor}|${data.started_at}`;
+                                }
+                            } catch (e) { /* ignore */ }
+
+                            // Cache animation state for recovery
                             try {
                                 if (data.state) {
                                     window.__synth_current_animation_state = {
                                         state: data.state,
-                                        animation: animFile,
-                                        descriptor: data.descriptor || null,
-                                        play_section: data.play_section || null,
-                                        frame_range: data.frame_range || null,
-                                        phase_authoritative: !!data.phase_authoritative,
+                                        animation: animationRef,
+                                        descriptor_id: data.descriptor || null,
+                                        descriptor: descriptorData,
+                                        started_at: data.started_at,
                                     };
-                                }
-                                if (data.animation_state) {
-                                    window.__synth_last_rich_animation_state = data.animation_state;
                                 }
                             } catch (e) { /* ignore */ }
                         } else if (data && data.type === 'vrm_preload') {
@@ -1534,13 +1587,21 @@ export function initChatUI() {
             window.__synth_tts_click_bound = true;
         }
 
-        // ── Autoplay unlock on first user interaction ───────────────────────────
-        // When the browser blocks autoplay (NotAllowedError), audio URLs are
-        // enqueued in window.__synthPendingAudio. The first gesture (click, key,
-        // touch) unlocks the AudioContext and drains the queue.
+        // ── Autoplay unlock on user interaction ─────────────────────────────────
+        // Single-body model: a spectator browser must also hear Synth speak.
+        // Browser autoplay policy blocks audio until the tab has a user gesture,
+        // so when audio.play() throws NotAllowedError the URL is enqueued in
+        // window.__synthPendingAudio. Every gesture (click, key, touch) resumes
+        // the AudioContext and drains any pending audio. The handler is kept
+        // registered (not removed after the first gesture) so a spectator that
+        // interacts later — or receives new audio while passive — still plays it
+        // on the next interaction, keeping all clients in sync with the one Synth.
         try {
             const _drainPendingAudio = () => {
                 try {
+                    // Resume a suspended AudioContext so subsequent plays are allowed.
+                    const ctx = window.__synthLipSyncCtx;
+                    if (ctx && ctx.state === 'suspended') { try { ctx.resume(); } catch (e) { /* ignore */ } }
                     const q = window.__synthPendingAudio;
                     if (!q || !q.length) return;
                     window.__synthPendingAudio = [];
@@ -1552,12 +1613,7 @@ export function initChatUI() {
                     try { __synthPlayWithLipsync(url, text, dur); } catch (e) { /* ignore */ }
                 } catch (e) { /* ignore */ }
             };
-            const _unlockHandler = () => {
-                _drainPendingAudio();
-                try { document.removeEventListener('click', _unlockHandler, true); } catch (e) { /* ignore */ }
-                try { document.removeEventListener('keydown', _unlockHandler, true); } catch (e) { /* ignore */ }
-                try { document.removeEventListener('touchstart', _unlockHandler, true); } catch (e) { /* ignore */ }
-            };
+            const _unlockHandler = () => { _drainPendingAudio(); };
             document.addEventListener('click', _unlockHandler, true);
             document.addEventListener('keydown', _unlockHandler, true);
             document.addEventListener('touchstart', _unlockHandler, true);

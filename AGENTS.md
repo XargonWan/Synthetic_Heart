@@ -399,6 +399,14 @@ docker exec synth-dev tail -f /app/logs/synth.log | grep -E "\[grillo\]|grillo"
 
 ---
 
+### `test_chat_attention_triggers.py` start_bot tests fail: FakeBuilder missing `get_updates_connection_pool_size`  <!-- 2026-07-03 -->
+**Symptom:** `test_start_bot_failure_resets_state_and_schedules_retry` and `test_start_bot_retries_transient_timeout_inline` fail with `AttributeError("'FakeBuilder' object has no attribute 'get_updates_connection_pool_size'")` — the interface's `disabled_reason` becomes `Startup failed: AttributeError(...)` instead of the expected timeout/retry text.
+**Location:** `tests/test_chat_attention_triggers.py` (`FakeBuilder` stub), `interface/telegram_bot.py` (`start_bot` builder chain).
+**Status:** known, not fixed — pre-existing, found (and verified unrelated) during the 2026-07-03 upstream merge: the merge touched neither file; the builder call was added by commit `83415cef` ("widen get_updates connection pool") without updating the test stub.
+**Notes:** Mechanical fix: give `FakeBuilder` a `get_updates_connection_pool_size(...)` chainable passthrough like its other builder methods. Left undone to keep the upstream merge free of unrelated changes.
+
+---
+
 ### `cortex_api.log` never logs the actual system prompt content — can't verify context injection from logs alone  <!-- 2026-07-01 -->
 **Symptom:** Every request entry in `cortex_api.log` (and the `cortex_read`/`cortex_analyze` MCP tools built on it) shows the system message as a placeholder, e.g. `"content": "<string: 16146 chars>"` — the real text is never written to the log, only its length. `cortex_search`'s payload/response text search therefore also cannot match anything inside the system prompt (it only sees the placeholder).
 **Location:** whatever call in `core/cortex_api_logger.py` serializes the outbound request before writing it (the truncation happens before the write, not in a display layer — confirmed by reading the raw log file directly, not just the MCP tool output).
@@ -688,6 +696,22 @@ docker exec synth-dev tail -f /app/logs/synth.log | grep -E "\[grillo\]|grillo"
 **Location:** `core/external_endpoints/bridges/cortex_bridge.py` `_inject_actions_into_prompt`; `core/prompt_engine.py` `_derive_default_prompt_action_types`, `_is_non_user_facing_action`.
 **Status:** known — cross-interface `message_*` leak and `PROMPT_LITE_MODE` bypass both fixed 2026-06-27; admin action leak in non-lite mode is open.
 **Notes:** The pre-filter (`_derive_default_prompt_action_types`) only excludes actions whose source matches a *registered* interface name. Plugin-provided actions (sources: `soul`, `bio`, `blocklist`, etc.) have no matching interface, so they pass through for every interface. `_is_non_user_facing_action` can exclude them if their brief/description contains "admin only", "deprecated", or "internal" — but most admin actions don't use those keywords. Two fix approaches: **(A) Tag at the plugin level** — add `"admin only"` to the brief of admin actions in each plugin's `get_supported_actions()`, so the existing guard in `_is_non_user_facing_action` catches them with zero new plumbing. **(B) Add an `admin_only` flag** to the action schema contract and update `_is_non_user_facing_action` to check it — cleaner but requires a schema change. Approach (A) is simpler. `PROMPT_LITE_MODE=true` already filters all these actions — the issue only affects non-lite local endpoints.
+
+---
+
+### `KaradaStateServer.ensure_idle_preloaded` can emit an unawaited coroutine warning  <!-- 2026-05-12 -->
+**Symptom:** Runtime startup can log `RuntimeWarning: coroutine 'KaradaStateServer.ensure_idle_preloaded' was never awaited` during WebUI initialization, even when the rest of the UI continues booting.
+**Location:** `core/webui.py` around the Karada API / preload setup path, plus `core/animation_handler.py` (`KaradaStateServer.ensure_idle_preloaded`).
+**Status:** known, not fixed.
+**Notes:** Observed while smoke-running `scripts/run_webui.py` on `feat/karada-v2`. The warning appears before server bind and suggests a preload helper is being called like a sync function somewhere in WebUI startup.
+
+---
+
+### Docker-served WebUI can keep stale static JS after host-side edits  <!-- 2026-05-13 -->
+**Symptom:** Browser validation against `https://localhost:8000` can keep showing old WebUI behavior and old console logs even after editing files under `res/synth_webui/js/` in the host repo.
+**Location:** Docker runtime / `synth` container image contents vs host workspace files.
+**Status:** known, workflow workaround in use.
+**Notes:** The default Docker stack serves WebUI assets from the built image, not a live bind-mount of the repo JS. Host-side edits do not reach the running browser until the `synth` container is rebuilt/recreated or the changed asset is copied into the container manually (for example `docker cp res/synth_webui/js/loadMixamoAnimation.js synth:/app/res/synth_webui/js/loadMixamoAnimation.js`). When browser logs seem to ignore a local JS patch, verify the file inside the container before debugging the code itself.
 
 ---
 

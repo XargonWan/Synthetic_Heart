@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -137,16 +137,17 @@ class TestPriorityPreemption:
     @pytest.mark.asyncio
     async def test_lower_priority_rejected_when_higher_active(self) -> None:
         handler, transport = _make_handler()
+        handler_any = cast(Any, handler)
 
         # Stub animation discovery
-        handler.get_animation_variants = MagicMock(
+        handler_any.get_animation_variants = MagicMock(
             return_value={"loop": ["Think.fbx"], "post": [], "other": []}
         )
-        handler.get_animations_for_state = MagicMock(return_value=["Think.fbx"])
-        handler._resolve_animation_descriptor = MagicMock(
+        handler_any.get_animations_for_state = MagicMock(return_value=["Think.fbx"])
+        handler_any._resolve_animation_descriptor = MagicMock(
             return_value=("/skins/Rei/animations/think/Think.fbx", None)
         )
-        handler._resolve_animation_descriptor_for_state = MagicMock(
+        handler_any._resolve_animation_descriptor_for_state = MagicMock(
             return_value=("/skins/Rei/animations/think/Think.fbx", None)
         )
 
@@ -160,7 +161,7 @@ class TestPriorityPreemption:
         assert len(transport.animation_payloads) == 1
 
         # Try to play WRITE (priority 3) — should be rejected
-        handler.get_animation_variants = MagicMock(
+        handler_any.get_animation_variants = MagicMock(
             return_value={"loop": ["Write.fbx"], "post": [], "other": []}
         )
         await handler.play_animation(
@@ -176,15 +177,16 @@ class TestPriorityPreemption:
     @pytest.mark.asyncio
     async def test_higher_priority_preempts_lower(self) -> None:
         handler, transport = _make_handler()
+        handler_any = cast(Any, handler)
 
-        handler.get_animation_variants = MagicMock(
+        handler_any.get_animation_variants = MagicMock(
             return_value={"loop": ["Write.fbx"], "post": [], "other": []}
         )
-        handler.get_animations_for_state = MagicMock(return_value=["Write.fbx"])
-        handler._resolve_animation_descriptor = MagicMock(
+        handler_any.get_animations_for_state = MagicMock(return_value=["Write.fbx"])
+        handler_any._resolve_animation_descriptor = MagicMock(
             return_value=("/skins/Rei/animations/write/Write.fbx", None)
         )
-        handler._resolve_animation_descriptor_for_state = MagicMock(
+        handler_any._resolve_animation_descriptor_for_state = MagicMock(
             return_value=("/skins/Rei/animations/write/Write.fbx", None)
         )
 
@@ -198,13 +200,13 @@ class TestPriorityPreemption:
         assert handler.current_state == AnimationState.WRITE
 
         # Play THINK (priority 10) — should succeed
-        handler.get_animation_variants = MagicMock(
+        handler_any.get_animation_variants = MagicMock(
             return_value={"loop": ["Think.fbx"], "post": [], "other": []}
         )
-        handler._resolve_animation_descriptor = MagicMock(
+        handler_any._resolve_animation_descriptor = MagicMock(
             return_value=("/skins/Rei/animations/think/Think.fbx", None)
         )
-        handler._resolve_animation_descriptor_for_state = MagicMock(
+        handler_any._resolve_animation_descriptor_for_state = MagicMock(
             return_value=("/skins/Rei/animations/think/Think.fbx", None)
         )
         await handler.play_animation(
@@ -218,15 +220,16 @@ class TestPriorityPreemption:
     @pytest.mark.asyncio
     async def test_idle_always_overridable(self) -> None:
         handler, transport = _make_handler()
+        handler_any = cast(Any, handler)
 
-        handler.get_animation_variants = MagicMock(
+        handler_any.get_animation_variants = MagicMock(
             return_value={"loop": ["Idle.fbx"], "post": [], "other": []}
         )
-        handler.get_animations_for_state = MagicMock(return_value=["Idle.fbx"])
-        handler._resolve_animation_descriptor = MagicMock(
+        handler_any.get_animations_for_state = MagicMock(return_value=["Idle.fbx"])
+        handler_any._resolve_animation_descriptor = MagicMock(
             return_value=("/skins/Rei/animations/idle/Idle.fbx", None)
         )
-        handler._resolve_animation_descriptor_for_state = MagicMock(
+        handler_any._resolve_animation_descriptor_for_state = MagicMock(
             return_value=("/skins/Rei/animations/idle/Idle.fbx", None)
         )
 
@@ -256,8 +259,9 @@ class TestPriorityPreemption:
             state_folder = state_name or AnimationState.IDLE.value
             return (f"/skins/Rei/animations/{state_folder}/{animation_file}", None)
 
-        handler.get_animation_variants = MagicMock(side_effect=fake_variants)
-        handler.get_animations_for_state = MagicMock(
+        handler_any = cast(Any, handler)
+        handler_any.get_animation_variants = MagicMock(side_effect=fake_variants)
+        handler_any.get_animations_for_state = MagicMock(
             side_effect=lambda state: (
                 fake_variants(
                     state.value if isinstance(state, AnimationState) else str(state)
@@ -267,10 +271,10 @@ class TestPriorityPreemption:
                 )["post"]
             )
         )
-        handler._resolve_animation_descriptor = MagicMock(
+        handler_any._resolve_animation_descriptor = MagicMock(
             side_effect=lambda animation_file: fake_resolve_for_state(animation_file)
         )
-        handler._resolve_animation_descriptor_for_state = MagicMock(
+        handler_any._resolve_animation_descriptor_for_state = MagicMock(
             side_effect=fake_resolve_for_state
         )
 
@@ -348,8 +352,9 @@ class TestPriorityPreemption:
 
         monkeypatch.setattr("core.animation_handler.random.choice", fake_choice)
 
-        handler.get_animation_variants = MagicMock(side_effect=fake_variants)
-        handler.get_animations_for_state = MagicMock(
+        handler_any = cast(Any, handler)
+        handler_any.get_animation_variants = MagicMock(side_effect=fake_variants)
+        handler_any.get_animations_for_state = MagicMock(
             side_effect=lambda state: (
                 fake_variants(
                     state.value if isinstance(state, AnimationState) else str(state)
@@ -359,10 +364,10 @@ class TestPriorityPreemption:
                 )["post"]
             )
         )
-        handler._resolve_animation_descriptor = MagicMock(
+        handler_any._resolve_animation_descriptor = MagicMock(
             side_effect=lambda animation_file: fake_resolve_for_state(animation_file)
         )
-        handler._resolve_animation_descriptor_for_state = MagicMock(
+        handler_any._resolve_animation_descriptor_for_state = MagicMock(
             side_effect=fake_resolve_for_state
         )
 
@@ -389,11 +394,13 @@ class TestPriorityPreemption:
         )
 
         assert think_choice_count == 1
-        assert transport.animation_payloads[0]["file"].endswith("/ThinkA.fbx")
-        assert transport.animation_payloads[-1]["file"].endswith("/ThinkA.fbx")
+        assert transport.animation_payloads[0]["type"] == "vrm_animation_v2"
+        assert transport.animation_payloads[0]["descriptor"].endswith("/thinka")
+        assert transport.animation_payloads[-1]["descriptor"].endswith("/thinka")
         assert transport.animation_payloads[-1]["state"] == AnimationState.THINK.value
-        assert transport.animation_payloads[-1]["play_section"] == "loop"
-        assert transport.animation_payloads[-1]["phase_authoritative"] is True
+        assert isinstance(
+            transport.animation_payloads[-1].get("started_at"), (int, float)
+        )
 
     @pytest.mark.asyncio
     async def test_face_values_snapshot_can_clear_to_neutral(self) -> None:
@@ -447,17 +454,18 @@ class TestGlobalRotation:
     @pytest.mark.asyncio
     async def test_rotation_key_is_state_only(self) -> None:
         handler, transport = _make_handler()
+        handler_any = cast(Any, handler)
 
-        handler.get_animation_variants = MagicMock(
+        handler_any.get_animation_variants = MagicMock(
             return_value={"loop": ["Idle.fbx", "Idle2.fbx"], "post": [], "other": []}
         )
-        handler.get_animations_for_state = MagicMock(
+        handler_any.get_animations_for_state = MagicMock(
             return_value=["Idle.fbx", "Idle2.fbx"]
         )
-        handler._resolve_animation_descriptor = MagicMock(
+        handler_any._resolve_animation_descriptor = MagicMock(
             return_value=("/skins/Rei/animations/idle/Idle.fbx", None)
         )
-        handler._resolve_animation_descriptor_for_state = MagicMock(
+        handler_any._resolve_animation_descriptor_for_state = MagicMock(
             return_value=("/skins/Rei/animations/idle/Idle.fbx", None)
         )
 
@@ -561,16 +569,17 @@ class TestWatchdog:
         # Simulate stuck state: THINK but no active tasks
         handler.current_state = AnimationState.THINK
         handler._active_tasks.clear()
+        handler_any = cast(Any, handler)
 
         # Stub for the fallback play_animation call
-        handler.get_animation_variants = MagicMock(
+        handler_any.get_animation_variants = MagicMock(
             return_value={"loop": ["Idle.fbx"], "post": [], "other": []}
         )
-        handler.get_animations_for_state = MagicMock(return_value=["Idle.fbx"])
-        handler._resolve_animation_descriptor = MagicMock(
+        handler_any.get_animations_for_state = MagicMock(return_value=["Idle.fbx"])
+        handler_any._resolve_animation_descriptor = MagicMock(
             return_value=("/skins/Rei/animations/idle/Idle.fbx", None)
         )
-        handler._resolve_animation_descriptor_for_state = MagicMock(
+        handler_any._resolve_animation_descriptor_for_state = MagicMock(
             return_value=("/skins/Rei/animations/idle/Idle.fbx", None)
         )
 

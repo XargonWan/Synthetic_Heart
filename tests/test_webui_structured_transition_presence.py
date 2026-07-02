@@ -110,16 +110,20 @@ def test_webui_structured_phase_preserved_for_non_authoritative_summary() -> Non
     assert "!incomingPhaseAuthoritative" in content
 
 
-def test_webui_threads_rei_fallback_path_and_metadata() -> None:
-    """When the backend resolves a full fallback path (for example under Rei), the
-    viewer must keep using that exact file path during pending-command replay,
-    initial restore, and resync rather than rebuilding a path from the active skin."""
+def test_webui_resolves_descriptor_tuples_for_restore_and_resync() -> None:
+    """The viewer must resolve descriptor ids during restore, pending replay,
+    and resync instead of relying on backend file-path payloads."""
     content = Path("res/synth_webui/js/vrm-viewer.mjs").read_text(encoding="utf-8")
-    assert "last.animation || last.file || null" in content
-    assert "summary.animation || summary.file || null" in content
-    assert "frameRange = null, phaseAuthoritative = false" in content
-    assert "summary.frame_range || null" in content
-    assert "!!summary.phase_authoritative" in content
+    assert "const lastDescriptorId = (typeof last.descriptor === 'string')" in content
+    assert "window.karadaResolveAnimationDescriptor(summary.descriptor)" in content
+    assert (
+        "const animationRef = resolved ? (resolved.animation_url || null) : null"
+        in content
+    )
+    assert (
+        "const descriptorData = resolved ? (resolved.descriptor_data || null) : null"
+        in content
+    )
 
 
 def test_webui_crossfade_timeouts_are_generation_guarded() -> None:

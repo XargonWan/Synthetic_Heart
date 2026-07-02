@@ -1,4 +1,6 @@
 import json
+from typing import Any, cast
+
 import pytest
 from fastapi.websockets import WebSocketDisconnect
 
@@ -35,7 +37,7 @@ async def test_post_animation_state_calls_play_animation(monkeypatch):
                 "source": "test",
             }
 
-    res = await webui.set_animation_state(DummyReq())
+    res = await webui.set_animation_state(cast(Any, DummyReq()))
     assert res.status_code == 200
     body = json.loads(res.body)
     assert body["status"] == "ok"
@@ -69,7 +71,7 @@ async def test_post_touch_animation_state_uses_overlay_defaults():
         async def json(self):
             return {"state": "touch"}
 
-    res = await webui.set_animation_state(DummyReq())
+    res = await webui.set_animation_state(cast(Any, DummyReq()))
     assert res.status_code == 200
     assert called["state"] == AnimationState.TOUCH
     assert called["session_id"] is None
@@ -151,12 +153,8 @@ async def test_get_animation_state_route_returns_payload():
     def fake_current_state():
         return {
             "state": "idle",
-            "animation_file": None,
-            "descriptor": None,
-            "play_section": "loop",
-            "frame_range": {"start_frame": 0, "end_frame": 30},
-            "phase_authoritative": False,
-            "animation_state": {"phase": "loop", "phase_authoritative": False},
+            "descriptor": "rei/idle/idle",
+            "started_at": 1234.5,
         }
 
     webui.animation_handler = type(
@@ -167,19 +165,13 @@ async def test_get_animation_state_route_returns_payload():
     handler = None
     for route in webui.app.routes:
         if getattr(route, "path", None) == "/api/animation_state":
-            handler = route.endpoint
+            handler = cast(Any, route).endpoint
             break
 
     assert handler is not None
-    res = await handler(None)
+    res = await handler()
     assert res.status_code == 200
     body = json.loads(res.body)
     assert body.get("state") == "idle"
-    assert "animation" in body and "descriptor" in body
-    assert body.get("play_section") == "loop"
-    assert body.get("frame_range") == {"start_frame": 0, "end_frame": 30}
-    assert body.get("phase_authoritative") is False
-    assert body.get("animation_state") == {
-        "phase": "loop",
-        "phase_authoritative": False,
-    }
+    assert body.get("descriptor") == "rei/idle/idle"
+    assert body.get("started_at") == 1234.5

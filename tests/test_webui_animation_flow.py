@@ -26,7 +26,9 @@ async def test_play_and_stop_with_outro(tmp_path: Path):
     # Setup fake animation with outro descriptor
     base = tmp_path / "webui_anim"
     (base / "think").mkdir(parents=True)
+    (base / "idle").mkdir(parents=True)
     (base / "think" / "think_long.fbx").write_text("FBX")
+    (base / "idle" / "idle_loop.fbx").write_text("FBX")
     (base / "think" / "think_long.fbx.json").write_text(
         json.dumps(
             {
@@ -36,11 +38,15 @@ async def test_play_and_stop_with_outro(tmp_path: Path):
             }
         )
     )
+    (base / "idle" / "idle_loop.fbx.json").write_text(
+        json.dumps({"loop": {"start_frame": 0, "end_frame": 40}})
+    )
 
     handler = KaradaStateServer()
     handler.set_animation_search_paths([base])
     # Force selection of our test animation regardless of active persona/skin content
     handler.register_state_animations("think", {"loop": ["think_long.fbx"]})
+    handler.register_state_animations("idle", {"loop": ["idle_loop.fbx"]})
 
     session = "sess1"
     fake = FakeWebUI(session)
@@ -55,19 +61,22 @@ async def test_play_and_stop_with_outro(tmp_path: Path):
         context_id="ctx1",
         priority=5,
     )
-    # Ensure we sent an animation payload (new type: vrm_animation)
-    sent = fake.connections[session].sent
-    assert any(p.get("type") == "vrm_animation" for p in sent)
 
-    # Ensure rich animation_state is present when descriptor exists
-    anim_payloads = [p for p in sent if p.get("type") == "vrm_animation"]
+    sent = fake.connections[session].sent
+    assert any(p.get("type") == "vrm_animation_v2" for p in sent)
+
+    anim_payloads = [p for p in sent if p.get("type") == "vrm_animation_v2"]
     assert anim_payloads
     first = anim_payloads[0]
-    assert first.get("descriptor") is not None
-    assert "animation_state" in first
-    assert first["animation_state"].get("lipsync") is False
+    assert first["state"] == "think"
+    assert first["descriptor"] == "local/think/think_long"
+    assert isinstance(first["started_at"], float)
 
-    # Now stop animation and expect an outro play_section event
     await handler.stop_animation(context_id="ctx1", session_id=session)
-    # After stop, at least one payload with play_section 'outro' should be in sent
-    assert any(p.get("play_section") == "outro" for p in sent)
+
+    assert any(
+        p.get("type") == "vrm_animation_v2"
+        and p.get("state") == "idle"
+        and p.get("descriptor") == "local/idle/idle_loop"
+        for p in sent
+    )

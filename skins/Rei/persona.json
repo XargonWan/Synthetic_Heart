@@ -60,8 +60,6 @@
     "animation_overrides": {
         "Think": {
             "animation": "/skins/Rei/animations/Think/Thinking.fbx",
-            "blendshape_presets": { "mouth_O": 0.05 }
-            ,
             "expressions": [
                 { "name": "thinking_eyes_closed", "targets": { "eyes_closed": 1.0 }, "priority": 90, "source": "persona_override" }
             ]

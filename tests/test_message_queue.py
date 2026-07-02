@@ -236,3 +236,71 @@ async def test_enqueue_recovers_grillo_activity_id_from_synthetic_message_id(
     assert recorded
     assert recorded[0].get("activity_log_id") == 6364
     assert recorded[0].get("grillo_activity_log_id") == 6364
+
+
+@pytest.mark.asyncio
+async def test_supervisor_restarts_dead_consumer(monkeypatch):
+    """The supervisor watchdog must restart the consumer if it dies unexpectedly.
+
+    Regression: a per-message LLM timeout cancellation could propagate up and
+    kill the consumer loop permanently. Without a supervisor the consumer never
+    restarted, so every subsequent message queued silently and the VRM avatar
+    stayed frozen on the ``think`` animation. The consumer must survive an
+    accidental cancellation.
+    """
+    import asyncio
+
+    # Speed the watchdog up so the test doesn't wait 5s.
+    monkeypatch.setattr(message_queue, "_SUPERVISOR_INTERVAL_SECONDS", 0.05)
+
+    # Make sure we start from a clean, non-shutdown state.
+    await message_queue.stop()
+
+    try:
+        await message_queue.run()
+
+        first_task = message_queue._consumer_task
+        assert first_task is not None and not first_task.done()
+
+        # Simulate an *accidental* cancellation (as a per-message timeout cancel
+        # propagating up would cause). This must NOT be treated as a shutdown.
+        first_task.cancel()
+
+        # Wait for the supervisor to notice and restart the consumer.
+        for _ in range(40):
+            await asyncio.sleep(0.05)
+            new_task = message_queue._consumer_task
+            if (
+                new_task is not None
+                and new_task is not first_task
+                and not new_task.done()
+            ):
+                break
+
+        new_task = message_queue._consumer_task
+        assert new_task is not None, "supervisor should have recreated the consumer"
+        assert new_task is not first_task, "consumer task should be a fresh instance"
+        assert not new_task.done(), "restarted consumer should be running"
+    finally:
+        await message_queue.stop()
+
+
+@pytest.mark.asyncio
+async def test_stop_prevents_consumer_restart(monkeypatch):
+    """After a deliberate stop() the supervisor must not resurrect the consumer."""
+    import asyncio
+
+    monkeypatch.setattr(message_queue, "_SUPERVISOR_INTERVAL_SECONDS", 0.05)
+
+    await message_queue.run()
+    await message_queue.stop()
+
+    # Give any lingering supervisor time to (wrongly) restart the consumer.
+    await asyncio.sleep(0.2)
+
+    assert message_queue._consumer_task is None
+    assert message_queue._supervisor_task is None
+    assert message_queue._shutdown_requested is True
+
+    # Clean up for other tests: allow the queue to run again.
+    message_queue._shutdown_requested = False

@@ -282,7 +282,7 @@
             console.log('[synth_webui] VRM loader configured with resource path: /skins/temp/');
         }
     </script>
-    <script type="module" src="/js/vrm-viewer.mjs?v=20260421-face-layer-balance"></script>
+    <script type="module" src="/js/vrm-viewer.mjs?v=20260703-noreset"></script>
 <!-- VRM alias table / duplicate inline fragment removed — implementation lives in /js/vrm-viewer.mjs -->
 
 
@@ -313,7 +313,7 @@
                         try {
                             if (!this._lastExpressionLogTime) this._lastExpressionLogTime = 0;
                             <script src="/js/webui-bootstrap.js"></script>
-                            <script type="module" src="/js/vrm-viewer.mjs?v=20260421-face-layer-balance"></script>
+                            <script type="module" src="/js/vrm-viewer.mjs?v=20260703-noreset"></script>
                                             return (sf <= timeInClip);
                                         }
                                         return true;
@@ -3793,11 +3793,15 @@
                     let desiredState = null;
                     let desiredAnimation = null;
                     let desiredDescriptor = null;
+                    let desiredDescriptorId = null;
+                    let desiredStartedAt = null;
                     try {
                         if (window.__synth_current_animation_state && window.__synth_current_animation_state.state) {
                             desiredState = window.__synth_current_animation_state.state;
                             desiredAnimation = window.__synth_current_animation_state.animation || null;
                             desiredDescriptor = window.__synth_current_animation_state.descriptor || null;
+                            desiredDescriptorId = window.__synth_current_animation_state.descriptor_id || null;
+                            desiredStartedAt = window.__synth_current_animation_state.started_at ?? null;
                             console.log('[synth_webui] Using cached animation state for VRM reload:', desiredState, desiredAnimation);
                         }
                     } catch (err) {
@@ -3812,10 +3816,24 @@
                                 const summary = await resp.json();
                                 console.log('[synth_webui] Backend animation state:', summary);
                                 if (summary && summary.state) {
+                                    let resolved = null;
+                                    if (summary.descriptor && typeof window.karadaResolveAnimationDescriptor === 'function') {
+                                        try {
+                                            resolved = await window.karadaResolveAnimationDescriptor(summary.descriptor);
+                                        } catch (e) { /* ignore */ }
+                                    }
                                     desiredState = summary.state;
-                                    desiredAnimation = summary.animation || null;
-                                    desiredDescriptor = summary.descriptor || null;
-                                    window.__synth_current_animation_state = { state: desiredState, animation: desiredAnimation, descriptor: desiredDescriptor || null };
+                                    desiredAnimation = resolved ? (resolved.animation_url || null) : null;
+                                    desiredDescriptorId = (typeof summary.descriptor === 'string') ? summary.descriptor : null;
+                                    desiredDescriptor = resolved ? (resolved.descriptor_data || null) : null;
+                                    desiredStartedAt = summary.started_at ?? null;
+                                    window.__synth_current_animation_state = {
+                                        state: desiredState,
+                                        animation: desiredAnimation,
+                                        descriptor_id: desiredDescriptorId,
+                                        descriptor: desiredDescriptor || null,
+                                        started_at: desiredStartedAt,
+                                    };
                                 }
                             } else {
                                 console.warn('[synth_webui] Failed to fetch backend animation state, resp ok=', !!resp?.ok);
@@ -3837,7 +3855,9 @@
                                     type: 'animation_state',
                                     state: stateToStart,
                                     animation: desiredAnimation || null,
+                                    descriptor_id: desiredDescriptorId || null,
                                     descriptor: desiredDescriptor || null,
+                                    started_at: desiredStartedAt,
                                     animation_state: window.__synth_last_rich_animation_state || null,
                                 };
                                 window.__synth_debug_last_remote_at.animation_state = Date.now();
@@ -3875,16 +3895,28 @@
                                 }
                             } catch (e) { /* ignore */ }
 
-                            const animationFileOrUrl = last.animation || null;
-                            const lastPlayOnce = (last.descriptor && last.descriptor.play_once) || (last.loop === false);
+                            const lastDescriptorId = (typeof last.descriptor === 'string')
+                                ? last.descriptor
+                                : (last.descriptor_id || null);
+                            let resolvedLast = null;
+                            if (lastDescriptorId && typeof window.karadaResolveAnimationDescriptor === 'function') {
+                                try {
+                                    resolvedLast = await window.karadaResolveAnimationDescriptor(lastDescriptorId);
+                                } catch (e) { /* ignore */ }
+                            }
+                            const animationFileOrUrl = last.animation || (resolvedLast ? (resolvedLast.animation_url || null) : null);
+                            const lastDescriptor = (last && typeof last.descriptor === 'object')
+                                ? last.descriptor
+                                : (resolvedLast ? (resolvedLast.descriptor_data || null) : null);
+                            const lastPlayOnce = !!(lastDescriptor && lastDescriptor.play_once);
                             const initialPlayOnce = !!(desiredDescriptor && desiredDescriptor.play_once);
 
                             // Skip if it matches what we just started as initial state.
                             try {
-                                const startedKey = `${(desiredState || 'idle') || ''}|${desiredAnimation || ''}|${initialPlayOnce ? '1' : '0'}`;
-                                const lastKey = `${last.state || ''}|${last.animation || ''}|${lastPlayOnce ? '1' : '0'}`;
+                                const startedKey = `${(desiredState || 'idle') || ''}|${desiredDescriptorId || desiredAnimation || ''}|${desiredStartedAt ?? ''}|${initialPlayOnce ? '1' : '0'}`;
+                                const lastKey = `${last.state || ''}|${lastDescriptorId || animationFileOrUrl || ''}|${last.started_at ?? ''}|${lastPlayOnce ? '1' : '0'}`;
                                 if (startedKey !== lastKey) {
-                                    animationHandler.startAction(last.state, animationFileOrUrl, !!lastPlayOnce, last.play_section || null, last.descriptor || null);
+                                    animationHandler.startAction(last.state, animationFileOrUrl, !!lastPlayOnce, null, lastDescriptor || null);
                                 } else {
                                     console.log('[synth_webui] Pending command matches started state; skipping');
                                     // Even when skipping (because the action is already playing),
@@ -3898,7 +3930,7 @@
                                     } catch (e) { /* ignore */ }
                                 }
                             } catch (e) {
-                                animationHandler.startAction(last.state, animationFileOrUrl, !!lastPlayOnce, last.play_section || null, last.descriptor || null);
+                                animationHandler.startAction(last.state, animationFileOrUrl, !!lastPlayOnce, null, lastDescriptor || null);
                             }
                         }
                     }

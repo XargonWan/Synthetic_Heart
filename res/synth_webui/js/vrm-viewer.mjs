@@ -1,10 +1,24 @@
-import * as THREE from 'three';
-import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
-import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
+import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js';
+import { OrbitControls } from 'https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/controls/OrbitControls.js';
+import { GLTFLoader } from 'https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/loaders/GLTFLoader.js';
+import { FBXLoader } from 'https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/loaders/FBXLoader.js';
 import { VRM, VRMLoaderPlugin, VRMUtils } from 'https://cdn.jsdelivr.net/npm/@pixiv/three-vrm@3/lib/three-vrm.module.js';
 import { loadMixamoAnimation } from '/js/loadMixamoAnimation.js';
 import { mixamoVRMRigMap } from '/js/mixamoVRMRigMap.js';
+import { AnimationUtils } from '/js/AnimationUtils.js';
+
+import {
+    initAnimationEngine,
+    playAnimation as karadaPlayAnimation,
+    stopAnimation as karadaStopAnimation,
+    transitionToIdle,
+    updateEngine,
+    getEngineState,
+    setOnStateChange,
+    setOnSectionChange,
+    getAnimationTime,
+} from '/js/vrm-animation-engine.mjs?v=20260703-descriptor-facial';
+
 
 // Module-scoped variables (initialized when the canvas is available)
 let canvas = null;
@@ -125,13 +139,94 @@ function _resetSummoningBootstrapCaches() {
     } catch (e) { /* ignore */ }
 }
 
+async function _fetchKaradaAnimationManifest(forceRefresh = false) {
+    try {
+        const cached = window.__karada_animation_manifest;
+        if (
+            !forceRefresh
+            && cached
+            && typeof cached === 'object'
+            && cached.animations
+            && typeof cached.animations === 'object'
+        ) {
+            return cached;
+        }
+    } catch (e) { /* ignore */ }
+
+    try {
+        const resp = await fetch('/api/karada/animations/manifest', { cache: 'no-store' });
+        if (resp && resp.ok) {
+            const manifest = await resp.json();
+            try { window.__karada_animation_manifest = manifest; } catch (e) { /* ignore */ }
+            return manifest;
+        }
+    } catch (err) {
+        console.warn('[synth_webui] Failed to fetch Karada animation manifest:', err);
+    }
+
+    return { version: 2, animations: {} };
+}
+
+async function _resolveKaradaAnimationDescriptor(descriptorId, forceRefresh = false) {
+    if (!descriptorId || typeof descriptorId !== 'string') {
+        return null;
+    }
+
+    try {
+        const manifest = await _fetchKaradaAnimationManifest(forceRefresh);
+        const animations = (manifest && typeof manifest === 'object' && manifest.animations && typeof manifest.animations === 'object')
+            ? manifest.animations
+            : null;
+        if (animations && animations[descriptorId]) {
+            return animations[descriptorId];
+        }
+    } catch (e) { /* ignore */ }
+
+    try {
+        const resp = await fetch(`/api/karada/animations/resolve?descriptor_id=${encodeURIComponent(descriptorId)}`, { cache: 'no-store' });
+        if (resp && resp.ok) {
+            const entry = await resp.json();
+            try {
+                const manifest = window.__karada_animation_manifest && typeof window.__karada_animation_manifest === 'object'
+                    ? window.__karada_animation_manifest
+                    : { version: 2, animations: {} };
+                manifest.animations = (manifest.animations && typeof manifest.animations === 'object') ? manifest.animations : {};
+                manifest.animations[descriptorId] = entry;
+                window.__karada_animation_manifest = manifest;
+            } catch (e) { /* ignore */ }
+            return entry;
+        }
+    } catch (err) {
+        console.warn('[synth_webui] Failed to resolve Karada descriptor:', descriptorId, err);
+    }
+
+    return null;
+}
+
+async function _resolveKaradaPlaybackStateTuple(payload, forceRefresh = false) {
+    const descriptorId = (payload && typeof payload.descriptor === 'string') ? payload.descriptor : null;
+    const resolvedEntry = descriptorId
+        ? await _resolveKaradaAnimationDescriptor(descriptorId, forceRefresh)
+        : null;
+
+    return {
+        descriptorId,
+        resolvedEntry,
+        animation: resolvedEntry
+            ? (resolvedEntry.animation_url || resolvedEntry.animation || null)
+            : ((payload && (payload.animation || payload.file)) || null),
+        descriptorData: resolvedEntry
+            ? (resolvedEntry.descriptor_data || null)
+            : ((payload && typeof payload.descriptor === 'object') ? payload.descriptor : null),
+    };
+}
+
 async function _fetchFreshSummoningState() {
     let desiredState = null;
     let desiredAnimation = null;
     let desiredDescriptor = null;
-    let desiredPlaySection = null;
-    let desiredFrameRange = null;
-    let desiredPhaseAuthoritative = false;
+    let desiredDescriptorId = null;
+    let desiredStartedAt = null;
     let richAnimationState = null;
     let faceValues = null;
 
@@ -142,12 +237,12 @@ async function _fetchFreshSummoningState() {
             const animation = (fullState && typeof fullState.animation === 'object' && fullState.animation)
                 ? fullState.animation
                 : {};
+            const resolvedPlayback = await _resolveKaradaPlaybackStateTuple(animation);
             desiredState = animation.state || null;
-            desiredAnimation = animation.file || animation.url || animation.animation || null;
-            desiredDescriptor = animation.descriptor || null;
-            desiredPlaySection = animation.play_section || null;
-            desiredFrameRange = animation.frame_range || null;
-            desiredPhaseAuthoritative = !!animation.phase_authoritative;
+            desiredAnimation = resolvedPlayback.animation;
+            desiredDescriptor = resolvedPlayback.descriptorData;
+            desiredDescriptorId = resolvedPlayback.descriptorId;
+            desiredStartedAt = animation.started_at || null;
             richAnimationState = animation.animation_state || null;
             faceValues = (fullState && fullState.face_values && typeof fullState.face_values === 'object')
                 ? fullState.face_values
@@ -158,10 +253,9 @@ async function _fetchFreshSummoningState() {
                     window.__synth_current_animation_state = {
                         state: desiredState,
                         animation: desiredAnimation,
+                        descriptor_id: desiredDescriptorId,
                         descriptor: desiredDescriptor || null,
-                        play_section: desiredPlaySection,
-                        frame_range: desiredFrameRange,
-                        phase_authoritative: desiredPhaseAuthoritative,
+                        started_at: desiredStartedAt,
                     };
                 } catch (e) { /* ignore */ }
             }
@@ -171,10 +265,9 @@ async function _fetchFreshSummoningState() {
             return {
                 state: desiredState,
                 animation: desiredAnimation,
+                descriptorId: desiredDescriptorId,
                 descriptor: desiredDescriptor,
-                playSection: desiredPlaySection,
-                frameRange: desiredFrameRange,
-                phaseAuthoritative: desiredPhaseAuthoritative,
+                startedAt: desiredStartedAt,
                 richAnimationState,
                 faceValues,
             };
@@ -187,22 +280,21 @@ async function _fetchFreshSummoningState() {
         const resp = await fetch('/api/animation_state', { cache: 'no-store' });
         if (resp && resp.ok) {
             const summary = await resp.json();
+            const resolvedPlayback = await _resolveKaradaPlaybackStateTuple(summary);
             desiredState = summary.state || null;
-            desiredAnimation = summary.animation || summary.file || null;
-            desiredDescriptor = summary.descriptor || null;
-            desiredPlaySection = summary.play_section || null;
-            desiredFrameRange = summary.frame_range || null;
-            desiredPhaseAuthoritative = !!summary.phase_authoritative;
-            richAnimationState = summary.animation_state || null;
+            desiredAnimation = resolvedPlayback.animation;
+            desiredDescriptor = resolvedPlayback.descriptorData;
+            desiredDescriptorId = resolvedPlayback.descriptorId;
+            desiredStartedAt = summary.started_at || null;
+            richAnimationState = null;
             if (desiredState) {
                 try {
                     window.__synth_current_animation_state = {
                         state: desiredState,
                         animation: desiredAnimation,
+                        descriptor_id: desiredDescriptorId,
                         descriptor: desiredDescriptor || null,
-                        play_section: desiredPlaySection,
-                        frame_range: desiredFrameRange,
-                        phase_authoritative: desiredPhaseAuthoritative,
+                        started_at: desiredStartedAt,
                     };
                 } catch (e) { /* ignore */ }
             }
@@ -217,10 +309,9 @@ async function _fetchFreshSummoningState() {
     return {
         state: desiredState,
         animation: desiredAnimation,
+        descriptorId: desiredDescriptorId,
         descriptor: desiredDescriptor,
-        playSection: desiredPlaySection,
-        frameRange: desiredFrameRange,
-        phaseAuthoritative: desiredPhaseAuthoritative,
+        startedAt: desiredStartedAt,
         richAnimationState,
         faceValues,
     };
@@ -259,7 +350,7 @@ function initVRMViewer() {
 
     try {
         renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
-        renderer.outputEncoding = THREE.sRGBEncoding;
+        renderer.outputColorSpace = THREE.SRGBColorSpace;
         renderer.setPixelRatio(window.devicePixelRatio);
         scene = new THREE.Scene();
         camera = new THREE.PerspectiveCamera(30, canvas.clientWidth / Math.max(1, canvas.clientHeight), 0.1, 20);
@@ -965,9 +1056,18 @@ class AnimationHandler {
                     this._emotionOverlay = null;
 
                     // On action change, perform a smooth eyes reset so that
-                    // persistent eye-closed flags are removed in a non-abrupt way
+                    // persistent eye-closed flags are removed in a non-abrupt way.
+                    //
+                    // BUT skip the reset when the incoming state itself declares a
+                    // persistent eyes-closed expression (e.g. the THINK descriptor's
+                    // `eyes_closed`). Otherwise this setTimeout-driven ramp writes
+                    // blink -> 0 and calls _clearEyesState()/_startBlinkLoop() a few
+                    // hundred ms after the state is applied, fighting the per-frame
+                    // expression ticker that is trying to hold the eyes closed. The
+                    // result is that the descriptor's eyes_closed never renders.
+                    const incomingHoldsEyesClosed = this._stateHasPersistentEyesClosed(state);
                     try {
-                        if (typeof this._resetEyesSmoothly === 'function') {
+                        if (!incomingHoldsEyesClosed && typeof this._resetEyesSmoothly === 'function') {
                             this._resetEyesSmoothly(220);
                         }
                     } catch (e) { /* ignore */ }
@@ -1019,10 +1119,30 @@ class AnimationHandler {
             if (prev !== this._lipsyncEnabled) {
                 try { window.dispatchEvent(new CustomEvent('synth_animation_lipsync_changed', { detail: { lipsync: this._lipsyncEnabled } })); } catch (e) { }
             }
+            // Re-apply the last server-sent emotion face values under the new
+            // action/lipsync state so idle attenuation and talk full-intensity
+            // track state transitions without waiting for a fresh WS update.
+            try {
+                if (this._lastRemoteFaceValues && typeof this._lastRemoteFaceValues === 'object'
+                    && Object.keys(this._lastRemoteFaceValues).length) {
+                    this._reapplyRemoteFaceValues();
+                }
+            } catch (e) { /* ignore */ }
             // manage blink/eye managers according to lipsync flag and persona defaults
             try {
                 this._loadPersonaForSkin(window.activeSkinName ? window.activeSkinName.split('/').pop().replace('.vrm', '') : 'Rei')
                     .then(persona => {
+                        // Guard against a stale-state race: this persona load is async, so a
+                        // newer animation state may have arrived (and replaced
+                        // this._lastAnimationState) before this .then() runs. If that happened,
+                        // abort — otherwise the code below re-writes this._lastAnimationState with
+                        // THIS (now obsolete) `state` and re-applies its persona_override
+                        // expressions (e.g. think's persistent eyes_closed), leaving the eyes shut
+                        // during the newer state (write/idle). This is the "fast animations" bug.
+                        if (this._lastAnimationState !== state) {
+                            console.debug('[AnimationHandler] persona load resolved for a superseded state; skipping override re-apply');
+                            return;
+                        }
                         console.debug('[AnimationHandler] persona loaded', persona && persona.name ? persona.name : '(unknown)');
                         const effectivePersona = this._getEffectivePersona();
                         const pdefaults = (effectivePersona && effectivePersona.defaults) ? effectivePersona.defaults : {};
@@ -1110,8 +1230,14 @@ class AnimationHandler {
                         this._eyeAutoEnabled = (!!eyeCfg.auto) && !this._lipsyncEnabled;
                         this._saccadeRateS = eyeCfg.saccade_rate_s || 2;
 
-                        if (this._blinkAutoEnabled) this._startBlinkLoop(); else this._stopBlinkLoop();
-                        if (this._eyeAutoEnabled) this._startEyeMovement(); else this._stopEyeMovement();
+                        // If this state holds the eyes closed for its whole span (e.g. the
+                        // 'think' descriptor + persona overrides), do NOT (re)start the
+                        // autoblink loop here. The per-frame expression ticker owns the eyes
+                        // in that case and would otherwise be fought by an autoblink loop
+                        // restarted on every state broadcast, re-opening the eyes.
+                        const holdsEyesClosed = this._stateHasPersistentEyesClosed(state);
+                        if (this._blinkAutoEnabled && !holdsEyesClosed) this._startBlinkLoop(); else this._stopBlinkLoop();
+                        if (this._eyeAutoEnabled && !holdsEyesClosed) this._startEyeMovement(); else this._stopEyeMovement();
                         // If we transitioned out of 'think' and persona overrides applied
                         // after the async persona load, ensure eyes are open now to avoid
                         // persona_override re-closing them after a force-open earlier.
@@ -1313,11 +1439,14 @@ class AnimationHandler {
 
             if (!dominantKey || dominantValue < 0.08) return null;
 
-            const subtleFloor = (dominantKey === 'relaxed') ? 0.05 : 0.07;
-            const subtleCeil = (dominantKey === 'relaxed') ? 0.14 : 0.18;
+            // 'relaxed' maps to a VRM preset that partially opens the mouth on this
+            // model, which looks unnatural at rest. Keep its idle contribution very
+            // minimal so the resting mouth stays essentially closed.
+            const subtleFloor = (dominantKey === 'relaxed') ? 0.02 : 0.07;
+            const subtleCeil = (dominantKey === 'relaxed') ? 0.06 : 0.18;
             const subtleIntensity = Math.min(
                 subtleCeil,
-                subtleFloor + dominantValue * ((dominantKey === 'relaxed') ? 0.07 : 0.12),
+                subtleFloor + dominantValue * ((dominantKey === 'relaxed') ? 0.03 : 0.12),
             );
 
             return { [dominantKey]: subtleIntensity };
@@ -1337,8 +1466,61 @@ class AnimationHandler {
                 try { if (this._faceValueCache) delete this._faceValueCache[String(key)]; } catch (e) { /* ignore */ }
             });
             this._remoteFaceValueKeys = new Set();
+            this._lastRemoteFaceValues = null;
             try { this._flushFaceNow(); } catch (e) { /* ignore */ }
         } catch (e) { /* ignore */ }
+    }
+
+    // Blendshape keys that are phonetic (visemes) or ocular, NOT emotional.
+    // These drive mouth shapes and blinks and must never be scaled down for
+    // idle micro-expression gating — only emotion presets are attenuated.
+    _isNonEmotionalFaceKey(name) {
+        try {
+            const k = String(name || '').toLowerCase();
+            if (!k) return true;
+            // Visemes (phonemes) and neutral/eye keys — driven by lipsync/blink.
+            const nonEmotional = new Set([
+                'aa', 'ih', 'ou', 'ee', 'oh',
+                'neutral',
+                'blink', 'blinkleft', 'blinkright',
+                'eyes_closed', 'eyesclosed',
+                'lookup', 'lookdown', 'lookleft', 'lookright',
+            ]);
+            return nonEmotional.has(k);
+        } catch (e) { return false; }
+    }
+
+    // Scale a server-sent emotion value for the resting (idle) state so that
+    // emotions read as subtle micro-expressions instead of a maxed-out face.
+    // While speaking (talk / lipsync) the full value is preserved so Synth can
+    // be more expressive. Gating is purely action-state based (no keywords).
+    _scaleRemoteEmotionForState(name, value) {
+        try {
+            const v = Math.max(0, Math.min(1, Number(value) || 0));
+            if (v <= 0) return v;
+            if (this._isNonEmotionalFaceKey(name)) return v;
+
+            const currentActionKey = (this.currentActionName && typeof this.currentActionName === 'string')
+                ? String(this.currentActionName).toLowerCase()
+                : (this.currentActionKey ? String(this.currentActionKey).toLowerCase() : null);
+            const isSpeaking = !!this._lipsyncEnabled || currentActionKey === 'talk';
+
+            // Speaking: keep full expressiveness so Synth can emote while talking.
+            if (isSpeaking) return v;
+            // Every non-speaking state (idle, think, write, touch, ...) shows the
+            // base emotion only as a subtle micro-expression. Passing the full
+            // value through for non-idle states (e.g. 'write') let 'relaxed' open
+            // the mouth at full intensity, producing an unnatural face while typing.
+
+            // Micro-expression: keep the emotion perceptible but subtle.
+            // 'relaxed' partially opens the mouth on this model, so cap it lower.
+            const k = String(name || '').toLowerCase();
+            const subtleCeil = (k === 'relaxed') ? 0.06 : 0.18;
+            const subtleFloor = (k === 'relaxed') ? 0.02 : 0.05;
+            return Math.min(subtleCeil, subtleFloor + v * (subtleCeil - subtleFloor));
+        } catch (e) {
+            return Math.max(0, Math.min(1, Number(value) || 0));
+        }
     }
 
     applyRemoteFaceValues(values) {
@@ -1355,11 +1537,15 @@ class AnimationHandler {
                 try { if (this._faceValueCache) delete this._faceValueCache[String(key)]; } catch (e) { /* ignore */ }
             });
 
+            // Remember the raw remote values so gating can be re-applied when the
+            // action state changes (idle -> talk) without a new server update.
+            this._lastRemoteFaceValues = Object.assign({}, incoming);
+
             this._remoteFaceValueKeys = new Set();
             Object.entries(incoming).forEach(([key, rawValue]) => {
                 const name = String(key || '');
                 if (!name) return;
-                const value = Math.max(0, Math.min(1, Number(rawValue) || 0));
+                const value = this._scaleRemoteEmotionForState(name, rawValue);
                 try { this._setFaceValue(name, value); } catch (e) { /* ignore */ }
                 if (value > 0) {
                     this._remoteFaceValueKeys.add(name);
@@ -1370,6 +1556,27 @@ class AnimationHandler {
         } catch (e) {
             console.warn('[AnimationHandler] applyRemoteFaceValues failed:', e);
         }
+    }
+
+    // Re-apply the last raw server-sent face values through the current
+    // action-state gating. Called on state transitions so idle/talk scaling
+    // updates even when the server has not sent a new vrm_face payload.
+    _reapplyRemoteFaceValues() {
+        try {
+            const raw = this._lastRemoteFaceValues;
+            if (!raw || typeof raw !== 'object') return;
+            Object.entries(raw).forEach(([key, rawValue]) => {
+                const name = String(key || '');
+                if (!name) return;
+                const value = this._scaleRemoteEmotionForState(name, rawValue);
+                try { this._setFaceValue(name, value); } catch (e) { /* ignore */ }
+                if (value > 0) {
+                    if (!(this._remoteFaceValueKeys instanceof Set)) this._remoteFaceValueKeys = new Set();
+                    this._remoteFaceValueKeys.add(name);
+                }
+            });
+            try { this._flushFaceNow(); } catch (e) { /* ignore */ }
+        } catch (e) { /* ignore */ }
     }
 
     resetBootstrapState() {
@@ -1635,7 +1842,21 @@ class AnimationHandler {
             // Also maintain a richer eyesState so we can distinguish persistent
             // closures (persona/animation) from transient blinks (autoblink).
             let eyesClosedRequestedMax = 0;
+            // Track whether the active eyes_closed request comes from a *persistent*
+            // expression (e.g. a descriptor closure with only a start_frame, or a very
+            // large end_frame). Persistent closures must lock the eyes so the autoblink
+            // loop does not fight and reset the pose every ~120ms.
+            let eyesClosedPersistent = false;
             const eyesClosedResolvedTargets = new Set();
+            // A closure is "persistent" when the expression has no end bound, or spans
+            // effectively the whole clip (very large end_frame).
+            const isPersistentExpr = (expr) => {
+                try {
+                    if (!expr || typeof expr !== 'object') return false;
+                    if (expr.end_frame === undefined || expr.end_frame === null) return true;
+                    return Number(expr.end_frame) >= 100000000;
+                } catch (e) { return false; }
+            };
 
             exprs.forEach(expr => {
                 if (!evaluateFrame(expr)) return;
@@ -1646,6 +1867,7 @@ class AnimationHandler {
                     const nkey = normalizeKey(key);
                     if (isEyesClosedLogicalKey(key) || isEyesClosedLogicalKey(nkey)) {
                         eyesClosedRequestedMax = Math.max(eyesClosedRequestedMax, intensity);
+                        if (intensity > 0.5 && isPersistentExpr(expr)) eyesClosedPersistent = true;
                     }
                     // Resolve mapping: support flat maps or grouped maps (emotions, visemes, expressions)
                     const flat = (blendMap && typeof blendMap[key] === 'string') ? blendMap[key]
@@ -1755,9 +1977,30 @@ class AnimationHandler {
             // If eyes are intentionally held closed, suppress any blink targets that are NOT
             // being used as the actual eyelid closure mapping for eyes_closed.
             // This prevents the blink loop (or unrelated expression aliases) from fighting the pose.
+            //
+            // IMPORTANT: several suppression aliases (e.g. 'Blink', 'blinkLeft') resolve to the
+            // SAME concrete VRM expression as a protected eyes_closed target (e.g. 'blink'). A
+            // naive per-alias string check (eyesClosedResolvedTargets.has(k)) would zero those
+            // aliases, and because they map back to the same VRM key, _setFaceValue would then
+            // overwrite the intended closure with 0 — leaving the eyes open. To avoid this we
+            // resolve BOTH sides to concrete VRM keys and only suppress an alias whose resolved
+            // keys do not overlap the protected closure keys.
             if (eyesClosedRequestedMax > 0.5) {
+                const resolveConcrete = (key) => {
+                    try {
+                        const r = this._resolveFaceKeys ? this._resolveFaceKeys(key) : null;
+                        return Array.isArray(r) ? r : (r ? [r] : [key]);
+                    } catch (e) { return [key]; }
+                };
+                // Concrete VRM keys that MUST stay driven (the actual eyelid closure morphs).
+                const protectedConcrete = new Set();
+                eyesClosedResolvedTargets.forEach(t => resolveConcrete(t).forEach(ck => protectedConcrete.add(ck)));
                 ['eye_blink_left', 'eye_blink_right', 'blink', 'blinkLeft', 'blinkRight', 'eyeBlinkLeft', 'eyeBlinkRight', 'Blink', 'BlinkLeft', 'BlinkRight'].forEach(k => {
-                    if (!eyesClosedResolvedTargets.has(k)) desired[k] = 0;
+                    if (eyesClosedResolvedTargets.has(k)) return;
+                    // Skip suppression if this alias resolves to a protected closure morph.
+                    const overlapsProtected = resolveConcrete(k).some(ck => protectedConcrete.has(ck));
+                    if (overlapsProtected) return;
+                    desired[k] = 0;
                 });
             }
 
@@ -1768,8 +2011,15 @@ class AnimationHandler {
                 const nowEyesClosed = eyesClosedRequestedMax > 0.5;
                 // If an expression is requesting eyes closed, set a persistent eyesState
                 if (nowEyesClosed) {
-                    // source 'expression' indicates a persistent request coming from expressions/persona
-                    this._setEyesState({ value: eyesClosedRequestedMax, source: 'expression' });
+                    // source 'expression' indicates a request coming from expressions/persona.
+                    // A persistent descriptor closure (no end bound / whole-clip span) must
+                    // LOCK the eyes so the autoblink loop stops fighting the pose. Pass a
+                    // long duration so _setEyesState treats it as a persistent closure.
+                    this._setEyesState({
+                        value: eyesClosedRequestedMax,
+                        source: 'expression',
+                        duration: eyesClosedPersistent ? 3600000 : null,
+                    });
                 } else {
                     // clear expression-based eyes state if present
                     if (this._eyesState && this._eyesState.source === 'expression') this._clearEyesState();
@@ -1966,9 +2216,16 @@ class AnimationHandler {
             }
             try { window.dispatchEvent(new CustomEvent('synth_eyes_state_changed', { detail: { value: this._eyesState.value, source: this._eyesState.source } })); } catch (e) { }
 
-            // Safety: if persistent close lasts too long, force reopen after timeout (30s)
+            // Safety: if a closure lasts too long, force reopen after a timeout.
+            // Transient closures use a 30s failsafe. A *persistent* closure (long
+            // explicit duration — e.g. a descriptor/persona eyes_closed span that
+            // must hold for the whole think phase) uses its declared duration so the
+            // failsafe never fights a legitimate long hold. The per-frame ticker
+            // re-calls _setEyesState (refreshing `since`) while the state is active,
+            // so this timer only fires once the closure truly stops being requested.
             if (this._eyesState.locked) {
-                const timeoutMs = 30000;
+                const persistentClosure = (typeof this._eyesState.duration === 'number' && this._eyesState.duration >= 3600000);
+                const timeoutMs = persistentClosure ? this._eyesState.duration : 30000;
                 if (this._eyesStateTimeout) { try { clearTimeout(this._eyesStateTimeout); } catch (e) { } }
                 this._eyesStateTimeout = setTimeout(() => {
                     try {
@@ -2127,6 +2384,67 @@ class AnimationHandler {
             // Clear any persistent eyesState when forcing open.
             try { if (this._eyesState) this._clearEyesState(); } catch (e) { }
         } catch (e) { /* ignore */ }
+    }
+
+    // Returns true when an incoming animation state declares a persistent
+    // eyes-closed expression (no end_frame => held for the whole clip), either
+    // directly as an `eyes_closed`-family target or via a blink target that the
+    // persona maps eyes_closed onto. Used to avoid running the on-action-change
+    // eyes reset (which would fight the per-frame ticker and re-open the eyes).
+    _stateHasPersistentEyesClosed(state) {
+        try {
+            if (!state || typeof state !== 'object') return false;
+            const exprs = Array.isArray(state.expressions) ? state.expressions : null;
+            if (!exprs || exprs.length === 0) return false;
+
+            const norm = (k) => String(k || '').toLowerCase().replace(/[\s.\-]+/g, '_');
+            const isEyesClosedKey = (k) => {
+                const n = norm(k);
+                return n === 'eyes_closed' || n === 'eyesclosed' || n === 'eye_closed';
+            };
+            const isBlinkKey = (k) => {
+                const n = norm(k);
+                return n === 'blink' || n === 'blinkleft' || n === 'blinkright'
+                    || n === 'blink_left' || n === 'blink_right';
+            };
+
+            // Persona map: eyes_closed may be expressed directly, or routed to blink.
+            let mapsBlinkToEyes = false;
+            try {
+                const persona = this._getEffectivePersona();
+                const bm = persona && persona.blendshape_map;
+                if (bm) {
+                    Object.keys(bm).forEach((src) => {
+                        const dst = bm[src];
+                        if (isEyesClosedKey(src) && typeof dst === 'string' && isBlinkKey(dst)) {
+                            mapsBlinkToEyes = true;
+                        }
+                    });
+                }
+            } catch (e) { /* ignore */ }
+
+            for (const e of exprs) {
+                if (!e || typeof e !== 'object') continue;
+                // Persistent = no explicit end_frame, or an end_frame that spans
+                // effectively the whole clip (e.g. persona overrides normalized to
+                // 1000000000). Keep this in sync with isPersistentExpr() in
+                // applyExpressionsForFrame().
+                const persistent = (e.end_frame === undefined || e.end_frame === null)
+                    || (Number(e.end_frame) >= 100000000);
+                if (!persistent) continue;
+                const targets = (e.targets && typeof e.targets === 'object') ? e.targets : null;
+                if (!targets) continue;
+                for (const tk of Object.keys(targets)) {
+                    const tv = Number(targets[tk]) || 0;
+                    if (tv <= 0.5) continue;
+                    if (isEyesClosedKey(tk)) return true;
+                    if (mapsBlinkToEyes && isBlinkKey(tk)) return true;
+                }
+            }
+            return false;
+        } catch (e) {
+            return false;
+        }
     }
 
     // Smoothly reset eyes over a short duration (ms). This will interpolate
@@ -2737,6 +3055,91 @@ class AnimationHandler {
         }
     }
 
+    // Fade out then unconditionally stop a finished intro action once we have
+    // transitioned to its loop/outro. Unlike _safeFadeStop this does NOT skip
+    // the stop when the action belongs to currentStructuredAction — a finished
+    // intro must never keep running, otherwise a clamped LoopOnce clip re-fires
+    // 'finished' on every mixer update, flooding the event handlers.
+    _stopIntroAfterCrossFade(introAction, fadeSec = 0.3) {
+        try {
+            if (!introAction) return;
+            try {
+                if (introAction.__synthFadeStopTimer) {
+                    clearTimeout(introAction.__synthFadeStopTimer);
+                    introAction.__synthFadeStopTimer = null;
+                }
+            } catch (e) { /* ignore */ }
+            try { introAction.fadeOut(fadeSec); } catch (e) { /* ignore */ }
+            const stopTimer = setTimeout(() => {
+                try {
+                    if (introAction.__synthFadeStopTimer !== stopTimer) return;
+                    introAction.__synthFadeStopTimer = null;
+                } catch (e) { /* ignore */ }
+                try { introAction.stop(); } catch (e) { /* ignore */ }
+                try { introAction.reset(); } catch (e) { /* ignore */ }
+                try { introAction.enabled = false; } catch (e) { /* ignore */ }
+            }, Math.round(fadeSec * 1000) + 60);
+            try { introAction.__synthFadeStopTimer = stopTimer; } catch (e) { /* ignore */ }
+        } catch (e) {
+            /* ignore */
+        }
+    }
+
+    _playActionWithCrossFade(action, prevAction = null, fadeSec = 0.3) {
+        try {
+            if (!action) return false;
+
+            try {
+                if (action.__synthFadeStopTimer) {
+                    clearTimeout(action.__synthFadeStopTimer);
+                    action.__synthFadeStopTimer = null;
+                }
+            } catch (e) { /* ignore */ }
+
+            try {
+                action.enabled = true;
+                action.paused = false;
+                action.reset();
+            } catch (e) { /* ignore */ }
+
+            const canCrossFade = !!(
+                prevAction
+                && prevAction !== action
+                && typeof action.crossFadeFrom === 'function'
+            );
+
+            if (canCrossFade) {
+                try {
+                    prevAction.enabled = true;
+                    prevAction.paused = false;
+                } catch (e) { /* ignore */ }
+
+                try { action.__synthCrossFadeSource = prevAction; } catch (e) { /* ignore */ }
+
+                action.crossFadeFrom(prevAction, fadeSec, false).play();
+                return true;
+            }
+
+            try { action.__synthCrossFadeSource = null; } catch (e) { /* ignore */ }
+            try {
+                if (typeof action.setEffectiveWeight === 'function') {
+                    action.setEffectiveWeight(1.0);
+                }
+            } catch (e) { /* ignore */ }
+            action.play();
+            return true;
+        } catch (e) {
+            console.warn('[AnimationHandler] Failed to start action with crossfade:', e);
+            try {
+                action.reset().fadeIn(fadeSec).play();
+                return true;
+            } catch (fallbackErr) {
+                console.warn('[AnimationHandler] Fallback fadeIn start failed:', fallbackErr);
+                return false;
+            }
+        }
+    }
+
     _cancelBaseIdleFloorDrop() {
         try {
             if (this._baseIdleDropTimer) {
@@ -2828,8 +3231,10 @@ class AnimationHandler {
         try {
             const baseIdle = this._baseIdleAction;
             const skip = new Set();
+            const crossFadeSource = newAction?.__synthCrossFadeSource || null;
             if (baseIdle) skip.add(baseIdle);
             if (newAction) skip.add(newAction);
+            if (crossFadeSource) skip.add(crossFadeSource);
 
             // Collect all parts of the new structured action if applicable
             if (this.currentStructuredAction) {
@@ -2868,6 +3273,12 @@ class AnimationHandler {
                 }
                 this._activeActions.clear();
             }
+
+            try {
+                if (newAction && Object.prototype.hasOwnProperty.call(newAction, '__synthCrossFadeSource')) {
+                    newAction.__synthCrossFadeSource = null;
+                }
+            } catch (e) { /* ignore */ }
 
             // Lower base idle weight now that the new action is taking over.
             // IMPORTANT: defer this reduction until AFTER the new action's fadeIn()
@@ -2951,6 +3362,18 @@ class AnimationHandler {
             this._baseIdleKey = 'idle';
 
             try {
+                const clip = idleAction.getClip ? idleAction.getClip() : null;
+                console.log('[AnimationHandler] === IDLE ACTION DEBUG ===');
+                console.log('[AnimationHandler] Clip name:', clip?.name);
+                console.log('[AnimationHandler] Clip duration:', clip?.duration);
+                console.log('[AnimationHandler] Clip tracks count:', clip?.tracks?.length ?? 'N/A');
+                if (clip?.tracks?.length > 0) {
+                    console.log('[AnimationHandler] First 3 track names:', clip.tracks.slice(0, 3).map(t => t.name));
+                }
+                if (!clip || clip.tracks.length === 0) {
+                    console.error('[AnimationHandler] ❌ IDLE CLIP HAS NO TRACKS! This is why the VRM is in T-pose.');
+                }
+
                 idleAction.enabled = true;
                 idleAction.setLoop(THREE.LoopRepeat);
                 idleAction.clampWhenFinished = false;
@@ -2958,11 +3381,15 @@ class AnimationHandler {
                 if (typeof idleAction.setEffectiveWeight === 'function') {
                     idleAction.setEffectiveWeight(minWeight);
                 }
-                // Do not fadeIn() the new base idle: previous overlays/base idle are
-                // already faded out separately, while a fadeIn here would reintroduce
-                // a one-frame zero-weight gap and visible bind-pose blink.
+                console.log('[AnimationHandler] Action enabled:', idleAction.enabled);
+                console.log('[AnimationHandler] Action weight:', typeof idleAction.getEffectiveWeight === 'function' ? idleAction.getEffectiveWeight() : 'N/A');
+                console.log('[AnimationHandler] Action paused:', idleAction.paused);
+                console.log('[AnimationHandler] Action time:', idleAction.time);
                 idleAction.play();
-            } catch (e) { /* ignore */ }
+                console.log('[AnimationHandler] === END IDLE ACTION DEBUG ===');
+            } catch (e) {
+                console.error('[AnimationHandler] Failed to play idle action:', e);
+            }
 
             // Only after the new base idle is in play, fade out the previous base.
             if (prevBaseIdle && prevBaseIdle !== idleAction) {
@@ -3357,7 +3784,7 @@ class AnimationHandler {
                                 if (this._idleRefineToken !== currentToken) return;
                                 descriptor = d;
                                 if (!descriptor || !descriptor.loop) return;
-                                if (!__idle_clip || !__idle_clip.duration || !THREE.AnimationUtils || typeof THREE.AnimationUtils.subclip !== 'function') return;
+                                if (!__idle_clip || !__idle_clip.duration || !AnimationUtils || typeof AnimationUtils.subclip !== 'function') return;
 
                                 const fps = (d && typeof d.fps === 'number' && d.fps > 0) ? d.fps : 30;
                                 const totalFrames = Math.max(2, Math.round(__idle_clip.duration * fps));
@@ -3379,7 +3806,7 @@ class AnimationHandler {
                                 // Descriptors use inclusive end_frame; subclip() expects exclusive. Add +1.
                                 const loopEnd = (descriptor.loop?.end_frame ?? (totalFrames - 1)) + 1;
                                 const loopR = normalizeRange(loopStart, loopEnd, 'idle.loop');
-                                const loopClip = THREE.AnimationUtils.subclip(__idle_clip, `${storageKey}_idle_loop`, loopR.start, loopR.end, fps);
+                                const loopClip = AnimationUtils.subclip(__idle_clip, `${storageKey}_idle_loop`, loopR.start, loopR.end, fps);
                                 loopClip.loop = THREE.LoopRepeat;
                                 const refined = this.mixer.clipAction(loopClip);
                                 refined.setLoop(THREE.LoopRepeat);
@@ -3491,7 +3918,7 @@ class AnimationHandler {
                             if (this._idleRefineToken !== currentToken) return;
                             descriptor = d;
                             if (!descriptor || !descriptor.loop) return;
-                            if (!clip || !clip.duration || !THREE.AnimationUtils || typeof THREE.AnimationUtils.subclip !== 'function') return;
+                            if (!clip || !clip.duration || !AnimationUtils || typeof AnimationUtils.subclip !== 'function') return;
 
                             const fps = (descriptor && typeof descriptor.fps === 'number' && descriptor.fps > 0) ? descriptor.fps : 30;
                             const totalFrames = Math.max(2, Math.round(clip.duration * fps));
@@ -3513,7 +3940,7 @@ class AnimationHandler {
                             // Descriptors use inclusive end_frame; subclip() expects exclusive. Add +1.
                             const loopEnd = (descriptor.loop?.end_frame ?? (totalFrames - 1)) + 1;
                             const loopR = normalizeRange(loopStart, loopEnd, 'idle.loop');
-                            const loopClip = THREE.AnimationUtils.subclip(clip, `${storageKey}_idle_loop`, loopR.start, loopR.end, fps);
+                            const loopClip = AnimationUtils.subclip(clip, `${storageKey}_idle_loop`, loopR.start, loopR.end, fps);
                             loopClip.loop = THREE.LoopRepeat;
                             const refined = this.mixer.clipAction(loopClip);
                             refined.setLoop(THREE.LoopRepeat);
@@ -3558,7 +3985,7 @@ class AnimationHandler {
         const hasStructuredDescriptor = descriptor && descriptor.intro && descriptor.outro;
         const shouldRetryStructured = !!(actionName === 'think' || hasStructuredDescriptor);
         console.log(`[AnimationHandler] For ${actionName}/${selectedFile}: hasStructuredDescriptor=${hasStructuredDescriptor}, actionName==='think' is ${actionName === 'think'}, descriptor=${descriptor ? JSON.stringify(descriptor) : 'null'}`);
-        if ((actionName === 'think' || hasStructuredDescriptor) && clip && clip.duration && THREE.AnimationUtils && typeof THREE.AnimationUtils.subclip === 'function') {
+        if ((actionName === 'think' || hasStructuredDescriptor) && clip && clip.duration && AnimationUtils && typeof AnimationUtils.subclip === 'function') {
             try {
                 const fps = (descriptor && typeof descriptor.fps === 'number' && descriptor.fps > 0) ? descriptor.fps : 30;
                 const totalFrames = Math.max(2, Math.round(clip.duration * fps));
@@ -3633,8 +4060,8 @@ class AnimationHandler {
 
                 // Use selectedFile in clip names so they match the storage key in mixer finished handler
                 const clipKeyBase = selectedFile ? `${actionName}:${selectedFile}` : actionName;
-                const introClip = THREE.AnimationUtils.subclip(clip, `${clipKeyBase}_intro`, introStart, introEnd, fps);
-                const outroClip = THREE.AnimationUtils.subclip(clip, `${clipKeyBase}_outro`, outroStart, outroEnd, fps);
+                const introClip = AnimationUtils.subclip(clip, `${clipKeyBase}_intro`, introStart, introEnd, fps);
+                const outroClip = AnimationUtils.subclip(clip, `${clipKeyBase}_outro`, outroStart, outroEnd, fps);
 
                 const introAction = this.mixer.clipAction(introClip);
                 const outroAction = this.mixer.clipAction(outroClip);
@@ -3656,7 +4083,7 @@ class AnimationHandler {
 
                 // Only create loop section if it exists in the descriptor or is default 'think'
                 if (loopStart !== null && loopEnd !== null) {
-                    const loopClip = THREE.AnimationUtils.subclip(clip, `${clipKeyBase}_loop`, loopStart, loopEnd, fps);
+                    const loopClip = AnimationUtils.subclip(clip, `${clipKeyBase}_loop`, loopStart, loopEnd, fps);
                     // Attach loop frame metadata so we can verify during playback
                     try {
                         loopClip._meta = loopClip._meta || {};
@@ -3793,7 +4220,18 @@ class AnimationHandler {
         // If we got a descriptorOverride but no explicit rich animation_state, apply a minimal
         // state so expression/blink configs are consistent across transitions.
         try {
-            const desc = descriptorOverride || null;
+            let desc = descriptorOverride || null;
+            // Fallback: when no explicit descriptorOverride was supplied (e.g. the action
+            // was started via applyAnimationState('think') or a backend WS command that
+            // did not embed the descriptor), resolve the on-disk descriptor so its
+            // facial expressions (e.g. eyes_closed), blink and eye_movement configs are
+            // still applied. Without this, descriptor-defined expressions never reach
+            // applyExpressionsForFrame and the face stays neutral (eyes open).
+            if (!desc && typeof this.loadDescriptor === 'function') {
+                try {
+                    desc = await this.loadDescriptor(actionName, animationFile);
+                } catch (e) { desc = null; }
+            }
             const hasRichFromDesc = !!(desc && (desc.expressions || desc.blink || desc.eye_movement || (typeof desc.lipsync === 'boolean')));
             if (hasRichFromDesc && typeof this.applyAnimationState === 'function') {
                 const phase = (playSection != null) ? playSection : (playOnce ? 'clip' : 'loop');
@@ -4066,7 +4504,7 @@ class AnimationHandler {
                         (typeof descriptor.intro.start_frame === 'number') && (typeof descriptor.intro.end_frame === 'number') &&
                         (typeof descriptor.outro.start_frame === 'number') && (typeof descriptor.outro.end_frame === 'number');
                     console.log(`[AnimationHandler] hasStructuredDescriptor: ${hasStructuredDescriptor}, hasLoopSection: ${descriptor && descriptor.loop ? 'yes' : 'no'}`);
-                    if (hasStructuredDescriptor && clip && clip.duration && THREE.AnimationUtils && typeof THREE.AnimationUtils.subclip === 'function') {
+                    if (hasStructuredDescriptor && clip && clip.duration && AnimationUtils && typeof AnimationUtils.subclip === 'function') {
                         // Create structured animation (intro/loop/outro)
                         try {
                             const fps = (descriptor && typeof descriptor.fps === 'number' && descriptor.fps > 0) ? descriptor.fps : 30;
@@ -4119,8 +4557,8 @@ class AnimationHandler {
                                 loopEnd = loopR.end;
                             }
 
-                            const introClip = THREE.AnimationUtils.subclip(clip, `${specificKey}_intro`, introStart, introEnd, fps);
-                            const outroClip = THREE.AnimationUtils.subclip(clip, `${specificKey}_outro`, outroStart, outroEnd, fps);
+                            const introClip = AnimationUtils.subclip(clip, `${specificKey}_intro`, introStart, introEnd, fps);
+                            const outroClip = AnimationUtils.subclip(clip, `${specificKey}_outro`, outroStart, outroEnd, fps);
 
                             const introAction = this.mixer.clipAction(introClip);
                             const outroAction = this.mixer.clipAction(outroClip);
@@ -4139,7 +4577,7 @@ class AnimationHandler {
                             };
 
                             if (loopStart !== null && loopEnd !== null) {
-                                const loopClip = THREE.AnimationUtils.subclip(clip, `${specificKey}_loop`, loopStart, loopEnd, fps);
+                                const loopClip = AnimationUtils.subclip(clip, `${specificKey}_loop`, loopStart, loopEnd, fps);
                                 // Attach loop frame metadata so we can verify during playback
                                 try {
                                     loopClip._meta = loopClip._meta || {};
@@ -4178,7 +4616,7 @@ class AnimationHandler {
                     } else {
                         // Simple animation without intro/outro structure.
                         // For IDLE, if a loop section is provided, subclip to that range and loop it.
-                        if (actionName === 'idle' && descriptor && descriptor.loop && clip && clip.duration && THREE.AnimationUtils && typeof THREE.AnimationUtils.subclip === 'function') {
+                        if (actionName === 'idle' && descriptor && descriptor.loop && clip && clip.duration && AnimationUtils && typeof AnimationUtils.subclip === 'function') {
                             try {
                                 const fps = (descriptor && typeof descriptor.fps === 'number' && descriptor.fps > 0) ? descriptor.fps : 30;
                                 const totalFrames = Math.max(2, Math.round(clip.duration * fps));
@@ -4201,7 +4639,7 @@ class AnimationHandler {
                                 // Descriptors use inclusive end_frame; subclip() expects exclusive. Add +1.
                                 const loopEnd = (descriptor.loop?.end_frame ?? (totalFrames - 1)) + 1;
                                 const loopR = normalizeRange(loopStart, loopEnd, 'loop');
-                                const loopClip = THREE.AnimationUtils.subclip(clip, `${specificKey}_idle_loop`, loopR.start, loopR.end, fps);
+                                const loopClip = AnimationUtils.subclip(clip, `${specificKey}_idle_loop`, loopR.start, loopR.end, fps);
                                 loopClip.loop = THREE.LoopRepeat;
                                 action = this.mixer.clipAction(loopClip);
                                 action.setLoop(THREE.LoopRepeat);
@@ -4385,21 +4823,14 @@ class AnimationHandler {
 
                             const outroAction = this.currentStructuredAction.outro;
                             try {
-                                outroAction.reset();
                                 outroAction.setLoop(THREE.LoopOnce, 0);
                                 outroAction.clampWhenFinished = true;
-                                outroAction.enabled = true;
-                                outroAction.paused = false;
-                                outroAction.fadeIn(fadeDuration).play();
+                                const prevPhaseAction = (this.currentActionPhase === 'intro')
+                                    ? this.currentStructuredAction.intro
+                                    : this.currentStructuredAction.loop;
+                                this._playActionWithCrossFade(outroAction, prevPhaseAction, fadeDuration);
                             } catch (e) {
-                                outroAction.reset().fadeIn(fadeDuration).play();
-                            }
-
-                            // NOW fade out the current phase (cross-fade overlap).
-                            if (this.currentActionPhase === 'intro' && this.currentStructuredAction.intro) {
-                                this._safeFadeStop(this.currentStructuredAction.intro, fadeDuration);
-                            } else if (this.currentActionPhase === 'loop' && this.currentStructuredAction.loop) {
-                                this._safeFadeStop(this.currentStructuredAction.loop, fadeDuration);
+                                this._playActionWithCrossFade(outroAction, this.currentAction, fadeDuration);
                             }
 
                             this.currentAction = outroAction;
@@ -4421,10 +4852,10 @@ class AnimationHandler {
             // If playSection is specified (intro, loop, or outro), play only that section
             if (playSection === 'intro') {
                 console.log(`[AnimationHandler] Playing only intro section for ${actionName}`);
+                const prevAct = this.currentAction;
                 structured.intro.setLoop(THREE.LoopOnce, 0);
                 structured.intro.clampWhenFinished = true;
-                structured.intro.reset().fadeIn(0.3).play();
-                const prevAct = this.currentAction;
+                this._playActionWithCrossFade(structured.intro, prevAct, 0.3);
                 this.currentAction = structured.intro;
                 this.currentActionName = actionName;
                 this.currentActionPhase = 'intro';
@@ -4433,7 +4864,7 @@ class AnimationHandler {
                 this._currentAnimationFile = animationFile || null;
                 // Fade out previous after new is playing
                 if (prevAct && prevAct !== structured.intro) {
-                    if (_prevStructured && _prevStructured === structured) {
+                    if (_prevStructured && _prevStructured === structured && prevAct !== structured.intro.__synthCrossFadeSource) {
                         // Intra-action transition: just fade the specific previous phase
                         this._safeFadeStop(prevAct, 0.3);
                     } else {
@@ -4448,10 +4879,10 @@ class AnimationHandler {
                     return;
                 }
                 console.log(`[AnimationHandler] Playing only loop section for ${actionName}`);
+                const prevAct = this.currentAction;
                 structured.loop.setLoop(THREE.LoopRepeat);
                 structured.loop.clampWhenFinished = false;
-                structured.loop.reset().fadeIn(0.3).play();
-                const prevAct = this.currentAction;
+                this._playActionWithCrossFade(structured.loop, prevAct, 0.3);
                 this.currentAction = structured.loop;
                 this.currentActionName = actionName;
                 this.currentActionPhase = 'loop';
@@ -4460,7 +4891,7 @@ class AnimationHandler {
                 this._currentAnimationFile = animationFile || null;
                 // Fade out previous after new is playing
                 if (prevAct && prevAct !== structured.loop) {
-                    if (_prevStructured && _prevStructured === structured) {
+                    if (_prevStructured && _prevStructured === structured && prevAct !== structured.loop.__synthCrossFadeSource) {
                         // Intra-action transition: just fade the specific previous phase
                         this._safeFadeStop(prevAct, 0.3);
                     } else {
@@ -4482,10 +4913,10 @@ class AnimationHandler {
                         this._baseIdleAction.play();
                     }
                 } catch (_e) { /* ignore */ }
+                const prevAct = this.currentAction;
                 structured.outro.setLoop(THREE.LoopOnce, 0);
                 structured.outro.clampWhenFinished = true;
-                structured.outro.reset().fadeIn(0.3).play();
-                const prevAct = this.currentAction;
+                this._playActionWithCrossFade(structured.outro, prevAct, 0.3);
                 this.currentAction = structured.outro;
                 this.currentActionName = actionName;
                 this.currentActionPhase = 'outro';
@@ -4494,7 +4925,7 @@ class AnimationHandler {
                 this._currentAnimationFile = animationFile || null;
                 // Fade out previous after new is playing
                 if (prevAct && prevAct !== structured.outro) {
-                    if (_prevStructured && _prevStructured === structured) {
+                    if (_prevStructured && _prevStructured === structured && prevAct !== structured.outro.__synthCrossFadeSource) {
                         // Intra-action transition: just fade the specific previous phase
                         this._safeFadeStop(prevAct, 0.3);
                     } else {
@@ -4522,7 +4953,7 @@ class AnimationHandler {
 
             // Start the intro immediately.
             try {
-                structured.intro.reset().fadeIn(0.3).play();
+                this._playActionWithCrossFade(structured.intro, _prevAction, 0.3);
                 this.currentAction = structured.intro;
                 this.currentActionName = actionName;
                 this.currentActionPhase = 'intro';
@@ -4583,10 +5014,14 @@ class AnimationHandler {
                                                 this._baseIdleAction.play();
                                             }
                                         } catch (_e) { /* ignore */ }
-                                        candidate.outro.reset().fadeIn(0.3).play();
-                                        // Fade out intro so it doesn't keep driving bones at its
-                                        // clamped last-frame pose while outro plays.
-                                        try { this._safeFadeStop(candidate.intro, 0.3); } catch (e) { }
+                                        this._playActionWithCrossFade(candidate.outro, candidate.intro, 0.3);
+                                        // Hard-stop the finished intro so the mixer stops updating
+                                        // it. A clamped LoopOnce intro left enabled re-fires
+                                        // 'finished' on every mixer update (event storm that floods
+                                        // the console and degrades the frontend). We cannot use
+                                        // _safeFadeStop here: it skips the stop when the action is
+                                        // part of currentStructuredAction, which intro still is.
+                                        this._stopIntroAfterCrossFade(candidate.intro, 0.3);
                                         this.currentAction = candidate.outro;
                                         this.currentActionName = logicalName;
                                         this.currentActionKey = key;
@@ -4599,9 +5034,14 @@ class AnimationHandler {
                                         if (loopClip) loopClip.loop = THREE.LoopRepeat;
                                         try { candidate.loop.setLoop(THREE.LoopRepeat); } catch (e) { }
                                         try { candidate.loop.clampWhenFinished = false; } catch (e) { }
-                                        try { candidate.loop.reset().fadeIn(0.3).play(); } catch (e) { }
-                                        // Fade out intro so it doesn't keep clamping at its last frame.
-                                        try { this._safeFadeStop(candidate.intro, 0.3); } catch (e) { }
+                                        try { this._playActionWithCrossFade(candidate.loop, candidate.intro, 0.3); } catch (e) { }
+                                        // Hard-stop the finished intro so the mixer stops updating
+                                        // it. A clamped LoopOnce intro left enabled re-fires
+                                        // 'finished' on every mixer update (event storm that floods
+                                        // the console and degrades the frontend). We cannot use
+                                        // _safeFadeStop here: it skips the stop when the action is
+                                        // part of currentStructuredAction, which intro still is.
+                                        this._stopIntroAfterCrossFade(candidate.intro, 0.3);
                                         this.currentAction = candidate.loop;
                                         this.currentActionName = logicalName;
                                         this.currentActionKey = key;
@@ -4976,26 +5416,27 @@ class AnimationHandler {
                                 try {
                                     // Ensure base idle is at full weight to cover the gap between old and new idle.
                                     if (this._baseIdleAction) {
-                                        try {
-                                            this._baseIdleAction.enabled = true;
-                                            this._baseIdleAction.setLoop(THREE.LoopRepeat);
-                                            this._baseIdleAction.clampWhenFinished = false;
-                                            if (typeof this._baseIdleAction.setEffectiveWeight === 'function') {
-                                                this._baseIdleAction.setEffectiveWeight(1.0);
-                                            }
-                                            this._baseIdleAction.play();
-                                        } catch (e) { /* ignore */ }
+                                        this._baseIdleAction.enabled = true;
+                                        this._baseIdleAction.setLoop(THREE.LoopRepeat);
+                                        this._baseIdleAction.clampWhenFinished = false;
+                                        if (typeof this._baseIdleAction.setEffectiveWeight === 'function') {
+                                            this._baseIdleAction.setEffectiveWeight(1.0);
+                                        }
+                                        this._baseIdleAction.play();
                                     }
-                                    await this.startAction('idle', nextFile, false);
+                                } catch (e) { /* ignore */ }
+
+                                try {
+                                    await this.startAction('idle', nextFile);
                                 } catch (e) {
-                                    console.warn('[AnimationHandler] Failed to start next idle action:', e);
+                                    console.warn('[AnimationHandler] Failed to start next idle animation:', e);
                                 }
                             }
-                        } catch (e) {
-                            console.warn('[AnimationHandler] Error advancing idle after playOnce:', e);
+                        } catch (err) {
+                            console.warn('[AnimationHandler] Error while advancing idle animation:', err);
                         }
                     } catch (err) {
-                        console.warn('[AnimationHandler] global mixer finished handler error:', err);
+                        console.warn('[AnimationHandler] mixer finished handler error:', err);
                     }
                 });
             }
@@ -5021,15 +5462,14 @@ class AnimationHandler {
         // Start the new action first (fade in), THEN cross-fade out previous actions.
         // This guarantees the skeleton is never un-driven during transitions.
         try {
-            action.enabled = true;
-            action.reset().fadeIn(0.5).play();
+            this._playActionWithCrossFade(action, _prevAction, 0.5);
             this.currentAction = action;
             this.currentActionName = actionName;
             this._currentAnimationFile = animationFile || null;
             console.log(`[AnimationHandler] New simple action started (cross-fade in)`);
         } catch (e) {
             console.warn('[AnimationHandler] Failed to start new action:', e);
-            try { action.reset().fadeIn(0.5).play(); this.currentAction = action; } catch (ee) { /* ignore */ }
+            try { this._playActionWithCrossFade(action, _prevAction, 0.5); this.currentAction = action; } catch (ee) { /* ignore */ }
         }
 
         // Now that the new action is playing, fade out all previous actions + orphans.
@@ -5095,8 +5535,7 @@ class AnimationHandler {
                             this._baseIdleAction.play();
                         }
                     } catch (_e) { /* ignore */ }
-                    action.loop.fadeOut(0.3);
-                    action.outro.reset().fadeIn(0.3).play();
+                    this._playActionWithCrossFade(action.outro, action.loop, 0.3);
                     this.currentAction = action.outro;
                     this.currentActionPhase = 'outro';
                     return;
@@ -5113,8 +5552,7 @@ class AnimationHandler {
                             this._baseIdleAction.play();
                         }
                     } catch (_e) { /* ignore */ }
-                    action.intro.fadeOut(0.3);
-                    action.outro.reset().fadeIn(0.3).play();
+                    this._playActionWithCrossFade(action.outro, action.intro, 0.3);
                     this.currentAction = action.outro;
                     this.currentActionPhase = 'outro';
                     return;
@@ -5206,7 +5644,7 @@ class AnimationHandler {
             try { console.debug('[AnimationHandler] startTemporaryLoop using clip', { name: clip && (clip.name || clip._clipName || '(unknown)'), duration: clip && clip.duration, frames: Math.round((clip && clip.duration || 0) * tfps) }); } catch (e) { }
 
             // Create subclip using frame indices.
-            // Note: THREE.AnimationUtils.subclip expects an *exclusive* end frame.
+            // Note: AnimationUtils.subclip expects an *exclusive* end frame.
             // Our UI + descriptors use inclusive end_frame, so we add +1.
             // Use descriptor FPS when available to avoid "range looks ignored" due to FPS mismatches.
             let tfps = (Number.isFinite(Number(fps)) && Number(fps) > 0) ? Number(fps) : NaN;
@@ -5228,7 +5666,7 @@ class AnimationHandler {
                 eInc = Math.max(0, Math.min(maxFrame, eInc));
             } catch (e) { /* ignore */ }
             const eExc = Math.max(sInc + 1, eInc + 1);
-            const loopClip = THREE.AnimationUtils.subclip(clip, subName, sInc, eExc, tfps);
+            const loopClip = AnimationUtils.subclip(clip, subName, sInc, eExc, tfps);
             try { loopClip._meta = loopClip._meta || {}; loopClip._meta.loopFrames = { startFrame: sInc, endFrame: eInc, fps: tfps }; } catch (e) { /* ignore */ }
 
             // Ensure the clip intends to repeat
@@ -5443,13 +5881,12 @@ async function loadVRM(url, name, { isObjectUrl = false } = {}) {
             console.log('[synth_webui] Processing VRM scene...');
             console.log('[synth_webui] Scene children count:', vrm.scene.children.length);
 
-            console.log('[synth_webui] Combining and optimizing skeleton...');
-            VRMUtils.combineSkeletons(vrm.scene);
-            console.log('[synth_webui] ✓ Skeleton combined and optimized');
-
-            console.log('[synth_webui] Removing unnecessary vertices...');
-            VRMUtils.removeUnnecessaryVertices(vrm.scene);
-            console.log('[synth_webui] ✓ Unnecessary vertices removed');
+            // NOTE: VRMUtils.combineSkeletons() and removeUnnecessaryVertices()
+            // rename/merge bones, which BREAKS the FBX-to-VRM bone mapping.
+            // The Mixamo→VRM retargeting relies on exact bone names from
+            // getNormalizedBoneNode(), so these utils MUST NOT be called.
+            // See: https://github.com/pixiv/three-vrm/issues/1351
+            console.log('[synth_webui] ⚠️ Skipping VRMUtils (combineSkeletons/removeUnnecessaryVertices) to preserve bone names for animation retargeting');
 
             if (vrm.meta?.metaVersion === '0') {
                 console.log('[synth_webui] Rotating VRM0 model (metaVersion=0)');
@@ -5503,12 +5940,66 @@ async function loadVRM(url, name, { isObjectUrl = false } = {}) {
             window.vrmMixer = currentMixer; // Make mixer available globally for AnimationHandler
             console.log('[synth_webui] AnimationMixer created and set globally (pre-add)');
 
+            // Initialize Karada v2 Animation Engine
+            initAnimationEngine(currentMixer);
+            console.log('[synth_webui] Karada v2 Animation Engine initialized');
+
+            // Keep the AnimationHandler's expression clock in sync with the
+            // engine's descriptor state machine. When the engine advances from
+            // intro -> loop -> outro, the handler must evaluate descriptor
+            // expressions against the frame window of the CURRENT section, so
+            // update the last animation state's phase on each section change.
+            try {
+                setOnSectionChange((section) => {
+                    try {
+                        if (animationHandler && animationHandler._lastAnimationState
+                            && animationHandler._lastAnimationState.source === 'karada_engine_descriptor') {
+                            animationHandler._lastAnimationState.phase = section || 'loop';
+                        }
+                    } catch (e) { /* ignore */ }
+                });
+            } catch (e) { /* ignore */ }
+
             console.log('[synth_webui] Loading default animations (pre-add)...');
             // Load and start idle/talk/think/write actions before adding to scene
             await loadDefaultAnimations(vrm);
             console.log('[synth_webui] Default animations loaded (pre-add)');
-            // If animations loaded successfully, unhide the VRM so it
-            // will be displayed already animated when added to the scene.
+
+            // Add VRM to scene but keep it invisible so spring bones can
+            // settle from their initial T-pose before the user sees anything.
+            console.log('[synth_webui] Clearing existing VRM from scene...');
+            clearVRM();
+            console.log('[synth_webui] ✓ Previous VRM cleared');
+
+            console.log('[synth_webui] Adding VRM to scene (invisible for physics warmup)...');
+            scene.add(vrm.scene);
+            console.log('[synth_webui] ✓ VRM added to scene');
+
+            currentVRM = vrm;
+            currentModel = name;
+            console.log('[synth_webui] currentVRM set:', currentVRM);
+
+            // Warm up spring bones: run several physics update cycles while
+            // invisible so hair/clothes settle from T-pose to their natural
+            // resting position before the VRM becomes visible.
+            try {
+                console.log('[synth_webui] Warming up spring bones...');
+                const warmupFrames = 30;
+                const warmupDelta = 1 / 60;
+                for (let i = 0; i < warmupFrames; i++) {
+                    if (currentVRM && typeof currentVRM.update === 'function') {
+                        currentVRM.update(warmupDelta);
+                    }
+                    if (currentMixer) {
+                        currentMixer.update(warmupDelta);
+                    }
+                }
+                console.log('[synth_webui] ✓ Spring bones settled');
+            } catch (warmupErr) {
+                console.warn('[synth_webui] Spring bone warmup failed (non-fatal):', warmupErr);
+            }
+
+            // Now make the VRM visible — physics is already settled.
             try {
                 if (vrm.scene) vrm.scene.visible = true;
             } catch (unvisErr) {
@@ -5518,7 +6009,14 @@ async function loadVRM(url, name, { isObjectUrl = false } = {}) {
             _hideVrmLoadingOverlay();
         } catch (animErr) {
             console.warn('[synth_webui] Warning: failed to preload animations before adding VRM:', animErr);
-            // Ensure we unhide even on error to avoid invisible models
+
+            // Ensure we add and unhide even on error to avoid invisible scene
+            try {
+                clearVRM();
+                scene.add(vrm.scene);
+                currentVRM = vrm;
+                currentModel = name;
+            } catch (_e) { /* ignore */ }
             try {
                 if (vrm.scene) vrm.scene.visible = true;
             } catch (_e) {
@@ -5528,19 +6026,9 @@ async function loadVRM(url, name, { isObjectUrl = false } = {}) {
             _hideVrmLoadingOverlay();
         }
 
-        console.log('[synth_webui] Clearing existing VRM from scene...');
-        clearVRM();
-        console.log('[synth_webui] ✓ Previous VRM cleared');
-
-        console.log('[synth_webui] Adding new VRM to scene (already animated)...');
-        console.log('[synth_webui] Scene before add - children count:', scene.children.length);
-        scene.add(vrm.scene);
-        console.log('[synth_webui] ✓ VRM added to scene');
-        console.log('[synth_webui] Scene after add - children count:', scene.children.length);
-
-        currentVRM = vrm;
-        currentModel = name;
-        console.log('[synth_webui] currentVRM set:', currentVRM);
+        // NOTE: VRM is already added to scene and currentVRM is already set
+        // above (before the warmup). The following blocks only handle
+        // raycast targets, capabilities, and LookAt setup.
 
         // Build raycast target list once for this model (meshes only)
         try {
@@ -5783,20 +6271,18 @@ async function loadDefaultAnimations(vrm) {
         let desiredState = null;
         let desiredAnimation = null;
         let desiredDescriptor = null;
+        let desiredDescriptorId = null;
+        let desiredStartedAt = null;
         let desiredRichAnimationState = null;
         let desiredFaceValues = null;
-        let desiredPlaySection = null;
-        let desiredFrameRange = null;
-        let desiredPhaseAuthoritative = false;
         try {
             console.log('[synth_webui] Querying fresh Karada state for Summoning bootstrap...');
             const freshSummoningState = await _fetchFreshSummoningState();
             desiredState = freshSummoningState.state;
             desiredAnimation = freshSummoningState.animation || null;
             desiredDescriptor = freshSummoningState.descriptor || null;
-            desiredPlaySection = freshSummoningState.playSection || null;
-            desiredFrameRange = freshSummoningState.frameRange || null;
-            desiredPhaseAuthoritative = !!freshSummoningState.phaseAuthoritative;
+            desiredDescriptorId = freshSummoningState.descriptorId || null;
+            desiredStartedAt = freshSummoningState.startedAt || null;
             desiredRichAnimationState = freshSummoningState.richAnimationState || null;
             desiredFaceValues = freshSummoningState.faceValues || null;
             console.log('[synth_webui] Fresh Summoning state:', desiredState || 'idle', desiredAnimation || null, desiredFaceValues ? '(with face values)' : '(no face values)');
@@ -5826,10 +6312,8 @@ async function loadDefaultAnimations(vrm) {
                     stateToStart,
                     desiredAnimation || null,
                     playOnce,
-                    desiredPlaySection || null,
+                    null,
                     desiredDescriptor || null,
-                    desiredFrameRange || null,
-                    !!desiredPhaseAuthoritative,
                 );
                 if (desiredRichAnimationState && typeof animationHandler.applyAnimationState === 'function') {
                     animationHandler.applyAnimationState(desiredRichAnimationState);
@@ -5869,16 +6353,28 @@ async function loadDefaultAnimations(vrm) {
                     }
                 } catch (e) { /* ignore */ }
 
-                const animationFileOrUrl = last.animation || last.file || null;
-                const lastPlayOnce = (last.descriptor && last.descriptor.play_once) || (last.loop === false);
+                const lastDescriptorId = (typeof last.descriptor === 'string')
+                    ? last.descriptor
+                    : (last.descriptor_id || null);
+                let resolvedLast = null;
+                if (lastDescriptorId && typeof window.karadaResolveAnimationDescriptor === 'function') {
+                    try {
+                        resolvedLast = await window.karadaResolveAnimationDescriptor(lastDescriptorId);
+                    } catch (e) { /* ignore */ }
+                }
+                const animationFileOrUrl = last.animation || last.file || (resolvedLast ? (resolvedLast.animation_url || null) : null);
+                const lastDescriptor = (last && typeof last.descriptor === 'object')
+                    ? last.descriptor
+                    : (resolvedLast ? (resolvedLast.descriptor_data || null) : null);
+                const lastPlayOnce = !!(lastDescriptor && lastDescriptor.play_once);
                 const initialPlayOnce = !!(desiredDescriptor && desiredDescriptor.play_once);
 
                 // Skip if it matches what we just started as initial state.
                 try {
-                    const startedKey = `${(desiredState || 'idle') || ''}|${desiredAnimation || ''}|${initialPlayOnce ? '1' : '0'}`;
-                    const lastKey = `${last.state || ''}|${animationFileOrUrl || ''}|${lastPlayOnce ? '1' : '0'}`;
+                    const startedKey = `${(desiredState || 'idle') || ''}|${desiredDescriptorId || desiredAnimation || ''}|${desiredStartedAt ?? ''}|${initialPlayOnce ? '1' : '0'}`;
+                    const lastKey = `${last.state || ''}|${lastDescriptorId || animationFileOrUrl || ''}|${last.started_at ?? ''}|${lastPlayOnce ? '1' : '0'}`;
                     if (startedKey !== lastKey) {
-                        animationHandler.startAction(last.state, animationFileOrUrl, !!lastPlayOnce, last.play_section || null, last.descriptor || null, last.frame_range || null, !!last.phase_authoritative);
+                        animationHandler.startAction(last.state, animationFileOrUrl, !!lastPlayOnce, null, lastDescriptor || null);
                     } else {
                         console.log('[synth_webui] Pending command matches started state; skipping');
                         // Even when skipping (because the action is already playing),
@@ -5892,7 +6388,7 @@ async function loadDefaultAnimations(vrm) {
                         } catch (e) { /* ignore */ }
                     }
                 } catch (e) {
-                    animationHandler.startAction(last.state, animationFileOrUrl, !!lastPlayOnce, last.play_section || null, last.descriptor || null, last.frame_range || null, !!last.phase_authoritative);
+                    animationHandler.startAction(last.state, animationFileOrUrl, !!lastPlayOnce, null, lastDescriptor || null);
                 }
             }
         }
@@ -6138,6 +6634,10 @@ function _sampleVisemeTimeline(timeline, currentTime) {
 function render() {
     requestAnimationFrame(render);
     const delta = clock.getDelta();
+
+    // Update Karada v2 Animation Engine
+    updateEngine();
+
     if (currentVRM) {
         if (window.__synthIsLipSyncing && window.__synthLipSyncAnalyser && currentVRM.expressionManager) {
             try {
@@ -6324,6 +6824,42 @@ function render() {
             currentMixer.update(delta);
         }
 
+        // Safety net against residual T-pose: the base idle is deliberately kept at
+        // a low floor weight (~0.12) while an overlay (talk/think/etc.) drives the
+        // skeleton. If an overlay finished (or a floor-drop timer fired late) and the
+        // base idle is left as the ONLY driver at that low weight, ~88% of the rig
+        // stays in bind pose (arms raised = "T-pose summed onto idle"). Here we detect
+        // "base idle is the sole active driver" and ramp it back toward full weight so
+        // the skeleton is fully driven. This is purely weight-based, no state keywords.
+        try {
+            const h = animationHandler;
+            const baseIdle = h && h._baseIdleAction;
+            if (baseIdle && typeof baseIdle.getEffectiveWeight === 'function'
+                && typeof baseIdle.setEffectiveWeight === 'function') {
+                const baseW = baseIdle.getEffectiveWeight() || 0;
+                if (baseW < 0.999) {
+                    // Determine the strongest non-base-idle overlay weight.
+                    let maxOverlayW = 0;
+                    const mixerActions = (currentMixer && Array.isArray(currentMixer._actions))
+                        ? currentMixer._actions : [];
+                    for (const a of mixerActions) {
+                        if (!a || a === baseIdle) continue;
+                        if (typeof a.getEffectiveWeight !== 'function') continue;
+                        const w = a.getEffectiveWeight() || 0;
+                        if (w > maxOverlayW) maxOverlayW = w;
+                    }
+                    // If no overlay is meaningfully driving the rig, the base idle is
+                    // the sole driver — promote it back to full weight smoothly.
+                    if (maxOverlayW < 0.05) {
+                        try { baseIdle.enabled = true; baseIdle.paused = false; } catch (e2) { /* ignore */ }
+                        const alpha = 1 - Math.exp(-8 * (Number.isFinite(delta) ? delta : 0.016));
+                        const nextW = baseW + (1.0 - baseW) * alpha;
+                        baseIdle.setEffectiveWeight(nextW >= 0.999 ? 1.0 : nextW);
+                    }
+                }
+            }
+        } catch (e) { /* ignore */ }
+
         // Monitor loop status and keep it alive
         if (animationHandler && animationHandler.currentActionPhase === 'loop') {
             const action = animationHandler.currentAction;
@@ -6430,11 +6966,25 @@ window.VRMAnimations = {
     // Registry accessors for plugins/interfaces.
     getMappings: () => (window.VRMAnimationMappings || {}),
     setMappings: (m) => { window.VRMAnimationMappings = m || {}; },
+    _getCachedAnimation: (state, file) => {
+        try {
+            const handler = animationHandler || window.animationHandler;
+            if (!handler || typeof handler._getCachedAnimation !== 'function') return null;
+            return handler._getCachedAnimation(state, file);
+        } catch (e) {
+            return null;
+        }
+    },
+    resolveDescriptor: async (descriptorId, forceRefresh = false) => {
+        return await _resolveKaradaAnimationDescriptor(descriptorId, forceRefresh);
+    },
     // NOTE: startThinking/startTalking are intentionally NOT exposed here.
-    // Animations are now server-driven via vrm_animation WS messages.
+    // Animations are now server-driven via vrm_animation_v2 WS messages.
     // The frontend plays whichever file the server selects; it never picks animations independently.
 };
 window.animationHandler = animationHandler;
+window.karadaPlayAnimation = karadaPlayAnimation;
+window.karadaResolveAnimationDescriptor = _resolveKaradaAnimationDescriptor;
 console.log('[synth_webui] Animation functions exposed globally via window.VRMAnimations');
 console.log('[synth_webui] animationHandler exposed globally');
 try {
@@ -6825,15 +7375,21 @@ try {
                     if (resp && resp.ok) {
                         const summary = await resp.json();
                         if (summary && summary.state) {
-                            const playOnce = !!(summary.descriptor && summary.descriptor.play_once);
+                            let resolved = null;
+                            if (summary.descriptor && typeof window.karadaResolveAnimationDescriptor === 'function') {
+                                try {
+                                    resolved = await window.karadaResolveAnimationDescriptor(summary.descriptor);
+                                } catch (e) { /* ignore */ }
+                            }
+                            const animationRef = resolved ? (resolved.animation_url || null) : null;
+                            const descriptorData = resolved ? (resolved.descriptor_data || null) : null;
+                            const playOnce = !!(descriptorData && descriptorData.play_once);
                             await animationHandler.startAction(
                                 summary.state,
-                                summary.animation || summary.file || null,
+                                animationRef,
                                 playOnce,
-                                summary.play_section || null,
-                                summary.descriptor || null,
-                                summary.frame_range || null,
-                                !!summary.phase_authoritative,
+                                null,
+                                descriptorData || null,
                             );
                             return;
                         }
@@ -6846,11 +7402,24 @@ try {
                 try {
                     const last = (window.__synth_debug_last_remote && window.__synth_debug_last_remote.animation) ? window.__synth_debug_last_remote.animation : null;
                     if (last && last.state) {
-                        const playOnce = (last.descriptor && last.descriptor.play_once) || (last.loop === false);
+                        const lastDescriptorId = (typeof last.descriptor === 'string')
+                            ? last.descriptor
+                            : (last.descriptor_id || null);
+                        let resolved = null;
+                        if (lastDescriptorId && typeof window.karadaResolveAnimationDescriptor === 'function') {
+                            try {
+                                resolved = await window.karadaResolveAnimationDescriptor(lastDescriptorId);
+                            } catch (e) { /* ignore */ }
+                        }
+                        const animationRef = last.animation || last.file || (resolved ? (resolved.animation_url || null) : null);
+                        const descriptorData = (last && typeof last.descriptor === 'object')
+                            ? last.descriptor
+                            : (resolved ? (resolved.descriptor_data || null) : null);
+                        const playOnce = !!(descriptorData && descriptorData.play_once);
                         if (last.animation_state && typeof animationHandler.applyAnimationState === 'function') {
                             animationHandler.applyAnimationState(last.animation_state);
                         }
-                        await animationHandler.startAction(last.state, last.animation || last.file || null, !!playOnce, last.play_section || null, last.descriptor || null, last.frame_range || null, !!last.phase_authoritative);
+                        await animationHandler.startAction(last.state, animationRef, !!playOnce, null, descriptorData || null);
                     }
                 } catch (e) { /* ignore */ }
             } catch (e) { /* ignore */ }
@@ -7186,7 +7755,25 @@ try {
             return { label: 'unknown', confidence: 0 };
         }
 
+        // A tap should only count as a model/scene interaction when the pointer
+        // actually lands on the bare canvas. Overlay UI (the WinBox chat window,
+        // debug panels, dropdowns, etc.) is stacked above the canvas, and its
+        // pointer events can still bubble/hit-test through to the canvas, which
+        // previously triggered a spurious 'touch' animation when clicking the
+        // chat input. Verify the top-most element under the cursor is the canvas.
+        function _pointerIsOnCanvas(ev) {
+            try {
+                const top = document.elementFromPoint(ev.clientX, ev.clientY);
+                return top === canvas;
+            } catch (_e) {
+                // If we cannot resolve the hit-test, fall back to the event target
+                // so we never silently break touch on browsers without the API.
+                return ev.target === canvas;
+            }
+        }
+
         canvas.addEventListener('pointerdown', (ev) => {
+            if (!_pointerIsOnCanvas(ev)) { pointerDownInfo = null; return; }
             pointerDownInfo = { x: ev.clientX, y: ev.clientY, t: Date.now() };
             isDragging = false;
             // User gesture: kick off SFX decode in background to avoid stutter on first knock.
@@ -7207,6 +7794,9 @@ try {
                 const down = pointerDownInfo;
                 pointerDownInfo = null;
                 if (!down) return;
+                // Ignore if the pointer was released over an overlay UI element
+                // rather than the bare canvas (e.g. the chat window on top).
+                if (!_pointerIsOnCanvas(ev)) return;
                 const dt = Date.now() - down.t;
                 if (isDragging || dt > 1000) return; // treat as drag or long press
 
