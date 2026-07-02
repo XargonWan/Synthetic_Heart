@@ -1587,13 +1587,21 @@ export function initChatUI() {
             window.__synth_tts_click_bound = true;
         }
 
-        // ── Autoplay unlock on first user interaction ───────────────────────────
-        // When the browser blocks autoplay (NotAllowedError), audio URLs are
-        // enqueued in window.__synthPendingAudio. The first gesture (click, key,
-        // touch) unlocks the AudioContext and drains the queue.
+        // ── Autoplay unlock on user interaction ─────────────────────────────────
+        // Single-body model: a spectator browser must also hear Synth speak.
+        // Browser autoplay policy blocks audio until the tab has a user gesture,
+        // so when audio.play() throws NotAllowedError the URL is enqueued in
+        // window.__synthPendingAudio. Every gesture (click, key, touch) resumes
+        // the AudioContext and drains any pending audio. The handler is kept
+        // registered (not removed after the first gesture) so a spectator that
+        // interacts later — or receives new audio while passive — still plays it
+        // on the next interaction, keeping all clients in sync with the one Synth.
         try {
             const _drainPendingAudio = () => {
                 try {
+                    // Resume a suspended AudioContext so subsequent plays are allowed.
+                    const ctx = window.__synthLipSyncCtx;
+                    if (ctx && ctx.state === 'suspended') { try { ctx.resume(); } catch (e) { /* ignore */ } }
                     const q = window.__synthPendingAudio;
                     if (!q || !q.length) return;
                     window.__synthPendingAudio = [];
@@ -1605,12 +1613,7 @@ export function initChatUI() {
                     try { __synthPlayWithLipsync(url, text, dur); } catch (e) { /* ignore */ }
                 } catch (e) { /* ignore */ }
             };
-            const _unlockHandler = () => {
-                _drainPendingAudio();
-                try { document.removeEventListener('click', _unlockHandler, true); } catch (e) { /* ignore */ }
-                try { document.removeEventListener('keydown', _unlockHandler, true); } catch (e) { /* ignore */ }
-                try { document.removeEventListener('touchstart', _unlockHandler, true); } catch (e) { /* ignore */ }
-            };
+            const _unlockHandler = () => { _drainPendingAudio(); };
             document.addEventListener('click', _unlockHandler, true);
             document.addEventListener('keydown', _unlockHandler, true);
             document.addEventListener('touchstart', _unlockHandler, true);

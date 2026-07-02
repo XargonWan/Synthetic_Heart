@@ -2225,7 +2225,9 @@ class SynthWebUIInterface:
             log_debug(
                 f"{LOG_PREFIX} Failed to load persisted history for {session_id}: {e}"
             )
-        await self._replay_history(session_id)
+        # Replay only to *this* freshly connected socket so already-connected
+        # spectators of the shared session don't receive duplicate history.
+        await self._replay_history(session_id, websocket=websocket)
 
         # ------------------------------------------------------------------
         # Hello handshake: wait briefly for the client to declare its
@@ -3596,14 +3598,24 @@ class SynthWebUIInterface:
                     f"{LOG_PREFIX} Failed to send response to session {session_id}: {send_exc}"
                 )
 
-    async def _replay_history(self, session_id: str) -> None:
+    async def _replay_history(
+        self, session_id: str, websocket: Optional["WebSocket"] = None
+    ) -> None:
         history = self.message_history.get(session_id)
         if not history:
             log_debug(
                 f"{LOG_PREFIX} _replay_history: no history for session {session_id}"
             )
             return
-        websocket = self.connections.get(session_id)
+        # A single logical session may be watched by several spectator sockets
+        # registered under keys like ``webui_default:<hex>`` (single-session
+        # mode). ``self.connections.get(session_id)`` would miss those, so when
+        # no explicit socket is supplied resolve the first live socket for the
+        # logical session. Replay is per-connection to avoid duplicating the
+        # history on clients that are already connected.
+        if websocket is None:
+            targets = self._sockets_for_session(session_id)
+            websocket = targets[0][1] if targets else None
         if not websocket:
             log_debug(
                 f"{LOG_PREFIX} _replay_history: no websocket for session {session_id}"
@@ -4172,17 +4184,6 @@ class SynthWebUIInterface:
             log_warning(f"{LOG_PREFIX} send_tts_audio: no websocket for session {sid}")
             return False
 
-        # Deliver the caption as a regular chat message so that it is persisted
-        # in the DB, appears in the in-memory history (replay on reconnect) and
-        # shows as a visible text bubble on clients that may not support audio.
-        if text:
-            try:
-                await self.send_message(sid, text=text)
-            except Exception as exc:
-                log_warning(
-                    f"{LOG_PREFIX} send_tts_audio: failed to send caption message for session {sid}: {exc}"
-                )
-
         # Derive a client-accessible URL from the filesystem path.
         # Audio is stored under the /static mount, e.g.
         #   res/synth_webui/static/audio/tts/vox_123.wav → /static/audio/tts/vox_123.wav
@@ -4198,6 +4199,21 @@ class SynthWebUIInterface:
                 url = "/static/audio/tts/" + p.name
         except Exception:
             url = "/static/audio/tts/" + str(audio_path).rsplit("/", 1)[-1]
+
+        # Deliver the caption as a regular chat message so that it is persisted
+        # in the DB, appears in the in-memory history (replay on reconnect) and
+        # shows as a visible text bubble on clients that may not support audio.
+        # Attach ``tts_url`` in the metadata so the click-to-replay audio icon
+        # is bound directly to the bubble on *every* spectator client (and
+        # restored on reconnect) without depending on the transient
+        # ``tts-play`` event race.
+        if text:
+            try:
+                await self.send_message(sid, text=text, metadata={"tts_url": url})
+            except Exception as exc:
+                log_warning(
+                    f"{LOG_PREFIX} send_tts_audio: failed to send caption message for session {sid}: {exc}"
+                )
 
         payload: Dict[str, Any] = {"type": "tts-play", "url": url}
         if text is not None:
