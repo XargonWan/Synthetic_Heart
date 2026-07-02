@@ -6774,6 +6774,42 @@ function render() {
             currentMixer.update(delta);
         }
 
+        // Safety net against residual T-pose: the base idle is deliberately kept at
+        // a low floor weight (~0.12) while an overlay (talk/think/etc.) drives the
+        // skeleton. If an overlay finished (or a floor-drop timer fired late) and the
+        // base idle is left as the ONLY driver at that low weight, ~88% of the rig
+        // stays in bind pose (arms raised = "T-pose summed onto idle"). Here we detect
+        // "base idle is the sole active driver" and ramp it back toward full weight so
+        // the skeleton is fully driven. This is purely weight-based, no state keywords.
+        try {
+            const h = animationHandler;
+            const baseIdle = h && h._baseIdleAction;
+            if (baseIdle && typeof baseIdle.getEffectiveWeight === 'function'
+                && typeof baseIdle.setEffectiveWeight === 'function') {
+                const baseW = baseIdle.getEffectiveWeight() || 0;
+                if (baseW < 0.999) {
+                    // Determine the strongest non-base-idle overlay weight.
+                    let maxOverlayW = 0;
+                    const mixerActions = (currentMixer && Array.isArray(currentMixer._actions))
+                        ? currentMixer._actions : [];
+                    for (const a of mixerActions) {
+                        if (!a || a === baseIdle) continue;
+                        if (typeof a.getEffectiveWeight !== 'function') continue;
+                        const w = a.getEffectiveWeight() || 0;
+                        if (w > maxOverlayW) maxOverlayW = w;
+                    }
+                    // If no overlay is meaningfully driving the rig, the base idle is
+                    // the sole driver — promote it back to full weight smoothly.
+                    if (maxOverlayW < 0.05) {
+                        try { baseIdle.enabled = true; baseIdle.paused = false; } catch (e2) { /* ignore */ }
+                        const alpha = 1 - Math.exp(-8 * (Number.isFinite(delta) ? delta : 0.016));
+                        const nextW = baseW + (1.0 - baseW) * alpha;
+                        baseIdle.setEffectiveWeight(nextW >= 0.999 ? 1.0 : nextW);
+                    }
+                }
+            }
+        } catch (e) { /* ignore */ }
+
         // Monitor loop status and keep it alive
         if (animationHandler && animationHandler.currentActionPhase === 'loop') {
             const action = animationHandler.currentAction;
