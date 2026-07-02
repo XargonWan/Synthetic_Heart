@@ -126,6 +126,63 @@ def test_parser_recovers_apostrophe_closed_string_with_escaped_sibling_keys():
     assert payload.get("reply_to_message_id") == "5208932647"
 
 
+def test_parser_recovers_curly_smart_quote_string_closer():
+    # Reproduces a Venice/gemma-4-uncensored output pattern (Langfuse trace
+    # 1f5a0ee1-0613-4350-aa95-bcb8fd189d3e): the LLM closes the "text" value
+    # with a Unicode curly quote (U+201C) instead of a straight ASCII quote.
+    # The repair scanner only recognized literal '"' as a structural
+    # boundary, so it ran straight past the curly quote and swallowed the
+    # real reply_message_id sibling key into the displayed message text.
+    corrupted = (
+        '{"actions":[{"type":"message_telegram_bot","payload":'
+        '{"interface_path":"telegram_bot/-5408266521",'
+        '"text":"Anything it takes to get her to go to bed without a fight!“,'
+        '"reply_message_id":"13615"}}]}'
+    )
+
+    obj, meta = extract_json_from_text(corrupted, return_metadata=True)
+
+    assert obj is not None
+    payload = obj["actions"][0]["payload"]
+    recovered_text = payload["text"]
+    assert "reply_message_id" not in recovered_text, (
+        f"reply_message_id leaked into displayed text (got: {recovered_text!r})"
+    )
+    assert (
+        recovered_text == "Anything it takes to get her to go to bed without a fight!"
+    )
+    assert payload.get("reply_message_id") == "13615"
+
+
+def test_parser_recovers_apostrophe_closed_string_with_single_quoted_sibling_keys():
+    # Reproduces a Venice/gemma-4-uncensored output pattern (Langfuse trace
+    # 1f5a0ee1-0613-4350-aa95-bcb8fd189d3e, seen replayed in chat_history):
+    # the LLM closes the "text" value with an apostrophe, then continues in
+    # Python-dict style with single-quoted sibling keys instead of real JSON
+    # object keys. Neither the escaped-double-quote tail repair nor the
+    # speech-quote scanner recognized single quotes as structural, so the
+    # whole tail (including reply_message_id) was swallowed into the text.
+    corrupted = (
+        '{"actions":[{"type":"message_telegram_bot","payload":{"text":'
+        "\"give your Daddy that big kiss you asked for before you drift off.'; "
+        "'reply_message_id': '13607'}}]}"
+    )
+
+    obj, meta = extract_json_from_text(corrupted, return_metadata=True)
+
+    assert obj is not None
+    payload = obj["actions"][0]["payload"]
+    recovered_text = payload["text"]
+    assert "reply_message_id" not in recovered_text, (
+        f"reply_message_id leaked into displayed text (got: {recovered_text!r})"
+    )
+    assert (
+        recovered_text
+        == "give your Daddy that big kiss you asked for before you drift off."
+    )
+    assert payload.get("reply_message_id") == "13607"
+
+
 def test_attempted_action_description_for_unknown_action():
     # If the LLM tries to use an action name that doesn't exist, we still
     # want the corrector to receive a helpful hint containing the available

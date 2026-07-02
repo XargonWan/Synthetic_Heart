@@ -174,6 +174,63 @@ def _repair_apostrophe_closed_escaped_tail(text: str) -> str:
     return _APOSTROPHE_ESCAPED_TAIL_RE.sub(_fix, text)
 
 
+_SMART_QUOTE_TRANSLATION = str.maketrans(
+    {
+        "“": '"',  # “ left double quotation mark
+        "”": '"',  # ” right double quotation mark
+        "‘": "'",  # ‘ left single quotation mark
+        "’": "'",  # ’ right single quotation mark
+    }
+)
+
+
+def _normalize_smart_quotes(text: str) -> str:
+    """Normalize Unicode curly quotes to their ASCII equivalents.
+
+    LLMs occasionally emit a curly quote (e.g. U+201C) where a straight
+    JSON string delimiter was intended. The repair scanners in this module
+    only recognize literal ASCII '"' (and ''') as structural boundaries, so
+    an unrecognized curly quote is treated as ordinary prose: the scanner
+    runs straight past it and silently swallows the next real JSON
+    key/value pair (e.g. reply_message_id) into the string value. Normalize
+    before any repair pass runs so a mistaken curly closer is recognized.
+    """
+    return text.translate(_SMART_QUOTE_TRANSLATION)
+
+
+_APOSTROPHE_SINGLE_QUOTED_TAIL_RE = re.compile(
+    r"'((?:[;,]\s*'[A-Za-z_][A-Za-z0-9_]*'\s*:\s*"
+    r"(?:'[^'\\]*'|-?\d+(?:\.\d+)?|true|false|null)\s*)+)"
+)
+
+
+def _repair_apostrophe_closed_single_quoted_tail(text: str) -> str:
+    """Repair JSON where the LLM closes a string value with an apostrophe,
+    then continues in Python-dict style with single-quoted sibling keys
+    that were meant to be real JSON object keys, not string content.
+
+    LLM produces (invalid JSON):
+        "text": "Some reply!'; 'reply_message_id': '13615'}
+
+    After repair (valid JSON):
+        "text": "Some reply!", "reply_message_id": "13615"}
+
+    The apostrophe becomes the real closing quote, the leading ';' or ','
+    separator becomes a JSON comma, and each single-quoted key/value pair
+    is converted to double-quoted JSON. A legitimate JSON string cannot
+    contain an unescaped apostrophe directly followed by a
+    ``'key': 'value'`` run like this, so the false-positive risk is nil.
+    """
+
+    def _fix(m: re.Match) -> str:
+        tail = m.group(1)
+        tail = re.sub(r"^[;,]", ",", tail)
+        tail = re.sub(r"'([^'\\]*)'", r'"\1"', tail)
+        return '"' + tail
+
+    return _APOSTROPHE_SINGLE_QUOTED_TAIL_RE.sub(_fix, text)
+
+
 def _repair_json_string_speech_quotes(raw: str) -> str:
     """Re-escape unescaped speech-marker quotes inside known text-heavy JSON fields.
 
@@ -501,12 +558,15 @@ def extract_json_from_text(
         cleaned_text = cleaned_text.strip()
 
     # Apply targeted repairs for premature string close patterns produced by LLMs.
+    # Pass 0: normalize curly/smart quotes so a mistaken closer is recognized
     # Pass 1: literal \\n sequences outside the string  ("value." \\n\\nmore)
     # Pass 2: apostrophe used as a string closer, followed by an escaped-quote
-    #         run of sibling keys that belong outside the string
+    #         or single-quoted run of sibling keys that belong outside the string
     # Pass 3: re-escape unescaped speech quotes inside text-heavy fields
-    repaired_text = _repair_premature_string_close(cleaned_text)
+    repaired_text = _normalize_smart_quotes(cleaned_text)
+    repaired_text = _repair_premature_string_close(repaired_text)
     repaired_text = _repair_apostrophe_closed_escaped_tail(repaired_text)
+    repaired_text = _repair_apostrophe_closed_single_quoted_tail(repaired_text)
     repaired_text = _repair_json_string_speech_quotes(repaired_text)
     if repaired_text != cleaned_text:
         log_debug("[extract_json_from_text] Applied premature string close repair")
