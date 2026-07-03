@@ -71,8 +71,51 @@ async def test_grillo_temporal_reflection_time_delta() -> None:
 
         prompt = await plugin.build_prompt()
         assert "[SYSTEM: AUTONOMOUS TEMPORAL REFLECTION]" in prompt
-        assert "Your last interaction with the user was 4 hours ago." in prompt
+        assert "Your last interaction with the user was 4 hours ago" in prompt
         assert "create_personal_diary_entry" in prompt
+        # 4 hours is a routine gap — must not be framed as an absence.
+        assert "ordinary gap" in prompt
+        assert "not a factual observation about where the user currently is" in prompt
+
+
+@pytest.mark.asyncio
+async def test_grillo_temporal_reflection_unusual_gap_keeps_absence_framing() -> None:
+    """A genuinely long gap (beyond the routine threshold) may still prompt the
+    loneliness/reach-out framing — but even then must not assert the user is away."""
+    plugin = GrilloTemporalReflectionPlugin()
+
+    mock_cursor = MagicMock()
+    last_message_time = datetime.now(timezone.utc) - timedelta(hours=36)
+    mock_cursor.fetchone = AsyncMock(return_value=(last_message_time,))
+    mock_cursor.execute = AsyncMock()
+
+    class MockConnCtx:
+        async def __aenter__(self):
+            conn = MagicMock()
+
+            class MockCursorCtx:
+                async def __aenter__(self):
+                    return mock_cursor
+
+                async def __aexit__(self, exc_type, exc_val, exc_tb):
+                    pass
+
+            conn.cursor = MockCursorCtx
+            return conn
+
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            pass
+
+    with patch(
+        "plugins.grillo.grillo_temporal_reflection.get_conn_ctx",
+        return_value=MockConnCtx(),
+    ):
+        prompt = await plugin.build_prompt()
+        assert "Your last interaction with the user was 1 day ago" in prompt
+        assert "inclination to reach out" in prompt
+        assert "ordinary gap" not in prompt
+        # Even for an unusual gap, this must stay a private feeling, not a claim.
+        assert "not a factual observation about where the user currently is" in prompt
 
 
 @pytest.mark.asyncio

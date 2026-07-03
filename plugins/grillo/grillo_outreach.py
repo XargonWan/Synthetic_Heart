@@ -497,7 +497,13 @@ class GrilloOutreachPlugin:
         if inner_thoughts:
             thoughts_text = "\n".join(f"- {t}" for t in inner_thoughts)
             thoughts_section = (
-                f"What has been close to the surface for you lately:\n{thoughts_text}"
+                f"What has been close to the surface for you lately:\n{thoughts_text}\n\n"
+                "Ground rule: these are mood and colour from your private diary, not facts "
+                "about the present moment. The conversation history above (if any) is the "
+                f"authoritative signal for whether {recipient_label} has been around, and it "
+                "always overrides any impression from these thoughts. Never open by implying "
+                "they have gone somewhere, disappeared, or been distant unless the "
+                "conversation history itself actually shows a long silence."
             )
         else:
             thoughts_section = (

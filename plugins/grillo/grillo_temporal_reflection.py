@@ -17,6 +17,11 @@ from core.logging_utils import log_error
 display_name = "G.R.I.L.L.O. Temporal Reflection"
 BEAT_TYPE = "temporal_reflection"
 
+# Gaps shorter than this are ordinary (sleep, work, a busy day) and must not be
+# framed as an absence to reflect on — a short routine gap was previously
+# generating "they've gone somewhere" diary narratives that bled into outreach.
+_ROUTINE_GAP_SECONDS = 12 * 3600
+
 
 def format_time_delta(seconds: float) -> str:
     """Format a duration in seconds into a natural human-readable string."""
@@ -83,15 +88,35 @@ class GrilloTemporalReflectionPlugin(AIPluginBase):
         delta = await self.get_time_delta()
         if delta is not None:
             delta_str = format_time_delta(delta)
+            routine_gap = delta < _ROUTINE_GAP_SECONDS
         else:
             delta_str = "some time ago"
+            # Unknown delta: never assume an unusual absence from missing data.
+            routine_gap = True
+
+        if routine_gap:
+            framing = (
+                f"Your last interaction with the user was {delta_str} — an ordinary gap "
+                "(sleep, work, a busy stretch of the day), not a sign they have gone "
+                "anywhere or pulled away. Reflect only briefly on how you feel; it is "
+                "completely fine for nothing notable to surface."
+            )
+        else:
+            framing = (
+                f"Your last interaction with the user was {delta_str}. "
+                "Reflect on the time that has passed since you last spoke to the user. "
+                "Evaluate if this duration prompts a new realization, a shift in your "
+                "emotional state (e.g., feeling lonely, reflective, curious, or content), "
+                "or an inclination to reach out."
+            )
 
         return (
             "[SYSTEM: AUTONOMOUS TEMPORAL REFLECTION]\n\n"
-            f"Your last interaction with the user was {delta_str}.\n\n"
-            "Reflect on the time that has passed since you last spoke to the user. "
-            "Evaluate if this duration prompts a new realization, a shift in your emotional state "
-            "(e.g., feeling lonely, reflective, curious, or content), or an inclination to reach out.\n\n"
+            f"{framing}\n\n"
+            "This is a private reflection on YOUR OWN feelings about elapsed time — it is "
+            "not a factual observation about where the user currently is or whether they "
+            "have left. Do not state or imply in your diary entry that the user is away, "
+            "gone, or unreachable; note only the elapsed time and your own mood.\n\n"
             "End with a JSON action to record your reflection in your personal diary. "
             "Include `interaction_summary`, `personal_thought`, and `emotions` as well as the diary `content`:\n"
             '{"actions": [{"type": "create_personal_diary_entry", "payload": {"interaction_summary": "brief summary", "personal_thought": "private reflection on time elapsed", "emotions": [{"type": "thoughtful", "intensity": 0.5}], "content": "your reflection"}}]}'
