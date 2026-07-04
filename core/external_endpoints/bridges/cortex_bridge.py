@@ -28,6 +28,17 @@ if TYPE_CHECKING:
 # unless they set max_tokens explicitly.
 _LOCAL_MAX_TOKENS_DEFAULT = 4096
 
+# --- NATIVE TOOLS ACCANTONATI GLOBALMENTE (2026-07-04) ---
+# I tool nativi (function-calling OpenAI/Gemini/Anthropic) sono disattivati
+# finché non implementeremo la funzionalità agentica (PR futura già pianificata).
+# Con questo flag a True, TUTTI gli endpoint usano il protocollo in-prompt: il
+# catalogo azioni viene iniettato come testo nel system prompt, così anche gli
+# engine senza tool-calling nativo (es. selenium-llm-engine, automazione browser)
+# vedono tutte le actions (incluso tts_speak).
+# Per riattivare i tool nativi quando arriverà la parte agentica: riportare
+# questo flag a False. La logica originale del ramo tools resta intatta sotto.
+_NATIVE_TOOLS_ENABLED = False
+
 
 # ---------------------------------------------------------------------------
 # Multimodal extraction helper
@@ -648,11 +659,14 @@ class ExternalCortexEngine(AIPluginBase):
                 fallback = self._build_fallback_action_grammar()
                 return {"extra_body": {"grammar": fallback}} if fallback else {}
 
-            if self._disable_tools():
-                # Force the legacy in-prompt JSON-action protocol: keep native
-                # tools off, fold the action catalog into the system prompt, and
-                # leave supports_tool_calling False so the renderer expects a
-                # JSON-in-content reply rather than tool_calls.
+            # Native tools are globally shelved (see _NATIVE_TOOLS_ENABLED) until
+            # the agentic feature lands. When disabled — or when an endpoint opts
+            # out via disable_tools/force_action_grammar — force the legacy
+            # in-prompt JSON-action protocol: keep native tools off, fold the
+            # action catalog into the system prompt, and leave
+            # supports_tool_calling False so the renderer expects a
+            # JSON-in-content reply rather than tool_calls.
+            if not _NATIVE_TOOLS_ENABLED or self._disable_tools():
                 prompt_request.supports_tool_calling = False
                 self._inject_actions_into_prompt(prompt_request)
                 grammar = self._build_action_grammar(prompt_request)
