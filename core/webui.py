@@ -1281,8 +1281,9 @@ class SynthWebUIInterface:
         if vox_on:
             webui_optional.append("send_as_voice")
             webui_description += (
-                " Set send_as_voice=true to deliver your reply as spoken voice "
-                "(the avatar speaks it aloud) instead of plain text."
+                " send_as_voice defaults to false. Only set send_as_voice=true when "
+                "the user explicitly asked for a voice/audio reply, or when they "
+                "just spoke to you by voice. Otherwise reply as plain text."
             )
 
         return {
@@ -1326,7 +1327,7 @@ class SynthWebUIInterface:
                 payload["send_as_voice"] = {
                     "type": "boolean",
                     "example": True,
-                    "description": "Optional. When true, your 'text' is synthesised and the avatar speaks it aloud (with the text shown as the caption bubble). Set it when the user asks to be answered with voice/audio in any language, or whenever a spoken reply is more appropriate. Leave it out (or false) for a normal text reply.",
+                    "description": "Optional, defaults to false. When true, your 'text' is synthesised and the avatar speaks it aloud (with the text shown as the caption bubble). Voice synthesis is slow, so use it SPARINGLY: only set it when the user EXPLICITLY asked to be answered with voice/audio (in any language), or when the user just spoke to you by voice. Do NOT set it just because it might be nice. For every ordinary reply, leave it out (or false) and answer as plain text.",
                     "optional": True,
                 }
 

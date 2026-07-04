@@ -731,8 +731,9 @@ class DiscordInterface:
         if vox_on:
             message_optional.append("send_as_voice")
             message_description += (
-                " Set send_as_voice=true to deliver your reply as a spoken voice "
-                "note instead of plain text."
+                " send_as_voice defaults to false. Only set send_as_voice=true when "
+                "the user explicitly asked for a voice/audio reply, or when they "
+                "just sent you a voice message. Otherwise reply as plain text."
             )
 
         return {
@@ -792,11 +793,11 @@ class DiscordInterface:
                 payload["send_as_voice"] = {
                     "type": "boolean",
                     "example": True,
-                    "description": "Optional. When true, your 'text' is synthesised into a spoken voice note and delivered as a single audio message (with the text as caption). Set it when the user asks to be answered with voice/audio in any language, or whenever you judge a spoken reply is more appropriate. Leave it out (or false) for a normal text reply.",
+                    "description": "Optional, defaults to false. When true, your 'text' is synthesised into a spoken voice note and delivered as a single audio message (with the text as caption). Voice synthesis is slow, so use it SPARINGLY: only set it when the user EXPLICITLY asked to be answered with voice/audio (in any language), or when the user's own message was a voice note. Do NOT set it just because it might be nice. For every ordinary reply, leave it out (or false) and answer as plain text.",
                     "optional": True,
                 }
                 important_notes.append(
-                    "To reply with voice, keep using message_discord_bot with your full reply in 'text' and add send_as_voice=true - do NOT emit a separate audio action."
+                    "send_as_voice defaults to false. Only reply with voice when the user explicitly requested audio or sent you a voice message; when you do, keep using message_discord_bot with your full reply in 'text' and add send_as_voice=true - do NOT emit a separate audio action."
                 )
 
             return {
