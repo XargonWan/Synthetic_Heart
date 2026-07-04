@@ -118,6 +118,77 @@ def _escape_json_string_control_chars(s: str) -> str:
     return "".join(escaped_chars)
 
 
+def _escape_unescaped_quotes_in_json_strings(s: str) -> str:
+    """Escape stray double quotes that appear *inside* JSON string values.
+
+    LLMs frequently emit a quoted passage inside a ``"text"`` value without
+    escaping the inner quotes, e.g.::
+
+        {"text": "he said "hello" to me"}
+
+    ``json.loads`` treats the first inner ``"`` as the end of the value and then
+    chokes on the following token, so only the leading fragment survives. This
+    helper walks the text with a small state machine and, while inside a string
+    literal, escapes any ``"`` that is *not* a genuine structural terminator.
+
+    A ``"`` is treated as a real string terminator only when the next
+    significant (non-whitespace) character is one of ``:,}]`` or end-of-input —
+    i.e. the positions where JSON grammar allows a string to end. Any other
+    ``"`` encountered inside a string is escaped to ``\\"`` so the full value is
+    preserved.
+
+    This runs before ``json.loads`` and is intentionally conservative: it never
+    touches quotes outside string context and leaves already-escaped quotes
+    (``\\"``) alone.
+    """
+
+    if not s:
+        return s
+
+    def _next_significant(idx: int) -> str:
+        j = idx
+        while j < len(s) and s[j] in " \t\r\n":
+            j += 1
+        return s[j] if j < len(s) else ""
+
+    out: list[str] = []
+    in_string = False
+    escape_next = False
+
+    for i, ch in enumerate(s):
+        if not in_string:
+            out.append(ch)
+            if ch == '"':
+                in_string = True
+            continue
+
+        if escape_next:
+            out.append(ch)
+            escape_next = False
+            continue
+
+        if ch == "\\":
+            out.append(ch)
+            escape_next = True
+            continue
+
+        if ch == '"':
+            # Decide whether this quote terminates the string or is an inner
+            # quote that must be escaped. It terminates only if the next
+            # significant character is a structural JSON delimiter.
+            nxt = _next_significant(i + 1)
+            if nxt in (":", ",", "}", "]", ""):
+                out.append(ch)
+                in_string = False
+            else:
+                out.append('\\"')
+            continue
+
+        out.append(ch)
+
+    return "".join(out)
+
+
 def _find_json_substrings(s: str, max_window: int = 20000):
     """Find candidate JSON substrings by scanning for balanced braces/brackets.
     Returns generator of (start, end, substring).
@@ -309,6 +380,18 @@ def extract_json_from_text(
     ):
         if candidate and candidate not in texts_to_try:
             texts_to_try.append(candidate)
+
+    # Last-resort variants: repair stray unescaped double quotes inside string
+    # values (e.g. an unescaped quoted passage inside a "text" field). These are
+    # appended after the cheaper variants so clean JSON is always preferred.
+    for value in tuple(texts_to_try):
+        repaired = _escape_unescaped_quotes_in_json_strings(value)
+        if repaired and repaired not in texts_to_try:
+            texts_to_try.append(repaired)
+        # Also cover the combined case (control chars + inner quotes).
+        combined = _escape_json_string_control_chars(repaired)
+        if combined and combined not in texts_to_try:
+            texts_to_try.append(combined)
 
     decoder = json.JSONDecoder()
     found_json = None
