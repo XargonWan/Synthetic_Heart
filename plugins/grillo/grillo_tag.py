@@ -30,7 +30,8 @@ class GrilloTagPlugin(AIPluginBase):
             "- How do these themes connect?\n"
             "- What insights emerge?\n\n"
             "IMPORTANT: You MUST end your response with a JSON action to create a diary entry about this. "
-            '{"actions": [{"type": "create_personal_diary_entry", "payload": {"content": "your reflection"}}]}'
+            "Include `interaction_summary`, `personal_thought`, and `emotions` as well as the diary `content`. "
+            '{"actions": [{"type": "create_personal_diary_entry", "payload": {"interaction_summary": "brief summary", "personal_thought": "private first-person reflection", "emotions": [{"type": "thoughtful", "intensity": 0.6}], "content": "your reflection"}}]}'
         )
         return prompt
 

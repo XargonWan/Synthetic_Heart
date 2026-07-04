@@ -27,7 +27,7 @@ async def test_create_action_exec_creates_table_if_missing(monkeypatch):
         async def commit(self):
             return None
 
-        async def cursor(self):
+        def cursor(self):
             return FakeCursor()
 
         async def __aenter__(self):
@@ -36,13 +36,20 @@ async def test_create_action_exec_creates_table_if_missing(monkeypatch):
         async def __aexit__(self, exc_type, exc, tb):
             return False
 
-    async def fake_get_conn_ctx():
+    class FakeConnCtx:
+        async def __aenter__(self):
+            return FakeConn()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    def fake_get_conn_ctx():
         if call["n"] == 0:
             call["n"] += 1
             raise Exception(
                 "(1146, \"Table 'synth.grillo_action_execs' doesn't exist\")"
             )
-        return FakeConn()
+        return FakeConnCtx()
 
     monkeypatch.setattr("core.db.get_conn_ctx", fake_get_conn_ctx)
 
@@ -90,7 +97,7 @@ async def test_fetch_action_execs_creates_table_if_missing(monkeypatch):
         async def commit(self):
             return None
 
-        async def cursor(self):
+        def cursor(self):
             return FakeCursor()
 
         async def __aenter__(self):
@@ -99,13 +106,20 @@ async def test_fetch_action_execs_creates_table_if_missing(monkeypatch):
         async def __aexit__(self, exc_type, exc, tb):
             return False
 
-    async def fake_get_conn_ctx():
+    class FakeConnCtx:
+        async def __aenter__(self):
+            return FakeConn()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    def fake_get_conn_ctx():
         if call["n"] == 0:
             call["n"] += 1
             raise Exception(
                 "(1146, \"Table 'synth.grillo_action_execs' doesn't exist\")"
             )
-        return FakeConn()
+        return FakeConnCtx()
 
     monkeypatch.setattr("core.db.get_conn_ctx", fake_get_conn_ctx)
 

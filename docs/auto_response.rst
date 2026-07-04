@@ -1,10 +1,16 @@
 Auto-Response System
-===================
+====================
 
 Overview
 --------
 
 The Auto-Response System enables interfaces to deliver their output back to users through the LLM, maintaining context and allowing the AI to format and comment on results appropriately.
+
+Since the prompt rewrite, auto-response delivery no longer depends only on a
+raw ``system_message`` block. The delivery path now also attaches a typed
+``PromptRequest(mode='delivery')`` built by
+``core.prompt_engine.build_delivery_request()`` so migrated engines can render
+delivery prompts natively.
 
 Problem Solved
 --------------
@@ -43,8 +49,8 @@ The new system ensures all responses flow through the LLM:
          │
          ▼
     ┌─────────────┐
-    │ Auto-       │ ──→ Preserves context (chat_id, command, etc.)
-    │ Response    │     Sends output + context to LLM
+    │ Auto-       │ ──→ Preserves context and builds
+    │ Response    │     system_message + PromptRequest(delivery)
     └─────────────┘
          │
          ▼
@@ -70,14 +76,16 @@ Located in ``core/auto_response.py``:
     class AutoResponseSystem:
         async def request_llm_response(
             self, 
-            output: str, 
+            output: str | None,
             original_context: Dict[str, Any],
             action_type: str,
-            command: str = None
+            command: str = None,
+            action_outputs: list[dict[str, Any]] | None = None,
         ):
-            # Creates mock message with output
-            # Enqueues LLM request with context
-            # LLM processes and delivers response
+            # Creates a synthetic message carrying delivery context
+            # Builds a compatibility system_message payload
+            # Attaches PromptRequest(mode="delivery") on __prompt_request
+            # Enqueues the request for normal message-chain processing
 
 2. Interface Integration
 ~~~~~~~~~~~~~~~~~~~~~~~~
@@ -135,6 +143,10 @@ repeat the previous request while adjusting only the invalid portion.
 
 All system messages also contain a ``full_json_instructions`` block that
 reminds the LLM of the JSON format and available actions.
+
+For migrated engines, the same payload also carries ``__prompt_request`` with a
+typed delivery request. This keeps the legacy correction/delivery semantics
+while allowing renderer-backed engines to use native message/tool formats.
 
 These system messages are ignored during JSON extraction, preventing
 unintended actions.
@@ -225,6 +237,49 @@ To add auto-response to a new interface:
 3. **Remove direct messaging**:
 
    Replace direct ``bot.send_message()`` calls with auto-response requests
+
+Plugin-Side Delivery: ``deliver_to_llm``
+----------------------------------------
+
+Interfaces call ``request_llm_delivery`` explicitly (above). Plugins have a
+simpler opt-in path for **fetch-only actions** — actions whose answer *is* the
+reply (e.g. ``recall_last_dream``): the action fetches data but has no message
+to send on its own, and the user should get an in-character recount rather than
+nothing.
+
+A plugin's ``execute_action`` only needs to return a result dict tagged with
+``deliver_to_llm: True``:
+
+.. code-block:: python
+
+    async def execute_action(self, action, context, bot, original_message):
+        if action.get("type") == "recall_last_dream":
+            return {
+                "status": "success",
+                "dream_content": dream_text,
+                "message": f"Recalled dream from {when}",
+                "deliver_to_llm": True,  # ← feed this back to the LLM to voice
+            }
+
+``core.action_parser.run_actions`` captures any such result into its
+``action_outputs`` list (an additive branch beside the existing ``terminal``
+handling), strips the ``deliver_to_llm`` control flag, stamps the action
+``type``, and routes the collected outputs through the same generic
+``request_llm_delivery`` delivery block. The LLM then composes the user-facing
+message. The loop-prevention instruction names the real action type, so the
+model is told *"DO NOT call 'recall_last_dream' again"* and simply voices the
+data.
+
+Two consequences worth knowing:
+
+* Unlike ``terminal``, a ``deliver_to_llm`` result does **not** halt the rest of
+  the action batch — sibling actions in the same response keep executing.
+* The delivery follow-up *is* the user's reply, so the missing-reply corrector
+  in ``core.message_chain.handle_incoming_message`` is suppressed whenever
+  ``run_actions`` returned non-empty ``action_outputs`` (otherwise the corrector
+  and the delivery would both fire, producing a double reply). Do **not** add
+  these fetch-only actions to ``USER_OUTPUT_ACTION_TYPES`` — that config is for
+  actions that reply *synchronously* on their own.
 
 Testing
 -------

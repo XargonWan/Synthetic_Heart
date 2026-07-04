@@ -616,17 +616,20 @@ class MatrixInterface:
                 "[matrix_interface] Cannot send message - interface is disabled"
             )
             return
+        skip_history = False
         if isinstance(room_id, dict):
             payload = room_id
             text = payload.get("text", text)
             room_id = payload.get("target") or payload.get("room_id")
             reply_to_event_id = payload.get("reply_to_event_id")
             thread_event_id = payload.get("thread_event_id") or payload.get("thread_id")
+            skip_history = payload.get("skip_history", False)
         else:
             payload = kwargs
             room_id = room_id or payload.get("target") or payload.get("room_id")
             reply_to_event_id = payload.get("reply_to_event_id")
             thread_event_id = payload.get("thread_event_id") or payload.get("thread_id")
+            skip_history = payload.get("skip_history", False)
 
         if not self.client:
             log_warning(
@@ -660,20 +663,21 @@ class MatrixInterface:
         )
 
         # Save SyntH's response via core chat_context_manager
-        try:
-            from core.chat_context_manager import save_response_message
-            from core.interface_path_utils import build_interface_path
+        if not skip_history:
+            try:
+                from core.chat_context_manager import save_response_message
+                from core.interface_path_utils import build_interface_path
 
-            interface_path = build_interface_path(
-                "matrix",
-                str(room_id),
-                str(thread_event_id) if thread_event_id else None,
-            )
-            await save_response_message(interface_path, text)
-        except Exception as e:
-            log_debug(
-                f"[matrix_interface] Failed to save response via context_manager: {e}"
-            )
+                interface_path = build_interface_path(
+                    "matrix",
+                    str(room_id),
+                    str(thread_event_id) if thread_event_id else None,
+                )
+                await save_response_message(interface_path, text)
+            except Exception as e:
+                log_debug(
+                    f"[matrix_interface] Failed to save response via context_manager: {e}"
+                )
 
     async def _send_matrix_message(
         self,
@@ -731,9 +735,10 @@ class MatrixInterface:
         try:
             log_info("[matrix_interface] Applying configuration changes from registry")
 
+            # Prime unresolved ConfigVar definitions without sync get_value() calls.
+            await config_registry.load_all_from_db()
+
             # Read current values from ConfigVar wrappers
-            new_homeserver = str(MATRIX_HOMESERVER).rstrip("/")
-            new_user = str(MATRIX_USER)
             new_password = (
                 MATRIX_PASSWORD.value
                 if hasattr(MATRIX_PASSWORD, "value")
@@ -744,10 +749,6 @@ class MatrixInterface:
                 if hasattr(MATRIX_ACCESS_TOKEN, "value")
                 else MATRIX_ACCESS_TOKEN
             )
-            new_device_id = MATRIX_DEVICE_ID if MATRIX_DEVICE_ID else None
-            new_device_name = str(MATRIX_DEVICE_NAME)
-            new_store_path = MATRIX_STORE_PATH if MATRIX_STORE_PATH else None
-
             new_allowed = get_matrix_allowed_rooms() or set()
             new_auto_join = bool(MATRIX_AUTO_JOIN)
             new_invite_policy = str(MATRIX_INVITE_POLICY).lower()
@@ -760,15 +761,21 @@ class MatrixInterface:
             self.private_message_policy = new_pm_policy
 
             # Detect authentication changes
+            has_active_session = bool(
+                self.client and getattr(self, "_logged_in", False)
+            )
             new_auth_configured = bool(new_password or new_token)
-            prev_auth = getattr(self, "_auth_configured", False)
+            prev_auth = bool(
+                getattr(self, "_auth_configured", False) or has_active_session
+            )
+            effective_auth = bool(new_auth_configured or has_active_session)
             self.password = new_password
             self.access_token = new_token
 
             # If auth state changed from unauthenticated -> authenticated, start
-            if not prev_auth and new_auth_configured:
+            if not prev_auth and effective_auth:
                 log_info("[matrix_interface] Credentials supplied — starting sync loop")
-                self._auth_configured = True
+                self._auth_configured = effective_auth
                 try:
                     await self.start()
                 except Exception as exc:
@@ -778,7 +785,7 @@ class MatrixInterface:
 
                 # Attempt a short sync to pick up pending invites/messages
                 try:
-                    if self.client and getattr(self, "_logged_in", False):
+                    if self.client and has_active_session:
                         await self.client.sync(timeout=1000, full_state=False)
                 except Exception as exc:
                     log_debug(
@@ -786,7 +793,7 @@ class MatrixInterface:
                     )
 
             # If auth removed, stop the interface
-            elif prev_auth and not new_auth_configured:
+            elif prev_auth and not effective_auth:
                 log_info("[matrix_interface] Credentials removed — stopping sync loop")
                 self._auth_configured = False
                 try:
@@ -799,8 +806,8 @@ class MatrixInterface:
             # Auth unchanged: if we're logged in trigger a short sync so
             # invite/message state is re-evaluated under the new policies.
             else:
-                self._auth_configured = new_auth_configured
-                if self.client and getattr(self, "_logged_in", False):
+                self._auth_configured = effective_auth
+                if self.client and has_active_session:
                     try:
                         await self.client.sync(timeout=1000, full_state=False)
                     except Exception as exc:

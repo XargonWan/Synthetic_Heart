@@ -45,6 +45,24 @@ class LiveEventType(str, Enum):
     AUDIO = "audio"  # TTS audio chunk (bytes)
     VAD = "vad"  # Voice-activity detection signal
     ERROR = "error"  # Engine-side error
+    TOOL_CALL = "tool_call"  # Model requested a function/tool call
+
+
+@dataclass
+class ToolCallPayload:
+    """Model-agnostic representation of a tool/function call from the model.
+
+    Attributes:
+        call_id: Opaque identifier assigned by the model.  Must be echoed
+                 back in the tool response so the model can correlate it.
+        name:    Tool name — matches the ``ToolManifest.name`` / SyntH
+                 action type.
+        args:    Key-value arguments provided by the model.
+    """
+
+    call_id: str
+    name: str
+    args: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -57,6 +75,7 @@ class LiveEvent:
     is_final: bool = False  # True when segment is complete
     vad_signal: Optional[str] = None  # "speech_start" | "speech_end" for VAD
     detail: Optional[str] = None  # Error message for ERROR events
+    tool_call: Optional[ToolCallPayload] = None  # Populated for TOOL_CALL events
     metadata: dict = field(default_factory=dict)
 
 
@@ -132,7 +151,7 @@ class LiveEngineBase(ABC):
         # Trick to make the type-checker happy for the default case.
         # Subclasses should use "yield" to make this an actual async generator.
         return
-        yield  # type: ignore[misc]
+        yield
 
     # ------------------------------------------------------------------
     # TTS side (output) — optional
@@ -144,6 +163,33 @@ class LiveEngineBase(ABC):
         The synthesised audio will arrive as ``LiveEvent(type=AUDIO, ...)``
         events on ``receive_events``.  Engines that do not support output may
         leave this as a no-op.
+        """
+
+    async def send_tool_response(
+        self,
+        session_id: str,
+        call_id: str,
+        name: str,
+        result: dict[str, Any],
+    ) -> None:
+        """Send the result of a tool/function call back to the model.
+
+        Called after the executor has run the action associated with a
+        ``TOOL_CALL`` event.  The model unblocks and continues generating
+        once it receives this response.
+
+        Engines that support async scheduling should inspect
+        ``result.get("scheduling")`` (values: ``"INTERRUPT"``, ``"WHEN_IDLE"``,
+        ``"SILENT"``) to decide how to deliver the response (Gemini 2.5+).
+        Engines that only support synchronous function calling (Gemini 3.1)
+        can ignore the key.
+
+        Args:
+            session_id: Session that originated the tool call.
+            call_id:    Opaque ID from ``ToolCallPayload.call_id`` — must be
+                        echoed back verbatim.
+            name:       Tool name from ``ToolCallPayload.name``.
+            result:     Arbitrary dict returned by ``run_action``.
         """
 
     # ------------------------------------------------------------------

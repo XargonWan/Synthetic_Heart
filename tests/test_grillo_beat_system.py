@@ -42,6 +42,7 @@ async def test_grillo_beat_types_exist() -> None:
     expected_types = [
         "tag_elaboration",
         "memory_consolidation",
+        "diary_consolidation",
         "self_reflection",
         "curiosity",
         "relationship",
@@ -77,6 +78,70 @@ async def test_grillo_set_activity_response_text_with_valid_id() -> None:
 
 
 @pytest.mark.asyncio
+async def test_grillo_set_activity_response_text_uses_postgres_append_sql() -> None:
+    """Postgres append path should cast params to text instead of using CONCAT."""
+    mock_ctx, mock_cursor = _create_mock_db_context()
+
+    def mock_get_conn_ctx() -> MagicMock:
+        return mock_ctx
+
+    import core.db
+
+    original_get_conn_ctx = core.db.get_conn_ctx
+    original_get_db_type = core.db._get_db_type
+    core.db.get_conn_ctx = mock_get_conn_ctx  # type: ignore[assignment]
+    core.db._get_db_type = lambda: "postgres"  # type: ignore[assignment]
+
+    try:
+        from plugins.grillo.grillo_impl import GrilloPlugin
+
+        await GrilloPlugin.set_activity_response_text(
+            activity_log_id=123,
+            response_text="Test response",
+        )
+
+        executed_sql = mock_cursor.execute.await_args_list[0][0][0]
+        assert "CONCAT" not in executed_sql
+        assert "%s::text" in executed_sql
+        assert "response_text || E'\\n\\n' || %s::text" in executed_sql
+    finally:
+        core.db.get_conn_ctx = original_get_conn_ctx
+        core.db._get_db_type = original_get_db_type
+
+
+@pytest.mark.asyncio
+async def test_grillo_record_suppressed_event_uses_postgres_append_sql() -> None:
+    """Suppressed-event annotations should use the Postgres-safe append SQL."""
+    mock_ctx, mock_cursor = _create_mock_db_context()
+
+    def mock_get_conn_ctx() -> MagicMock:
+        return mock_ctx
+
+    import core.db
+
+    original_get_conn_ctx = core.db.get_conn_ctx
+    original_get_db_type = core.db._get_db_type
+    core.db.get_conn_ctx = mock_get_conn_ctx  # type: ignore[assignment]
+    core.db._get_db_type = lambda: "postgres"  # type: ignore[assignment]
+
+    try:
+        from plugins.grillo.grillo_impl import GrilloPlugin
+
+        await GrilloPlugin.record_suppressed_event(
+            activity_log_id=123,
+            reason="duplicate",
+        )
+
+        executed_sql = mock_cursor.execute.await_args_list[-1][0][0]
+        assert "suppressed_count = COALESCE(suppressed_count, 0) + 1" in executed_sql
+        assert "CONCAT" not in executed_sql
+        assert "%s::text" in executed_sql
+    finally:
+        core.db.get_conn_ctx = original_get_conn_ctx
+        core.db._get_db_type = original_get_db_type
+
+
+@pytest.mark.asyncio
 async def test_grillo_set_activity_response_text_with_none_id() -> None:
     """Test that set_activity_response_text handles None activity_log_id."""
     from plugins.grillo.grillo_impl import GrilloPlugin
@@ -101,9 +166,39 @@ async def test_grillo_outreach_prompt_generation() -> None:
         context=["Test context 1", "Test context 2"],
     )
 
-    assert "G.R.I.L.L.O. OUTREACH" in prompt
+    assert "SELF-INITIATED OUTREACH" in prompt
+    # Outreach must be framed as a self-initiated impulse, not an inbound reply.
+    assert "NOT a reply" in prompt
     assert "message_telegram_bot" in prompt
+    assert "create_personal_diary_entry" in prompt
+    assert "personal_thought" in prompt
+    assert "emotions" in prompt
     assert "Test context 1" in prompt
+
+
+@pytest.mark.asyncio
+async def test_grillo_reflection_prompts_request_introspection_fields() -> None:
+    from plugins.grillo.grillo_self_reflection import GrilloSelfReflectionPlugin
+    from plugins.grillo.grillo_curiosity import GrilloCuriosityPlugin
+    from plugins.grillo.grillo_tag import GrilloTagPlugin
+    from plugins.grillo.grillo_relationship import GrilloRelationshipPlugin
+
+    # NOTE: memory_consolidation is intentionally absent — its prompt is built by
+    # GrilloPlugin._create_memory_consolidation_prompt (see _create_beat_prompt's
+    # interception), covered by test_grillo_select_active_chats.py. The vestigial
+    # grillo_memory.py plugin that used to shadow it has been retired.
+    prompts = [
+        await GrilloSelfReflectionPlugin().build_prompt(),
+        await GrilloCuriosityPlugin().build_prompt(),
+        await GrilloTagPlugin().build_prompt(),
+        await GrilloRelationshipPlugin().build_prompt(),
+    ]
+
+    for prompt in prompts:
+        assert "create_personal_diary_entry" in prompt
+        assert "interaction_summary" in prompt
+        assert "personal_thought" in prompt
+        assert "emotions" in prompt
 
 
 @pytest.mark.asyncio
@@ -138,7 +233,7 @@ async def test_grillo_response_extraction() -> None:
 @pytest.mark.asyncio
 async def test_grillo_activity_log_creation() -> None:
     """Test activity log creation."""
-    mock_ctx, _ = _create_mock_db_context()
+    mock_ctx, mock_cursor = _create_mock_db_context()
 
     def mock_get_conn_ctx() -> MagicMock:
         return mock_ctx
@@ -156,8 +251,111 @@ async def test_grillo_activity_log_creation() -> None:
         )
 
         assert result == 999
+        _, params = mock_cursor.execute.await_args_list[0][0]
+        assert params[2] == "{}"
     finally:
         core.db.get_conn_ctx = original
+
+
+@pytest.mark.asyncio
+async def test_grillo_activity_log_creation_postgres_returns_id() -> None:
+    """Postgres inserts should use RETURNING id instead of relying on lastrowid."""
+    mock_ctx, mock_cursor = _create_mock_db_context()
+    mock_cursor.lastrowid = None
+    mock_cursor.fetchone = AsyncMock(return_value={"id": 4242})
+
+    def mock_get_conn_ctx() -> MagicMock:
+        return mock_ctx
+
+    import core.db
+
+    original_get_conn_ctx = core.db.get_conn_ctx
+    original_get_db_type = core.db._get_db_type
+    core.db.get_conn_ctx = mock_get_conn_ctx  # type: ignore[assignment]
+    core.db._get_db_type = lambda: "postgres"  # type: ignore[assignment]
+
+    try:
+        from plugins.grillo.grillo_impl import GrilloPlugin
+
+        result = await GrilloPlugin.create_activity_log(
+            beat_type="test_beat", prompt_text="Test prompt"
+        )
+
+        assert result == 4242
+        executed_sql = mock_cursor.execute.await_args_list[0][0][0]
+        assert "RETURNING id" in executed_sql
+    finally:
+        core.db.get_conn_ctx = original_get_conn_ctx
+        core.db._get_db_type = original_get_db_type
+
+
+@pytest.mark.asyncio
+async def test_plugin_instance_grillo_response_uses_postgres_append_sql() -> None:
+    """plugin_instance should use the same Postgres-safe append expression."""
+    mock_ctx, mock_cursor = _create_mock_db_context()
+
+    def mock_get_conn_ctx() -> MagicMock:
+        return mock_ctx
+
+    import core.db
+
+    original_get_conn_ctx = core.db.get_conn_ctx
+    original_get_db_type = core.db._get_db_type
+    core.db.get_conn_ctx = mock_get_conn_ctx  # type: ignore[assignment]
+    core.db._get_db_type = lambda: "postgres"  # type: ignore[assignment]
+
+    try:
+        from core.plugin_instance import _update_grillo_response
+
+        await _update_grillo_response(123, "chunk one")
+
+        executed_sql = mock_cursor.execute.await_args_list[0][0][0]
+        assert "CONCAT" not in executed_sql
+        assert "%s::text" in executed_sql
+        assert "response_text || E'\\n\\n' || %s::text" in executed_sql
+    finally:
+        core.db.get_conn_ctx = original_get_conn_ctx
+        core.db._get_db_type = original_get_db_type
+
+
+@pytest.mark.asyncio
+async def test_plugin_instance_grillo_response_records_empty_response_marker() -> None:
+    """Empty Grillo responses should still persist a diagnostic marker."""
+    mock_ctx, mock_cursor = _create_mock_db_context()
+
+    def mock_get_conn_ctx() -> MagicMock:
+        return mock_ctx
+
+    import core.db
+
+    original_get_conn_ctx = core.db.get_conn_ctx
+    original_get_db_type = core.db._get_db_type
+    core.db.get_conn_ctx = mock_get_conn_ctx  # type: ignore[assignment]
+    core.db._get_db_type = lambda: "postgres"  # type: ignore[assignment]
+
+    try:
+        from core.plugin_instance import _update_grillo_response
+
+        await _update_grillo_response(
+            123,
+            "",
+            response_metadata={
+                "finish_reason": "safety",
+                "block_reason": "PROHIBITED_CONTENT",
+                "model": "gemini-2.5-flash",
+            },
+            engine_label="gemini-endpoint",
+        )
+
+        executed_params = mock_cursor.execute.await_args_list[0][0][1]
+        assert executed_params[0] == executed_params[1]
+        assert "[EMPTY LLM RESPONSE]" in executed_params[0]
+        assert "engine=gemini-endpoint" in executed_params[0]
+        assert "finish_reason=safety" in executed_params[0]
+        assert "block_reason=PROHIBITED_CONTENT" in executed_params[0]
+    finally:
+        core.db.get_conn_ctx = original_get_conn_ctx
+        core.db._get_db_type = original_get_db_type
 
 
 @pytest.mark.asyncio

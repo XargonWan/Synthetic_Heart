@@ -1,5 +1,5 @@
 import pytest
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import plugins.grillo.grillo_chat_observer as gco
 from core import message_queue
@@ -16,13 +16,13 @@ async def test_observer_builds_prompt_and_collects(monkeypatch):
     monkeypatch.setattr("core.chat_update_checker.check_for_updates_once", fake_check)
 
     # Mock collect_recent_snippets to return predictable data
-    async def fake_collect(limit):
+    async def fake_collect(limit: int) -> list[str]:
         return [
             "(chat:telegram_bot/1) Hello world",
             "(chat:telegram_bot/2) Another message",
         ]
 
-    plugin._collect_recent_snippets = fake_collect
+    monkeypatch.setattr(plugin, "_collect_recent_snippets", fake_collect)
 
     # Mock create_activity_log
     class FakeGrillo:
@@ -139,7 +139,7 @@ async def test_collect_recent_snippets_skips_recent_bot_messages(monkeypatch):
                     "text": "Hello",
                     "sender_name": "self",
                     "timestamp": (
-                        datetime.utcnow() - timedelta(seconds=1800)
+                        datetime.now(timezone.utc) - timedelta(seconds=1800)
                     ).isoformat(),
                 }
             ]
@@ -162,7 +162,7 @@ async def test_collect_recent_snippets_skips_recent_bot_messages(monkeypatch):
                     "text": "Hello",
                     "sender_name": "self",
                     "timestamp": (
-                        datetime.utcnow() - timedelta(seconds=7200)
+                        datetime.now(timezone.utc) - timedelta(seconds=7200)
                     ).isoformat(),
                 }
             ]
@@ -187,10 +187,10 @@ async def test_observer_propose_only_flag_in_prompt(monkeypatch):
     monkeypatch.setattr("core.chat_update_checker.check_for_updates_once", fake_check)
 
     # minimal snippet
-    async def fake_collect(limit):
+    async def fake_collect(limit: int) -> list[str]:
         return ["test"]
 
-    plugin._collect_recent_snippets = fake_collect
+    monkeypatch.setattr(plugin, "_collect_recent_snippets", fake_collect)
 
     class FakeGrillo:
         @staticmethod
@@ -237,11 +237,11 @@ async def test_observer_runs_when_updates_present(monkeypatch):
     # Spy on collect and enqueue to ensure both are executed
     called = {}
 
-    async def fake_collect(limit):
+    async def fake_collect(limit: int) -> list[str]:
         called["collected"] = True
         return ["test snippet"]
 
-    plugin._collect_recent_snippets = fake_collect
+    monkeypatch.setattr(plugin, "_collect_recent_snippets", fake_collect)
 
     async def fake_enqueue(
         bot, message, context_memory=None, interface_id=None, original_message=None
@@ -270,10 +270,16 @@ async def test_observer_db_check_updates_and_advances_last_run_ts(monkeypatch):
     # Initialize last run to an earlier timestamp
     plugin._last_run_ts = 1000.0
 
-    async def fake_execute(query, params=()):
+    expected_max_ts = datetime.fromtimestamp(1100.0, tz=timezone.utc)
+
+    async def fake_execute(
+        query: str, params: tuple[object, ...] = ()
+    ) -> list[dict[str, object]]:
         # This corresponds to the COUNT/MAX query used in _run_observer()
-        if "SELECT COUNT(*) as cnt, MAX(UNIX_TIMESTAMP(timestamp)) as max_ts" in query:
-            return [{"cnt": 1, "max_ts": 1100.0}]
+        if "SELECT COUNT(*) as cnt, MAX(timestamp) as max_ts" in query:
+            assert params
+            assert params[0] == datetime.fromtimestamp(1000.0, tz=timezone.utc)
+            return [{"cnt": 1, "max_ts": expected_max_ts}]
         return []
 
     # Replace DB executor used inside plugin
@@ -290,11 +296,11 @@ async def test_observer_db_check_updates_and_advances_last_run_ts(monkeypatch):
 
     monkeypatch.setattr("core.config_manager.config_registry.set_value", fake_set_value)
 
-    async def fake_collect(limit):
+    async def fake_collect(limit: int) -> list[str]:
         called["collected"] = True
         return ["(chat:telegram_bot/1) Hello"]
 
-    plugin._collect_recent_snippets = fake_collect
+    monkeypatch.setattr(plugin, "_collect_recent_snippets", fake_collect)
 
     async def fake_enqueue(
         bot, message, context_memory=None, interface_id=None, original_message=None
@@ -319,6 +325,11 @@ async def test_observer_db_check_updates_and_advances_last_run_ts(monkeypatch):
 async def test_observer_skips_when_no_updates(monkeypatch):
     plugin = gco.GrilloChatObserverPlugin()
 
+    async def fake_execute_query(*args, **kwargs):
+        raise RuntimeError("db unavailable")
+
+    monkeypatch.setattr("core.db.execute_query", fake_execute_query)
+
     # Make the checker report that there are NO updates
     async def fake_check(consume=True):
         return {
@@ -332,11 +343,11 @@ async def test_observer_skips_when_no_updates(monkeypatch):
     # Spy on collect and enqueue to ensure they are NOT executed
     called = {}
 
-    async def fake_collect(limit):
+    async def fake_collect(limit: int) -> list[str]:
         called["collected"] = True
         return ["test snippet"]
 
-    plugin._collect_recent_snippets = fake_collect
+    monkeypatch.setattr(plugin, "_collect_recent_snippets", fake_collect)
 
     async def fake_enqueue(
         bot, message, context_memory=None, interface_id=None, original_message=None

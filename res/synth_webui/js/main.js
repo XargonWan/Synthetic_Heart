@@ -130,7 +130,7 @@
                             // Ensure the Home section (and #chat mount) is available before creating the window
                             try { if (window.SynthWebUI && typeof window.SynthWebUI.loadSection === 'function') await window.SynthWebUI.loadSection('home'); } catch (e) { /* ignore */ }
                             // createChatWindow returns a Promise resolving to the WinBox instance (or null)
-                            const winbox = await mod.createChatWindow().catch(() => null);
+                            await mod.createChatWindow().catch(() => null);
                         }
                     } catch (e) { /* ignore */ }
                 }).catch((e) => { try { console.debug('[synth_webui] chat-window import failed', e); } catch (e) {} });
@@ -172,8 +172,8 @@ try {
         document.documentElement.style.setProperty('--accent-r', String(r));
         document.documentElement.style.setProperty('--accent-g', String(g));
         document.documentElement.style.setProperty('--accent-b', String(b));
-        try { document.documentElement.style.setProperty('--accent-contrast', pickAccentContrastFromHex(accent)); } catch(e) { document.documentElement.style.setProperty('--accent-contrast', '#07070c'); }
-        try { document.documentElement.style.setProperty('--accent-dark', pickAccentDarkFromHex(accent)); } catch(e) { document.documentElement.style.setProperty('--accent-dark', '#5b5b6b'); }
+        try { document.documentElement.style.setProperty('--accent-contrast', pickAccentContrastFromHex(accent)); } catch (e) { document.documentElement.style.setProperty('--accent-contrast', '#07070c'); }
+        try { document.documentElement.style.setProperty('--accent-dark', pickAccentDarkFromHex(accent)); } catch (e) { document.documentElement.style.setProperty('--accent-dark', '#5b5b6b'); }
       }
     } catch (e) { /* ignore */ }
   }
@@ -192,7 +192,7 @@ function pickAccentContrastFromHex(hex) {
     const crWhite = _contrastRatio(la, lWhite);
     const crBlack = _contrastRatio(la, lBlack);
     return (crWhite >= crBlack) ? '#ffffff' : '#07070c';
-  } catch(e) { return '#07070c'; }
+    } catch (e) { return '#07070c'; }
 }
 
 // Darken a color (hex) using HSL lightness reduction to generate gradient end
@@ -526,6 +526,79 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                 };
             }
 
+            function setNormalRect(entry, rect) {
+                if (!entry || !rect) return false;
+                const x = Number.isFinite(rect.x) ? rect.x : rect.left;
+                const y = Number.isFinite(rect.y) ? rect.y : rect.top;
+                const width = Number.isFinite(rect.width) ? rect.width : null;
+                const height = Number.isFinite(rect.height) ? rect.height : null;
+                if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(width) || !Number.isFinite(height)) {
+                    return false;
+                }
+                if (width < 120 || height < 120) return false;
+                entry.lastNormalRect = {
+                    x: Math.round(x),
+                    y: Math.round(y),
+                    width: Math.round(width),
+                    height: Math.round(height)
+                };
+                return true;
+            }
+
+            function applyNormalRect(entry) {
+                if (!entry || !entry.winbox) return false;
+                if (!setNormalRect(entry, entry.lastNormalRect)) return false;
+                const topbar = getTopbarHeight() || 0;
+                const rect = entry.lastNormalRect;
+                try { entry.winbox.resize(rect.width, rect.height); } catch (e) { /* ignore */ }
+                try { entry.winbox.move(rect.x, Math.max(topbar, rect.y)); } catch (e) { /* ignore */ }
+                try { clampEntryToViewport(entry); } catch (e) { /* ignore */ }
+                try { captureNormalRect(entry); } catch (e) { /* ignore */ }
+                return true;
+            }
+
+            function getWindowStorageKeys(id) {
+                const stableStateKey = `${CHAT_WINDOW_STATE_KEY}-${id}`;
+                const stableRectKey = `${CHAT_RECT_KEY}-${id}`;
+                const sessionStateKey = sessionId ? `${CHAT_WINDOW_STATE_KEY}-${id}-${sessionId}` : null;
+                const sessionRectKey = sessionId ? `${CHAT_RECT_KEY}-${id}-${sessionId}` : null;
+                return {
+                    stableStateKey,
+                    stableRectKey,
+                    sessionStateKey,
+                    sessionRectKey,
+                    stateLookupKeys: [
+                        stableStateKey,
+                        sessionStateKey,
+                        sessionStateKey ? `${sessionStateKey}-desktop` : null,
+                        sessionStateKey ? `${sessionStateKey}-mobile` : null,
+                        `${CHAT_WINDOW_STATE_KEY}-${id}-desktop`,
+                        `${CHAT_WINDOW_STATE_KEY}-${id}-mobile`,
+                        CHAT_WINDOW_STATE_KEY,
+                    ].filter(Boolean),
+                    rectLookupKeys: [
+                        stableRectKey,
+                        sessionRectKey,
+                        sessionRectKey ? `${sessionRectKey}-desktop` : null,
+                        sessionRectKey ? `${sessionRectKey}-mobile` : null,
+                        `${CHAT_RECT_KEY}-${id}-desktop`,
+                        `${CHAT_RECT_KEY}-${id}-mobile`,
+                        CHAT_RECT_KEY,
+                    ].filter(Boolean),
+                };
+            }
+
+            function getFirstStoredValue(keys) {
+                if (!Array.isArray(keys)) return null;
+                for (const key of keys) {
+                    try {
+                        const value = localStorage.getItem(key);
+                        if (value) return value;
+                    } catch (e) { /* ignore */ }
+                }
+                return null;
+            }
+
             function clampToTopbar(entry) {
                 if (!entry || !entry.winbox) return;
                 const top = getTopbarHeight();
@@ -731,6 +804,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                     if (entry.winbox.max) {
                         entry.winbox.restore();
                     } else {
+                        captureNormalRect(entry);
                         entry.winbox.maximize();
                     }
                 } catch (e) { /* ignore */ }
@@ -741,21 +815,26 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                 const entry = windows.get(id);
                 if (!entry || !entry.winbox) return;
                 try {
-                    // Use id in keys so we can persist multiple windows (chat, debug, etc.)
-                    const stateKey = sessionId ? `${CHAT_WINDOW_STATE_KEY}-${id}-${sessionId}` : `${CHAT_WINDOW_STATE_KEY}-${id}`;
+                    const { stableStateKey, stableRectKey, sessionStateKey, sessionRectKey } = getWindowStorageKeys(id);
                     let state = 'normal';
                     if (entry.minimized) state = 'minimized';
                     else if (entry.winbox.max) state = 'maximized';
-                    try { localStorage.setItem(stateKey, state); } catch (e) { /* ignore */ }
+                    try { localStorage.setItem(stableStateKey, state); } catch (e) { /* ignore */ }
+                    if (sessionStateKey) {
+                        try { localStorage.setItem(sessionStateKey, state); } catch (e) { /* ignore */ }
+                    }
 
-                    const rectKey = sessionId ? `${CHAT_RECT_KEY}-${id}-${sessionId}` : `${CHAT_RECT_KEY}-${id}`;
+                    const storedRect = (entry.winbox.max || entry.minimized) ? entry.lastNormalRect : null;
                     const payload = {
-                        left: Math.round(entry.winbox.x || 0),
-                        top: Math.round(entry.winbox.y || 0),
-                        width: Math.round(entry.winbox.width || 0),
-                        height: Math.round(entry.winbox.height || 0)
+                        left: Math.round((storedRect && storedRect.x) || entry.winbox.x || 0),
+                        top: Math.round((storedRect && storedRect.y) || entry.winbox.y || 0),
+                        width: Math.round((storedRect && storedRect.width) || entry.winbox.width || 0),
+                        height: Math.round((storedRect && storedRect.height) || entry.winbox.height || 0)
                     };
-                    try { localStorage.setItem(rectKey, JSON.stringify(payload)); } catch (e) { /* ignore */ }
+                    try { localStorage.setItem(stableRectKey, JSON.stringify(payload)); } catch (e) { /* ignore */ }
+                    if (sessionRectKey) {
+                        try { localStorage.setItem(sessionRectKey, JSON.stringify(payload)); } catch (e) { /* ignore */ }
+                    }
                 } catch (e) { /* ignore */ }
             }
 
@@ -763,12 +842,11 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                 const entry = windows.get(id);
                 if (!entry || !entry.winbox) return false;
                 try {
-                    const rectKey = sessionId ? `${CHAT_RECT_KEY}-${id}-${sessionId}` : `${CHAT_RECT_KEY}-${id}`;
-                    const legacyRectMobileKey = sessionId ? `${CHAT_RECT_KEY}-${id}-${sessionId}-mobile` : `${CHAT_RECT_KEY}-${id}-mobile`;
-                    const legacyRectDesktopKey = sessionId ? `${CHAT_RECT_KEY}-${id}-${sessionId}-desktop` : `${CHAT_RECT_KEY}-${id}-desktop`;
-                    const rectRaw = localStorage.getItem(rectKey) || localStorage.getItem(legacyRectDesktopKey) || localStorage.getItem(legacyRectMobileKey) || localStorage.getItem(sessionId ? `${CHAT_RECT_KEY}-${id}-${sessionId}` : `${CHAT_RECT_KEY}-${id}`) || localStorage.getItem(CHAT_RECT_KEY);
+                    const { stateLookupKeys, rectLookupKeys } = getWindowStorageKeys(id);
+                    const rectRaw = getFirstStoredValue(rectLookupKeys);
                     if (rectRaw) {
                         const rect = JSON.parse(rectRaw);
+                        setNormalRect(entry, rect);
                         const hasWidth = typeof rect.width === 'number' && rect.width >= 260;
                         const hasHeight = typeof rect.height === 'number' && rect.height >= 180;
                         if (hasWidth && hasHeight) {
@@ -803,12 +881,10 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                             const top = Math.max(topbar, Math.round(viewport.height - height - 18));
                             try { entry.winbox.move(18, top); } catch (e) { /* ignore */ }
                         } catch (e) { /* ignore */ }
+                        try { captureNormalRect(entry); } catch (e) { /* ignore */ }
                     }
 
-                    const stateKey = sessionId ? `${CHAT_WINDOW_STATE_KEY}-${id}-${sessionId}` : `${CHAT_WINDOW_STATE_KEY}-${id}`;
-                    const legacyStateMobileKey = sessionId ? `${CHAT_WINDOW_STATE_KEY}-${id}-${sessionId}-mobile` : `${CHAT_WINDOW_STATE_KEY}-${id}-mobile`;
-                    const legacyStateDesktopKey = sessionId ? `${CHAT_WINDOW_STATE_KEY}-${id}-${sessionId}-desktop` : `${CHAT_WINDOW_STATE_KEY}-${id}-desktop`;
-                    const localState = localStorage.getItem(stateKey) || localStorage.getItem(legacyStateDesktopKey) || localStorage.getItem(legacyStateMobileKey) || localStorage.getItem(sessionId ? `${CHAT_WINDOW_STATE_KEY}-${id}-${sessionId}` : `${CHAT_WINDOW_STATE_KEY}-${id}`) || localStorage.getItem(CHAT_WINDOW_STATE_KEY);
+                    const localState = getFirstStoredValue(stateLookupKeys);
                     if (localState === 'minimized') {
                         minimize(id);
                     } else if (localState === 'maximized') {
@@ -855,7 +931,8 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                     dockLabel: opts.dockLabel || null,
                     iconText: opts.iconText || null,
                     minimized: false,
-                    lastNormalRect: null
+                    lastNormalRect: null,
+                    maximizingInProgress: false
                 };
                 const className = `${opts.className || 'synth-winbox no-full no-close'} modern`;
                 const desktopRoot = document.getElementById('desktop-root');
@@ -877,17 +954,48 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                         try { saveState(opts.id); } catch (e) { /* ignore */ }
                     },
                     onrestore: function() {
-                        try { saveState(opts.id); } catch (e) { /* ignore */ }
+                        // Defer all post-restore work so WinBox fully completes its own restore
+                        // sequence before we touch resize/move (avoids re-entrant freeze).
+                        setTimeout(() => {
+                            try {
+                                if (entry.winbox && !entry.winbox.max && !entry.winbox.min) {
+                                    clampEntryToViewport(entry);
+                                    captureNormalRect(entry);
+                                }
+                            } catch (e) { /* ignore */ }
+                            try { saveState(opts.id); } catch (e) { /* ignore */ }
+                        }, 0);
                     },
                     onmove: function() {
-                        if (!this.max && !this.min) try { captureNormalRect(entry); } catch (e) { /* ignore */ }
+                        if (!entry.maximizingInProgress && !this.max && !this.min) try { captureNormalRect(entry); } catch (e) { /* ignore */ }
                     },
                     onresize: function() {
-                        if (!this.max && !this.min) try { captureNormalRect(entry); } catch (e) { /* ignore */ }
+                        if (!entry.maximizingInProgress && !this.max && !this.min) try { captureNormalRect(entry); } catch (e) { /* ignore */ }
                     }
                 });
                 try { console.debug('[SynthWindowManager] created winbox for', opts.id, 'instance=', winbox); } catch (e) { /* ignore */ }
                 entry.winbox = winbox;
+                try {
+                    const nativeMaximize = typeof winbox.maximize === 'function' ? winbox.maximize.bind(winbox) : null;
+                    if (nativeMaximize) {
+                        winbox.maximize = function(...args) {
+                            // Capture pre-maximize rect before WinBox resizes to fullscreen.
+                            // Guard captureNormalRect in onresize/onmove while WinBox internal
+                            // maximize is running (this.max is still false during resize/move
+                            // calls inside maximize(), so without the flag captureNormalRect
+                            // would snapshot the fullscreen dimensions and corrupt lastNormalRect).
+                            try {
+                                if (!this.max && !this.min) captureNormalRect(entry);
+                            } catch (e) { /* ignore */ }
+                            entry.maximizingInProgress = true;
+                            try {
+                                return nativeMaximize(...args);
+                            } finally {
+                                entry.maximizingInProgress = false;
+                            }
+                        };
+                    }
+                } catch (e) { /* ignore */ }
                 // Ensure we cleanup windows map when the WinBox instance is closed so
                 // it can be recreated correctly on subsequent opens (hot-reload / repeated opens).
                 try {
@@ -940,6 +1048,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                 ensureDockButton(entry);
                 try { applyViewportInsets(entry); } catch (e) { /* ignore */ }
                 try { clampEntryToViewport(entry); } catch (e) { /* ignore */ }
+                try { captureNormalRect(entry); } catch (e) { /* ignore */ }
                 return winbox;
             }
 
@@ -1307,7 +1416,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                                 b.addEventListener('click', (ev) => {
                                     ev.preventDefault();
                                     previewValue = c;
-                                    try { document.documentElement.style.setProperty('--accent', c); const [r,g,b2] = _hexToRgb(c); document.documentElement.style.setProperty('--accent-soft', `rgba(${r}, ${g}, ${b2}, 0.16)`); document.documentElement.style.setProperty('--accent-r', String(r)); document.documentElement.style.setProperty('--accent-g', String(g)); document.documentElement.style.setProperty('--accent-b', String(b2)); document.documentElement.style.setProperty('--accent-contrast', pickAccentContrastFromHex(c)); document.documentElement.style.setProperty('--accent-dark', pickAccentDarkFromHex(c)); } catch(e){}
+                                    try { document.documentElement.style.setProperty('--accent', c); const [r,g,b2] = _hexToRgb(c); document.documentElement.style.setProperty('--accent-soft', `rgba(${r}, ${g}, ${b2}, 0.16)`); document.documentElement.style.setProperty('--accent-r', String(r)); document.documentElement.style.setProperty('--accent-g', String(g)); document.documentElement.style.setProperty('--accent-b', String(b2)); document.documentElement.style.setProperty('--accent-contrast', pickAccentContrastFromHex(c)); document.documentElement.style.setProperty('--accent-dark', pickAccentDarkFromHex(c)); } catch (e) {}
                                 });
                                 presetsEl.appendChild(b);
                             });
@@ -1330,7 +1439,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                                     document.documentElement.style.setProperty('--accent-b', String(b2));
                                     document.documentElement.style.setProperty('--accent-contrast', pickAccentContrastFromHex(c));
                                     document.documentElement.style.setProperty('--accent-dark', pickAccentDarkFromHex(c));
-                                } catch(e){}
+                                } catch (e) {}
                             });
 
                             // Apply / Cancel controls for preview UX
@@ -1364,7 +1473,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                                     document.documentElement.style.setProperty('--accent-b', String(b2));
                                     document.documentElement.style.setProperty('--accent-contrast', pickAccentContrastFromHex(current));
                                     document.documentElement.style.setProperty('--accent-dark', pickAccentDarkFromHex(current));
-                                } catch(e){}
+                                } catch (e) {}
                             });
 
                             const reset = document.createElement('button');
@@ -1384,7 +1493,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                                     document.documentElement.style.setProperty('--accent-b', String(b2));
                                     document.documentElement.style.setProperty('--accent-contrast', pickAccentContrastFromHex(def));
                                     document.documentElement.style.setProperty('--accent-dark', pickAccentDarkFromHex(def));
-                                } catch(e){}
+                                } catch (e) {}
                             });
 
                             swatchWrap.appendChild(presetsEl);
@@ -1478,6 +1587,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                                 // Small option sets: use native datalist
                                 const input = document.createElement('input');
                                 input.type = 'text';
+                                input.autocomplete = 'off';
                                 input.value = typeof value === 'string' ? value : '';
                                 input.disabled = !isEditable;
                                 if (opts.length) {
@@ -1656,6 +1766,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
 
                                     const idInput = document.createElement('input');
                                     idInput.type = 'text';
+                                    idInput.autocomplete = 'off';
                                     idInput.placeholder = 'Trainer ID or username';
                                     idInput.value = entry && entry.id ? entry.id : '';
                                     idInput.disabled = !isEditable;
@@ -1724,6 +1835,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
 
                             const input = document.createElement('input');
                             input.type = 'text';
+                            input.autocomplete = 'off';
                             input.className = 'tag-input-field';
                             input.placeholder = 'Add tag and press Enter';
                             input.disabled = !isEditable;
@@ -1815,6 +1927,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                         } else {
                             const input = document.createElement('input');
                             input.type = item.ui_type === 'password' ? 'password' : (item.value_type === 'int' || item.value_type === 'float' || item.ui_type === 'number' ? 'number' : 'text');
+                            input.autocomplete = item.ui_type === 'password' ? 'new-password' : 'off';
                             input.value = typeof value === 'string' ? value : JSON.stringify(value);
                             input.disabled = !isEditable;
                             inputEl = input;
@@ -1997,7 +2110,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                             b.setAttribute('data-color', c);
                             b.addEventListener('click', () => {
                                 previewVal = c;
-                                try { document.documentElement.style.setProperty('--accent', c); const [r,g,b2] = _hexToRgb(c); document.documentElement.style.setProperty('--accent-soft', `rgba(${r}, ${g}, ${b2}, 0.16)`); document.documentElement.style.setProperty('--accent-r', String(r)); document.documentElement.style.setProperty('--accent-g', String(g)); document.documentElement.style.setProperty('--accent-b', String(b2)); document.documentElement.style.setProperty('--accent-contrast', pickAccentContrastFromHex(c)); document.documentElement.style.setProperty('--accent-dark', pickAccentDarkFromHex(c)); } catch(e){}
+                                try { document.documentElement.style.setProperty('--accent', c); const [r,g,b2] = _hexToRgb(c); document.documentElement.style.setProperty('--accent-soft', `rgba(${r}, ${g}, ${b2}, 0.16)`); document.documentElement.style.setProperty('--accent-r', String(r)); document.documentElement.style.setProperty('--accent-g', String(g)); document.documentElement.style.setProperty('--accent-b', String(b2)); document.documentElement.style.setProperty('--accent-contrast', pickAccentContrastFromHex(c)); document.documentElement.style.setProperty('--accent-dark', pickAccentDarkFromHex(c)); } catch (e) {}
                                 updateColorDot(c);
                                 setActivePreset(c);
                             });
@@ -2011,7 +2124,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                         colorInput.disabled = !isEditable;
                         colorInput.addEventListener('input', (ev) => {
                             previewVal = ev.target.value;
-                            try { const c = previewVal; document.documentElement.style.setProperty('--accent', c); const [r,g,b2] = _hexToRgb(c); document.documentElement.style.setProperty('--accent-soft', `rgba(${r}, ${g}, ${b2}, 0.16)`); document.documentElement.style.setProperty('--accent-r', String(r)); document.documentElement.style.setProperty('--accent-g', String(g)); document.documentElement.style.setProperty('--accent-b', String(b2)); document.documentElement.style.setProperty('--accent-contrast', pickAccentContrastFromHex(c)); document.documentElement.style.setProperty('--accent-dark', pickAccentDarkFromHex(c)); } catch(e){}
+                            try { const c = previewVal; document.documentElement.style.setProperty('--accent', c); const [r,g,b2] = _hexToRgb(c); document.documentElement.style.setProperty('--accent-soft', `rgba(${r}, ${g}, ${b2}, 0.16)`); document.documentElement.style.setProperty('--accent-r', String(r)); document.documentElement.style.setProperty('--accent-g', String(g)); document.documentElement.style.setProperty('--accent-b', String(b2)); document.documentElement.style.setProperty('--accent-contrast', pickAccentContrastFromHex(c)); document.documentElement.style.setProperty('--accent-dark', pickAccentDarkFromHex(c)); } catch (e) {}
                             updateColorDot(previewVal);
                         });
 
@@ -2066,7 +2179,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                         cancelBtn.addEventListener('click', () => {
                             previewVal = null;
                             colorInput.value = current;
-                            try { const c = current; document.documentElement.style.setProperty('--accent', c); const [r,g,b2] = _hexToRgb(c); document.documentElement.style.setProperty('--accent-soft', `rgba(${r}, ${g}, ${b2}, 0.16)`); document.documentElement.style.setProperty('--accent-r', String(r)); document.documentElement.style.setProperty('--accent-g', String(g)); document.documentElement.style.setProperty('--accent-b', String(b2)); document.documentElement.style.setProperty('--accent-contrast', pickAccentContrastFromHex(c)); document.documentElement.style.setProperty('--accent-dark', pickAccentDarkFromHex(c)); } catch(e){}
+                            try { const c = current; document.documentElement.style.setProperty('--accent', c); const [r,g,b2] = _hexToRgb(c); document.documentElement.style.setProperty('--accent-soft', `rgba(${r}, ${g}, ${b2}, 0.16)`); document.documentElement.style.setProperty('--accent-r', String(r)); document.documentElement.style.setProperty('--accent-g', String(g)); document.documentElement.style.setProperty('--accent-b', String(b2)); document.documentElement.style.setProperty('--accent-contrast', pickAccentContrastFromHex(c)); document.documentElement.style.setProperty('--accent-dark', pickAccentDarkFromHex(c)); } catch (e) {}
                             updateColorDot(current);
                             setActivePreset(current);
                         });
@@ -2155,7 +2268,8 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                     const componentsVoxListEl = document.getElementById('components-vox-list');
                     const componentsAurisListEl = document.getElementById('components-auris-list');
                     const componentsLiveListEl = document.getElementById('components-live-list');
-                    if (!componentsCortexListEl || !componentsInterfacesListEl || !componentsPluginsListEl) return;
+                    const componentsIrisListEl = document.getElementById('components-iris-list');
+                    if (!componentsCortexListEl && !componentsInterfacesListEl && !componentsPluginsListEl && !componentsVoxListEl && !componentsAurisListEl && !componentsLiveListEl && !componentsIrisListEl) return;
                     const [res, cfgRes] = await Promise.all([
                         fetch('/api/components'),
                         fetch('/api/config').catch(() => null),
@@ -2189,6 +2303,10 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                             if (componentsCortexListEl) componentsCortexListEl.innerHTML = `<div class="meta">Failed to load components: ${safeEscapeHtml(errText)}</div>`;
                             if (componentsInterfacesListEl) componentsInterfacesListEl.innerHTML = `<div class="meta">Failed to load components: ${safeEscapeHtml(errText)}</div>`;
                             if (componentsPluginsListEl) componentsPluginsListEl.innerHTML = `<div class="meta">Failed to load components: ${safeEscapeHtml(errText)}</div>`;
+                            if (componentsVoxListEl) componentsVoxListEl.innerHTML = `<div class="meta">Failed to load components: ${safeEscapeHtml(errText)}</div>`;
+                            if (componentsAurisListEl) componentsAurisListEl.innerHTML = `<div class="meta">Failed to load components: ${safeEscapeHtml(errText)}</div>`;
+                            if (componentsLiveListEl) componentsLiveListEl.innerHTML = `<div class="meta">Failed to load components: ${safeEscapeHtml(errText)}</div>`;
+                            if (componentsIrisListEl) componentsIrisListEl.innerHTML = `<div class="meta">Failed to load components: ${safeEscapeHtml(errText)}</div>`;
                         } catch (e) {
                             console.error('[synth_webui] Failed to read components error body', e);
                             if (componentsCortexListEl) componentsCortexListEl.innerHTML = '<div class="meta">Failed to load components.</div>';
@@ -2257,7 +2375,10 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                     // Helper to render engines list and select for a particular cortex kind
                     const renderForCortex = (kind) => {
                         const byCortex = (data.cortex && data.cortex.by_cortex) || {};
-                        const engines = (Array.isArray(byCortex[kind]) ? byCortex[kind].slice() : []).sort((a, b) => {
+                        let engines = (Array.isArray(byCortex[kind]) ? byCortex[kind].slice() : []);
+                        // For llm_provider, only show external endpoint engines
+                        if (kind === 'llm_provider') engines = engines.filter(e => e.is_external);
+                        engines = engines.sort((a, b) => {
                             const an = (a.display_name || a.name || '').toLowerCase();
                             const bn = (b.display_name || b.name || '').toLowerCase();
                             return an.localeCompare(bn);
@@ -2403,6 +2524,61 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                                 }).catch(() => {});
                             }
                         }
+
+                        // --- Per-endpoint extra config editor (external endpoints only) ---
+                        const cfgWrap = document.getElementById('cortex-engine-config-wrap');
+                        const cfgArea = document.getElementById('cortex-engine-config');
+                        const cfgSave = document.getElementById('cortex-engine-config-save');
+                        const cfgStatus = document.getElementById('cortex-engine-config-status');
+                        if (cfgWrap && cfgArea) {
+                            if (active && active.is_external && active.endpoint_id != null) {
+                                cfgWrap.style.display = '';
+                                const ec = active.extra_config || {};
+                                cfgArea.value = Object.keys(ec).length ? JSON.stringify(ec, null, 2) : '';
+                                if (cfgStatus) cfgStatus.textContent = '';
+                                if (cfgSave) {
+                                    cfgSave._epId = active.endpoint_id;
+                                    if (!cfgSave.dataset.bound) {
+                                        cfgSave.dataset.bound = '1';
+                                        cfgSave.addEventListener('click', async () => {
+                                            const setCfgStatus = (msg, ok) => {
+                                                if (!cfgStatus) return;
+                                                cfgStatus.textContent = msg;
+                                                cfgStatus.style.color = ok ? 'var(--success,#27ae60)' : 'var(--danger,#c0392b)';
+                                            };
+                                            const raw = (cfgArea.value || '').trim();
+                                            let parsed = {};
+                                            if (raw) {
+                                                try {
+                                                    parsed = JSON.parse(raw);
+                                                } catch (err) {
+                                                    setCfgStatus('Invalid JSON: ' + err.message, false);
+                                                    return;
+                                                }
+                                                if (typeof parsed !== 'object' || Array.isArray(parsed) || parsed === null) {
+                                                    setCfgStatus('Extra Config must be a JSON object.', false);
+                                                    return;
+                                                }
+                                            }
+                                            try {
+                                                const res = await fetch(`/api/external-endpoints/${cfgSave._epId}`, {
+                                                    method: 'PUT',
+                                                    headers: { 'Content-Type': 'application/json' },
+                                                    body: JSON.stringify({ extra_config: parsed }),
+                                                });
+                                                if (!res.ok) throw new Error('HTTP ' + res.status);
+                                                setCfgStatus('Saved — reload this engine to apply.', true);
+                                                if (window.showToast) window.showToast('Engine config saved', false);
+                                            } catch (err) {
+                                                setCfgStatus('Save failed: ' + err.message, false);
+                                            }
+                                        });
+                                    }
+                                }
+                            } else {
+                                cfgWrap.style.display = 'none';
+                            }
+                        }
                     };
 
                     // Populate cortex kind select
@@ -2425,7 +2601,9 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                                 try {
                                     if (componentsCortexListEl) {
                                         const byCortex = (data.cortex && data.cortex.by_cortex) || {};
-                                        renderDetailsList(byCortex[kind] || [], componentsCortexListEl);
+                                        let kindEngines = byCortex[kind] || [];
+                                        if (kind === 'llm_provider') kindEngines = kindEngines.filter(e => e.is_external);
+                                        renderDetailsList(kindEngines, componentsCortexListEl);
                                     }
                                 } catch (e) { console.debug('[synth_webui] renderForCortex: failed to re-render cards', e); }
                             });
@@ -2440,10 +2618,14 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                     // Also make sure the initial cards reflect the selected cortex kind
                     try {
                         const byCortex = (data.cortex && data.cortex.by_cortex) || {};
-                        if (componentsCortexListEl) renderDetailsList(byCortex[initialKind] || [], componentsCortexListEl);
+                        if (componentsCortexListEl) {
+                            let initEngines = byCortex[initialKind] || [];
+                            if (initialKind === 'llm_provider') initEngines = initEngines.filter(e => e.is_external);
+                            renderDetailsList(initEngines, componentsCortexListEl);
+                        }
                     } catch (e) { console.debug('[synth_webui] init: failed to render initial cortex cards', e); }
                     // Bind engineSelect change to switch engine
-                    if (!engineSelect.dataset.bound) {
+                        if (engineSelect && !engineSelect.dataset.bound) {
                         engineSelect.addEventListener('change', async () => {
                             const selected = engineSelect.value;
                             if (!selected) return;
@@ -2851,6 +3033,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                                         const inp = document.createElement('input');
                                         inp.type = ci.ui_type === 'password' ? 'password'
                                             : (ci.value_type === 'int' || ci.value_type === 'float' || ci.ui_type === 'number') ? 'number' : 'text';
+                                        inp.autocomplete = ci.ui_type === 'password' ? 'new-password' : 'off';
                                         inp.style.cssText = 'padding:6px 10px; background:var(--background); color:var(--text); border:1px solid var(--border,#444); border-radius:6px; font-size:0.88rem; max-width:400px; width:100%;';
                                         inp.value = typeof val === 'string' ? val : JSON.stringify(val);
                                         inp.disabled = !editable;
@@ -2906,9 +3089,11 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                     // Render engine list for the selected cortex kind
                     const toRenderKind = initialKind || 'llm_provider';
                     const byCortex = (data.cortex && data.cortex.by_cortex) || {};
-                    renderDetailsList(byCortex[toRenderKind] || [], componentsCortexListEl);
-                    renderDetailsList(data.interfaces || [], componentsInterfacesListEl);
-                    renderDetailsList(data.plugins || [], componentsPluginsListEl);
+                    let toRenderEngines = byCortex[toRenderKind] || [];
+                    if (toRenderKind === 'llm_provider') toRenderEngines = toRenderEngines.filter(e => e.is_external);
+                    if (componentsCortexListEl) renderDetailsList(toRenderEngines, componentsCortexListEl);
+                    if (componentsInterfacesListEl) renderDetailsList(data.interfaces || [], componentsInterfacesListEl);
+                    if (componentsPluginsListEl) renderDetailsList(data.plugins || [], componentsPluginsListEl);
 
                     // ── Audio registry selectors (Vox / Auris / Live) ──────────────
                     const setupRegistrySelect = (selectId, infoId, labelId, descId, engines, configKey) => {
@@ -2962,7 +3147,118 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
 
                     setupRegistrySelect('vox-engine-select',  'vox-engine-info',  'vox-engine-label',  'vox-engine-description',  data.vox  || [], 'ACTIVE_VOX_ENGINE');
                     setupRegistrySelect('auris-engine-select','auris-engine-info','auris-engine-label','auris-engine-description', data.auris || [], 'ACTIVE_AURIS_ENGINE');
+                    setupRegistrySelect('iris-engine-select', 'iris-engine-info', 'iris-engine-label', 'iris-engine-description',  data.iris || [], 'ACTIVE_IRIS_ENGINE');
                     setupRegistrySelect('live-engine-select', 'live-engine-info', 'live-engine-label', 'live-engine-description',  data.live || [], 'LIVE_CORTEX');  // persist selected live engine via LIVE_CORTEX config
+
+                    // ── Iris model selector ──────────────────────────────────
+                    const irisModelSel = document.getElementById('iris-model-select');
+                    const irisEngineSel = document.getElementById('iris-engine-select');
+
+                    const populateIrisModelSelect = (engineName) => {
+                        if (!irisModelSel) return;
+                        const engine = (data.iris || []).find((e) => e.name === engineName);
+                        const models = (engine && engine.available_models) ? engine.available_models : [];
+                        if (!models.length) {
+                            irisModelSel.style.display = 'none';
+                            irisModelSel.innerHTML = '';
+                            return;
+                        }
+                        irisModelSel.innerHTML = '';
+                        models.forEach((m) => {
+                            const opt = document.createElement('option');
+                            opt.value = m;
+                            opt.textContent = m;
+                            irisModelSel.appendChild(opt);
+                        });
+                        // Pre-select: prefer the saved global IRIS_DEFAULT_MODEL, then engine default
+                        const saved = data.iris_current_model || (engine && engine.default_model) || '';
+                        irisModelSel.value = models.includes(saved) ? saved : models[0];
+                        irisModelSel.style.display = '';
+                    };
+
+                    if (irisEngineSel) {
+                        populateIrisModelSelect(irisEngineSel.value);
+                        if (!irisEngineSel.dataset.irisModelBound) {
+                            irisEngineSel.addEventListener('change', () => populateIrisModelSelect(irisEngineSel.value));
+                            irisEngineSel.dataset.irisModelBound = '1';
+                        }
+                    }
+
+                    if (irisModelSel && !irisModelSel.dataset.bound) {
+                        irisModelSel.addEventListener('change', async () => {
+                            try {
+                                const r = await fetch('/api/config', {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({ key: 'IRIS_DEFAULT_MODEL', value: irisModelSel.value }),
+                                });
+                                if (!r.ok) throw new Error('HTTP ' + r.status);
+                                window.showToast && window.showToast('Iris model set to ' + irisModelSel.value);
+                            } catch (e) {
+                                console.error('[synth_webui] Failed to set IRIS_DEFAULT_MODEL', e);
+                                window.showToast && window.showToast('Failed to save Iris model', true);
+                            }
+                        });
+                        irisModelSel.dataset.bound = '1';
+                    }
+                    // ────────────────────────────────────────────────────────
+
+                    // ── Vox / Auris model selectors (generic, mirrors Iris) ───
+                    const setupAudioModelSelect = (modelSelId, engineSelId, engineList, currentModel, configKey, boundFlag) => {
+                        const modelSel = document.getElementById(modelSelId);
+                        const engineSel = document.getElementById(engineSelId);
+                        if (!modelSel) return;
+
+                        const populate = (engineName) => {
+                            const engine = (engineList || []).find((e) => e.name === engineName);
+                            const models = (engine && engine.available_models) ? engine.available_models : [];
+                            if (!models.length) {
+                                modelSel.style.display = 'none';
+                                modelSel.innerHTML = '';
+                                return;
+                            }
+                            modelSel.innerHTML = '';
+                            models.forEach((m) => {
+                                const opt = document.createElement('option');
+                                opt.value = m;
+                                opt.textContent = m;
+                                modelSel.appendChild(opt);
+                            });
+                            const saved = currentModel || (engine && engine.default_model) || '';
+                            modelSel.value = models.includes(saved) ? saved : models[0];
+                            modelSel.style.display = '';
+                        };
+
+                        if (engineSel) {
+                            populate(engineSel.value);
+                            if (!engineSel.dataset[boundFlag]) {
+                                engineSel.addEventListener('change', () => populate(engineSel.value));
+                                engineSel.dataset[boundFlag] = '1';
+                            }
+                        }
+
+                        if (!modelSel.dataset.bound) {
+                            modelSel.addEventListener('change', async () => {
+                                try {
+                                    const r = await fetch('/api/config', {
+                                        method: 'POST',
+                                        headers: { 'Content-Type': 'application/json' },
+                                        body: JSON.stringify({ key: configKey, value: modelSel.value }),
+                                    });
+                                    if (!r.ok) throw new Error('HTTP ' + r.status);
+                                    window.showToast && window.showToast('Model set to ' + modelSel.value);
+                                } catch (e) {
+                                    console.error('[synth_webui] Failed to set ' + configKey, e);
+                                    window.showToast && window.showToast('Failed to save model', true);
+                                }
+                            });
+                            modelSel.dataset.bound = '1';
+                        }
+                    };
+
+                    setupAudioModelSelect('vox-model-select', 'vox-engine-select', data.vox || [], data.vox_current_model || '', 'VOX_DEFAULT_MODEL', 'voxModelBound');
+                    setupAudioModelSelect('auris-model-select', 'auris-engine-select', data.auris || [], data.auris_current_model || '', 'AURIS_DEFAULT_MODEL', 'aurisModelBound');
+                    // ────────────────────────────────────────────────────────
 
                     // ── Live voice configuration ──────────────────────────────
                     const liveVoiceCfg = document.getElementById('live-voice-config');
@@ -3191,7 +3487,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                                     const item = Array.isArray(cfg.items)? cfg.items.find(i=>i.key==='VOSK_LANGUAGE') : null;
                                     if(item && item.value) voskLangSelect.value = item.value;
                                 }
-                            }catch(e){/* ignore */}
+                            } catch (e) { /* ignore */ }
                         } else {
                             voskLangSelect.style.display = 'none';
                         }
@@ -3230,6 +3526,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                     if (componentsVoxListEl)   renderDetailsList(data.vox   || [], componentsVoxListEl);
                     if (componentsAurisListEl) renderDetailsList(data.auris || [], componentsAurisListEl);
                     if (componentsLiveListEl)  renderDetailsList(data.live  || [], componentsLiveListEl);
+                    if (componentsIrisListEl)   renderDetailsList(data.iris  || [], componentsIrisListEl);
 
                     // Render cortex scope selectors (Grillo / Trainer / Live)
                     try {
@@ -3287,9 +3584,11 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                     const componentsVoxListErrEl = document.getElementById('components-vox-list');
                     const componentsAurisListErrEl = document.getElementById('components-auris-list');
                     const componentsLiveListErrEl = document.getElementById('components-live-list');
+                    const componentsIrisListErrEl = document.getElementById('components-iris-list');
                     if (componentsVoxListErrEl) componentsVoxListErrEl.innerHTML = '<div class="meta">Failed to load components.</div>';
                     if (componentsAurisListErrEl) componentsAurisListErrEl.innerHTML = '<div class="meta">Failed to load components.</div>';
                     if (componentsLiveListErrEl) componentsLiveListErrEl.innerHTML = '<div class="meta">Failed to load components.</div>';
+                    if (componentsIrisListErrEl) componentsIrisListErrEl.innerHTML = '<div class="meta">Failed to load components.</div>';
                 }
             }
 
@@ -3609,6 +3908,8 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
             function initSettingsTab() {
                 if (!window.__synth_settings_initialized) {
                     const resetBtn = document.getElementById('reset-window-positions');
+                    const backupBtn = document.getElementById('create-database-backup');
+                    const backupStatus = document.getElementById('database-backup-status');
                     if (resetBtn) {
                         resetBtn.addEventListener('click', () => {
                             try {
@@ -3648,14 +3949,227 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                             } catch (e) { /* ignore */ }
                         });
                     }
+                    if (backupBtn) {
+                        backupBtn.addEventListener('click', async () => {
+                            backupBtn.disabled = true;
+                            if (backupStatus) backupStatus.textContent = 'Creating backup…';
+                            try {
+                                const response = await fetch('/api/database/backup', {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                });
+                                const payload = await response.json().catch(() => ({}));
+                                if (!response.ok || !payload.success) {
+                                    throw new Error(payload.detail || payload.error || `HTTP ${response.status}`);
+                                }
+                                const filename = payload.filename || payload.path || 'backup completed';
+                                if (backupStatus) backupStatus.textContent = `Backup created: ${filename}`;
+                                try { if (window.showToast) window.showToast(`Database backup created: ${filename}`, false); } catch (e) { /* ignore */ }
+                            } catch (error) {
+                                const message = error && error.message ? error.message : 'Backup failed';
+                                if (backupStatus) backupStatus.textContent = `Backup failed: ${message}`;
+                                try { if (window.showToast) window.showToast(`Database backup failed: ${message}`, true); } catch (e) { /* ignore */ }
+                            } finally {
+                                backupBtn.disabled = false;
+                            }
+                        });
+                    }
                     initNotifications();
                     window.__synth_settings_initialized = true;
                 }
                 refreshConfig();
             }
 
-            function initComponentsTab() {
+            function initPluginsTab() {
                 loadComponentsSummary();
+            }
+            // Also expose as initEnginesTab so that the Engines tab triggers the engine selector UI
+            function initEnginesTab() {
+                loadComponentsSummary();
+                initModelManager();
+            }
+
+            // ── Manage Models modal (shared by Vox / Auris / Iris) ──────────
+            function initModelManager() {
+                if (window.__synth_model_manager_initialized) return;
+                const modal = document.getElementById('model-manager-modal');
+                const listEl = document.getElementById('model-manager-list');
+                const titleEl = document.getElementById('model-manager-title');
+                const subtitleEl = document.getElementById('model-manager-subtitle');
+                const errorEl = document.getElementById('model-manager-error');
+                const closeBtn = document.getElementById('model-manager-close');
+                const rowTpl = document.getElementById('model-manager-row-tpl');
+                if (!modal || !listEl || !rowTpl) return;
+
+                const SUBSYSTEMS = {
+                    vox: { label: 'Vox — Text-to-Speech', tag: 'tts', prefix: 'vox_' },
+                    auris: { label: 'Auris — Speech-to-Text', tag: 'stt', prefix: 'auris_' },
+                    iris: { label: 'Iris — Vision', tag: 'vision', prefix: 'iris_' },
+                };
+                const pollTimers = {};
+
+                const showError = (msg) => {
+                    if (!errorEl) return;
+                    if (msg) { errorEl.textContent = msg; errorEl.style.display = ''; }
+                    else { errorEl.textContent = ''; errorEl.style.display = 'none'; }
+                };
+
+                const closeModal = () => {
+                    modal.style.display = 'none';
+                    Object.keys(pollTimers).forEach((k) => { clearInterval(pollTimers[k]); delete pollTimers[k]; });
+                };
+
+                if (closeBtn && !closeBtn.dataset.bound) {
+                    closeBtn.addEventListener('click', closeModal);
+                    closeBtn.dataset.bound = '1';
+                }
+                if (!modal.dataset.bound) {
+                    modal.addEventListener('click', (ev) => { if (ev.target === modal) closeModal(); });
+                    modal.dataset.bound = '1';
+                }
+
+                const belongsToSubsystem = (model, sub) => {
+                    const cfg = SUBSYSTEMS[sub];
+                    if (!cfg) return false;
+                    const tags = Array.isArray(model.tags) ? model.tags : [];
+                    if (tags.includes(cfg.tag)) return true;
+                    return typeof model.plugin_id === 'string' && model.plugin_id.startsWith(cfg.prefix);
+                };
+
+                const setDownloadingState = (row, model) => {
+                    const dlBtn = row.querySelector('.mm-download-btn');
+                    const delBtn = row.querySelector('.mm-delete-btn');
+                    const progWrap = row.querySelector('.mm-progress-wrap');
+                    const progBar = row.querySelector('.mm-progress-bar');
+                    const badge = row.querySelector('.mm-downloaded-badge');
+                    if (model.downloading) {
+                        dlBtn.textContent = 'Downloading…';
+                        dlBtn.disabled = true;
+                        if (delBtn) delBtn.style.display = 'none';
+                        if (progWrap) progWrap.style.display = '';
+                        if (progBar) progBar.style.width = Math.round((model.download_progress || 0) * 100) + '%';
+                    } else if (model.downloaded) {
+                        dlBtn.textContent = 'Re-download';
+                        dlBtn.disabled = false;
+                        if (delBtn) delBtn.style.display = '';
+                        if (progWrap) progWrap.style.display = 'none';
+                        if (badge) badge.style.display = '';
+                    } else {
+                        dlBtn.textContent = 'Download';
+                        dlBtn.disabled = false;
+                        if (delBtn) delBtn.style.display = 'none';
+                        if (progWrap) progWrap.style.display = 'none';
+                        if (badge) badge.style.display = 'none';
+                    }
+                };
+
+                const pollProgress = (modelId, row) => {
+                    if (pollTimers[modelId]) return;
+                    pollTimers[modelId] = setInterval(async () => {
+                        try {
+                            const r = await fetch('/api/models/' + encodeURIComponent(modelId) + '/progress');
+                            if (!r.ok) throw new Error('HTTP ' + r.status);
+                            const m = await r.json();
+                            setDownloadingState(row, m);
+                            if (!m.downloading) {
+                                clearInterval(pollTimers[modelId]);
+                                delete pollTimers[modelId];
+                                window.showToast && window.showToast(m.downloaded ? 'Model downloaded' : 'Download stopped');
+                            }
+                        } catch (e) {
+                            clearInterval(pollTimers[modelId]);
+                            delete pollTimers[modelId];
+                        }
+                    }, 1500);
+                };
+
+                const renderRow = (model) => {
+                    const frag = rowTpl.content.cloneNode(true);
+                    const row = frag.querySelector('.mm-row');
+                    row.querySelector('.mm-name').textContent = model.display_name || model.model_id;
+                    const desc = row.querySelector('.mm-desc');
+                    desc.textContent = model.description || '';
+                    const sizeEl = row.querySelector('.mm-size');
+                    sizeEl.textContent = model.size_mb ? '· ' + model.size_mb + ' MB' : '';
+                    setDownloadingState(row, model);
+
+                    const dlBtn = row.querySelector('.mm-download-btn');
+                    dlBtn.addEventListener('click', async () => {
+                        showError('');
+                        dlBtn.disabled = true;
+                        dlBtn.textContent = 'Starting…';
+                        try {
+                            const r = await fetch('/api/models/' + encodeURIComponent(model.model_id) + '/download', { method: 'POST' });
+                            if (!r.ok) throw new Error('HTTP ' + r.status);
+                            model.downloading = true;
+                            setDownloadingState(row, model);
+                            pollProgress(model.model_id, row);
+                        } catch (e) {
+                            showError('Failed to start download: ' + e.message);
+                            setDownloadingState(row, model);
+                        }
+                    });
+
+                    const delBtn = row.querySelector('.mm-delete-btn');
+                    delBtn.addEventListener('click', async () => {
+                        if (!window.confirm('Delete downloaded model "' + (model.display_name || model.model_id) + '"?')) return;
+                        showError('');
+                        delBtn.disabled = true;
+                        try {
+                            const r = await fetch('/api/models/' + encodeURIComponent(model.model_id), { method: 'DELETE' });
+                            if (!r.ok) throw new Error('HTTP ' + r.status);
+                            model.downloaded = false;
+                            setDownloadingState(row, model);
+                            window.showToast && window.showToast('Model removed');
+                        } catch (e) {
+                            showError('Failed to delete model: ' + e.message);
+                            delBtn.disabled = false;
+                        }
+                    });
+
+                    return frag;
+                };
+
+                const openModal = async (sub) => {
+                    const cfg = SUBSYSTEMS[sub];
+                    if (!cfg) return;
+                    showError('');
+                    if (titleEl) titleEl.textContent = 'Manage Models — ' + cfg.label;
+                    if (subtitleEl) subtitleEl.textContent = 'Download, update or remove locally-managed models for the ' + sub + ' subsystem.';
+                    listEl.innerHTML = '<div class="meta">Loading…</div>';
+                    modal.style.display = 'flex';
+                    try {
+                        const r = await fetch('/api/models');
+                        if (!r.ok) throw new Error('HTTP ' + r.status);
+                        const data = await r.json();
+                        const models = (Array.isArray(data) ? data : (data.models || [])).filter((m) => belongsToSubsystem(m, sub));
+                        listEl.innerHTML = '';
+                        if (!models.length) {
+                            listEl.innerHTML = '<div class="meta">No locally-managed models available for this subsystem.</div>';
+                            return;
+                        }
+                        models.forEach((m) => {
+                            listEl.appendChild(renderRow(m));
+                            if (m.downloading) {
+                                const row = listEl.lastElementChild;
+                                if (row) pollProgress(m.model_id, row);
+                            }
+                        });
+                    } catch (e) {
+                        listEl.innerHTML = '';
+                        showError('Failed to load models: ' + e.message);
+                    }
+                };
+
+                [['vox-manage-models-btn', 'vox'], ['auris-manage-models-btn', 'auris'], ['iris-manage-models-btn', 'iris']].forEach(([btnId, sub]) => {
+                    const btn = document.getElementById(btnId);
+                    if (btn && !btn.dataset.bound) {
+                        btn.addEventListener('click', () => openModal(sub));
+                        btn.dataset.bound = '1';
+                    }
+                });
+
+                window.__synth_model_manager_initialized = true;
             }
 
             function initLogsTab() {
@@ -3666,6 +4180,35 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                 const logFilters = document.querySelectorAll('.log-filter');
                 const logSearchInput = document.getElementById('log-search');
                 const logsRefreshBtn = document.getElementById('logs-refresh');
+                const logsSubtabButtons = document.querySelectorAll('.logs-subnav-btn[data-logs-subtab]');
+                const logsSubtabPanels = document.querySelectorAll('.logs-subpanel[data-logs-subtab]');
+                const logsFailuresOutput = document.getElementById('logs-failures-output');
+                const logsFailuresPagination = document.getElementById('logs-failures-pagination');
+                const logsFailuresRefreshBtn = document.getElementById('logs-failures-refresh');
+                const logsFailuresSearch = document.getElementById('logs-failures-search');
+                const logsFailuresCode = document.getElementById('logs-failures-code');
+                const logsFailuresStage = document.getElementById('logs-failures-stage');
+                const logsFailuresSort = document.getElementById('logs-failures-sort');
+                const logsState = window.__synth_logs_state || {
+                    currentSubtab: 'live',
+                    failurePage: 1,
+                    failurePerPage: 20,
+                    failureSearch: '',
+                    failureCode: '',
+                    failureStage: '',
+                    failureSort: 'desc',
+                    failureTotalPages: 1,
+                    loadingFailures: false,
+                };
+                window.__synth_logs_state = logsState;
+
+                function debounce(fn, wait) {
+                    let timer = null;
+                    return (...args) => {
+                        if (timer) window.clearTimeout(timer);
+                        timer = window.setTimeout(() => fn(...args), wait);
+                    };
+                }
 
                 function detectLevel(text) {
                     const match = String(text || '').match(/\b(DEBUG|INFO|WARNING|ERROR)\b/i);
@@ -3716,6 +4259,152 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                     applyFilters();
                 }
 
+                function switchLogsSubtab(nextSubtab) {
+                    logsState.currentSubtab = nextSubtab;
+                    logsSubtabButtons.forEach((button) => {
+                        const active = button.dataset.logsSubtab === nextSubtab;
+                        button.classList.toggle('active', active);
+                        button.setAttribute('aria-selected', active ? 'true' : 'false');
+                    });
+                    logsSubtabPanels.forEach((panel) => {
+                        panel.classList.toggle('active', panel.dataset.logsSubtab === nextSubtab);
+                    });
+                    if (nextSubtab === 'failures') {
+                        loadFailureLog();
+                        return;
+                    }
+                    applyFilters();
+                }
+
+                function formatFailureDate(value) {
+                    if (!value) return 'Unknown time';
+                    const date = new Date(value);
+                    if (Number.isNaN(date.getTime())) return safeEscapeHtml(value);
+                    return safeEscapeHtml(date.toLocaleString());
+                }
+
+                function renderFailurePagination(payload) {
+                    if (!logsFailuresPagination) return;
+                    const page = Number(payload.page || logsState.failurePage || 1);
+                    const totalPages = Number(payload.total_pages || 1);
+                    const totalCount = Number(payload.total_count || 0);
+                    logsState.failureTotalPages = totalPages;
+                    logsFailuresPagination.innerHTML = `
+                        <div class="logs-page-summary">${safeEscapeHtml(String(totalCount))} entries</div>
+                        <div class="logs-page-buttons">
+                            <button type="button" class="logs-pagination-btn" data-page-action="prev" ${page <= 1 ? 'disabled' : ''}>Previous</button>
+                            <span>Page ${safeEscapeHtml(String(page))} / ${safeEscapeHtml(String(totalPages))}</span>
+                            <button type="button" class="logs-pagination-btn" data-page-action="next" ${page >= totalPages ? 'disabled' : ''}>Next</button>
+                        </div>
+                    `;
+
+                    logsFailuresPagination.querySelectorAll('[data-page-action]').forEach((button) => {
+                        button.addEventListener('click', () => {
+                            const action = button.dataset.pageAction;
+                            if (action === 'prev' && logsState.failurePage > 1) {
+                                logsState.failurePage -= 1;
+                                loadFailureLog();
+                            }
+                            if (action === 'next' && logsState.failurePage < logsState.failureTotalPages) {
+                                logsState.failurePage += 1;
+                                loadFailureLog();
+                            }
+                        });
+                    });
+                }
+
+                function renderFailureEntries(payload) {
+                    if (!logsFailuresOutput) return;
+                    const entries = Array.isArray(payload.entries) ? payload.entries : [];
+                    if (!entries.length) {
+                        logsFailuresOutput.innerHTML = '<div class="logs-empty-state">No failure entries match the current filters.</div>';
+                        renderFailurePagination(payload);
+                        return;
+                    }
+
+                    logsFailuresOutput.innerHTML = entries.map((entry) => {
+                        const reason = safeEscapeHtml(entry.reason || 'Unknown failure');
+                        const preview = entry.content_preview ? `<div class="logs-failure-preview">${safeEscapeHtml(entry.content_preview)}</div>` : '';
+                        const meta = [
+                            entry.engine ? `Engine: ${entry.engine}` : '',
+                            entry.model ? `Model: ${entry.model}` : '',
+                            entry.interface_path ? `Interface: ${entry.interface_path}` : '',
+                            entry.chat_id ? `Chat: ${entry.chat_id}` : '',
+                            entry.thread_id ? `Thread: ${entry.thread_id}` : '',
+                            `At: ${formatFailureDate(entry.created_at)}`,
+                        ].filter(Boolean).map((value) => `<span>${safeEscapeHtml(value)}</span>`).join('');
+
+                        return `
+                            <article class="logs-failure-entry" data-failure-id="${safeEscapeHtml(String(entry.id))}">
+                                <div class="logs-failure-entry-header">
+                                    <div>
+                                        <div class="logs-failure-title">
+                                            <span class="logs-failure-pill code">${safeEscapeHtml(entry.failure_code || 'llm_failure')}</span>
+                                            <span class="logs-failure-pill stage">${safeEscapeHtml(entry.stage || 'unknown')}</span>
+                                        </div>
+                                        <div class="logs-failure-meta">${meta}</div>
+                                    </div>
+                                    <button class="logs-failure-delete" type="button" data-delete-failure="${safeEscapeHtml(String(entry.id))}">Delete</button>
+                                </div>
+                                <div class="logs-failure-reason">${reason}</div>
+                                ${preview}
+                            </article>
+                        `;
+                    }).join('');
+
+                    logsFailuresOutput.querySelectorAll('[data-delete-failure]').forEach((button) => {
+                        button.addEventListener('click', async () => {
+                            const failureId = button.dataset.deleteFailure;
+                            if (!failureId) return;
+                            if (!window.confirm('Delete this failure entry? This cannot be undone.')) return;
+                            try {
+                                const response = await fetch(`/api/log-failures/${encodeURIComponent(failureId)}`, { method: 'DELETE' });
+                                if (!response.ok) {
+                                    const payloadText = await response.text();
+                                    throw new Error(payloadText || `HTTP ${response.status}`);
+                                }
+                                if (window.showToast) window.showToast('Failure entry deleted', false);
+                                loadFailureLog();
+                            } catch (error) {
+                                console.error('[logs] failed to delete failure entry', error);
+                                if (window.showToast) window.showToast('Failed to delete failure entry', true);
+                            }
+                        });
+                    });
+
+                    renderFailurePagination(payload);
+                }
+
+                async function loadFailureLog() {
+                    if (!logsFailuresOutput || logsState.loadingFailures) return;
+                    logsState.loadingFailures = true;
+                    logsFailuresOutput.innerHTML = '<div class="logs-empty-state">Loading failure log...</div>';
+
+                    const params = new URLSearchParams({
+                        page: String(logsState.failurePage),
+                        per_page: String(logsState.failurePerPage),
+                        search: logsState.failureSearch || '',
+                        failure_code: logsState.failureCode || '',
+                        stage: logsState.failureStage || '',
+                        sort: logsState.failureSort || 'desc',
+                    });
+
+                    try {
+                        const response = await fetch(`/api/log-failures?${params.toString()}`);
+                        const payload = await response.json();
+                        if (!response.ok || !payload.success) {
+                            throw new Error((payload && payload.error) || `HTTP ${response.status}`);
+                        }
+                        renderFailureEntries(payload);
+                    } catch (error) {
+                        console.error('[logs] failed to load failure log', error);
+                        logsFailuresOutput.innerHTML = '<div class="logs-empty-state">Failed to load failure log.</div>';
+                        if (logsFailuresPagination) logsFailuresPagination.innerHTML = '';
+                    } finally {
+                        logsState.loadingFailures = false;
+                    }
+                }
+
                 function connectLogs() {
                     if (window.__synth_logs_socket && (window.__synth_logs_socket.readyState === WebSocket.OPEN || window.__synth_logs_socket.readyState === WebSocket.CONNECTING)) {
                         return;
@@ -3748,6 +4437,46 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                 }
 
                 connectLogs();
+                logsSubtabButtons.forEach((button) => {
+                    button.addEventListener('click', () => {
+                        const nextSubtab = button.dataset.logsSubtab || 'live';
+                        switchLogsSubtab(nextSubtab);
+                    });
+                });
+                if (logsFailuresRefreshBtn) {
+                    logsFailuresRefreshBtn.addEventListener('click', () => {
+                        loadFailureLog();
+                    });
+                }
+                if (logsFailuresSearch) {
+                    logsFailuresSearch.addEventListener('input', debounce(() => {
+                        logsState.failureSearch = logsFailuresSearch.value || '';
+                        logsState.failurePage = 1;
+                        loadFailureLog();
+                    }, 350));
+                }
+                if (logsFailuresCode) {
+                    logsFailuresCode.addEventListener('change', () => {
+                        logsState.failureCode = logsFailuresCode.value || '';
+                        logsState.failurePage = 1;
+                        loadFailureLog();
+                    });
+                }
+                if (logsFailuresStage) {
+                    logsFailuresStage.addEventListener('change', () => {
+                        logsState.failureStage = logsFailuresStage.value || '';
+                        logsState.failurePage = 1;
+                        loadFailureLog();
+                    });
+                }
+                if (logsFailuresSort) {
+                    logsFailuresSort.addEventListener('change', () => {
+                        logsState.failureSort = logsFailuresSort.value || 'desc';
+                        logsState.failurePage = 1;
+                        loadFailureLog();
+                    });
+                }
+                switchLogsSubtab(logsState.currentSubtab || 'live');
                 window.__synth_logs_initialized = true;
             }
 
@@ -3882,7 +4611,10 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
             window.SynthWebUI = window.SynthWebUI || {};
             window.SynthWebUI.initHomeTab = initHomeTab;
             window.SynthWebUI.initSettingsTab = initSettingsTab;
-            window.SynthWebUI.initComponentsTab = initComponentsTab;
+            window.SynthWebUI.initPluginsTab = initPluginsTab;
+            window.SynthWebUI.initEnginesTab = initEnginesTab;
+            window.SynthWebUI.loadEnginesSummary = loadComponentsSummary;
+            window.SynthWebUI.initModelManager = initModelManager;
             window.SynthWebUI.initLogsTab = initLogsTab;
             window.SynthWebUI.initAboutTab = initAboutTab;
 

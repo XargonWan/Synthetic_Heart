@@ -4,11 +4,10 @@ import json
 from datetime import datetime, timedelta
 from typing import Any, Callable
 import asyncio
-import aiomysql
 import threading
 from contextlib import asynccontextmanager
 
-from core.db import get_conn_ctx
+from core.db import get_conn_ctx, _get_db_type, DictCursor
 from core.logging_utils import log_error, log_info, log_debug, log_warning
 from core.core_initializer import register_plugin
 from core.user_utils import get_user_display_name, get_user_usertag
@@ -104,7 +103,13 @@ async def init_bio_table():
         """)
 
         # Check and add missing columns on-demand
-        await cursor.execute("SHOW COLUMNS FROM bio")
+        is_postgres = _get_db_type() == "postgres"
+        if is_postgres:
+            await cursor.execute(
+                "SELECT column_name FROM information_schema.columns WHERE table_name = 'bio'"
+            )
+        else:
+            await cursor.execute("SHOW COLUMNS FROM bio")
         existing_columns = {row[0] for row in await cursor.fetchall()}
 
         # Add last_update column if missing
@@ -177,7 +182,7 @@ async def _execute(query: str, params: tuple = ()) -> None:
 
 async def _fetchone(query: str, params: tuple = ()):
     async with get_conn_ctx() as conn:
-        async with conn.cursor(aiomysql.DictCursor) as cur:
+        async with conn.cursor(DictCursor) as cur:
             await cur.execute(query, params)
             return await cur.fetchone()
 
@@ -341,7 +346,7 @@ def _update_json_field(user_id: str, key: str, update_fn: Callable[[Any], Any]) 
             updated = DEFAULTS.get(key, "")
 
         try:
-            json_value = json.dumps(updated)
+            json.dumps(updated)  # serializability check only
         except (TypeError, ValueError) as e:
             log_error(f"[bio_manager] Failed to serialize updated {key}: {e}")
             return
@@ -528,7 +533,7 @@ def _check_update_limits(user_id: str, updates: dict) -> tuple[bool, str]:
                 last_update = datetime.fromisoformat(
                     last_update_str.replace("Z", "+00:00")
                 )
-            except:
+            except Exception:
                 last_update = datetime.utcnow() - timedelta(
                     hours=2
                 )  # Default to 2 hours ago
@@ -623,16 +628,41 @@ def update_bio_fields(user_id: str, updates: dict) -> None:
     ) % 6  # Reset after 5 updates
 
     # Try to update with all fields, fallback to basic fields if some columns are missing
+    is_postgres = _get_db_type() == "postgres"
     try:
-        _run(
-            _execute(
-                """
+        if is_postgres:
+            query = """
+                INSERT INTO bio (
+                    id, known_as, likes, not_likes, information,
+                    past_events, feelings, contacts, social_accounts,
+                    privacy, created_at, last_accessed, last_update, update_count
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (id) DO UPDATE SET
+                    known_as = EXCLUDED.known_as,
+                    likes = EXCLUDED.likes,
+                    not_likes = EXCLUDED.not_likes,
+                    information = EXCLUDED.information,
+                    past_events = EXCLUDED.past_events,
+                    feelings = EXCLUDED.feelings,
+                    contacts = EXCLUDED.contacts,
+                    social_accounts = EXCLUDED.social_accounts,
+                    privacy = EXCLUDED.privacy,
+                    created_at = EXCLUDED.created_at,
+                    last_accessed = EXCLUDED.last_accessed,
+                    last_update = EXCLUDED.last_update,
+                    update_count = EXCLUDED.update_count
+            """
+        else:
+            query = """
                 REPLACE INTO bio (
                     id, known_as, likes, not_likes, information,
                     past_events, feelings, contacts, social_accounts,
                     privacy, created_at, last_accessed, last_update, update_count
                 ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                """,
+            """
+        _run(
+            _execute(
+                query,
                 (
                     user_id,
                     json.dumps(merged.get("known_as") or []),
@@ -654,15 +684,37 @@ def update_bio_fields(user_id: str, updates: dict) -> None:
     except Exception as e:
         # Fallback to basic columns only
         log_warning(f"[bio_manager] Full replace failed ({e}), trying basic columns")
-        _run(
-            _execute(
-                """
+        if is_postgres:
+            fallback_query = """
+                INSERT INTO bio (
+                    id, known_as, likes, not_likes, information,
+                    past_events, feelings, contacts, social_accounts,
+                    privacy, created_at, last_accessed
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (id) DO UPDATE SET
+                    known_as = EXCLUDED.known_as,
+                    likes = EXCLUDED.likes,
+                    not_likes = EXCLUDED.not_likes,
+                    information = EXCLUDED.information,
+                    past_events = EXCLUDED.past_events,
+                    feelings = EXCLUDED.feelings,
+                    contacts = EXCLUDED.contacts,
+                    social_accounts = EXCLUDED.social_accounts,
+                    privacy = EXCLUDED.privacy,
+                    created_at = EXCLUDED.created_at,
+                    last_accessed = EXCLUDED.last_accessed
+            """
+        else:
+            fallback_query = """
                 REPLACE INTO bio (
                     id, known_as, likes, not_likes, information,
                     past_events, feelings, contacts, social_accounts,
                     privacy, created_at, last_accessed
                 ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                """,
+            """
+        _run(
+            _execute(
+                fallback_query,
                 (
                     user_id,
                     json.dumps(merged.get("known_as") or []),
@@ -744,16 +796,41 @@ def update_bio_fields_auto(user_id: str, updates: dict) -> None:
     # Don't increment update_count for automatic updates
     merged["update_count"] = current.get("update_count", 0)
 
+    is_postgres = _get_db_type() == "postgres"
     try:
-        _run(
-            _execute(
-                """
+        if is_postgres:
+            query = """
+                INSERT INTO bio (
+                    id, known_as, likes, not_likes, information,
+                    past_events, feelings, contacts, social_accounts,
+                    privacy, created_at, last_accessed, last_update, update_count
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (id) DO UPDATE SET
+                    known_as = EXCLUDED.known_as,
+                    likes = EXCLUDED.likes,
+                    not_likes = EXCLUDED.not_likes,
+                    information = EXCLUDED.information,
+                    past_events = EXCLUDED.past_events,
+                    feelings = EXCLUDED.feelings,
+                    contacts = EXCLUDED.contacts,
+                    social_accounts = EXCLUDED.social_accounts,
+                    privacy = EXCLUDED.privacy,
+                    created_at = EXCLUDED.created_at,
+                    last_accessed = EXCLUDED.last_accessed,
+                    last_update = EXCLUDED.last_update,
+                    update_count = EXCLUDED.update_count
+            """
+        else:
+            query = """
                 REPLACE INTO bio (
                     id, known_as, likes, not_likes, information,
                     past_events, feelings, contacts, social_accounts,
                     privacy, created_at, last_accessed, last_update, update_count
                 ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                """,
+            """
+        _run(
+            _execute(
+                query,
                 (
                     user_id,
                     json.dumps(merged.get("known_as") or []),
@@ -775,15 +852,37 @@ def update_bio_fields_auto(user_id: str, updates: dict) -> None:
     except Exception as e:
         # Fallback to basic columns only
         log_warning(f"[bio_manager] Auto update failed ({e}), trying basic columns")
-        _run(
-            _execute(
-                """
+        if is_postgres:
+            fallback_query = """
+                INSERT INTO bio (
+                    id, known_as, likes, not_likes, information,
+                    past_events, feelings, contacts, social_accounts,
+                    privacy, created_at, last_accessed
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (id) DO UPDATE SET
+                    known_as = EXCLUDED.known_as,
+                    likes = EXCLUDED.likes,
+                    not_likes = EXCLUDED.not_likes,
+                    information = EXCLUDED.information,
+                    past_events = EXCLUDED.past_events,
+                    feelings = EXCLUDED.feelings,
+                    contacts = EXCLUDED.contacts,
+                    social_accounts = EXCLUDED.social_accounts,
+                    privacy = EXCLUDED.privacy,
+                    created_at = EXCLUDED.created_at,
+                    last_accessed = EXCLUDED.last_accessed
+            """
+        else:
+            fallback_query = """
                 REPLACE INTO bio (
                     id, known_as, likes, not_likes, information,
                     past_events, feelings, contacts, social_accounts,
                     privacy, created_at, last_accessed
                 ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                """,
+            """
+        _run(
+            _execute(
+                fallback_query,
                 (
                     user_id,
                     json.dumps(merged.get("known_as") or []),
@@ -1142,7 +1241,7 @@ class BioPlugin:
                 try:
                     # Special handling for user_name field - check if it's a "call me" request
                     if "user_name" in fields:
-                        update_user_name(uid, fields["user_name"])
+                        self.update_user_name(uid, fields["user_name"])
                         # Remove user_name from fields since it's been handled specially
                         remaining_fields = {
                             k: v for k, v in fields.items() if k != "user_name"
@@ -1173,6 +1272,7 @@ class BioPlugin:
 
         return {"success": False, "message": f"Unsupported action type: {action_type}"}
 
+    @staticmethod
     def update_user_name(user_id: str, new_name: str) -> None:
         """Update user's primary name, moving old name to known_as if it exists."""
         _ensure_user_exists(user_id)
@@ -1186,7 +1286,7 @@ class BioPlugin:
         if isinstance(known_as, str):
             try:
                 known_as = json.loads(known_as)
-            except:
+            except Exception:
                 known_as = []
 
         # If there's an existing name, move it to known_as
@@ -1206,6 +1306,7 @@ class BioPlugin:
             f"[bio_manager] Updated user_name for {user_id}: '{new_name}' (moved '{current_name}' to known_as)"
         )
 
+    @staticmethod
     async def resolve_user_info(user_identifier: str) -> tuple[str, str] | None:
         """Resolve user identifier to (user_id, user_name) tuple.
 
@@ -1221,13 +1322,13 @@ class BioPlugin:
             if bio and bio.get("id"):
                 user_name = bio.get("user_name") or user_identifier
                 return (user_identifier, user_name)
-        except:
+        except Exception:
             pass
 
         # Search through all users for a match in user_name or known_as
         try:
             async with get_conn_ctx() as conn:
-                async with conn.cursor(aiomysql.DictCursor) as cursor:
+                async with conn.cursor(DictCursor) as cursor:
                     # Search by user_name
                     await cursor.execute(
                         "SELECT id, user_name FROM bio WHERE user_name = %s",
@@ -1252,7 +1353,7 @@ class BioPlugin:
                             )
                             if user_identifier in known_as:
                                 return (user_id, user_name)
-                        except:
+                        except Exception:
                             continue
 
                     return None

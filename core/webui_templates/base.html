@@ -1441,21 +1441,44 @@
                         }));
                     } catch (e) { /* ignore */ }
                 };
-                ws.onmessage = (event) => {
+                ws.onmessage = async (event) => {
                     try { console.log('[synth_webui ws] onmessage', event && event.data ? event.data.toString().slice(0,200) : event); } catch (e) {}
                     try {
                         const data = JSON.parse(event.data);
                         updateDebug('Received WebSocket message: ' + data.type);
 
-                        if (data.type === 'vrm_animation') {
+                        if (data.type === 'vrm_animation_v2') {
                             try {
+                                let resolved = null;
+                                let animationRef = null;
+                                let descriptorData = null;
+                                try {
+                                    if (data.descriptor && typeof window.karadaResolveAnimationDescriptor === 'function') {
+                                        resolved = await window.karadaResolveAnimationDescriptor(data.descriptor);
+                                    }
+                                    animationRef = resolved ? (resolved.animation_url || null) : null;
+                                    descriptorData = resolved ? (resolved.descriptor_data || null) : null;
+                                } catch (e) { /* ignore */ }
+
                                 if (window.VRMAnimations && typeof window.VRMAnimations.play === 'function') {
                                     window.VRMAnimations.play(data.state, {
-                                        animation: data.file,
-                                        playOnce: data.loop === false,
-                                        playSection: data.play_section,
-                                        descriptor: data.descriptor
+                                        animation: animationRef,
+                                        playOnce: !!(descriptorData && descriptorData.play_once),
+                                        descriptor: descriptorData
                                     });
+                                }
+
+                                if (data.state) {
+                                    window.__synth_current_animation_state = {
+                                        state: data.state,
+                                        animation: animationRef,
+                                        descriptor_id: data.descriptor || null,
+                                        descriptor: descriptorData || null,
+                                        started_at: data.started_at,
+                                    };
+                                }
+                                if (data.state && data.descriptor && data.started_at != null) {
+                                    window.__synth_current_animation_id = `${data.state}|${data.descriptor}|${data.started_at}`;
                                 }
                             } catch (e) { /* ignore */ }
                         } else if (data.type === 'vrm_preload') {

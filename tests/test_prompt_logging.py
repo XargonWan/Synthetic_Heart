@@ -1,3 +1,6 @@
+import json
+
+
 def make_dummy_message():
     class Dummy:
         text = "hello"
@@ -35,3 +38,67 @@ async def test_prompt_and_llm_logging(monkeypatch, capsys):
     # logs produced during both calls will still be on stdout
     _ = capsys.readouterr()
     assert result == "dummy-response"
+
+
+def test_redact_multimodal_for_logging_redacts_attachment_data() -> None:
+    from core.json_utils import redact_multimodal_for_logging
+
+    prompt = {
+        "input": {
+            "payload": {
+                "text": "describe this image",
+                "attachments": [
+                    {
+                        "mime_type": "image/jpeg",
+                        "data": "A" * 1024,
+                        "file_name": "image.jpg",
+                    }
+                ],
+            }
+        },
+        "actions": {
+            "vision_describe": {
+                "schema": {
+                    "properties": {
+                        "image_path": {"description": "Path to the source image."}
+                    }
+                }
+            }
+        },
+    }
+
+    redacted = redact_multimodal_for_logging(prompt)
+
+    assert redacted["input"]["payload"]["attachments"][0]["data"] == (
+        "<redacted: 1024 chars>"
+    )
+    assert (
+        redacted["actions"]["vision_describe"]["schema"]["properties"]["image_path"][
+            "description"
+        ]
+        == "Path to the source image."
+    )
+
+
+def test_redact_multimodal_for_logging_parses_json_response_strings() -> None:
+    from core.json_utils import redact_multimodal_for_logging
+
+    response = json.dumps(
+        {
+            "actions": [
+                {
+                    "type": "vision_describe",
+                    "payload": {
+                        "image_path": "A" * 768,
+                        "mime_type": "image/jpeg",
+                    },
+                }
+            ]
+        }
+    )
+
+    redacted = redact_multimodal_for_logging(response)
+
+    assert redacted["actions"][0]["payload"]["image_path"] == (
+        "<redacted-inline-media: 768 chars>"
+    )

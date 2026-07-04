@@ -25,21 +25,30 @@ def test_no_direct_getenv_for_exposed_vars():
 
     repo_root = Path(__file__).resolve().parents[1]
     py_files = list(repo_root.glob("**/*.py"))
+    allowed_bootstrap_files = {
+        (repo_root / "core" / "logging_utils.py").resolve(),
+    }
 
     failures = []
     for p in py_files:
-        # Skip virtual envs, site-packages, git metadata and test environments
-        sp = str(p)
-        if any(
-            x in sp
-            for x in (
-                "/venv/",
-                "/.venv",
-                "/.venv_test",
-                "/env/",
-                "/site-packages/",
-                "/.git/",
-            )
+        if p.resolve() in allowed_bootstrap_files:
+            continue
+        # Skip virtual envs, third-party packages, tests, and standalone utilities.
+        parts = {part.lower() for part in p.parts}
+        if parts.intersection(
+            {
+                "venv",
+                ".venv",
+                ".venv_test",
+                "env",
+                "site-packages",
+                ".git",
+                "tests",
+                "scripts",
+                "tools",
+                "mcp_servers",
+                "vendor",
+            }
         ):
             continue
         # Skip the variables_engine itself (it registers the vars)

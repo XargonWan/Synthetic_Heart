@@ -15,7 +15,7 @@ import ``kittentts`` and behave as if a proper neural engine were present.
 from __future__ import annotations
 
 import io
-from typing import List
+from typing import Any, List
 
 # the real package will have its own dependency list; in the vendored
 # stub we lazily import third-party libraries so that merely importing
@@ -35,6 +35,29 @@ _DEFAULT_VOICE_LIST = [
 ]
 
 
+def _make_loud(seg: Any) -> Any:
+    """Multi-stage compression for radio-level loudness.
+
+    Three cascading compressors progressively crush the dynamic range, then
+    peak-normalise to -1 dBFS.  **No explicit makeup gain** — all gain is
+    applied transparently by the final normalise step, so there is zero
+    hard clipping.  Inside the engine, the output is inherently louder
+    without requiring any post-generation processing.
+    """
+    from pydub.effects import compress_dynamic_range
+
+    seg = compress_dynamic_range(
+        seg, threshold=-24.0, ratio=3.0, attack=5.0, release=80.0
+    )
+    seg = compress_dynamic_range(
+        seg, threshold=-18.0, ratio=12.0, attack=1.5, release=40.0
+    )
+    seg = compress_dynamic_range(
+        seg, threshold=-10.0, ratio=50.0, attack=0.5, release=15.0
+    )
+    return seg
+
+
 class KittenTTS:
     """Simple KittenTTS implementation.
 
@@ -42,6 +65,9 @@ class KittenTTS:
     ``KittenML/kitten-tts-nano-*`` and synthesise directly.  This stub falls
     back to ``gtts`` so that tests and the dev container continue to work
     without large model downloads.
+
+    The output WAV is peak-normalised to -1 dBFS with gentle compression
+    so the voice sounds naturally loud without requiring downstream gain.
     """
 
     def __init__(self, model_id: str | None = None) -> None:
@@ -73,9 +99,15 @@ class KittenTTS:
         tts.write_to_fp(mp3_buf)
         mp3_buf.seek(0)
 
+        seg = AudioSegment.from_file(mp3_buf, format="mp3")
+        # Multi-stage compression crushes dynamic range so the final
+        # normalise can bring the RMS level up without hard clipping.
+        seg = _make_loud(seg)
+        # Peak normalise to -1 dBFS for consistent level across calls.
+        seg = seg.normalize(headroom=1.0)
+
         wav_buf = io.BytesIO()
-        # convert MP3 -> WAV so callers always receive PCM data
-        AudioSegment.from_file(mp3_buf, format="mp3").export(wav_buf, format="wav")
+        seg.export(wav_buf, format="wav")
         return wav_buf.getvalue()
 
     @classmethod

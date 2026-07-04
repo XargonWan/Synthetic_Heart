@@ -9,14 +9,17 @@ def test_parser_records_error_on_unescaped_quotes():
 
     obj, meta = extract_json_from_text(corrupted, return_metadata=True)
 
-    # For this conservative approach we don't require full recovery here.
-    # The important behavior is that the parser detected errors and recorded a
-    # clear hint so the corrector middleware can use it to ask the LLM to
-    # regenerate valid JSON.
-    assert obj is not None, (
-        "Decoder should return at least partial JSON (other actions)"
+    # json_repair handles unescaped quotes directly, so we get a clean repaired
+    # result rather than a partial recovery that needs a corrector round-trip.
+    assert obj is not None, "Decoder should return repaired JSON"
+    assert isinstance(obj, dict) and "actions" in obj, (
+        "Repaired result should be a dict with 'actions'"
     )
-    assert meta.get("had_errors", False) is True, "Parser should mark had_errors=True"
+    assert meta.get("syntax_repaired") is True, (
+        "Parser should mark syntax_repaired=True when json_repair fixed the output"
+    )
+    # LAST_JSON_ERROR_INFO is still populated from the initial scan pass that
+    # detected the malformed input before json_repair ran.
     assert transport_layer.LAST_JSON_ERROR_INFO is not None and isinstance(
         transport_layer.LAST_JSON_ERROR_INFO, str
     )
@@ -24,6 +27,20 @@ def test_parser_records_error_on_unescaped_quotes():
         "Expecting" in transport_layer.LAST_JSON_ERROR_INFO
         or "Invalid" in transport_layer.LAST_JSON_ERROR_INFO
     )
+
+
+def test_parser_recovers_literal_newlines_inside_json_strings():
+    corrupted = (
+        '{"actions":[{"type":"send_message","payload":{"interface_path":'
+        '"telegram_bot/5208932647","message":"First line\n\nSecond line"}}]}'
+    ).replace("\\n", "\n")
+
+    obj, meta = extract_json_from_text(corrupted, return_metadata=True)
+
+    assert obj is not None
+    assert obj["actions"][0]["type"] == "send_message"
+    assert obj["actions"][0]["payload"]["message"] == "First line\n\nSecond line"
+    assert meta.get("recovered") is True
 
 
 def test_attempted_action_description_for_unknown_action():

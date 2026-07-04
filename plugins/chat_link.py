@@ -471,30 +471,39 @@ class ChatLinkPlugin:
             import asyncio
 
             asyncio.create_task(self._ensure_chat_action(payload))
+            return None
 
         elif action_type == "get_chat_info":
             import asyncio
 
             asyncio.create_task(
-                self._get_chat_info_action(bot, original_message, payload)
+                self._get_chat_info_action(context, original_message, payload)
             )
+            return None
 
         elif action_type == "resolve_chat":
             import asyncio
 
             asyncio.create_task(
-                self._resolve_chat_action(bot, original_message, payload)
+                self._resolve_chat_action(context, original_message, payload)
             )
+            return None
 
         elif action_type == "update_chat_names":
             import asyncio
 
             asyncio.create_task(self._update_names_action(payload))
+            return None
 
         elif action_type == "list_chats":
             import asyncio
 
-            asyncio.create_task(self._list_chats_action(bot, original_message, payload))
+            asyncio.create_task(
+                self._list_chats_action(context, original_message, payload)
+            )
+            return None
+
+        return None
 
     async def _ensure_chat_action(self, payload):
         """Execute ensure chat action."""
@@ -510,8 +519,8 @@ class ChatLinkPlugin:
         except Exception as e:
             log_error(f"[chat_link] Failed to ensure chat: {e}")
 
-    async def _get_chat_info_action(self, bot, original_message, payload):
-        """Execute get chat info action and send response."""
+    async def _get_chat_info_action(self, context, original_message, payload):
+        """Execute get chat info action and return message action."""
         try:
             info = await self.store.get_chat_info(
                 chat_id=payload["chat_id"],
@@ -519,30 +528,30 @@ class ChatLinkPlugin:
                 interface=payload.get("interface"),
             )
             if info:
-                response = f"Chat info: {info}"
+                text = f"Chat info: {info}"
             else:
-                response = f"No chat info found for {payload['chat_id']}"
-
-            await bot.send_message(original_message.chat_id, response)
+                text = f"No chat info found for {payload['chat_id']}"
         except Exception as e:
             log_error(f"[chat_link] Failed to get chat info: {e}")
+            text = f"❌ Failed to get chat info: {e}"
+        return self._build_message_action(text, context, original_message)
 
-    async def _resolve_chat_action(self, bot, original_message, payload):
-        """Execute resolve chat action and send response."""
+    async def _resolve_chat_action(self, context, original_message, payload):
+        """Execute resolve chat action and return message action."""
         try:
             results = await self.store.resolve_chat_identifier(
                 identifier=payload["identifier"], interface=payload.get("interface")
             )
             if results:
-                response = f"Found {len(results)} chat(s):\n"
+                text = f"Found {len(results)} chat(s):\n"
                 for result in results:
-                    response += f"• {result['chat_name'] or result['chat_id']} ({result['interface']})\n"
+                    text += f"• {result['chat_name'] or result['chat_id']} ({result['interface']})\n"
             else:
-                response = f"No chats found for identifier '{payload['identifier']}'"
-
-            await bot.send_message(original_message.chat_id, response)
+                text = f"No chats found for identifier '{payload['identifier']}'"
         except Exception as e:
             log_error(f"[chat_link] Failed to resolve chat: {e}")
+            text = f"❌ Failed to resolve chat: {e}"
+        return self._build_message_action(text, context, original_message)
 
     async def _update_names_action(self, payload):
         """Execute update names action."""
@@ -558,23 +567,50 @@ class ChatLinkPlugin:
         except Exception as e:
             log_error(f"[chat_link] Failed to update names: {e}")
 
-    async def _list_chats_action(self, bot, original_message, payload):
-        """Execute list chats action and send response."""
+    async def _list_chats_action(self, context, original_message, payload):
+        """Execute list chats action and return message action."""
         try:
             chats = await self.store.list_all_links(interface=payload.get("interface"))
             if chats:
-                response = f"Found {len(chats)} chat(s):\n"
+                text = f"Found {len(chats)} chat(s):\n"
                 for chat in chats[:10]:  # Limit to first 10
                     name = chat["chat_name"] or chat["chat_id"]
-                    response += f"• {name} ({chat['interface']})\n"
+                    text += f"• {name} ({chat['interface']})\n"
                 if len(chats) > 10:
-                    response += f"... and {len(chats) - 10} more"
+                    text += f"... and {len(chats) - 10} more"
             else:
-                response = "No chats found"
-
-            await bot.send_message(original_message.chat_id, response)
+                text = "No chats found"
         except Exception as e:
             log_error(f"[chat_link] Failed to list chats: {e}")
+            text = f"❌ Failed to list chats: {e}"
+        return self._build_message_action(text, context, original_message)
+
+    @staticmethod
+    def _build_message_action(text: str, context: dict, original_message) -> dict:
+        """Build a message action dict for interface-agnostic delivery."""
+        interface_path = None
+        if context and isinstance(context, dict):
+            interface_path = context.get("interface_path")
+        if not interface_path and original_message:
+            interface_path = getattr(original_message, "interface_path", None)
+        if not interface_path:
+            log_warning(
+                "[chat_link] Cannot build message action: no interface_path available"
+            )
+            return None
+
+        interface_name = interface_path.split("/")[0] if interface_path else None
+        if not interface_name:
+            return None
+
+        action_type = f"message_{interface_name}"
+        return {
+            "type": action_type,
+            "payload": {
+                "text": text,
+                "interface_path": interface_path,
+            },
+        }
 
 
 PLUGIN_CLASS = ChatLinkPlugin

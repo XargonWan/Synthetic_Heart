@@ -1,0 +1,55 @@
+{
+  "mcpServers": {
+    "gemini-api-docs-mcp": {
+      "command": "uvx",
+      "args": [
+        "--from",
+        "git+https://github.com/philschmid/gemini-api-docs-mcp",
+        "gemini-docs-mcp"
+      ]
+    },
+    "grok-api-docs": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["d:/dev/13/synthetic_heart/mcp_servers/grok-api-mcp/dist/index.js"]
+    },
+    "xai-docs-official": {
+      "type": "sse",
+      "url": "https://docs.x.ai/api/mcp"
+    },
+    "gitnexus": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["gitnexus", "mcp"]
+    },
+    "synth-logs": {
+      "type": "stdio",
+      "command": "uv",
+      "args": ["run", "python", "mcp_servers/synth_logs.py"]
+    },
+    "synth-db": {
+      "type": "stdio",
+      "command": "uv",
+      "args": ["run", "python", "mcp_servers/synth_db.py"]
+    },
+    "synth-cortex": {
+      "type": "stdio",
+      "command": "uv",
+      "args": ["run", "python", "mcp_servers/synth_cortex.py"]
+    },
+    "affine": {
+      "type": "stdio",
+      "command": "affine-mcp"
+    },
+    "langfuse": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@therealsachin/langfuse-mcp"],
+      "env": {
+        "LANGFUSE_PUBLIC_KEY": "pk-lf-9e5f606b-dd83-4002-beb8-354d70f4b1c7",
+        "LANGFUSE_SECRET_KEY": "sk-lf-e1296dae-a75f-40ef-abb6-2dd9cb95dfca",
+        "LANGFUSE_BASEURL": "https://fuse.zwiz.town"
+      }
+    }
+  }
+}

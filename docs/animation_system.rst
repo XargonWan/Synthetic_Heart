@@ -167,65 +167,34 @@ Frontend WebSocket Protocol
 The backend communicates animation state to connected WebUI clients through five
 distinct WebSocket message types.  All messages are JSON objects.
 
-``vrm_animation`` — Play an animation
---------------------------------------
+``vrm_animation_v2`` — Play or restore an animation tuple
+---------------------------------------------------------
 
-Emitted by ``KaradaStateServer._send_animation_command()`` whenever the active
-animation changes.  This is the primary playback command.
+Emitted by ``KaradaStateServer._send_animation_command_v2()`` whenever the
+active animation changes or when a newly connected client needs a restore
+packet.  This is the canonical Karada v2 playback command.
 
 .. code-block:: json
 
     {
-        "type": "vrm_animation",
-        "file": "/skins/Rei/animations/think/Thinking.fbx",
+        "type": "vrm_animation_v2",
         "state": "think",
-        "loop": true,
-        "reset_eyes": true,
-        "descriptor": {
-            "intro":  {"start_frame": 0,  "end_frame": 15},
-            "loop":   {"start_frame": 16, "end_frame": 60},
-            "outro":  {"start_frame": 61, "end_frame": 90},
-            "fps": 30
-        },
-
-.. note::
-   The descriptor object above comes directly from the companion
-   ``<animation>.fbx.json`` file located next to the FBX.  that file is
-   the *single source of truth* for loop/intro/outro timings, fps, and
-   related metadata; duplicating the same values elsewhere is a bug.
-   When no descriptor file exists, the handler synthesises sensible
-   defaults (idle animations loop, other states play once, and the
-   implicit loop section spans frames ``0``–``max``).
-
-        "animation_state": {
-            "action": "think",
-            "phase": "loop",
-            "animation": "/skins/Rei/animations/think/Thinking.fbx",
-            "descriptor": { "..." : "..." },
-            "clip": {"name": "Thinking", "duration": 1.47, "fps": 30.0},
-            "timing": {"started_at": "2026-03-04T12:00:00Z", "time_in_clip": 0.0, "current_frame": 0},
-            "expressions": [],
-            "blink": {"auto": true},
-            "eye_movement": {"auto": true},
-            "emotions": {"dominant": "happy", "values": {"happy": 7.5}},
-            "lipsync": false,
-            "priority": 10,
-            "source": "core"
-        }
+        "descriptor": "rei/think/thinking",
+        "started_at": 1778553555.180961,
+        "restore": true
     }
 
+The server no longer sends file paths, phase hints, frame ranges, or any other
+playback-control fields.  Clients resolve ``descriptor`` locally through the
+Karada manifest/resolver endpoints, then decide how to play the clip based on
+the descriptor metadata and the locally computed clock derived from
+``started_at``.
+
 .. note::
 
-    The key is ``"file"`` (not ``"animation"``).  The legacy ``"type": "animation"``
-    spelling is still accepted by ``chat-window.mjs`` for backwards compatibility,
-    but the backend always emits ``"vrm_animation"``.
-
-    ``reset_eyes`` is emitted only for **targeted** session plays (not broadcast), so
-    each client can perform a smooth eyes-reset when the animation changes.  It is
-    **not** included in global broadcasts (``session_id=None``).
-
-    ``animation_state`` is populated only when a descriptor and/or emotions are
-    available.  Clients should treat it as optional.
+    The descriptor data still comes from the companion ``<animation>.fbx.json``
+    file next to the FBX.  That JSON file remains the single source of truth for
+    intro/loop/outro timings, fps, and related metadata.
 
 ``vrm_model`` — Set active VRM model
 --------------------------------------
@@ -279,18 +248,18 @@ To clear the override and return to the emotional baseline:
     {"type": "vrm_expression_clear"}
 
 
-``preload_animation`` — Preload an animation file
----------------------------------------------------
+``vrm_preload`` — Preload an animation asset
+--------------------------------------------
 
 Asks the frontend to preload an FBX file in the background so it is ready when
-``vrm_animation`` requests it.  Up to 3 IDLE variants are pre-warmed before any
+``vrm_animation_v2`` requests it.  Up to 3 IDLE variants are pre-warmed before any
 non-IDLE animation plays (see ``ensure_idle_preloaded()``).
 
 .. code-block:: json
 
     {
-        "type": "preload_animation",
-        "animation": "/skins/Rei/animations/idle/Idle.fbx",
+        "type": "vrm_preload",
+        "file": "/skins/Rei/animations/idle/Idle.fbx",
         "descriptor": {
             "loop": {"start_frame": 0, "end_frame": 120},
             "fps": 30
@@ -299,22 +268,9 @@ non-IDLE animation plays (see ``ensure_idle_preloaded()``).
 
 .. note::
 
-    The message type is ``"preload_animation"`` and the URL key is ``"animation"``.
-
-``animation_state`` — Informational state summary
----------------------------------------------------
-
-A lightweight broadcast that communicates *what* is playing without necessarily
-triggering a re-play.  Used by clients that arrived after the original
-``vrm_animation`` command was sent and need to know the current state.
-
-.. code-block:: json
-
-    {
-        "type": "animation_state",
-        "state": "think",
-        "animation_file": "Thinking.fbx"
-    }
+    The preload packet is advisory only.  The authoritative runtime state still
+    comes from the ``vrm_animation_v2`` tuple and the `/api/karada/state` /
+    `/api/animation_state` polling endpoints.
 
 New-client handshake (hello / has_assets)
 ------------------------------------------
@@ -333,7 +289,7 @@ current state (VRM model + active animation + face values) is pushed via
 
 .. note::
 
-    All ``vrm_animation`` commands are broadcast to **all connected sessions**
+    All ``vrm_animation_v2`` commands are broadcast to **all connected sessions**
     (``session_id=None``), ensuring that every open WebUI window shows the
     same animation simultaneously.
 
@@ -402,8 +358,8 @@ The following public methods are available for plugins and interfaces.
 
         {
             "vrm_model":   {"name": "...", "url": "...", "hash": "..."},
-            "animation":   {"file": "...", "url": "...", "state": "idle",
-                            "loop": True, "descriptor": {...}},
+            "animation":   {"state": "idle", "descriptor": "rei/idle/idle",
+                            "started_at": 1778553555.180961},
             "face_values": {"happy": 0.0, ...},
             "audio":       {"url": "...", "audio_duration_s": 3.2,
                             "offset_s": 0.7, "lipsync_data": null}
@@ -703,9 +659,9 @@ They resume once the value drops below the threshold.
 Additionally, the ``eyes_closed`` value is **clamped to 0.85** to prevent
 visual artefacts (eyelash/cheek clipping).
 
-The backend emits ``"reset_eyes": true`` in every **targeted** (non-broadcast)
-``vrm_animation`` command so that the client can smoothly reset eye state when
-a new animation starts.
+Eye reset is now a purely client-side concern derived from the descriptor and
+local transition logic.  The transport no longer carries a dedicated
+``reset_eyes`` flag.
 
 Known Issues Fixed
 ==================
@@ -714,7 +670,7 @@ Stale ``window.animationHandler`` (idle-only animation)
 ---------------------------------------------------------
 
 **Symptom:** Only the Idle animation played; Think/Write state changes were logged by
-``chat-window.mjs`` (``vrm_animation received: think``) but ``[KaradaStateServer] startAction``
+``chat-window.mjs`` (``vrm_animation_v2 received: think``) but ``[KaradaStateServer] startAction``
 never appeared in the console.
 
 **Root cause:** ``window.animationHandler`` was set at module-load time (when

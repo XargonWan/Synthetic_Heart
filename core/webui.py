@@ -18,10 +18,13 @@ import re
 import threading
 import uuid
 import platform
+import tempfile
+import base64
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Deque, Dict, Optional, List, Any
+from urllib.parse import quote, unquote, urlparse
 
 from fastapi import (
     FastAPI,
@@ -58,6 +61,7 @@ import mimetypes
 
 BRAND_NAME = "Synthetic Heart"
 INTERFACE_NAME = "synth_webui"
+EXTERNAL_ENDPOINT_PROBE_TIMEOUT_SECONDS = 300.0
 
 # exposed configuration variable to toggle experimental multi-session mode
 register_exposed_var(
@@ -85,6 +89,8 @@ _LEGACY_AUTOSTART_ENV = "WEBWAIFU_AUTOSTART"
 _AUTOSTART_ENV = "SYNTH_WEBUI_AUTOSTART"
 _LEGACY_VRM_DIR_ENV = "WEBWAIFU_VRM_DIR"
 _VRM_DIR_ENV = "SYNTH_WEBUI_VRM_DIR"
+_WEBUI_TOUCH_CONTEXT_ID = "__webui_touch_overlay"
+_WEBUI_TOUCH_PRIORITY = 11
 
 
 # Ensure correct MIME types are registered
@@ -286,6 +292,63 @@ class SynthWebUIInterface:
         # initialise skin hint based on whatever active_vrm we found
         self._current_skin = self._derive_skin_from_active_vrm()
 
+        # Attachments storage: prefer explicit env var, then XDG_DATA_HOME,
+        # then a platform default. On Windows, /config becomes a drive-root
+        # path, so prefer a temp-backed local directory instead.
+        attachments_root = os.getenv("SYNTH_ATTACHMENTS_ROOT")
+        if attachments_root:
+            self.attachments_dir = Path(attachments_root).expanduser()
+            log_info(
+                f"{LOG_PREFIX} Using attachments directory from SYNTH_ATTACHMENTS_ROOT: {self.attachments_dir}",
+                log_file=WEBUI_LOG,
+            )
+        else:
+            xdg_data_home = os.getenv("XDG_DATA_HOME")
+            if xdg_data_home:
+                self.attachments_dir = Path(xdg_data_home).expanduser() / "attachments"
+                log_info(
+                    f"{LOG_PREFIX} Using attachments directory from XDG_DATA_HOME: {self.attachments_dir}",
+                    log_file=WEBUI_LOG,
+                )
+            elif os.name == "nt":
+                self.attachments_dir = (
+                    Path(tempfile.gettempdir()) / "synth_webui" / "attachments"
+                )
+                log_info(
+                    f"{LOG_PREFIX} Using Windows attachments directory: {self.attachments_dir}",
+                    log_file=WEBUI_LOG,
+                )
+            else:
+                self.attachments_dir = Path("/config") / "uploads"
+                log_info(
+                    f"{LOG_PREFIX} Using default attachments directory: {self.attachments_dir}",
+                    log_file=WEBUI_LOG,
+                )
+        try:
+            self.attachments_dir.mkdir(parents=True, exist_ok=True)
+        except Exception as exc:
+            log_warning(
+                f"{LOG_PREFIX} Could not create attachments directory {self.attachments_dir}: {exc}",
+                log_file=WEBUI_LOG,
+            )
+            fallback_dir = Path(tempfile.gettempdir()) / "synth_webui" / "attachments"
+            try:
+                fallback_dir.mkdir(parents=True, exist_ok=True)
+                self.attachments_dir = fallback_dir
+                log_info(
+                    f"{LOG_PREFIX} Falling back to attachments directory {self.attachments_dir}",
+                    log_file=WEBUI_LOG,
+                )
+                log_warning(
+                    f"{LOG_PREFIX} Uploaded files will not persist in temporary attachments directory {self.attachments_dir}",
+                    log_file=WEBUI_LOG,
+                )
+            except Exception as exc2:
+                log_warning(
+                    f"{LOG_PREFIX} Could not create fallback attachments directory {fallback_dir}: {exc2}",
+                    log_file=WEBUI_LOG,
+                )
+
         if static_dir.exists():
             self.app.mount(
                 "/static", StaticFiles(directory=str(static_dir)), name="static"
@@ -354,6 +417,7 @@ class SynthWebUIInterface:
                         path.startswith("/js/")
                         or path.startswith("/static/")
                         or path.startswith("/skins")
+                        or path.startswith("/uploads")
                     ):
                         # No store ensures proxies and browsers always revalidate.
                         response.headers["Cache-Control"] = "no-cache"
@@ -383,6 +447,20 @@ class SynthWebUIInterface:
                 log_warning(f"{LOG_PREFIX} Failed to mount /skins: {exc}")
         else:
             log_warning(f"{LOG_PREFIX} Skins directory not found: {skins_dir}")
+        if self.attachments_dir.exists():
+            try:
+                self.app.mount(
+                    "/uploads",
+                    StaticFiles(directory=str(self.attachments_dir)),
+                    name="synth-webui-uploads",
+                )
+                log_info(f"{LOG_PREFIX} Mounted /uploads to {self.attachments_dir}")
+            except Exception as exc:
+                log_warning(f"{LOG_PREFIX} Failed to mount /uploads: {exc}")
+        else:
+            log_warning(
+                f"{LOG_PREFIX} Attachments directory does not exist, /uploads endpoint NOT mounted"
+            )
         if self.vrm_dir.exists():
             try:
                 self.app.mount(
@@ -491,6 +569,15 @@ class SynthWebUIInterface:
         # Persona manager will be initialized in start() method after core initialization
         self.persona_manager = None
 
+        # Plugin extension points: JS content and API route handlers registered by plugins.
+        # Plugins call register_plugin_js() / register_plugin_api_route() from their start().
+        # Removing a plugin simply leaves these dicts empty — no core traces remain.
+        self._plugin_scripts: dict[str, str] = {}
+        self._plugin_api_routes: dict[str, Any] = {}
+        # Plugin section tabs: keyed by section name, each entry is a list of
+        # {"tab_id": str, "button_html": str, "panel_html": str} dicts.
+        self._plugin_section_tabs: dict[str, list[dict[str, str]]] = {}
+
         if self.autostart:
             log_info(
                 f"{LOG_PREFIX} Autostart enabled - will start server when event loop is available",
@@ -534,6 +621,7 @@ class SynthWebUIInterface:
         self.app.websocket("/logs")(self.logs_ws_endpoint)
         # Auris audio endpoints
         self.app.post("/api/audio/upload")(self.audio_upload_endpoint)
+        self.app.post("/api/chat/attachments")(self.chat_attachment_upload_endpoint)
         # helper endpoint for Vosk language selection (legacy compat, delegates to MODEL_MANAGER)
         self.app.post("/api/auris/vosk/download")(self.vosk_model_download)
         # Model management endpoints (SSOT: MODEL_MANAGER)
@@ -617,6 +705,8 @@ class SynthWebUIInterface:
         self.app.get("/api/history/diary")(self.history_diary)
         self.app.get("/api/history/grillo")(self.history_grillo)
         self.app.get("/api/history/chat")(self.history_chat)
+        self.app.get("/api/log-failures")(self.list_log_failures)
+        self.app.delete("/api/log-failures/{failure_id}")(self.delete_log_failure)
         self.app.get("/api/selkies")(self.get_selkies_config)
         self.app.get("/api/selkies/health")(self.get_selkies_health)
 
@@ -654,33 +744,21 @@ class SynthWebUIInterface:
         # Provide an internal endpoint implementation that doesn't rely on a
         # bound `get_animation_state` method at init time. This avoids
         # AttributeError in environments with dynamic reloads.
-        async def _animation_state_endpoint(request: Request = None):
+        async def _animation_state_endpoint():
             try:
                 if not getattr(self, "animation_handler", None):
                     return JSONResponse(
-                        {"state": "idle", "animation": None, "descriptor": None}
+                        {"state": "idle", "descriptor": None, "started_at": None}
                     )
 
                 current = self.animation_handler.get_current_animation_state()
-                animation_file = current.get("animation_file")
-                resolved = None
-                if animation_file:
-                    try:
-                        resolved, _ = (
-                            self.animation_handler._resolve_animation_descriptor(
-                                animation_file
-                            )
-                        )
-                    except Exception:
-                        resolved = animation_file
-
-                payload = {
-                    "state": current.get("state"),
-                    "animation": resolved,
-                    "descriptor": current.get("descriptor"),
-                    "animation_id": current.get("animation_id"),
-                }
-                return JSONResponse(payload)
+                return JSONResponse(
+                    {
+                        "state": current.get("state"),
+                        "descriptor": current.get("descriptor"),
+                        "started_at": current.get("started_at"),
+                    }
+                )
             except Exception as exc:
                 log_error(f"{LOG_PREFIX} animation_state endpoint failed: {exc}")
                 raise HTTPException(
@@ -698,6 +776,10 @@ class SynthWebUIInterface:
         # External endpoints (custom AI service connections)
         self.app.get("/api/external-endpoints")(self.list_external_endpoints)
         self.app.post("/api/external-endpoints")(self.create_external_endpoint)
+        # NOTE: /presets MUST be registered before /{ep_id} to avoid routing conflicts
+        self.app.get("/api/external-endpoints/presets")(
+            self.list_external_endpoint_presets
+        )
         self.app.get("/api/external-endpoints/{ep_id}")(self.get_external_endpoint)
         self.app.put("/api/external-endpoints/{ep_id}")(self.update_external_endpoint)
         self.app.delete("/api/external-endpoints/{ep_id}")(
@@ -721,11 +803,113 @@ class SynthWebUIInterface:
         self.app.put("/api/external-endpoints/{ep_id}/model")(
             self.set_external_endpoint_model
         )
+        self.app.post("/api/database/backup")(self.create_database_backup_endpoint)
 
         # Template sections route for modular loading
         self.app.get("/templates/{section}.html")(self.serve_template_section)
         # Endpoint serving an iframe host page for embedding sections inside an iframe
         self.app.get("/iframe/{section}")(self.iframe_host)
+
+        # Plugin dispatch middleware — handles JS files and API routes registered by
+        # plugins at runtime.  Added last so it runs first in the middleware stack,
+        # intercepting plugin-specific paths before the static-file mounts.
+        try:
+            from starlette.middleware.base import BaseHTTPMiddleware
+
+            class _PluginDispatchMiddleware(BaseHTTPMiddleware):
+                async def dispatch(inner_self, request, call_next):
+                    path = request.url.path
+
+                    # Serve registered plugin JS: GET /js/plugins/<name>.js
+                    if path.startswith("/js/plugins/") and path.endswith(".js"):
+                        plugin_name = path[len("/js/plugins/") : -len(".js")]
+                        content = self._plugin_scripts.get(plugin_name)
+                        if content is not None:
+                            from starlette.responses import Response
+
+                            return Response(
+                                content,
+                                media_type="application/javascript",
+                            )
+
+                    # Dispatch registered plugin API routes
+                    handler = self._plugin_api_routes.get(path)
+                    if handler is not None:
+                        import inspect
+                        from starlette.responses import JSONResponse
+                        from starlette.responses import Response as StarletteResponse
+
+                        sig = inspect.signature(handler)
+                        result = handler(request) if sig.parameters else handler()
+                        if inspect.isawaitable(result):
+                            result = await result
+                        if isinstance(result, StarletteResponse):
+                            return result
+                        return JSONResponse(result)
+
+                    return await call_next(request)
+
+            self.app.add_middleware(_PluginDispatchMiddleware)
+        except Exception as _mw_exc:
+            log_warning(
+                f"{LOG_PREFIX} Failed to add plugin dispatch middleware: {_mw_exc}"
+            )
+
+    # ------------------------------------------------------------------
+    # Plugin extension API
+    # ------------------------------------------------------------------
+
+    def register_plugin_js(self, name: str, js_content: str) -> None:
+        """Register a plugin's JS content to be served at /js/plugins/<name>.js.
+
+        The script tag ``<script src="/js/plugins/<name>.js" defer></script>`` is
+        injected automatically into every rendered index page.  Calling this
+        multiple times for the same *name* replaces the previous content.
+        """
+        self._plugin_scripts[name] = js_content
+        log_info(
+            f"{LOG_PREFIX} Plugin JS registered: '{name}' ({len(js_content)} bytes)",
+            log_file=WEBUI_LOG,
+        )
+
+    def register_plugin_api_route(self, path: str, handler: Any) -> None:
+        """Register an async or sync callable at *path* for GET requests.
+
+        The handler must return a JSON-serialisable value.  Registering the
+        same path again replaces the previous handler.
+        """
+        self._plugin_api_routes[path] = handler
+        log_info(
+            f"{LOG_PREFIX} Plugin API route registered: {path}",
+            log_file=WEBUI_LOG,
+        )
+
+    def register_plugin_section_tab(
+        self,
+        section: str,
+        tab_id: str,
+        button_html: str,
+        panel_html: str,
+    ) -> None:
+        """Register a sub-tab to be injected into a section template.
+
+        When ``/templates/<section>.html`` is served, the *button_html* snippet
+        is appended inside the ``<nav class="sub-nav">`` element and *panel_html*
+        is appended inside the ``.sub-tabs-container`` element.
+
+        Calling this multiple times with the same *tab_id* replaces the previous
+        registration.  Removing a plugin simply leaves the dict empty.
+        """
+        tabs = self._plugin_section_tabs.setdefault(section, [])
+        # Replace existing entry for this tab_id
+        self._plugin_section_tabs[section] = [t for t in tabs if t["tab_id"] != tab_id]
+        self._plugin_section_tabs[section].append(
+            {"tab_id": tab_id, "button_html": button_html, "panel_html": panel_html}
+        )
+        log_info(
+            f"{LOG_PREFIX} Plugin section tab registered: section='{section}' tab_id='{tab_id}'",
+            log_file=WEBUI_LOG,
+        )
 
     def _is_missing_agent_table_error(self, exc: Exception) -> bool:
         """Return True when agent tables are missing so endpoints can degrade gracefully."""
@@ -768,8 +952,9 @@ class SynthWebUIInterface:
                     f"{LOG_PREFIX} list_agent_tasks: agent_tasks table missing, returning empty list"
                 )
                 return JSONResponse({"tasks": []})
-            log_error(f"{LOG_PREFIX} list_agent_tasks failed: {e}")
-            raise HTTPException(status_code=500, detail=str(e))
+            error_msg = str(e)
+            log_error(f"{LOG_PREFIX} list_agent_tasks failed: {error_msg}")
+            raise HTTPException(status_code=500, detail=error_msg)
 
     async def get_agent_task(self, task_id: int):
         try:
@@ -801,8 +986,9 @@ class SynthWebUIInterface:
         except HTTPException:
             raise
         except Exception as e:
-            log_error(f"{LOG_PREFIX} get_agent_task failed: {e}")
-            raise HTTPException(status_code=500, detail=str(e))
+            error_msg = str(e)
+            log_error(f"{LOG_PREFIX} get_agent_task failed: {error_msg}")
+            raise HTTPException(status_code=500, detail=error_msg)
 
     async def create_agent_task(self, request: Request):
         try:
@@ -834,8 +1020,38 @@ class SynthWebUIInterface:
         except HTTPException:
             raise
         except Exception as e:
-            log_error(f"{LOG_PREFIX} create_agent_task failed: {e}")
-            raise HTTPException(status_code=500, detail=str(e))
+            error_msg = str(e)
+            log_error(f"{LOG_PREFIX} create_agent_task failed: {error_msg}")
+            raise HTTPException(status_code=500, detail=error_msg)
+
+    async def create_database_backup_endpoint(self):
+        try:
+            from core.db_backup import create_database_backup
+
+            backup_path = await create_database_backup(
+                reason="manual_webui",
+                force=True,
+            )
+            if backup_path is None:
+                raise HTTPException(
+                    status_code=500,
+                    detail="Manual database backup did not produce an output file",
+                )
+            return JSONResponse(
+                {
+                    "success": True,
+                    "path": str(backup_path),
+                    "filename": backup_path.name,
+                }
+            )
+        except HTTPException:
+            raise
+        except Exception as e:
+            error_msg = str(e)
+            log_error(
+                f"{LOG_PREFIX} create_database_backup_endpoint failed: {error_msg}"
+            )
+            raise HTTPException(status_code=500, detail=error_msg)
 
     async def pause_agent_task(self, task_id: int):
         try:
@@ -855,8 +1071,9 @@ class SynthWebUIInterface:
                     await conn.commit()
             return JSONResponse({"status": "paused"})
         except Exception as e:
-            log_error(f"{LOG_PREFIX} pause_agent_task failed: {e}")
-            raise HTTPException(status_code=500, detail=str(e))
+            error_msg = str(e)
+            log_error(f"{LOG_PREFIX} pause_agent_task failed: {error_msg}")
+            raise HTTPException(status_code=500, detail=error_msg)
 
     async def resume_agent_task(self, task_id: int):
         try:
@@ -875,8 +1092,9 @@ class SynthWebUIInterface:
                     await conn.commit()
             return JSONResponse({"status": "running"})
         except Exception as e:
-            log_error(f"{LOG_PREFIX} resume_agent_task failed: {e}")
-            raise HTTPException(status_code=500, detail=str(e))
+            error_msg = str(e)
+            log_error(f"{LOG_PREFIX} resume_agent_task failed: {error_msg}")
+            raise HTTPException(status_code=500, detail=error_msg)
 
     async def cancel_agent_task(self, task_id: int):
         try:
@@ -895,8 +1113,9 @@ class SynthWebUIInterface:
                     await conn.commit()
             return JSONResponse({"status": "cancelled"})
         except Exception as e:
-            log_error(f"{LOG_PREFIX} cancel_agent_task failed: {e}")
-            raise HTTPException(status_code=500, detail=str(e))
+            error_msg = str(e)
+            log_error(f"{LOG_PREFIX} cancel_agent_task failed: {error_msg}")
+            raise HTTPException(status_code=500, detail=error_msg)
 
     async def approve_agent_proposal(self, proposal_id: int, request: Request):
         try:
@@ -923,8 +1142,9 @@ class SynthWebUIInterface:
         except HTTPException:
             raise
         except Exception as e:
-            log_error(f"{LOG_PREFIX} approve_agent_proposal failed: {e}")
-            raise HTTPException(status_code=500, detail=str(e))
+            error_msg = str(e)
+            log_error(f"{LOG_PREFIX} approve_agent_proposal failed: {error_msg}")
+            raise HTTPException(status_code=500, detail=error_msg)
 
     async def list_agent_proposals(self, limit: int = 50):
         try:
@@ -955,12 +1175,13 @@ class SynthWebUIInterface:
                     f"{LOG_PREFIX} list_agent_proposals: agent_activity_log table missing, returning empty list"
                 )
                 return JSONResponse({"proposals": []})
-            log_error(f"{LOG_PREFIX} list_agent_proposals failed: {e}")
-            raise HTTPException(status_code=500, detail=str(e))
+            error_msg = str(e)
+            log_error(f"{LOG_PREFIX} list_agent_proposals failed: {error_msg}")
+            raise HTTPException(status_code=500, detail=error_msg)
 
     async def set_animation_state(self, request: Request):
         """Set the centralized animation state. Expected JSON:
-        {"state": "think|write|idle|talk", "session_id": "...", "loop": true}
+        {"state": "think|write|idle|talk|touch", "session_id": "...", "loop": true}
         """
         data = await request.json()
         state_str = data.get("state") if isinstance(data, dict) else None
@@ -979,6 +1200,24 @@ class SynthWebUIInterface:
         loop = bool(data.get("loop", True))
         context_id = data.get("context_id")
         source = data.get("source")
+        priority = data.get("priority")
+        if priority is not None:
+            try:
+                priority = int(priority)
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=400, detail="'priority' must be an integer"
+                ) from exc
+
+        if state_enum == AnimationState.TOUCH:
+            if "loop" not in data:
+                loop = False
+            if not context_id:
+                context_id = _WEBUI_TOUCH_CONTEXT_ID
+            if priority is None:
+                priority = _WEBUI_TOUCH_PRIORITY
+            if not source:
+                source = "webui.touch"
 
         try:
             await self.animation_handler.play_animation(
@@ -986,6 +1225,7 @@ class SynthWebUIInterface:
                 session_id=session_id,
                 loop=loop,
                 context_id=context_id,
+                priority=priority,
                 source=source,
             )
             return JSONResponse(
@@ -994,6 +1234,34 @@ class SynthWebUIInterface:
         except Exception as exc:
             log_error(f"{LOG_PREFIX} set_animation_state failed: {exc}")
             raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    async def _handle_touch_animation_request(
+        self, session_id: str, payload: Dict[str, Any]
+    ) -> None:
+        """Convert a WebUI touch interaction into an authoritative Karada state."""
+        if not self.animation_handler:
+            return
+
+        source = payload.get("source") or "webui.touch"
+        priority = payload.get("priority")
+        if not isinstance(priority, int):
+            priority = _WEBUI_TOUCH_PRIORITY
+
+        context_id = payload.get("context_id") or _WEBUI_TOUCH_CONTEXT_ID
+        touched_part = payload.get("mapped_part") or payload.get("part") or "unknown"
+        log_info(
+            f"{LOG_PREFIX} Touch interaction from session {session_id}: part={touched_part}, "
+            f"context={context_id}, priority={priority}"
+        )
+
+        await self.animation_handler.play_animation(
+            AnimationState.TOUCH,
+            session_id=None,
+            loop=False,
+            context_id=str(context_id),
+            priority=int(priority),
+            source=str(source),
+        )
 
     # ------------------------------------------------------------------
     # Interface metadata
@@ -1004,11 +1272,25 @@ class SynthWebUIInterface:
 
     @staticmethod
     def get_supported_actions() -> dict:
+        from plugins.vox_plugin import is_vox_enabled
+
+        vox_on = is_vox_enabled()
+
+        webui_optional = ["interface_path"]
+        webui_description = f"Send a reply to a {BRAND_NAME} session."
+        if vox_on:
+            webui_optional.append("send_as_voice")
+            webui_description += (
+                " send_as_voice defaults to false. Only set send_as_voice=true when "
+                "the user explicitly asked for a voice/audio reply, or when they "
+                "just spoke to you by voice. Otherwise reply as plain text."
+            )
+
         return {
             "message_synth_webui": {
                 "required_fields": ["text"],
-                "optional_fields": ["interface_path"],
-                "description": f"Send a text message to a {BRAND_NAME} session.",
+                "optional_fields": webui_optional,
+                "description": webui_description,
             },
             "message_mate_engine": {
                 "required_fields": ["text"],
@@ -1025,20 +1307,33 @@ class SynthWebUIInterface:
     @staticmethod
     def get_prompt_instructions(action_name: str) -> dict:
         if action_name == "message_synth_webui":
+            from plugins.vox_plugin import is_vox_enabled
+
+            vox_on = is_vox_enabled()
+
+            payload = {
+                "text": {
+                    "type": "string",
+                    "example": "Ciao!",
+                    "description": "Message content to deliver",
+                },
+                "target": {
+                    "type": "string",
+                    "example": "session-id",
+                    "description": "Session identifier returned by the websocket",
+                },
+            }
+            if vox_on:
+                payload["send_as_voice"] = {
+                    "type": "boolean",
+                    "example": True,
+                    "description": "Optional, defaults to false. When true, your 'text' is synthesised and the avatar speaks it aloud (with the text shown as the caption bubble). Voice synthesis is slow, so use it SPARINGLY: only set it when the user EXPLICITLY asked to be answered with voice/audio (in any language), or when the user just spoke to you by voice. Do NOT set it just because it might be nice. For every ordinary reply, leave it out (or false) and answer as plain text.",
+                    "optional": True,
+                }
+
             return {
                 "description": f"Send a message to the {BRAND_NAME} browser client.",
-                "payload": {
-                    "text": {
-                        "type": "string",
-                        "example": "Ciao!",
-                        "description": "Message content to deliver",
-                    },
-                    "target": {
-                        "type": "string",
-                        "example": "session-id",
-                        "description": "Session identifier returned by the websocket",
-                    },
-                },
+                "payload": payload,
             }
         if action_name == "message_mate_engine":
             return {
@@ -1151,6 +1446,25 @@ class SynthWebUIInterface:
             replacements["%%VOX_ENABLED%%"] = "true" if _vox_enabled else "false"
             replacements["%%VOX_AUDIO_CACHE_SIZE%%"] = str(_vox_cache)
 
+            # Iris enabled flag exposed to the WebUI client. Attachments require
+            # the Iris subsystem to be available in the current session.
+            try:
+                active_iris = str(
+                    config_registry.get_value(
+                        "ACTIVE_IRIS_ENGINE",
+                        "disabled",
+                        label="Active Iris Engine",
+                        description="Name of the active Iris vision engine. Set to 'disabled' to turn off the Iris subsystem.",
+                        value_type=str,
+                        group="plugins",
+                        component="iris_plugin",
+                    )
+                )
+                _iris_enabled = bool(active_iris and active_iris != "disabled")
+            except Exception:
+                _iris_enabled = False
+            replacements["%%IRIS_ENABLED%%"] = "true" if _iris_enabled else "false"
+
             # Accent color config + presets (exposed to client as runtime config)
             try:
                 accent = str(config_registry.get_value("WEBUI_ACCENT_COLOR", "#6bfefe"))
@@ -1169,6 +1483,16 @@ class SynthWebUIInterface:
 
             for placeholder, value in replacements.items():
                 template = template.replace(placeholder, value)
+
+            # Inject script tags for registered plugins right before </body>.
+            # _plugin_scripts is populated lazily when plugins call
+            # register_plugin_js(); re-reading per request is intentional (no cache).
+            if self._plugin_scripts:
+                extra = "".join(
+                    f'<script src="/js/plugins/{name}.js" defer></script>\n'
+                    for name in self._plugin_scripts
+                )
+                template = template.replace("</body>", f"{extra}</body>", 1)
 
             return template
 
@@ -1431,7 +1755,9 @@ class SynthWebUIInterface:
         sessions = len(self.connections)
         python_version = platform.python_version()
         platform_label = os.getenv("SYNTH_HOST_OS") or platform.platform()
-        database_label = os.getenv("SYNTH_DB_TYPE", os.getenv("DB_TYPE", "unknown"))
+        database_label = os.getenv("SYNTH_PRIMARY_DB") or os.getenv(
+            "SYNTH_DB_TYPE", os.getenv("DB_TYPE", "unknown")
+        )
         version = os.getenv("SYNTH_VERSION", self.app.version)
         components_count = 0
         try:
@@ -1584,7 +1910,15 @@ class SynthWebUIInterface:
 
         delivered = 0
         errors: List[str] = []
-        for session_id in list(self.connections.keys()):
+        # Deduplicate on the *logical* session id: several spectator sockets may
+        # share one session (Karada v2), but the action pipeline must run once
+        # per logical session, not once per physical socket.
+        logical_sessions = list(
+            dict.fromkeys(
+                self._logical_session_id(key) for key in self.connections.keys()
+            )
+        )
+        for session_id in logical_sessions:
             interface_path = f"{INTERFACE_NAME}/{session_id}"
 
             # Build the action list.  Use clean_text (tags already stripped).
@@ -1706,6 +2040,8 @@ class SynthWebUIInterface:
     async def serve_template_section(self, section: str):
         """Serve modular template sections for dynamic loading."""
         try:
+            import time
+
             # Validate section name to prevent path traversal
             allowed_sections = {
                 "home",
@@ -1714,11 +2050,12 @@ class SynthWebUIInterface:
                 "diary",
                 "history",
                 "config",
-                "components",
+                "plugins",
                 "settings",
                 "about",
                 "navbar",
                 "agent",
+                "engines",
                 "external_engines",
             }
             if section not in allowed_sections:
@@ -1744,10 +2081,26 @@ class SynthWebUIInterface:
             # Apply basic replacements
             replacements = {
                 "%%BRAND_NAME%%": BRAND_NAME,
+                # cache-busting token so section scripts refresh on each render
+                "%%STATIC_VERSION%%": str(int(time.time())),
             }
 
             for key, value in replacements.items():
                 template = template.replace(key, str(value))
+
+            # Inject plugin-registered sub-tabs for this section
+            section_tabs = self._plugin_section_tabs.get(section, [])
+            for tab in section_tabs:
+                # Append button inside <nav class="sub-nav">
+                template = template.replace(
+                    "</nav>", tab["button_html"] + "\n</nav>", 1
+                )
+                # Append panel inside .sub-tabs-container (anchored by closing comment)
+                template = template.replace(
+                    "</div><!-- .sub-tabs-container -->",
+                    tab["panel_html"] + "\n      </div><!-- .sub-tabs-container -->",
+                    1,
+                )
 
             return HTMLResponse(content=template)
 
@@ -1882,7 +2235,19 @@ class SynthWebUIInterface:
             # history survives container restarts without any file/DB dependency.
             session_id = "webui_default"
             self.session_id = session_id
-        self.connections[session_id] = websocket
+        # Karada v2 shared-state model: every connected client is a *spectator*
+        # of the same unique Synth character. The logical ``session_id`` (chat
+        # history / interface_path identity) is intentionally shared in
+        # single-session mode, but each physical socket must be registered under
+        # a *unique* connection key — otherwise a second WebUI overwrites the
+        # first in ``self.connections`` and only the last client receives
+        # animation/face/expression broadcasts. In multi-session mode the two
+        # values coincide (unique UUID per client).
+        if self._multi_session_enabled():
+            conn_key = session_id
+        else:
+            conn_key = f"{session_id}:{uuid.uuid4().hex}"
+        self.connections[conn_key] = websocket
         self.message_history.setdefault(session_id, deque(maxlen=self.max_history))
         await websocket.send_json({"type": "session", "session_id": session_id})
         # Ensure persisted history is loaded into memory and replayed
@@ -1892,7 +2257,9 @@ class SynthWebUIInterface:
             log_debug(
                 f"{LOG_PREFIX} Failed to load persisted history for {session_id}: {e}"
             )
-        await self._replay_history(session_id)
+        # Replay only to *this* freshly connected socket so already-connected
+        # spectators of the shared session don't receive duplicate history.
+        await self._replay_history(session_id, websocket=websocket)
 
         # ------------------------------------------------------------------
         # Hello handshake: wait briefly for the client to declare its
@@ -1953,15 +2320,13 @@ class SynthWebUIInterface:
 
                 # 2) Current animation (if any)
                 anim = full_state.get("animation", {})
-                if anim.get("file"):
+                if anim.get("descriptor"):
                     await websocket.send_json(
                         {
-                            "type": "vrm_animation",
-                            "file": anim.get("url") or anim.get("file"),
+                            "type": "vrm_animation_v2",
                             "state": anim.get("state", "idle"),
-                            "loop": anim.get("loop", True),
                             "descriptor": anim.get("descriptor"),
-                            "animation_id": anim.get("animation_id"),
+                            "started_at": anim.get("started_at"),
                             "restore": True,
                         }
                     )
@@ -1975,7 +2340,7 @@ class SynthWebUIInterface:
                     await websocket.send_json({"type": "vrm_face", "values": face})
 
                 # 5) If no animation is set yet, start idle
-                if not anim.get("file") and self.persona_manager:
+                if not anim.get("descriptor") and self.persona_manager:
                     await self.persona_manager.set_animation_state("idle")
                     log_debug(f"{LOG_PREFIX} Started idle animation for first session")
         except Exception as push_exc:
@@ -1997,25 +2362,55 @@ class SynthWebUIInterface:
                 msg_type = payload.get("type")
                 if msg_type in ("hello",):
                     continue
+                if msg_type == "touch":
+                    try:
+                        await self._handle_touch_animation_request(session_id, payload)
+                    except Exception as touch_exc:
+                        log_warning(
+                            f"{LOG_PREFIX} Failed to handle touch interaction from {session_id}: {touch_exc}"
+                        )
+                    continue
 
                 text = (payload.get("text") or "").strip()
-                if not text:
+                attachments = payload.get("attachments") or []
+                if not text and not attachments:
                     continue
                 is_voice_input = bool(payload.get("is_voice_input", False))
-                await self._append_history(session_id, "user", text)
+                normalized_attachments = [
+                    self._normalize_webui_attachment(att) for att in attachments
+                ]
+                metadata = (
+                    {"attachments": normalized_attachments}
+                    if normalized_attachments
+                    else None
+                )
+                await self._append_history(session_id, "user", text, metadata=metadata)
                 # Process message in background to avoid blocking WebSocket
                 asyncio.create_task(
                     self._handle_user_message(
-                        session_id, text, is_voice_input=is_voice_input
+                        session_id,
+                        text,
+                        attachments=normalized_attachments,
+                        is_voice_input=is_voice_input,
                     )
                 )
         except WebSocketDisconnect:
-            log_info(f"{LOG_PREFIX} Client disconnected: {session_id}")
+            log_info(
+                f"{LOG_PREFIX} Client disconnected: {session_id} (conn={conn_key})"
+            )
         except Exception as exc:  # pragma: no cover - runtime issues
             log_error(f"{LOG_PREFIX} websocket error: {exc}")
         finally:
-            self.connections.pop(session_id, None)
-            self.message_history.pop(session_id, None)
+            # Remove only this physical socket. In single-session mode the
+            # logical history is shared across all spectator clients, so only
+            # drop it once the last connection for this session_id is gone.
+            self.connections.pop(conn_key, None)
+            still_connected = any(
+                key == session_id or key.startswith(f"{session_id}:")
+                for key in self.connections
+            )
+            if not still_connected:
+                self.message_history.pop(session_id, None)
 
     async def logs_ws_endpoint(
         self, websocket: WebSocket
@@ -2225,6 +2620,43 @@ class SynthWebUIInterface:
         except Exception as exc:
             log_error(f"{LOG_PREFIX} audio_upload_endpoint error: {exc}")
             return JSONResponse({"error": str(exc)}, status_code=500)
+
+    # ------------------------------------------------------------------
+    # WebUI chat attachment upload endpoint
+    # ------------------------------------------------------------------
+
+    async def chat_attachment_upload_endpoint(
+        self,
+        file: UploadFile = File(...),
+    ):
+        """POST /api/chat/attachments — store a user attachment for WebUI chat."""
+        if not file or not file.filename:
+            raise HTTPException(status_code=400, detail="No file uploaded")
+
+        filename = Path(file.filename).name
+        safe_name = f"{uuid.uuid4().hex}_{filename}"
+        destination = self.attachments_dir / safe_name
+        try:
+            with destination.open("wb") as fh:
+                while True:
+                    chunk = await file.read(1 << 20)
+                    if not chunk:
+                        break
+                    fh.write(chunk)
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to store chat attachment: {exc}")
+            raise HTTPException(status_code=500, detail="Failed to store uploaded file")
+
+        file_url = f"/uploads/{quote(safe_name)}"
+        return JSONResponse(
+            {
+                "status": "ok",
+                "url": file_url,
+                "filename": filename,
+                "mime_type": file.content_type or "application/octet-stream",
+                "size": destination.stat().st_size,
+            }
+        )
 
     # ------------------------------------------------------------------
     # Vox metadata/sample endpoints
@@ -2830,39 +3262,128 @@ class SynthWebUIInterface:
         animation_file: str,
         descriptor: Optional[Dict[str, Any]],
     ) -> None:
-        """No-op stub kept for external plugin compatibility.
+        """Broadcast a lightweight animation-state summary to connected clients."""
+        if not self.connections:
+            return
 
-        Lightweight state summaries are superseded by the ``vrm_face`` channel
-        for emotion data and ``vrm_animation`` for animation state.
-        """
+        current: Dict[str, Any] = {}
+        if self.animation_handler:
+            try:
+                current = self.animation_handler.get_current_animation_state() or {}
+            except Exception:
+                current = {}
+
+        animation_state = {
+            "descriptor": current.get("descriptor"),
+            "started_at": current.get("started_at"),
+            "expressions": descriptor.get("expressions")
+            if isinstance(descriptor, dict)
+            else None,
+            "blink": descriptor.get("blink") if isinstance(descriptor, dict) else None,
+            "eye_movement": (
+                descriptor.get("eye_movement") if isinstance(descriptor, dict) else None
+            ),
+            "emotions": None,
+            "lipsync": (
+                descriptor.get("lipsync")
+                if isinstance(descriptor, dict) and "lipsync" in descriptor
+                else False
+            ),
+        }
+
+        emotions = None
+        try:
+            emotion_mgr = None
+            emotion_manager_cls = None
+            try:
+                from plugins.emotion_manager import EmotionManager
+
+                emotion_manager_cls = EmotionManager
+            except Exception:
+                emotion_manager_cls = None
+
+            try:
+                from core.core_initializer import PLUGIN_REGISTRY
+
+                if isinstance(PLUGIN_REGISTRY, dict):
+                    candidate = PLUGIN_REGISTRY.get("emotion_manager")
+                    if candidate is not None and hasattr(
+                        candidate, "get_emotion_state"
+                    ):
+                        if emotion_manager_cls is None or isinstance(
+                            candidate, emotion_manager_cls
+                        ):
+                            emotion_mgr = candidate
+            except Exception:
+                emotion_mgr = None
+
+            if emotion_mgr is None and emotion_manager_cls is not None:
+                try:
+                    emotion_mgr = emotion_manager_cls()
+                except Exception:
+                    emotion_mgr = None
+
+            emotions_raw = None
+            if emotion_mgr is not None and hasattr(emotion_mgr, "get_emotion_state"):
+                emotions_raw_maybe = emotion_mgr.get_emotion_state()
+                emotions_raw = (
+                    await emotions_raw_maybe
+                    if asyncio.iscoroutine(emotions_raw_maybe)
+                    else emotions_raw_maybe
+                )
+
+            if isinstance(emotions_raw, dict) and emotions_raw:
+                emotions_filtered = {
+                    key: value
+                    for key, value in emotions_raw.items()
+                    if isinstance(value, (int, float)) and value >= 0.1
+                }
+                if emotions_filtered:
+                    dominant, _ = max(
+                        emotions_filtered.items(), key=lambda item: item[1]
+                    )
+                    emotions = {
+                        "dominant": dominant,
+                        "values": emotions_filtered,
+                    }
+        except Exception:
+            emotions = None
+
+        animation_state["emotions"] = emotions
+
+        message = {
+            "type": "animation_state",
+            "state": current.get("state") or getattr(state, "value", state),
+            "descriptor": current.get("descriptor"),
+            "started_at": current.get("started_at"),
+            "animation_state": animation_state,
+        }
+
+        for session_id, websocket in list(self.connections.items()):
+            try:
+                await websocket.send_json(message)
+            except Exception as exc:
+                log_warning(
+                    f"{LOG_PREFIX} Failed to broadcast animation state to {session_id}: {exc}"
+                )
 
     async def get_animation_state(self):
         """HTTP endpoint that returns a lightweight animation state summary.
 
         This endpoint is used by clients to query the current canonical
-        animation state (state name, resolved animation path and descriptor).
+        animation state tuple (state name, descriptor id, started_at).
         """
         try:
             if not self.animation_handler:
                 return JSONResponse(
-                    {"state": "idle", "animation": None, "descriptor": None}
+                    {"state": "idle", "descriptor": None, "started_at": None}
                 )
 
             current = self.animation_handler.get_current_animation_state()
-            animation_file = current.get("animation_file")
-            resolved = None
-            if animation_file:
-                try:
-                    resolved, _ = self.animation_handler._resolve_animation_descriptor(
-                        animation_file
-                    )
-                except Exception:
-                    resolved = animation_file
-
             payload = {
                 "state": current.get("state"),
-                "animation": resolved,
                 "descriptor": current.get("descriptor"),
+                "started_at": current.get("started_at"),
             }
             return JSONResponse(payload)
         except Exception as exc:
@@ -2871,16 +3392,76 @@ class SynthWebUIInterface:
                 status_code=500, detail=f"Failed to retrieve animation state: {exc}"
             ) from exc
 
+    def _normalize_webui_attachment(self, attachment: dict[str, Any]) -> dict[str, Any]:
+        """Normalize WebUI attachment metadata for local engine ingestion."""
+        if not isinstance(attachment, dict):
+            return attachment
+
+        url = attachment.get("url")
+        if not isinstance(url, str):
+            return attachment
+
+        parsed = urlparse(url)
+        if parsed.path.startswith("/uploads/"):
+            file_name = Path(unquote(parsed.path[len("/uploads/") :])).name
+            if file_name:
+                local_path = self.attachments_dir / file_name
+                normalized = dict(attachment)
+                normalized["path"] = str(local_path)
+                normalized["file_path"] = str(local_path)
+                if local_path.exists() and local_path.is_file():
+                    try:
+                        content = local_path.read_bytes()
+                        normalized["data"] = base64.b64encode(content).decode("utf-8")
+                        normalized["mime_type"] = normalized.get(
+                            "mime_type",
+                            mimetypes.guess_type(str(local_path))[0]
+                            or "application/octet-stream",
+                        )
+                        normalized["size"] = normalized.get("size", len(content))
+                    except Exception as exc:
+                        log_warning(
+                            f"{LOG_PREFIX} Failed to inline chat attachment data: {exc}"
+                        )
+                log_debug(
+                    f"{LOG_PREFIX} Normalized webui attachment: filename={file_name}, "
+                    f"mime_type={normalized.get('mime_type')}, "
+                    f"size={normalized.get('size')}, "
+                    f"path={normalized.get('path')}, "
+                    f"inlined_data={'data' in normalized}"
+                )
+                return normalized
+
+        return attachment
+
     async def _handle_user_message(
-        self, session_id: str, text: str, is_voice_input: bool = False
+        self,
+        session_id: str,
+        text: str,
+        attachments: list[dict[str, Any]] | None = None,
+        is_voice_input: bool = False,
     ) -> None:
         from types import SimpleNamespace
         from core.config import TRAINER_NAME
         from core import message_queue
 
+        normalized_attachments = [
+            self._normalize_webui_attachment(att) for att in (attachments or [])
+        ]
+
         log_info(
             f"{LOG_PREFIX} [_handle_user_message] START: session_id={session_id}, text_len={len(text)}, text={text[:100]}"
         )
+        log_debug(
+            f"{LOG_PREFIX} [_handle_user_message] normalized_attachments={len(normalized_attachments)}"
+        )
+        for att in normalized_attachments:
+            log_debug(
+                f"{LOG_PREFIX} [_handle_user_message] attachment metadata: "
+                f"filename={att.get('filename')}, mime_type={att.get('mime_type')}, "
+                f"size={att.get('size')}, path={att.get('path')}, "
+                f"has_data={'data' in att}"
+            )
 
         # Get trainer name for the user
         trainer_name = (
@@ -2894,6 +3475,7 @@ class SynthWebUIInterface:
             interface_path=f"{INTERFACE_NAME}/{session_id}",  # Add interface_path for proper routing
             message_id=int(datetime.utcnow().timestamp() * 1000) % 1_000_000,
             text=text,
+            attachments=normalized_attachments or [],
             is_voice_input=is_voice_input,
             date=datetime.utcnow(),
             from_user=SimpleNamespace(
@@ -3048,14 +3630,24 @@ class SynthWebUIInterface:
                     f"{LOG_PREFIX} Failed to send response to session {session_id}: {send_exc}"
                 )
 
-    async def _replay_history(self, session_id: str) -> None:
+    async def _replay_history(
+        self, session_id: str, websocket: Optional["WebSocket"] = None
+    ) -> None:
         history = self.message_history.get(session_id)
         if not history:
             log_debug(
                 f"{LOG_PREFIX} _replay_history: no history for session {session_id}"
             )
             return
-        websocket = self.connections.get(session_id)
+        # A single logical session may be watched by several spectator sockets
+        # registered under keys like ``webui_default:<hex>`` (single-session
+        # mode). ``self.connections.get(session_id)`` would miss those, so when
+        # no explicit socket is supplied resolve the first live socket for the
+        # logical session. Replay is per-connection to avoid duplicating the
+        # history on clients that are already connected.
+        if websocket is None:
+            targets = self._sockets_for_session(session_id)
+            websocket = targets[0][1] if targets else None
         if not websocket:
             log_debug(
                 f"{LOG_PREFIX} _replay_history: no websocket for session {session_id}"
@@ -3100,6 +3692,9 @@ class SynthWebUIInterface:
                     replay_payload["data"] = {"tts_url": tts_url}
                 else:
                     replay_payload["data"] = meta
+                attachments = meta.get("attachments")
+                if attachments:
+                    replay_payload["attachments"] = attachments
             await websocket.send_json(replay_payload)
         log_info(
             f"{LOG_PREFIX} _replay_history: sent {len(history)} messages to session {session_id}"
@@ -3111,6 +3706,7 @@ class SynthWebUIInterface:
         sender: str,
         text: str,
         metadata: dict[str, Any] | None = None,
+        skip_history: bool = False,
     ) -> None:
         history = self.message_history.setdefault(
             session_id, deque(maxlen=self.max_history)
@@ -3148,35 +3744,62 @@ class SynthWebUIInterface:
         history.append(msg)
 
         # Persist to chat_history_cache for long-term storage
-        try:
-            from core.chat_history_cache import save_chat_message
-
-            # Normalize sender_name for DB storage: we want to store "self" as the
-            # canonical name for the SyntH agent so that restore/replay can map
-            # it back to "synth" for WS payloads. This avoids misattribution
-            # where stored value "synth" would be considered a user on replay.
-            db_sender_name = sender
+        if not skip_history:
             try:
-                if isinstance(sender, str) and sender.lower() in (
-                    "synth",
-                    "bot",
-                    "synth_webui",
-                ):
-                    db_sender_name = "self"
-            except Exception:
-                db_sender_name = sender
+                from core.chat_history_cache import save_chat_message
 
-            await save_chat_message(
-                interface_path,
-                text,
-                sender_name=db_sender_name,
-                sender_id=session_id,
-                timestamp=datetime.now(timezone.utc).isoformat(),
-            )
-        except Exception as e:
-            log_debug(
-                f"{LOG_PREFIX} Failed to persist chat message for {session_id}: {e}"
-            )
+                # Normalize sender_name for DB storage: we want to store "self" as the
+                # canonical name for the SyntH agent so that restore/replay can map
+                # it back to "synth" for WS payloads. This avoids misattribution
+                # where stored value "synth" would be considered a user on replay.
+                db_sender_name = sender
+                try:
+                    if isinstance(sender, str) and sender.lower() in (
+                        "synth",
+                        "bot",
+                        "synth_webui",
+                    ):
+                        db_sender_name = "self"
+                except Exception:
+                    db_sender_name = sender
+
+                await save_chat_message(
+                    interface_path,
+                    text,
+                    sender_name=db_sender_name,
+                    sender_id=session_id,
+                    timestamp=datetime.now(timezone.utc).isoformat(),
+                )
+            except Exception as e:
+                log_debug(
+                    f"{LOG_PREFIX} Failed to persist chat message for {session_id}: {e}"
+                )
+
+    def _logical_session_id(self, conn_key: str) -> str:
+        """Map a physical connection key back to its logical session id.
+
+        In single-session mode a socket is registered under a composite key
+        ``"<session_id>:<socket-uuid>"`` so that multiple spectator clients can
+        coexist without overwriting each other (Karada v2 shared-state model).
+        This strips the ``:<socket-uuid>`` suffix to recover the shared logical
+        ``session_id`` used for chat history / interface_path. In multi-session
+        mode keys have no suffix and are returned unchanged.
+        """
+        return conn_key.split(":", 1)[0] if ":" in conn_key else conn_key
+
+    def _sockets_for_session(self, session_id: str) -> "list[tuple[str, WebSocket]]":
+        """Return all live ``(conn_key, websocket)`` pairs for a logical session.
+
+        A logical session may be observed by several spectator clients that each
+        hold their own physical socket. Outbound messages for a shared avatar
+        (text, audio, animation) must reach every one of them, so callers should
+        iterate this list instead of doing a single ``connections.get(id)``.
+        """
+        return [
+            (key, ws)
+            for key, ws in self.connections.items()
+            if self._logical_session_id(key) == session_id
+        ]
 
     def _multi_session_enabled(self) -> bool:
         """Return True if the experimental multi-session flag is active.
@@ -3299,22 +3922,26 @@ class SynthWebUIInterface:
     async def _ensure_session_history_loaded(self, session_id: str) -> None:
         """Load persisted chat history for the given session into self.message_history.
 
-        This uses core.chat_context_manager.load_chat_history to rehydrate memory
-        and then makes sure self.message_history references the same deque.
+        This keeps the LLM context rehydration path intact, but restores the
+        WebUI-visible session history from the persisted cache using the WebUI's
+        own max_history limit instead of the smaller prompt-context deque.
         """
         try:
-            from core.chat_context_manager import (
-                load_chat_history,
-                get_or_create_chat_context,
-            )
+            from core.chat_context_manager import load_chat_history as load_context
+            from core.chat_history_cache import load_chat_history as load_persisted
 
             interface_path = f"{INTERFACE_NAME}/{session_id}"
-            await load_chat_history(interface_path)
-            ctx = get_or_create_chat_context(interface_path)
-            # Ensure local message_history points to the same deque
-            self.message_history[session_id] = ctx
+            await load_context(interface_path)
+            persisted_history = await load_persisted(
+                interface_path,
+                limit=self.max_history,
+            )
+            self.message_history[session_id] = deque(
+                persisted_history,
+                maxlen=self.max_history,
+            )
             log_debug(
-                f"{LOG_PREFIX} Session history for {session_id} loaded, {len(ctx)} messages"
+                f"{LOG_PREFIX} Session history for {session_id} loaded, {len(self.message_history[session_id])} messages"
             )
         except Exception as e:
             log_debug(
@@ -3339,7 +3966,11 @@ class SynthWebUIInterface:
         if isinstance(payload_or_chat_id, dict):
             payload = payload_or_chat_id
             # Accept both "text" (standard) and "value" (legacy synthetic-action mapping)
-            text = payload.get("text") or payload.get("value") or text
+            payload_text = (
+                payload.get("text") or payload.get("value") or payload.get("content")
+            )
+            if payload_text is not None:
+                text = payload_text
             chat_id = (
                 payload.get("interface_path")
                 or payload.get("target")
@@ -3354,6 +3985,14 @@ class SynthWebUIInterface:
                 text = kwargs.get("text")
             if metadata is None and isinstance(kwargs.get("metadata"), dict):
                 metadata = kwargs.get("metadata")
+
+        # Guard against accidental object leakage (e.g. original_message passed as
+        # positional arg by callers). Only strings are valid outbound message text.
+        if text is not None and not isinstance(text, str):
+            log_warning(
+                f"{LOG_PREFIX} send_message got non-string text type={type(text).__name__}; dropping"
+            )
+            return
 
         if not text or not chat_id:
             log_warning(f"{LOG_PREFIX} send_message missing text or chat_id")
@@ -3370,7 +4009,11 @@ class SynthWebUIInterface:
                 chat_id = session_id
 
         session_id = str(chat_id)
-        websocket = self.connections.get(session_id)
+        # Karada v2 shared-state: a logical session may be watched by several
+        # spectator sockets. Collect *all* of them so the message reaches every
+        # viewer, not just the one whose key happens to equal session_id.
+        targets = self._sockets_for_session(session_id)
+        websocket = targets[0][1] if targets else None
         if not websocket:
             try:
                 from core.config_manager import config_registry
@@ -3393,8 +4036,9 @@ class SynthWebUIInterface:
                             log_debug(
                                 f"{LOG_PREFIX} 🔀 Alias redirect: {session_id} -> {candidate}"
                             )
-                            websocket = self.connections[candidate]
-                            session_id = candidate
+                            session_id = self._logical_session_id(candidate)
+                            targets = self._sockets_for_session(session_id)
+                            websocket = targets[0][1] if targets else None
                             break
             except Exception as e:
                 log_debug(f"{LOG_PREFIX} Alias resolution check failed: {e}")
@@ -3426,28 +4070,42 @@ class SynthWebUIInterface:
             writing_action_id = existing_writing[-1]
             writing_pushed = True
 
-        # If websocket is present attempt to send; otherwise persist for later replay
-        if websocket:
-            try:
-                payload: Dict[str, Any] = {
-                    "type": "message",
-                    "sender": "synth",
-                    "text": text,
-                }
-                # Forward metadata fields that the client can use (e.g. tts_url).
-                if metadata and metadata.get("tts_url"):
-                    payload["tts_url"] = metadata["tts_url"]
-                    # Also include in `data` for clients that expect it there.
-                    payload["data"] = {"tts_url": metadata["tts_url"]}
+        # Normalize metadata before websocket/history/DB use to avoid serialization errors.
+        safe_metadata = self._clean_for_json(metadata) if metadata is not None else None
 
-                await websocket.send_json(payload)
-            except Exception as e:
-                log_warning(
-                    f"{LOG_PREFIX} Failed to send websocket message to {session_id}: {e}"
-                )
+        # If websocket is present attempt to send; otherwise persist for later replay.
+        # Broadcast to every spectator socket of this logical session so all
+        # viewers of the shared avatar see the same message bubble.
+        if websocket:
+            payload: Dict[str, Any] = {
+                "type": "message",
+                "sender": "synth",
+                "text": text,
+            }
+            # Forward attachments if present so the WebUI can render them.
+            if metadata and isinstance(metadata.get("attachments"), list):
+                payload["attachments"] = metadata["attachments"]
+                # Keep attachments accessible under `data` for compatibility.
+                payload.setdefault("data", {})["attachments"] = metadata["attachments"]
+
+            # Forward metadata fields that the client can use (e.g. tts_url).
+            if safe_metadata and safe_metadata.get("tts_url"):
+                payload["tts_url"] = safe_metadata["tts_url"]
+                payload.setdefault("data", {})["tts_url"] = safe_metadata["tts_url"]
+
+            clean_payload = self._clean_for_json(payload)
+            for target_key, target_ws in targets:
+                try:
+                    await target_ws.send_json(clean_payload)
+                except Exception as e:
+                    log_warning(
+                        f"{LOG_PREFIX} Failed to send websocket message to {target_key}: {e}"
+                    )
 
         # Append to in-memory history so reconnect will replay it
-        await self._append_history(session_id, "synth", text, metadata=metadata)
+        await self._append_history(
+            session_id, "synth", text, metadata=safe_metadata, skip_history=skip_history
+        )
 
         # Save SyntH's response via core chat_context_manager
         if not skip_history:
@@ -3455,7 +4113,9 @@ class SynthWebUIInterface:
                 from core.chat_context_manager import save_response_message
 
                 msg_interface_path = f"{INTERFACE_NAME}/{chat_id}"
-                await save_response_message(msg_interface_path, text, metadata=metadata)
+                await save_response_message(
+                    msg_interface_path, text, metadata=safe_metadata
+                )
             except Exception as e:
                 log_debug(
                     f"{LOG_PREFIX} Failed to save response via context_manager: {e}"
@@ -3552,21 +4212,9 @@ class SynthWebUIInterface:
             if len(parts) >= 2 and parts[0] == INTERFACE_NAME:
                 sid = parts[1]
 
-        websocket = self.connections.get(sid)
-        if not websocket:
+        if not self._sockets_for_session(sid):
             log_warning(f"{LOG_PREFIX} send_tts_audio: no websocket for session {sid}")
             return False
-
-        # Deliver the caption as a regular chat message so that it is persisted
-        # in the DB, appears in the in-memory history (replay on reconnect) and
-        # shows as a visible text bubble on clients that may not support audio.
-        if text:
-            try:
-                await self.send_message(sid, text=text)
-            except Exception as exc:
-                log_warning(
-                    f"{LOG_PREFIX} send_tts_audio: failed to send caption message for session {sid}: {exc}"
-                )
 
         # Derive a client-accessible URL from the filesystem path.
         # Audio is stored under the /static mount, e.g.
@@ -3583,6 +4231,21 @@ class SynthWebUIInterface:
                 url = "/static/audio/tts/" + p.name
         except Exception:
             url = "/static/audio/tts/" + str(audio_path).rsplit("/", 1)[-1]
+
+        # Deliver the caption as a regular chat message so that it is persisted
+        # in the DB, appears in the in-memory history (replay on reconnect) and
+        # shows as a visible text bubble on clients that may not support audio.
+        # Attach ``tts_url`` in the metadata so the click-to-replay audio icon
+        # is bound directly to the bubble on *every* spectator client (and
+        # restored on reconnect) without depending on the transient
+        # ``tts-play`` event race.
+        if text:
+            try:
+                await self.send_message(sid, text=text, metadata={"tts_url": url})
+            except Exception as exc:
+                log_warning(
+                    f"{LOG_PREFIX} send_tts_audio: failed to send caption message for session {sid}: {exc}"
+                )
 
         payload: Dict[str, Any] = {"type": "tts-play", "url": url}
         if text is not None:
@@ -3794,15 +4457,24 @@ class SynthWebUIInterface:
     async def execute_action(self, action: dict, context: dict, bot, original_message):
         if action.get("type") == "message_synth_webui":
             payload = action.get("payload", {})
-            # Try to get session_id from context (chat_id or interface_path)
+
+            def _extract_session_id(value: str | None) -> str | None:
+                if not value or "/" not in str(value):
+                    return None
+                parts = str(value).split("/")
+                if len(parts) >= 2 and parts[0] == INTERFACE_NAME:
+                    return parts[1]
+                return None
+
             session_id = context.get("chat_id")
-            if not session_id and "interface_path" in context:
-                # Extract session_id from interface_path format: "synth_webui/session_id"
-                interface_path = context.get("interface_path")
-                if interface_path and "/" in interface_path:
-                    parts = interface_path.split("/")
-                    if len(parts) >= 2:
-                        session_id = parts[1]
+            if not session_id:
+                session_id = _extract_session_id(context.get("interface_path"))
+            if not session_id:
+                session_id = _extract_session_id(payload.get("interface_path"))
+            if not session_id and original_message is not None:
+                session_id = _extract_session_id(
+                    getattr(original_message, "interface_path", None)
+                )
 
             # Ensure the payload has the correct interface_path for sending
             if session_id:
@@ -4305,6 +4977,15 @@ class SynthWebUIInterface:
                 exposed_def.ui_type if exposed_def else entry.get("ui_type", "string")
             )
             options = exposed_def.options if exposed_def else []
+
+            # If no explicit options from exposed_vars, try deriving from constraints
+            if not options and entry.get("constraints"):
+                constraints = entry["constraints"]
+                if isinstance(constraints, dict) and "choices" in constraints:
+                    choices = constraints["choices"]
+                    if choices and len(choices) > 0:
+                        options = choices
+                        ui_type = "combobox"
 
             # If this is the autonomy whitelist, present unsafe actions as choices
             if entry.get("key") == "AUTONOMY_ALLOWED_ACTIONS":
@@ -4856,15 +5537,19 @@ class SynthWebUIInterface:
             msg = SimpleNamespace()
             msg.chat_id = payload.get("conversation_id") or None
             msg.interface_path = f"integration:{source}"
-            # Forward into the message chain so plugins and the core can handle it
-            from core import message_chain
+            # Forward into the message queue so plugins and the core can handle it
+            from core import message_queue
 
-            result = await message_chain.handle_incoming_message(
-                None,
-                msg,
-                text,
-                source="interface",
-                context={"integration_source": source, "metadata": metadata},
+            result = await message_queue.enqueue_and_wait(
+                bot=None,
+                message=msg,
+                context_memory={"integration_source": source, "metadata": metadata},
+                history_scope="local",
+                priority=False,
+                interface_id="integration",
+                skip_mention_check=True,
+                original_message=msg,
+                timeout=30.0,
             )
             return JSONResponse({"status": "ok", "result": result})
         else:
@@ -4912,6 +5597,7 @@ class SynthWebUIInterface:
         Never raises — errors are captured and returned as a failed probe dict.
         """
         import asyncio
+        import os
 
         try:
             from core.external_endpoints.probe import probe_endpoint
@@ -4920,7 +5606,15 @@ class SynthWebUIInterface:
             if ep is None:
                 return {"status": "failed", "error": "Endpoint not found"}
 
-            result = await asyncio.wait_for(probe_endpoint(ep, api_key), timeout=40.0)
+            timeout_seconds = float(
+                os.getenv(
+                    "EXTERNAL_ENDPOINT_PROBE_TIMEOUT_SECONDS",
+                    str(EXTERNAL_ENDPOINT_PROBE_TIMEOUT_SECONDS),
+                )
+            )
+            result = await asyncio.wait_for(
+                probe_endpoint(ep, api_key), timeout=timeout_seconds
+            )
             await reg.set_probe_result(
                 ep_id,
                 status=result.status,
@@ -4936,7 +5630,10 @@ class SynthWebUIInterface:
             }
         except asyncio.TimeoutError:
             log_warning(f"{LOG_PREFIX} auto-probe timed out for ep_id={ep_id}")
-            return {"status": "failed", "error": "Probe timed out (40 s)"}
+            return {
+                "status": "failed",
+                "error": f"Probe timed out ({os.getenv('EXTERNAL_ENDPOINT_PROBE_TIMEOUT_SECONDS', str(EXTERNAL_ENDPOINT_PROBE_TIMEOUT_SECONDS))} s)",
+            }
         except Exception as exc:
             log_warning(f"{LOG_PREFIX} auto-probe failed for ep_id={ep_id}: {exc}")
             return {"status": "failed", "error": str(exc)}
@@ -4950,6 +5647,23 @@ class SynthWebUIInterface:
             return JSONResponse({"endpoints": [ep.to_dict() for ep in endpoints]})
         except Exception as exc:
             log_error(f"{LOG_PREFIX} list_external_endpoints failed: {exc}")
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    async def list_external_endpoint_presets(self) -> JSONResponse:
+        """GET /api/external-endpoints/presets — list available provider presets.
+
+        Reads JSON files from the project-level ``providers/`` directory.  Each
+        file describes a known AI provider (Gemini, Anthropic, OpenRouter, …)
+        with default values that the UI wizard can use to pre-fill the add form.
+        Files can be deleted by the user without breaking the rest of the system.
+        """
+        try:
+            from core.external_endpoints.preset_registry import load_presets
+
+            presets = load_presets()
+            return JSONResponse({"presets": presets})
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} list_external_endpoint_presets failed: {exc}")
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     async def create_external_endpoint(self, request: Request) -> JSONResponse:
@@ -4967,6 +5681,11 @@ class SynthWebUIInterface:
             raise HTTPException(status_code=400, detail="Missing 'base_url'")
 
         api_key_str = str(data.get("api_key") or "")
+        # Extract subsystem_map if provided by the form (capabilities section)
+        raw_smap = data.get("subsystem_map")
+        subsystem_map: dict[str, bool] | None = None
+        if isinstance(raw_smap, dict):
+            subsystem_map = {k: bool(v) for k, v in raw_smap.items()}
         try:
             from core.external_endpoints.registry import get_external_endpoint_registry
 
@@ -4978,6 +5697,7 @@ class SynthWebUIInterface:
                 api_key=api_key_str,
                 display_label=str(data.get("display_label") or ""),
                 extra_config=data.get("extra_config"),
+                subsystem_map=subsystem_map,
             )
 
             # Auto-probe immediately after creation
@@ -5058,7 +5778,6 @@ class SynthWebUIInterface:
         """POST /api/external-endpoints/{ep_id}/probe — probe capabilities."""
         try:
             from core.external_endpoints.crypto import decrypt_api_key
-            from core.external_endpoints.probe import probe_endpoint
             from core.external_endpoints.registry import get_external_endpoint_registry
 
             reg = get_external_endpoint_registry()
@@ -5067,19 +5786,13 @@ class SynthWebUIInterface:
                 raise HTTPException(status_code=404, detail="Endpoint not found")
 
             api_key = decrypt_api_key(ep.api_key_enc or "")
-            result = await probe_endpoint(ep, api_key)
-            await reg.set_probe_result(
-                ep_id,
-                status=result.status,
-                capabilities=result.capabilities,
-                models=result.models,
-            )
+            probe_data = await self._run_auto_probe(ep_id, api_key, reg)
             return JSONResponse(
                 {
-                    "status": result.status,
-                    "capabilities": result.capabilities,
-                    "models": result.models,
-                    "error": result.error_message,
+                    "status": probe_data.get("status", "failed"),
+                    "capabilities": probe_data.get("capabilities", {}),
+                    "models": probe_data.get("models", []),
+                    "error": probe_data.get("error", ""),
                 }
             )
         except HTTPException:
@@ -5111,7 +5824,10 @@ class SynthWebUIInterface:
 
             api_key = decrypt_api_key(ep.api_key_enc or "")
             adapter = get_adapter_for_endpoint(ep, api_key)
-            ok, echo = await adapter.ping_test(model=model, timeout=30.0)
+            ok, echo = await adapter.ping_test(
+                model=model,
+                timeout=EXTERNAL_ENDPOINT_PROBE_TIMEOUT_SECONDS,
+            )
             return JSONResponse(
                 {
                     "ok": ok,
@@ -5896,15 +6612,18 @@ class SynthWebUIInterface:
         sort = params.get("sort", "desc")
 
         try:
-            from core.db import get_conn_ctx
+            from core.db import _get_db_type, get_conn_ctx
 
             offset = (page - 1) * per_page
             order = "DESC" if sort == "desc" else "ASC"
+            is_postgres = _get_db_type() == "postgres"
 
             async with get_conn_ctx() as conn:
                 async with conn.cursor() as cur:
-                    # Increase limit so long diary days aren't truncated
-                    await cur.execute("SET SESSION group_concat_max_len = 1048576")
+                    # MySQL/MariaDB truncates GROUP_CONCAT aggressively by default.
+                    # Postgres uses translated string_agg and does not support this SET.
+                    if not is_postgres:
+                        await cur.execute("SET SESSION group_concat_max_len = 1048576")
 
                     if search:
                         search_term = f"%{search}%"
@@ -6199,16 +6918,28 @@ class SynthWebUIInterface:
                         rows = rows[:per_page]
 
                     for row in rows:
-                        timestamp_str = self._dt_to_utc_iso(row[3])
                         import json as _json
 
-                        raw_meta = row[4]
+                        if isinstance(row, dict):
+                            raw_interface_path = row.get("interface_path")
+                            raw_sender_name = row.get("sender_name")
+                            raw_message_text = row.get("message_text")
+                            raw_timestamp = row.get("timestamp")
+                            raw_meta = row.get("metadata")
+                        else:
+                            raw_interface_path = row[0]
+                            raw_sender_name = row[1]
+                            raw_message_text = row[2]
+                            raw_timestamp = row[3]
+                            raw_meta = row[4] if len(row) > 4 else None
+
+                        timestamp_str = self._dt_to_utc_iso(raw_timestamp)
                         parsed_meta = _json.loads(raw_meta) if raw_meta else None
                         messages.append(
                             {
-                                "interface_path": row[0],
-                                "sender_name": row[1],
-                                "message_text": row[2],
+                                "interface_path": raw_interface_path,
+                                "sender_name": raw_sender_name,
+                                "message_text": raw_message_text,
                                 "timestamp": timestamp_str,
                                 "metadata": parsed_meta,
                             }
@@ -6242,8 +6973,97 @@ class SynthWebUIInterface:
             )
 
         except Exception as exc:
+            error_text = str(exc)
+            lowered_error = error_text.lower()
+            if (
+                "asyncpg is not installed" in lowered_error
+                or "aiomysql is not installed" in lowered_error
+                or "db unavailable" in lowered_error
+            ):
+                log_warning(
+                    f"{LOG_PREFIX} Chat history DB unavailable; returning empty history payload: {exc}"
+                )
+                return JSONResponse(
+                    {
+                        "success": True,
+                        "messages": [],
+                        "interface_paths": [],
+                        "page": page,
+                        "per_page": per_page,
+                        "total_count": 0,
+                        "total_pages": 0,
+                    }
+                )
+
             log_error(f"{LOG_PREFIX} Failed to fetch chat history: {exc}")
             return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+
+    async def list_log_failures(self, request: Request):
+        """Return paginated failure events for the Logs > Failures sub-tab."""
+        params = request.query_params
+
+        def _bounded_int(value: Any, default: int, minimum: int, maximum: int) -> int:
+            try:
+                parsed = int(value)
+            except (TypeError, ValueError):
+                return default
+            return max(minimum, min(maximum, parsed))
+
+        page = _bounded_int(params.get("page"), default=1, minimum=1, maximum=1000)
+        per_page = _bounded_int(
+            params.get("per_page"), default=20, minimum=1, maximum=100
+        )
+        search = params.get("search", "").strip()
+        failure_code = params.get("failure_code", "").strip()
+        stage = params.get("stage", "").strip()
+        sort = params.get("sort", "desc")
+
+        try:
+            from core.llm_failure_log import list_failure_entries
+
+            payload = await list_failure_entries(
+                page=page,
+                per_page=per_page,
+                search=search,
+                failure_code=failure_code,
+                stage=stage,
+                sort=sort,
+            )
+
+            entries = []
+            for entry in payload.get("entries", []):
+                normalized = dict(entry)
+                normalized["created_at"] = self._dt_to_utc_iso(entry.get("created_at"))
+                entries.append(normalized)
+
+            return JSONResponse(
+                {
+                    "success": True,
+                    "entries": entries,
+                    "page": payload.get("page", page),
+                    "per_page": payload.get("per_page", per_page),
+                    "total_count": payload.get("total_count", 0),
+                    "total_pages": payload.get("total_pages", 1),
+                }
+            )
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to fetch log failures: {exc}")
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+
+    async def delete_log_failure(self, failure_id: int):
+        """Delete a persistent failure-log entry."""
+        try:
+            from core.llm_failure_log import delete_failure_entry
+
+            deleted = await delete_failure_entry(failure_id)
+            if not deleted:
+                raise HTTPException(status_code=404, detail="Failure entry not found")
+            return JSONResponse({"success": True, "deleted": True, "id": failure_id})
+        except HTTPException:
+            raise
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to delete log failure {failure_id}: {exc}")
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     # ------------------------------------------------------------------
     # Chat archive endpoints (filesystem-backed)
@@ -6677,11 +7497,14 @@ class SynthWebUIInterface:
             component = None
 
         try:
-            await config_registry.set_value(key, value)
+            await config_registry.set_value(key, value, require_persist=True)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            log_error(f"{LOG_PREFIX} failed to persist config {key}: {exc}")
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
         except Exception as exc:
             log_error(f"{LOG_PREFIX} failed to update config {key}: {exc}")
             raise HTTPException(
@@ -7544,31 +8367,10 @@ class SynthWebUIInterface:
                     )
 
             meta = self._get_component_meta(engine_name)
-            # Attempt to include login info for Selenium-based engines without inducing side-effects
+            # Login state — only relevant for external-endpoint based engines
             login_state = "unknown"
             logged_in = False
             login_url = ""
-            try:
-                from cortex.selenium_engine.selenium_llm_base import SeleniumLLMBase
-
-                if instance is not None and isinstance(instance, SeleniumLLMBase):
-                    login_url = getattr(instance, "service_url", "") or getattr(
-                        instance, "config", {}
-                    ).get("service_url", "")
-                    # If the driver isn't initialized, avoid creating it just to check login
-                    if getattr(instance, "driver", None) is None:
-                        login_state = "unknown"
-                        logged_in = False
-                    else:
-                        try:
-                            logged_in = bool(instance.is_user_logged_in())
-                            login_state = "logged" if logged_in else "unlogged"
-                        except Exception:
-                            login_state = "unknown"
-                            logged_in = False
-            except Exception:
-                # If SeleniumLLMBase is not importable, just skip enrichment
-                pass
 
             # Gather model information from engines that expose it
             supported_models: list[str] = []
@@ -7585,20 +8387,37 @@ class SynthWebUIInterface:
                 except Exception:
                     pass
 
-            # For external endpoints, fall back to DB if the in-memory bridge has
-            # stale/empty available_models (e.g. bridge created before first probe).
-            if not supported_models and engine_name.startswith("ext_"):
+            # Detect external-endpoint engines and pull live endpoint details:
+            # the id + extra_config feed the inline per-endpoint config editor,
+            # and available_models acts as a fallback when the in-memory bridge
+            # predates the first probe.
+            try:
+                from core.external_endpoints.bridges.cortex_bridge import (
+                    ExternalCortexEngine as _ExtCB,
+                )
+
+                _is_external = isinstance(instance, _ExtCB)
+            except Exception:
+                _is_external = False
+            endpoint_id: int | None = None
+            endpoint_extra_config: dict | None = None
+            if _is_external:
                 try:
                     from core.external_endpoints.registry import (
                         get_external_endpoint_registry,
                     )
 
                     _ext_reg = get_external_endpoint_registry()
-                    _fallback_ep = await _ext_reg.get_endpoint_by_name(engine_name[4:])
-                    if _fallback_ep and _fallback_ep.available_models:
-                        supported_models = list(_fallback_ep.available_models)
-                        if not current_model and _fallback_ep.default_model:
-                            current_model = _fallback_ep.default_model
+                    _ep_fresh = await _ext_reg.get_endpoint_by_name(
+                        instance._endpoint.name  # type: ignore[union-attr]
+                    )
+                    if _ep_fresh is not None:
+                        endpoint_id = _ep_fresh.id
+                        endpoint_extra_config = _ep_fresh.extra_config
+                        if not supported_models and _ep_fresh.available_models:
+                            supported_models = list(_ep_fresh.available_models)
+                            if not current_model and _ep_fresh.default_model:
+                                current_model = _ep_fresh.default_model
                 except Exception:
                     pass
 
@@ -7642,6 +8461,9 @@ class SynthWebUIInterface:
                     ),
                     "supported_models": supported_models,
                     "current_model": current_model,
+                    "is_external": _is_external,
+                    "endpoint_id": endpoint_id,
+                    "extra_config": endpoint_extra_config,
                 }
             )
         interfaces_data: List[dict] = []
@@ -7851,6 +8673,15 @@ class SynthWebUIInterface:
             for _name in VOX_REGISTRY.get_available_engines():
                 _meta = VOX_REGISTRY.get_engine_meta(_name)
                 _caps = _meta.get("capabilities") or {}
+                _v_available_models: list[str] = []
+                _v_default_model: str | None = None
+                _v_instance = VOX_REGISTRY._instances.get(_name)
+                if _v_instance is not None and hasattr(_v_instance, "_endpoint"):
+                    _v_ep = _v_instance._endpoint
+                    _v_available_models = list(
+                        getattr(_v_ep, "available_models", None) or []
+                    )
+                    _v_default_model = getattr(_v_ep, "default_model", None)
                 vox_data.append(
                     {
                         "name": _name,
@@ -7862,6 +8693,8 @@ class SynthWebUIInterface:
                         "details": "Active" if _name == active_vox else "",
                         "error": None,
                         "active": _name == active_vox,
+                        "available_models": _v_available_models,
+                        "default_model": _v_default_model,
                     }
                 )
         except Exception as exc:
@@ -7873,7 +8706,14 @@ class SynthWebUIInterface:
 
             active_auris: str | None = None
             try:
-                active_auris = config_registry.get_value("ACTIVE_AURIS_ENGINE", None)
+                active_auris = config_registry.get_value(
+                    "ACTIVE_AURIS_ENGINE",
+                    None,
+                    label="Active Auris Engine",
+                    description="Name of the active Auris speech-to-text engine. Set to 'disabled' to turn off the Auris subsystem.",
+                    component="auris_plugin",
+                    group="plugins",
+                )
             except Exception:
                 pass
             # add disabled option first
@@ -7890,9 +8730,38 @@ class SynthWebUIInterface:
                     "active": active_auris == "disabled",
                 }
             )
+            # Hardcoded pseudo-engine: bypass Auris transcription entirely and
+            # forward the raw audio bytes inline to the Cortex engine so an
+            # audio-capable multimodal model can hear the audio directly.  Only
+            # useful when the active Cortex endpoint accepts inline audio.
+            auris_data.append(
+                {
+                    "name": "inline",
+                    "display_name": "Inline (send to LLM)",
+                    "label": "Forward audio inline to a multimodal Cortex engine",
+                    "capabilities": {"audio": True},
+                    "description": (
+                        "Bypass Auris transcription and send the audio directly "
+                        "to the LLM (requires an audio-capable Cortex endpoint)"
+                    ),
+                    "status": "success",
+                    "details": "Active" if active_auris == "inline" else "",
+                    "error": None,
+                    "active": active_auris == "inline",
+                }
+            )
             for _name in AURIS_REGISTRY.get_available_engines():
                 _meta = AURIS_REGISTRY.get_engine_meta(_name)
                 _caps = _meta.get("capabilities") or {}
+                _a_available_models: list[str] = []
+                _a_default_model: str | None = None
+                _a_instance = AURIS_REGISTRY._instances.get(_name)
+                if _a_instance is not None and hasattr(_a_instance, "_endpoint"):
+                    _a_ep = _a_instance._endpoint
+                    _a_available_models = list(
+                        getattr(_a_ep, "available_models", None) or []
+                    )
+                    _a_default_model = getattr(_a_ep, "default_model", None)
                 auris_data.append(
                     {
                         "name": _name,
@@ -7904,6 +8773,8 @@ class SynthWebUIInterface:
                         "details": "Active" if _name == active_auris else "",
                         "error": None,
                         "active": _name == active_auris,
+                        "available_models": _a_available_models,
+                        "default_model": _a_default_model,
                     }
                 )
         except Exception as exc:
@@ -7962,33 +8833,126 @@ class SynthWebUIInterface:
         except Exception as exc:
             log_warning(f"{LOG_PREFIX} unable to build Live engine list: {exc}")
 
-        # Build scope overrides for the UI (Grillo, Trainer, Live cortex selectors)
-        cortex_scopes: list[dict] = []
+        iris_data: list[dict] = []
         try:
-            all_engines_sorted = sorted(engine_names)
-            live_engines: list[str] = []
+            from core.iris_registry import IRIS_REGISTRY
+
+            active_iris: str | None = None
             try:
-                live_engines = cortex_reg.get_engines_by_cortex("live")
+                active_iris = config_registry.get_value(
+                    "ACTIVE_IRIS_ENGINE",
+                    None,
+                    label="Active Iris Engine",
+                    description="Name of the active Iris vision engine. Set to 'disabled' to turn off the Iris subsystem.",
+                    component="iris_plugin",
+                    group="plugins",
+                )
             except Exception:
                 pass
+            iris_data.append(
+                {
+                    "name": "disabled",
+                    "display_name": "Disabled",
+                    "label": "No vision engine (disabled)",
+                    "capabilities": {},
+                    "description": "Vision disabled",
+                    "status": "success",
+                    "details": "Active" if active_iris == "disabled" else "",
+                    "error": None,
+                    "active": active_iris == "disabled",
+                }
+            )
+            # Hardcoded pseudo-engine: bypass Iris entirely and forward image /
+            # video bytes inline to the Cortex engine so a vision-capable LLM can
+            # see the media directly (no separate description step).  Only takes
+            # effect when the active Cortex endpoint is marked vision-capable.
+            iris_data.append(
+                {
+                    "name": "inline",
+                    "display_name": "Inline (send to LLM)",
+                    "label": "Forward images inline to a multimodal Cortex engine",
+                    "capabilities": {"vision": True},
+                    "description": (
+                        "Bypass Iris descriptions and send the image directly to "
+                        "the LLM (requires a vision-capable Cortex endpoint)"
+                    ),
+                    "status": "success",
+                    "details": "Active" if active_iris == "inline" else "",
+                    "error": None,
+                    "active": active_iris == "inline",
+                }
+            )
+            for _name in IRIS_REGISTRY.get_available_engines():
+                _meta = IRIS_REGISTRY.get_engine_meta(_name)
+                _caps = _meta.get("capabilities") or {}
+                _available_models: list[str] = []
+                _default_model: str | None = None
+                _instance = IRIS_REGISTRY.get_instance(_name)
+                if _instance is not None and hasattr(_instance, "_endpoint"):
+                    _ep = _instance._endpoint
+                    _available_models = list(
+                        getattr(_ep, "available_models", None) or []
+                    )
+                    _default_model = getattr(_ep, "default_model", None)
+                iris_data.append(
+                    {
+                        "name": _name,
+                        "display_name": _name.replace("_", " ").title(),
+                        "label": _meta.get("label", ""),
+                        "capabilities": _caps,
+                        "description": f"Vision engine — capabilities: {_caps_desc(_caps)}",
+                        "status": "success",
+                        "details": "Active" if _name == active_iris else "",
+                        "error": None,
+                        "active": _name == active_iris,
+                        "available_models": _available_models,
+                        "default_model": _default_model,
+                    }
+                )
+        except Exception as exc:
+            log_warning(f"{LOG_PREFIX} unable to build Iris engine list: {exc}")
+
+        # Build scope overrides for the UI (Grillo, Trainer, Live cortex selectors)
+        # Single source of truth: derive options from the same data already built above.
+        cortex_scopes: list[dict] = []
+        try:
+            # Grillo/Trainer: only llm_provider engines — same source as the main
+            # engine selector in the Engines tab (by_cortex is already built above).
+            llm_engines_sorted = sorted(
+                e["name"] for e in by_cortex.get("llm_provider", [])
+            )
+            # Live scope: LIVE_REGISTRY is the authoritative source for streaming
+            # engines; fall back to CortexRegistry if the registry is unavailable.
+            live_engine_names: list[str] = ["disabled"]
+            try:
+                from core.live_registry import LIVE_REGISTRY as _LIVE_REG
+
+                live_engine_names += sorted(_LIVE_REG.get_available_engines())
+            except Exception:
+                try:
+                    live_engine_names += sorted(
+                        cortex_reg.get_engines_by_cortex("live")
+                    )
+                except Exception:
+                    pass
             cortex_scopes = [
                 {
                     "key": "GRILLO_CORTEX",
                     "label": "Grillo",
                     "value": config_registry.get_value("GRILLO_CORTEX", "Default"),
-                    "options": ["Default"] + all_engines_sorted,
+                    "options": ["Default"] + llm_engines_sorted,
                 },
                 {
                     "key": "TRAINER_CORTEX",
                     "label": "Trainer",
                     "value": config_registry.get_value("TRAINER_CORTEX", "Default"),
-                    "options": ["Default"] + all_engines_sorted,
+                    "options": ["Default"] + llm_engines_sorted,
                 },
                 {
                     "key": "LIVE_CORTEX",
                     "label": "Live",
                     "value": config_registry.get_value("LIVE_CORTEX", "Default"),
-                    "options": ["Default"] + live_engines,
+                    "options": ["Default"] + live_engine_names,
                 },
             ]
         except Exception as exc:
@@ -8005,6 +8969,16 @@ class SynthWebUIInterface:
             },
             "vox": vox_data,
             "auris": auris_data,
+            "iris": iris_data,
+            "iris_current_model": (
+                config_registry.get_value("IRIS_DEFAULT_MODEL", "") or ""
+            ),
+            "vox_current_model": (
+                config_registry.get_value("VOX_DEFAULT_MODEL", "") or ""
+            ),
+            "auris_current_model": (
+                config_registry.get_value("AURIS_DEFAULT_MODEL", "") or ""
+            ),
             "live": live_data,
             "interfaces": interfaces_data,
             "plugins": plugins_data,
@@ -8117,10 +9091,11 @@ class SynthWebUIInterface:
             model_config_keys = {
                 "openrouter": "OPENROUTER_DEFAULT_MODEL",
                 "gemini_api": "GEMINI_MODEL",
+                "openapi": "OPENAPI_DEFAULT_MODEL",
             }
             config_key = model_config_keys.get(engine_name)
             if config_key:
-                config_registry.set_value(config_key, model_name)
+                await config_registry.set_value(config_key, model_name)
         except Exception as exc:
             log_warning(
                 f"{LOG_PREFIX} model set on engine but config persist failed: {exc}"
@@ -8149,89 +9124,18 @@ class SynthWebUIInterface:
         )
 
     async def cortex_login(self, request: Request):
-        """Start the login flow for a Selenium-based Cortex engine (non-blocking).
+        """Selenium-based login is no longer supported.
 
-        Expects JSON: { "name": "selenium_chatgpt" }
+        The embedded Selenium engine has been removed. Use the external
+        selenium-llm-engine service and configure it as an external endpoint.
         """
-        try:
-            data = await request.json()
-        except Exception as exc:
-            raise HTTPException(status_code=400, detail="Invalid JSON payload") from exc
-
-        name = str(data.get("name") or "").strip()
-        if not name:
-            raise HTTPException(status_code=400, detail="Missing 'name'")
-
-        try:
-            from core.cortex_registry import get_cortex_registry
-
-            registry = get_cortex_registry()
-            engine = registry.get_engine(name)
-        except Exception as exc:
-            log_error(f"{LOG_PREFIX} unable to access Cortex registry: {exc}")
-            raise HTTPException(
-                status_code=500, detail="Unable to access Cortex registry"
-            ) from exc
-
-        if not engine:
-            raise HTTPException(
-                status_code=404, detail=f"Cortex engine '{name}' not loaded"
-            )
-
-        try:
-            from cortex.selenium_engine.selenium_llm_base import SeleniumLLMBase
-
-            if not isinstance(engine, SeleniumLLMBase):
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Cortex engine '{name}' is not Selenium-based",
-                )
-        except HTTPException:
-            raise
-        except Exception:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Cortex engine '{name}' is not Selenium-based",
-            )
-
-        try:
-            # Fire-and-forget the login flow so the endpoint is non-blocking
-            try:
-                task = asyncio.create_task(engine.start_login_flow())
-                log_info(
-                    f"{LOG_PREFIX} Started login flow for Cortex '{name}' (task: {task})"
-                )
-            except RuntimeError:
-                # If event loop is not running or other issues, try scheduling differently
-                loop = asyncio.get_event_loop()
-                loop.create_task(engine.start_login_flow())
-
-            # Return immediate status (do not wait for the login to complete)
-            current_logged = False
-            try:
-                current_logged = bool(
-                    getattr(engine, "is_user_logged_in") and engine.is_user_logged_in()
-                )
-            except Exception:
-                current_logged = False
-
-            return JSONResponse(
-                {
-                    "status": "ok",
-                    "name": name,
-                    "action": "started",
-                    "logged_in": current_logged,
-                }
-            )
-
-        except HTTPException:
-            raise
-        except Exception as exc:
-            log_error(f"{LOG_PREFIX} Failed to start login flow for '{name}': {exc}")
-            raise HTTPException(
-                status_code=500,
-                detail=f"Failed to start login flow for '{name}': {exc}",
-            ) from exc
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Selenium-based login is no longer supported. "
+                "Use the external selenium-llm-engine endpoint."
+            ),
+        )
 
     # Cortex endpoints
 
@@ -9686,6 +10590,9 @@ class SynthWebUIInterface:
 
 async def start_server() -> None:
     """Compatibility helper to run the Synthetic Heart Web UI server in the foreground."""
+    if synth_webui_interface is None:
+        raise RuntimeError("WebUI interface is not initialized")
+
     if not synth_webui_interface.autostart:
         await synth_webui_interface._run_server()
         return

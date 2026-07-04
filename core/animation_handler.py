@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import random
-import uuid
+from collections.abc import Callable
 from enum import Enum
 from typing import Dict, List, Optional, TYPE_CHECKING, Any
 from datetime import datetime, timezone
@@ -31,9 +31,16 @@ class AnimationState(Enum):
 
     IDLE = "idle"
     THINK = "think"
+    TOUCH = "touch"
     WRITE = "write"
     TALK = "talk"
     SKIN_CHANGE = "skin_change"
+
+
+AnimationStateChangedCallback = Callable[
+    [AnimationState, str, Optional[Dict[str, Any]]],
+    Any,
+]
 
 
 # Priority levels for animation states (matching action_state_manager.py priorities)
@@ -43,6 +50,7 @@ ANIMATION_STATE_PRIORITIES = {
     AnimationState.WRITE: 3,  # Writing - low priority
     AnimationState.TALK: 5,  # Talking - medium priority
     AnimationState.THINK: 10,  # Thinking - highest priority, cannot be interrupted
+    AnimationState.TOUCH: 11,  # Touch reaction - temporary overlay above think/write/talk
     AnimationState.SKIN_CHANGE: 15,  # Skin change - always plays, overrides everything
 }
 
@@ -85,10 +93,13 @@ class KaradaStateServer:
         self._transports: List[KaradaTransport] = []
         self.current_state: AnimationState = AnimationState.IDLE
         self.current_animation: Optional[str] = None
+        self._current_context_id: Optional[str] = None
         self._lock = asyncio.Lock()
         # Track active animation contexts -> map context_id to priority (int)
         # If a context_id maps to None, treat as priority 0
         self._active_tasks: Dict[str, Optional[int]] = {}
+        self._active_context_meta: Dict[str, Dict[str, Any]] = {}
+        self._context_sequence: int = 0
         # Rotation tasks per session+state key -> asyncio.Task
         self._rotation_tasks: Dict[str, asyncio.Task] = {}
         # Sequential animation indices per state -> map state.value to current index
@@ -96,22 +107,21 @@ class KaradaStateServer:
         # States that use sequential rotation instead of random
         self._sequential_states = {AnimationState.IDLE.value}
 
-        # Centralized animation state that syncs across all clients
+        # Centralized animation state that syncs across all clients (Karada v2)
+        # Server ONLY sends: state + descriptor + started_at.
+        # NO phase control, NO timing control, NO frame-level logic
         self._current_animation_file: Optional[str] = None  # Actual file being played
-        self._current_animation_descriptor: Optional[Dict] = (
-            None  # Descriptor with frame info
+        self._current_animation_descriptor: Optional[Dict[str, Any]] = (
+            None  # Descriptor with frame info (intro/loop/outro)
         )
         self._current_animation_started_at: Optional[datetime] = (
-            None  # UTC timestamp for current animation start
+            None  # UTC timestamp for current animation start (authoritative)
         )
-        # Stable identifier for the currently playing animation; changes only when
-        # a genuinely new animation file starts (not during outro or re-send of the
-        # same file).  All interfaces use this to avoid restarting an already-running
-        # animation after a reconnect or periodic re-sync.
-        self._current_animation_id: str = ""
+        # Animation clock: server sends started_at, client computes animation_time locally
         self._animation_state_changed_callbacks: List[
-            callable
-        ] = []  # Callbacks when animation changes
+            AnimationStateChangedCallback
+        ] = []
+        # Callbacks when animation changes
 
         # new methods inserted here (will add after class header)
         # Plugin/override state animations: state_name -> {'loop': [...], 'post': [...], 'other': [...]}
@@ -135,6 +145,16 @@ class KaradaStateServer:
         self._current_audio_lipsync: Optional[Dict] = None
         self._current_audio_started_at: Optional[datetime] = None
         self._audio_clear_task: Optional[asyncio.Task] = None
+        # Face state: authoritative snapshot of the last face values broadcast
+        # to clients. Keys are normalized blendshape/emotion values in the 0..1
+        # range and reused for reconnect/full-state sync.
+        self._current_face_values: Dict[str, float] = {}
+        self._face_values_initialized: bool = False
+        # Active transient facial expression (from [em_*] timeline). This is the
+        # authoritative snapshot re-sent to late-joining clients and by the
+        # periodic state refresh so every viewer of the shared avatar converges
+        # on the same expression. ``None`` means no expression override active.
+        self._current_expression: Optional[Dict[str, Any]] = None
 
         # Priority registration: maps state names to their priority values.
         # Starts from ANIMATION_STATE_PRIORITIES and can be extended at runtime.
@@ -144,6 +164,11 @@ class KaradaStateServer:
 
         # Watchdog: periodic background task to detect stuck states
         self._watchdog_task: Optional[asyncio.Task] = None
+        # Periodic state refresh: re-broadcasts the authoritative face /
+        # expression snapshot so every connected client (shared "single body")
+        # converges even after dropped packets or a mid-timeline join.
+        self._state_refresh_task: Optional[asyncio.Task] = None
+        self._state_refresh_interval: float = 5.0
 
     def set_webui(self, webui: SynthWebUIInterface) -> None:
         """Set or update the WebUI reference.
@@ -153,6 +178,14 @@ class KaradaStateServer:
         """
         self.webui = webui
         log_debug("[KaradaStateServer] WebUI reference set")
+        try:
+            connections = getattr(webui, "connections", None)
+            if isinstance(connections, dict):
+                from core.karada_ws_transport import WebSocketTransport
+
+                self.add_transport(WebSocketTransport(connections))
+        except Exception:
+            pass
         # Register a lightweight summary callback so the WebUI can broadcast
         # the canonical animation state to all connected clients whenever it
         # changes. This is different from the full 'animation' command (which
@@ -186,20 +219,37 @@ class KaradaStateServer:
     # Transport management
     # ------------------------------------------------------------------
 
+    def _is_same_transport_target(
+        self, existing: KaradaTransport, candidate: KaradaTransport
+    ) -> bool:
+        if existing is candidate:
+            return True
+
+        existing_connections = getattr(existing, "_connections", None)
+        candidate_connections = getattr(candidate, "_connections", None)
+        return (
+            type(existing) is type(candidate)
+            and existing_connections is not None
+            and existing_connections is candidate_connections
+        )
+
     def add_transport(self, transport: KaradaTransport) -> None:
         """Register a transport for delivering payloads to clients.
 
         Args:
             transport: A concrete :class:`KaradaTransport` implementation.
         """
-        if transport not in self._transports:
-            self._transports.append(transport)
-            log_debug(
-                f"[KaradaStateServer] Transport added: {type(transport).__name__}"
-            )
-            # Start the watchdog when the first transport arrives
-            if len(self._transports) == 1:
-                self.start_watchdog()
+        for existing in self._transports:
+            if self._is_same_transport_target(existing, transport):
+                return
+
+        self._transports.append(transport)
+        log_debug(f"[KaradaStateServer] Transport added: {type(transport).__name__}")
+        # Start the watchdog and periodic state refresh when the first
+        # transport arrives.
+        if len(self._transports) == 1:
+            self.start_watchdog()
+            self.start_state_refresh()
 
     def remove_transport(self, transport: KaradaTransport) -> None:
         """Un-register a previously added transport."""
@@ -226,15 +276,55 @@ class KaradaStateServer:
         as-is in a ``vrm_face`` WebSocket packet.  Any exceptions are logged
         but not re-raised since this call is often invoked inside a task.
         """
+        if not isinstance(values, dict):
+            return
+
+        merged = dict(self._current_face_values)
+        for key, raw_value in values.items():
+            name = str(key).strip()
+            if not name:
+                continue
+            try:
+                value = float(raw_value)
+            except (TypeError, ValueError):
+                continue
+            if value > 1.0:
+                value = value / 10.0
+            value = max(0.0, min(1.0, value))
+            if value <= 0.0001:
+                merged.pop(name, None)
+            else:
+                merged[name] = value
+
+        self._current_face_values = merged
+        self._face_values_initialized = True
+
         if not self._has_any_transport():
             return
-        payload = {"type": "vrm_face", "values": values}
+        payload = {"type": "vrm_face", "values": dict(self._current_face_values)}
         for transport in self._transports:
             try:
                 await transport.broadcast_face(payload)
             except Exception as exc:  # pragma: no cover - best effort
                 log_warning(
                     f"[KaradaStateServer] failed to broadcast face_values via {type(transport).__name__}: {exc}"
+                )
+
+    async def clear_face_values(self) -> None:
+        """Clear all tracked face values and broadcast a neutral snapshot."""
+        self._current_face_values = {}
+        self._face_values_initialized = True
+
+        if not self._has_any_transport():
+            return
+
+        payload = {"type": "vrm_face", "values": {}}
+        for transport in self._transports:
+            try:
+                await transport.broadcast_face(payload)
+            except Exception as exc:  # pragma: no cover - best effort
+                log_warning(
+                    f"[KaradaStateServer] failed to clear face_values via {type(transport).__name__}: {exc}"
                 )
 
     async def push_face_expression(
@@ -258,8 +348,6 @@ class KaradaStateServer:
         When *targets* is ``None`` the bare *name* and *intensity* are
         forwarded as a backward-compatible fallback.
         """
-        if not self._has_any_transport():
-            return
         payload: Dict[str, Any]
         if not name:
             payload = {"type": "vrm_expression_clear"}
@@ -271,6 +359,12 @@ class KaradaStateServer:
                 "name": name,
                 "intensity": intensity,
             }
+        # Remember the active expression so late-joining clients and the
+        # periodic refresh can reproduce it (shared "single body" state).
+        # A clear resets the override to None.
+        self._current_expression = None if not name else dict(payload)
+        if not self._has_any_transport():
+            return
         for transport in self._transports:
             try:
                 await transport.broadcast_expression(payload)
@@ -285,6 +379,109 @@ class KaradaStateServer:
             if transport.has_connected_clients():
                 return True
         return False
+
+    @staticmethod
+    def _is_overlay_state(state: AnimationState | str | None) -> bool:
+        """Return True when a state is a temporary overlay over another state."""
+        if state is None:
+            return False
+        name = state.value if isinstance(state, AnimationState) else str(state)
+        return name == AnimationState.TOUCH.value
+
+    def _remember_active_context(
+        self,
+        context_id: str,
+        state: AnimationState,
+        session_id: Optional[str],
+        loop: bool,
+        priority: Optional[int],
+        source: Optional[str],
+        animation_file: Optional[str] = None,
+        resume_section: Optional[str] = None,
+    ) -> None:
+        """Persist enough metadata to restore a covered context later."""
+        self._context_sequence += 1
+        self._active_context_meta[context_id] = {
+            "state": state,
+            "session_id": session_id,
+            "loop": bool(loop),
+            "priority": int(priority) if isinstance(priority, int) else None,
+            "source": source,
+            "animation_file": animation_file,
+            "resume_section": resume_section,
+            "sequence": self._context_sequence,
+        }
+
+    def _forget_active_context(self, context_id: Optional[str]) -> None:
+        """Drop saved metadata for a context that is no longer active."""
+        if not context_id:
+            return
+        self._active_context_meta.pop(context_id, None)
+
+    def _select_restore_context_locked(
+        self, excluded_context_id: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
+        """Pick the highest-priority remaining context, preferring the most recent."""
+        best: Optional[Dict[str, Any]] = None
+        for context_id, meta in self._active_context_meta.items():
+            if context_id == excluded_context_id:
+                continue
+            if context_id not in self._active_tasks:
+                continue
+            priority = self._active_tasks.get(context_id)
+            if not isinstance(priority, int):
+                priority = meta.get("priority")
+            sequence = meta.get("sequence", 0)
+            if not isinstance(priority, int):
+                priority = 0
+            if (
+                best is None
+                or priority > best["priority"]
+                or (priority == best["priority"] and sequence > best["sequence"])
+            ):
+                best = {
+                    "context_id": context_id,
+                    "state": meta.get("state"),
+                    "session_id": meta.get("session_id"),
+                    "loop": bool(meta.get("loop", True)),
+                    "priority": priority,
+                    "source": meta.get("source"),
+                    "animation_file": meta.get("animation_file"),
+                    "resume_section": meta.get("resume_section"),
+                    "sequence": sequence,
+                }
+        return best
+
+    async def _resume_context_or_idle(
+        self,
+        session_id: Optional[str],
+        excluded_context_id: Optional[str] = None,
+    ) -> None:
+        """Resume the highest-priority remaining context, or fall back to idle."""
+        async with self._lock:
+            restore = self._select_restore_context_locked(excluded_context_id)
+
+        if restore and isinstance(restore.get("state"), AnimationState):
+            await self.play_animation(
+                restore["state"],
+                session_id=restore.get("session_id")
+                if restore.get("session_id") is not None
+                else session_id,
+                loop=bool(restore.get("loop", True)),
+                context_id=restore.get("context_id"),
+                priority=restore.get("priority"),
+                source=restore.get("source"),
+                animation_file=restore.get("animation_file"),
+                resume_section=restore.get("resume_section"),
+            )
+            return
+
+        await self.play_animation(
+            AnimationState.IDLE,
+            session_id=session_id,
+            loop=True,
+            context_id=None,
+        )
 
     async def ensure_idle_preloaded(self, session_id: Optional[str] = None) -> None:
         """Pre-load IDLE animation in advance to ensure smooth fallback.
@@ -327,7 +524,9 @@ class KaradaStateServer:
         except Exception as exc:
             log_warning(f"[KaradaStateServer] ensure_idle_preloaded failed: {exc}")
 
-    def register_animation_state_changed_callback(self, callback: callable) -> None:
+    def register_animation_state_changed_callback(
+        self, callback: AnimationStateChangedCallback
+    ) -> None:
         """Register a callback to be called when animation state changes.
 
         The callback will be called with (state, animation_file, descriptor) as arguments.
@@ -339,7 +538,10 @@ class KaradaStateServer:
         log_debug("[KaradaStateServer] Registered animation state changed callback")
 
     async def _notify_animation_state_changed(
-        self, state: AnimationState, animation_file: str, descriptor: Optional[Dict]
+        self,
+        state: AnimationState,
+        animation_file: str,
+        descriptor: Optional[Dict[str, Any]],
     ) -> None:
         """Notify all callbacks that animation state has changed.
 
@@ -365,148 +567,219 @@ class KaradaStateServer:
                     f"[KaradaStateServer] Error in animation state callback: {exc}"
                 )
 
-    def get_current_animation_state(self) -> Dict[str, any]:
-        """Get the current centralized animation state.
+    @staticmethod
+    def _started_at_epoch(started_at: Optional[datetime]) -> Optional[float]:
+        """Convert a datetime to UTC epoch seconds for the Karada v2 contract."""
+        if started_at is None:
+            return None
+
+        try:
+            if started_at.tzinfo is None:
+                started_at = started_at.replace(tzinfo=timezone.utc)
+            return float(started_at.astimezone(timezone.utc).timestamp())
+        except Exception:
+            return None
+
+    @staticmethod
+    def _slug_contract_part(value: Optional[str]) -> str:
+        """Normalize a contract segment into a stable ASCII slug."""
+        raw = str(value or "").strip().lower()
+        if not raw:
+            return "unknown"
+
+        out: List[str] = []
+        last_was_sep = False
+        for char in raw:
+            if char.isalnum():
+                out.append(char)
+                last_was_sep = False
+            elif not last_was_sep:
+                out.append("_")
+                last_was_sep = True
+
+        normalized = "".join(out).strip("_")
+        return normalized or "unknown"
+
+    def _extract_contract_identity(
+        self,
+        state_name: Optional[str],
+        resolved_path: Optional[str],
+        animation_file: Optional[str],
+    ) -> tuple[str, str, str]:
+        """Return ``(skin, state, stem)`` for contract and manifest generation."""
+        resolved = str(resolved_path or "").split("?", 1)[0].split("#", 1)[0]
+        segments = [segment for segment in resolved.split("/") if segment]
+
+        skin_name = "local"
+        state_value = str(state_name or "").strip() or "unknown"
+
+        if (
+            len(segments) >= 5
+            and segments[0] == "skins"
+            and segments[2] == "animations"
+        ):
+            skin_name = segments[1] or skin_name
+            if not state_name:
+                state_value = segments[3] or state_value
+
+        stem_source = (
+            animation_file or (segments[-1] if segments else "") or state_value
+        )
+        stem = Path(stem_source).stem or stem_source or state_value
+        return skin_name, state_value, stem
+
+    def _build_descriptor_id(
+        self,
+        state_name: Optional[str],
+        animation_file: Optional[str],
+        resolved_path: Optional[str] = None,
+    ) -> Optional[str]:
+        """Build the logical Karada v2 descriptor identifier for an animation."""
+        if not state_name and not animation_file and not resolved_path:
+            return None
+
+        skin_name, state_value, stem = self._extract_contract_identity(
+            state_name=state_name,
+            resolved_path=resolved_path,
+            animation_file=animation_file,
+        )
+        return (
+            f"{self._slug_contract_part(skin_name)}/"
+            f"{self._slug_contract_part(state_value)}/"
+            f"{self._slug_contract_part(stem)}"
+        )
+
+    def get_animation_manifest_entry(
+        self,
+        state_name: Optional[str],
+        animation_file: Optional[str],
+        descriptor: Optional[Dict[str, Any]] = None,
+        resolved_path: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Build one reusable Karada animation manifest entry."""
+        if not animation_file:
+            return None
+
+        resolved = resolved_path
+        descriptor_data = descriptor if isinstance(descriptor, dict) else None
+        effective_state = state_name or (
+            self.current_state.value if self.current_state else None
+        )
+
+        if resolved is None:
+            try:
+                resolved, resolved_descriptor = (
+                    self._resolve_animation_descriptor_for_state(
+                        animation_file,
+                        effective_state,
+                    )
+                )
+            except Exception:
+                resolved = animation_file
+                resolved_descriptor = None
+            if descriptor_data is None and isinstance(resolved_descriptor, dict):
+                descriptor_data = resolved_descriptor
+
+        descriptor_id = self._build_descriptor_id(
+            state_name=effective_state,
+            animation_file=animation_file,
+            resolved_path=resolved,
+        )
+        if not descriptor_id:
+            return None
+
+        skin_name, state_value, _ = self._extract_contract_identity(
+            state_name=effective_state,
+            resolved_path=resolved,
+            animation_file=animation_file,
+        )
+
+        return {
+            "id": descriptor_id,
+            "state": state_value,
+            "skin": skin_name,
+            "animation_file": animation_file,
+            "animation_url": resolved,
+            "descriptor_url": (
+                f"/api/karada/animations/resolve?descriptor_id={descriptor_id}"
+            ),
+            "descriptor_data": descriptor_data,
+        }
+
+    def get_animation_manifest(self) -> Dict[str, Any]:
+        """Return the client-facing Karada animation manifest keyed by descriptor id."""
+        animations: Dict[str, Dict[str, Any]] = {}
+        state_names = sorted(
+            {
+                *(state.value for state in AnimationState),
+                *self._registered_state_animations.keys(),
+            }
+        )
+
+        for state_name in state_names:
+            try:
+                variants = self.get_animation_variants(state_name)
+            except Exception:
+                continue
+
+            for category, files in variants.items():
+                for animation_file in files:
+                    entry = self.get_animation_manifest_entry(
+                        state_name=state_name,
+                        animation_file=animation_file,
+                    )
+                    if not entry:
+                        continue
+                    manifest_entry = dict(entry)
+                    manifest_entry["category"] = category
+                    animations.setdefault(entry["id"], manifest_entry)
+
+        return {"version": 2, "animations": animations}
+
+    def get_animation_manifest_entry_by_id(
+        self, descriptor_id: str
+    ) -> Optional[Dict[str, Any]]:
+        """Resolve one manifest entry by descriptor id."""
+        if not descriptor_id:
+            return None
+        return self.get_animation_manifest().get("animations", {}).get(descriptor_id)
+
+    def get_current_animation_state(self) -> Dict[str, Any]:
+        """Get the current centralized animation state (Karada v2).
+
+        Karada v2: Returns ONLY state + descriptor + started_at.
+        NO phase control, NO timing control, NO frame-level logic.
 
         Returns:
-            Dict with 'state', 'animation_file', and 'descriptor' keys
+            Dict with state information for clients
         """
-        # Minimal informative structure; richer payload is assembled when sending commands
         anim = self._current_animation_file
-        desc = self._current_animation_descriptor
-        try:
-            resolved, _ = (
-                self._resolve_animation_descriptor(anim) if anim else (None, None)
-            )
-        except Exception:
-            resolved = anim
+        state_name = self.current_state.value if self.current_state else None
 
-        started_at = self._current_animation_started_at
-        timing = {
-            "started_at": started_at.isoformat() if started_at else None,
-            "time_in_clip": 0.0,
-            "current_frame": 0,
-        }
-
-        clip = None
-        try:
-            if isinstance(desc, dict):
-                fps = (
-                    desc.get("fps") if isinstance(desc.get("fps"), (int, float)) else 30
+        resolved_path: Optional[str] = None
+        if anim:
+            try:
+                resolved_path, _ = self._resolve_animation_descriptor_for_state(
+                    anim, state_name
                 )
-                duration = None
-                # Prefer the loop section for timing calculations, fall back to intro/outro
-                section = None
-                try:
-                    section = (
-                        desc.get("loop") if isinstance(desc.get("loop"), dict) else None
-                    )
-                    if not section:
-                        section = (
-                            desc.get("intro")
-                            if isinstance(desc.get("intro"), dict)
-                            else None
-                        )
-                    if not section:
-                        section = (
-                            desc.get("outro")
-                            if isinstance(desc.get("outro"), dict)
-                            else None
-                        )
-                    if (
-                        section
-                        and isinstance(section.get("start_frame"), (int, float))
-                        and isinstance(section.get("end_frame"), (int, float))
-                    ):
-                        frames = max(
-                            0.0,
-                            float(section.get("end_frame"))
-                            - float(section.get("start_frame")),
-                        )
-                        duration = frames / float(fps) if fps else None
-                except Exception:
-                    duration = None
+            except Exception:
+                resolved_path = anim
 
-                try:
-                    clip = {
-                        "name": Path(resolved).stem
-                        if isinstance(resolved, str) and resolved
-                        else (Path(anim).stem if anim else None),
-                        "duration": duration,
-                        "fps": float(fps) if fps else 30,
-                    }
-                except Exception:
-                    clip = None
-
-                # If we have a start timestamp, compute elapsed time and current_frame
-                try:
-                    if started_at and isinstance(started_at, datetime):
-                        elapsed = max(
-                            0.0,
-                            (
-                                datetime.utcnow().replace(tzinfo=timezone.utc)
-                                - started_at
-                            ).total_seconds(),
-                        )
-                        timing["time_in_clip"] = elapsed
-                        if clip and clip.get("fps"):
-                            fps_val = float(clip.get("fps") or 30)
-                            if (
-                                section
-                                and isinstance(section.get("start_frame"), (int, float))
-                                and isinstance(section.get("end_frame"), (int, float))
-                            ):
-                                start = float(section.get("start_frame"))
-                                end = float(section.get("end_frame"))
-                                span = max(1.0, end - start)
-                                tframes = int(elapsed * fps_val)
-                                if desc.get("loop"):
-                                    current_frame = int(start + (tframes % span))
-                                else:
-                                    current_frame = int(start + min(span, tframes))
-                                timing["current_frame"] = current_frame
-                            else:
-                                timing["current_frame"] = int(elapsed * fps_val)
-                except Exception:
-                    # best-effort; keep defaults on failure
-                    pass
-        except Exception:
-            clip = None
-
-        state = {
-            "state": self.current_state.value,
-            "animation_file": anim,
-            "animation": resolved,
-            "descriptor": desc,
-            "animation_id": self._current_animation_id,
-            "animation_state": {
-                "action": self.current_state.value,
-                "phase": "loop",
-                "animation": resolved,
-                "descriptor": desc,
-                "timing": timing,
-                "expressions": desc.get("expressions")
-                if isinstance(desc, dict)
-                else None,
-                "blink": desc.get("blink") if isinstance(desc, dict) else None,
-                "eye_movement": desc.get("eye_movement")
-                if isinstance(desc, dict)
-                else None,
-                "emotions": None,
-                "lipsync": (
-                    desc.get("lipsync")
-                    if isinstance(desc, dict) and "lipsync" in desc
-                    else False
-                ),
-            },
+        return {
+            "state": state_name,
+            "descriptor": self._build_descriptor_id(
+                state_name=state_name,
+                animation_file=anim,
+                resolved_path=resolved_path,
+            ),
+            "started_at": self._started_at_epoch(self._current_animation_started_at),
         }
-
-        return state
 
     async def get_full_state(self) -> Dict[str, Any]:
-        """Return the complete VRM state for clients on WebSocket connect.
+        """Return the complete VRM state for clients on WebSocket connect (Karada v2).
 
-        Same keys as before, but this version awaits the emotion manager.
+        Karada v2: Returns simplified state with started_at timestamp.
+        Client uses started_at to compute animation_time locally.
         """
         # VRM model: prefer explicitly stored state, fall back to reading from webui
         vrm_model: Dict[str, Any] = {}
@@ -539,45 +812,73 @@ class KaradaStateServer:
             except Exception:
                 vrm_model = {}
 
+        # Animation state (Karada v2 protocol)
         animation: Dict[str, Any] = {}
         anim_file = self._current_animation_file
         if anim_file:
             try:
-                resolved, desc = self._resolve_animation_descriptor(anim_file)
+                resolved, _ = self._resolve_animation_descriptor(anim_file)
             except Exception:
                 resolved = anim_file
-                desc = self._current_animation_descriptor
             animation = {
-                "file": anim_file,
-                "url": resolved,
-                "state": self.current_state.value,
-                "loop": True,
-                "descriptor": desc or self._current_animation_descriptor,
-                "animation_id": self._current_animation_id,
+                "state": self.current_state.value if self.current_state else None,
+                "descriptor": self._build_descriptor_id(
+                    state_name=self.current_state.value if self.current_state else None,
+                    animation_file=anim_file,
+                    resolved_path=resolved,
+                ),
+                "started_at": self._started_at_epoch(
+                    self._current_animation_started_at
+                ),
             }
 
-        face_values: Dict[str, Any] = {}
-        try:
-            from core.core_initializer import PLUGIN_REGISTRY  # type: ignore[import]
+        # Face values
+        face_values: Dict[str, float] = dict(self._current_face_values)
+        if not self._face_values_initialized:
+            try:
+                from core.core_initializer import PLUGIN_REGISTRY
 
-            mgr = (
-                PLUGIN_REGISTRY.get("emotion_manager")
-                if isinstance(PLUGIN_REGISTRY, dict)
-                else None
-            )
-            if mgr is not None and hasattr(mgr, "get_emotion_state"):
-                raw = await mgr.get_emotion_state()  # awaitable now
-                if isinstance(raw, dict):
-                    face_values = raw
-        except Exception:
-            face_values = {}
+                mgr = (
+                    PLUGIN_REGISTRY.get("emotion_manager")
+                    if isinstance(PLUGIN_REGISTRY, dict)
+                    else None
+                )
+                if mgr is not None and hasattr(mgr, "get_emotion_state"):
+                    raw = await mgr.get_emotion_state()  # awaitable now
+                    if isinstance(raw, dict):
+                        normalized: Dict[str, float] = {}
+                        for key, raw_value in raw.items():
+                            name = str(key).strip()
+                            if not name:
+                                continue
+                            try:
+                                value = float(raw_value)
+                            except (TypeError, ValueError):
+                                continue
+                            if value > 1.0:
+                                value = value / 10.0
+                            value = max(0.0, min(1.0, value))
+                            if value > 0.0001:
+                                normalized[name] = value
+                        self._current_face_values = normalized
+                        face_values = dict(normalized)
+                self._face_values_initialized = True
+            except Exception:
+                face_values = {}
+                self._current_face_values = {}
+                self._face_values_initialized = True
 
-        return {
+        state: Dict[str, Any] = {
             "vrm_model": vrm_model,
             "animation": animation,
             "face_values": face_values,
             "audio": self.get_current_audio(),
         }
+        # Active transient expression override, if any, so a late-joining
+        # client renders the same face as everyone else.
+        if self._current_expression:
+            state["expression"] = dict(self._current_expression)
+        return state
 
     async def set_vrm_model(
         self,
@@ -696,12 +997,12 @@ class KaradaStateServer:
 
         return unique_animations
 
-    def set_animation_search_paths(self, paths: List[Path]) -> None:
+    def set_animation_search_paths(self, paths: List[Path | str]) -> None:
         """Set additional search paths (ordered) to resolve animation files.
 
         These are checked after the active persona skin and before the Rei fallback.
         """
-        self._search_paths = list(paths)
+        self._search_paths = [Path(path) for path in paths]
         log_debug(
             f"[KaradaStateServer] Animation search paths set: {self._search_paths}"
         )
@@ -881,22 +1182,7 @@ class KaradaStateServer:
                 # If descriptor parsing fails, treat as loopable by default
                 variants["loop"].append(fbx_path.name)
 
-        def _find_case_insensitive_file(
-            directory: Path, filename: str
-        ) -> Optional[Path]:
-            try:
-                direct = directory / filename
-                if direct.exists() and direct.is_file():
-                    return direct
-                lower = filename.lower()
-                for f in directory.glob("*.fbx"):
-                    if f.name.lower() == lower:
-                        return f
-            except Exception:
-                return None
-            return None
-
-        # 2) Resolve exact file match <state>.fbx ONLY in root animation dirs (case-insensitive)
+        # 2) Resolve folder variants by scanning ONLY <dir>/<state>/ (and Rei fallback)
         found_any = False
         active_persona_folder = None
         try:
@@ -913,23 +1199,6 @@ class KaradaStateServer:
         except Exception:
             active_persona_folder = None
 
-        root_dirs: List[Path] = []
-        if active_persona_folder:
-            root_dirs.append(self.SKINS_DIR / str(active_persona_folder) / "animations")
-        for p in self._search_paths:
-            root_dirs.append(Path(p))
-        root_dirs.append(self.SKIN_DEFAULT_ANIMATIONS_DIR)
-
-        for rd in root_dirs:
-            if not (rd.exists() and rd.is_dir()):
-                continue
-            exact = _find_case_insensitive_file(rd, f"{key}.fbx")
-            if exact is not None:
-                found_any = True
-                _classify_and_add(exact)
-                break
-
-        # 3) Resolve folder variants by scanning ONLY <dir>/<state>/ (and Rei fallback)
         state_dirs: List[Path] = []
         if active_persona_folder:
             state_dirs.append(
@@ -1028,7 +1297,8 @@ class KaradaStateServer:
                 url = self._build_search_url_prefix(root)
                 if state_folder:
                     search_roots.append((root / state_folder, f"{url}/{state_folder}"))
-                search_roots.append((root, url))
+                else:
+                    search_roots.append((root, url))
             except Exception:
                 continue
 
@@ -1042,7 +1312,10 @@ class KaradaStateServer:
                         f"/skins/{active_persona_folder}/animations/{state_folder}",
                     )
                 )
-            search_roots.append((base, f"/skins/{active_persona_folder}/animations"))
+            else:
+                search_roots.append(
+                    (base, f"/skins/{active_persona_folder}/animations")
+                )
 
         # Default Rei fallback
         rei_base = self.SKINS_DIR / "Rei" / "animations"
@@ -1050,7 +1323,8 @@ class KaradaStateServer:
             search_roots.append(
                 (rei_base / state_folder, f"/skins/Rei/animations/{state_folder}")
             )
-        search_roots.append((rei_base, "/skins/Rei/animations"))
+        else:
+            search_roots.append((rei_base, "/skins/Rei/animations"))
 
         def _try_load_descriptor(fpath: Path) -> Optional[Dict[str, Any]]:
             dpath = fpath.with_suffix(fpath.suffix + ".json")
@@ -1192,6 +1466,12 @@ class KaradaStateServer:
 
         return sanitized or None
 
+    # ------------------------------------------------------------------
+    # Karada v2: Phase control methods REMOVED
+    # Server no longer controls animation phases (intro/loop/outro).
+    # Client handles all phase transitions locally using descriptor + started_at.
+    # ------------------------------------------------------------------
+
     async def play_animation(
         self,
         state: AnimationState,
@@ -1200,101 +1480,39 @@ class KaradaStateServer:
         context_id: Optional[str] = None,
         priority: Optional[int] = None,
         source: Optional[str] = None,
+        animation_file: Optional[str] = None,
+        resume_section: Optional[str] = None,
     ) -> None:
-        """Play an animation for a specific state.
+        """Play an animation for a specific state (Karada v2).
 
-        If the animation has an intro section in its descriptor, it will be played first,
-        followed by the loop section on repeat. When stop_animation() is called, the outro
-        section is played before returning to Idle.
+        Karada v2: Server ONLY sends state + descriptor + started_at.
+        NO phase control, NO timing control, NO frame-level logic.
+        Client handles intro→loop→outro locally using the descriptor.
 
         Args:
             state: The animation state to play
             session_id: The WebUI session ID to send the animation to
-            loop: Whether the animation should loop (ignored if descriptor specifies intro/loop/outro)
+            loop: Whether the animation should loop (hint for client)
             context_id: Optional identifier for this animation context (for tracking)
             priority: Optional priority level for this animation context.
-                      If not provided, uses the priority from ANIMATION_STATE_PRIORITIES mapping.
-            source: Optional string describing the origin of the animation request (e.g. 'core', 'plugin').
-                    This is informational and is forwarded to WebUI when provided.
+            source: Optional string describing the origin of the animation request.
+            animation_file: Optional concrete animation file override.
+            resume_section: Deprecated - ignored in Karada v2.
         """
         log_info(
-            f"[KaradaStateServer] ⭐ play_animation CALLED: state={state.value}, session={session_id}, loop={loop}, context={context_id}, priority={priority}, source={source}",
+            f"[KaradaStateServer] ⭐ play_animation (v2) CALLED: state={state.value}, session={session_id}",
             log_file="webui",
         )
-
-        # Check if we need to play outro before transitioning to new animation
-        # This must be done BEFORE acquiring the lock to avoid deadlocks.
-        # We capture the previous animation/state/descriptor here so that the
-        # outro is played for the CORRECT (old) animation, not the new one.
-        outro_duration = 0
-        needs_outro_transition = False
-        prev_animation_for_outro: Optional[str] = None
-        prev_state_for_outro: Optional[str] = None
-        prev_descriptor_for_outro: Optional[Dict] = None
-
-        try:
-            if self.current_state != state and self.current_animation:
-                prev_animation_for_outro = self.current_animation
-                prev_state_for_outro = self.current_state.value
-                # Resolve descriptor using the OLD state folder explicitly
-                _, current_descriptor = self._resolve_animation_descriptor_for_state(
-                    self.current_animation, self.current_state.value
-                )
-                current_structure = self._analyze_animation_structure(
-                    current_descriptor, self.current_animation
-                )
-
-                if current_structure["has_outro"]:
-                    needs_outro_transition = True
-                    prev_descriptor_for_outro = current_descriptor
-                    log_debug(
-                        f"[KaradaStateServer] Preparing transition from {self.current_state.value} "
-                        f"to {state.value}: playing outro for {self.current_animation}"
-                    )
-        except Exception as exc:
-            log_warning(
-                f"[KaradaStateServer] Error checking outro during transition: {exc}"
-            )
 
         async with self._lock:
             # Use state priority if not explicitly provided
             if priority is None:
                 priority = self.get_state_priority(state)
 
-            # --- Preemption check ---
-            # If a higher-priority context is already active, reject this request
-            # (IDLE is always overridable regardless of current priority).
-            if state != AnimationState.IDLE and self._active_tasks:
-                max_active = max(
-                    (p for p in self._active_tasks.values() if p is not None),
-                    default=0,
-                )
-                if max_active > priority:
-                    log_debug(
-                        f"[KaradaStateServer] Preemption: rejecting {state.value} "
-                        f"(priority={priority}) because active priority={max_active}"
-                    )
-                    return
-
-            # If we have a context_id, mark it as active with priority.
-            # When context_id is None and state != IDLE, generate a synthetic
-            # context so the watchdog doesn't kill the animation prematurely.
-            _KARADA_AUTO_CTX = "__karada_auto"
-            if context_id:
-                # Clear any previous synthetic context when an explicit one arrives
-                self._active_tasks.pop(_KARADA_AUTO_CTX, None)
-                self._active_tasks[context_id] = priority
-            elif state != AnimationState.IDLE:
-                self._active_tasks[_KARADA_AUTO_CTX] = priority
-            else:
-                # Transitioning to IDLE: clear the synthetic context
-                self._active_tasks.pop(_KARADA_AUTO_CTX, None)
-
-            # Select animation file
-            # Prefer variants discovered via descriptors and overrides
+            # Step 1: Select animation file and finalize resolved_state
+            resolved_state = state
             variants = self.get_animation_variants(state.value)
             if state == AnimationState.IDLE:
-                # Never pick `post` variants for idle: they are often play-once/clamped.
                 animations = variants.get("loop", []) or variants.get("other", [])
             else:
                 animations = (
@@ -1303,8 +1521,13 @@ class KaradaStateServer:
                     or variants.get("other", [])
                 )
             if not animations:
-                # Fallback to idle if no animations found for this state
-                animations = self.get_animations_for_state(AnimationState.IDLE)
+                resolved_state = AnimationState.IDLE
+                idle_variants = self.get_animation_variants(AnimationState.IDLE.value)
+                animations = idle_variants.get("loop", []) or idle_variants.get(
+                    "other", []
+                )
+                if not animations:
+                    animations = self.get_animations_for_state(AnimationState.IDLE)
             if not animations:
                 log_warning(
                     f"[KaradaStateServer] No animations found for state {state.value}, skipping"
@@ -1312,397 +1535,216 @@ class KaradaStateServer:
                 return
 
             # Select animation based on rotation mode
-            if state.value in self._sequential_states and len(animations) > 1:
-                # Sequential mode: use current index or start from 0
-                current_index = self._sequence_indices.get(state.value, -1)
+            if animation_file:
+                selected_animation = animation_file
+            elif (
+                resolved_state.value in self._sequential_states and len(animations) > 1
+            ):
+                current_index = self._sequence_indices.get(resolved_state.value, -1)
                 next_index = (current_index + 1) % len(animations)
                 selected_animation = animations[next_index]
-                self._sequence_indices[state.value] = next_index
+                self._sequence_indices[resolved_state.value] = next_index
             else:
-                # Random mode or single animation
                 selected_animation = random.choice(animations)
 
-            # Update internal state
-            self.current_state = state
-            self.current_animation = selected_animation
-
             log_debug(
-                f"[KaradaStateServer] Playing {state.value} animation: {selected_animation} "
-                f"(loop={loop}, session={session_id}, context={context_id}, priority={priority})"
+                f"[KaradaStateServer] Playing {resolved_state.value} animation: {selected_animation}"
             )
 
-            # Send animation command to clients
+            # Step 3: Update context tracking
+            _KARADA_AUTO_CTX = "__karada_auto"
+
+            # Step 2: Compute should_update_state
+            #
+            # Priority comparison must only guard against a *different*, explicit
+            # context (e.g. a plugin-driven touch/emote overlay). Successive
+            # lifecycle phases (think -> write -> idle) all arrive as the
+            # auto-context with no explicit context_id: they are sequential
+            # phases of the same flow, not competing overlays, so a later phase
+            # must always replace the previous one regardless of its nominal
+            # priority. Otherwise a lower-priority phase (e.g. write, priority 3)
+            # would be deferred behind the still-active higher-priority phase
+            # (think, priority 10), freezing the avatar on the earlier state.
+            should_update_state = True
+            is_auto_request = context_id is None
+            current_is_auto = self._current_context_id == _KARADA_AUTO_CTX
+            same_lifecycle_lane = is_auto_request and current_is_auto
+            if (
+                not same_lifecycle_lane
+                and self._current_context_id
+                and self._current_context_id in self._active_tasks
+            ):
+                current_priority = self._active_tasks.get(self._current_context_id) or 0
+                if priority < current_priority:
+                    should_update_state = False
+
+            # Create context metadata with FINALIZED resolved_state
+            context_meta = {
+                "state": resolved_state,
+                "session_id": session_id,
+                "loop": loop,
+                "priority": priority,
+                "source": source,
+                "animation_file": selected_animation,
+                "sequence": getattr(self, "_context_sequence", 0),
+            }
+            self._context_sequence = getattr(self, "_context_sequence", 0) + 1
+
+            if context_id:
+                self._active_tasks.pop(_KARADA_AUTO_CTX, None)
+                self._active_tasks[context_id] = priority
+                self._active_context_meta[context_id] = context_meta
+                if should_update_state:
+                    self._current_context_id = context_id
+            elif resolved_state != AnimationState.IDLE:
+                self._active_tasks[_KARADA_AUTO_CTX] = priority
+                self._active_context_meta[_KARADA_AUTO_CTX] = context_meta
+                if should_update_state:
+                    self._current_context_id = _KARADA_AUTO_CTX
+            else:
+                self._active_tasks.pop(_KARADA_AUTO_CTX, None)
+                self._forget_active_context(_KARADA_AUTO_CTX)
+                self._current_context_id = None
+
+            if not should_update_state:
+                log_debug(
+                    "[KaradaStateServer] Higher-priority animation active; deferring "
+                    f"{resolved_state.value} until the dominant context ends"
+                )
+                return
+
+            # Step 4: Pre-load animation before sending command
             if self._has_any_transport():
-                # Resolve descriptor for intelligent section handling
-                resolved_path, descriptor = self._resolve_animation_descriptor(
-                    selected_animation
-                )
-                structure = self._analyze_animation_structure(
-                    descriptor, selected_animation
-                )
-
-                log_debug(
-                    f"[KaradaStateServer] Resolved animation {selected_animation}: "
-                    f"descriptor={'found' if descriptor else 'NOT FOUND'}, "
-                    f"structure=(intro:{structure['has_intro']}, loop:{structure['has_loop']}, outro:{structure['has_outro']})"
-                )
-
-                is_idle_state = state == AnimationState.IDLE
-
-                # Determine effective loop behavior based on descriptor structure:
-                # 1. If has intro/outro (structured animation): loop=True if has loop section, else play once
-                # 2. If only loop (no intro/outro) + play_once: play loop once only (don't really loop)
-                # 3. Otherwise: use provided loop parameter
-                has_intro_or_outro = structure["has_intro"] or structure["has_outro"]
-
-                if is_idle_state:
-                    # IDLE is always looped; descriptor (if any) is used only to define a safe loop range.
-                    effective_loop = True
-                    start_rotation = len(animations) > 1
-                elif has_intro_or_outro:
-                    # Structured animation (intro/outro present)
-                    # play_once flag is ignored (warning already logged in _analyze_animation_structure)
-                    if structure["has_loop"]:
-                        # intro/loop/outro or intro/outro - loop the middle section
-                        effective_loop = True
-                    else:
-                        # intro only or intro/outro (no loop) - play once
-                        effective_loop = False
-                    start_rotation = False
-                elif (
-                    structure["has_loop"] and descriptor and descriptor.get("play_once")
-                ):
-                    # Only loop section (no intro/outro) with play_once flag
-                    # Loop plays once only - don't really loop, don't rotate
-                    log_debug(
-                        f"[KaradaStateServer] Animation '{selected_animation}' has loop section "
-                        f"with play_once flag: loop will play once only (no looping)"
-                    )
-                    effective_loop = False
-                    start_rotation = False
-                elif structure["has_loop"]:
-                    # Only loop section - loop it normally
-                    effective_loop = True
-                    start_rotation = False
-                elif descriptor and descriptor.get("play_once"):
-                    # Legacy: play_once flag without structured sections
-                    effective_loop = False
-                    start_rotation = False
-                elif not descriptor:
-                    # IMPLICIT DESCRIPTOR:
-                    # If no descriptor exists, we cannot infer intro/loop/outro. Respect the requested
-                    # loop parameter so core states (THINK/WRITE/TALK) can remain stable (loop=True)
-                    # and avoid ending/clamping into T-pose.
-                    log_debug(
-                        f"[KaradaStateServer] Animation '{selected_animation}' has NO descriptor: "
-                        f"respecting requested loop={loop} for non-idle states"
-                    )
-                    effective_loop = bool(loop)
-                    start_rotation = False
-                else:
-                    # Has descriptor but no special flags
-                    # Use provided loop parameter
-                    effective_loop = loop
-                    start_rotation = len(animations) > 1
-
-                log_debug(
-                    f"[KaradaStateServer] Animation structure - intro: {structure['has_intro']}, "
-                    f"loop: {structure['has_loop']}, outro: {structure['has_outro']}, "
-                    f"play_once: {descriptor.get('play_once') if descriptor else False}, "
-                    f"effective_loop: {effective_loop}"
-                )
-
-                # CRITICAL: Pre-load animation before sending play command
-                # This ensures the client has the FBX/VRM data loaded before playback starts,
-                # preventing T-pose due to missing animation data.
-                # session_id can be None for broadcast; _preload_animation handles that.
-                preload_ok = True
                 try:
-                    if self._has_any_transport():
-                        # For non-idle animations, pre-load IDLE first to ensure smooth fallback
-                        if state != AnimationState.IDLE:
-                            await self.ensure_idle_preloaded(session_id=session_id)
-
-                        # Then pre-load the requested animation
-                        await self._preload_animation(
-                            session_id=session_id,
-                            animation_file=selected_animation,
-                            state_folder=state.value,
-                        )
+                    if resolved_state != AnimationState.IDLE:
+                        await self.ensure_idle_preloaded(session_id=session_id)
+                    await self._preload_animation(
+                        session_id=session_id,
+                        animation_file=selected_animation,
+                        state_folder=resolved_state.value,
+                    )
                 except Exception as exc:
                     log_warning(
-                        f"[KaradaStateServer] Preload failed for {selected_animation}: {exc}. "
-                        f"Falling back to IDLE to prevent T-pose."
+                        f"[KaradaStateServer] Preload failed for {selected_animation}: {exc}"
                     )
-                    preload_ok = False
+                    if resolved_state != AnimationState.IDLE:
+                        if context_id:
+                            self._active_tasks.pop(context_id, None)
+                            self._forget_active_context(context_id)
+                        return
 
-                if not preload_ok and state != AnimationState.IDLE:
-                    # Preload failed — do NOT play the animation (would T-pose).
-                    # Fall back to IDLE instead.
-                    log_warning(
-                        f"[KaradaStateServer] Skipping {state.value} animation due to preload failure"
-                    )
-                    if context_id:
-                        self._active_tasks.pop(context_id, None)
-                    return
+            # Step 5: Karada v2 - Update state and broadcast
+            self._current_animation_started_at = datetime.now(timezone.utc)
+            if should_update_state:
+                self.current_state = resolved_state
+            self.current_animation = selected_animation
+            self._current_animation_file = selected_animation
 
-                # If we need to play outro before transitioning, do it now
-                # (before releasing lock).  Use the PREVIOUS animation/state/descriptor
-                # captured before the lock, not self.current_animation which already
-                # points to the NEW animation.
-                if (
-                    needs_outro_transition
-                    and self._has_any_transport()
-                    and prev_animation_for_outro
-                ):
-                    log_debug(
-                        f"[KaradaStateServer] Sending outro command for {prev_animation_for_outro} "
-                        f"before transitioning to {state.value}"
-                    )
-
-                    # Send outro command using the PREVIOUS animation data.
-                    # Pass state_for_resolution so the path is resolved against the
-                    # OLD state folder (e.g. 'think'), not the NEW one ('idle').
-                    await self._send_animation_command(
-                        session_id=session_id,
-                        animation_file=prev_animation_for_outro,
-                        loop=False,
-                        state=prev_state_for_outro or self.current_state.value,
-                        descriptor=prev_descriptor_for_outro,
-                        play_section="outro",
-                        priority=priority,
-                        source=source,
-                        state_for_resolution=prev_state_for_outro,
-                    )
-
-                    # Calculate outro duration to wait before sending the new animation command
-                    if (
-                        prev_descriptor_for_outro
-                        and "outro" in prev_descriptor_for_outro
-                    ):
-                        outro_start = prev_descriptor_for_outro["outro"].get(
-                            "start_frame", 0
-                        )
-                        outro_end = prev_descriptor_for_outro["outro"].get(
-                            "end_frame", 0
-                        )
-                        outro_fps = float(
-                            prev_descriptor_for_outro.get("fps", 30) or 30
-                        )
-                        outro_duration = max(0.3, (outro_end - outro_start) / outro_fps)
-                        log_debug(
-                            f"[KaradaStateServer] Outro duration: {outro_duration:.2f}s"
-                        )
-
-                await self._send_animation_command(
-                    session_id=session_id,
-                    animation_file=selected_animation,
-                    loop=effective_loop,
-                    state=state.value,
-                    descriptor=self._sanitize_idle_descriptor(descriptor)
-                    if is_idle_state
-                    else descriptor,
-                    priority=priority,
-                    source=source,
-                )
-
-                # Update centralized animation state and notify all clients
-                self._current_animation_file = selected_animation
-                self._current_animation_descriptor = (
-                    self._sanitize_idle_descriptor(descriptor)
-                    if is_idle_state
-                    else descriptor
-                )
-                await self._notify_animation_state_changed(
-                    state,
-                    selected_animation,
-                    self._current_animation_descriptor,
-                )
-                # If animation is not looping and is not idle, schedule a fallback transition
-                # to Idle after the clip duration in case the client doesn't trigger a transition.
-                # The backend fallback is ONLY a safety net — the frontend already handles the
-                # outro→idle pipeline via the mixer 'finished' event.  The key requirement is
-                # that this fires AFTER the full clip (intro + loop + outro) has had time to
-                # finish on the client, plus a generous buffer.  Using a single section's
-                # duration (old behaviour) caused the fallback to fire while the outro was
-                # still playing, interrupting it and producing a T-Pose.
-                #
-                # Fallback duration is calculated by summing the lengths of all descriptor
-                # sections (intro, loop, outro) converted from frames to seconds and then
-                # adding 1.5 s of extra slack.  If there is no descriptor or no frame info,
-                # a conservative default of 3 s is used before the buffer.  This avoids
-                # premature transitions when metadata is missing.
-                try:
-                    if not effective_loop and state != AnimationState.IDLE:
-                        # Sum durations of ALL descriptor sections so we never fire mid-animation.
-                        fallback_duration: float = 0.0
-                        if descriptor and isinstance(descriptor, dict):
-                            fps_val = float(descriptor.get("fps") or 30)
-                            for sec_key in ("intro", "loop", "outro"):
-                                sec = descriptor.get(sec_key)
-                                if (
-                                    isinstance(sec, dict)
-                                    and isinstance(sec.get("start_frame"), (int, float))
-                                    and isinstance(sec.get("end_frame"), (int, float))
-                                ):
-                                    fallback_duration += (
-                                        max(
-                                            0.0,
-                                            float(sec["end_frame"])
-                                            - float(sec["start_frame"]),
-                                        )
-                                        / fps_val
-                                    )
-                        if fallback_duration <= 0.0:
-                            # No descriptor or no frame info — use a conservative default so
-                            # the frontend's own transition has time to complete.
-                            fallback_duration = 3.0
-                        # Add a buffer so the frontend mixer 'finished' + 140 ms timer
-                        # always fires before the backend safety-net does.
-                        fallback_duration += 1.5
-
-                        # Schedule background task to return to Idle after duration if nothing else changed
-                        running_loop = asyncio.get_running_loop()
-                        running_loop.create_task(
-                            self._non_loop_fallback(
-                                session_id,
-                                state,
-                                selected_animation,
-                                fallback_duration,
-                            )
-                        )
-                except Exception:
-                    pass
-            else:
-                log_warning(
-                    "[KaradaStateServer] No transports registered, cannot send animation command"
-                )
-                start_rotation = False
-
-            # If there are multiple animations for this state, start a background
-            # rotation task that will randomly switch between them every 30-60s.
-            # Skip rotation for animations with loop/intro/outro structure.
-            if start_rotation:
-                await self._start_rotation_task(session_id, state, context_id)
-            else:
-                await self._stop_rotation_task(session_id, state)
-
-        # Wait for outro to complete outside the lock (so other operations can proceed)
-        if needs_outro_transition and outro_duration > 0:
-            log_debug(
-                f"[KaradaStateServer] Waiting {outro_duration:.2f}s for outro to complete..."
+            # Step 6: Resolve descriptor
+            resolved_path, descriptor = self._resolve_animation_descriptor_for_state(
+                selected_animation, resolved_state.value
             )
-            await asyncio.sleep(outro_duration)
 
-        # If this is a non-idle animation, pre-load IDLE in the background
-        # so that when the animation stops, the fallback to IDLE is instant
-        if state != AnimationState.IDLE:
+            # Sanitize descriptor for idle (no outro/play_once)
+            if resolved_state == AnimationState.IDLE:
+                self._current_animation_descriptor = self._sanitize_idle_descriptor(
+                    descriptor
+                )
+            else:
+                self._current_animation_descriptor = descriptor
+
+            # Step 7: Broadcast Karada v2 payload only
+            if self._has_any_transport():
+                await self._send_animation_command_v2(
+                    session_id=session_id,
+                    state=resolved_state.value,
+                    animation_file=selected_animation,
+                    started_at=self._current_animation_started_at,
+                )
+
+            # Step 8: Notify callbacks
+            await self._notify_animation_state_changed(
+                resolved_state,
+                selected_animation,
+                self._current_animation_descriptor,
+            )
+
+            # Step 9: Handle rotation for idle
+            if resolved_state == AnimationState.IDLE and len(animations) > 1:
+                await self._start_rotation_task(session_id, resolved_state, context_id)
+            else:
+                await self._stop_rotation_task(session_id, resolved_state)
+
+        # Background: pre-load idle for non-idle animations
+        if resolved_state != AnimationState.IDLE:
             try:
                 asyncio.create_task(self.ensure_idle_preloaded(session_id=session_id))
             except Exception:
                 pass
 
-    async def stop_animation(self, context_id: str, session_id: str) -> None:
+    async def stop_animation(self, context_id: str, session_id: Optional[str]) -> None:
         """Stop an animation context and return to Idle if no other contexts are active.
 
-        Intelligently handles animations with flexible outro sections:
-        - If outro exists: play outro before transitioning to Idle
-        - If no outro: transition immediately to Idle
-        - Handles partial animations gracefully (intro-only, loop-only, etc.)
+        Karada v2: Server simply sends idle state.
+        Client handles any outro transitions locally using the descriptor.
 
         Args:
             context_id: The context identifier to stop
             session_id: The WebUI session ID
         """
         async with self._lock:
-            # Get current animation descriptor to check structure
-            current_animation = self.current_animation
-            current_state_value = (
-                self.current_state.value if self.current_state else None
+            # Clear context tracking
+            self._active_tasks.pop(context_id, None)
+            self._forget_active_context(context_id)
+
+            is_current_context = self._current_context_id == context_id
+            if is_current_context:
+                self._current_context_id = None
+
+            # Find the context to restore (inside the lock)
+            restore = self._select_restore_context_locked(
+                excluded_context_id=context_id
             )
-            descriptor = None
-            if current_animation:
-                _, descriptor = self._resolve_animation_descriptor(current_animation)
+            should_restore = restore is not None
+            restore_state = restore.get("state") if restore else None
+            restore_session_id = restore.get("session_id") if restore else None
+            restore_loop = restore.get("loop") if restore else True
+            restore_priority = restore.get("priority") if restore else None
+            restore_source = restore.get("source") if restore else None
+            restore_animation_file = restore.get("animation_file") if restore else None
+            restore_context_id = restore.get("context_id") if restore else None
 
-            # Analyze animation structure
-            structure = self._analyze_animation_structure(descriptor)
-
-            # If the animation has an outro, play it first
-            if structure["has_outro"]:
-                log_debug(
-                    f"[KaradaStateServer] Playing outro for {current_animation} "
-                    f"before stopping (context={context_id}, session={session_id})"
-                )
-                # Play outro with loop=False (play once), explicitly requesting 'outro' section
-                await self._send_animation_command(
-                    session_id=session_id,
-                    animation_file=current_animation,
-                    loop=False,
-                    state=self.current_state.value,
-                    descriptor=descriptor,
-                    play_section="outro",
-                    state_for_resolution=current_state_value,
-                )
-                # Estimate outro duration and wait before transitioning to Idle
-                # Default: assume ~30 frames at 30fps = ~1 second per 30 frames
-                outro_frames = descriptor["outro"].get("end_frame", 0) - descriptor[
-                    "outro"
-                ].get("start_frame", 0)
-                outro_duration = max(
-                    0.5, outro_frames / 30.0
-                )  # Minimum 0.5s, assume 30fps
-                log_debug(
-                    f"[KaradaStateServer] Waiting {outro_duration:.1f}s for outro to complete"
-                )
-                # Release lock during wait so other operations can proceed
-                # But mark that we're in outro playback
-                self._active_tasks.pop(context_id, None)
-            else:
-                # No outro section - transition immediately
-                log_debug(
-                    f"[KaradaStateServer] No outro section for {current_animation}, "
-                    f"stopping immediately (context={context_id})"
-                )
-                self._active_tasks.pop(context_id, None)
-                outro_duration = 0
-
-        # Wait for outro if needed (outside the lock)
-        if outro_duration > 0:
-            await asyncio.sleep(outro_duration)
-
-        # After outro (or immediately if no outro), decide whether to transition to Idle.
-        should_return_idle = False
-        async with self._lock:
-            remaining_priorities = [
-                p for p in self._active_tasks.values() if p is not None
-            ]
-            highest = max(remaining_priorities) if remaining_priorities else 0
-
-            # Define Idle priority as 0; only return to Idle when no active context has priority > 0
-            if highest <= 0:
-                should_return_idle = True
-
-        # IMPORTANT: call play_animation outside the lock to avoid deadlocks.
-        if should_return_idle:
-            log_debug(
-                f"[KaradaStateServer] No high-priority contexts, returning to Idle (session={session_id})"
-            )
+        # Outside the lock, perform the restore or idle transition
+        if should_restore and isinstance(restore_state, AnimationState):
             await self.play_animation(
-                AnimationState.IDLE, session_id=session_id, loop=True, context_id=None
+                restore_state,
+                session_id=restore_session_id or session_id,
+                loop=bool(restore_loop),
+                context_id=restore_context_id,
+                priority=restore_priority,
+                source=restore_source,
+                animation_file=restore_animation_file,
+            )
+        else:
+            # No context to restore, transition to idle
+            await self.play_animation(
+                AnimationState.IDLE,
+                session_id=session_id,
+                loop=True,
+                context_id=None,
             )
 
-            # When returning to Idle, make sure other rotation tasks for the previous
-            # contexts are cleaned up (stop any rotation tasks for non-idle states tied to this session)
+        # Clean up rotation tasks for non-idle states
+        async with self._lock:
+            has_remaining_context = self._select_restore_context_locked() is not None
+        if not has_remaining_context:
             for anim_state in [
                 AnimationState.THINK,
                 AnimationState.WRITE,
                 AnimationState.TALK,
+                AnimationState.TOUCH,
             ]:
                 await self._stop_rotation_task(session_id, anim_state)
-        else:
-            log_debug(
-                f"[KaradaStateServer] Context {context_id} stopped but other contexts still active"
-            )
 
     async def transition_to(
         self, state: AnimationState, session_id: str, context_id: Optional[str] = None
@@ -1726,249 +1768,71 @@ class KaradaStateServer:
             context_id=context_id,
         )
 
-    async def _send_animation_command(
+    # ------------------------------------------------------------------
+    # Karada v2 Protocol - Simplified Animation Command
+    # Server ONLY sends: state + descriptor + started_at.
+    # NO phase control, NO timing control, NO frame-level logic
+    # ------------------------------------------------------------------
+
+    async def _send_animation_command_v2(
         self,
         session_id: Optional[str],
-        animation_file: str,
-        loop: bool,
         state: str,
-        descriptor: Optional[Dict] = None,
-        play_section: Optional[str] = None,
-        priority: Optional[int] = None,
-        source: Optional[str] = None,
-        state_for_resolution: Optional[str] = None,
+        animation_file: str,
+        started_at: datetime,
     ) -> None:
-        """Send animation command to the WebUI via WebSocket.
+        """Send Karada v2 animation command to clients.
 
-        If descriptor contains intro/loop sections, the WebUI should play intro first,
-        then loop the loop section. The descriptor is sent along for WebUI interpretation.
+        Karada v2 Protocol:
+        - Server sends WHAT to play (state, descriptor id)
+        - Server sends authoritative timestamp (started_at)
+        - Client decides HOW and WHEN to play it locally
+        - No phase control, no timing control, no frame-level logic
 
         Args:
-            session_id: The WebUI session ID
+            session_id: Target session or None for broadcast
+            state: The logical state name (e.g., 'think', 'idle')
             animation_file: The animation file name
-            loop: Whether to loop the animation
-            state: The logical state name
-            descriptor: Optional animation descriptor with frame info (intro/loop/outro)
-            play_section: Optional section to play - 'intro', 'loop', 'outro', or None for full animation
-            priority: Optional numeric priority for client-side preemption.
-            source: Optional origin string forwarded to the WebUI.
-            state_for_resolution: Optional state folder override for path resolution.
-                When playing an outro, pass the OLD state so the file is found in
-                the correct subdirectory (e.g. 'think' not 'idle').
+            started_at: Authoritative UTC timestamp when animation started
         """
         if not self._has_any_transport():
             return
 
-        # Resolve path and descriptor (if not already provided)
-        # When state_for_resolution is given (e.g. during outro), resolve against
-        # that state folder instead of self.current_state (which has already
-        # been updated to the NEW state at this point).
-        if state_for_resolution:
-            if descriptor is None:
-                resolved_rel_path, descriptor = (
-                    self._resolve_animation_descriptor_for_state(
-                        animation_file, state_for_resolution
-                    )
-                )
-            else:
-                resolved_rel_path, _ = self._resolve_animation_descriptor_for_state(
-                    animation_file, state_for_resolution
-                )
-        else:
-            if descriptor is None:
-                resolved_rel_path, descriptor = self._resolve_animation_descriptor(
-                    animation_file
-                )
-            else:
-                resolved_rel_path, _ = self._resolve_animation_descriptor(
-                    animation_file
-                )
-
-        # Prepare optional rich animation_state payload
-        animation_state: Dict[str, Any] = {}
-        started_at = datetime.utcnow().replace(tzinfo=timezone.utc)
+        # Resolve descriptor id for the animation file
         try:
-            resolved_path = resolved_rel_path
-            phase = (
-                play_section
-                if play_section is not None
-                else ("loop" if loop else "clip")
+            resolved_path, _ = self._resolve_animation_descriptor_for_state(
+                animation_file, state
             )
-            timing = {
-                "started_at": started_at.isoformat(),
-                "time_in_clip": 0.0,
-                "current_frame": 0,
-            }
-
-            # Try to fetch emotions from the runtime EmotionManager plugin instance if available
-            # (fallback to constructing a local instance).
-            emotions = None
-            try:
-                mgr = None
-                try:
-                    from core.core_initializer import PLUGIN_REGISTRY
-
-                    mgr = (
-                        PLUGIN_REGISTRY.get("emotion_manager")
-                        if isinstance(PLUGIN_REGISTRY, dict)
-                        else None
-                    )
-                except Exception:
-                    mgr = None
-
-                if mgr is None:
-                    # No EmotionManager plugin available; skip emotion enrichment
-                    mgr = None
-
-                emotions_raw = None
-                if mgr is not None and hasattr(mgr, "get_emotion_state"):
-                    emotions_raw_maybe = mgr.get_emotion_state()
-                    emotions_raw = (
-                        await emotions_raw_maybe
-                        if asyncio.iscoroutine(emotions_raw_maybe)
-                        else emotions_raw_maybe
-                    )
-
-                if isinstance(emotions_raw, dict) and emotions_raw:
-                    # Filter out near-zero values (decay tail) to avoid sending meaningless noise.
-                    emotions_filtered = {
-                        k: v
-                        for k, v in emotions_raw.items()
-                        if isinstance(v, (int, float)) and v >= 0.1
-                    }
-                    if emotions_filtered:
-                        dominant, max_intensity = max(
-                            emotions_filtered.items(), key=lambda x: x[1]
-                        )
-                        emotions = {"dominant": dominant, "values": emotions_filtered}
-                        log_debug(
-                            f"[KaradaStateServer] Attached emotions to animation_state: dominant={dominant}, max={max_intensity}"
-                        )
-            except Exception:
-                emotions = None
-
-            lipsync_flag = False
-            if descriptor and isinstance(descriptor, dict):
-                lipsync_flag = bool(descriptor.get("lipsync", False))
-
-            clip = None
-            if isinstance(descriptor, dict):
-                fps = (
-                    descriptor.get("fps")
-                    if isinstance(descriptor.get("fps"), (int, float))
-                    else 30
-                )
-                duration = None
-                try:
-                    section_key = play_section or ("loop" if loop else None)
-                    section = (
-                        descriptor.get(section_key)
-                        if section_key and isinstance(descriptor.get(section_key), dict)
-                        else None
-                    )
-                    if (
-                        section
-                        and isinstance(section.get("start_frame"), (int, float))
-                        and isinstance(section.get("end_frame"), (int, float))
-                    ):
-                        frames = max(
-                            0.0,
-                            float(section.get("end_frame"))
-                            - float(section.get("start_frame")),
-                        )
-                        duration = frames / float(fps) if fps else None
-                except Exception:
-                    duration = None
-                try:
-                    clip = {
-                        "name": Path(resolved_path).stem
-                        if isinstance(resolved_path, str) and resolved_path
-                        else Path(animation_file).stem,
-                        "duration": duration,
-                        "fps": float(fps) if fps else 30,
-                    }
-                except Exception:
-                    clip = None
-
-            # Only attach rich animation_state when we have descriptor and/or emotions.
-            if descriptor is None and emotions is None:
-                animation_state = {}
-            else:
-                animation_state = {
-                    "action": state,
-                    "phase": phase,
-                    "animation": resolved_path,
-                    "descriptor": descriptor,
-                    "clip": clip,
-                    "timing": timing,
-                    "expressions": descriptor.get("expressions")
-                    if isinstance(descriptor, dict)
-                    else None,
-                    "blink": descriptor.get("blink")
-                    if isinstance(descriptor, dict)
-                    else None,
-                    "eye_movement": descriptor.get("eye_movement")
-                    if isinstance(descriptor, dict)
-                    else None,
-                    "emotions": emotions,
-                    "lipsync": lipsync_flag,
-                    "priority": int(priority) if isinstance(priority, int) else None,
-                    "source": source,
-                }
         except Exception:
-            animation_state = {}
+            resolved_path = None
 
-        # Keep track of start time for summaries
+        descriptor_id = self._build_descriptor_id(
+            state_name=state,
+            animation_file=animation_file,
+            resolved_path=resolved_path,
+        )
+
+        # Build Karada v2 payload
+        payload: Dict[str, Any] = {
+            "type": "vrm_animation_v2",
+            "state": state,
+            "descriptor": descriptor_id,
+            "started_at": self._started_at_epoch(started_at),
+        }
+
+        # Send to clients
         try:
-            self._current_animation_started_at = started_at
-        except Exception:
-            pass
-
-        # Generate a new stable animation_id only when a genuinely new animation
-        # starts (different file, and not the outro section of the current one).
-        # The ID is kept unchanged for re-sends of the same animation so that
-        # any interface that already has the correct ID can skip the restart.
-        try:
-            if (
-                animation_file != self._current_animation_file
-                and play_section != "outro"
-            ):
-                self._current_animation_id = str(uuid.uuid4())
-        except Exception:
-            pass
-
-        # If session_id is None, broadcast to all connected clients via transports
-        try:
-            payload: Dict[str, Any] = {
-                "type": "vrm_animation",
-                "file": resolved_path,
-                "loop": loop,
-                "state": state,
-                "animation_id": self._current_animation_id,
-                "reset_eyes": True,
-            }
-            if isinstance(priority, int):
-                payload["priority"] = int(priority)
-            if source:
-                payload["source"] = str(source)
-            if descriptor is not None:
-                payload["descriptor"] = descriptor
-            if animation_state:
-                payload["animation_state"] = animation_state
-            if play_section is not None:
-                payload["play_section"] = play_section
-
             if session_id is None:
                 for transport in self._transports:
                     try:
                         await transport.broadcast_animation(payload)
                         log_debug(
-                            f"[KaradaStateServer] Broadcast animation via "
-                            f"{type(transport).__name__}: {resolved_rel_path}"
+                            f"[KaradaStateServer] Broadcast v2 animation via "
+                            f"{type(transport).__name__}: {state}"
                         )
                     except Exception as exc:
                         log_warning(
-                            f"[KaradaStateServer] Failed to broadcast animation via "
+                            f"[KaradaStateServer] Failed to broadcast v2 animation via "
                             f"{type(transport).__name__}: {exc}"
                         )
                 return
@@ -1977,15 +1841,17 @@ class KaradaStateServer:
                 try:
                     await transport.send_to_session(session_id, payload)
                     log_debug(
-                        f"[KaradaStateServer] Sent animation to session {session_id}: {resolved_rel_path}"
+                        f"[KaradaStateServer] Sent v2 animation to session {session_id}: {state}"
                     )
                 except Exception as exc:
                     log_warning(
-                        f"[KaradaStateServer] Failed to send animation to session "
+                        f"[KaradaStateServer] Failed to send v2 animation to session "
                         f"{session_id} via {type(transport).__name__}: {exc}"
                     )
         except Exception as exc:
-            log_warning(f"[KaradaStateServer] Failed to send animation command: {exc}")
+            log_warning(
+                f"[KaradaStateServer] Failed to send v2 animation command: {exc}"
+            )
 
     async def _preload_animation(
         self,
@@ -2068,7 +1934,18 @@ class KaradaStateServer:
                     # If current state changed, stop the loop
                     if self.current_state != state:
                         break
-                    animations = self.get_animations_for_state(state)
+
+                    variants = self.get_animation_variants(state.value)
+                    if state == AnimationState.IDLE:
+                        animations = variants.get("loop", []) or variants.get(
+                            "other", []
+                        )
+                    else:
+                        animations = (
+                            variants.get("loop", [])
+                            or variants.get("post", [])
+                            or variants.get("other", [])
+                        )
                     if not animations or len(animations) <= 1:
                         break
 
@@ -2094,26 +1971,33 @@ class KaradaStateServer:
                                 a for a in animations if a != self.current_animation
                             ]
                             candidate = random.choice(choices) if choices else candidate
+                    self.current_state = state
                     self.current_animation = candidate
-                    # Resolve descriptor for candidate to respect play_once if present
-                    _, candidate_descriptor = self._resolve_animation_descriptor(
-                        candidate
-                    )
-                    candidate_loop = (
-                        False
-                        if (
-                            candidate_descriptor
-                            and candidate_descriptor.get("play_once")
+                    self._current_animation_file = candidate
+                    self._current_animation_started_at = datetime.now(timezone.utc)
+
+                    _, candidate_descriptor = (
+                        self._resolve_animation_descriptor_for_state(
+                            candidate, state.value
                         )
-                        else True
                     )
-                    # send new animation command (loop depends on descriptor)
-                    await self._send_animation_command(
+                    if state == AnimationState.IDLE:
+                        self._current_animation_descriptor = (
+                            self._sanitize_idle_descriptor(candidate_descriptor)
+                        )
+                    else:
+                        self._current_animation_descriptor = candidate_descriptor
+
+                    await self._send_animation_command_v2(
                         session_id=session_id,
-                        animation_file=candidate,
-                        loop=candidate_loop,
                         state=state.value,
-                        priority=ANIMATION_STATE_PRIORITIES.get(state, 0),
+                        animation_file=candidate,
+                        started_at=self._current_animation_started_at,
+                    )
+                    await self._notify_animation_state_changed(
+                        state,
+                        candidate,
+                        self._current_animation_descriptor,
                     )
         except asyncio.CancelledError:
             # Normal cancellation path
@@ -2132,6 +2016,7 @@ class KaradaStateServer:
         state: AnimationState,
         animation_file: str,
         duration: float,
+        context_id: Optional[str] = None,
     ):
         """Wait for duration and revert to Idle if the animation completed and no other contexts are active.
 
@@ -2142,6 +2027,7 @@ class KaradaStateServer:
         """
         try:
             await asyncio.sleep(duration + 0.05)
+            should_resume = False
             async with self._lock:
                 # Only act if the current animation/state match what we scheduled for
                 if (
@@ -2149,20 +2035,19 @@ class KaradaStateServer:
                     or self.current_animation != animation_file
                 ):
                     return
-                remaining_priorities = [
-                    p for p in self._active_tasks.values() if p is not None
-                ]
-                highest = max(remaining_priorities) if remaining_priorities else 0
-                if highest <= 0:
-                    # call play_animation outside lock
-                    asyncio.create_task(
-                        self.play_animation(
-                            AnimationState.IDLE,
-                            session_id=session_id,
-                            loop=True,
-                            context_id=None,
-                        )
-                    )
+                if context_id and self._current_context_id != context_id:
+                    return
+                if context_id:
+                    self._active_tasks.pop(context_id, None)
+                    self._forget_active_context(context_id)
+                    if self._current_context_id == context_id:
+                        self._current_context_id = None
+                should_resume = True
+
+            if should_resume:
+                await self._resume_context_or_idle(
+                    session_id, excluded_context_id=context_id
+                )
         except Exception:
             pass
 
@@ -2262,6 +2147,69 @@ class KaradaStateServer:
             self._watchdog_task = loop.create_task(self._watchdog_loop())
         except RuntimeError:
             pass
+
+    def start_state_refresh(self) -> None:
+        """Start a periodic broadcast that re-syncs face/expression state.
+
+        Karada v2 treats the avatar as a single shared "body": every connected
+        client must converge on the same face values and active expression.
+        Transient expression packets (from ``[em_*]`` timelines) can be missed
+        by a client that joined mid-timeline or dropped a frame, so this task
+        periodically re-broadcasts the authoritative face snapshot and the
+        active expression override to all transports. Packets reuse the same
+        message types the client already handles (``vrm_face``,
+        ``vrm_expression_set``/``vrm_expression_clear``), so no frontend change
+        is required.
+        """
+        if self._state_refresh_task and not self._state_refresh_task.done():
+            return  # already running
+        try:
+            loop = asyncio.get_running_loop()
+            self._state_refresh_task = loop.create_task(self._state_refresh_loop())
+        except RuntimeError:
+            pass
+
+    async def _state_refresh_loop(self) -> None:
+        """Every ``_state_refresh_interval`` s, re-broadcast face state."""
+        try:
+            while True:
+                await asyncio.sleep(self._state_refresh_interval)
+                if not self._has_any_transport():
+                    continue
+                await self._broadcast_current_face_state()
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:  # pragma: no cover - best effort
+            log_warning(f"[KaradaStateServer] State refresh error: {exc}")
+
+    async def _broadcast_current_face_state(self) -> None:
+        """Re-broadcast the authoritative face values + active expression.
+
+        Sends the current ``vrm_face`` snapshot to every transport, then the
+        active expression override (or a clear if none is active) so all
+        clients converge on the same shared-avatar face.
+        """
+        face_payload = {"type": "vrm_face", "values": dict(self._current_face_values)}
+        expr_payload = (
+            dict(self._current_expression)
+            if self._current_expression
+            else {"type": "vrm_expression_clear"}
+        )
+        for transport in self._transports:
+            try:
+                await transport.broadcast_face(face_payload)
+            except Exception as exc:  # pragma: no cover - best effort
+                log_warning(
+                    f"[KaradaStateServer] refresh face_values failed via "
+                    f"{type(transport).__name__}: {exc}"
+                )
+            try:
+                await transport.broadcast_expression(expr_payload)
+            except Exception as exc:  # pragma: no cover - best effort
+                log_warning(
+                    f"[KaradaStateServer] refresh expression failed via "
+                    f"{type(transport).__name__}: {exc}"
+                )
 
     async def _watchdog_loop(self) -> None:
         """Every 10 s, verify state coherence and force-reset to IDLE if stuck."""

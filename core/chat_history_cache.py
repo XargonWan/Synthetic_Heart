@@ -10,7 +10,7 @@ cached in a database table and limited to the configured CHAT_HISTORY_LIMIT.
 
 import asyncio
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from collections import deque
 from typing import Any
 from core.db import get_conn_ctx
@@ -116,15 +116,16 @@ async def save_chat_message(
                 # Deduplication: Check for identical message text within last 5 seconds for this interface
                 # This prevents double-logging from different pipeline stages (e.g. generation vs dispatch)
                 try:
+                    dedup_cutoff = datetime.now(timezone.utc) - timedelta(seconds=5)
                     await cur.execute(
                         """
                         SELECT id FROM chat_history_cache 
                         WHERE interface_path = %s 
                         AND message_text = %s 
-                        AND timestamp > DATE_SUB(UTC_TIMESTAMP(), INTERVAL 5 SECOND)
+                        AND timestamp > %s
                         LIMIT 1
                         """,
-                        (interface_path, message_text),
+                        (interface_path, message_text, dedup_cutoff),
                     )
                     if await cur.fetchone():
                         log_debug(
@@ -196,19 +197,39 @@ async def save_chat_message(
                 )
 
                 # Notify live sessions about this new message, unless it's the
-                # live-sync path itself (to avoid echo loops).
-                if not interface_path.startswith("discord_live_"):
+                # live-sync path itself (to avoid echo loops) or an internal
+                # background source like grillo/diary. Non-live bot replies are
+                # intentionally mirrored too, so the live session can continue
+                # from text-side replies and multimodal annotations that happen
+                # outside the voice stream.
+                if (
+                    not interface_path.startswith("discord_live_")
+                    and not interface_path.startswith("grillo")
+                    and not interface_path.startswith("ai_diary")
+                    and not interface_path.startswith("diary")
+                    and sender_name != "grillo"
+                ):
                     try:
                         from core.live_session_manager import LiveSessionManager
 
-                        mgr = LiveSessionManager._instance  # type: ignore[attr-defined]
+                        try:
+                            mgr = LiveSessionManager.get_instance()
+                        except Exception:
+                            mgr = LiveSessionManager._instance
                         if not mgr:
                             # no live manager has been created yet, nothing to do
                             pass
                         else:
-                            context_text = (
-                                f"[context update from {interface_path}] {message_text}"
-                            )
+                            if sender_name == "self":
+                                context_text = (
+                                    f"[assistant reply template synced from {interface_path}] "
+                                    "Use the reply below as the primary loose template for your next spoken reply to the same conversation turn. "
+                                    "Keep the same opening idea, core meaning, and paragraph order, but adapt it naturally for voice instead of reciting it verbatim. "
+                                    "Do not replace it with a generic fresh answer unless the conversation has materially changed.\n"
+                                    f"{message_text}"
+                                )
+                            else:
+                                context_text = f"[context update from {interface_path}] {message_text}"
                             for gid in mgr.get_active_sessions():
                                 asyncio.create_task(
                                     mgr.send_context_update(gid, context_text)
@@ -224,11 +245,13 @@ async def save_chat_message(
         return False
 
 
-async def load_chat_history(interface_path: str) -> deque:
+async def load_chat_history(interface_path: str, limit: int | None = None) -> deque:
     """Load chat history from cache for a specific interface path.
 
     Args:
         interface_path: The interface path (e.g., telegram_bot/123456/2)
+        limit: Optional explicit row limit. When omitted, uses the configured
+            history limit for the calling subsystem.
 
     Returns:
         deque of message objects in chronological order
@@ -239,15 +262,22 @@ async def load_chat_history(interface_path: str) -> deque:
     try:
         async with get_conn_ctx() as conn:
             async with conn.cursor() as cur:
-                history_limit = _get_history_limit(10)
-                # Load messages in chronological order
+                history_limit = (
+                    max(1, int(limit)) if limit is not None else _get_history_limit(10)
+                )
+                # Fetch the most recent N rows, then reorder them chronologically
+                # for downstream consumers such as WebUI replay and prompt context.
                 await cur.execute(
                     """
                     SELECT sender_name, sender_id, message_text, timestamp, interface_path, metadata
-                    FROM chat_history_cache
-                    WHERE interface_path = %s
+                    FROM (
+                        SELECT sender_name, sender_id, message_text, timestamp, interface_path, metadata, id
+                        FROM chat_history_cache
+                        WHERE interface_path = %s
+                        ORDER BY timestamp DESC, id DESC
+                        LIMIT %s
+                    ) AS recent_messages
                     ORDER BY timestamp ASC, id ASC
-                    LIMIT %s
                 """,
                     (interface_path, history_limit),
                 )

@@ -1,4 +1,4 @@
-from core.db import insert_memory, get_conn_ctx
+from core.db import _get_db_type, get_conn_ctx, insert_memory
 import logging
 import json
 import os
@@ -22,6 +22,20 @@ DEFAULT_SCOPE = "general"
 DEFAULT_SOURCE = "chat"
 
 REMEMBER_KEYWORDS = []
+
+
+def _build_json_tag_conditions(column: str, tags: list[str]) -> tuple[str, list[str]]:
+    if not tags:
+        return "", []
+
+    if _get_db_type() == "postgres":
+        conditions = " OR ".join(
+            [f"COALESCE(NULLIF(BTRIM({column}), ''), '[]')::jsonb ? %s"] * len(tags)
+        )
+        return conditions, list(tags)
+
+    conditions = " OR ".join([f"JSON_CONTAINS({column}, %s)"] * len(tags))
+    return conditions, [json.dumps(tag) for tag in tags]
 
 
 def should_remember(user_text: str, response_text: str) -> bool:
@@ -115,118 +129,138 @@ async def search_memories(
 
     hits: list[dict] = []
 
+    # Two-tier precision-then-recall search over the memories/ai_diary tables.
+    #
+    # Tier 1 (precision): tag_clause AND keyword_clause. Returns the highest-
+    #   confidence rows where both the recon-derived tags AND the content
+    #   keywords match.
+    # Tier 2 (recall): tag_clause OR keyword_clause. Run WHENEVER both clauses
+    #   are present (not only when Tier 1 is empty). This rescues rows whose
+    #   stored context_tags are generic auto-tags (e.g. ["grillo", "observer",
+    #   "passive"]) that don't match the query-derived tags, but whose content
+    #   DOES contain the searched keyword. Running it only on an empty Tier 1
+    #   was insufficient: a single unrelated ai_diary AND-match made Tier 1
+    #   non-empty, so a stored fact (e.g. "sender:Alonza ... Supercar 458/488",
+    #   tagged ["grillo","observer","passive"]) was never even queried and
+    #   never reached the pool. Both tiers feed the same dedup + IDF-relevance
+    #   ranking below, so the rarer keyword-only match still surfaces correctly.
+    #
+    # When only tags OR only keywords are present (not both), the AND and OR
+    # joins are identical, so Tier 2 is skipped as it would be redundant.
+    both_present = bool(tags) and bool(keywords)
+
+    def _append_rows(rows) -> None:
+        for r in rows:
+            src, _id, ts, content, row_tags = r
+            snippet = content if isinstance(content, str) else str(content)
+            if len(snippet) > 400:
+                snippet = snippet[:400] + "..."
+            try:
+                ts_iso = ts.isoformat() if hasattr(ts, "isoformat") else str(ts)
+            except Exception:
+                ts_iso = str(ts)
+            try:
+                tags_list = json.loads(row_tags) if row_tags else []
+            except Exception:
+                tags_list = []
+            hits.append(
+                {
+                    "source": src,
+                    "id": _id,
+                    "timestamp": ts_iso,
+                    "snippet": snippet,
+                    "tags": tags_list,
+                }
+            )
+
+    def _mem_where(join_op: str) -> tuple[str, list]:
+        conditions: list[str] = []
+        params: list = []
+        if tags:
+            tag_conditions, tag_params = _build_json_tag_conditions("tags", tags)
+            conditions.append(f"({tag_conditions})")
+            params.extend(tag_params)
+        if keywords:
+            # LOWER(col) with a lowercased pattern keeps matching case-insensitive
+            # across backends: Postgres LIKE is case-sensitive (MariaDB LIKE is
+            # not), so a lowercase token like "alonza" would never match content
+            # stored as "Alonza" without this normalization.
+            kw_conditions = " OR ".join(["LOWER(content) LIKE %s"] * len(keywords))
+            conditions.append(f"({kw_conditions})")
+            params.extend([f"%{kw.lower()}%" for kw in keywords])
+        return f" {join_op} ".join(conditions), params
+
+    def _diary_where(join_op: str) -> tuple[str, list]:
+        conditions: list[str] = []
+        params: list = []
+        if tags:
+            tag_conditions, tag_params = _build_json_tag_conditions(
+                "context_tags", tags
+            )
+            conditions.append(f"({tag_conditions})")
+            params.extend(tag_params)
+        if keywords:
+            # Case-insensitive across backends (see _mem_where note).
+            kw_conditions = " OR ".join(
+                [
+                    "LOWER(content) LIKE %s",
+                    "LOWER(personal_thought) LIKE %s",
+                    "LOWER(interaction_summary) LIKE %s",
+                    "LOWER(user_message) LIKE %s",
+                ]
+                * len(keywords)
+            )
+            conditions.append(f"({kw_conditions})")
+            for kw in keywords:
+                like = f"%{kw.lower()}%"
+                params.extend([like, like, like, like])
+        return f" {join_op} ".join(conditions), params
+
+    async def _run_tier(cur, join_op: str) -> int:
+        """Run the memories + ai_diary queries with the given join operator.
+        Appends matches to ``hits`` and returns how many rows were added."""
+        added = 0
+
+        mem_where, mem_params = _mem_where(join_op)
+        if mem_where:
+            mem_query = (
+                "SELECT 'memories' AS source, id, timestamp, content, tags "
+                "FROM memories WHERE " + mem_where + " ORDER BY timestamp DESC LIMIT %s"
+            )
+            mem_params.append(pool_limit)
+            await cur.execute(mem_query, mem_params)
+            rows = await cur.fetchall()
+            added += len(rows)
+            _append_rows(rows)
+
+        diary_where, diary_params = _diary_where(join_op)
+        if diary_where:
+            diary_query = (
+                "SELECT 'ai_diary' AS source, id, timestamp, content, context_tags "
+                "FROM ai_diary WHERE "
+                + diary_where
+                + " ORDER BY timestamp DESC LIMIT %s"
+            )
+            diary_params.append(pool_limit)
+            await cur.execute(diary_query, diary_params)
+            rows = await cur.fetchall()
+            added += len(rows)
+            _append_rows(rows)
+
+        return added
+
     try:
         async with get_conn_ctx() as conn:
             async with conn.cursor() as cur:
-                # --- Memories table ---
-                mem_conditions = []
-                mem_params: list = []
-                if tags:
-                    tag_conditions = " OR ".join(
-                        ["JSON_CONTAINS(tags, %s)"] * len(tags)
-                    )
-                    mem_conditions.append(f"({tag_conditions})")
-                    mem_params.extend([json.dumps(tag) for tag in tags])
-                if keywords:
-                    kw_conditions = " OR ".join(["content LIKE %s"] * len(keywords))
-                    mem_conditions.append(f"({kw_conditions})")
-                    mem_params.extend([f"%{kw}%" for kw in keywords])
+                # Tier 1: precision (tag AND keyword).
+                await _run_tier(cur, "AND")
 
-                if mem_conditions:
-                    mem_where = " AND ".join(mem_conditions)
-                    mem_query = (
-                        "SELECT 'memories' AS source, id, timestamp, content, tags "
-                        "FROM memories WHERE "
-                        + mem_where
-                        + " ORDER BY timestamp DESC LIMIT %s"
-                    )
-                    mem_params.append(pool_limit)
-                    await cur.execute(mem_query, mem_params)
-                    rows = await cur.fetchall()
-                    for r in rows:
-                        src, _id, ts, content, row_tags = r
-                        snippet = content if isinstance(content, str) else str(content)
-                        if len(snippet) > 400:
-                            snippet = snippet[:400] + "..."
-                        try:
-                            ts_iso = (
-                                ts.isoformat() if hasattr(ts, "isoformat") else str(ts)
-                            )
-                        except Exception:
-                            ts_iso = str(ts)
-                        try:
-                            tags_list = json.loads(row_tags) if row_tags else []
-                        except Exception:
-                            tags_list = []
-                        hits.append(
-                            {
-                                "source": src,
-                                "id": _id,
-                                "timestamp": ts_iso,
-                                "snippet": snippet,
-                                "tags": tags_list,
-                            }
-                        )
-
-                # --- AI diary table ---
-                diary_conditions = []
-                diary_params: list = []
-                if tags:
-                    tag_conditions = " OR ".join(
-                        ["JSON_CONTAINS(context_tags, %s)"] * len(tags)
-                    )
-                    diary_conditions.append(f"({tag_conditions})")
-                    diary_params.extend([json.dumps(tag) for tag in tags])
-                if keywords:
-                    kw_conditions = " OR ".join(
-                        [
-                            "content LIKE %s",
-                            "personal_thought LIKE %s",
-                            "interaction_summary LIKE %s",
-                            "user_message LIKE %s",
-                        ]
-                        * len(keywords)
-                    )
-                    diary_conditions.append(f"({kw_conditions})")
-                    for kw in keywords:
-                        like = f"%{kw}%"
-                        diary_params.extend([like, like, like, like])
-
-                if diary_conditions:
-                    diary_where = " AND ".join(diary_conditions)
-                    diary_query = (
-                        "SELECT 'ai_diary' AS source, id, timestamp, content, context_tags "
-                        "FROM ai_diary WHERE "
-                        + diary_where
-                        + " ORDER BY timestamp DESC LIMIT %s"
-                    )
-                    diary_params.append(pool_limit)
-                    await cur.execute(diary_query, diary_params)
-                    rows = await cur.fetchall()
-                    for r in rows:
-                        src, _id, ts, content, row_tags = r
-                        snippet = content if isinstance(content, str) else str(content)
-                        if len(snippet) > 400:
-                            snippet = snippet[:400] + "..."
-                        try:
-                            ts_iso = (
-                                ts.isoformat() if hasattr(ts, "isoformat") else str(ts)
-                            )
-                        except Exception:
-                            ts_iso = str(ts)
-                        try:
-                            tags_list = json.loads(row_tags) if row_tags else []
-                        except Exception:
-                            tags_list = []
-                        hits.append(
-                            {
-                                "source": src,
-                                "id": _id,
-                                "timestamp": ts_iso,
-                                "snippet": snippet,
-                                "tags": tags_list,
-                            }
-                        )
+                # Tier 2: recall (tag OR keyword), run whenever both clauses are
+                # present. Dedup below removes rows already found by Tier 1, and
+                # IDF ranking decides final ordering, so this only ADDS the
+                # keyword-only matches that Tier 1's AND join would have dropped.
+                if both_present:
+                    await _run_tier(cur, "OR")
 
                 # --- Chat history cache ---
                 if include_chat and (keywords or tags):
@@ -234,8 +268,9 @@ async def search_memories(
                     chat_params: list = []
                     chat_conditions = []
                     for tok in chat_tokens:
-                        chat_conditions.append("message_text LIKE %s")
-                        chat_params.append(f"%{tok}%")
+                        # Case-insensitive across backends (see _mem_where note).
+                        chat_conditions.append("LOWER(message_text) LIKE %s")
+                        chat_params.append(f"%{tok.lower()}%")
                     if chat_conditions:
                         chat_where = " OR ".join(chat_conditions)
                         chat_query = (
@@ -286,7 +321,8 @@ async def search_memories(
     seen = set()
     deduped: list[dict] = []
     for h in hits:
-        key = f"{h.get('source')}::{h.get('id')}::{h.get('snippet')[:80]}"
+        snippet_key = str(h.get("snippet") or "")[:80]
+        key = f"{h.get('source')}::{h.get('id')}::{snippet_key}"
         if key in seen:
             continue
         seen.add(key)
@@ -303,5 +339,83 @@ async def search_memories(
                 return 0.0
         return 0.0
 
-    deduped.sort(key=_sort_key, reverse=True)
-    return deduped[:limit]
+    # Relevance scoring by keyword rarity (purely statistical — no word
+    # semantics). Pure recency ordering lets common query tokens (which match
+    # many recent rows) dilute a rare, discriminating token: e.g. a request
+    # like "another test, try to remember Alonza" produces tokens where "test"
+    # matches dozens of recent rows while "alonza" matches only a few older
+    # ones. Ordered by timestamp alone, the recent "test" matches outrank and
+    # evict the older "alonza" fact before it can reach the prompt.
+    #
+    # Fix: weight each matched keyword by its inverse document frequency within
+    # THIS result pool (how many of the returned rows contain it). A token that
+    # appears in few rows contributes a high weight; a token that appears in
+    # many rows contributes little. Each row's relevance is the sum of the
+    # weights of the keywords it contains. This is data-frequency based only —
+    # it never inspects what a word means, so it works in any language.
+    lowered_keywords = [kw.lower() for kw in keywords]
+    if lowered_keywords:
+        df: dict[str, int] = {kw: 0 for kw in lowered_keywords}
+        for h in deduped:
+            snippet_lc = str(h.get("snippet") or "").lower()
+            for kw in lowered_keywords:
+                if kw and kw in snippet_lc:
+                    df[kw] += 1
+        for h in deduped:
+            snippet_lc = str(h.get("snippet") or "").lower()
+            score = 0.0
+            for kw in lowered_keywords:
+                if kw and kw in snippet_lc and df[kw] > 0:
+                    # Inverse document frequency within the pool.
+                    score += 1.0 / df[kw]
+            h["_relevance"] = score
+    else:
+        for h in deduped:
+            h["_relevance"] = 0.0
+
+    def _rank_key(h: dict) -> tuple[float, float]:
+        # Primary: keyword-rarity relevance. Tie-breaker: recency.
+        return (float(h.get("_relevance") or 0.0), _sort_key(h))
+
+    deduped.sort(key=_rank_key, reverse=True)
+
+    # Fair, source-aware truncation. A purely chronological cut lets a single
+    # high-volume source (recent chat_history / ai_diary turns) monopolize the
+    # limited result set and evict older-but-relevant long-term facts from the
+    # `memories` table. That is exactly how a stored fact (e.g. Alonza's
+    # favourite supercar, recorded weeks ago) could be found by the query yet
+    # never reach the prompt. Reserve slots per source via round-robin so
+    # long-term memories always get a chance to surface, while still preferring
+    # more relevant (then more recent) rows within each source.
+    def _strip_internal(rows: list[dict]) -> list[dict]:
+        for r in rows:
+            r.pop("_relevance", None)
+        return rows
+
+    if len(deduped) <= limit:
+        return _strip_internal(deduped)
+
+    by_source: dict[str, list[dict]] = {}
+    for h in deduped:
+        by_source.setdefault(str(h.get("source")), []).append(h)
+
+    # Within each source, order by relevance first so the most discriminating
+    # match is the one that survives round-robin truncation, not merely the
+    # most recent.
+    for src_rows in by_source.values():
+        src_rows.sort(key=_rank_key, reverse=True)
+
+    selected: list[dict] = []
+    # Iterate round-robin across sources, always taking the most relevant
+    # remaining row from each, until we hit the limit.
+    while len(selected) < limit and any(by_source.values()):
+        for src_rows in by_source.values():
+            if not src_rows:
+                continue
+            selected.append(src_rows.pop(0))
+            if len(selected) >= limit:
+                break
+
+    # Preserve relevance-then-recency ordering in the final output.
+    selected.sort(key=_rank_key, reverse=True)
+    return _strip_internal(selected)

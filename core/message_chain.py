@@ -26,7 +26,7 @@ is treated as a correctable error; the corrector will request valid JSON format.
 
 import asyncio
 from types import SimpleNamespace
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, cast
 
 from core.logging_utils import log_debug, log_info, log_warning, log_error
 from core.config_manager import config_registry
@@ -49,9 +49,13 @@ FAILED_MESSAGE_TEXT = config_registry.get_var(
 # Register RESPONSE_TIMEOUT configuration
 RESPONSE_TIMEOUT = config_registry.get_var(
     "RESPONSE_TIMEOUT",
-    300,
+    2100,
     label="Response Timeout",
-    description="Maximum time in seconds to wait for LLM responses before sending fallback message.",
+    description=(
+        "Maximum time in seconds to wait for LLM responses before sending a "
+        "fallback message. Must stay above LLM_GENERATION_TIMEOUT_SEC so a slow "
+        "generation is not cut off by this outer guard."
+    ),
     value_type=int,
     group="core",
     component="core",
@@ -62,8 +66,9 @@ def get_failed_message_text() -> str:
     """Get the fallback message when LLM fails."""
     fallback = FAILED_MESSAGE_TEXT
     # Ensure we return a string (ConfigVar might be returned)
-    if hasattr(fallback, "get_value"):
-        fallback = fallback.get_value()
+    get_value = getattr(fallback, "get_value", None)
+    if callable(get_value):
+        fallback = get_value()
     return str(fallback)
 
 
@@ -74,7 +79,207 @@ _INTERFACE_TO_MESSAGE_ACTION: Dict[str, str] = {
     "synth_webui": "message_synth_webui",
     "matrix_chat": "message_matrix_chat",
     "ollama_serve": "message_ollama_serve",
+    # radio_host: speaking on-air is the equivalent of "sending a message"
+    "radio_host": "radio_speak",
 }
+
+_ACTION_TYPE_ALIASES: Dict[str, str] = {
+    "diary": "create_personal_diary_entry",
+    "diary_entry": "create_personal_diary_entry",
+}
+
+# Keys that are part of the action envelope and must NOT be swept into payload
+# when gathering flat fields.
+_ACTION_SYSTEM_KEYS = frozenset(
+    {
+        "type",
+        "payload",
+        "meta",
+        # Alternative type/payload key names (already handled above, just exclude)
+        "function",
+        "name",
+        "plugin",
+        "action",
+        "command",
+        "method",
+        "arguments",
+        "parameters",
+        "args",
+        "schema",
+        "input",
+    }
+)
+
+
+def _normalize_message_payload_text(actions: list) -> list:
+    """Promote legacy message payload text aliases to payload.text.
+
+    LLMs occasionally emit message-like actions with keys such as ``body`` or
+    ``content`` instead of the canonical ``text`` field required by validation.
+    Normalize those aliases in-place before validation/correction so valid reply
+    intents do not trigger an unnecessary corrective round-trip.
+
+    Args:
+        actions: List of action dicts to normalize.
+
+    Returns:
+        The same list with legacy text aliases copied into ``payload.text``.
+    """
+    if not actions:
+        return actions
+
+    for action in actions:
+        if not isinstance(action, dict):
+            continue
+
+        action_type = action.get("type") or action.get("action")
+        if not isinstance(action_type, str):
+            continue
+        if action_type not in (
+            "message",
+            "send_message",
+        ) and not action_type.startswith("message_"):
+            continue
+
+        payload = action.get("payload")
+        if not isinstance(payload, dict):
+            continue
+
+        existing_text = payload.get("text")
+        if isinstance(existing_text, str) and existing_text.strip():
+            continue
+
+        for legacy_key in ("body", "content", "message", "value"):
+            legacy_value = payload.get(legacy_key)
+            if isinstance(legacy_value, str) and legacy_value.strip():
+                payload["text"] = legacy_value
+                log_debug(
+                    f"[message_chain] Normalized payload.{legacy_key} -> payload.text for {action_type}"
+                )
+                break
+
+    return actions
+
+
+def _normalize_action_type_aliases(actions: list) -> list:
+    """Rewrite legacy action aliases to their canonical registered names."""
+
+    if not actions:
+        return actions
+
+    for action in actions:
+        if not isinstance(action, dict):
+            continue
+
+        action_type = action.get("type") or action.get("action")
+        if not isinstance(action_type, str):
+            continue
+
+        if action_type.startswith("default_api:"):
+            action_type = action_type.split("default_api:", 1)[1]
+            action["type"] = action_type
+            if "action" in action:
+                action["action"] = action_type
+
+        canonical_type = _ACTION_TYPE_ALIASES.get(action_type)
+        if not canonical_type or canonical_type == action_type:
+            continue
+
+        action["type"] = canonical_type
+        log_debug(
+            f"[message_chain] Normalized action type alias: {action_type} -> {canonical_type}"
+        )
+
+    return actions
+
+
+def _normalize_diary_payload_fields(actions: list) -> list:
+    """Promote legacy diary payload keys to canonical create_personal_diary_entry fields."""
+
+    if not actions:
+        return actions
+
+    legacy_field_map = {
+        "entry": "interaction_summary",
+        "summary": "interaction_summary",
+        "thought": "personal_thought",
+    }
+
+    diary_action: dict[str, Any] | None = None
+    for action in actions:
+        if not isinstance(action, dict):
+            continue
+
+        action_type = action.get("type") or action.get("action")
+        if action_type != "create_personal_diary_entry":
+            continue
+
+        payload = action.get("payload")
+        if isinstance(payload, dict):
+            diary_action = action
+            break
+
+    normalized_actions = []
+
+    for action in actions:
+        if not isinstance(action, dict):
+            normalized_actions.append(action)
+            continue
+
+        action_type = action.get("type") or action.get("action")
+        if action_type == "thought":
+            payload = action.get("payload")
+            diary_payload = diary_action.get("payload") if diary_action else None
+            if isinstance(payload, dict) and isinstance(diary_payload, dict):
+                thought_value = payload.get("personal_thought") or payload.get(
+                    "thought"
+                )
+                existing_thought = diary_payload.get("personal_thought")
+                if isinstance(thought_value, str) and thought_value.strip():
+                    if isinstance(existing_thought, str) and existing_thought.strip():
+                        if thought_value.strip() not in existing_thought:
+                            diary_payload["personal_thought"] = (
+                                f"{existing_thought}\n\n{thought_value}"
+                            )
+                    else:
+                        diary_payload["personal_thought"] = thought_value
+                if not diary_payload.get("timestamp") and payload.get("timestamp"):
+                    diary_payload["timestamp"] = payload["timestamp"]
+                log_debug(
+                    "[message_chain] Folded legacy thought action into create_personal_diary_entry"
+                )
+                continue
+
+            normalized_actions.append(action)
+            continue
+
+        if action_type != "create_personal_diary_entry":
+            normalized_actions.append(action)
+            continue
+
+        payload = action.get("payload")
+        if not isinstance(payload, dict):
+            normalized_actions.append(action)
+            continue
+
+        for legacy_field, canonical_field in legacy_field_map.items():
+            canonical_value = payload.get(canonical_field)
+            if isinstance(canonical_value, str) and canonical_value.strip():
+                continue
+
+            legacy_value = payload.get(legacy_field)
+            if not isinstance(legacy_value, str) or not legacy_value.strip():
+                continue
+
+            payload[canonical_field] = legacy_value
+            log_debug(
+                "[message_chain] Normalized diary payload field: "
+                f"{legacy_field} -> {canonical_field}"
+            )
+
+        normalized_actions.append(action)
+
+    return normalized_actions
 
 
 def _auto_inject_interface_path(actions: list, interface_path: Optional[str]) -> list:
@@ -97,7 +302,12 @@ def _auto_inject_interface_path(actions: list, interface_path: Optional[str]) ->
     for action in actions:
         if not isinstance(action, dict):
             continue
-        action_type = action.get("type") or action.get("action")
+        action_type = (
+            action.get("type")
+            or action.get("action")
+            or action.get("command")
+            or action.get("method")
+        )
         # Only process registered interface message action types (no hard-coded checks)
         if not action_type:
             continue
@@ -177,6 +387,7 @@ def _normalize_message_unknown(actions: list, interface_path: Optional[str]) -> 
         # Normalize 'message_unknown' and similar fabricated types
         if (
             action_type
+            and isinstance(action_type, str)
             and action_type.startswith("message_")
             and action_type not in _INTERFACE_TO_MESSAGE_ACTION.values()
         ):
@@ -194,7 +405,10 @@ def _normalize_message_unknown(actions: list, interface_path: Optional[str]) -> 
 
 
 async def send_llm_fallback_message(
-    bot, message: SimpleNamespace, failure_reason: str, context: dict = None
+    bot,
+    message: SimpleNamespace,
+    failure_reason: str,
+    context: dict[str, Any] | None = None,
 ) -> str:
     """Send fallback message when LLM fails and log the failure reason.
 
@@ -206,8 +420,9 @@ async def send_llm_fallback_message(
     """
     fallback_text = get_failed_message_text()
     # Ensure fallback_text is a string (ConfigVar might be returned)
-    if hasattr(fallback_text, "get_value"):
-        fallback_text = fallback_text.get_value()
+    fallback_get_value = getattr(fallback_text, "get_value", None)
+    if callable(fallback_get_value):
+        fallback_text = fallback_get_value()
     fallback_text = str(fallback_text)
     chat_id = getattr(message, "chat_id", None)
     # Preserve thread_id when available so the fallback message is routed to the
@@ -233,6 +448,87 @@ async def send_llm_fallback_message(
         f"[message_chain] LLM FAILURE - Chat: {chat_id}, Interface: {interface_path}, Thread: {thread_id}, Reason: {failure_reason}"
     )
     log_error(f"[message_chain] Sending fallback message: '{fallback_text}'")
+
+    async def _record_failure_event(
+        stage: str,
+        reason_text: str,
+        *,
+        failure_code: str | None = None,
+        extra_metadata: dict[str, Any] | None = None,
+    ) -> None:
+        if stage == "llm_fallback" and getattr(message, "_llm_failure_logged", False):
+            return
+
+        try:
+            from core.llm_failure_log import build_failure_entry, record_failure_entry
+
+            correction_context = getattr(message, "correction_context", None)
+            last_action_result = getattr(message, "last_action_result", None)
+            metadata: dict[str, Any] = {}
+            if isinstance(extra_metadata, dict):
+                metadata.update(extra_metadata)
+            if isinstance(last_action_result, dict) and last_action_result:
+                metadata["last_action_result"] = last_action_result
+            if context:
+                for key in (
+                    "source",
+                    "interface_name",
+                    "payload_thread_id",
+                    "allowed_action_types",
+                ):
+                    if key in context:
+                        metadata[key] = context.get(key)
+
+            original_text = None
+            if context:
+                original_text = context.get("original_text")
+            if not isinstance(original_text, str):
+                original_text = getattr(message, "original_text", None)
+            if not isinstance(original_text, str):
+                original_text = None
+
+            entry = build_failure_entry(
+                reason=reason_text,
+                stage=stage,
+                interface_path=interface_path,
+                chat_id=chat_id,
+                thread_id=thread_id,
+                engine=(context or {}).get("engine")
+                or (context or {}).get("cortex_engine"),
+                model=(context or {}).get("model")
+                or (context or {}).get("cortex_model"),
+                message_id=getattr(message, "event_id", None)
+                or getattr(message, "message_id", None),
+                content_preview=original_text[:500]
+                if isinstance(original_text, str)
+                else None,
+                correction_context=correction_context
+                if isinstance(correction_context, dict)
+                else None,
+                metadata=metadata,
+                failure_code=failure_code,
+            )
+            await record_failure_entry(entry)
+            if stage == "llm_fallback":
+                message._llm_failure_logged = True
+        except Exception as exc:
+            log_warning(f"[message_chain] Failed to persist failure log entry: {exc}")
+
+    await _record_failure_event("llm_fallback", failure_reason)
+
+    # Clear transient avatar face state so upstream outages do not leave the
+    # persona stuck with stale failure-adjacent expressions on reconnect.
+    try:
+        from core.animation_handler import get_karada_state_server
+
+        karada = get_karada_state_server()
+        if karada is not None:
+            await karada.push_face_expression(None, 0)
+            await karada.clear_face_values()
+    except Exception as face_exc:
+        log_warning(
+            f"[message_chain] Failed to clear face state on fallback: {face_exc}"
+        )
 
     # Send fallback message through transport layer
     try:
@@ -274,6 +570,12 @@ async def send_llm_fallback_message(
                         f"[message_chain] Failed to send fallback message after retry: {e} (original: {te})"
                     )
         else:
+            await _record_failure_event(
+                "delivery",
+                "Fallback delivery skipped: bot does not have send_message method",
+                failure_code="delivery_failed",
+                extra_metadata={"fallback_text": fallback_text},
+            )
             log_warning(
                 "[message_chain] Bot does not have send_message method, cannot send fallback"
             )
@@ -311,7 +613,7 @@ async def handle_incoming_message(
     from core.transport_layer import extract_json_from_text, run_corrector_middleware
     from core.action_parser import run_actions, CORRECTOR_RETRIES
     from types import SimpleNamespace
-    from datetime import datetime
+    from datetime import datetime, timezone
 
     # Extract interface_path early for debug tracing
     _entry_interface_path = kwargs.get("interface_path") or (
@@ -341,7 +643,7 @@ async def handle_incoming_message(
         message.chat_id = kwargs.get("chat_id")
         message.text = ""
         message.interface_path = kwargs.get("interface_path")
-        message.date = datetime.utcnow()
+        message.date = datetime.now(timezone.utc)
 
     # Default context
     ctx = context or {}
@@ -446,7 +748,9 @@ async def handle_incoming_message(
                         }
 
                         # Try to send corrector message
-                        asyncio.create_task(run_action(corrector_action, message))
+                        asyncio.create_task(
+                            run_action(corrector_action, ctx, bot, message)
+                        )
                         log_info(
                             "[message_chain] ✓ Corrector action scheduled for invalid emotions"
                         )
@@ -459,6 +763,18 @@ async def handle_incoming_message(
             import traceback
 
             log_error(f"[message_chain] Traceback: {traceback.format_exc()}")
+
+        # Remove internal emotion tags from the LLM text once they have been
+        # processed so downstream actions and interfaces only see clean text.
+        try:
+            from plugins.emotion_manager import strip_emotion_tags
+
+            cleaned_text = strip_emotion_tags(text)
+            if cleaned_text != text:
+                log_debug("[message_chain] Stripped emotion tags from LLM-origin text")
+                text = cleaned_text
+        except Exception:
+            pass
 
     log_info("[message_chain] 📋 Starting action extraction loop...")
     # Retry/tried set to avoid loops
@@ -496,6 +812,39 @@ async def handle_incoming_message(
             f"[message_chain] 🔄 LOOP: attempt={attempt} source={source} chat={getattr(message, 'chat_id', None)} text_len={len(text) if text else 0}"
         )
 
+        # Determine interface flags early
+        user_facing_interfaces = [
+            "discord_bot",
+            "telegram_bot",
+            "synth_webui",
+            "matrix_chat",
+            "ollama_serve",
+        ]
+        interface_path = ctx.get("interface_path") or ""
+        chat_id = ctx.get("chat_id")
+
+        is_user_facing = interface_path and any(
+            interface_path.startswith(f"{iface}/") for iface in user_facing_interfaces
+        )
+
+        is_internal_chat = chat_id == -1 or chat_id == "-1" or str(chat_id) == "-1"
+
+        is_grillo_internal = ctx.get("grillo_beat", False) and ctx.get(
+            "beat_type"
+        ) not in ("outreach", None)
+
+        # Prompt-scoped turns (e.g. vision_describe, delivery prompts) restrict the
+        # LLM to specific action types; if no message_* type is allowed, the LLM
+        # cannot reply to the user and we must not demand one.
+        _allowed_types = ctx.get("allowed_action_types")
+        is_scoped_non_message = (
+            isinstance(_allowed_types, (list, tuple, set))
+            and len(_allowed_types) > 0
+            and not any(
+                isinstance(t, str) and t.startswith("message_") for t in _allowed_types
+            )
+        )
+
         actions = None
 
         # Quick JSON extraction with metadata to detect corruption
@@ -503,11 +852,7 @@ async def handle_incoming_message(
         metadata = {}
         try:
             log_info("[message_chain] Attempting to extract JSON from text...")
-            _maybe = extract_json_from_text(text, return_metadata=True)
-            if asyncio.iscoroutine(_maybe):
-                parsed, metadata = await _maybe
-            else:
-                parsed, metadata = _maybe
+            parsed, metadata = extract_json_from_text(text, return_metadata=True)
             log_info(
                 f"[message_chain] JSON extraction completed: parsed={parsed is not None} recovered={metadata.get('recovered')}"
             )
@@ -537,6 +882,51 @@ async def handle_incoming_message(
                 return BLOCKED
 
             # Build actions list
+
+            # Pre-normalize: unwrap single-element arrays wrapping a
+            # standard dict response — [{"actions": [...]}, ...],
+            # [{"tool_calls": [...]}, ...], or [{"text": "...", ...}].
+            # Collapse to the inner dict so the existing dict-branch
+            # handles everything (meta, feelings, normalization, etc.).
+            if (
+                isinstance(parsed, list)
+                and len(parsed) == 1
+                and isinstance(parsed[0], dict)
+                and (
+                    "actions" in parsed[0]
+                    or "tool_calls" in parsed[0]
+                    or "text" in parsed[0]
+                )
+            ):
+                _wrapper = parsed[0]
+                _wkey = (
+                    "actions"
+                    if "actions" in _wrapper
+                    else ("tool_calls" if "tool_calls" in _wrapper else "text")
+                )
+                log_info(
+                    f'[message_chain] \U0001f504 Unwrapping [{{"{_wkey}": ...}}] '
+                    "single-element list wrapper \u2192 dict"
+                )
+                parsed = _wrapper
+
+            # Recognise 'tool_calls' as a synonym for 'actions'.  Gemini
+            # sometimes outputs {"tool_calls": [{"name": ..., "arguments": ...}]}
+            # instead of {"actions": [{"type": ..., "payload": ...}]}.
+            if (
+                isinstance(parsed, dict)
+                and "tool_calls" in parsed
+                and "actions" not in parsed
+            ):
+                tc = parsed["tool_calls"]
+                if isinstance(tc, list):
+                    log_info(
+                        f"[message_chain] \U0001f504 Normalizing top-level 'tool_calls' "
+                        f"({len(tc)} item(s)) \u2192 'actions'"
+                    )
+                    parsed["actions"] = tc
+                    del parsed["tool_calls"]
+
             if isinstance(parsed, dict) and "actions" in parsed:
                 actions = (
                     parsed["actions"] if isinstance(parsed["actions"], list) else None
@@ -547,10 +937,256 @@ async def handle_incoming_message(
                     )
                     # Don't return here - let corrector fix it
                     parsed = None  # Force correction path
+                else:
+                    # Recover a root-level type+payload action that the LLM placed
+                    # outside the actions array, e.g.:
+                    #   {"actions": [...], "type": "message_telegram_bot", "payload": {...}}
+                    # gemma-uncensored and similar models occasionally emit this
+                    # malformed structure where the last action leaks to root.
+                    # Folding it in here avoids the corrector firing for every
+                    # message that ends this way, which would produce duplicate
+                    # user-visible messages via the deliver_to_llm chain.
+                    _root_type = parsed.get("type")
+                    _root_payload = parsed.get("payload")
+                    if (
+                        isinstance(_root_type, str)
+                        and _root_type not in ("actions", "recovery_actions")
+                        and isinstance(_root_payload, dict)
+                    ):
+                        actions.append({"type": _root_type, "payload": _root_payload})
+                        log_info(
+                            f"[message_chain] \U0001f504 Recovered root-level action "
+                            f"'{_root_type}' outside actions array → appended"
+                        )
+
+                    # Normalize OpenAI tool calling format (name/parameters) to type/payload
+                    for i, act in enumerate(actions):
+                        if isinstance(act, dict):
+                            act = cast(dict[str, Any], act)
+                            # Normalize legacy single-key action objects inside the
+                            # actions array, e.g. {"create_personal_diary_entry": {...}}
+                            # to the canonical {"type": ..., "payload": ...} format.
+                            if (
+                                "type" not in act
+                                and "action" not in act
+                                and "name" not in act
+                                and len(act) == 1
+                            ):
+                                action_name, action_payload = next(iter(act.items()))
+                                if isinstance(action_name, str):
+                                    normalized_payload = (
+                                        action_payload
+                                        if isinstance(action_payload, dict)
+                                        else {"value": action_payload}
+                                    )
+                                    actions[i] = {
+                                        "type": action_name,
+                                        "payload": normalized_payload,
+                                    }
+                                    act = cast(dict[str, Any], actions[i])
+                                    log_info(
+                                        "[message_chain] 🔄 Normalized legacy single-key action object inside actions array: "
+                                        f"{action_name}"
+                                    )
+                            # Normalize alternative keys for action type if 'type' is missing
+                            if "type" not in act:
+                                # Prioritize 'function' or 'name' (OpenAI/Gemini style) then 'plugin'
+                                _t = (
+                                    act.get("function")
+                                    or act.get("name")
+                                    or act.get("plugin")
+                                    or act.get("action")
+                                    or act.get("command")
+                                    or act.get("method")
+                                )
+                                if _t:
+                                    act["type"] = _t
+                                    log_debug(
+                                        f"[message_chain] Normalizing action type: mapped to '{_t}'"
+                                    )
+
+                            # Normalize alternative keys for payload if 'payload' is missing
+                            if "payload" not in act:
+                                # Prioritize 'arguments' (OpenAI) or 'parameters' (Gemini) then 'args'/'schema'/'input'
+                                _p = (
+                                    act.get("arguments")
+                                    or act.get("parameters")
+                                    or act.get("args")
+                                    or act.get("schema")
+                                    or act.get("input")
+                                )
+                                if _p:
+                                    act["payload"] = _p
+                                    log_debug(
+                                        f"[message_chain] Normalizing action payload for {act.get('type')}"
+                                    )
+
+                            # Fallback: gather flat action fields into payload
+                            if "payload" not in act and "type" in act:
+                                _extra = {
+                                    k: v
+                                    for k, v in act.items()
+                                    if k not in _ACTION_SYSTEM_KEYS
+                                }
+                                if _extra:
+                                    for k in _extra:
+                                        del act[k]
+                                    act["payload"] = _extra
+                                    log_debug(
+                                        f"[message_chain] Gathered {len(_extra)} flat fields into payload for {act.get('type')}"
+                                    )
+                            elif "payload" in act and "type" in act:
+                                # Merge any action-level keys that belong inside
+                                # payload but were placed at the action level by
+                                # the LLM (e.g. interface_path, chat_name,
+                                # reply_to_message_id for message_* actions).
+                                _orphaned = {
+                                    k: v
+                                    for k, v in act.items()
+                                    if k not in _ACTION_SYSTEM_KEYS
+                                }
+                                if _orphaned:
+                                    for k in _orphaned:
+                                        del act[k]
+                                    for k, v in _orphaned.items():
+                                        if k not in act["payload"]:
+                                            act["payload"][k] = v
+                                    log_debug(
+                                        f"[message_chain] Merged {len(_orphaned)} orphaned action-level"
+                                        f" key(s) into payload for {act.get('type')}: {list(_orphaned)}"
+                                    )
             elif isinstance(parsed, list):
                 actions = parsed
-            elif isinstance(parsed, dict) and "type" in parsed:
+                # Normalize OpenAI tool calling format for bare list responses
+                for i, act in enumerate(actions):
+                    if isinstance(act, dict):
+                        act = cast(dict[str, Any], act)
+                        # Normalize type
+                        if "type" not in act:
+                            _t = (
+                                act.get("function")
+                                or act.get("name")
+                                or act.get("plugin")
+                                or act.get("action")
+                                or act.get("command")
+                                or act.get("method")
+                            )
+                            if _t:
+                                act["type"] = _t
+                                log_debug(
+                                    f"[message_chain] Normalizing bare list action type: mapped to '{_t}'"
+                                )
+                        # Normalize payload
+                        if "payload" not in act:
+                            _p = (
+                                act.get("arguments")
+                                or act.get("parameters")
+                                or act.get("args")
+                                or act.get("schema")
+                                or act.get("input")
+                            )
+                            if _p:
+                                act["payload"] = _p
+                                log_debug(
+                                    f"[message_chain] Normalizing bare list action payload for {act.get('type')}"
+                                )
+
+                        # Fallback: gather flat action fields into payload
+                        if "payload" not in act and "type" in act:
+                            _extra = {
+                                k: v
+                                for k, v in act.items()
+                                if k not in _ACTION_SYSTEM_KEYS
+                            }
+                            if _extra:
+                                for k in _extra:
+                                    del act[k]
+                                act["payload"] = _extra
+                                log_debug(
+                                    f"[message_chain] Gathered {len(_extra)} flat fields into payload for {act.get('type')}"
+                                )
+                        elif "payload" in act and "type" in act:
+                            # Merge any action-level keys that belong inside
+                            # payload but were placed at the action level by
+                            # the LLM (e.g. interface_path, chat_name,
+                            # reply_to_message_id for message_* actions).
+                            _orphaned = {
+                                k: v
+                                for k, v in act.items()
+                                if k not in _ACTION_SYSTEM_KEYS
+                            }
+                            if _orphaned:
+                                for k in _orphaned:
+                                    del act[k]
+                                for k, v in _orphaned.items():
+                                    if k not in act["payload"]:
+                                        act["payload"][k] = v
+                                log_debug(
+                                    f"[message_chain] Merged {len(_orphaned)} orphaned action-level key(s) into"
+                                    f" payload for {act.get('type')}: {list(_orphaned)}"
+                                )
+            elif isinstance(parsed, dict) and (
+                "type" in parsed
+                or "name" in parsed
+                or "function" in parsed
+                or "plugin" in parsed
+                or "action" in parsed
+                or "command" in parsed
+                or "method" in parsed
+            ):
+                # Normalize singe-action dict (type/name/function/plugin/command)
+                if "type" not in parsed:
+                    parsed["type"] = (
+                        parsed.get("function")
+                        or parsed.get("name")
+                        or parsed.get("plugin")
+                        or parsed.get("action")
+                        or parsed.get("command")
+                        or parsed.get("method")
+                    )
+                if "payload" not in parsed:
+                    parsed["payload"] = (
+                        parsed.get("arguments")
+                        or parsed.get("parameters")
+                        or parsed.get("args")
+                        or parsed.get("schema")
+                        or parsed.get("input")
+                    )
+                # Fallback: gather flat action fields into payload
+                if not parsed.get("payload") and "type" in parsed:
+                    _extra = {
+                        k: v for k, v in parsed.items() if k not in _ACTION_SYSTEM_KEYS
+                    }
+                    if _extra:
+                        for k in _extra:
+                            del parsed[k]
+                        parsed["payload"] = _extra
+                        log_debug(
+                            f"[message_chain] Gathered {len(_extra)} flat fields into payload for {parsed.get('type')}"
+                        )
+                elif (
+                    isinstance((_pl := parsed.get("payload")), dict)
+                    and "type" in parsed
+                ):
+                    _orphaned = {
+                        k: v for k, v in parsed.items() if k not in _ACTION_SYSTEM_KEYS
+                    }
+                    if _orphaned:
+                        for k in _orphaned:
+                            del parsed[k]
+                        for k, v in _orphaned.items():
+                            if k not in _pl:
+                                _pl[k] = v
+                        log_debug(
+                            f"[message_chain] Merged {len(_orphaned)} orphaned action-level key(s) into"
+                            f" payload for {parsed.get('type')}: {list(_orphaned)}"
+                        )
+                if "payload" not in parsed:
+                    parsed["payload"] = {}
                 actions = [parsed]
+                log_debug(
+                    f"[message_chain] Normalized single-action dict: {parsed.get('type')}"
+                )
             elif isinstance(parsed, dict) and "recovery_actions" in parsed:
                 # Debrief plugins sometimes return {"recovery_actions": [{"action_type": ..., "payload": ...}]}
                 # Normalize this to the standard {"actions": [{"type": ..., "payload": ...}]} format.
@@ -588,7 +1224,11 @@ async def handle_incoming_message(
                         "[message_chain] recovery_actions field is not a list - triggering corrector"
                     )
                     parsed = None
-            elif isinstance(parsed, dict) and "action" in parsed:
+            elif (
+                isinstance(parsed, dict)
+                and "action" in parsed
+                and isinstance(parsed["action"], str)
+            ):
                 # Normalize Gemini-style {"action": "...", "action_input"|"content": "..."} to standard format
                 # This handles LLMs that output the older single-action format
                 # Gemini sometimes uses "action_input", sometimes "content", sometimes "text"
@@ -647,6 +1287,67 @@ async def handle_incoming_message(
                         f"but no inferrable action type: {_ipath}"
                     )
                     parsed = None
+            elif isinstance(parsed, dict) and "text" in parsed:
+                # Text-only response without actions — e.g.
+                # {"text": "...", "meta": {"autonomous": true}}
+                # The LLM returned a plain message with optional metadata
+                # but omitted the actions wrapper entirely.  Infer the
+                # correct message action from the context interface_path.
+                _ctx_ipath = ctx.get("interface_path", "") if ctx else ""
+                _ctx_iface = (
+                    _ctx_ipath.split("/")[0] if "/" in _ctx_ipath else _ctx_ipath
+                )
+                _inferred_type = _INTERFACE_TO_MESSAGE_ACTION.get(_ctx_iface)
+                if _inferred_type:
+                    _text_content = parsed.get("text", "")
+                    _payload: dict[str, Any] = {
+                        "text": _text_content,
+                        "interface_path": _ctx_ipath,
+                    }
+                    _msg_action: dict[str, Any] = {
+                        "type": _inferred_type,
+                        "payload": _payload,
+                    }
+                    # Propagate top-level meta (e.g. autonomous flag) to the action
+                    _top_meta = parsed.get("meta")
+                    if isinstance(_top_meta, dict):
+                        _msg_action["meta"] = _top_meta
+                    actions = [_msg_action]
+                    log_info(
+                        f"[message_chain] 🔄 Wrapping text-only response "
+                        f"as {_inferred_type} (no actions array, inferred "
+                        f"from context interface_path={_ctx_ipath})"
+                    )
+                else:
+                    log_warning(
+                        f"[message_chain] Text-only response but cannot "
+                        f"infer message action from interface_path: "
+                        f"{_ctx_ipath!r}"
+                    )
+                    parsed = None
+            elif (
+                isinstance(parsed, dict)
+                and not any(
+                    k in ["actions", "recovery_actions", "type", "text"]
+                    for k in parsed.keys()
+                )
+                and not isinstance(parsed.get("action"), str)
+            ):
+                # The LLM may have returned a dictionary mapping action types to payloads
+                # e.g., {"message_telegram_bot": {...}, "create_personal_diary_entry": {...}}
+                # Or it may have returned {"action": {"command": "...", ...}}
+                log_info("[message_chain] 🔄 Normalizing action-key dictionary format")
+                actions = []
+                for k, v in parsed.items():
+                    if isinstance(v, dict):
+                        # Handle {"action": {"command": "update_emotion_from_tags", ...}}
+                        if k == "action" and ("command" in v or "type" in v):
+                            atype = v.get("command") or v.get("type")
+                            actions.append({"type": str(atype), "payload": v})
+                        else:
+                            actions.append({"type": k, "payload": v})
+                    else:
+                        actions.append({"type": k, "payload": {}})
             else:
                 log_warning(
                     f"[message_chain] Unrecognized JSON structure: {parsed} - triggering corrector"
@@ -677,7 +1378,9 @@ async def handle_incoming_message(
                         extra_keys = [
                             k
                             for k in parsed.keys()
-                            if k != "actions" and k not in allowed_metadata
+                            if k != "actions"
+                            and k not in allowed_metadata
+                            and not k.startswith("meta.")
                         ]
                         if extra_keys:
                             synthetic_actions = []
@@ -711,12 +1414,22 @@ async def handle_incoming_message(
                                     "reply",
                                     "response",
                                 ) and isinstance(value, str):
+
+                                    def _matches_existing_message(action: Any) -> bool:
+                                        if not isinstance(action, dict):
+                                            return False
+                                        action_type = action.get("type")
+                                        if not isinstance(action_type, str):
+                                            return False
+                                        if not action_type.startswith("message_"):
+                                            return False
+                                        payload = action.get("payload")
+                                        if not isinstance(payload, dict):
+                                            return False
+                                        return payload.get("text") == value
+
                                     already_present = any(
-                                        isinstance(a, dict)
-                                        and (a.get("type") or "").startswith("message_")
-                                        and isinstance(a.get("payload"), dict)
-                                        and a["payload"].get("text") == value
-                                        for a in actions
+                                        _matches_existing_message(a) for a in actions
                                     )
                                     if already_present:
                                         log_debug(
@@ -758,6 +1471,9 @@ async def handle_incoming_message(
 
                 ctx_interface_path = ctx.get("interface_path") if ctx else None
                 actions = _normalize_message_unknown(actions, ctx_interface_path)
+                actions = _normalize_action_type_aliases(actions)
+                actions = _normalize_diary_payload_fields(actions)
+                actions = _normalize_message_payload_text(actions)
                 # Auto-inject interface_path into message actions that are missing it
                 # This prevents validation failures and avoids costly LLM correction calls
                 actions = _auto_inject_interface_path(actions, ctx_interface_path)
@@ -775,19 +1491,82 @@ async def handle_incoming_message(
 
                 # Only enforce this for LLM-originated responses
                 if is_from_cortex and isinstance(actions, list):
+                    try:
+                        scoped_actions = ctx.get("allowed_action_types") or ctx.get(
+                            "allowed_actions"
+                        )
+                        if isinstance(scoped_actions, (list, set, tuple)):
+                            supported_action_types.update(
+                                str(action_type)
+                                for action_type in scoped_actions
+                                if action_type
+                            )
+                    except Exception as e:
+                        log_debug(
+                            "[message_chain] Failed to merge scoped allowed action "
+                            f"types into runtime supported set: {e}"
+                        )
+
                     # quick mapping: some models may output a generic "message"
-                    # action when they really intend to send text to the current
-                    # interface.  Convert it to a concrete type based on the
-                    # context path to avoid unnecessary corrector loops.
+                    # or plain "text" / "reply" / "response" action when they
+                    # really intend to send text to the current interface.
+                    # Convert it to a concrete type based on the context path
+                    # to avoid unnecessary corrector loops.
+                    _GENERIC_MSG_TYPES = (
+                        "message",
+                        "send_message",
+                        "message_send",  # some LLMs swap the word order
+                        "text",
+                        "reply",
+                        "response",
+                    )
                     if ctx_interface_path:
+                        interface_prefix = (
+                            ctx_interface_path.split("/")[0]
+                            if "/" in ctx_interface_path
+                            else ctx_interface_path
+                        )
+                        resolved_message_type = _INTERFACE_TO_MESSAGE_ACTION.get(
+                            interface_prefix, "message_synth_webui"
+                        )
+                        rewrote_generic_message_action = False
                         for act in actions:
-                            if isinstance(act, dict) and act.get("type") == "message":
-                                if ctx_interface_path.startswith("telegram_bot"):
-                                    act["type"] = "message_telegram_bot"
-                                elif ctx_interface_path.startswith("discord_bot"):
-                                    act["type"] = "message_discord_bot"
-                                else:
-                                    act["type"] = "message_synth_webui"
+                            if (
+                                isinstance(act, dict)
+                                and act.get("type") in _GENERIC_MSG_TYPES
+                            ):
+                                act["type"] = resolved_message_type
+                                rewrote_generic_message_action = True
+
+                                payload = act.get("payload")
+                                if not isinstance(payload, dict):
+                                    payload = {}
+                                    act["payload"] = payload
+
+                                if (
+                                    not isinstance(payload.get("text"), str)
+                                    or not payload.get("text", "").strip()
+                                ):
+                                    for legacy_key in (
+                                        "text",
+                                        "body",
+                                        "content",
+                                        "message",
+                                        "value",
+                                    ):
+                                        legacy_value = act.get(legacy_key)
+                                        if (
+                                            isinstance(legacy_value, str)
+                                            and legacy_value.strip()
+                                        ):
+                                            payload["text"] = legacy_value
+                                            break
+
+                        if rewrote_generic_message_action:
+                            actions = _normalize_message_payload_text(actions)
+                            actions = _auto_inject_interface_path(
+                                actions, ctx_interface_path
+                            )
 
                     unsupported = []
                     for idx, act in enumerate(actions):
@@ -806,24 +1585,43 @@ async def handle_incoming_message(
                             )
 
                     if unsupported:
-                        log_warning(
-                            f"[message_chain] 🚨 Detected unsupported action types from LLM: {[u['action'].get('type') or u['action'].get('action') for u in unsupported]} - requesting correction"
-                        )
-                        # Attach correction context and force correction path
-                        correction_context = {
-                            "successful_actions": [],
-                            "successful_types": [],
-                            "failed_actions": unsupported,
-                            "had_json_errors": False,
-                            "original_text": text,
-                        }
-                        try:
-                            if hasattr(message, "__dict__"):
-                                message.correction_context = correction_context
-                        except Exception:
-                            pass
+                        bad_indices = frozenset(u["index"] for u in unsupported)
+                        remaining_valid = [
+                            act
+                            for idx, act in enumerate(actions)
+                            if idx not in bad_indices
+                        ]
 
-                        parsed = None  # Trigger the corrector loop below
+                        if remaining_valid:
+                            # Some valid actions remain — drop only the unrecognised
+                            # ones so the response can still be delivered without
+                            # triggering (and likely exhausting) the corrector.
+                            log_warning(
+                                f"[message_chain] 🚨 Dropping {len(unsupported)} unsupported action "
+                                f"type(s): {[u['action'].get('type') or u['action'].get('action') for u in unsupported]} "
+                                "— continuing with valid actions"
+                            )
+                            actions = remaining_valid
+                        else:
+                            # All actions are unsupported — request correction
+                            log_warning(
+                                f"[message_chain] 🚨 Detected unsupported action types from LLM: {[u['action'].get('type') or u['action'].get('action') for u in unsupported]} - requesting correction"
+                            )
+                            # Attach correction context and force correction path
+                            correction_context = {
+                                "successful_actions": [],
+                                "successful_types": [],
+                                "failed_actions": unsupported,
+                                "had_json_errors": False,
+                                "original_text": text,
+                            }
+                            try:
+                                if hasattr(message, "__dict__"):
+                                    message.correction_context = correction_context
+                            except Exception:
+                                pass
+
+                            parsed = None  # Trigger the corrector loop below
 
             # Synthera Emotion Forwarding: copy dominant feeling into tts_speak payload
             if (
@@ -842,7 +1640,8 @@ async def handle_incoming_message(
                         }
                         if valid_feelings:
                             dominant_emotion = max(
-                                valid_feelings, key=valid_feelings.get
+                                valid_feelings.keys(),
+                                key=lambda emotion_name: valid_feelings[emotion_name],
                             )
                             if valid_feelings[dominant_emotion] > 0:
                                 log_debug(
@@ -870,6 +1669,11 @@ async def handle_incoming_message(
                 if source == "llm" or getattr(message, "from_cortex", False):
                     has_user_response = False
                     has_tts = False
+                    # Set when the LLM emits an action that delivers user-visible
+                    # output on its own (a self-replying plugin action). Tracked
+                    # separately from has_user_response so it suppresses the
+                    # missing-reply corrector without affecting message/TTS handling.
+                    has_user_output_action = False
                     user_message_action = None
                     # Determine current set of message action types from config (dynamic)
                     current_message_action_types = []
@@ -911,7 +1715,43 @@ async def handle_incoming_message(
                         except Exception:
                             current_message_action_types = []
 
+                    # Action types that deliver user-visible output on their own
+                    # (self-replying plugin actions, e.g. a plugin that calls
+                    # bot.send_message inside execute_action). They satisfy the
+                    # "did the user get a reply this turn?" check so the missing-reply
+                    # corrector does not fire when the LLM responds with only such an
+                    # action. Engine-agnostic and unrelated to any endpoint grammar —
+                    # purely about whether the user receives output. Contributors add
+                    # their own self-replying actions here via config; fetch-only
+                    # actions that need a follow-up reply (e.g. recall_last_dream) must
+                    # NOT be listed.
+                    current_user_output_action_types = []
+                    try:
+                        from core.config_manager import config_registry
+
+                        USER_OUTPUT_ACTION_TYPES = config_registry.get_var(
+                            "USER_OUTPUT_ACTION_TYPES",
+                            ["get_recent_chats"],
+                            label="User-output action types",
+                            description=(
+                                "Action types that deliver user-visible output on their own "
+                                "(self-replying plugin actions). Counted as a user reply so the "
+                                "missing-reply corrector does not fire when the LLM responds with "
+                                "only such an action."
+                            ),
+                            group="core",
+                            component="message_chain",
+                        )
+                        current_user_output_action_types = (
+                            list(USER_OUTPUT_ACTION_TYPES.value)
+                            if hasattr(USER_OUTPUT_ACTION_TYPES, "value")
+                            else list(USER_OUTPUT_ACTION_TYPES)
+                        )
+                    except Exception:
+                        current_user_output_action_types = []
+
                     if isinstance(actions, list):
+                        actions = cast(list[dict[str, Any]], actions)
                         # ========================================
                         # STRIP TTS FROM AUTONOMOUS MESSAGES
                         # ========================================
@@ -920,12 +1760,16 @@ async def handle_incoming_message(
                         has_autonomous_message = False
                         for action in actions:
                             if isinstance(action, dict):
-                                action_meta = action.get("meta", {})
+                                action_meta = action.get("meta")
+                                if not isinstance(action_meta, dict):
+                                    action_meta = {}
                                 action_name = action.get("action") or action.get("type")
                                 # Check if this is an autonomous message action
                                 if action_meta.get("autonomous", False) is True:
-                                    if action_name and action_name.startswith(
-                                        "message_"
+                                    if (
+                                        action_name
+                                        and isinstance(action_name, str)
+                                        and action_name.startswith("message_")
                                     ):
                                         has_autonomous_message = True
                                         break
@@ -944,8 +1788,11 @@ async def handle_incoming_message(
                             if tts_to_remove:
                                 for i in reversed(tts_to_remove):
                                     removed = actions.pop(i)
+                                    removed_payload = removed.get("payload")
+                                    if not isinstance(removed_payload, dict):
+                                        removed_payload = {}
                                     log_debug(
-                                        f"[message_chain] 🔇 Stripped TTS from autonomous message: {removed.get('payload', {}).get('text', '')[:40]}..."
+                                        f"[message_chain] 🔇 Stripped TTS from autonomous message: {removed_payload.get('text', '')[:40]}..."
                                     )
 
                         for action in actions:
@@ -955,15 +1802,120 @@ async def handle_incoming_message(
                                 action_name = action.get("action") or action.get("type")
                             if action_name == "tts_speak":
                                 has_tts = True
-                            if action_name in current_message_action_types:
+                            if action_name in current_message_action_types or (
+                                isinstance(action_name, str)
+                                and action_name.startswith("message_")
+                            ):
                                 has_user_response = True
                                 if not user_message_action:
                                     user_message_action = action
                                 # break
+                            if action_name in current_user_output_action_types:
+                                has_user_output_action = True
+
+                    # ------------------------------------------------------------------
+                    # LLM-CHOSEN VOICE REPLY (text turn): merge into a single voice note
+                    # ------------------------------------------------------------------
+                    # When the LLM itself decided to answer with `tts_speak` AND also
+                    # emitted a text-only message_* action for the same reply, we don't
+                    # want the user to receive both a text bubble and a separate audio
+                    # note. Mirror the voice-input behaviour: drop the standalone text
+                    # message and fold its text into the tts_speak as the caption.
+                    #
+                    # This lets the synth reply with voice on a *typed* request (e.g.
+                    # "answer me with a voice message") or whenever it chooses to speak,
+                    # driven purely by the LLM's action choice (no keyword detection).
+                    # Skipped for: WebUI (keeps its text bubble for the tts-play handler),
+                    # autonomous/internal turns (already stripped above), and voice-input
+                    # turns (handled by the auto-inject path below).
+                    if (
+                        has_tts
+                        and has_user_response
+                        and user_message_action
+                        and isinstance(actions, list)
+                    ):
+                        _merge_iface_prefix = (ctx.get("interface_path") or "").split(
+                            "/"
+                        )[0]
+                        _merge_is_voice_input = bool(ctx.get("is_voice_input", False))
+                        _merge_request_tts = bool(
+                            context
+                            and isinstance(context, dict)
+                            and context.get("request_tts")
+                        )
+                        # Only merge for LLM-driven voice replies on non-voice turns.
+                        # Voice-originated turns are merged by the auto-inject path, and
+                        # WebUI intentionally keeps the separate text bubble.
+                        if (
+                            _merge_iface_prefix != "synth_webui"
+                            and not _merge_is_voice_input
+                            and not _merge_request_tts
+                        ):
+                            # Find the LLM-emitted tts_speak that is NOT auto-injected.
+                            _llm_tts_action = None
+                            for _a in actions:
+                                if not isinstance(_a, dict):
+                                    continue
+                                if (_a.get("action") or _a.get("type")) != "tts_speak":
+                                    continue
+                                _a_payload = _a.get("payload")
+                                if not isinstance(_a_payload, dict):
+                                    _a_payload = {}
+                                if _a_payload.get("__auto_injected"):
+                                    continue
+                                _llm_tts_action = _a
+                                break
+
+                            if _llm_tts_action is not None:
+                                _tts_payload = _llm_tts_action.get("payload")
+                                if not isinstance(_tts_payload, dict):
+                                    _tts_payload = {}
+                                    _llm_tts_action["payload"] = _tts_payload
+                                _spoken_text = str(
+                                    _tts_payload.get("text") or ""
+                                ).strip()
+                                # Prefer the spoken text as caption; fall back to the
+                                # text-only message body if tts_speak carried no text.
+                                _msg_payload = (
+                                    user_message_action.get("payload")
+                                    if isinstance(user_message_action, dict)
+                                    else {}
+                                )
+                                if not isinstance(_msg_payload, dict):
+                                    _msg_payload = {}
+                                _msg_text = str(
+                                    _msg_payload.get("text")
+                                    or _msg_payload.get("content")
+                                    or _msg_payload.get("message")
+                                    or ""
+                                ).strip()
+                                _caption = _spoken_text or _msg_text
+                                if _caption:
+                                    if not _tts_payload.get("text"):
+                                        _tts_payload["text"] = _caption
+                                    _tts_payload["__merged_text"] = _caption
+                                    log_info(
+                                        "[message_chain] \U0001f3a4 LLM voice reply on text turn: "
+                                        f"merging text+audio into a single voice message for: {_caption[:30]}..."
+                                    )
+                                    # Remove standalone message_* actions; the voice
+                                    # message (audio + caption) replaces them.
+                                    actions[:] = [
+                                        a
+                                        for a in actions
+                                        if isinstance(a, dict)
+                                        and (a.get("action") or a.get("type"))
+                                        not in current_message_action_types
+                                    ]
 
                     # Auto-inject TTS if there's a user response but no tts_speak
                     # Only for actual user-facing interfaces (not internal like grillo)
-                    if has_user_response and not has_tts and user_message_action:
+                    if (
+                        has_user_response
+                        and not has_tts
+                        and user_message_action
+                        and isinstance(actions, list)
+                    ):
                         # Check if this is for a user-facing interface
                         user_facing_interfaces = [
                             "discord_bot",
@@ -998,18 +1950,22 @@ async def handle_incoming_message(
                         # Check for autonomous messages (Grillo outreach, dreams, etc.)
                         # These are system-initiated, not user-response, so they shouldn't get TTS
                         action_meta = (
-                            user_message_action.get("meta", {})
+                            user_message_action.get("meta")
                             if isinstance(user_message_action, dict)
                             else {}
                         )
+                        if not isinstance(action_meta, dict):
+                            action_meta = {}
                         is_autonomous = action_meta.get("autonomous", False) is True
 
                         # Check for system startup/internal message patterns
                         payload = (
-                            user_message_action.get("payload", {})
+                            user_message_action.get("payload")
                             if isinstance(user_message_action, dict)
                             else {}
                         )
+                        if not isinstance(payload, dict):
+                            payload = {}
                         text_to_speak = (
                             payload.get("text")
                             or payload.get("content")
@@ -1069,7 +2025,15 @@ async def handle_incoming_message(
                                 tts_already_executed = True
 
                         # Determine if we should skip TTS
+                        # When the LLM explicitly set send_as_voice=true on the
+                        # message_* action, the audio is routed centrally in
+                        # action_parser (VoxPlugin.speak) and the plain text is
+                        # suppressed there. Auto-injecting tts_speak here as well
+                        # would produce a second spoken message, so skip it.
+                        _explicit_send_as_voice = bool(payload.get("send_as_voice"))
+
                         # Skip for: internal grillo beats, internal chats, system messages, autonomous messages, already-executed TTS,
+                        # an explicit send_as_voice request (handled in action_parser),
                         # or if the request_tts flag/feature is off
                         should_skip_tts = (
                             is_grillo_internal
@@ -1077,6 +2041,7 @@ async def handle_incoming_message(
                             or is_system_message
                             or is_autonomous
                             or tts_already_executed
+                            or _explicit_send_as_voice
                         )
                         # honor explicit request flag passed via context or wrapped message
                         _explicit_tts_request = bool(
@@ -1221,7 +2186,8 @@ async def handle_incoming_message(
                                     actions[:] = [
                                         a
                                         for a in actions
-                                        if (a.get("action") or a.get("type"))
+                                        if isinstance(a, dict)
+                                        and (a.get("action") or a.get("type"))
                                         not in current_message_action_types
                                     ]
                                     tts_action = {
@@ -1413,6 +2379,13 @@ async def handle_incoming_message(
                         processed = result.get("processed", [])
                         failed = result.get("failed_actions", [])
                         errors = result.get("errors", [])
+                        # A non-empty action_outputs means run_actions already
+                        # enqueued an LLM delivery follow-up (terminal output, or a
+                        # deliver_to_llm fetch action like recall_last_dream). That
+                        # follow-up *is* the user's reply, so the missing-reply
+                        # corrector must not also fire — otherwise both produce a
+                        # message and the user gets a double reply.
+                        delivered_to_llm = bool(result.get("action_outputs"))
 
                         # remember if we actually ran anything
                         if processed:
@@ -1441,6 +2414,17 @@ async def handle_incoming_message(
                                 f"[message_chain] Skipping correction for {len(unfixable_failures)} unfixable policy errors: {unfixable_types}"
                             )
 
+                        recovered_with_extra_text = bool(
+                            metadata.get("recovered", False)
+                            and (
+                                metadata.get("had_extra_text", False)
+                                or metadata.get("prefix_length", 0)
+                                or metadata.get("suffix_length", 0)
+                                or metadata.get("unparsed_content", "")
+                                or metadata.get("recovery_attempts", 0)
+                            )
+                        )
+
                         needs_correction = len(fixable_failures) > 0 or metadata.get(
                             "recovered", False
                         )
@@ -1462,10 +2446,48 @@ async def handle_incoming_message(
                         if needs_correction and (
                             source == "llm" or getattr(message, "from_cortex", False)
                         ):
-                            # Some actions failed or JSON was corrupted - request selective correction
-                            log_warning(
-                                f"[message_chain] {len(failed)} actions failed, requesting correction for missing/invalid actions"
-                            )
+                            # Some actions failed or JSON was corrupted - request selective correction.
+                            # If recovery left extra trailing content, we may have silently dropped
+                            # additional actions after executing the ones we could salvage.
+                            if len(failed) > 0:
+                                log_warning(
+                                    f"[message_chain] {len(failed)} actions failed, requesting correction for missing/invalid actions"
+                                )
+                            elif recovered_with_extra_text:
+                                extra_chars = int(
+                                    metadata.get("prefix_length", 0)
+                                ) + int(metadata.get("suffix_length", 0))
+                                log_warning(
+                                    "[message_chain] Recovered LLM JSON still had extra trailing content "
+                                    f"({extra_chars} chars, {metadata.get('error_count', 0)} parse errors); "
+                                    "requesting correction for dropped actions"
+                                )
+                            else:
+                                log_warning(
+                                    "[message_chain] JSON recovery requires correction despite no execution failures"
+                                )
+
+                            # Check if user response is required but missing.
+                            missing_user_reply = False
+                            if (
+                                is_user_facing
+                                and not is_grillo_internal
+                                and not is_internal_chat
+                                and not is_scoped_non_message
+                                and not has_user_response
+                                and not has_user_output_action
+                                and not delivered_to_llm
+                            ):
+                                missing_user_reply = True
+
+                            errors_list = list(errors)
+                            if missing_user_reply:
+                                errors_list.append(
+                                    "CHAT REPLY REQUIRED: The user is waiting for a reply in this active conversation turn. "
+                                    f"You MUST include a message action targeting the originating interface '{interface_path.split('/')[0]}' "
+                                    "(e.g., 'message_telegram_bot') to reply to the user. Internal actions like diary entries "
+                                    "and emotion updates do NOT substitute for replying."
+                                )
 
                             # Build correction context with info about what succeeded and what failed
                             correction_context = {
@@ -1476,7 +2498,7 @@ async def handle_incoming_message(
                                     if isinstance(a, dict)
                                 ],
                                 "failed_actions": failed,
-                                "errors": errors,
+                                "errors": errors_list,
                                 "had_json_errors": metadata.get("recovered", False),
                                 "original_text": text,
                             }
@@ -1487,7 +2509,11 @@ async def handle_incoming_message(
 
                             # Set parsed = None to trigger correction path
                             # But keep the successful actions already executed
-                            if len(failed) > 0:
+                            if (
+                                len(failed) > 0
+                                or recovered_with_extra_text
+                                or missing_user_reply
+                            ):
                                 parsed = (
                                     None  # This will trigger the correction loop below
                                 )
@@ -1498,11 +2524,44 @@ async def handle_incoming_message(
                                 )
                                 return ACTIONS_EXECUTED
                         else:
-                            # All actions succeeded
-                            log_info(
-                                "[message_chain] Actions executed successfully - loop interrupted"
-                            )
-                            return ACTIONS_EXECUTED
+                            # All actions succeeded, but check if user response is required and missing
+                            if (
+                                is_user_facing
+                                and not is_grillo_internal
+                                and not is_internal_chat
+                                and not is_scoped_non_message
+                                and not has_user_response
+                                and not has_user_output_action
+                                and not delivered_to_llm
+                            ):
+                                log_warning(
+                                    f"[message_chain] ⚠️ LLM generated no outbound message action for user-facing interface '{interface_path}' — triggering corrector for missing reply"
+                                )
+                                correction_context = {
+                                    "successful_actions": processed,
+                                    "successful_types": [
+                                        (a.get("type") or a.get("action"))
+                                        for a in processed
+                                        if isinstance(a, dict)
+                                    ],
+                                    "failed_actions": [],
+                                    "errors": [
+                                        "CHAT REPLY REQUIRED: The user is waiting for a reply in this active conversation turn. "
+                                        f"You MUST include a message action targeting the originating interface '{interface_path.split('/')[0]}' "
+                                        "(e.g., 'message_telegram_bot') to reply to the user. Internal actions like diary entries "
+                                        "and emotion updates do NOT substitute for replying."
+                                    ],
+                                    "had_json_errors": False,
+                                    "original_text": text,
+                                }
+                                if hasattr(message, "__dict__"):
+                                    message.correction_context = correction_context
+                                parsed = None
+                            else:
+                                log_info(
+                                    "[message_chain] Actions executed successfully - loop interrupted"
+                                )
+                                return ACTIONS_EXECUTED
 
                     except Exception as e:
                         log_warning(f"[message_chain] Failed to run actions: {e}")
@@ -1541,6 +2600,31 @@ async def handle_incoming_message(
                 "[message_chain] Detected system error message from corrector; preventing re-correction loop"
             )
             return BLOCKED
+
+        # Check if the LLM returned a clear server-side error (not fixable by correction).
+        # In these cases the corrector would also fail since it hits the same engine, so
+        # skip directly to the fallback to avoid wasting minutes of retry time.
+        _SERVER_ERROR_MARKERS = (
+            "logprobs not supported",
+            "internal server error",
+            "service unavailable",
+            "bad gateway",
+            "gateway timeout",
+            "503 service unavailable",
+            "502 bad gateway",
+            "504 gateway timeout",
+        )
+        if any(marker in (text or "").lower() for marker in _SERVER_ERROR_MARKERS):
+            log_warning(
+                "[message_chain] LLM returned server-side error; skipping correction loop "
+                f"(error: {(text or '')[:200]})"
+            )
+            if not actions_executed_during_loop:
+                await send_llm_fallback_message(
+                    bot, message, f"LLM engine error: {(text or '')[:200]}", context=ctx
+                )
+                return LLM_FAILED
+            return ACTIONS_EXECUTED
 
         attempt += 1
         if attempt > max_retries:

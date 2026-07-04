@@ -11,7 +11,7 @@ The ``gemini_api`` module is the primary API-based Cortex engine for Synthetic H
 Overview
 --------
 
-**File:** ``cortex/llm_provider/gemini_api.py``
+**File:** ``engines/external_engines/gemini_api.py``
 
 **Base class:** ``AIPluginBase`` (from ``core/ai_plugin_base.py``)
 
@@ -19,8 +19,12 @@ Overview
 
 The engine:
 
-- Sends structured JSON prompts to the Gemini REST API and returns raw text responses (usually JSON action payloads) to the message chain.
-- Supports **multimodal input**: images, audio, video, and documents are sent as ``inline_data`` parts alongside the text prompt.
+- Accepts either a direct ``PromptRequest``, a compatibility dict carrying
+  ``__prompt_request``, or a legacy dict/string fallback.
+- Uses ``GeminiRenderer`` to turn typed prompts into Gemini-native
+  ``system_instruction_text`` + ``contents`` payloads.
+- Supports **multimodal input**: images, audio, video, and documents are sent
+  as native Gemini parts instead of being duplicated into a giant text blob.
 - Handles **correction/retry loops** when the model produces invalid JSON or fails action validation.
 - Integrates with the optional **Agent plugin** via lightweight agentic hooks.
 - Exposes configuration variables (API key, base URL, model selection) to the WebUI and ``config_registry``.
@@ -41,8 +45,8 @@ Architecture Diagram
    │     plugin_instance.py            │
    │  - Extracts multimodal            │
    │    attachments (audio, images)    │
-   │  - Calls build_json_prompt()      │
-   │    with attachments inline        │
+  │  - Calls build_prompt_request()   │
+  │    (build_json_prompt() is alias) │
    │  - Passes prompt to Cortex engine  │
    └───────────────┬───────────────────┘
                    │
@@ -58,25 +62,26 @@ Architecture Diagram
                    ▼
    ┌───────────────────────────────────┐
    │     generate_response()           │
-   │  1. Normalize prompt format       │
-   │  2. Detect correction prompts     │
-   │  3. Extract multimodal parts      │
-   │  4. Redact duplicate base64 data  │
-   │  5. Build system instruction      │
-   │  6. Call _http_generate_content() │
+  │  1. Detect PromptRequest path     │
+  │  2. Handle correction prompts     │
+  │  3. Extract multimodal parts      │
+  │  4. Render via GeminiRenderer     │
+  │  5. Use legacy fallback only      │
+  │     when typed data is absent     │
    └───────────────┬───────────────────┘
                    │
                    ▼
    ┌───────────────────────────────────┐
-   │     _http_generate_content()      │
+  │ _http_generate_content_from_      │
+  │ rendered()                        │
    │  - Constructs REST API URL        │
    │  - Builds payload:                │
    │    ┌─────────────────────────┐    │
    │    │ contents:               │    │
-   │    │  - inline_data (media)  │    │
-   │    │  - text (JSON prompt)   │    │
-   │    │ systemInstruction       │    │
-   │    │ generationConfig        │    │
+  │    │  - native parts         │    │
+  │    │  - turn history         │    │
+  │    │ system_instruction_text │    │
+  │    │ optional tools          │    │
    │    └─────────────────────────┘    │
    │  - POST with retry (3 attempts)  │
    │  - Parse response candidates     │
@@ -236,11 +241,14 @@ generate_response()
 
 Orchestrates the full generation pipeline:
 
-**Step 1 — Prompt normalization:**
+**Step 1 — Prompt shape detection:**
 
-- ``dict`` → checks for ``system_message`` (correction prompt), then serializes to JSON string.
-- ``str`` → tries to parse as JSON to check for correction prompt, keeps as-is otherwise.
-- Other → ``str(prompt)``.
+- ``PromptRequest`` object → render directly through ``GeminiRenderer``.
+- ``dict`` with ``__prompt_request`` → use the attached typed request.
+- legacy ``dict`` without ``__prompt_request`` → build a minimal fallback
+  ``PromptRequest`` and render that.
+- ``str`` → parse only to detect correction prompts; otherwise treat as legacy
+  fallback text.
 
 **Step 2 — Correction detection:**
 
@@ -253,22 +261,22 @@ delegates to ``_handle_correction_prompt()`` (see `Correction & Error Recovery`_
 Calls ``_extract_multimodal_parts(prompt)`` to recursively pull out attachments
 as Gemini-compatible ``inline_data`` parts (see `Multimodal Support`_).
 
-**Step 4 — Data redaction:**
+**Step 4 — Native rendering:**
 
-Calls ``_copy_and_redact_data(prompt)`` to deep-copy the prompt and replace
-base64 ``data``/``base64`` fields with ``<redacted: N chars>`` placeholders.
-This prevents the text prompt from containing duplicate copies of binary data
-that was already extracted as native multimodal parts.
+Renderer-backed paths call ``GeminiRenderer.render()`` or
+``GeminiRenderer.render_with_multimodal()`` to build Gemini-native request
+data.
 
-**Step 5 — System instruction:**
+**Step 5 — Legacy fallback only when required:**
 
-Calls ``_build_system_instruction(prompt)`` to construct the system-level
-instruction (see `System Instruction`_).
+If no typed request is available, the engine redacts bulky attachment data,
+builds a minimal fallback ``PromptRequest``, and then renders that instead of
+sending the original dict as one indented JSON blob.
 
 **Step 6 — HTTP call:**
 
-Calls ``_http_generate_content()`` with the redacted prompt text, system
-instruction, max output tokens, and multimodal parts.
+Calls ``_http_generate_content_from_rendered()`` with the rendered Gemini
+payload and provider-specific token limits.
 
 **Step 7 — Return:**
 
@@ -287,8 +295,12 @@ Returns the response text. On exception, returns a JSON error action:
 System Instruction
 ------------------
 
-``_build_system_instruction(prompt)`` constructs the system-level instruction
-sent to Gemini. It:
+``_build_system_instruction(prompt)`` remains as a legacy fallback helper for
+older dict-based callers that do not carry ``__prompt_request``. In the normal
+renderer-backed path, the system prompt comes from
+``PromptRequest.system_instruction`` and is rendered by ``GeminiRenderer``.
+
+When the fallback helper is used, it:
 
 1. **Extracts the interface** from the prompt dict, checking (in order):
 
@@ -318,11 +330,11 @@ sent to Gemini. It:
    - Reference to the action schema in the prompt.
 
 4. **Prepends verbose instructions** if ``prompt["instructions_verbose"]`` is
-   present (injected by ``prompt_engine``).
+   present in the compatibility dict.
 
-The system instruction is intentionally minimal because the full action schema,
-persona, memories, and context are already in the user prompt. The system
-instruction's job is to enforce output format and interface routing.
+The fallback system instruction is intentionally minimal because the normal
+typed prompt path already carries persona, context summary, conversation turns,
+and optional tools in structured fields.
 
 
 HTTP Communication
@@ -364,7 +376,7 @@ as-is. Otherwise ``/v1beta`` is appended.
        "parts": [
          {"inline_data": {"mime_type": "audio/ogg", "data": "...base64..."}},
          {"inline_data": {"mime_type": "image/jpeg", "data": "...base64..."}},
-         {"text": "...the JSON prompt text..."}
+         {"text": "...the rendered prompt text or current user turn..."}
        ]
      }],
      "systemInstruction": {
@@ -480,7 +492,7 @@ _copy_and_redact_data()
 **Signature:** ``def _copy_and_redact_data(self, prompt: dict) -> dict``
 
 After multimodal parts are extracted as native API parts, the base64 data still
-exists in the JSON prompt text. Sending both would:
+exists in the compatibility text fallback. Sending both would:
 
 1. **Double the payload size** (binary data as both inline_data AND text).
 2. **Confuse the model** (seeing raw base64 strings in the prompt).
@@ -686,7 +698,8 @@ dependency:
 - **If absent:** ``_HAS_GENAI_SDK = False``, ``self.client = None``, live
   processing is disabled, everything else works normally.
 
-The main pipeline (``generate_response`` → ``_http_generate_content``) uses the
+The main pipeline (``generate_response`` →
+``_http_generate_content_from_rendered``) uses the
 ``requests`` library directly and does **not** depend on the GenAI SDK.
 
 Install the SDK with::
@@ -699,7 +712,7 @@ File Structure Summary
 
 ::
 
-   cortex/llm_provider/gemini_api.py (≈1500 lines)
+  engines/external_engines/gemini_api.py (≈1500 lines)
    │
    ├── Imports & SDK availability check          (1-38)
    ├── Variable registration                     (41-94)

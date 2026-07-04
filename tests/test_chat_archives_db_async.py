@@ -49,10 +49,9 @@ async def test_list_archives_handles_tuple_row_with_missing_fields(monkeypatch):
     now = datetime.utcnow()
     rows = [("id1", "sess1", "Chat", now)]
 
-    async def fake_get_conn_ctx():
-        return _FakeCtx(_FakeConn(rows))
-
-    monkeypatch.setattr(chat_archives_db, "get_conn_ctx", fake_get_conn_ctx)
+    monkeypatch.setattr(
+        chat_archives_db, "get_conn_ctx", lambda: _FakeCtx(_FakeConn(rows))
+    )
 
     out = await chat_archives_db.list_archives()
     assert isinstance(out, list)
@@ -75,10 +74,9 @@ async def test_list_archives_handles_dict_row(monkeypatch):
         }
     ]
 
-    async def fake_get_conn_ctx():
-        return _FakeCtx(_FakeConn(rows))
-
-    monkeypatch.setattr(chat_archives_db, "get_conn_ctx", fake_get_conn_ctx)
+    monkeypatch.setattr(
+        chat_archives_db, "get_conn_ctx", lambda: _FakeCtx(_FakeConn(rows))
+    )
 
     out = await chat_archives_db.list_archives()
     assert isinstance(out, list)

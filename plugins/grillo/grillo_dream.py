@@ -140,6 +140,7 @@ class GrilloDreamPlugin:
                             "status": "success",
                             "dream_content": None,
                             "message": "No recent dreams found in the archives.",
+                            "deliver_to_llm": True,
                         }
 
                     response_text, diary_content, prompt_text, executed_at = row
@@ -153,6 +154,7 @@ class GrilloDreamPlugin:
                             "status": "success",
                             "dream_content": None,
                             "message": "Found a dream record but the content appears to be missing.",
+                            "deliver_to_llm": True,
                         }
 
                     return {
@@ -160,6 +162,7 @@ class GrilloDreamPlugin:
                         "dream_content": final_content,
                         "timestamp": executed_at.isoformat() if executed_at else None,
                         "message": f"Recalled dream from {executed_at}",
+                        "deliver_to_llm": True,
                     }
 
         except Exception as e:
@@ -167,6 +170,7 @@ class GrilloDreamPlugin:
             return {
                 "status": "error",
                 "message": f"Database error recalling dream: {e}",
+                "deliver_to_llm": True,
             }
 
     async def start(self):
@@ -489,9 +493,9 @@ class GrilloDreamPlugin:
             "- Generate a single, cohesive dream narrative (approx 150-400 words).\n"
             "- Rely SOLELY on the provided fragments; do NOT use memory_search or other tools.\n"
             "- RESPOND ONLY WITH VALID JSON following the exact format below (no prose outside JSON):\n"
-            '{"actions": [{"type": "create_personal_diary_entry", "payload": {"interaction_summary": "Dream about [brief topic]", "content": "..."}}], "meta": {"autonomous": true, "rationale": "Daily dream consolidation"}}\n'
+            '{"actions": [{"type": "create_personal_diary_entry", "payload": {"interaction_summary": "Dream about [brief topic]", "personal_thought": "What lingered emotionally after the dream", "emotions": [{"type": "wistful", "intensity": 0.5}], "content": "..."}}], "meta": {"autonomous": true, "rationale": "Daily dream consolidation"}}\n'
             "- The diary 'content' should be the generated dream text (plain text).\n"
-            "- 'interaction_summary' is REQUIRED.\n"
+            "- 'interaction_summary', 'personal_thought', and 'emotions' are REQUIRED.\n"
             "- If you cannot generate a dream, reply with a JSON proposal explaining why (e.g., insufficient data).\n"
             "- Do NOT address or mention the WebUI or any system/internal labels (for example: 'webui', 'system', 'internal')."
         )

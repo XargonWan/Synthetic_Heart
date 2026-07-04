@@ -2,10 +2,36 @@ import os
 import signal
 import sys
 import asyncio
-from core.db import init_db, test_connection, get_conn_ctx
+from pathlib import Path
+
+
+def _load_repo_env_defaults() -> None:
+    env_path = Path(__file__).resolve().with_name(".env")
+    if not env_path.exists():
+        return
+
+    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if not key:
+            continue
+
+        value = value.strip()
+        if value[:1] in {'"', "'"} and value[-1:] == value[:1]:
+            value = value[1:-1]
+        os.environ.setdefault(key, value)
+
+
+_load_repo_env_defaults()
+
+from core.db import init_db, test_connection, get_conn_ctx, _get_db_type  # noqa: E402
 
 # from core.blocklist import init_blocklist_table  # Now handled by blocklist plugin
-from core.logging_utils import (
+from core.logging_utils import (  # noqa: E402
     log_debug,
     log_info,
     log_warning,
@@ -95,7 +121,20 @@ async def initialize_database():
         try:
             async with get_conn_ctx() as conn:
                 async with conn.cursor() as cur:
-                    await cur.execute("SHOW GRANTS FOR CURRENT_USER()")
+                    if _get_db_type() == "postgres":
+                        await cur.execute(
+                            """
+                            SELECT
+                                current_user AS role_name,
+                                current_database() AS database_name,
+                                has_database_privilege(current_user, current_database(), 'CONNECT') AS can_connect,
+                                has_database_privilege(current_user, current_database(), 'CREATE') AS can_create,
+                                has_schema_privilege(current_user, 'public', 'USAGE') AS public_usage,
+                                has_schema_privilege(current_user, 'public', 'CREATE') AS public_create
+                            """
+                        )
+                    else:
+                        await cur.execute("SHOW GRANTS FOR CURRENT_USER()")
                     grants = await cur.fetchall()
                     log_debug("[main] Database permissions check completed")
                     return grants
@@ -180,6 +219,31 @@ if __name__ == "__main__":
                     f"[main] Attempting database connection (attempt {attempt + 1}/{max_retries})..."
                 )
 
+                # Conditional execution of legacy MariaDB→Postgres migration
+                if os.getenv("EXECUTE_MARIADB_POSTGRES_MIGRATION", "false").lower() in (
+                    "1",
+                    "true",
+                    "yes",
+                    "on",
+                ):
+                    try:
+                        from core.db_cutover import (
+                            resume_legacy_mysql_cutover_if_needed,
+                        )
+
+                        migrated = await resume_legacy_mysql_cutover_if_needed()
+                        if migrated:
+                            log_info(
+                                "[main] Legacy MySQL to Postgres cutover completed"
+                            )
+                    except Exception as e:
+                        log_error(f"[main] Legacy DB cutover failed: {e}")
+                        raise
+                else:
+                    log_info(
+                        "[main] Skipping legacy MariaDB→Postgres migration (set EXECUTE_MARIADB_POSTGRES_MIGRATION=true to enable)"
+                    )
+
                 # Initialize database async
                 if await initialize_database():
                     break
@@ -198,6 +262,14 @@ if __name__ == "__main__":
                         f"[main] Critical error during database initialization after {max_retries} attempts: {e}"
                     )
                     sys.exit(1)
+
+        try:
+            from core.db_backup import start_database_backup_scheduler
+
+            if start_database_backup_scheduler() is not None:
+                log_info("[main] Embedded database backup scheduler started")
+        except Exception as e:
+            log_warning(f"[main] Failed to start database backup scheduler: {e}")
 
         while True:
             _restart_requested = False

@@ -10,93 +10,130 @@ import tests  # noqa: F401 - Import to register stubs
 import pytest
 import asyncio
 from unittest.mock import Mock, AsyncMock, patch
-from core.plugin_instance import load_plugin, plugin
+import core.plugin_instance as plugin_instance_module
+from core.plugin_instance import load_plugin, get_plugin
+
+
+class _FakeManualPlugin:
+    __module__ = "cortex.llm_provider.manual"
+
+    def __init__(self):
+        self.cleanup = Mock()
+
+
+class _FakeSeleniumPlugin:
+    __module__ = "cortex.selenium_engine.selenium_chatgpt"
+
+    def __init__(self):
+        self.start = AsyncMock()
+
+
+class _FakeRegistry:
+    def __init__(self, manual_plugin=None, selenium_plugin=None):
+        self._engines = {
+            "manual": manual_plugin or _FakeManualPlugin(),
+            "selenium_chatgpt": selenium_plugin or _FakeSeleniumPlugin(),
+        }
+
+    def get_engine(self, name):
+        return self._engines.get(name)
+
+    def load_engine(self, name, notify_fn=None):
+        return self._engines[name]
+
+
+@pytest.fixture(autouse=True)
+def reset_loaded_plugin():
+    original = plugin_instance_module.plugin
+    plugin_instance_module.plugin = None
+    try:
+        yield
+    finally:
+        plugin_instance_module.plugin = None
+        plugin_instance_module.plugin = original
 
 
 @pytest.mark.asyncio
 async def test_cortex_plugin_hotswap_from_manual_to_manual():
     """Test switching Cortex plugin from manual to manual (no-op)."""
-    # Start with manual
-    await load_plugin("manual")
+    registry = _FakeRegistry()
 
-    # Verify it's loaded
-    assert plugin is not None
-    assert "manual" in plugin.__class__.__module__
+    with patch("core.plugin_instance.get_cortex_registry", return_value=registry):
+        # Start with manual
+        await load_plugin("manual")
+        plugin = get_plugin()
 
-    # Try to load the same plugin again
-    await load_plugin("manual")
+        # Verify it's loaded
+        assert plugin is not None
+        assert "manual" in plugin.__class__.__module__
 
-    # Should still be the same plugin
-    assert plugin is not None
-    assert "manual" in plugin.__class__.__module__
+        # Try to load the same plugin again
+        await load_plugin("manual")
+        plugin = get_plugin()
+
+        # Should still be the same plugin
+        assert plugin is registry.get_engine("manual")
+        assert "manual" in plugin.__class__.__module__
 
 
 @pytest.mark.asyncio
 async def test_cortex_plugin_hotswap_cleanup():
     """Test that plugin cleanup is called during hotswap."""
-    # Load manual first
-    await load_plugin("manual")
-    initial_plugin = plugin
+    manual_plugin = _FakeManualPlugin()
+    selenium_plugin = _FakeSeleniumPlugin()
+    registry = _FakeRegistry(
+        manual_plugin=manual_plugin, selenium_plugin=selenium_plugin
+    )
 
-    # Mock cleanup method to track calls
-    initial_plugin.cleanup = Mock()
+    with patch("core.plugin_instance.get_cortex_registry", return_value=registry):
+        # Load manual first
+        await load_plugin("manual")
+        initial_plugin = get_plugin()
 
-    # Now trigger a hotswap by loading a different plugin
-    with patch("core.cortex_registry.get_cortex_registry") as mock_registry:
-        mock_registry_instance = Mock()
-        mock_new_plugin = Mock()
-        mock_new_plugin.__class__.__module__ = "cortex.selenium_engine.selenium_chatgpt"
-        mock_new_plugin.start = AsyncMock()
-
-        # Make load_engine return a different plugin class
-        mock_registry_instance.load_engine = Mock(return_value=mock_new_plugin)
-        mock_registry.return_value = mock_registry_instance
-
+        # Now trigger a hotswap by loading a different plugin
         await load_plugin("selenium_chatgpt")
 
-    # Cleanup should have been called
-    initial_plugin.cleanup.assert_called_once()
+        # Cleanup should have been called
+        initial_plugin.cleanup.assert_called_once()
 
 
 @pytest.mark.asyncio
 async def test_cortex_plugin_worker_task_waiting():
     """Test that hotswap waits for worker task completion."""
-    # Load manual first
-    await load_plugin("manual")
-    initial_plugin = plugin
+    manual_plugin = _FakeManualPlugin()
+    selenium_plugin = _FakeSeleniumPlugin()
+    registry = _FakeRegistry(
+        manual_plugin=manual_plugin, selenium_plugin=selenium_plugin
+    )
 
-    # Create a mock worker task that takes time
-    mock_task = AsyncMock()
-    mock_task.done.return_value = False  # Task not done initially
-    mock_task.cancel = Mock()
+    with patch("core.plugin_instance.get_cortex_registry", return_value=registry):
+        # Load manual first
+        await load_plugin("manual")
+        initial_plugin = get_plugin()
 
-    # Set a fake worker task
-    initial_plugin._worker_task = mock_task
-    initial_plugin.cleanup = Mock()
+        # Create a mock worker task that takes time
+        mock_task = AsyncMock()
+        mock_task.done.return_value = False
+        mock_task.cancel = Mock()
 
-    # Simulate task completion after cancel
-    async def task_completion():
-        await asyncio.sleep(0.1)
+        # Set a fake worker task
+        initial_plugin._worker_task = mock_task
+        initial_plugin.cleanup = Mock()
 
-    mock_task.side_effect = task_completion
+        # Simulate task completion after cancel
+        async def task_completion():
+            await asyncio.sleep(0.1)
 
-    with patch("core.plugin_instance.get_cortex_registry") as mock_registry:
-        mock_registry_instance = Mock()
-        mock_new_plugin = Mock()
-        mock_new_plugin.__class__.__module__ = "cortex.selenium_engine.selenium_chatgpt"
-        mock_new_plugin.start = AsyncMock()
-
-        mock_registry_instance.load_engine = Mock(return_value=mock_new_plugin)
-        mock_registry.return_value = mock_registry_instance
+        mock_task.side_effect = task_completion
 
         await load_plugin("selenium_chatgpt")
 
-    # Cleanup should have been called after waiting
-    initial_plugin.cleanup.assert_called_once()
+        # Cleanup should have been called after waiting
+        initial_plugin.cleanup.assert_called_once()
 
-    # We must NOT force-cancel an ongoing worker task on hotswap timeouts —
-    # rely on the engine's own waiting logic instead (Selenium handles streaming)
-    mock_task.cancel.assert_not_called()
+        # We must NOT force-cancel an ongoing worker task on hotswap timeouts —
+        # rely on the engine's own waiting logic instead (Selenium handles streaming)
+        mock_task.cancel.assert_not_called()
 
 
 @pytest.mark.asyncio

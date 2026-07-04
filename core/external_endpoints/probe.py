@@ -58,9 +58,11 @@ def get_adapter_for_endpoint(
             raise ValueError(
                 f"[probe] Endpoint '{endpoint.name}' (openai) requires a base_url."
             )
+        timeout = float((endpoint.extra_config or {}).get("timeout", 300.0))
         return OpenAICompatAdapter(
             base_url=endpoint.base_url,
             api_key=api_key,
+            timeout=timeout,
         )
 
     if proto == EndpointProtocol.GEMINI:
@@ -83,15 +85,31 @@ def get_adapter_for_endpoint(
         return AnthropicAdapter(api_key=api_key, base_url=base_url)
 
     if proto == EndpointProtocol.CUSTOM:
+        if endpoint.extra_config.get("legacy_http_tts"):
+            from core.external_endpoints.adapters.custom_tts_adapter import (
+                LegacyHttpTTSAdapter,
+            )
+
+            if not endpoint.base_url:
+                raise ValueError(
+                    f"[probe] Endpoint '{endpoint.name}' (custom) requires a base_url."
+                )
+            return LegacyHttpTTSAdapter(
+                base_url=endpoint.base_url,
+                extra_config=endpoint.extra_config,
+            )
+
         # Fall back to OpenAI-compatible if a base_url is provided
         if endpoint.base_url:
             from core.external_endpoints.adapters.openai_compat import (
                 OpenAICompatAdapter,
             )
 
+            timeout = float((endpoint.extra_config or {}).get("timeout", 60.0))
             return OpenAICompatAdapter(
                 base_url=endpoint.base_url,
                 api_key=api_key,
+                timeout=timeout,
             )
         raise ValueError(
             f"[probe] Endpoint '{endpoint.name}' (custom) requires a base_url."
@@ -121,8 +139,11 @@ async def probe_endpoint(endpoint: ExternalEndpoint, api_key: str = "") -> Probe
 
     cap_task = asyncio.create_task(adapter.probe_capabilities())
     model_task = asyncio.create_task(adapter.list_models())
-    # Ping a first available model; we won't know it yet, so use None (→ "default")
-    ping_task = asyncio.create_task(adapter.ping_test())
+    # Prefer the endpoint's configured default_model for the ping so capacity
+    # errors on a random first-in-list model don't block probing.
+    ping_task = asyncio.create_task(
+        adapter.ping_test(model=endpoint.default_model or None)
+    )
 
     capabilities: dict[str, bool] = {}
     models: list[str] = []

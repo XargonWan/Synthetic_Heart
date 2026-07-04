@@ -17,12 +17,15 @@ sending to the Gemini Live API.
 from __future__ import annotations
 
 import asyncio
+import base64
 import re
 import time
 from typing import Any, Callable, Awaitable, ClassVar
 
+from core.genai_client_utils import harden_genai_client_for_async_close
 from core.logging_utils import log_debug, log_error, log_info, log_warning
 from core.live_api_logger import log_live_send, log_live_recv, log_live_session_event
+from core.live_tool_executor import LiveToolExecutor
 
 # PCM audio constants for Gemini Live API
 # Discord provides 48kHz PCM; we downsample to 16kHz before sending.
@@ -39,8 +42,11 @@ LIVE_OUTPUT_MIME = f"audio/pcm;rate={LIVE_OUTPUT_SAMPLE_RATE}"
 MAX_AUDIO_SESSION_SECONDS = 10 * 60  # ~10 minutes (empirical)
 RECONNECT_BUFFER_SECONDS = 60  # reconnect 60s before observed limit
 
-# Live API model
-LIVE_MODEL = "gemini-2.5-flash-native-audio-preview-12-2025"
+# Live API model — Gemini 3.1 Flash Live Preview (audio-to-audio, low-latency)
+LIVE_MODEL = "gemini-3.1-flash-live-preview"
+
+# Fallback model for features not yet supported on 3.1 (affective dialog, proactive audio)
+LIVE_MODEL_LEGACY = "gemini-2.5-flash-native-audio-preview-12-2025"
 
 # Default voice — configurable via LIVE_VOICE_NAME in the WebUI or .env.
 # 30 Chirp3:HD prebuilt voices available — see Google's docs for the full list.
@@ -73,6 +79,90 @@ def _clean_transcript(parts: list[str]) -> str:
     return text
 
 
+def _extract_model_turn_payload(message: Any) -> tuple[bytes | None, str | None]:
+    """Extract audio/text payloads from a Live API message.
+
+    Gemini 3.1 can place multiple response parts inside
+    ``server_content.model_turn.parts`` in a single server event. The SDK
+    convenience properties (``message.data`` / ``message.text``) are not
+    sufficient in every case, so prefer the structured parts and only fall
+    back to the convenience properties when needed.
+    """
+
+    audio_chunks: list[bytes] = []
+    text_parts: list[str] = []
+
+    server_content = getattr(message, "server_content", None)
+    model_turn = getattr(server_content, "model_turn", None) if server_content else None
+    parts = getattr(model_turn, "parts", None) or []
+
+    for part in parts:
+        inline_data = getattr(part, "inline_data", None)
+        if inline_data is not None:
+            mime_type = str(getattr(inline_data, "mime_type", "") or "").lower()
+            data = getattr(inline_data, "data", None)
+            if data and (not mime_type or mime_type.startswith("audio/")):
+                if isinstance(data, str):
+                    try:
+                        data = base64.b64decode(data)
+                    except Exception:
+                        data = None
+                if isinstance(data, bytes):
+                    audio_chunks.append(data)
+
+        part_text = getattr(part, "text", None)
+        if part_text:
+            text_parts.append(str(part_text))
+
+    fallback_audio = getattr(message, "data", None)
+    if not audio_chunks and isinstance(fallback_audio, bytes) and fallback_audio:
+        audio_chunks.append(fallback_audio)
+
+    fallback_text = getattr(message, "text", None)
+    if not text_parts and fallback_text:
+        text_parts.append(str(fallback_text))
+
+    audio = b"".join(audio_chunks) if audio_chunks else None
+    text = "".join(text_parts).strip() if text_parts else None
+    return audio, text
+
+
+def _build_initial_kick_text(
+    *,
+    is_reconnect: bool,
+    history_snippet: str = "",
+    initial_user_message: str | None = None,
+    initial_user_name: str | None = None,
+) -> str:
+    """Build the first text turn sent to a freshly opened live session.
+
+    Fresh sessions usually need a small kick so Gemini starts responding
+    without waiting for audio. When the live session was summoned from an
+    existing text turn, that text should become the first conversational
+    anchor instead of being ignored behind a generic greeting.
+    """
+    if is_reconnect:
+        return (
+            "[Voice session refreshed — you are continuing the same "
+            "conversation. Do NOT greet or introduce yourself again. "
+            "Simply acknowledge briefly that you're back and continue "
+            f"naturally.{history_snippet}]"
+        )
+
+    cleaned_message = " ".join((initial_user_message or "").split()).strip()
+    if cleaned_message:
+        if len(cleaned_message) > 2000:
+            cleaned_message = cleaned_message[:1999].rstrip() + "…"
+        speaker = " ".join((initial_user_name or "user").split()).strip() or "user"
+        return (
+            "[Session started from an active text conversation. "
+            f'The latest message from {speaker} was: "{cleaned_message}". '
+            "Respond naturally to that message instead of giving a generic greeting.]"
+        )
+
+    return "[Session started. Greet naturally.]"
+
+
 class LiveSessionState:
     """Tracks the state of a single Live API session."""
 
@@ -91,6 +181,14 @@ class LiveSessionState:
         "pending_context_updates",  # queued texts awaiting flush
         "_user_speaking",  # whether we have sent activity_start (manual VAD)
         "attachment_context",  # document text for system instruction (survives reconnects)
+        # Session resumption — set by _receive_loop when server sends a resumable handle.
+        # Passed to start_session on reconnect so the new WebSocket resumes where
+        # the old one left off (context window preserved, no cold restart).
+        "resumption_handle",
+        # Set True when a GoAway message is received — signals _receive_loop to
+        # trigger an immediate proactive reconnect rather than waiting for the
+        # connection to drop.
+        "_go_away_triggered",
     )
 
     def __init__(
@@ -117,6 +215,12 @@ class LiveSessionState:
         )
         # Document context embedded in system instruction (persisted for reconnects)
         self.attachment_context: str | None = None
+        # Latest resumption handle received from the server — used on reconnect
+        # to resume the session context without a cold restart.
+        self.resumption_handle: str | None = None
+        # Signals that a GoAway message has been received and a proactive
+        # reconnect should be triggered at the end of the current turn.
+        self._go_away_triggered: bool = False
 
     @property
     def elapsed_seconds(self) -> float:
@@ -148,17 +252,17 @@ class LiveSessionManager:
         """Return (and lazily create) a global LiveSessionManager.
 
         The manager requires an ``api_key`` argument for its constructor.  When
-        invoked without one we attempt to read ``LIVE_API_KEY`` from the
-        configuration registry.  This mirrors the behaviour in
-        ``cortex.live.live_base.LiveSessionManager`` and keeps tests simple
-        (they can monkeypatch this method directly).
+        invoked without one we read ``GEMINI_API_KEY`` from the configuration
+        registry (the Live API uses the same key as the REST engine).
+        Tests can monkeypatch this method directly.
         """
         if cls._instance is None:
             if api_key is None:
                 try:
                     from core.config_manager import config_registry
 
-                    api_key = str(config_registry.get_value("LIVE_API_KEY", "") or "")
+                    # Re-use the Gemini API key — no separate Live API key needed.
+                    api_key = str(config_registry.get_value("GEMINI_API_KEY", "") or "")
                 except Exception:
                     api_key = ""
             cls._instance = cls(api_key=api_key or "")
@@ -176,6 +280,7 @@ class LiveSessionManager:
             api_key=api_key.strip(),
             http_options={"api_version": "v1alpha"},
         )
+        self._client = harden_genai_client_for_async_close(self._client)
         # guild_id -> LiveSessionState
         self._sessions: dict[int, LiveSessionState] = {}
         # Callbacks
@@ -184,11 +289,25 @@ class LiveSessionManager:
         self._on_tool_call: Callable[[int, dict], Awaitable[dict]] | None = None
         self._on_turn_complete: Callable[[int, str, str], Awaitable[None]] | None = None
         self._on_reconnect_failed: Callable[[int], Awaitable[None]] | None = None
+        # Model-agnostic tool executor — created lazily when tools are registered.
+        # When set, _receive_loop dispatches TOOL_CALL events through this instead
+        # of calling _on_tool_call directly.  _on_tool_call is still called via
+        # the executor's context dict so callers don't need to change.
+        self._tool_executor: LiveToolExecutor | None = None
         self._reconnect_locks: dict[int, asyncio.Lock] = {}
+        # Per-guild session epoch — incremented on every start_session so that
+        # stale reconnect tasks spawned by old receive-loop iterations can detect
+        # they are no longer relevant and abort without opening a new connection.
+        self._session_epochs: dict[int, int] = {}
         # Audio send buffers: guild_id -> bytearray
         self._send_buffers: dict[int, bytearray] = {}
         # Periodic flush tasks: guild_id -> Task
         self._flush_tasks: dict[int, asyncio.Task[None]] = {}
+        # Deferred context-update flush tasks: guild_id -> Task
+        self._pending_update_flush_tasks: dict[int, asyncio.Task[None]] = {}
+        # Guild playback-state probes supplied by the Discord interface so we
+        # can avoid injecting new text while buffered audio is still speaking.
+        self._playback_active_callbacks: dict[int, Callable[[], bool]] = {}
         # Periodic history sync tasks: guild_id -> Task
         self._sync_tasks: dict[int, asyncio.Task[None]] = {}
 
@@ -243,8 +362,32 @@ class LiveSessionManager:
     def set_tool_call_callback(
         self, callback: Callable[[int, dict], Awaitable[dict]]
     ) -> None:
-        """Set callback for tool/function calls. Args: (guild_id, call_dict) -> response_dict."""
+        """Set callback for tool/function calls. Args: (guild_id, call_dict) -> response_dict.
+
+        Legacy interface — kept for backwards compatibility.  When a
+        ``LiveToolExecutor`` is also registered via ``set_tool_executor``,
+        the executor takes precedence and the callback is invoked from inside
+        it via the ``context`` dict rather than directly by the receive loop.
+        """
         self._on_tool_call = callback
+
+    def set_tool_executor(self, executor: LiveToolExecutor) -> None:
+        """Register a ``LiveToolExecutor`` for model-agnostic tool dispatching.
+
+        When set, the receive loop routes ``TOOL_CALL`` events through this
+        executor instead of calling ``_on_tool_call`` directly.  The executor
+        internally calls ``run_action`` and then calls back to the engine's
+        ``send_tool_response``.
+
+        The ``LiveSessionManager`` itself handles ``send_tool_response`` for
+        the managed Gemini session, so you don't need to pass the raw
+        ``GeminiLiveEngine`` instance — ``_receive_loop`` builds the context
+        dict including ``guild_id`` and ``_manager_ref`` automatically.
+
+        Args:
+            executor: A configured ``LiveToolExecutor`` instance.
+        """
+        self._tool_executor = executor
 
     def set_turn_complete_callback(
         self, callback: Callable[[int, str, str], Awaitable[None]]
@@ -267,6 +410,74 @@ class LiveSessionManager:
         """
         self._on_reconnect_failed = callback
 
+    def set_playback_active_callback(
+        self,
+        guild_id: int,
+        callback: Callable[[], bool] | None,
+    ) -> None:
+        """Register a probe that reports whether Discord is still playing audio.
+
+        Context updates that arrive while buffered audio is still being played
+        are deferred until playback settles so late text-side replies do not
+        interrupt or partially overwrite an in-flight live response.
+        """
+        if callback is None:
+            self._playback_active_callbacks.pop(guild_id, None)
+            return
+        self._playback_active_callbacks[guild_id] = callback
+
+    def _is_playback_active(self, guild_id: int) -> bool:
+        callback = self._playback_active_callbacks.get(guild_id)
+        if callback is None:
+            return False
+        try:
+            return bool(callback())
+        except Exception as exc:
+            log_debug(
+                f"[live_session] Playback probe failed for guild {guild_id}: {exc}"
+            )
+            return False
+
+    def _should_defer_context_update(
+        self,
+        guild_id: int,
+        state: LiveSessionState,
+    ) -> bool:
+        return bool(getattr(state, "generating", False)) or self._is_playback_active(
+            guild_id
+        )
+
+    def _ensure_pending_update_flush(self, guild_id: int) -> None:
+        task = self._pending_update_flush_tasks.get(guild_id)
+        if task is not None and not task.done():
+            return
+
+        async def _wait_and_flush() -> None:
+            try:
+                while True:
+                    await asyncio.sleep(0.1)
+                    state = self._sessions.get(guild_id)
+                    if not state or not state.is_active or not state._session:
+                        return
+                    if self._should_defer_context_update(guild_id, state):
+                        continue
+                    await self._flush_pending_updates(guild_id)
+                    if not state.pending_context_updates:
+                        return
+            except asyncio.CancelledError:
+                log_debug(
+                    f"[live_session] Deferred context flush cancelled for guild {guild_id}"
+                )
+            finally:
+                current = self._pending_update_flush_tasks.get(guild_id)
+                if current is asyncio.current_task():
+                    self._pending_update_flush_tasks.pop(guild_id, None)
+
+        self._pending_update_flush_tasks[guild_id] = asyncio.create_task(
+            _wait_and_flush(),
+            name=f"live_pending_context_flush_{guild_id}",
+        )
+
     async def start_session(
         self,
         guild_id: int,
@@ -274,7 +485,11 @@ class LiveSessionManager:
         system_instruction: str,
         tools: list[dict[str, Any]] | None = None,
         attachment_context: str | None = None,
+        initial_user_message: str | None = None,
+        initial_user_name: str | None = None,
+        initial_message_timestamp: str | None = None,
         is_reconnect: bool = False,
+        resumption_handle: str | None = None,
     ) -> bool:
         """Start a Live API session for a guild's voice channel.
 
@@ -283,6 +498,19 @@ class LiveSessionManager:
             channel_id: Discord voice channel ID.
             system_instruction: Full persona/system prompt text.
             tools: Optional function declarations for the Live API.
+            attachment_context: Document text embedded in the system instruction.
+            initial_user_message: Optional text message that triggered the live
+                session start. When present on a fresh session, it becomes the
+                first conversational anchor instead of a generic greeting.
+            initial_user_name: Display name associated with
+                ``initial_user_message``.
+            initial_message_timestamp: ISO timestamp for the text message used
+                to seed the session. Stored as the initial history-sync cursor
+                so the same summon text is not re-injected later.
+            is_reconnect: True when re-establishing after a session drop.
+            resumption_handle: If provided, the new WebSocket will resume the
+                previous session's context window instead of starting fresh.
+                Obtained from ``LiveSessionState.resumption_handle``.
 
         Returns:
             True if session started successfully.
@@ -307,7 +535,7 @@ class LiveSessionManager:
         # ── Resolve optional session features from config ──
         _affective = False
         _proactive = False
-        _thinking_budget = 0
+        _thinking_level = "minimal"  # 3.1 Live default — lowest latency
         try:
             from core.config_manager import config_registry as _cfg
 
@@ -320,11 +548,17 @@ class LiveSessionManager:
             _proactive = _pro_raw is True or (
                 isinstance(_pro_raw, str) and _pro_raw.lower() == "true"
             )
-            _tb = _cfg.get_value("LIVE_THINKING_BUDGET", 0)
-            _thinking_budget = int(_tb) if _tb else 0
+            _tl = _cfg.get_value("LIVE_THINKING_LEVEL", "minimal")
+            if isinstance(_tl, str) and _tl.strip().lower() in (
+                "minimal",
+                "low",
+                "medium",
+                "high",
+            ):
+                _thinking_level = _tl.strip().lower()
             log_info(
                 f"[live_session] Feature flags: affective={_affective} "
-                f"proactive={_proactive} thinking_budget={_thinking_budget}"
+                f"proactive={_proactive} thinking_level={_thinking_level}"
             )
         except Exception:
             pass
@@ -354,36 +588,128 @@ class LiveSessionManager:
             system_instruction=system_instruction,
         )
 
-        # Affective dialog — model adapts tone to user's expression (v1alpha)
+        # Enable send_client_content for initial-context seeding on Gemini 3.1.
+        # On 3.1 the method is restricted to initial history only; this flag
+        # unlocks it.  On 2.5 send_client_content works unconditionally, so
+        # setting the flag there is harmless.
+        try:
+            live_config.history_config = types.HistoryConfig(
+                initial_history_in_client_content=True,
+            )
+            log_info(
+                "[live_session] history_config: initial_history_in_client_content=True"
+            )
+        except Exception as _hc_exc:
+            log_warning(f"[live_session] Could not set history_config: {_hc_exc}")
+
+        # Context window compression — keeps audio-only sessions alive beyond
+        # the 15-min raw limit by compressing old context with a sliding window.
+        # This is the official Google-recommended approach for long sessions.
+        try:
+            live_config.context_window_compression = (
+                types.ContextWindowCompressionConfig(
+                    sliding_window=types.SlidingWindow(),
+                )
+            )
+            log_info(
+                "[live_session] Context window compression enabled (sliding window)"
+            )
+        except Exception as _cw_exc:
+            log_warning(
+                f"[live_session] Could not enable context window compression: {_cw_exc}"
+            )
+
+        # Session resumption — the server will periodically send a resumable
+        # handle via SessionResumptionUpdate messages.  When the WebSocket
+        # connection drops (at ~10 min), we pass the latest handle back in the
+        # next connect call so Gemini resumes the same context without a cold
+        # restart.  resumption_handle=None means start a fresh session.
+        try:
+            live_config.session_resumption = types.SessionResumptionConfig(
+                handle=resumption_handle,
+            )
+            if resumption_handle:
+                log_info(
+                    f"[live_session] Resuming session with handle "
+                    f"{resumption_handle[:16]}…"
+                )
+            else:
+                log_info("[live_session] Session resumption enabled (fresh session)")
+        except Exception as _sr_exc:
+            log_warning(
+                f"[live_session] Could not configure session resumption: {_sr_exc}"
+            )
+
+        # ── Model selection ──
+        # Affective dialog and proactive audio are NOT supported on Gemini 3.1
+        # Flash Live.  If the user enables either, fall back to the 2.5 legacy
+        # model which does support them.
+        _effective_model = LIVE_MODEL
+        if _affective or _proactive:
+            _effective_model = LIVE_MODEL_LEGACY
+            log_info(
+                f"[live_session] Falling back to {LIVE_MODEL_LEGACY} for "
+                f"affective={_affective} / proactive={_proactive}"
+            )
+
+        # Affective dialog — model adapts tone to user's expression (v1alpha, 2.5 only)
         if _affective:
             try:
-                live_config.enable_affective_dialog = True  # type: ignore[attr-defined]
+                live_config.enable_affective_dialog = True
                 log_info("[live_session] Affective dialog enabled")
             except Exception as exc:
                 log_warning(f"[live_session] Could not enable affective dialog: {exc}")
 
-        # Proactive audio — model can choose not to respond to irrelevant audio
+        # Proactive audio — model can choose not to respond to irrelevant audio (2.5 only)
         if _proactive:
             try:
-                live_config.proactivity = types.ProactivityConfig(  # type: ignore[attr-defined]
+                live_config.proactivity = types.ProactivityConfig(
                     proactive_audio=True,
                 )
                 log_info("[live_session] Proactive audio enabled")
             except Exception as exc:
                 log_warning(f"[live_session] Could not enable proactive audio: {exc}")
 
-        # Thinking budget — internal reasoning tokens before responding
-        if _thinking_budget > 0:
+        # Thinking — Gemini 3.1 uses thinkingLevel, 2.5 uses thinkingBudget
+        _thinking_level_enum: dict[str, types.ThinkingLevel] = {
+            "minimal": types.ThinkingLevel.MINIMAL,
+            "low": types.ThinkingLevel.LOW,
+            "medium": types.ThinkingLevel.MEDIUM,
+            "high": types.ThinkingLevel.HIGH,
+        }
+        if _effective_model == LIVE_MODEL:
+            # Gemini 3.1 Flash Live: use thinkingLevel (minimal/low/medium/high)
             try:
-                live_config.thinking_config = types.ThinkingConfig(  # type: ignore[attr-defined]
-                    thinking_budget=_thinking_budget,
+                live_config.thinking_config = types.ThinkingConfig(
+                    thinking_level=_thinking_level_enum.get(
+                        _thinking_level, types.ThinkingLevel.MINIMAL
+                    ),
                     include_thoughts=False,
                 )
-                log_info(
-                    f"[live_session] Thinking budget set to {_thinking_budget} tokens"
-                )
+                log_info(f"[live_session] Thinking level set to {_thinking_level!r}")
             except Exception as exc:
-                log_warning(f"[live_session] Could not set thinking budget: {exc}")
+                log_warning(f"[live_session] Could not set thinking level: {exc}")
+        else:
+            # Legacy 2.5 model: use thinkingBudget (integer token count)
+            _thinking_budget = 0
+            try:
+                from core.config_manager import config_registry as _cfg2
+
+                _tb = _cfg2.get_value("LIVE_THINKING_BUDGET", 0)
+                _thinking_budget = int(_tb) if _tb else 0
+            except Exception:
+                pass
+            if _thinking_budget > 0:
+                try:
+                    live_config.thinking_config = types.ThinkingConfig(
+                        thinking_budget=_thinking_budget,
+                        include_thoughts=False,
+                    )
+                    log_info(
+                        f"[live_session] Thinking budget set to {_thinking_budget} tokens"
+                    )
+                except Exception as exc:
+                    log_warning(f"[live_session] Could not set thinking budget: {exc}")
         if tools:
             live_config.tools = tools  # type: ignore[assignment]
 
@@ -393,10 +719,12 @@ class LiveSessionManager:
             channel_id=channel_id,
         )
         state.attachment_context = attachment_context
+        if initial_message_timestamp:
+            state.last_injected_ts = initial_message_timestamp
 
         try:
             session_ctx = self._client.aio.live.connect(
-                model=LIVE_MODEL,
+                model=_effective_model,
                 config=live_config,
             )
             session = await session_ctx.__aenter__()
@@ -407,11 +735,14 @@ class LiveSessionManager:
 
             self._sessions[guild_id] = state
             self._reconnect_locks.setdefault(guild_id, asyncio.Lock())
+            # Bump the epoch so any receive-loop tasks from the previous session
+            # can detect they are stale and avoid triggering spurious reconnects.
+            self._session_epochs[guild_id] = self._session_epochs.get(guild_id, 0) + 1
 
             log_live_session_event(
                 guild_id,
                 "start",
-                f"model={LIVE_MODEL} voice={_voice_name} "
+                f"model={_effective_model} voice={_voice_name} "
                 f"system_instruction={len(system_instruction)} chars",
             )
             log_live_send(
@@ -440,35 +771,79 @@ class LiveSessionManager:
 
             log_info(
                 f"[live_session] Session started for guild {guild_id} "
-                f"channel {channel_id} (model={LIVE_MODEL})"
+                f"channel {channel_id} (model={_effective_model})"
             )
 
             # Kick off the model with an initial text turn so it sends a greeting
             # without waiting for user audio. The system instruction handles the persona.
-            # On reconnect, tell the model to continue naturally without re-greeting.
+            # On reconnect (cold restart only — resumption preserves context), inject
+            # the last N messages from DB so the model knows what was discussed.
+            #
+            # NOTE: gemini-3.1-flash-live-preview restricts send_client_content to
+            # initial-history seeding (requires history_config).  Use
+            # send_realtime_input(text=...) for all text injections instead.
             if is_reconnect:
-                _kick_text = (
-                    "[Voice session refreshed — you are continuing the same "
-                    "conversation. Do NOT greet or introduce yourself again. "
-                    "Simply acknowledge briefly that you're back and continue "
-                    "naturally.]"
+                # Fetch recent chat history so a cold restart doesn't cause amnesia.
+                # Resumption (handle != None) preserves the context window server-side;
+                # only cold restarts need this injection.
+                _history_snippet = ""
+                if not resumption_handle:
+                    try:
+                        from core.chat_history_cache import load_chat_history_for_guild
+
+                        _hist = await load_chat_history_for_guild(guild_id, limit=20)
+                        if _hist:
+                            _lines = []
+                            for _m in _hist:
+                                _sender = _m.get("sender_name") or "user"
+                                _txt = (_m.get("text") or "").strip()
+                                if _txt:
+                                    _lines.append(f"{_sender}: {_txt}")
+                            if _lines:
+                                _history_snippet = (
+                                    "\n\nRecent conversation context:\n"
+                                    + "\n".join(_lines[-20:])
+                                )
+                            log_info(
+                                f"[live_session] Injected {len(_lines)} history "
+                                f"messages into cold restart kick for guild {guild_id}"
+                            )
+                    except Exception as _hist_err:
+                        log_warning(
+                            f"[live_session] Could not load history for cold restart "
+                            f"kick (guild {guild_id}): {_hist_err}"
+                        )
+
+                _kick_text = _build_initial_kick_text(
+                    is_reconnect=True,
+                    history_snippet=_history_snippet,
                 )
             else:
-                _kick_text = "[Session started. Greet naturally.]"
-            try:
-                await session.send_client_content(
-                    turns=types.Content(
-                        role="user",
-                        parts=[types.Part(text=_kick_text)],
-                    ),
-                    turn_complete=True,
+                _kick_text = _build_initial_kick_text(
+                    is_reconnect=False,
+                    initial_user_message=initial_user_message,
+                    initial_user_name=initial_user_name,
                 )
+            # On resumption, the server restores the full context window
+            # server-side.  Sending a kick text would trigger an unsolicited
+            # model response before any audio arrives — and the model may read
+            # back system-level data (emotion state, instructions) aloud.
+            # Only kick on cold restarts where we need the model to greet or
+            # re-orient itself.
+            if not resumption_handle:
+                try:
+                    await session.send_realtime_input(text=_kick_text)
+                    log_info(
+                        f"[live_session] Sent initial kick to model for guild {guild_id} "
+                        f"(reconnect={is_reconnect})"
+                    )
+                except Exception as e:
+                    log_warning(f"[live_session] Initial kick failed (non-fatal): {e}")
+            else:
                 log_info(
-                    f"[live_session] Sent initial kick to model for guild {guild_id} "
-                    f"(reconnect={is_reconnect})"
+                    f"[live_session] Skipping kick on resumption for guild {guild_id} "
+                    "(context restored server-side)"
                 )
-            except Exception as e:
-                log_warning(f"[live_session] Initial kick failed (non-fatal): {e}")
 
             return True
 
@@ -484,6 +859,15 @@ class LiveSessionManager:
         state = self._sessions.pop(guild_id, None)
         self._send_buffers.pop(guild_id, None)
         self._reconnect_locks.pop(guild_id, None)
+        self._playback_active_callbacks.pop(guild_id, None)
+
+        pending_flush_task = self._pending_update_flush_tasks.pop(guild_id, None)
+        if pending_flush_task and not pending_flush_task.done():
+            pending_flush_task.cancel()
+            try:
+                await pending_flush_task
+            except asyncio.CancelledError:
+                pass
 
         # Cancel the flush task
         flush_task = self._flush_tasks.pop(guild_id, None)
@@ -581,7 +965,12 @@ class LiveSessionManager:
 
                 # Check if session needs reconnection
                 if state.should_reconnect:
-                    asyncio.create_task(self._reconnect(guild_id))
+                    asyncio.create_task(
+                        self._reconnect(
+                            guild_id,
+                            epoch=self._session_epochs.get(guild_id),
+                        )
+                    )
                     break
 
                 buf = self._send_buffers.get(guild_id)
@@ -729,6 +1118,106 @@ class LiveSessionManager:
                 f"[live_session] History sync loop cancelled for guild {guild_id}"
             )
 
+    async def inject_initial_context(
+        self,
+        guild_id: int,
+        turns: list[dict[str, Any]],
+    ) -> bool:
+        """Seed conversation history via ``send_client_content`` (initial context only).
+
+        On Gemini 3.1 Flash Live, ``send_client_content`` is restricted to
+        seeding the initial conversation history — this is enabled by the
+        ``initial_history_in_client_content`` flag in ``history_config`` set
+        during session setup.  Call this method *right after*
+        ``start_session`` and *before* the first user audio arrives.
+
+        On Gemini 2.5, ``send_client_content`` works throughout the session,
+        so this method can also be used mid-session there.
+
+        Each turn dict must contain:
+        - ``"role"`` (``"user"`` or ``"model"``)
+        - ``"parts"`` — a list of part dicts, each with either:
+          - ``{"text": "..."}`` for plain text, or
+          - ``{"inline_data": {"mime_type": "image/jpeg", "data": <bytes>}}``
+            for multimodal content (images, documents, etc.)
+
+        Example::
+
+            await manager.inject_initial_context(guild_id, [
+                {"role": "user", "parts": [
+                    {"text": "What is in this image?"},
+                    {"inline_data": {"mime_type": "image/jpeg", "data": jpeg_bytes}},
+                    {"inline_data": {"mime_type": "image/png", "data": png_bytes}},
+                ]},
+                {"role": "model", "parts": [{"text": "The images show ..."}]},
+            ])
+
+        Args:
+            guild_id: Target guild session.
+            turns: List of turn dicts representing prior conversation context.
+
+        Returns:
+            True if sent successfully, False otherwise.
+        """
+        state = self._sessions.get(guild_id)
+        if not state or not state.is_active or not state._session:
+            log_warning(
+                f"[live_session] inject_initial_context: no active session for guild {guild_id}"
+            )
+            return False
+
+        if not turns:
+            return True
+
+        try:
+            content_turns: list[Any] = []
+            for t in turns:
+                role: str = str(t.get("role", "user"))
+                parts: list[Any] = []
+                for p in t.get("parts", []):
+                    if "text" in p:
+                        parts.append(types.Part(text=str(p["text"])))
+                    elif "inline_data" in p:
+                        id_dict: dict[str, Any] = p["inline_data"]
+                        parts.append(
+                            types.Part(
+                                inline_data=types.Blob(
+                                    mime_type=str(
+                                        id_dict.get(
+                                            "mime_type", "application/octet-stream"
+                                        )
+                                    ),
+                                    data=id_dict["data"],
+                                )
+                            )
+                        )
+                if parts:
+                    content_turns.append(types.Content(role=role, parts=parts))
+
+            if not content_turns:
+                return True
+
+            await state._session.send_client_content(
+                turns=content_turns,
+                turn_complete=False,
+            )
+            total_parts = sum(len(c.parts) for c in content_turns)
+            log_live_send(
+                guild_id,
+                msg_type="initial_context",
+                content=f"{len(content_turns)} turn(s), {total_parts} part(s)",
+            )
+            log_info(
+                f"[live_session] Injected initial context for guild {guild_id}: "
+                f"{len(content_turns)} turn(s), {total_parts} part(s)"
+            )
+            return True
+        except Exception as e:
+            log_warning(
+                f"[live_session] inject_initial_context failed for guild {guild_id}: {e}"
+            )
+            return False
+
     async def send_context_update(self, guild_id: int, text: str) -> None:
         """Send or buffer a system-role context update message to a Live API session.
 
@@ -744,28 +1233,26 @@ class LiveSessionManager:
         if not state or not state.is_active or not state._session:
             return
 
-        # buffer if model currently generating
-        if getattr(state, "generating", False):
+        # Buffer while Gemini is generating or while Discord is still draining
+        # already-received audio. Injecting a late text-side reply during either
+        # window can cause audible interruptions or skipped openings.
+        if self._should_defer_context_update(guild_id, state):
             state.pending_context_updates.append(text)
             log_debug(
                 f"[live_session] Buffered context update for guild {guild_id}: {text[:60]}"
             )
+            self._ensure_pending_update_flush(guild_id)
             return
 
         try:
             full_text = f"[System Context Update] {text}"
-            await state._session.send_client_content(
-                turns=types.Content(
-                    role="user",
-                    parts=[types.Part(text=full_text)],
-                ),
-                turn_complete=False,
-            )
+            # Use send_realtime_input — send_client_content is restricted on
+            # gemini-3.1-flash-live-preview (requires history_config).
+            await state._session.send_realtime_input(text=full_text)
             log_live_send(
                 guild_id,
                 msg_type="context_update",
                 content=full_text,
-                extra={"turn_complete": False},
             )
             log_info(
                 f"[live_session] Sent context update to guild {guild_id}: {text[:60]}"
@@ -786,16 +1273,13 @@ class LiveSessionManager:
             return
         if not state.pending_context_updates:
             return
+        if self._should_defer_context_update(guild_id, state):
+            self._ensure_pending_update_flush(guild_id)
+            return
         for upd in list(state.pending_context_updates):
             try:
                 _upd_text = f"[System Context Update] {upd}"
-                await state._session.send_client_content(
-                    turns=types.Content(
-                        role="user",
-                        parts=[types.Part(text=_upd_text)],
-                    ),
-                    turn_complete=False,
-                )
+                await state._session.send_realtime_input(text=_upd_text)
                 log_live_send(
                     guild_id,
                     msg_type="context_update_flush",
@@ -821,10 +1305,7 @@ class LiveSessionManager:
             return
 
         try:
-            await state._session.send_client_content(
-                turns=types.Content(role="user", parts=[types.Part(text=text)]),
-                turn_complete=True,
-            )
+            await state._session.send_realtime_input(text=text)
             log_live_send(
                 guild_id,
                 msg_type="send_text",
@@ -840,52 +1321,86 @@ class LiveSessionManager:
         text: str | None = None,
         file_data: bytes | None = None,
         mime_type: str = "application/octet-stream",
+        attachments: list[tuple[str, bytes]] | None = None,
     ) -> bool:
-        """Inject a multimodal context message (text + optional file) into a Live session.
+        """Inject a multimodal context message (text + inline attachments) mid-session.
 
-        This allows sending documents, images, or other files alongside a text
-        description so the model can discuss them during voice conversation.
+        Uses ``send_realtime_input`` so it works during an active session on
+        both Gemini 3.1 and 2.5.  Call this to push documents, images, or other
+        binary content into the model's context window without interrupting the
+        audio stream.
+
+        Multiple attachments are sent as sequential ``send_realtime_input``
+        calls.  Each blob is routed to the appropriate SDK parameter:
+
+        - ``audio/*``  →  ``audio=Blob(...)``
+        - ``image/*`` / ``video/*``  →  ``video=Blob(...)``
+        - everything else  →  ``media=Blob(...)``
 
         Args:
             guild_id: Target guild's Live session.
-            text: Optional text description / instruction for the file.
-            file_data: Raw file bytes (image, PDF, etc.).
-            mime_type: MIME type of ``file_data``.
+            text: Optional leading text description / instruction.
+            file_data: Single-file shorthand (bytes). Use ``mime_type`` to set
+                its MIME type. Merged with ``attachments`` if both are given.
+            mime_type: MIME type for ``file_data`` (default
+                ``application/octet-stream``).
+            attachments: List of ``(mime_type, data)`` tuples for sending
+                multiple inline blobs in one call.
 
         Returns:
-            True if the message was sent successfully.
+            True if all parts were sent successfully, False on any error.
         """
         state = self._sessions.get(guild_id)
         if not state or not state.is_active or not state._session:
             log_warning(
-                f"[live_session] Cannot send multimodal context: no active session for guild {guild_id}"
+                f"[live_session] Cannot send multimodal context: "
+                f"no active session for guild {guild_id}"
             )
             return False
 
-        parts: list[types.Part] = []
-        if text:
-            parts.append(types.Part(text=f"[Document Context] {text}"))
+        # Build a unified attachment list from both the legacy single-file args
+        # and the new multi-attachment list.
+        all_attachments: list[tuple[str, bytes]] = []
         if file_data:
-            parts.append(
-                types.Part(inline_data=types.Blob(mime_type=mime_type, data=file_data))
-            )
+            all_attachments.append((mime_type, file_data))
+        if attachments:
+            all_attachments.extend(attachments)
 
-        if not parts:
+        if not text and not all_attachments:
             return False
 
         try:
-            await state._session.send_client_content(
-                turns=types.Content(role="user", parts=parts),
-                turn_complete=False,
-            )
+            if text:
+                await state._session.send_realtime_input(
+                    text=f"[Document Context] {text}"
+                )
+
+            for att_mime, att_data in all_attachments:
+                blob = types.Blob(mime_type=att_mime, data=att_data)
+                if att_mime.startswith("audio/"):
+                    await state._session.send_realtime_input(audio=blob)
+                elif att_mime.startswith("image/") or att_mime.startswith("video/"):
+                    await state._session.send_realtime_input(video=blob)
+                else:
+                    await state._session.send_realtime_input(media=blob)
+
             log_info(
                 f"[live_session] Sent multimodal context to guild {guild_id}: "
-                f"text={bool(text)}, file={bool(file_data)} ({mime_type})"
+                f"text={bool(text)}, attachments={len(all_attachments)}"
+            )
+            log_live_send(
+                guild_id,
+                msg_type="multimodal_context",
+                content=(
+                    f"text={bool(text)} "
+                    f"attachments=[{', '.join(m for m, _ in all_attachments)}]"
+                ),
             )
             return True
         except Exception as e:
             log_warning(
-                f"[live_session] Failed to send multimodal context for guild {guild_id}: {e}"
+                f"[live_session] Failed to send multimodal context "
+                f"for guild {guild_id}: {e}"
             )
             return False
 
@@ -898,6 +1413,66 @@ class LiveSessionManager:
         """Return list of guild IDs with active sessions."""
         return [gid for gid, s in self._sessions.items() if s.is_active]
 
+    async def send_tool_response(
+        self,
+        session_id: str,
+        call_id: str,
+        name: str,
+        result: dict[str, Any],
+    ) -> None:
+        """Send a tool response back to the Gemini model for a given session.
+
+        This method has the same signature as ``LiveEngineBase.send_tool_response``
+        so that ``LiveToolExecutor`` can be constructed with the manager itself
+        as the "engine" argument when running inside the manager-owned session
+        context.
+
+        The ``session_id`` string is in the form ``"live_{guild_id}_{ts}"``
+        (set by ``start_session``).  We resolve the owning guild from the
+        active sessions dict.
+
+        Args:
+            session_id: Session ID string from ``LiveSessionState.session_id``.
+            call_id:    Opaque ID from the model's function call.
+            name:       Tool/function name.
+            result:     Result dict from ``run_action`` / ``LiveToolExecutor``.
+        """
+        # Find the session by session_id string
+        state: LiveSessionState | None = None
+        for s in self._sessions.values():
+            if s.session_id == session_id:
+                state = s
+                break
+
+        if state is None or not state.is_active or not state._session:
+            log_warning(
+                f"[live_session] send_tool_response: no active session for "
+                f"session_id={session_id!r}"
+            )
+            return
+
+        response_payload = {k: v for k, v in result.items() if k != "scheduling"}
+
+        try:
+            await state._session.send_tool_response(
+                function_responses=[
+                    types.FunctionResponse(
+                        id=call_id,
+                        name=name,
+                        response=response_payload,
+                    )
+                ]
+            )
+            log_info(
+                f"[live_session] Sent tool response for {name!r} "
+                f"(session {session_id!r})"
+            )
+        except Exception as exc:
+            log_error(
+                f"[live_session] send_tool_response failed for {name!r} "
+                f"(session {session_id!r}): {exc}"
+            )
+
     async def _receive_loop(self, guild_id: int) -> None:
         """Background task: receive messages from the Live API and dispatch callbacks."""
         state = self._sessions.get(guild_id)
@@ -906,6 +1481,11 @@ class LiveSessionManager:
                 f"[live_session] Receive loop aborted: no state/session for guild {guild_id}"
             )
             return
+
+        # Capture the epoch at loop-start.  If start_session is called again
+        # before this loop exits (reconnect storm), the epoch will have advanced
+        # and any reconnect tasks we spawn will abort immediately.
+        _loop_epoch = self._session_epochs.get(guild_id, 0)
 
         log_info(f"[live_session] Receive loop started for guild {guild_id}")
 
@@ -924,6 +1504,7 @@ class LiveSessionManager:
                 user_parts: list[str] = []
                 model_parts: list[str] = []
                 turn_msg_count = 0
+                turn_was_interrupted: bool = False
 
                 async for message in state._session.receive():
                     if not state.is_active:
@@ -936,6 +1517,8 @@ class LiveSessionManager:
                     sc = getattr(message, "server_content", None)
                     _tc = getattr(sc, "turn_complete", None) if sc else None
                     _interrupted = getattr(sc, "interrupted", None) if sc else None
+                    if _interrupted:
+                        turn_was_interrupted = True
                     _gen_complete = (
                         getattr(sc, "generation_complete", None) if sc else None
                     )
@@ -949,6 +1532,15 @@ class LiveSessionManager:
                     _has_output_tx = bool(
                         getattr(sc, "output_transcription", None) if sc else None
                     )
+                    _audio_data, _text_data = _extract_model_turn_payload(message)
+                    if not state.generating and (
+                        _has_model_turn
+                        or _has_output_tx
+                        or _has_tool_call
+                        or bool(_audio_data)
+                        or bool(_text_data)
+                    ):
+                        state.generating = True
                     log_debug(
                         f"[live_session] MSG#{msg_count} turn={turn_count} "
                         f"guild={guild_id}: "
@@ -959,8 +1551,8 @@ class LiveSessionManager:
                         f"tool_call={_has_tool_call} "
                         f"input_tx={_has_input_tx} "
                         f"output_tx={_has_output_tx} "
-                        f"has_data={bool(message.data)} "
-                        f"has_text={bool(message.text)}"
+                        f"has_data={bool(_audio_data)} "
+                        f"has_text={bool(_text_data)}"
                     )
 
                     # ── Bidirectional log to live_api.log ──
@@ -988,8 +1580,8 @@ class LiveSessionManager:
                         model_turn=_has_model_turn,
                         turn_complete=_tc,
                         interrupted=_interrupted,
-                        audio_bytes=len(message.data) if message.data else 0,
-                        text=message.text,
+                        audio_bytes=len(_audio_data) if _audio_data else 0,
+                        text=_text_data,
                         input_transcript=_input_tx_text,
                         output_transcript=_output_tx_text,
                         tool_call=_tool_call_str,
@@ -1004,8 +1596,9 @@ class LiveSessionManager:
                             f"(turn {turn_count}) from Gemini (guild {guild_id})"
                         )
 
-                    # Audio — use SDK convenience property (handles inline_data decoding)
-                    audio_data = message.data
+                    # Audio/Text — Gemini 3.1 may deliver these only inside
+                    # server_content.model_turn.parts, so use structured extraction.
+                    audio_data, text = _extract_model_turn_payload(message)
                     if audio_data and self._on_audio:
                         log_debug(
                             f"[live_session] Received audio from model: "
@@ -1016,8 +1609,6 @@ class LiveSessionManager:
                         except Exception as e:
                             log_warning(f"[live_session] Audio callback error: {e}")
 
-                    # Text — use SDK convenience property (skips thought parts)
-                    text = message.text
                     if text and self._on_text:
                         try:
                             await self._on_text(guild_id, text)
@@ -1042,30 +1633,102 @@ class LiveSessionManager:
                                 model_parts.append(t)
 
                     # Tool/function calls
+                    # Prefer LiveToolExecutor (model-agnostic) when registered;
+                    # fall back to the legacy _on_tool_call callback otherwise.
                     tool_call = getattr(message, "tool_call", None)
-                    if tool_call and self._on_tool_call:
+                    if tool_call:
                         function_calls = getattr(tool_call, "function_calls", []) or []
                         for fc in function_calls:
                             fc_name: str = str(getattr(fc, "name", ""))
                             fc_id: str = str(getattr(fc, "id", ""))
-                            call_dict = {
-                                "name": fc_name,
-                                "id": fc_id,
-                                "args": getattr(fc, "args", {}),
-                            }
-                            try:
-                                result = await self._on_tool_call(guild_id, call_dict)
-                                await state._session.send_tool_response(
-                                    function_responses=types.FunctionResponse(
+                            fc_args: dict[str, Any] = dict(
+                                getattr(fc, "args", {}) or {}
+                            )
+                            if self._tool_executor is not None:
+                                # Model-agnostic path: executor calls run_action
+                                # and then send_tool_response on this manager.
+                                from plugins.live_base import (
+                                    LiveEvent as _LE,
+                                    LiveEventType as _LET,
+                                    ToolCallPayload as _TCP,
+                                )
+
+                                _tc_event = _LE(
+                                    type=_LET.TOOL_CALL,
+                                    tool_call=_TCP(
+                                        call_id=fc_id,
                                         name=fc_name,
-                                        id=fc_id,
-                                        response=result or {"status": "ok"},
+                                        args=fc_args,
+                                    ),
+                                )
+                                _ctx: dict[str, Any] = {
+                                    "source": "live_voice",
+                                    "guild_id": guild_id,
+                                    "_manager_ref": self,
+                                    "_session_id": state.session_id,
+                                }
+                                try:
+                                    await self._tool_executor.handle(
+                                        state.session_id,
+                                        _tc_event,
+                                        _ctx,
+                                        None,  # bot resolved inside executor via context
                                     )
-                                )
-                            except Exception as e:
-                                log_warning(
-                                    f"[live_session] Tool call handling error: {e}"
-                                )
+                                except Exception as e:
+                                    log_warning(
+                                        f"[live_session] Tool executor error: {e}"
+                                    )
+                            elif self._on_tool_call is not None:
+                                # Legacy callback path
+                                call_dict = {
+                                    "name": fc_name,
+                                    "id": fc_id,
+                                    "args": fc_args,
+                                }
+                                try:
+                                    result = await self._on_tool_call(
+                                        guild_id, call_dict
+                                    )
+                                    await state._session.send_tool_response(
+                                        function_responses=types.FunctionResponse(
+                                            name=fc_name,
+                                            id=fc_id,
+                                            response=result or {"status": "ok"},
+                                        )
+                                    )
+                                except Exception as e:
+                                    log_warning(
+                                        f"[live_session] Tool call handling error: {e}"
+                                    )
+
+                    # ── Session resumption handle ──
+                    # The server periodically sends a SessionResumptionUpdate with
+                    # a handle we can use to resume context across WebSocket
+                    # reconnections.  We store the latest *resumable* handle so
+                    # _reconnect_inner can pass it to the next start_session call.
+                    _sru = getattr(message, "session_resumption_update", None)
+                    if _sru is not None:
+                        _resumable = getattr(_sru, "resumable", False)
+                        _new_handle = getattr(_sru, "new_handle", None)
+                        if _resumable and _new_handle:
+                            state.resumption_handle = str(_new_handle)
+                            log_debug(
+                                f"[live_session] Stored resumption handle for guild "
+                                f"{guild_id}: {state.resumption_handle[:16]}…"
+                            )
+
+                    # ── GoAway — server signalling imminent connection close ──
+                    # The server sends this before terminating the WebSocket.
+                    # We mark go_away so the turn-complete handler will trigger
+                    # a proactive reconnect rather than waiting for an error.
+                    _go_away = getattr(message, "go_away", None)
+                    if _go_away is not None:
+                        _time_left = getattr(_go_away, "time_left", None)
+                        log_info(
+                            f"[live_session] ⏳ GoAway received for guild {guild_id} "
+                            f"(time_left={_time_left}) — queuing proactive reconnect"
+                        )
+                        state._go_away_triggered = True
 
                 log_info(
                     f"[live_session] Turn {turn_count} receive loop exited "
@@ -1083,10 +1746,22 @@ class LiveSessionManager:
                         f"{guild_id} (elapsed {state.elapsed_seconds:.0f}s) "
                         f"— session likely dead, triggering reconnect"
                     )
-                    asyncio.create_task(self._reconnect(guild_id))
+                    asyncio.create_task(self._reconnect(guild_id, epoch=_loop_epoch))
                     break
 
                 # Turn complete — fire callback with accumulated transcripts.
+                # If the turn was interrupted (noise or barge-in mid-response),
+                # the model_transcript is a partial fragment.  Discard it so we
+                # don't write cut-off bot responses to the DB.  The model will
+                # regenerate a complete response in the next turn.
+                if turn_was_interrupted:
+                    log_info(
+                        f"[live_session] Turn {turn_count} interrupted for guild "
+                        f"{guild_id} — discarding partial model transcript "
+                        f"({len(model_parts)} fragments)"
+                    )
+                    model_parts = []
+
                 if self._on_turn_complete and (user_parts or model_parts):
                     user_transcript = _clean_transcript(user_parts)
                     model_transcript = _clean_transcript(model_parts)
@@ -1105,13 +1780,17 @@ class LiveSessionManager:
                 if not state.is_active:
                     break
 
-                # After each turn, check if session is approaching time limit
-                if state.should_reconnect:
+                # Proactive reconnect: GoAway received or approaching time limit.
+                # GoAway takes priority — the server is about to kill the connection
+                # so we reconnect immediately at turn boundary.  The time-based
+                # check is a last-resort fallback for sessions without resumption.
+                if state._go_away_triggered or state.should_reconnect:
+                    _reason = "GoAway" if state._go_away_triggered else "time limit"
                     log_info(
-                        f"[live_session] Session nearing time limit for guild "
-                        f"{guild_id}, reconnecting"
+                        f"[live_session] Proactive reconnect ({_reason}) for guild "
+                        f"{guild_id} (handle={'yes' if state.resumption_handle else 'none'})"
                     )
-                    asyncio.create_task(self._reconnect(guild_id))
+                    asyncio.create_task(self._reconnect(guild_id, epoch=_loop_epoch))
                     break
 
         except asyncio.CancelledError:
@@ -1120,13 +1799,19 @@ class LiveSessionManager:
             log_error(f"[live_session] Receive loop error for guild {guild_id}: {e}")
             state.is_active = False
             log_info(f"[live_session] Attempting auto-reconnect for guild {guild_id}")
-            asyncio.create_task(self._reconnect(guild_id))
+            asyncio.create_task(self._reconnect(guild_id, epoch=_loop_epoch))
 
     _RECONNECT_MAX_RETRIES: int = 3
     _RECONNECT_RETRY_DELAY: float = 2.0  # seconds between retries
 
-    async def _reconnect(self, guild_id: int) -> None:
+    async def _reconnect(self, guild_id: int, *, epoch: int | None = None) -> None:
         """Reconnect a session approaching the time limit.
+
+        ``epoch`` is the session epoch captured at the moment the reconnect was
+        scheduled.  If the epoch has advanced (i.e. a newer session is already
+        running) this task is stale and exits immediately without opening a new
+        connection — preventing the reconnect storm caused by queued tasks from
+        closed receive loops.
 
         Rebuilds the system instruction from the current persona and
         re-discovers tool declarations so function calling is preserved
@@ -1134,7 +1819,7 @@ class LiveSessionManager:
         times before giving up and notifying via ``_on_reconnect_failed``.
         """
         try:
-            await self._reconnect_inner(guild_id)
+            await self._reconnect_inner(guild_id, epoch=epoch)
         except Exception as outer_err:
             # Safety net: ensure no exception escapes silently from the
             # create_task wrapper.  If we get here, something unexpected
@@ -1149,8 +1834,21 @@ class LiveSessionManager:
                 except Exception:
                     pass
 
-    async def _reconnect_inner(self, guild_id: int) -> None:
+    async def _reconnect_inner(
+        self, guild_id: int, *, epoch: int | None = None
+    ) -> None:
         """Core reconnect logic — called by ``_reconnect`` with safety wrapper."""
+        # Stale-epoch guard: if we were given an epoch and the current epoch for
+        # this guild is already newer, a more-recent session is running and this
+        # task should not open yet another connection.
+        current_epoch = self._session_epochs.get(guild_id, 0)
+        if epoch is not None and current_epoch != epoch:
+            log_debug(
+                f"[live_session] Skipping stale reconnect task for guild {guild_id} "
+                f"(task epoch={epoch}, current epoch={current_epoch})"
+            )
+            return
+
         lock = self._reconnect_locks.get(guild_id)
         if not lock:
             log_warning(
@@ -1173,46 +1871,125 @@ class LiveSessionManager:
                 )
                 return  # Session was fully removed — nothing to reconnect
 
+            # Harvest the resumption handle *before* tearing down the session
+            # so we can pass it to the new connection.
+            _resumption_handle: str | None = state.resumption_handle
+            _has_handle = bool(_resumption_handle)
+
             log_info(
                 f"[live_session] 🔄 Reconnecting session for guild {guild_id} "
-                f"(elapsed {state.elapsed_seconds:.0f}s, was_active={state.is_active})"
+                f"(elapsed {state.elapsed_seconds:.0f}s, "
+                f"resumption={'yes' if _has_handle else 'no'})"
             )
 
             channel_id = state.channel_id
             _att_ctx = state.attachment_context
             await self.stop_session(guild_id)
 
-            # Rebuild system instruction from current persona for the new
-            # session — includes fresh chat history from recent_chats cache.
+            if _has_handle:
+                # ── Fast path: session resumption ──────────────────────────
+                # The server preserved our context window.  We just need to
+                # open a new WebSocket with the handle — no need to rebuild
+                # the system instruction or tool declarations from scratch.
+                # We still pass the last known instruction/tools so
+                # start_session can include them in the config (the server
+                # uses the handle to restore context, not the instruction).
+                log_info(f"[live_session] Using resumption handle for guild {guild_id}")
+                # Retrieve last-used instruction from prompt engine (quick, cached)
+                from core.prompt_engine import build_live_system_instruction
+
+                instruction = await build_live_system_instruction(
+                    attachment_context=_att_ctx,
+                )
+                tools: list[dict[str, Any]] | None = None
+                try:
+                    from core.live_tool_registry import LiveToolRegistry
+                    from core.live_tool_adapters.gemini import GeminiToolAdapter
+
+                    _manifests = LiveToolRegistry.build_manifests()
+                    tools = (
+                        GeminiToolAdapter.to_declarations(_manifests)
+                        if _manifests
+                        else None
+                    )
+                except Exception as _te:
+                    log_warning(
+                        f"[live_session] Could not rebuild tool declarations on resumption: {_te}"
+                    )
+
+                last_err: Exception | None = None
+                for attempt in range(1, self._RECONNECT_MAX_RETRIES + 1):
+                    try:
+                        ok = await self.start_session(
+                            guild_id=guild_id,
+                            channel_id=channel_id,
+                            system_instruction=instruction,
+                            tools=tools,
+                            attachment_context=_att_ctx,
+                            is_reconnect=True,
+                            resumption_handle=_resumption_handle,
+                        )
+                        if ok:
+                            log_info(
+                                f"[live_session] ✅ Resumed session for guild "
+                                f"{guild_id} (attempt {attempt})"
+                            )
+                            return
+                        last_err = RuntimeError("start_session returned False")
+                    except Exception as exc:
+                        last_err = exc
+
+                    log_warning(
+                        f"[live_session] Resumption attempt {attempt}/"
+                        f"{self._RECONNECT_MAX_RETRIES} failed for guild "
+                        f"{guild_id}: {last_err}"
+                    )
+                    if attempt < self._RECONNECT_MAX_RETRIES:
+                        await asyncio.sleep(self._RECONNECT_RETRY_DELAY * attempt)
+
+                # Resumption failed — fall through to cold restart below
+                log_warning(
+                    f"[live_session] Session resumption failed for guild {guild_id}, "
+                    "falling back to cold restart"
+                )
+                _resumption_handle = None
+
+            # ── Cold restart path ─────────────────────────────────────────
+            # No handle available, or resumption exhausted all retries.
+            # Rebuild system instruction and tool declarations from scratch.
             from core.prompt_engine import build_live_system_instruction
 
             instruction = await build_live_system_instruction(
                 attachment_context=_att_ctx,
             )
             log_info(
-                f"[live_session] Rebuilt system instruction for reconnect "
+                f"[live_session] Rebuilt system instruction for cold restart "
                 f"({len(instruction)} chars)"
             )
 
-            # Re-discover tool declarations so function calling persists
-            tools: list[dict[str, Any]] | None = None
+            tools = None
             try:
-                from interface.discord_interface import _build_gemini_tool_declarations
+                from core.live_tool_registry import LiveToolRegistry
+                from core.live_tool_adapters.gemini import GeminiToolAdapter
 
-                tools = _build_gemini_tool_declarations()
+                _manifests = LiveToolRegistry.build_manifests()
+                tools = (
+                    GeminiToolAdapter.to_declarations(_manifests)
+                    if _manifests
+                    else None
+                )
             except Exception as e:
                 log_warning(
                     f"[live_session] Could not rebuild tool declarations on reconnect: {e}"
                 )
 
             # Retry loop — Gemini may reject the connection briefly after a
-            # 1011 close.  We back off and try again up to _RECONNECT_MAX_RETRIES
-            # times before declaring failure.
-            last_err: Exception | None = None
+            # 1011 close.  Back off and retry up to _RECONNECT_MAX_RETRIES times.
+            last_err = None
             for attempt in range(1, self._RECONNECT_MAX_RETRIES + 1):
                 try:
                     log_info(
-                        f"[live_session] Reconnect attempt {attempt}/"
+                        f"[live_session] Cold restart attempt {attempt}/"
                         f"{self._RECONNECT_MAX_RETRIES} for guild {guild_id}"
                     )
                     ok = await self.start_session(
@@ -1225,7 +2002,7 @@ class LiveSessionManager:
                     )
                     if ok:
                         log_info(
-                            f"[live_session] ✅ Reconnect succeeded for guild "
+                            f"[live_session] ✅ Cold restart succeeded for guild "
                             f"{guild_id} (attempt {attempt})"
                         )
                         return  # success
@@ -1234,7 +2011,7 @@ class LiveSessionManager:
                     last_err = exc
 
                 log_warning(
-                    f"[live_session] Reconnect attempt {attempt}/"
+                    f"[live_session] Cold restart attempt {attempt}/"
                     f"{self._RECONNECT_MAX_RETRIES} failed for guild "
                     f"{guild_id}: {last_err}"
                 )

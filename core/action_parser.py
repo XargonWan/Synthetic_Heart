@@ -3,12 +3,15 @@
 
 import asyncio
 import inspect
+import re
 import time
 from typing import Any, Dict, List, Tuple
 
+from core.json_utils import dumps as json_dumps, redact_multimodal_for_logging
 from core.logging_utils import log_debug, log_info, log_warning, log_error
 from core.validation_registry import get_validation_registry
 from core.config_manager import config_registry
+from core.action_safety import register_action_safety_config
 from core.image_processor import RESTRICT_ACTIONS
 import json
 from core.transport_layer import run_corrector_middleware
@@ -17,8 +20,11 @@ from core.core_initializer import INTERFACE_REGISTRY
 # Global dictionary to track retry attempts per chat/message thread for the corrector
 # Use a ConfigVar so consumers always see the latest value (set via WebUI/API)
 CORRECTOR_RETRIES = config_registry.get_var("CORRECTOR_RETRIES", 2)
+register_action_safety_config()
 
 _retry_tracker = {}
+_STATIC_INJECTION_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+_GRILLO_ACTIVITY_MESSAGE_ID_RE = re.compile(r"^grillo_[a-z_]+_(\d+)$")
 
 
 def _extract_json_local(text: str):
@@ -30,6 +36,93 @@ def _extract_json_local(text: str):
     from core.transport_layer import extract_json_from_text
 
     return extract_json_from_text(text, return_metadata=False)
+
+
+def _extract_grillo_activity_log_id(
+    context: Dict[str, Any] | None, message: Any
+) -> int | None:
+    """Resolve the current Grillo activity id from context or synthetic message id."""
+    if isinstance(context, dict):
+        for key in ("activity_log_id", "grillo_activity_log_id"):
+            value = context.get(key)
+            if value is None:
+                continue
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                continue
+
+    message_id = getattr(message, "message_id", None)
+    if not isinstance(message_id, str):
+        return None
+
+    match = _GRILLO_ACTIVITY_MESSAGE_ID_RE.match(message_id.strip())
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except (TypeError, ValueError):
+        return None
+
+
+def _normalize_diary_emotions(emotions_payload: Any) -> List[Dict[str, Any]]:
+    """Normalize emotion payloads into ai_diary's list-of-dicts shape."""
+    if isinstance(emotions_payload, list):
+        normalized: List[Dict[str, Any]] = []
+        for entry in emotions_payload:
+            if isinstance(entry, dict) and entry.get("type"):
+                normalized.append(entry)
+        return normalized
+
+    if not isinstance(emotions_payload, dict):
+        return []
+
+    normalized = []
+    for emotion_type, intensity in emotions_payload.items():
+        normalized.append({"type": str(emotion_type), "intensity": intensity})
+    return normalized
+
+
+def _extract_diary_metadata_from_actions(
+    processed_actions: List[Dict[str, Any]],
+    context: Dict[str, Any] | None,
+) -> Dict[str, Any]:
+    """Collect diary metadata explicitly expressed by the LLM across actions/meta."""
+    diary_payload: Dict[str, Any] = {}
+
+    for action in processed_actions:
+        if action.get("type") == "create_personal_diary_entry":
+            payload = action.get("payload") or {}
+            if isinstance(payload, dict):
+                diary_payload.update(payload)
+            break
+
+    if not diary_payload.get("emotions"):
+        for action in reversed(processed_actions):
+            if action.get("type") != "update_emotion_state":
+                continue
+            payload = action.get("payload") or {}
+            if isinstance(payload, dict):
+                emotions_payload = payload.get("emotions", payload)
+                diary_payload["emotions"] = _normalize_diary_emotions(emotions_payload)
+            break
+
+    llm_response_text = (
+        context.get("llm_response_text") if isinstance(context, dict) else None
+    )
+    if isinstance(llm_response_text, str) and llm_response_text.strip():
+        parsed_llm = _extract_json_local(llm_response_text)
+        if isinstance(parsed_llm, dict):
+            meta = parsed_llm.get("meta") or {}
+            rationale = meta.get("rationale") if isinstance(meta, dict) else None
+            if (
+                isinstance(meta, dict)
+                and isinstance(rationale, str)
+                and rationale.strip()
+            ):
+                diary_payload.setdefault("personal_thought", rationale.strip())
+
+    return diary_payload
 
 
 def _maybe_unescape_text_in_payload(payload: dict) -> None:
@@ -156,16 +249,16 @@ async def _grillo_recent_same_message(
         return False
     try:
         from core.db import execute_query
-        from datetime import datetime, timedelta
+        from datetime import datetime, timedelta, timezone
 
-        threshold = datetime.utcnow() - timedelta(seconds=window)
+        threshold = datetime.now(timezone.utc) - timedelta(seconds=window)
         rows = await execute_query(
             """
             SELECT COUNT(*)
             FROM chat_history_cache
             WHERE interface_path = %s
               AND COALESCE(sender_id,'') IN (%s,%s)
-              AND text = %s
+              AND message_text = %s
               AND timestamp > %s
             """,
             (interface_path, "self", "synth", text, threshold),
@@ -328,35 +421,103 @@ def get_supported_action_types() -> set[str]:
     except Exception as e:  # pragma: no cover - defensive
         log_debug(f"[action_parser] Error loading interface actions: {e}")
 
+    # Action metadata published by the core initializer should count as known
+    # action types even when the corresponding handler is intentionally absent.
+    # This lets safety policy classify them before dispatch.
+    supported_types.update(_get_core_declared_action_types())
+
     return supported_types
 
 
+def _get_core_declared_action_types() -> set[str]:
+    """Return action types declared in core_initializer.actions_block."""
+
+    try:
+        from core.core_initializer import core_initializer
+
+        available_actions = (core_initializer.actions_block or {}).get(
+            "available_actions", {}
+        )
+        if isinstance(available_actions, dict):
+            return set(available_actions.keys())
+    except Exception as e:
+        log_debug(f"[action_parser] Error loading core action metadata: {e}")
+
+    return set()
+
+
+def _get_builtin_interface_message_action_types() -> set[str]:
+    """Return canonical built-in interface message action types."""
+
+    return {
+        "message_telegram_bot",
+        "message_discord_bot",
+        "message_synth_webui",
+        "message_matrix_chat",
+        "message_ollama_serve",
+    }
+
+
+# ID-style fields coerced to *int* only — a chat/user/message id is never a
+# float, and a quoted id like ``"5208932647"`` must become an int for DB lookups.
+_INT_ID_FIELDS = {"chat_id", "user_id", "message_id", "animation_state"}
+
+# Numeric *parameter* fields (counts, limits, time windows). Coerced to int when
+# integral, float otherwise. Grammar-constrained local models routinely quote
+# numbers (``"limit": "5"``) — valid JSON, but the string then breaks downstream
+# int math and SQL ``LIMIT`` clauses. Normalizing here fixes every such action at
+# once rather than per-plugin. Genuinely string-typed numeric fields (e.g. the
+# Telegram ``target`` id, free text) are intentionally absent so they stay strings.
+_NUMERIC_PARAM_FIELDS = {
+    "limit",
+    "offset",
+    "count",
+    "index",
+    "page",
+    "page_size",
+    "depth",
+    "top_k",
+    "lines",
+    "context",
+    "context_lines",
+    "cycles",
+    "max_results",
+    "max_memories",
+    "total_count",
+    "total_pages",
+    "older_than_days",
+    "older_than_hours",
+    "days",
+    "hours",
+    "minutes",
+    "seconds",
+    "duration",
+    "intensity",
+    "threshold",
+    "temperature",
+}
+
+
 def _normalize_payload(action_type: str, payload: dict) -> None:
-    """Normalize payload by converting string numbers to int for numeric fields.
+    """Normalize a payload in-place so quoted numbers become real numbers.
 
-    This makes the system more flexible by accepting both ``"2"`` and ``2`` for
-    numeric IDs.  We also strip surrounding whitespace so ``" 42 "`` works, and
-    we recursively normalize nested dictionaries.
+    Local models behind ``force_action_grammar`` (and small models generally)
+    often emit numeric values as JSON strings — ``"limit": "5"`` instead of
+    ``"limit": 5``. The shape is valid, but the string then breaks downstream
+    integer math and SQL ``LIMIT`` clauses. We coerce two field classes,
+    recursively through nested dicts and lists:
 
-    Modifies the payload dict in-place.
+    * ID-style fields (``chat_id``, ``user_id``, ``message_id``,
+      ``animation_state``, anything ending in ``_id``) → ``int``.
+    * Known numeric parameter fields (see ``_NUMERIC_PARAM_FIELDS``) → ``int``
+      when integral, ``float`` otherwise.
 
-    Fields that should be integers:
-    - chat_id: Chat identifier
-    - user_id: User identifier
-    - message_id
-    - animation_state
-    - Any field ending with ``_id``
+    Non-numeric strings, already-numeric values, and string-typed fields such as
+    the Telegram ``target`` id are left untouched.
     """
-    # Fields that should always be integers
-    int_fields = {"chat_id", "user_id", "message_id", "animation_state"}
 
-    # Also handle fields ending with _id
-    for key in payload.keys():
-        if key.endswith("_id") and key not in int_fields:
-            int_fields.add(key)
-
-    def _coerce(value):
-        """Try to convert a value to an int if it looks like one."""
+    def _coerce_int(value):
+        """Convert a clean integer string to ``int``; otherwise return as-is."""
         if isinstance(value, str):
             s = value.strip()
             if s.lstrip("-").isdigit():
@@ -366,29 +527,53 @@ def _normalize_payload(action_type: str, payload: dict) -> None:
                     pass
         return value
 
-    # Normalize top-level fields
-    for field in int_fields:
-        if field in payload:
-            orig = payload[field]
-            coerced = _coerce(orig)
-            if coerced is not orig:
-                payload[field] = coerced
-                log_debug(
-                    f"[action_parser] Normalized {action_type}.payload.{field}: '{orig}' -> {coerced}"
-                )
+    def _coerce_number(value):
+        """Convert a clean numeric string to ``int`` (integral) or ``float``."""
+        if not isinstance(value, str):
+            return value
+        s = value.strip()
+        if s.lstrip("-").isdigit():
+            try:
+                return int(s)
+            except (ValueError, TypeError):
+                return value
+        # Plain decimal like "0.9" or "-1.5" — reject inf/nan/"1e3" by requiring
+        # exactly one dot with digits on both sides.
+        if s.count(".") == 1:
+            intpart, _, fracpart = s.lstrip("-").partition(".")
+            if intpart.isdigit() and fracpart.isdigit():
+                try:
+                    return float(s)
+                except (ValueError, TypeError):
+                    return value
+        return value
 
-    # Normalize nested dict fields (like target: {chat_id: ...})
-    for key, value in list(payload.items()):
-        if isinstance(value, dict):
-            for nested_field in int_fields:
-                if nested_field in value:
-                    orig = value[nested_field]
-                    coerced = _coerce(orig)
-                    if coerced is not orig:
-                        value[nested_field] = coerced
-                        log_debug(
-                            f"[action_parser] Normalized {action_type}.payload.{key}.{nested_field}: '{orig}' -> {coerced}"
-                        )
+    def _walk(obj, path: str) -> None:
+        if isinstance(obj, dict):
+            for key, value in list(obj.items()):
+                if isinstance(value, (dict, list)):
+                    _walk(value, f"{path}.{key}")
+                    continue
+                if not isinstance(key, str):
+                    continue
+                if key in _INT_ID_FIELDS or key.endswith("_id"):
+                    coerced = _coerce_int(value)
+                elif key in _NUMERIC_PARAM_FIELDS:
+                    coerced = _coerce_number(value)
+                else:
+                    continue
+                if coerced is not value:
+                    obj[key] = coerced
+                    log_debug(
+                        f"[action_parser] Normalized {action_type}.payload"
+                        f"{path}.{key}: {value!r} -> {coerced!r}"
+                    )
+        elif isinstance(obj, list):
+            for i, item in enumerate(obj):
+                if isinstance(item, (dict, list)):
+                    _walk(item, f"{path}[{i}]")
+
+    _walk(payload, "")
 
 
 def _attempt_auto_fix(actions: list) -> bool:
@@ -543,8 +728,18 @@ def validate_action(
         return False, ["action must be a dict"]
 
     # Validate action type - with specific action names, interface is implicit
-    supported_types = get_supported_action_types()
+    supported_types = set(get_supported_action_types())
+    supported_types.update(_get_core_declared_action_types())
+    supported_types.update(_get_builtin_interface_message_action_types())
     action_type = action.get("type")
+    if (
+        action_type
+        and isinstance(action_type, str)
+        and action_type.startswith("default_api:")
+    ):
+        action_type = action_type.split("default_api:", 1)[1]
+        action["type"] = action_type
+
     if not action_type:
         errors.append("Missing 'type'")
     elif action_type not in supported_types:
@@ -924,6 +1119,24 @@ async def _handle_plugin_action(
                     log_debug(
                         "[action_parser] Text unescape normalization failed (non-fatal)"
                     )
+                # Strip emotion / meta tags from outbound text so they
+                # never leak to the end-user interface.
+                if isinstance(payload, dict):
+                    _raw_text = payload.get("text")
+                    if isinstance(_raw_text, str) and "{" in _raw_text:
+                        try:
+                            from plugins.emotion_manager import (
+                                strip_emotion_tags,
+                            )
+
+                            _cleaned = strip_emotion_tags(_raw_text)
+                            if _cleaned != _raw_text:
+                                payload["text"] = _cleaned
+                                log_debug(
+                                    "[action_parser] Stripped emotion/meta tags from action payload text"
+                                )
+                        except Exception:
+                            pass
                 log_info(
                     f"[action_parser] ✉️ Dispatching message action to interface '{iface_name}'"
                 )
@@ -1011,10 +1224,13 @@ async def _handle_plugin_action(
 
                             persona_json = None
                             pm = get_persona_manager()
-                            if pm and getattr(pm, "_current_persona", None):
+                            current_persona = (
+                                getattr(pm, "_current_persona", None) if pm else None
+                            )
+                            if pm and current_persona is not None:
                                 try:
                                     persona_json = pm._load_persona_json(
-                                        pm._current_persona.name
+                                        current_persona.name
                                     )
                                 except Exception:
                                     persona_json = None
@@ -1047,6 +1263,51 @@ async def _handle_plugin_action(
                     )
                 except Exception:
                     pass
+
+                # === send_as_voice: deliver this reply as a spoken voice note ===
+                # When the model sets send_as_voice=true on a message_* action,
+                # route the text through Vox (TTS). Vox synthesises the audio and
+                # dispatches BOTH the audio and the caption text to the interface,
+                # so we must NOT also call send_message here (that would duplicate
+                # the text). If Vox is disabled or fails, Vox.speak() falls back to
+                # sending the text itself, so a plain reply is still delivered.
+                if bool(payload.get("send_as_voice")):
+                    try:
+                        from core.core_initializer import PLUGIN_REGISTRY
+                        from plugins.vox_plugin import VoxPlugin
+
+                        vox_plugin = None
+                        if isinstance(PLUGIN_REGISTRY, dict):
+                            for p in PLUGIN_REGISTRY.values():
+                                if isinstance(p, VoxPlugin):
+                                    vox_plugin = p
+                                    break
+
+                        if vox_plugin is not None:
+                            voice_ip = payload.get("interface_path") or getattr(
+                                original_message, "interface_path", None
+                            )
+                            log_info(
+                                f"[action_parser] 🎙️ send_as_voice=true — routing '{action_type}' "
+                                f"to Vox for interface '{plugin_iface}'"
+                            )
+                            await vox_plugin.speak(
+                                text=payload.get("text", "") or "",
+                                interface_path=voice_ip,
+                                context=context,
+                                original_message=original_message,
+                            )
+                            return None
+                        log_warning(
+                            "[action_parser] send_as_voice=true but no Vox plugin "
+                            "loaded — falling back to plain text send."
+                        )
+                    except Exception as e:
+                        log_error(
+                            f"[action_parser] send_as_voice routing failed: {repr(e)} "
+                            "— falling back to plain text send."
+                        )
+
                 log_info(
                     f"[action_parser] ✉️ Dispatching message action to interface '{plugin_iface}' via send_message"
                 )
@@ -1087,7 +1348,10 @@ async def _handle_plugin_action(
                 log_info(
                     f"[action_parser] 🚀 Delegating action to {plugin.__class__.__name__}: type={action_type} interface={plugin_iface}"
                 )
-                log_debug(f"[action_parser] 📦 Action payload: {payload}")
+                log_debug(
+                    "[action_parser] 📦 Action payload: "
+                    + json_dumps(redact_multimodal_for_logging(payload))
+                )
 
                 result = plugin.execute_action(
                     new_action, context, bot, original_message
@@ -1170,9 +1434,19 @@ async def _request_selective_correction(
 ):
     """Request LLM to fix only the failed actions, while preserving successful ones."""
 
+    fixable_failed_actions = [
+        failed for failed in failed_actions if not failed.get("unfixable")
+    ]
+    unfixable_failed_count = len(failed_actions) - len(fixable_failed_actions)
+    if not fixable_failed_actions:
+        log_info(
+            "[action_parser] Skipping selective correction because all failed actions are unfixable"
+        )
+        return
+
     # Build clear correction prompt
     successful_count = len(successful_actions)
-    failed_count = len(failed_actions)
+    failed_count = len(fixable_failed_actions)
 
     # Extract successful action types for context
     successful_types = [action.get("type", "unknown") for action in successful_actions]
@@ -1222,7 +1496,7 @@ async def _request_selective_correction(
     error_details = []
     # we'll also note globally whether any unknown action types occurred
     unknown_actions: list[str] = []
-    for failed in failed_actions:
+    for failed in fixable_failed_actions:
         action = failed["action"]
         errors = failed["errors"]
         action_type = action.get("type", "unknown")
@@ -1318,11 +1592,17 @@ Respond with JSON containing only the corrected actions (not the successful ones
 IMPORTANT: Do not include the {successful_count} actions that were already executed successfully ({", ".join(successful_types) if successful_types else "none"}).
 """
 
+    if unfixable_failed_count:
+        instruction += "\nDo not retry actions that were blocked by safety policy or otherwise marked unfixable."
+
     correction_context = {
         "previous_response_status": "partial_success",
-        "successful_actions": successful_count,
+        "successful_actions": successful_actions,
         "successful_types": successful_types,
-        "failed_actions": failed_count,
+        "successful_count": successful_count,
+        "failed_actions": fixable_failed_actions,
+        "failed_count": failed_count,
+        "unfixable_failed_count": unfixable_failed_count,
         "correction_needed": True,
         "instruction": instruction,
     }
@@ -1541,6 +1821,21 @@ async def run_actions(actions: Any, context: Dict[str, Any], bot, original_messa
                             "output": result,
                         }
                     )
+                elif isinstance(result, dict) and result.get("deliver_to_llm"):
+                    # Opt-in convention: a plugin's execute_action result tagged
+                    # deliver_to_llm=True is fed back to the LLM so it can voice
+                    # the fetched data in-character. This covers fetch-only
+                    # actions whose answer *is* the reply (e.g. recall_last_dream):
+                    # the action returns content but never sends, so without this
+                    # the user would get nothing. The generic request_llm_delivery
+                    # block below handles loop-prevention and message-scoped
+                    # delivery. Unlike "terminal" this does NOT set terminal_seen,
+                    # so sibling actions in the same batch keep executing normally.
+                    delivery_output = {
+                        k: v for k, v in result.items() if k != "deliver_to_llm"
+                    }
+                    delivery_output["type"] = action_type
+                    action_outputs.append(delivery_output)
 
         except Exception as e:
             error_msg = f"Error executing action {idx}: {repr(e)}"
@@ -1591,10 +1886,21 @@ async def run_actions(actions: Any, context: Dict[str, Any], bot, original_messa
         try:
             from core.auto_response import request_llm_delivery
 
+            # Prefer a real fetch-action type for the loop-prevention instruction
+            # ("DO NOT call '<type>' again"); fall back to "terminal".
+            delivery_action_type = next(
+                (
+                    o.get("type")
+                    for o in action_outputs
+                    if o.get("type") and o.get("type") != "terminal"
+                ),
+                "terminal",
+            )
+
             await request_llm_delivery(
                 action_outputs=action_outputs,
                 original_context=response_context,
-                action_type="terminal",
+                action_type=delivery_action_type,
             )
         except Exception as e:
             log_warning(
@@ -1660,6 +1966,24 @@ async def run_actions(actions: Any, context: Dict[str, Any], bot, original_messa
     }
 
 
+def _llm_already_provided_diary_content(processed_actions: list) -> bool:
+    """Return True if any action is create_personal_diary_entry with explicit content.
+
+    When the LLM already provides a full diary entry with its own ``content``
+    field, the automatic summary hook would duplicate it.  All Grillo beats
+    (self_reflection, curiosity, memory_consolidation, …) send ``content`` in
+    their diary payload, so this catches all of them.
+    """
+    for action in processed_actions:
+        if action.get("type") != "create_personal_diary_entry":
+            continue
+        payload = action.get("payload") or {}
+        content = (payload.get("content") or "").strip()
+        if content:
+            return True
+    return False
+
+
 async def _create_diary_entry_for_actions(processed_actions, context, original_message):
     """Create a diary entry summarizing the actions performed during this interaction."""
     if not processed_actions:
@@ -1672,17 +1996,37 @@ async def _create_diary_entry_for_actions(processed_actions, context, original_m
             log_debug("[action_parser] Diary plugin disabled, skipping diary entry")
             return
 
+        if isinstance(context, dict) and (
+            context.get("beat_type") == "diary_consolidation"
+            or context.get("interface") == "diary_merge"
+        ):
+            log_debug(
+                "[action_parser] Skipping automatic diary entry for internal diary consolidation"
+            )
+            return
+
+        # If the LLM already provided a diary entry with explicit content,
+        # skip the automatic summary — it would just append a duplicate fragment.
+        if _llm_already_provided_diary_content(processed_actions):
+            log_debug(
+                "[action_parser] LLM provided explicit diary content — skipping automatic summary"
+            )
+            return
+
         # Extract relevant information
         interface_name = context.get("interface", "unknown")
         chat_id = getattr(original_message, "chat_id", None)
+        thread_id = getattr(original_message, "thread_id", None)
+        if thread_id is None:
+            thread_id = getattr(original_message, "message_thread_id", None)
+        if thread_id is None and isinstance(context, dict):
+            thread_id = context.get("thread_id") or context.get("payload_thread_id")
 
         # Prefer LLM-provided diary metadata when present.
         # This avoids generic/hardcoded reflections unrelated to the real context.
-        llm_diary_payload = {}
-        for action in processed_actions:
-            if action.get("type") == "create_personal_diary_entry":
-                llm_diary_payload = action.get("payload") or {}
-                break
+        llm_diary_payload = _extract_diary_metadata_from_actions(
+            processed_actions, context if isinstance(context, dict) else None
+        )
 
         # Get user message from context or original_message
         user_message = ""
@@ -1786,9 +2130,11 @@ async def _create_diary_entry_for_actions(processed_actions, context, original_m
             involved_users=involved_list,
             interface=interface_name,
             chat_id=str(chat_id) if chat_id else None,
-            grillo_activity_log_id=context.get("activity_log_id")
-            if isinstance(context, dict)
-            else None,
+            thread_id=str(thread_id) if thread_id is not None else None,
+            grillo_activity_log_id=_extract_grillo_activity_log_id(
+                context if isinstance(context, dict) else None,
+                original_message,
+            ),
             interaction_summary=llm_diary_payload.get("interaction_summary"),
             personal_thought=llm_diary_payload.get("personal_thought"),
             emotions=llm_diary_payload.get("emotions"),
@@ -1927,7 +2273,10 @@ def _generate_context_tags(
 
 async def parse_action(action: dict, bot, message):
     """Parse and execute a single action."""
-    log_debug(f"[action_parser] Received action: {action}")
+    log_debug(
+        "[action_parser] Received action: "
+        + json_dumps(redact_multimodal_for_logging(action))
+    )
 
     action_type = action.get("type")
     interface = action.get("interface")
@@ -1943,7 +2292,7 @@ async def parse_action(action: dict, bot, message):
         + ", Interface: "
         + str(interface)
         + ", Payload: "
-        + str(payload)
+        + json_dumps(redact_multimodal_for_logging(payload))
     )
 
     # First allow the active LLM plugin to handle custom actions
@@ -2077,6 +2426,36 @@ async def gather_static_injections(message=None, context_memory=None):
             async def _run_injection(p=plugin):
                 name = p.__class__.__name__
                 start = time.time()
+                cache_key = f"{p.__class__.__module__}.{p.__class__.__qualname__}"
+                allow_stale_fallback = bool(
+                    getattr(p, "allow_static_injection_stale_fallback", False)
+                )
+                cache_ttl_seconds = float(
+                    getattr(p, "static_injection_cache_ttl_seconds", 0.0) or 0.0
+                )
+
+                def _stale_fallback(reason: str) -> dict[str, Any]:
+                    if not allow_stale_fallback:
+                        return {}
+
+                    cached_entry = _STATIC_INJECTION_CACHE.get(cache_key)
+                    if not cached_entry:
+                        return {}
+
+                    cached_at, cached_payload = cached_entry
+                    age_seconds = time.time() - cached_at
+                    if cache_ttl_seconds > 0 and age_seconds > cache_ttl_seconds:
+                        _STATIC_INJECTION_CACHE.pop(cache_key, None)
+                        log_warning(
+                            f"[action_parser] Stale static injection cache for {name} expired after {age_seconds:.1f}s"
+                        )
+                        return {}
+
+                    log_warning(
+                        f"[action_parser] Using cached static injection for {name} after {reason} ({age_seconds:.1f}s old)"
+                    )
+                    return dict(cached_payload)
+
                 try:
                     # Enforce a strict timeout per-plugin to prevent hangs
                     async def _inner():
@@ -2097,7 +2476,7 @@ async def gather_static_injections(message=None, context_memory=None):
                         log_error(
                             f"[action_parser] ⏰ get_static_injection() on {name} timed out after 5s"
                         )
-                        return {}
+                        return _stale_fallback("timeout")
 
                     duration = time.time() - start
                     if duration > 0.1:
@@ -2109,12 +2488,19 @@ async def gather_static_injections(message=None, context_memory=None):
                             f"[action_parser] ✅ get_static_injection() on {name} took {duration:.3f}s"
                         )
 
-                    return res if isinstance(res, dict) else {}
+                    if isinstance(res, dict):
+                        if allow_stale_fallback:
+                            _STATIC_INJECTION_CACHE[cache_key] = (
+                                time.time(),
+                                dict(res),
+                            )
+                        return res
+                    return {}
                 except Exception as e:
                     log_error(
                         f"[action_parser] Error in get_static_injection() on {name}: {e}"
                     )
-                    return {}
+                    return _stale_fallback("error")
 
             tasks.append(_run_injection())
             plugin_names.append(plugin.__class__.__name__)
@@ -2294,20 +2680,72 @@ async def corrector_orchestrator(
                 extra_keys = [
                     k
                     for k in parsed.keys()
-                    if k != "actions" and k not in allowed_metadata
+                    if k != "actions"
+                    and k not in allowed_metadata
+                    and not k.startswith("meta.")
                 ]
 
                 if extra_keys:
-                    synthetic_actions = []
+                    # Mapping from interface prefix to the correct message
+                    # action type — mirrors _INTERFACE_TO_MESSAGE_ACTION in
+                    # message_chain but kept inline to avoid circular imports.
+                    _iface_msg_map: dict[str, str] = {
+                        "telegram_bot": "message_telegram_bot",
+                        "discord_bot": "message_discord_bot",
+                        "synth_webui": "message_synth_webui",
+                        "matrix_chat": "message_matrix_chat",
+                        "ollama_serve": "message_ollama_serve",
+                    }
+                    _message_like_keys = {"message", "text", "reply", "response"}
+                    ctx_ipath = (context or {}).get("interface_path")
+
+                    synthetic_actions: list[dict] = []
                     for key in extra_keys:
                         value = parsed.get(key)
-                        payload = value if isinstance(value, dict) else {"value": value}
-                        synthetic_actions.append({"type": key, "payload": payload})
+                        # Message-like keys with string values → map to a
+                        # proper interface message action so the reply
+                        # reaches the user instead of failing validation.
+                        if key in _message_like_keys and isinstance(value, str):
+                            # Skip if the same text is already in an
+                            # explicit message action (avoid duplicates).
+                            already_present = any(
+                                isinstance(a, dict)
+                                and isinstance(a.get("type"), str)
+                                and a["type"].startswith("message_")
+                                and isinstance(a.get("payload"), dict)
+                                and a["payload"].get("text") == value
+                                for a in actions
+                            )
+                            if already_present:
+                                log_debug(
+                                    f"[corrector_orchestrator] Skipping synthetic '{key}' — text already in explicit message action"
+                                )
+                                continue
+
+                            payload: dict = {"text": value}
+                            synthetic_type = key
+                            if ctx_ipath:
+                                iface_prefix = str(ctx_ipath).split("/")[0]
+                                resolved = _iface_msg_map.get(iface_prefix)
+                                if resolved:
+                                    synthetic_type = resolved
+                                payload["interface_path"] = str(ctx_ipath)
+                        elif isinstance(value, dict):
+                            payload = value
+                            synthetic_type = key
+                        else:
+                            payload = {"value": value}
+                            synthetic_type = key
+
+                        synthetic_actions.append(
+                            {"type": synthetic_type, "payload": payload}
+                        )
 
                     actions.extend(synthetic_actions)
-                    log_info(
-                        f"[corrector_orchestrator] Added {len(synthetic_actions)} synthetic actions for unregistered top-level keys: {', '.join(extra_keys)}"
-                    )
+                    if synthetic_actions:
+                        log_info(
+                            f"[corrector_orchestrator] Added {len(synthetic_actions)} synthetic actions for unregistered top-level keys: {', '.join(extra_keys)}"
+                        )
         except Exception as _e:
             log_debug(
                 f"[corrector_orchestrator] Error while processing top-level keys: {_e}"

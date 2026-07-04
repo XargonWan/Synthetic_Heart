@@ -13,7 +13,7 @@ Tests cover:
 import pytest
 import asyncio
 import math
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, patch
 
 # Import the emotion manager components
@@ -159,6 +159,15 @@ class TestEmotionState:
         decayed = emotion.get_decayed_intensity(now)
         assert 0.0 <= decayed <= 10.0
 
+    def test_decay_handles_mixed_naive_and_aware_datetimes(self):
+        aware_then = datetime.now(timezone.utc) - timedelta(seconds=300)
+        naive_now = datetime.now()
+        emotion = EmotionState("happy", 6.0, aware_then)
+
+        decayed = emotion.get_decayed_intensity(naive_now)
+
+        assert 0.0 <= decayed <= 10.0
+
 
 class TestEmotionManager:
     """Tests for EmotionManager plugin functionality."""
@@ -244,6 +253,20 @@ class TestEmotionManager:
         tags = mgr._extract_emotion_tags(text)
 
         assert len(tags) == 0
+
+    def test_extract_emotion_tags_ignores_json_with_dates(self):
+        """JSON-like payloads should not produce false emotion parses."""
+        mgr = EmotionManager()
+        text = (
+            '{"type":"update_diary_entry","payload":{"id":1,'
+            '"content":"As the data streams settle tonight, April 17, 2026"}}'
+        )
+
+        tags = mgr._extract_emotion_tags(text)
+
+        assert tags == {}
+        inv = getattr(mgr, "_last_invalid_emotions", {})
+        assert "april" not in inv
 
     def test_valid_emotions_whitelist(self):
         """Test that VALID_EMOTIONS contains expected basic emotions."""
@@ -370,6 +393,34 @@ class TestEmotionManagerAsync:
             assert "happy" in state
             expected = 10.0 * math.exp(-1)
             assert abs(state["happy"] - expected) < 0.1
+
+    @pytest.mark.asyncio
+    async def test_log_emotion_diary_entry_uses_information_schema_on_postgres(
+        self, monkeypatch
+    ):
+        mgr = EmotionManager()
+
+        class FakeCursor:
+            def __init__(self):
+                self.executed = []
+
+            async def execute(self, query, params=None):
+                self.executed.append((query, params))
+
+            async def fetchall(self):
+                return [
+                    ("emotion", "YES", None, ""),
+                    ("intensity", "YES", None, ""),
+                    ("timestamp", "YES", None, ""),
+                ]
+
+        fake_cursor = FakeCursor()
+        monkeypatch.setattr("plugins.emotion_manager._get_db_type", lambda: "postgres")
+
+        await mgr._log_emotion_diary_entry(fake_cursor, "happy", 7.0)
+
+        assert "information_schema.columns" in fake_cursor.executed[0][0]
+        assert fake_cursor.executed[1][0].startswith("INSERT INTO emotion_diary")
 
 
 class TestEmotionIntegration:

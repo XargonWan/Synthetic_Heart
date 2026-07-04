@@ -280,16 +280,23 @@ def _fallback_to_trainer(message: str) -> None:
             if not iface:
                 break
 
-            async def send_to_trainer(target_id: int):
+            # Bind loop variables as defaults: the task only starts after this
+            # sync loop has finished, so late reads would hit the last interface.
+            async def send_to_trainer(
+                target_id: int,
+                *,
+                _iface=iface,
+                _interface_name: str = interface_name,
+            ):
                 try:
                     message_data = {"text": message, "target": target_id}
-                    await iface.send_message(message_data)
+                    await _iface.send_message(message_data)
                     log_info(
-                        f"[notifier] Message sent to {interface_name} trainer successfully"
+                        f"[notifier] Message sent to {_interface_name} trainer successfully"
                     )
                 except Exception as e:
                     log_warning(
-                        f"[notifier] Failed to send to {interface_name} trainer: {repr(e)}"
+                        f"[notifier] Failed to send to {_interface_name} trainer: {repr(e)}"
                     )
 
             try:
@@ -366,7 +373,14 @@ def notify_trainer(message: str) -> None:
         if not targets:
             continue
 
-        async def send(target: int | str):
+        # Bind loop variables as defaults: tasks only start after this sync
+        # loop has finished, so late reads would hit the last interface.
+        async def send(
+            target: int | str,
+            *,
+            _iface=iface,
+            _interface_name: str = interface_name,
+        ):
             try:
                 # Build message data with thread_id for LogChat if applicable
                 message_data = {"text": message, "target": target, "skip_history": True}
@@ -388,7 +402,7 @@ def notify_trainer(message: str) -> None:
                     )
 
                 log_info(f"[notifier] Final message_data: {message_data}")
-                await iface.send_message(message_data)
+                await _iface.send_message(message_data)
             except Exception as e:  # pragma: no cover - best effort
                 # Check if interpreter is shutting down
                 if "interpreter shutdown" in str(
@@ -399,7 +413,7 @@ def notify_trainer(message: str) -> None:
                     )
                 else:
                     log_warning(
-                        f"[notifier] Failed to notify via {interface_name}: {repr(e)}",
+                        f"[notifier] Failed to notify via {_interface_name}: {repr(e)}",
                     )
 
         for tgt in targets:
@@ -427,9 +441,14 @@ def flush_pending_for_interface(interface_name: str) -> None:
             remaining.append((name, trainer_id, msg))
             continue
 
-        async def send():
+        # Bind loop variables as defaults: tasks only start after this sync
+        # loop has finished, so late reads would flush the last pending
+        # message repeatedly instead of each queued one.
+        async def send(*, _msg: str = msg, _trainer_id=trainer_id):
             try:
-                await iface.send_message({"text": msg, "target": trainer_id})
+                await iface.send_message(
+                    {"text": _msg, "target": _trainer_id, "skip_history": True}
+                )
             except Exception as e:  # pragma: no cover - best effort
                 log_warning(
                     f"[notifier] Failed to flush pending notify via {interface_name}: {repr(e)}",

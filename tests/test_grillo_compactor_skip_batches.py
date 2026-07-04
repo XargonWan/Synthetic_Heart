@@ -111,7 +111,7 @@ async def test_skip_whole_untagged_batches_then_process_next(monkeypatch):
     )
     monkeypatch.setattr(
         "core.config.get_active_cortex_engine",
-        lambda: asyncio.sleep(0, result="dummy"),
+        lambda *args, **kwargs: asyncio.sleep(0, result="dummy"),
     )
 
     logged = []

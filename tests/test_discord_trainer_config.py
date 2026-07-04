@@ -63,7 +63,7 @@ def test_interface_registration_with_config(monkeypatch):
         lambda *args, **kwargs: "discord:alice",
     )
     # instantiate; token may be blank
-    iface = discord_interface.DiscordInterface("")
+    discord_interface.DiscordInterface("")
     assert captured["iface"] == "discord_bot"
     assert captured["tid"] == "alice"
 
@@ -72,7 +72,7 @@ def test_interface_registration_with_config(monkeypatch):
 async def test_join_voice_trainer_gating(monkeypatch):
     # prepare dummy manager enforcing trainer-only voice
     monkeypatch.setattr(
-        "cortex.live.live_base.LiveSessionManager.get_instance",
+        "engines.live.live_base.LiveSessionManager.get_instance",
         lambda: DummyLiveMgr(trainer_only=True),
     )
 

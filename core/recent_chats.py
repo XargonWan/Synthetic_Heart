@@ -11,7 +11,9 @@ from typing import Union, Optional, Callable
 
 MAX_ENTRIES = 100
 _metadata = {}
-chat_path_map = {}
+# Keyed by str(chat_id): chat ids may be ints (Telegram) or strings
+# (webui sessions, UUIDs), and JSON persistence stringifies keys anyway.
+chat_path_map: dict[str, str] = {}
 
 _CHAT_MAP_PATH = Path(__file__).with_name("chat_paths.json")
 
@@ -30,7 +32,9 @@ def _save_chat_paths():
 if _CHAT_MAP_PATH.exists():
     try:
         with _CHAT_MAP_PATH.open("r", encoding="utf-8") as f:
-            chat_path_map = {int(k): v for k, v in json.load(f).items()}
+            # Keys stay strings: int(k) here would discard the whole map when
+            # any non-numeric chat id (webui session, UUID) was persisted.
+            chat_path_map = {str(k): v for k, v in json.load(f).items()}
         log_debug(
             f"[recent_chats] Loaded chat path map with {len(chat_path_map)} entries"
         )
@@ -91,23 +95,24 @@ async def reset_chat(chat_id: Union[int, str], interface_name: str):
         log_warning(f"[recent_chats] Unexpected error in reset_chat: {e}")
 
     _metadata.pop(chat_id, None)
-    if chat_path_map.pop(chat_id, None) is not None:
+    if chat_path_map.pop(str(chat_id), None) is not None:
         _save_chat_paths()
 
 
 def set_chat_path(chat_id: Union[int, str], chat_path: str) -> None:
-    chat_path_map[chat_id] = chat_path
+    chat_path_map[str(chat_id)] = chat_path
     _save_chat_paths()
 
 
 def get_chat_path(chat_id: Union[int, str]) -> str | None:
-    return chat_path_map.get(chat_id)
+    return chat_path_map.get(str(chat_id))
 
 
 def clear_chat_path(chat_id: Union[int, str]) -> None:
     """Remove chat path mapping for the given chat_id."""
-    if chat_id in chat_path_map:
-        del chat_path_map[chat_id]
+    key = str(chat_id)
+    if key in chat_path_map:
+        del chat_path_map[key]
         _save_chat_paths()
         log_info(f"[recent_chats] Cleared chat path for chat_id: {chat_id}")
     else:

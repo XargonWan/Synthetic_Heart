@@ -1,5 +1,6 @@
 import asyncio
-from datetime import datetime
+from datetime import UTC, datetime
+from collections import deque
 
 import pytest
 
@@ -21,14 +22,10 @@ async def test_save_chat_message_triggers_live_context(monkeypatch):
             calls.append((gid, text))
 
     dummy_mgr = DummyMgr()
-    import core.live_session_manager as lsm_mod
-
     monkeypatch.setattr(
         "core.live_session_manager.LiveSessionManager.get_instance",
         lambda: dummy_mgr,
     )
-    # also ensure the internal singleton reference points to our dummy
-    lsm_mod.LiveSessionManager._instance = dummy_mgr
 
     # patch get_conn_ctx so no real database is touched
     class DummyCursor:
@@ -62,7 +59,7 @@ async def test_save_chat_message_triggers_live_context(monkeypatch):
         message_text="hello world",
         sender_name="Alice",
         sender_id="alice123",
-        timestamp=datetime.utcnow(),
+        timestamp=datetime.now(UTC),
     )
 
     assert result is True
@@ -115,10 +112,11 @@ async def test_save_chat_message_skips_live_path(monkeypatch):
             return DummyCursor2()
 
     monkeypatch.setattr(chat_history_cache, "get_conn_ctx", lambda: DummyConn2())
+    original_create_task = asyncio.create_task
     monkeypatch.setattr(
         chat_history_cache.asyncio,
         "create_task",
-        lambda coro: asyncio.create_task(coro),
+        lambda coro: original_create_task(coro),
     )
 
     result = await chat_history_cache.save_chat_message(
@@ -128,3 +126,212 @@ async def test_save_chat_message_skips_live_path(monkeypatch):
     await asyncio.sleep(0)
     assert result is True
     assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_save_chat_message_forwards_self_reply_to_live(monkeypatch):
+    """Bot text replies on non-live interfaces should still enrich live context."""
+
+    calls = []
+
+    class DummyMgr:
+        def get_active_sessions(self):
+            return [7]
+
+        async def send_context_update(self, gid, text):
+            calls.append((gid, text))
+
+    dummy_mgr = DummyMgr()
+    monkeypatch.setattr(
+        "core.live_session_manager.LiveSessionManager.get_instance",
+        lambda: dummy_mgr,
+    )
+
+    class DummyCursor:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            pass
+
+        async def execute(self, q, params=None):
+            pass
+
+        async def fetchone(self):
+            return None
+
+    class DummyConn:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            pass
+
+        def cursor(self):
+            return DummyCursor()
+
+    monkeypatch.setattr(chat_history_cache, "get_conn_ctx", lambda: DummyConn())
+    original_create_task = asyncio.create_task
+    monkeypatch.setattr(
+        chat_history_cache.asyncio,
+        "create_task",
+        lambda coro: original_create_task(coro),
+    )
+
+    result = await chat_history_cache.save_chat_message(
+        interface_path="telegram_bot/123",
+        message_text="bot reply",
+        sender_name="self",
+        sender_id="self",
+        timestamp=datetime.now(UTC),
+    )
+    await asyncio.sleep(0.05)
+
+    assert result is True
+    assert len(calls) == 1
+    assert calls[0][0] == 7
+    assert "assistant reply template synced from telegram_bot/123" in calls[0][1]
+    assert "primary loose template" in calls[0][1]
+    assert "same opening idea" in calls[0][1]
+    assert calls[0][1].endswith("bot reply")
+
+
+@pytest.mark.asyncio
+async def test_save_chat_message_uses_parametrized_dedup_cutoff(monkeypatch):
+    executed: list[tuple[str, tuple[object, ...] | None]] = []
+
+    class DummyCursor:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            pass
+
+        async def execute(self, q, params: tuple[object, ...] | None = None):
+            executed.append((q, params))
+
+        async def fetchone(self):
+            return None
+
+    class DummyConn:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            pass
+
+        def cursor(self):
+            return DummyCursor()
+
+    monkeypatch.setattr(chat_history_cache, "get_conn_ctx", lambda: DummyConn())
+
+    result = await chat_history_cache.save_chat_message(
+        interface_path="telegram_bot/123",
+        message_text="hello again",
+        sender_name="Alice",
+        sender_id="alice123",
+        timestamp=datetime.now(UTC),
+    )
+
+    assert result is True
+    dedup_query, dedup_params = executed[0]
+    assert "DATE_SUB" not in dedup_query
+    assert "UTC_TIMESTAMP()" not in dedup_query
+    assert "timestamp > %s" in dedup_query
+    assert dedup_params is not None
+
+
+@pytest.mark.asyncio
+async def test_load_chat_history_returns_latest_rows_in_chronological_order(
+    monkeypatch,
+):
+    now = datetime.now(UTC)
+    rows = [
+        (
+            "user",
+            "user-1",
+            f"message-{index}",
+            now.replace(microsecond=index),
+            "synth_webui/webui_default",
+            None,
+        )
+        for index in range(12)
+    ]
+    executed: list[tuple[str, tuple[object, ...] | None]] = []
+
+    class DummyCursor:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            pass
+
+        async def execute(self, query, params=None):
+            executed.append((query, params))
+
+        async def fetchall(self):
+            # Simulate the DB returning the last 10 messages reordered ASC.
+            return rows[2:]
+
+    class DummyConn:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            pass
+
+        def cursor(self):
+            return DummyCursor()
+
+    monkeypatch.setattr(chat_history_cache, "get_conn_ctx", lambda: DummyConn())
+    monkeypatch.setattr(chat_history_cache, "_get_history_limit", lambda default=10: 10)
+
+    history = await chat_history_cache.load_chat_history("synth_webui/webui_default")
+
+    assert isinstance(history, deque)
+    assert [message["text"] for message in history] == [
+        f"message-{index}" for index in range(2, 12)
+    ]
+    query, params = executed[0]
+    assert "ORDER BY timestamp DESC, id DESC" in query
+    assert "ORDER BY timestamp ASC, id ASC" in query
+    assert params == ("synth_webui/webui_default", 10)
+
+
+@pytest.mark.asyncio
+async def test_load_chat_history_uses_explicit_limit(monkeypatch):
+    executed: list[tuple[str, tuple[object, ...] | None]] = []
+
+    class DummyCursor:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            pass
+
+        async def execute(self, query, params=None):
+            executed.append((query, params))
+
+        async def fetchall(self):
+            return []
+
+    class DummyConn:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            pass
+
+        def cursor(self):
+            return DummyCursor()
+
+    monkeypatch.setattr(chat_history_cache, "get_conn_ctx", lambda: DummyConn())
+
+    history = await chat_history_cache.load_chat_history(
+        "synth_webui/webui_default",
+        limit=37,
+    )
+
+    assert isinstance(history, deque)
+    _, params = executed[0]
+    assert params == ("synth_webui/webui_default", 37)

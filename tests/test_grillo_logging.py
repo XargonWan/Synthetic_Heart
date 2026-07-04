@@ -9,7 +9,13 @@ import plugins.grillo.grillo_dream as gd
 async def test_observer_logs_activity(caplog, monkeypatch):
     caplog.set_level("INFO")
 
+    logged_messages = []
+    monkeypatch.setattr(
+        gco, "log_info", lambda msg, *a, **kw: logged_messages.append(str(msg))
+    )
+
     observer = gco.GrilloChatObserverPlugin()
+    observer._last_run_ts = 1.0
 
     async def fake_execute_query(q, params):
         # Simulate 1 new message and a recent max_ts
@@ -40,7 +46,7 @@ async def test_observer_logs_activity(caplog, monkeypatch):
     await observer._run_observer()
 
     # Assert the activity log line was emitted and contains our activity id
-    logged = "\n".join([r.getMessage() for r in caplog.records])
+    logged = "\n".join(logged_messages)
     assert "GRILLO_ACTIVITY id=999" in logged
     assert "Observer prompt enqueued for LLM processing" in logged
 
@@ -48,6 +54,11 @@ async def test_observer_logs_activity(caplog, monkeypatch):
 @pytest.mark.asyncio
 async def test_dream_logs_activity(caplog, monkeypatch):
     caplog.set_level("INFO")
+
+    logged_messages = []
+    monkeypatch.setattr(
+        gd, "log_info", lambda msg, *a, **kw: logged_messages.append(str(msg))
+    )
 
     dream = gd.GrilloDreamPlugin()
 
@@ -73,6 +84,6 @@ async def test_dream_logs_activity(caplog, monkeypatch):
 
     await dream._generate_dream()
 
-    logged = "\n".join([r.getMessage() for r in caplog.records])
+    logged = "\n".join(logged_messages)
     assert "GRILLO_ACTIVITY id=4242" in logged
     assert "Dream enqueued for LLM processing" in logged

@@ -65,3 +65,20 @@ async def test_replay_history_maps_sender_name_to_synth():
     second = calls[1][0][0]
     assert first["sender"] == "user"
     assert second["sender"] == "synth"
+
+
+@pytest.mark.asyncio
+async def test_append_history_skip_history():
+    webui = SynthWebUIInterface()
+    session_id = "test_session_skip"
+    webui.connections[session_id] = AsyncMock()
+
+    # Append a synth message with skip_history=True
+    with patch(
+        "core.chat_history_cache.save_chat_message", AsyncMock(return_value=True)
+    ) as mock_save:
+        await webui._append_history(
+            session_id, "synth", "Hello from synth", skip_history=True
+        )
+        # save_chat_message should NOT have been called
+        mock_save.assert_not_called()

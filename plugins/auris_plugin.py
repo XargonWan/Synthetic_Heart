@@ -31,11 +31,11 @@ from plugins.auris_base import AurisTranscriptResult
 register_exposed_var(
     "ACTIVE_AURIS_ENGINE",
     label="Active Auris Engine",
-    default="disabled",
+    default="vosk",
     value_type=str,
     ui_type="string",
     description=(
-        "Name of the active Auris STT engine (file-based only, e.g. 'gemini'). "
+        "Name of the active Auris STT engine (file-based only, e.g. 'vosk'). "
         "Set to 'disabled' to turn off the Auris subsystem. For real-time streaming use the Live subsystem."
     ),
     scope="plugins",
@@ -154,9 +154,13 @@ class AurisPlugin(AIPluginBase):
         """
         self.refresh_config()
 
-        # if the configured engine is explicitly disabled, behave identically
-        if self._active_engine_name == "disabled":
-            log_info("[auris_plugin] Engine disabled; skipping transcription.")
+        # 'inline' forwards raw audio bytes to the Cortex engine instead of
+        # transcribing; 'disabled' turns the subsystem off.  Both skip STT here.
+        if self._active_engine_name in ("disabled", "inline"):
+            log_info(
+                f"[auris_plugin] Engine '{self._active_engine_name}'; "
+                "skipping transcription."
+            )
             return None
 
         if not os.path.exists(file_path):
@@ -220,6 +224,12 @@ class AurisPlugin(AIPluginBase):
             }
         }
 
+    def is_enabled(self) -> bool:
+        self.refresh_config()
+        # 'inline' forwards audio bytes straight to the Cortex engine and has no
+        # transcription engine, so the stt_transcribe action is not exposed.
+        return self._active_engine_name not in ("disabled", "inline")
+
     def get_prompt_instructions(self, action_name: str) -> dict:
         if action_name == "stt_transcribe":
             return {
@@ -275,7 +285,7 @@ class AurisPlugin(AIPluginBase):
             self._active_engine_name = str(
                 config_registry.get_value(
                     "ACTIVE_AURIS_ENGINE",
-                    "gemini",
+                    "vosk",
                     value_type=str,
                     group="plugins",
                     component="auris_plugin",
@@ -320,7 +330,9 @@ class AurisPlugin(AIPluginBase):
         in ``plugins/live_engines/`` and are loaded by the Live registry.
         """
         builtins = [
-            "plugins.auris_engines.gemini",
+            # Note: cloud-based engines (e.g. Gemini) are not auto-loaded here;
+            # they are registered only when the user explicitly adds them as an
+            # external endpoint via the External Engines UI.
             "plugins.auris_engines.vosk_engine",
         ]
         for mod in builtins:
@@ -342,7 +354,7 @@ class AurisPlugin(AIPluginBase):
         if not text or not text.strip():
             return None
         try:
-            from lingua import LanguageDetectorBuilder  # type: ignore[import]
+            from lingua import LanguageDetectorBuilder
 
             detector = (
                 LanguageDetectorBuilder.from_all_languages()

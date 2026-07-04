@@ -117,6 +117,114 @@ async def test_auris_plugin_transcribe_disabled() -> None:
 
 
 @pytest.mark.asyncio
+async def test_auris_plugin_transcribe_inline_returns_none() -> None:
+    """'inline' has no transcription engine, so transcribe_audio returns None."""
+    with (
+        patch("core.core_initializer.register_plugin"),
+        patch.object(
+            __import__(
+                "core.config_manager", fromlist=["config_registry"]
+            ).config_registry,
+            "get_value",
+            side_effect=lambda key, default=None, **kwargs: (
+                "inline" if key == "ACTIVE_AURIS_ENGINE" else default
+            ),
+        ),
+    ):
+        from plugins.auris_plugin import AurisPlugin
+
+        plugin = AurisPlugin.__new__(AurisPlugin)
+        plugin._active_engine_name = "inline"
+        plugin._engine_settings = {}
+
+        result = await plugin.transcribe_audio("/tmp/fake.wav")
+        assert result is None
+
+
+def test_auris_plugin_inline_is_not_enabled() -> None:
+    """'inline' must not expose the stt_transcribe action (is_enabled False)."""
+    from plugins.auris_plugin import AurisPlugin
+
+    plugin = AurisPlugin.__new__(AurisPlugin)
+    plugin._active_engine_name = "inline"
+
+    with patch.object(
+        plugin,
+        "refresh_config",
+        side_effect=lambda: setattr(plugin, "_active_engine_name", "inline"),
+    ):
+        assert plugin.is_enabled() is False
+
+
+@pytest.mark.asyncio
+async def test_dispatch_media_audio_inline_skips_transcription() -> None:
+    """In Auris inline mode dispatch_media returns None without transcribing."""
+    import core.media_dispatcher as md
+
+    with (
+        patch.object(md, "_is_subsystem_inline", return_value=True),
+        patch.object(md, "_try_auris") as mock_auris,
+        patch.object(md, "_try_live_fallback") as mock_live,
+    ):
+        result = await md.dispatch_media("/tmp/fake.ogg", "audio/ogg")
+
+    assert result is None
+    mock_auris.assert_not_called()
+    mock_live.assert_not_called()
+
+
+def test_get_active_auris_engine_reflects_pseudo_engine() -> None:
+    """_get_active_auris_engine reports the configured engine, incl. 'inline'."""
+    import core.plugin_instance as pi
+
+    class _FakeAuris:
+        def __init__(self, name: str) -> None:
+            self._active_engine_name = name
+
+        def refresh_config(self) -> None:  # no-op
+            pass
+
+    for engine_name in ("inline", "disabled", "vosk"):
+        registry = {"auris_plugin": _FakeAuris(engine_name)}
+        with patch("core.core_initializer.PLUGIN_REGISTRY", registry):
+            assert pi._get_active_auris_engine() == engine_name
+
+
+def test_auris_plugin_refresh_config_uses_vosk_default() -> None:
+    from core.config_manager import config_registry as cfg
+    from plugins.auris_plugin import AurisPlugin
+
+    plugin = AurisPlugin.__new__(AurisPlugin)
+    with patch.object(
+        cfg, "get_value", side_effect=lambda key, default=None, **kwargs: default
+    ):
+        plugin.refresh_config()
+
+    assert plugin._active_engine_name == "vosk"
+
+
+def test_auris_plugin_is_enabled_tracks_active_engine() -> None:
+    from plugins.auris_plugin import AurisPlugin
+
+    plugin = AurisPlugin.__new__(AurisPlugin)
+    plugin._active_engine_name = "vosk"
+
+    with patch.object(
+        plugin,
+        "refresh_config",
+        side_effect=lambda: setattr(plugin, "_active_engine_name", "disabled"),
+    ):
+        assert plugin.is_enabled() is False
+
+    with patch.object(
+        plugin,
+        "refresh_config",
+        side_effect=lambda: setattr(plugin, "_active_engine_name", "vosk"),
+    ):
+        assert plugin.is_enabled() is True
+
+
+@pytest.mark.asyncio
 async def test_auris_plugin_transcribe_calls_engine() -> None:
     """transcribe_audio should call the engine's transcribe method."""
     from core.auris_registry import AurisRegistry

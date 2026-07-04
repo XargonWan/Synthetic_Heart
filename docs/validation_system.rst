@@ -162,6 +162,22 @@ Updated Behavior
    - The heuristic is intentionally narrow to avoid guessing about meaning; it
      can be extended in the future if additional common 'typos' are discovered.
 
+6. **Missing-reply corrector** (new)
+   - On a user-facing turn the core checks whether the LLM actually replied to the
+     user. A reply is recognised when the response contains a ``message_*`` action
+     (or a type listed in the ``MESSAGE_ACTION_TYPES`` config). If none is present,
+     the corrector fires to remind the model to answer.
+   - Some plugin actions deliver user-visible output **themselves** (they call
+     ``bot.send_message`` inside ``execute_action``), so a turn containing only such
+     an action is not actually a silent turn. List these action types in the
+     ``USER_OUTPUT_ACTION_TYPES`` config to exempt them from the missing-reply
+     corrector (default: ``get_recent_chats``). This is engine-agnostic and
+     unrelated to any endpoint output grammar.
+   - **Do not** list fetch-only actions whose result must still be voiced by a
+     follow-up reply (e.g. ``recall_last_dream``, which returns its content as an
+     action result rather than messaging the user) — those legitimately require the
+     corrector's follow-up pass.
+
 No Hardcoding
 ~~~~~~~~~~~~~
 
@@ -295,11 +311,17 @@ Before validation, the action parser automatically normalizes payloads to make t
 
 **Normalization Rules** (``_normalize_payload`` in ``core/action_parser.py``):
 
-- String numbers are converted to integers for numeric ID fields
-- Supported fields: ``thread_id``, ``chat_id``, ``user_id``, ``message_id``, ``animation_state``, and any field ending with ``_id``
-- Applies to both top-level fields and nested dictionaries
-- Non-numeric strings are left unchanged
-- Already-integer values remain unchanged
+- **ID fields** → ``int``: ``chat_id``, ``user_id``, ``message_id``, ``animation_state``, and any field ending with ``_id`` (e.g. ``thread_id``).
+- **Numeric parameter fields** → ``int`` when integral, ``float`` otherwise: ``limit``, ``offset``, ``count``, ``older_than_days``, ``older_than_hours``, ``intensity``, and the rest of ``_NUMERIC_PARAM_FIELDS``. This catches grammar-constrained local models that quote numbers (``"limit": "5"``) — valid JSON, but the string would otherwise break downstream int math and SQL ``LIMIT`` clauses.
+- Applies recursively through nested dictionaries **and lists**, at any depth.
+- Non-numeric strings, already-numeric values, and string-typed fields (e.g. the Telegram ``target`` id) are left unchanged.
+
+.. note::
+
+   The GBNF action grammar (``force_action_grammar``) constrains the JSON
+   *shape* and the action ``type`` enum, but not payload value *types* — per-action
+   payload schemas are intentionally not encoded. A model is therefore free to
+   emit ``"limit": "5"``. Coercion here is what closes that gap.
 
 **Example:**
 
@@ -314,14 +336,14 @@ Before validation, the action parser automatically normalizes payloads to make t
             "thread_id": "2"        # String!
         }
     }
-    
+
     # After normalization
     {
         "type": "message_telegram_bot",
         "payload": {
             "text": "Hello",
-            "target": "-1003098886330",
-            "thread_id": 2          # Converted to int
+            "target": "-1003098886330",   # String-typed id — left unchanged
+            "thread_id": 2                # Converted to int
         }
     }
 

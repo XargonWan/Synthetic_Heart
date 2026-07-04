@@ -1,6 +1,8 @@
 # plugins/message_plugin.py
 """Message plugin for handling text message actions."""
 
+from difflib import SequenceMatcher
+
 from core.logging_utils import log_debug, log_info, log_warning, log_error
 from core.core_initializer import INTERFACE_REGISTRY
 from core.config_manager import config_registry
@@ -80,13 +82,65 @@ class MessagePlugin:
                 + str(payload)
             )
 
+    async def _should_mirror_origin_path(self, context, original_message) -> bool:
+        """Whether a reply's route should be forced to the originating chat.
+
+        Scoped to **local-model** openai endpoints — those with ``disable_tools``
+        or ``force_action_grammar`` set. Such models frequently hallucinate
+        ``interface_path`` (e.g. ``/channels/main``), so a direct reply silently
+        fails to deliver ("Chat not found"). Cloud openai endpoints (xai,
+        openrouter) route reliably and are left untouched, as are non-openai and
+        grillo/outreach/internal turns (the latter target a system-chosen chat).
+        """
+        try:
+            if isinstance(context, dict) and (
+                context.get("beat_type") == "outreach"
+                or context.get("grillo_beat")
+                or context.get("activity_log_id")
+                or context.get("grillo_activity_log_id")
+            ):
+                return False
+            if getattr(original_message, "chat_id", None) in (None, "", -1, "-1"):
+                return False
+
+            from core.config import derive_cortex_scope, get_active_cortex_engine
+            from core.cortex_registry import get_cortex_registry
+            from core.external_endpoints.bridges.cortex_bridge import (
+                ExternalCortexEngine,
+            )
+            from core.external_endpoints.models import EndpointProtocol
+
+            # Resolve the engine for THIS turn's scope (base/trainer), not just the
+            # global base. Scopes are routinely split (e.g. local 1070ti base +
+            # xai trainer for image recognition); only the local openai_compat
+            # engine needs path mirroring — an xai trainer turn must be left alone.
+            scope = derive_cortex_scope(context if isinstance(context, dict) else None)
+            engine_name = await get_active_cortex_engine(scope=scope)
+            if not engine_name:
+                return False
+            instance = get_cortex_registry().get_engine(engine_name)
+            if not (
+                isinstance(instance, ExternalCortexEngine)
+                and getattr(instance._endpoint, "protocol", None)
+                is EndpointProtocol.OPENAI
+            ):
+                return False
+            # All endpoints here are openai-protocol, so gate on the local-model
+            # marker (the same flags as disable_tools / force_action_grammar).
+            # Cloud openai endpoints (xai, openrouter) route reliably and must NOT
+            # be mirrored.
+            extra = getattr(instance._endpoint, "extra_config", None) or {}
+            return bool(extra.get("disable_tools") or extra.get("force_action_grammar"))
+        except Exception:
+            return False
+
     async def _handle_message_action(
         self, action: dict, context: dict, bot, original_message
     ):
         """Handle message action execution using the interface registry."""
 
         payload = action.get("payload", {})
-        text = payload.get("text", "")
+        text = payload.get("text") or payload.get("content") or ""
         interface_path = payload.get("interface_path")
         target = payload.get("target")
         thread_id = payload.get("thread_id")
@@ -132,6 +186,33 @@ class MessagePlugin:
                 else "telegram_bot"
             )
 
+        # openai_compat cortex routing safety: these small local models routinely
+        # hallucinate the interface_path (e.g. "/channels/main") so a direct reply
+        # never reaches the user. For these engines only — and only on normal user
+        # turns (grillo/outreach keep their system-chosen target) — mirror the
+        # reply back to the originating chat instead of trusting the model.
+        if await self._should_mirror_origin_path(context, original_message):
+            origin_interface = (
+                (context.get("interface") if isinstance(context, dict) else None)
+                or getattr(original_message, "interface", None)
+                or interface_name
+            )
+            origin_chat = getattr(original_message, "chat_id", None)
+            origin_thread = getattr(original_message, "thread_id", None) or getattr(
+                original_message, "message_thread_id", None
+            )
+            if origin_chat is not None and (
+                str(interface_name) != str(origin_interface)
+                or str(target) != str(origin_chat)
+            ):
+                log_info(
+                    "[message_plugin] openai_compat reply path mirror: "
+                    f"{interface_name}/{target} -> {origin_interface}/{origin_chat}"
+                )
+                interface_name = origin_interface
+                target = origin_chat
+                thread_id = origin_thread
+
         log_debug(
             f"[message_plugin] Handling {action_type} via {interface_name}: {str(text)[:50]}..."
         )
@@ -165,6 +246,11 @@ class MessagePlugin:
         is_outreach = (
             isinstance(context, dict) and context.get("beat_type") == "outreach"
         )
+        activity_log_id = None
+        if isinstance(context, dict):
+            activity_log_id = context.get("activity_log_id") or context.get(
+                "grillo_activity_log_id"
+            )
 
         if (
             not is_outreach
@@ -190,7 +276,7 @@ class MessagePlugin:
                 suppress_enabled = True
 
             try:
-                from core.chat_history_cache import get_last_message
+                from core.chat_history_cache import get_last_message, load_chat_history
 
                 target_interface_path = (
                     rebuilt_interface_path
@@ -241,7 +327,66 @@ class MessagePlugin:
                                 log_info(
                                     f"[message_plugin] Suppressing Grillo message to {target_interface_path} (last msg from synth)"
                                 )
+                                try:
+                                    from plugins.grillo.grillo_impl import GrilloPlugin
+
+                                    await GrilloPlugin.record_suppressed_event(
+                                        activity_log_id=activity_log_id,
+                                        reason="last msg from synth",
+                                    )
+                                except Exception as suppression_error:
+                                    log_debug(
+                                        f"[message_plugin] Failed to record Grillo suppression event: {suppression_error}"
+                                    )
                                 return
+
+                        similarity_threshold = float(
+                            config_registry.get_value(
+                                "GRILLO_DUP_SIMILARITY_THRESHOLD",
+                                0.85,
+                                label="Grillo Duplicate Similarity Threshold",
+                                description=(
+                                    "Similarity threshold above which Grillo suppresses outbound messages that are too close to recent public-chat text."
+                                ),
+                                value_type=float,
+                                group="grillo",
+                                component="grillo",
+                            )
+                        )
+                        candidate_text = str(text or "").strip().lower()
+                        if candidate_text:
+                            recent_history = await load_chat_history(
+                                target_interface_path
+                            )
+                            for entry in recent_history or []:
+                                previous_text = (
+                                    str(entry.get("text") or "").strip().lower()
+                                )
+                                if not previous_text:
+                                    continue
+                                similarity = SequenceMatcher(
+                                    None, candidate_text, previous_text
+                                ).ratio()
+                                if similarity >= similarity_threshold:
+                                    log_info(
+                                        f"[message_plugin] Suppressing Grillo message to {target_interface_path} (similarity={similarity:.2f})"
+                                    )
+                                    try:
+                                        from plugins.grillo.grillo_impl import (
+                                            GrilloPlugin,
+                                        )
+
+                                        await GrilloPlugin.record_suppressed_event(
+                                            activity_log_id=activity_log_id,
+                                            reason=(
+                                                f"duplicate similarity={similarity:.2f}"
+                                            ),
+                                        )
+                                    except Exception as suppression_error:
+                                        log_debug(
+                                            f"[message_plugin] Failed to record Grillo suppression event: {suppression_error}"
+                                        )
+                                    return
 
             except Exception as e:
                 log_debug(f"[message_plugin] Grillo suppression check failed: {e}")
@@ -272,6 +417,76 @@ class MessagePlugin:
         ):
             reply_to = original_message.message_id
 
+        # === Voice input forces a spoken reply ===
+        # Historically, when the incoming message was an audio/voice note the reply
+        # was always delivered as voice. Preserve that behaviour: if this turn was
+        # voice-originated (is_voice_input / request_tts) and Vox is enabled, force
+        # send_as_voice=true regardless of whether the model set it. WebUI has its
+        # own lipsync/VRM path and is excluded.
+        try:
+            _voice_input = isinstance(context, dict) and (
+                context.get("is_voice_input") or context.get("request_tts")
+            )
+            _is_webui = "webui" in (interface_name or "").lower()
+            if _voice_input and not _is_webui and not payload.get("send_as_voice"):
+                from plugins.vox_plugin import is_vox_enabled
+
+                if is_vox_enabled():
+                    log_info(
+                        "[message_plugin] Voice input detected — forcing "
+                        "send_as_voice=true for spoken reply."
+                    )
+                    payload["send_as_voice"] = True
+        except Exception as e:
+            log_debug(f"[message_plugin] Voice-input force check failed: {e}")
+
+        # === send_as_voice: deliver this reply as a spoken voice note ===
+        # message_* actions are routed through this plugin (not the interface's
+        # own send_message branch in action_parser), so the send_as_voice routing
+        # must live here too. When set, hand the text to Vox (TTS): Vox synthesises
+        # the audio AND dispatches both the audio and caption to the interface, so
+        # we must NOT also call handler.send_message() (that would duplicate the
+        # text). If Vox is disabled or fails, Vox.speak() falls back to sending the
+        # text itself, so a plain reply is still delivered.
+        if bool(payload.get("send_as_voice")):
+            try:
+                from core.core_initializer import PLUGIN_REGISTRY
+                from plugins.vox_plugin import VoxPlugin
+
+                vox_plugin = None
+                if isinstance(PLUGIN_REGISTRY, dict):
+                    for p in PLUGIN_REGISTRY.values():
+                        if isinstance(p, VoxPlugin):
+                            vox_plugin = p
+                            break
+
+                if vox_plugin is not None:
+                    voice_ip = (
+                        rebuilt_interface_path
+                        or interface_path
+                        or getattr(original_message, "interface_path", None)
+                    )
+                    log_info(
+                        f"[message_plugin] 🎙️ send_as_voice=true — routing '{action_type}' "
+                        f"to Vox for interface '{interface_name}'"
+                    )
+                    await vox_plugin.speak(
+                        text=text or "",
+                        interface_path=voice_ip,
+                        context=context,
+                        original_message=original_message,
+                    )
+                    return
+                log_warning(
+                    "[message_plugin] send_as_voice=true but no Vox plugin loaded "
+                    "— falling back to plain text send."
+                )
+            except Exception as e:
+                log_error(
+                    f"[message_plugin] send_as_voice routing failed: {repr(e)} "
+                    "— falling back to plain text send."
+                )
+
         send_payload = {"text": text, "target": target}
         if thread_id is not None:
             send_payload["thread_id"] = thread_id
@@ -279,7 +494,13 @@ class MessagePlugin:
             send_payload["interface_path"] = rebuilt_interface_path
 
         try:
-            await handler.send_message(send_payload, original_message)
+            send_result = await handler.send_message(
+                send_payload, original_message=original_message
+            )
+            if send_result is False:
+                raise RuntimeError(
+                    f"{interface_name} send_message() reported delivery failure"
+                )
             log_info(
                 f"[message_plugin] Message successfully sent to {target} (thread: {thread_id}, reply_to: {reply_to})"
             )
@@ -288,6 +509,7 @@ class MessagePlugin:
             log_error(
                 f"[message_plugin] Failed to send message via {interface_name}: {e}"
             )
+            raise
 
 
 # Export the plugin class

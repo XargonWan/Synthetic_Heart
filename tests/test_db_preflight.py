@@ -35,6 +35,8 @@ async def test_ensure_plugin_tables_executes_create_statements(monkeypatch):
         return FakeConn()
 
     monkeypatch.setattr("core.db.get_conn_ctx", fake_get_conn_ctx)
+    # Pin the mariadb path: a local .env may select the postgres primary DB
+    monkeypatch.setattr("core.db._get_db_type", lambda: "mariadb")
 
     # Run the preflight
     await db.ensure_plugin_tables()
@@ -83,6 +85,8 @@ async def test_ensure_plugin_tables_creates_ai_diary_if_plugin_init_fails(monkey
 
     monkeypatch.setattr("core.db.get_conn_ctx", fake_get_conn_ctx)
     monkeypatch.setattr("plugins.ai_diary.init_diary_table", fake_init_fail)
+    # Pin the mariadb path: a local .env may select the postgres primary DB
+    monkeypatch.setattr("core.db._get_db_type", lambda: "mariadb")
 
     # Run the preflight
     from core import db
@@ -133,6 +137,8 @@ async def test_ensure_plugin_tables_creates_minimal_ai_diary_placeholder(monkeyp
 
     monkeypatch.setattr("core.db.get_conn_ctx", fake_get_conn_ctx)
     monkeypatch.setattr("plugins.ai_diary.init_diary_table", fake_init_fail)
+    # Pin the mariadb path: a local .env may select the postgres primary DB
+    monkeypatch.setattr("core.db._get_db_type", lambda: "mariadb")
 
     # Run the preflight
     from core import db
@@ -163,3 +169,59 @@ async def test_ensure_plugin_tables_creates_minimal_ai_diary_placeholder(monkeyp
         assert forbidden not in ai_sql, (
             f"Fallback created plugin-only column: {forbidden}"
         )
+
+
+@pytest.mark.asyncio
+async def test_ensure_plugin_tables_supports_proxy_cursor_contexts(monkeypatch):
+    executed = []
+
+    class InnerCursor:
+        async def execute(self, sql, *args, **kwargs):
+            executed.append(sql)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class ProxyCursor:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+        async def close(self):
+            return None
+
+    class FakeConn:
+        def cursor(self):
+            async def _make_cursor():
+                return ProxyCursor(InnerCursor())
+
+            return _make_cursor()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def commit(self):
+            return None
+
+    async def fake_get_conn_ctx():
+        return FakeConn()
+
+    async def fake_init_diary_table():
+        return None
+
+    monkeypatch.setattr("core.db.get_conn_ctx", fake_get_conn_ctx)
+    monkeypatch.setattr("plugins.ai_diary.init_diary_table", fake_init_diary_table)
+    # Pin the mariadb path: a local .env may select the postgres primary DB
+    monkeypatch.setattr("core.db._get_db_type", lambda: "mariadb")
+
+    await db.ensure_plugin_tables()
+
+    assert executed, "Expected ensure_plugin_tables to execute CREATE statements"

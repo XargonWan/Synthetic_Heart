@@ -33,9 +33,13 @@ def test_list_available_cortexs_uses_registry(monkeypatch):
 
     class FakeRegistry:
         def __init__(self):
+            self._cortex_kinds = {
+                "live": {},
+                "llm_provider": {},
+            }
             self._engine_meta = {
                 "grok": {"cortex": "live"},
-                "manual": {"cortex": "llm"},
+                "manual": {"cortex": "llm_provider"},
             }
 
     # Patch the cortex registry getter used by core.config
@@ -46,7 +50,7 @@ def test_list_available_cortexs_uses_registry(monkeypatch):
     import core.config as conf
 
     kinds = conf.list_available_cortexs()
-    assert "llm" in kinds
+    assert "llm_provider" in kinds
     assert "live" in kinds
     assert isinstance(kinds, list)
 
@@ -106,3 +110,71 @@ def test_get_log_chat_reads_from_config_registry(monkeypatch):
     assert val == 12345
     val = asyncio.run(conf.get_log_chat_thread_id())
     assert val == 678
+
+
+@pytest.mark.asyncio
+async def test_get_active_cortex_engine_repairs_stale_base_for_scope(monkeypatch):
+    from core import config as conf
+    import core.config_manager as cm
+
+    class FakeRegistry:
+        def get_available_engines(self):
+            return ["anthropic", "gemini_api"]
+
+        def get_default_engine(self):
+            return "anthropic"
+
+    values = {
+        "BASE_CORTEX": "gemini",
+        "GRILLO_CORTEX": "Default",
+    }
+    set_value = AsyncMock()
+
+    monkeypatch.setattr(
+        cm.config_registry,
+        "get_value",
+        lambda key, default=None: values.get(key, default),
+    )
+    monkeypatch.setattr(cm.config_registry, "set_value", set_value)
+    monkeypatch.setattr(
+        "core.cortex_registry.get_cortex_registry", lambda: FakeRegistry()
+    )
+
+    engine = await conf.get_active_cortex_engine("grillo")
+
+    assert engine == "anthropic"
+    set_value.assert_awaited_once_with("BASE_CORTEX", "anthropic")
+
+
+@pytest.mark.asyncio
+async def test_get_active_cortex_engine_resets_bad_scope_override_to_base(monkeypatch):
+    from core import config as conf
+    import core.config_manager as cm
+
+    class FakeRegistry:
+        def get_available_engines(self):
+            return ["anthropic", "gemini_api"]
+
+        def get_default_engine(self):
+            return "anthropic"
+
+    values = {
+        "BASE_CORTEX": "gemini_api",
+        "GRILLO_CORTEX": "removed_engine",
+    }
+    set_value = AsyncMock()
+
+    monkeypatch.setattr(
+        cm.config_registry,
+        "get_value",
+        lambda key, default=None: values.get(key, default),
+    )
+    monkeypatch.setattr(cm.config_registry, "set_value", set_value)
+    monkeypatch.setattr(
+        "core.cortex_registry.get_cortex_registry", lambda: FakeRegistry()
+    )
+
+    engine = await conf.get_active_cortex_engine("grillo")
+
+    assert engine == "gemini_api"
+    set_value.assert_awaited_once_with("GRILLO_CORTEX", "Default")

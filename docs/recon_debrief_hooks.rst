@@ -13,18 +13,18 @@ metadata.
 Key concepts
 ------------
 - Recon: prompt-0, plugin-driven, JSON-only contributions injected into the
-  main prompt's `context.recon` and `instructions`.
-- Debrief: postflight hook for plugins (`on_debrief`) to inspect processed
+  main prompt's ``context.recon`` and ``instructions``.
+- Debrief: postflight hook for plugins (``on_debrief``) to inspect processed
   and failed actions and optionally return recovery actions.
-- Plugins: implement `get_recon_contributions()` and/or `on_debrief()`.
+- Plugins: implement ``get_recon_contributions()`` and/or ``on_debrief()``.
   Recon and Debrief plugins should each live in their own file under the
-  `plugins/` directory (e.g. `recon_language_evaluator.py` or
-  `debrief_action_intent.py`) and register themselves via the normal plugin
+  ``plugins/`` directory (e.g. ``recon_language_evaluator.py`` or
+  ``debrief_action_intent.py``) and register themselves via the normal plugin
   registry. Core code only handles orchestration; individual plugin logic
-  belongs in the `plugins/` folder.
+  belongs in the ``plugins/`` folder.
 - Language/Tone detectors: implemented as plugins or as Recon contributions.
   Language detector plugins should only consider the user message and recent
-  history from the same `interface_path` when making a decision; global chat or
+  history from the same ``interface_path`` when making a decision; global chat or
   other interface histories must not influence the chosen language.
   For the built-in language evaluator, incoming user text is given extra
   prominence (weight 3) while any assistant response and the surrounding
@@ -33,32 +33,53 @@ Key concepts
 
 Plugin hooks and schemas
 ------------------------
-- get_recon_contributions(self, *, message, context_memory, text, tags=None, keywords=None, max_results=5)
-  - Return list of normalized contributions. Contribution `type` values:
-    `memory`, `snippet`, `instruction`, `language_hint`, `tone_hint`, `log_flag`.
-  - Contribution example:
+- ``get_recon_contributions(self, *, message, context_memory, text, tags=None, keywords=None, max_results=5)``
+  Return list of normalized contributions. Contribution ``type`` values:
+  ``memory``, ``snippet``, ``instruction``, ``language_hint``,
+  ``tone_hint``, ``log_flag``.
 
-    {
-      "type": "language_hint",
-      "language_code": "it",
-      "priority": 10,
-      "source": "lang_detector"
-    }
+  Contribution example::
 
-- on_debrief(self, *, processed_actions, failed_actions, results, context, original_message)
-  - Run after actions and event delivery. May return recovery actions:
-    `{"recovery_actions": [...], "metadata": {...}}`.
+     {
+       "type": "language_hint",
+       "language_code": "it",
+       "priority": 10,
+       "source": "lang_detector"
+     }
+
+- ``on_debrief(self, *, processed_actions, failed_actions, results, context, original_message)``
+  Run after actions and event delivery. May return recovery actions such as
+  ``{"recovery_actions": [...], "metadata": {...}}``.
+
+Debrief action-intent recovery
+------------------------------
+- The action-intent Debrief plugin is the canonical postflight path for
+  missing-action recovery. It compares the original user message, the raw
+  assistant reply, and the actions already processed or failed.
+- Recovery is LLM-based and context-sensitive. It is not a keyword or fuzzy
+  text scan.
+- The plugin asks the LLM for canonical action JSON (``{"actions": [...]}``),
+  then normalizes the result back into Debrief ``recovery_actions`` for the
+  core orchestrator.
+- If the Debrief LLM returns malformed or unusable JSON, the plugin may invoke
+  the standard corrector middleware before giving up, using the same
+  action-scope restrictions as the main response path.
+- When auto-recovery is enabled, recovered actions are executed through the
+  canonical action parser with the original interface/chat context preserved,
+  so validation, safety policy, and selective correction still apply.
 
 How Recon affects the main prompt
 ---------------------------------
-- Recon contributions are attached to `context.recon` (see `build_json_prompt`).
+- Recon contributions are attached to ``context.recon`` during
+  ``build_prompt_request()`` (``build_json_prompt()`` remains as a deprecated
+  compatibility alias).
 - Language and tone hints are resolved and injected as short instruction
   prefixes (e.g. "Use Italian language for the assistant replies.").
-- Memory/snippet contributions are merged into the prompt `memories` block
+- Memory/snippet contributions are merged into the prompt ``memories`` block
   (deduped and prioritized).
 
 Resolution precedence (language / tone)
---------------------------------------
+---------------------------------------
 1. Interface override (`INTERFACE_LANGUAGE_OVERRIDES` / `INTERFACE_TONE_OVERRIDES`)
 2. Recon contribution (`language_hint` / `tone_hint`) with highest priority
 3. Detector plugin (highest priority wins)
@@ -88,7 +109,8 @@ Testing & compatibility
 - Debrief hooks are fail-safe: plugin exceptions are logged and ignored.
 - The action-intent Debrief plugin (see `plugins/debrief_action_intent.py`) can
   propose recovery actions when the assistant implied or promised an action
-  but did not execute it.
+  but did not execute it. Typical examples are reminders or follow-up actions
+  promised in natural language but omitted from the main JSON reply.
 
 See also
 --------
@@ -109,8 +131,8 @@ Changelog
 - Added comprehensive debug logging for both Recon and Debrief; logs now
   include input parameters, generated system/user prompts, LLM responses,
   parsed data, plugin dispatch details and recovery-action decisions.
-- Prompt builder and plugin-instance components now emit full JSON prompt
-  dumps at DEBUG level (`[json_prompt]` and plugin-instance `🌐 JSON PROMPT`),
-  along with raw LLM responses. When `LOG_LLM_TRAFFIC_ENABLED` is enabled a
-  separate JSONL file is produced. Together these allow the entire sequence of
-  prompts/responses to be replayed from the logs.
+- Prompt builder and plugin-instance components now emit compatibility prompt
+  dumps and renderer-backed prompt debug traces at DEBUG level, along with raw
+  LLM responses. When ``LOG_LLM_TRAFFIC_ENABLED`` is enabled a separate JSONL
+  file is produced so prompt / response sequences can still be replayed after
+  the prompt rewrite.

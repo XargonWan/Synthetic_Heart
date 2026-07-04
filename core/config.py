@@ -96,14 +96,35 @@ TRAINER_NAME = config_registry.get_var(
     component="core",
 )
 
+
+def get_trainer_display_name() -> str:
+    """Resolve the configured trainer name(s) for use in prompt text.
+
+    Read live from the config registry so runtime edits take effect without a
+    restart, falling back to the module-level ``TRAINER_NAME``. Returns an empty
+    string when no real name is configured (still the ``"Trainer"`` placeholder)
+    so callers can omit the reference instead of leaking a default. A
+    comma-separated multi-trainer value is preserved verbatim.
+    """
+    try:
+        raw = config_registry.get_value("TRAINER_NAME", "Trainer")
+    except Exception:
+        raw = TRAINER_NAME
+    name = str(raw or "").strip()
+    if not name or name == "Trainer":
+        return ""
+    return name
+
+
 BASE_CORTEX = config_registry.get_var(
     "BASE_CORTEX",
-    "selenium_chatgpt",
+    "manual",
     label="Base Cortex",
     description="Default cortex engine used system-wide unless overridden by scope.",
     group="core",
     component="cortex",
     hidden=True,  # Managed via the Cortex Engines component selector
+    allow_env_override=False,
 )
 
 GRILLO_CORTEX = config_registry.get_var(
@@ -114,6 +135,7 @@ GRILLO_CORTEX = config_registry.get_var(
     group="core",
     component="cortex",
     hidden=True,  # Managed via the Cortex Engines scope selectors
+    allow_env_override=False,
 )
 
 TRAINER_CORTEX = config_registry.get_var(
@@ -126,6 +148,7 @@ TRAINER_CORTEX = config_registry.get_var(
     group="core",
     component="cortex",
     hidden=True,  # Managed via the Cortex Engines scope selectors
+    allow_env_override=False,
 )
 
 LIVE_CORTEX = config_registry.get_var(
@@ -136,6 +159,28 @@ LIVE_CORTEX = config_registry.get_var(
     group="core",
     component="cortex",
     hidden=True,  # Managed via the Cortex Engines scope selectors
+    allow_env_override=False,
+)
+
+# LLM generation request timeout. Caps how long the synth waits for a single
+# cortex generation before aborting. On slow hardware a long reply can exceed a
+# short timeout, which aborts the HTTP request and makes llama.cpp cancel the
+# in-flight task ("should_stop"). The default is intentionally generous so weak
+# hardware does not hit an invisible cap; override per host via the
+# LLM_GENERATION_TIMEOUT_SEC env var (.env) or the WebUI. A per-endpoint
+# extra_config["timeout"] still takes precedence when set.
+LLM_GENERATION_TIMEOUT_SEC = config_registry.get_var(
+    "LLM_GENERATION_TIMEOUT_SEC",
+    1800,
+    label="LLM Generation Timeout (s)",
+    description=(
+        "Maximum time in seconds to wait for a single LLM cortex generation "
+        "before aborting. Raise this on slow hardware so long replies are not "
+        "cut off mid-generation. Settable via the .env file."
+    ),
+    value_type=int,
+    group="core",
+    component="cortex",
 )
 
 # ----------------------------------------------------------------------
@@ -278,13 +323,63 @@ LIVE_PROACTIVE_AUDIO = config_registry.get_var(
     component="cortex_live",
 )
 
+LIVE_THINKING_LEVEL = config_registry.get_var(
+    "LIVE_THINKING_LEVEL",
+    "minimal",
+    label="Live Thinking Level",
+    description=(
+        "Reasoning depth for the Live session. "
+        "'minimal' gives lowest latency; 'high' gives deepest reasoning. "
+        "Applies to Gemini 3.1 Flash Live; legacy 2.5 model uses LIVE_THINKING_BUDGET."
+    ),
+    group="core",
+    component="cortex_live",
+)
+
+_register_exposed_var(
+    "LIVE_THINKING_LEVEL",
+    label="Live Thinking Level",
+    default="minimal",
+    value_type=str,
+    ui_type="select",
+    options=["minimal", "low", "medium", "high"],
+    description=(
+        "Reasoning depth for the Live session. "
+        "'minimal' gives lowest latency; 'high' gives deepest reasoning."
+    ),
+    scope="live",
+    component="cortex_live",
+)
+
+# Legacy config kept for users on the 2.5 fallback model (affective/proactive sessions).
 LIVE_THINKING_BUDGET = config_registry.get_var(
     "LIVE_THINKING_BUDGET",
     0,
-    label="Thinking Budget",
-    description="Internal reasoning tokens before responding (0 = disabled).",
+    label="Live Thinking Budget (legacy 2.5)",
+    description=(
+        "Internal reasoning token budget for the legacy Gemini 2.5 Live model. "
+        "Only used when affective dialog or proactive audio is enabled. "
+        "0 = disabled."
+    ),
     group="core",
     component="cortex_live",
+    hidden=True,
+)
+
+LIVE_AUDIO_MIN_RMS = config_registry.get_var(
+    "LIVE_AUDIO_MIN_RMS",
+    500,
+    label="Live Audio Noise Gate (RMS)",
+    description=(
+        "Minimum RMS amplitude required before a Discord audio packet is forwarded "
+        "to the Live API. Packets below this threshold are silently discarded, "
+        "preventing mic hiss / background noise from triggering activity_start and "
+        "causing the model to transcribe garbage. Typical ambient noise sits around "
+        "100–300; speech is usually above 500. Set to 0 to disable the gate."
+    ),
+    group="core",
+    component="cortex_live",
+    value_type=int,
 )
 
 # --- LogChat configuration (use config_registry so exposed-variable APIs are consistent)
@@ -327,30 +422,102 @@ async def get_active_cortex_engine(scope: str | None = None) -> str:
     """
     try:
         base = config_registry.get_value("BASE_CORTEX", "")
+        override_key: str | None = None
         if scope == "grillo":
-            override = config_registry.get_value("GRILLO_CORTEX", "Default")
+            override_key = "GRILLO_CORTEX"
         elif scope == "trainer":
-            override = config_registry.get_value("TRAINER_CORTEX", "Default")
+            override_key = "TRAINER_CORTEX"
         elif scope == "live":
-            override = config_registry.get_value("LIVE_CORTEX", "Default")
+            override_key = "LIVE_CORTEX"
         else:
-            override = "Default"
+            override_key = None
 
-        chosen = base if override in (None, "", "Default", "None") else override
+        override = (
+            config_registry.get_value(override_key, "Default")
+            if override_key is not None
+            else "Default"
+        )
+
+        use_override = override_key is not None and override not in (
+            None,
+            "",
+            "Default",
+            "None",
+        )
+
+        chosen = override if use_override else base
         if not chosen:
             raise ValueError("BASE_CORTEX is not configured")
 
         from core.cortex_registry import get_cortex_registry
 
         reg = get_cortex_registry()
-        if chosen not in reg.get_available_engines():
-            raise ValueError(f"Cortex engine '{chosen}' is not registered")
+        available = set(reg.get_available_engines())
+        if chosen not in available:
+            # Stale engine name in DB (e.g. removed engine from a previous branch).
+            # Fall back to the registry default rather than leaving the system broken.
+            updates: list[tuple[str, str]] = []
+            if use_override and override_key is not None and base in available:
+                fallback = base
+                updates.append((override_key, "Default"))
+            else:
+                try:
+                    fallback = reg.get_default_engine()
+                except ValueError:
+                    raise ValueError(f"Cortex engine '{chosen}' is not registered")
+                if use_override and override_key is not None:
+                    updates.append((override_key, "Default"))
+                if base != fallback:
+                    updates.append(("BASE_CORTEX", fallback))
+
+            stale_key = override_key if use_override and override_key else "BASE_CORTEX"
+            log_warning(
+                f"[config] ⚠️ Cortex engine '{chosen}' is no longer registered. "
+                f"Falling back to '{fallback}'. "
+                f"Update {stale_key} to silence this warning."
+            )
+            try:
+                seen_keys: set[str] = set()
+                for key, value in updates:
+                    if key in seen_keys:
+                        continue
+                    seen_keys.add(key)
+                    await config_registry.set_value(key, value)
+            except Exception:
+                pass
+            chosen = fallback
 
         log_debug(f"[config] 🧠 Active Cortex ({scope or 'base'}): {chosen}")
         return chosen
     except Exception as e:
         log_error(f"[config] ❌ Error resolving active cortex: {repr(e)}")
         raise
+
+
+def derive_cortex_scope(context: dict | None) -> str | None:
+    """Return the scope string implied by *context*, or ``None`` for the base engine.
+
+    Reads the same context flags used throughout the message chain so that
+    Recon, the main LLM call, and Debrief all route to the same engine for a
+    given request.  This is the single authoritative place that maps context
+    keys to scope strings.
+
+    Scope values mirror those accepted by :func:`get_active_cortex_engine`:
+    ``"trainer"``, ``"grillo"``, or ``None`` (base engine).
+    """
+    if not isinstance(context, dict):
+        return None
+    if context.get("is_trainer"):
+        return "trainer"
+    # Diary consolidation ("diary_merge") is a grillo-family background task, but
+    # it is re-dispatched as its own interface without the ``grillo_beat`` flag.
+    # Route it explicitly to the grillo scope so it follows GRILLO_CORTEX. Without
+    # this it falls through to BASE_CORTEX and silently breaks whenever the base
+    # engine is not usable (e.g. a keyless Anthropic base) — a near-undebuggable
+    # failure for end users.
+    if context.get("grillo_beat") or context.get("diary_merge_beat"):
+        return "grillo"
+    return None
 
 
 async def set_base_cortex(name: str) -> None:
@@ -438,6 +605,19 @@ async def switch_active_cortex_engine(name: str, use_hot_swap: bool = True):
             loaded = getattr(plugin_instance, "plugin", None)
             if loaded is None:
                 return None
+            # Reverse-lookup in the registry so that direct-instance engines
+            # (e.g. ExternalCortexEngine registered as "ext_xyz") are matched
+            # by their registry key, not by their Python module name.
+            try:
+                from core.cortex_registry import get_cortex_registry
+
+                reg = get_cortex_registry()
+                for engine_name in reg.get_available_engines():
+                    if reg.get_engine(engine_name) is loaded:
+                        return engine_name
+            except Exception:
+                pass
+            # Fallback: module-based name for non-direct engines
             return loaded.__class__.__module__.split(".")[-1]
         except Exception:
             return None

@@ -18,15 +18,34 @@ class ExternalVoxEngine(VoxEngineBase):
     def __init__(
         self,
         endpoint: "ExternalEndpoint",
-        adapter: "BaseProtocolAdapter",
+        adapter: "BaseProtocolAdapter | None",
     ) -> None:
         self._endpoint = endpoint
         self._adapter = adapter
+        if self._adapter is not None:
+            self._adapter._engine_label = endpoint.name or "vox_bridge"
         self.display_name = f"{endpoint.display_label or endpoint.name} (TTS)"
 
     @property
     def output_format(self) -> str:
-        return "wav"
+        extra = self._endpoint.extra_config or {}
+        return str(extra.get("tts_output_format", extra.get("output_format", "wav")))
+
+    @property
+    def sample_rate(self) -> int:
+        extra = self._endpoint.extra_config or {}
+        try:
+            return int(extra.get("tts_sample_rate", extra.get("sample_rate", 22050)))
+        except Exception:
+            return 22050
+
+    @property
+    def channels(self) -> int:
+        extra = self._endpoint.extra_config or {}
+        try:
+            return int(extra.get("tts_channels", extra.get("channels", 1)))
+        except Exception:
+            return 1
 
     def generate_tts(
         self,
@@ -36,6 +55,9 @@ class ExternalVoxEngine(VoxEngineBase):
     ) -> bytes | None:
         """Synchronous wrapper – runs the async adapter call in the event loop."""
         import asyncio
+
+        if self._adapter is None:
+            return None
 
         extra = self._endpoint.extra_config or {}
         voice = extra.get("tts_voice") or kwargs.get("voice")

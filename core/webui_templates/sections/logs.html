@@ -1,37 +1,257 @@
 <section class="tab-panel" id="tab-logs" data-tab="logs" role="tabpanel">
     <div class="logs-wrapper">
         <div class="log-header">
-            <h2>Live Log Stream</h2>
-            <div class="log-controls">
-                <button id="logs-refresh" type="button">Reconnect</button>
-                <label><input type="checkbox" id="logs-autoscroll" checked="checked" /> Auto-scroll</label>
-                <input type="text" id="log-search" placeholder="Search logs..." style="padding: 0.4rem 0.8rem; border-radius: 6px; border: 1px solid var(--border); background: rgba(12, 12, 20, 0.58); color: inherit; margin-left: 1rem; min-width: 200px;" />
-                <label><input type="checkbox" class="log-filter" data-level="debug" checked="checked" /> Debug</label>
-                <label><input type="checkbox" class="log-filter" data-level="info" checked="checked" /> Info</label>
-                <label><input type="checkbox" class="log-filter" data-level="warning" checked="checked" /> Warning</label>
-                <label><input type="checkbox" class="log-filter" data-level="error" checked="checked" /> Error</label>
-                <label><input type="checkbox" class="log-filter" data-level="other" checked="checked" /> Other</label>
-                <label style="margin-left: 1rem;">
-                    System Log Level:
-                    <select id="logging-level" style="margin-left: 0.5rem; padding: 0.25rem 0.5rem;">
-                        <option value="DEBUG">DEBUG</option>
-                        <option value="INFO">INFO</option>
-                        <option value="WARNING">WARNING</option>
-                        <option value="ERROR" selected="selected">ERROR</option>
-                    </select>
-                </label>
-                <label style="margin-left: 1rem;">
-                    LogChat Notification Level:
-                    <select id="logchat-level" style="margin-left: 0.5rem; padding: 0.25rem 0.5rem;">
-                        <option value="DEBUG">DEBUG</option>
-                        <option value="INFO">INFO</option>
-                        <option value="WARNING">WARNING</option>
-                        <option value="ERROR" selected="selected">ERROR</option>
-                        <option value="NONE">NONE</option>
-                    </select>
-                </label>
-            </div>
+            <h2>Logs</h2>
+            <nav class="logs-subnav" role="tablist" aria-label="Logs views">
+                <button class="logs-subnav-btn active" type="button" data-logs-subtab="live" aria-selected="true">Live Log Stream</button>
+                <button class="logs-subnav-btn" type="button" data-logs-subtab="failures" aria-selected="false">LLM Failures</button>
+            </nav>
         </div>
-        <div id="log-output"><div class="log-line level-info">Open the Logs tab to begin streaming…</div></div>
+
+        <div class="logs-subpanels">
+            <section class="logs-subpanel active" id="logs-panel-live" data-logs-subtab="live">
+                <div class="log-controls">
+                    <button id="logs-refresh" type="button">Reconnect</button>
+                    <label><input type="checkbox" id="logs-autoscroll" checked="checked" /> Auto-scroll</label>
+                    <input type="text" id="log-search" placeholder="Search logs..." style="padding: 0.4rem 0.8rem; border-radius: 6px; border: 1px solid var(--border); background: rgba(12, 12, 20, 0.58); color: inherit; margin-left: 1rem; min-width: 200px;" />
+                    <label><input type="checkbox" class="log-filter" data-level="debug" checked="checked" /> Debug</label>
+                    <label><input type="checkbox" class="log-filter" data-level="info" checked="checked" /> Info</label>
+                    <label><input type="checkbox" class="log-filter" data-level="warning" checked="checked" /> Warning</label>
+                    <label><input type="checkbox" class="log-filter" data-level="error" checked="checked" /> Error</label>
+                    <label><input type="checkbox" class="log-filter" data-level="other" checked="checked" /> Other</label>
+                    <label style="margin-left: 1rem;">
+                        System Log Level:
+                        <select id="logging-level" style="margin-left: 0.5rem; padding: 0.25rem 0.5rem;">
+                            <option value="DEBUG">DEBUG</option>
+                            <option value="INFO">INFO</option>
+                            <option value="WARNING">WARNING</option>
+                            <option value="ERROR" selected="selected">ERROR</option>
+                        </select>
+                    </label>
+                    <label style="margin-left: 1rem;">
+                        LogChat Notification Level:
+                        <select id="logchat-level" style="margin-left: 0.5rem; padding: 0.25rem 0.5rem;">
+                            <option value="DEBUG">DEBUG</option>
+                            <option value="INFO">INFO</option>
+                            <option value="WARNING">WARNING</option>
+                            <option value="ERROR" selected="selected">ERROR</option>
+                            <option value="NONE">NONE</option>
+                        </select>
+                    </label>
+                </div>
+                <div id="log-output"><div class="log-line level-info">Open the Logs tab to begin streaming…</div></div>
+            </section>
+
+            <section class="logs-subpanel" id="logs-panel-failures" data-logs-subtab="failures">
+                <div class="log-controls logs-failure-controls">
+                    <button id="logs-failures-refresh" type="button">Refresh</button>
+                    <input type="text" id="logs-failures-search" placeholder="Search reasons, engine, model, interface..." style="padding: 0.4rem 0.8rem; border-radius: 6px; border: 1px solid var(--border); background: rgba(12, 12, 20, 0.58); color: inherit; min-width: 260px;" />
+                    <label>
+                        Type:
+                        <select id="logs-failures-code" style="margin-left: 0.5rem; padding: 0.25rem 0.5rem;">
+                            <option value="">All</option>
+                            <option value="malformed_json">Malformed JSON</option>
+                            <option value="unsupported_action">Unsupported action</option>
+                            <option value="invalid_action">Invalid action</option>
+                            <option value="invalid_interface_path">Invalid interface path</option>
+                            <option value="timeout">Timeout</option>
+                            <option value="correction_exhausted">Correction exhausted</option>
+                            <option value="correction_loop">Correction loop</option>
+                            <option value="provider_unreachable">Provider unreachable</option>
+                            <option value="delivery_failed">Delivery failed</option>
+                            <option value="llm_failure">Other</option>
+                        </select>
+                    </label>
+                    <label>
+                        Stage:
+                        <select id="logs-failures-stage" style="margin-left: 0.5rem; padding: 0.25rem 0.5rem;">
+                            <option value="">All</option>
+                            <option value="llm_fallback">LLM fallback</option>
+                            <option value="delivery">Delivery</option>
+                            <option value="correction">Correction</option>
+                            <option value="validation">Validation</option>
+                        </select>
+                    </label>
+                    <label>
+                        Sort:
+                        <select id="logs-failures-sort" style="margin-left: 0.5rem; padding: 0.25rem 0.5rem;">
+                            <option value="desc">Newest first</option>
+                            <option value="asc">Oldest first</option>
+                        </select>
+                    </label>
+                </div>
+
+                <div id="logs-failures-output" class="logs-failures-output">
+                    <div class="logs-empty-state">No failure data loaded yet.</div>
+                </div>
+
+                <div id="logs-failures-pagination" class="logs-failures-pagination"></div>
+            </section>
+        </div>
     </div>
+
+    <style>
+    .logs-subnav {
+        display: flex;
+        gap: 0.75rem;
+        margin-top: 1rem;
+        padding: 0.5rem;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 10px;
+        background: rgba(12, 12, 20, 0.35);
+    }
+
+    .logs-subnav-btn {
+        border: 0;
+        border-radius: 8px;
+        padding: 0.55rem 0.95rem;
+        background: transparent;
+        color: var(--text-soft);
+        cursor: pointer;
+        transition: background 0.2s ease, color 0.2s ease;
+    }
+
+    .logs-subnav-btn:hover {
+        background: rgba(255, 255, 255, 0.05);
+        color: var(--text);
+    }
+
+    .logs-subnav-btn.active {
+        background: var(--accent);
+        color: #fff;
+    }
+
+    .logs-subpanels {
+        display: flex;
+        flex: 1;
+        min-height: 0;
+    }
+
+    .logs-subpanel {
+        display: none;
+        flex: 1;
+        min-height: 0;
+        flex-direction: column;
+    }
+
+    .logs-subpanel.active {
+        display: flex;
+    }
+
+    .logs-failure-controls {
+        align-items: center;
+        flex-wrap: wrap;
+    }
+
+    .logs-failures-output {
+        display: flex;
+        flex-direction: column;
+        gap: 0.85rem;
+        padding: 1rem 0;
+        overflow-y: auto;
+    }
+
+    .logs-failure-entry {
+        padding: 1rem;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 12px;
+        background: rgba(12, 12, 20, 0.55);
+    }
+
+    .logs-failure-entry-header {
+        display: flex;
+        justify-content: space-between;
+        gap: 1rem;
+        align-items: flex-start;
+        margin-bottom: 0.75rem;
+    }
+
+    .logs-failure-title {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.5rem;
+        align-items: center;
+        margin-bottom: 0.35rem;
+    }
+
+    .logs-failure-pill {
+        display: inline-flex;
+        align-items: center;
+        padding: 0.2rem 0.55rem;
+        border-radius: 999px;
+        font-size: 0.75rem;
+        background: rgba(255, 255, 255, 0.08);
+        color: var(--text-soft);
+    }
+
+    .logs-failure-pill.code {
+        background: rgba(255, 122, 89, 0.18);
+        color: #ffb099;
+    }
+
+    .logs-failure-pill.stage {
+        background: rgba(101, 160, 255, 0.16);
+        color: #b9d2ff;
+    }
+
+    .logs-failure-meta {
+        color: var(--text-soft);
+        font-size: 0.88rem;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.75rem;
+    }
+
+    .logs-failure-reason {
+        white-space: pre-wrap;
+        line-height: 1.45;
+        margin-bottom: 0.75rem;
+    }
+
+    .logs-failure-preview {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 0.84rem;
+        white-space: pre-wrap;
+        color: var(--text-soft);
+        padding: 0.75rem;
+        border-radius: 10px;
+        background: rgba(255, 255, 255, 0.04);
+        border: 1px solid rgba(255, 255, 255, 0.06);
+    }
+
+    .logs-failure-delete {
+        border: 1px solid rgba(255, 107, 107, 0.45);
+        border-radius: 8px;
+        background: transparent;
+        color: #ff9d9d;
+        cursor: pointer;
+        padding: 0.45rem 0.8rem;
+    }
+
+    .logs-failure-delete:hover {
+        background: rgba(255, 107, 107, 0.12);
+    }
+
+    .logs-failures-pagination {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 1rem;
+        padding-top: 0.75rem;
+        border-top: 1px solid rgba(255, 255, 255, 0.06);
+    }
+
+    .logs-page-buttons {
+        display: flex;
+        gap: 0.5rem;
+    }
+
+    .logs-empty-state {
+        padding: 1.2rem;
+        border-radius: 12px;
+        color: var(--text-soft);
+        background: rgba(12, 12, 20, 0.42);
+        border: 1px dashed rgba(255, 255, 255, 0.1);
+    }
+    </style>
 </section>

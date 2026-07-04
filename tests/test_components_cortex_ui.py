@@ -16,9 +16,9 @@ def test_components_payload_includes_cortex_mapping():
     assert "by_cortex" in cortex
     assert isinstance(cortex["by_cortex"], dict)
 
-    # Ensure 'agent' is always an available cortex kind
-    assert "agent" in (cortex.get("available_kinds") or []), (
-        "Expected 'agent' to be present in available cortex kinds"
+    # Ensure the default text-generation cortex kind is always present.
+    assert "llm_provider" in (cortex.get("available_kinds") or []), (
+        "Expected 'llm_provider' to be present in available cortex kinds"
     )
 
     # If there are any engines, each should include the optional 'label' field

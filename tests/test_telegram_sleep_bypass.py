@@ -1,9 +1,11 @@
 import pytest
 from types import SimpleNamespace
+from typing import Any, cast
+from unittest.mock import AsyncMock
 
 # Skip tests if python-telegram-bot is not installed in the environment
 try:
-    pass  # type: ignore
+    pass
 except Exception:
     pytest.skip(
         "python-telegram-bot not installed; skipping telegram integration tests",
@@ -38,6 +40,10 @@ async def test_trainer_bypasses_private(monkeypatch):
 
     monkeypatch.setattr(tbot, "ensure_plugin_loaded", lambda update: True)
     monkeypatch.setattr(tbot, "is_trainer", lambda uid: uid == trainer_id)
+    monkeypatch.setattr(
+        "core.chat_context_manager.add_message_to_context",
+        AsyncMock(return_value=None),
+    )
 
     # Force chat to be asleep
     set_attention(chat_id, False)
@@ -54,7 +60,7 @@ async def test_trainer_bypasses_private(monkeypatch):
     class Ctx:
         bot = SimpleNamespace()
 
-    await tbot.handle_message(update, Ctx())
+    await tbot.handle_message(cast(Any, update), cast(Any, Ctx()))
     assert called.get("enqueued", False), (
         "Trainer private message should be enqueued despite sleep"
     )
@@ -84,6 +90,10 @@ async def test_trainer_does_not_bypass_supergroup(monkeypatch):
 
     monkeypatch.setattr(tbot, "ensure_plugin_loaded", lambda update: True)
     monkeypatch.setattr(tbot, "is_trainer", lambda uid: uid == trainer_id)
+    monkeypatch.setattr(
+        "core.chat_context_manager.add_message_to_context",
+        AsyncMock(return_value=None),
+    )
 
     # Force group to be asleep
     set_attention(chat_id, False)
@@ -100,7 +110,7 @@ async def test_trainer_does_not_bypass_supergroup(monkeypatch):
     class Ctx:
         bot = SimpleNamespace()
 
-    await tbot.handle_message(update, Ctx())
+    await tbot.handle_message(cast(Any, update), cast(Any, Ctx()))
     assert not called.get("enqueued", False), (
         "Trainer group message should NOT bypass sleep"
     )

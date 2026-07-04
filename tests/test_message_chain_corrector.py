@@ -1,4 +1,6 @@
+import asyncio
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -17,7 +19,7 @@ async def test_validate_action_rejects_unknown():
 @pytest.mark.asyncio
 async def test_message_chain_triggers_corrector_for_unregistered_action(monkeypatch):
     # Simulate LLM output containing an unregistered action type 'message'
-    called = {"count": 0, "args": None}
+    called: dict[str, Any] = {"count": 0, "args": None}
 
     async def fake_corrector(
         text, bot=None, context=None, chat_id=None, thread_id=None
@@ -67,7 +69,7 @@ async def test_message_chain_triggers_corrector_for_unregistered_action(monkeypa
     msg.from_cortex = True
 
     # Call the message chain as if the source was LLM
-    result = await message_chain.handle_incoming_message(
+    await message_chain.handle_incoming_message(
         bot=None,
         message=msg,
         text='{"actions":[{"type":"message","payload":{"text":"hello","interface_path":"telegram_bot/123"}}]}',
@@ -79,6 +81,52 @@ async def test_message_chain_triggers_corrector_for_unregistered_action(monkeypa
     assert called["count"] >= 1
     assert isinstance(called["args"], dict)
     assert msg.correction_context is not None
+
+
+@pytest.mark.asyncio
+async def test_send_llm_fallback_message_clears_face_state(monkeypatch):
+    sent = {}
+    face_calls = []
+
+    class DummyKarada:
+        async def push_face_expression(self, name, intensity, targets=None):
+            face_calls.append(("expression", name, intensity, targets))
+
+        async def clear_face_values(self):
+            face_calls.append(("clear_face",))
+
+    async def fake_universal_send(send_fn, chat_id, **kwargs):
+        sent["chat_id"] = chat_id
+        sent["kwargs"] = kwargs
+        return None
+
+    async def fake_send_message(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(
+        "core.transport_layer.universal_send",
+        fake_universal_send,
+    )
+    monkeypatch.setattr(
+        "core.animation_handler.get_karada_state_server",
+        lambda: DummyKarada(),
+    )
+
+    bot = SimpleNamespace(send_message=fake_send_message)
+    msg = SimpleNamespace(chat_id="sid", interface_path="synth_webui/sid")
+
+    result = await message_chain.send_llm_fallback_message(
+        bot,
+        msg,
+        failure_reason="timeout",
+        context={"interface_path": "synth_webui/sid"},
+    )
+
+    assert result == message_chain.get_failed_message_text()
+    assert ("expression", None, 0, None) in face_calls
+    assert ("clear_face",) in face_calls
+    assert sent["chat_id"] == "sid"
+    assert sent["kwargs"]["text"] == message_chain.get_failed_message_text()
 
 
 @pytest.mark.asyncio
@@ -131,13 +179,270 @@ async def test_message_chain_triggers_corrector_for_unregistered_top_level_key(
         chat_id=123, interface_path="telegram_bot/123", from_cortex=True
     )
 
-    result = await message_chain.handle_incoming_message(
+    await message_chain.handle_incoming_message(
         bot=None,
         message=msg,
         text='{"actions": [{"type": "create_personal_diary_entry", "payload": {"interaction_summary": "x"}}], "message": "ciao"}',
         source="llm",
         context={},
     )
+
+
+@pytest.mark.asyncio
+async def test_message_chain_honors_prompt_scoped_allowed_action_types(monkeypatch):
+    corrector_calls: list[str] = []
+    run_actions_calls: list[dict] = []
+
+    async def fake_corrector(
+        text, bot=None, context=None, chat_id=None, thread_id=None
+    ):
+        corrector_calls.append(text)
+        return None
+
+    def fake_extract_json(text, return_metadata=False):
+        parsed = {
+            "actions": [
+                {
+                    "type": "vision_describe",
+                    "payload": {"prompt": "Describe this image."},
+                }
+            ]
+        }
+        return (parsed, {})
+
+    async def fake_run_actions(actions, context, bot, original_message):
+        run_actions_calls.append({"actions": actions, "context": context})
+        return {
+            "processed": list(actions or []),
+            "failed_actions": [],
+            "errors": [],
+        }
+
+    monkeypatch.setattr(
+        action_parser,
+        "get_supported_action_types",
+        lambda: set(),
+    )
+    monkeypatch.setattr(
+        "core.transport_layer.run_corrector_middleware",
+        fake_corrector,
+    )
+    monkeypatch.setattr(
+        "core.transport_layer.extract_json_from_text",
+        fake_extract_json,
+    )
+    monkeypatch.setattr("core.action_parser.run_actions", fake_run_actions)
+    monkeypatch.setattr("core.persona_manager.get_persona_manager", lambda: None)
+
+    msg = SimpleNamespace(
+        chat_id=123,
+        interface_path="telegram_bot/123",
+        from_cortex=True,
+    )
+
+    result = await message_chain.handle_incoming_message(
+        bot=None,
+        message=msg,
+        text='{"actions":[{"type":"vision_describe","payload":{"prompt":"Describe this image."}}]}',
+        source="llm",
+        context={
+            "interface_path": "telegram_bot/123",
+            "allowed_action_types": ["vision_describe"],
+        },
+    )
+
+    assert result == message_chain.ACTIONS_EXECUTED
+    assert not corrector_calls
+    assert run_actions_calls
+    assert run_actions_calls[0]["actions"][0]["type"] == "vision_describe"
+
+
+def _corrector_harness(monkeypatch, parsed_actions: list[dict], supported_types: set):
+    """Wire the common monkeypatches and return the corrector-call recorder.
+
+    The parsed actions are made *supported* (so they pass the unsupported-action
+    pre-check) and run_actions is faked to report success, so the chain reaches
+    the "all actions succeeded — is a user reply missing?" branch.
+    """
+    corrector_calls: list[str] = []
+
+    async def fake_corrector(
+        text, bot=None, context=None, chat_id=None, thread_id=None
+    ):
+        corrector_calls.append(text)
+        return None
+
+    def fake_extract_json(text, return_metadata=False):
+        return ({"actions": parsed_actions}, {})
+
+    async def fake_run_actions(actions, context, bot, original_message):
+        return {
+            "processed": list(actions or []),
+            "failed_actions": [],
+            "errors": [],
+        }
+
+    monkeypatch.setattr(
+        action_parser, "get_supported_action_types", lambda: set(supported_types)
+    )
+    monkeypatch.setattr("core.transport_layer.run_corrector_middleware", fake_corrector)
+    monkeypatch.setattr(
+        "core.transport_layer.extract_json_from_text", fake_extract_json
+    )
+    monkeypatch.setattr("core.action_parser.run_actions", fake_run_actions)
+    monkeypatch.setattr("core.persona_manager.get_persona_manager", lambda: None)
+    return corrector_calls
+
+
+@pytest.mark.asyncio
+async def test_self_replying_action_suppresses_missing_reply_corrector(monkeypatch):
+    # get_recent_chats delivers its own user-visible output, so a turn that
+    # contains only it must NOT trigger the missing-reply corrector.
+    corrector_calls = _corrector_harness(
+        monkeypatch,
+        [{"type": "get_recent_chats", "payload": {"limit": 5}}],
+        supported_types={"get_recent_chats"},
+    )
+
+    msg = SimpleNamespace(
+        chat_id=123, interface_path="telegram_bot/123", from_cortex=True
+    )
+
+    result = await message_chain.handle_incoming_message(
+        bot=None,
+        message=msg,
+        text='{"actions":[{"type":"get_recent_chats","payload":{"limit":5}}]}',
+        source="llm",
+        context={"interface_path": "telegram_bot/123"},
+    )
+
+    assert result == message_chain.ACTIONS_EXECUTED
+    assert not corrector_calls
+
+
+@pytest.mark.asyncio
+async def test_plain_internal_action_still_triggers_missing_reply_corrector(
+    monkeypatch,
+):
+    # A non-message action that is NOT a self-replying user-output action (here a
+    # diary entry) leaves the user without a reply, so the corrector must fire.
+    corrector_calls = _corrector_harness(
+        monkeypatch,
+        [{"type": "diary_entry", "payload": {"content": "noted"}}],
+        supported_types={"diary_entry"},
+    )
+
+    msg = SimpleNamespace(
+        chat_id=123, interface_path="telegram_bot/123", from_cortex=True
+    )
+
+    await message_chain.handle_incoming_message(
+        bot=None,
+        message=msg,
+        text='{"actions":[{"type":"diary_entry","payload":{"content":"noted"}}]}',
+        source="llm",
+        context={"interface_path": "telegram_bot/123"},
+    )
+
+    assert corrector_calls
+
+
+@pytest.mark.asyncio
+async def test_invalid_emotions_corrector_uses_full_run_action_signature(monkeypatch):
+    scheduled = asyncio.Event()
+    captured: dict[str, object] = {}
+
+    class FakePersonaManager:
+        def process_llm_message_for_emotions(self, text: str) -> None:
+            return None
+
+        def get_emotion_validation_corrector(self) -> str:
+            return "invalid emotions"
+
+    async def fake_run_action(action, context, bot, original_message):
+        captured["action"] = action
+        captured["context"] = context
+        captured["bot"] = bot
+        captured["original_message"] = original_message
+        scheduled.set()
+        return {"status": "ok"}
+
+    def fake_extract_json(text, return_metadata=False):
+        parsed = {
+            "actions": [
+                {
+                    "type": "message_telegram_bot",
+                    "payload": {
+                        "text": "hello",
+                        "interface_path": "telegram_bot/123",
+                    },
+                }
+            ]
+        }
+        return (parsed, {})
+
+    async def fake_run_actions(actions, context, bot, original_message):
+        return {
+            "processed": list(actions or []),
+            "failed_actions": [],
+            "errors": [],
+        }
+
+    monkeypatch.setattr(
+        "core.persona_manager.get_persona_manager",
+        lambda: FakePersonaManager(),
+    )
+    monkeypatch.setattr("core.action_parser.run_action", fake_run_action)
+    monkeypatch.setattr("core.action_parser.run_actions", fake_run_actions)
+    monkeypatch.setattr(
+        action_parser,
+        "get_supported_action_types",
+        lambda: {"message_telegram_bot"},
+    )
+    monkeypatch.setattr(
+        "core.transport_layer.extract_json_from_text",
+        fake_extract_json,
+    )
+
+    bot = object()
+    msg = SimpleNamespace(
+        chat_id=123,
+        interface_path="telegram_bot/123",
+        from_cortex=True,
+    )
+
+    result = await message_chain.handle_incoming_message(
+        bot=bot,
+        message=msg,
+        text='{"actions":[{"type":"message_telegram_bot","payload":{"text":"hello","interface_path":"telegram_bot/123"}}]}',
+        source="llm",
+        context={
+            "chat_id": 123,
+            "interface_path": "telegram_bot/123",
+            "allowed_action_types": ["message_telegram_bot"],
+        },
+    )
+
+    await asyncio.wait_for(scheduled.wait(), timeout=0.2)
+
+    assert result == message_chain.ACTIONS_EXECUTED
+    assert captured["bot"] is bot
+    assert captured["original_message"] is msg
+    context = captured["context"]
+    assert isinstance(context, dict)
+    assert context["chat_id"] == 123
+    assert context["interface_path"] == "telegram_bot/123"
+    assert context["allowed_action_types"] == ["message_telegram_bot"]
+    assert context["from_cortex"] is True
+    assert captured["action"] == {
+        "type": "send_corrector_message",
+        "payload": {
+            "correction_type": "invalid_emotions",
+            "message": "invalid emotions",
+            "interface_path": "telegram_bot/123",
+            "chat_id": 123,
+        },
+    }
 
 
 @pytest.mark.asyncio
@@ -239,6 +544,308 @@ async def test_normalize_message_unknown_obeys_supported_actions(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_send_message_body_alias_is_normalized_before_validation(monkeypatch):
+    captured: dict[str, Any] = {"actions": None, "corrector_calls": 0}
+
+    async def fake_corrector(
+        text, bot=None, context=None, chat_id=None, thread_id=None
+    ):
+        captured["corrector_calls"] += 1
+        return None
+
+    def fake_extract_json(text, return_metadata=False):
+        return (
+            {
+                "actions": [
+                    {
+                        "type": "send_message",
+                        "payload": {
+                            "body": "ping pong",
+                            "interface_path": "telegram_bot/123",
+                        },
+                    }
+                ]
+            },
+            {},
+        )
+
+    async def fake_run_actions(actions, ctx, bot, message):
+        captured["actions"] = actions
+        return {"processed": actions, "failed_actions": [], "errors": []}
+
+    monkeypatch.setattr(
+        action_parser,
+        "get_supported_action_types",
+        lambda: {"message_telegram_bot"},
+    )
+    monkeypatch.setattr(
+        "core.transport_layer.run_corrector_middleware",
+        fake_corrector,
+    )
+    monkeypatch.setattr(
+        "core.transport_layer.extract_json_from_text",
+        fake_extract_json,
+    )
+    monkeypatch.setattr("core.action_parser.run_actions", fake_run_actions)
+
+    msg = SimpleNamespace(
+        chat_id=123, interface_path="telegram_bot/123", from_cortex=True
+    )
+
+    result = await message_chain.handle_incoming_message(
+        bot=None,
+        message=msg,
+        text='{"actions":[{"type":"send_message","payload":{"body":"ping pong","interface_path":"telegram_bot/123"}}]}',
+        source="llm",
+        context={},
+    )
+
+    assert result == message_chain.ACTIONS_EXECUTED
+    assert captured["corrector_calls"] == 0
+    assert captured["actions"] is not None
+    assert captured["actions"][0]["type"] == "message_telegram_bot"
+    assert captured["actions"][0]["payload"]["text"] == "ping pong"
+
+
+@pytest.mark.asyncio
+async def test_diary_entry_alias_is_normalized_before_validation(monkeypatch):
+    captured: dict[str, Any] = {"actions": None, "corrector_calls": 0}
+
+    async def fake_corrector(
+        text, bot=None, context=None, chat_id=None, thread_id=None
+    ):
+        captured["corrector_calls"] += 1
+        return None
+
+    def fake_extract_json(text, return_metadata=False):
+        return (
+            {
+                "actions": [
+                    {
+                        "type": "send_message",
+                        "payload": {
+                            "message": "ping pong",
+                            "interface_path": "telegram_bot/123",
+                        },
+                    },
+                    {
+                        "type": "diary_entry",
+                        "payload": {
+                            "summary": "checked the rewrite",
+                            "thought": "looks cleaner now",
+                        },
+                    },
+                ]
+            },
+            {},
+        )
+
+    async def fake_run_actions(actions, ctx, bot, message):
+        captured["actions"] = actions
+        return {"processed": actions, "failed_actions": [], "errors": []}
+
+    monkeypatch.setattr(
+        action_parser,
+        "get_supported_action_types",
+        lambda: {"message_telegram_bot", "create_personal_diary_entry"},
+    )
+    monkeypatch.setattr(
+        "core.transport_layer.run_corrector_middleware",
+        fake_corrector,
+    )
+    monkeypatch.setattr(
+        "core.transport_layer.extract_json_from_text",
+        fake_extract_json,
+    )
+    monkeypatch.setattr("core.action_parser.run_actions", fake_run_actions)
+
+    msg = SimpleNamespace(
+        chat_id=123, interface_path="telegram_bot/123", from_cortex=True
+    )
+
+    result = await message_chain.handle_incoming_message(
+        bot=None,
+        message=msg,
+        text='{"actions":[{"type":"send_message","payload":{"message":"ping pong","interface_path":"telegram_bot/123"}},{"type":"diary_entry","payload":{"summary":"checked the rewrite","thought":"looks cleaner now"}}]}',
+        source="llm",
+        context={},
+    )
+
+    assert result == message_chain.ACTIONS_EXECUTED
+    assert captured["corrector_calls"] == 0
+    assert captured["actions"] is not None
+    assert [action["type"] for action in captured["actions"]] == [
+        "message_telegram_bot",
+        "create_personal_diary_entry",
+    ]
+    assert captured["actions"][0]["payload"]["text"] == "ping pong"
+    assert (
+        captured["actions"][1]["payload"]["interaction_summary"]
+        == "checked the rewrite"
+    )
+    assert captured["actions"][1]["payload"]["personal_thought"] == "looks cleaner now"
+
+
+@pytest.mark.asyncio
+async def test_diary_alias_is_normalized_before_validation(monkeypatch):
+    captured: dict[str, Any] = {"actions": None, "corrector_calls": 0}
+
+    async def fake_corrector(
+        text, bot=None, context=None, chat_id=None, thread_id=None
+    ):
+        captured["corrector_calls"] += 1
+        return None
+
+    def fake_extract_json(text, return_metadata=False):
+        return (
+            {
+                "actions": [
+                    {
+                        "type": "send_message",
+                        "payload": {
+                            "message": "still here",
+                            "interface_path": "telegram_bot/123",
+                        },
+                    },
+                    {
+                        "type": "diary",
+                        "payload": {
+                            "entry": "Whispering sweet nothings at 02:56.",
+                        },
+                    },
+                ]
+            },
+            {},
+        )
+
+    async def fake_run_actions(actions, ctx, bot, message):
+        captured["actions"] = actions
+        return {"processed": actions, "failed_actions": [], "errors": []}
+
+    monkeypatch.setattr(
+        action_parser,
+        "get_supported_action_types",
+        lambda: {"message_telegram_bot", "create_personal_diary_entry"},
+    )
+    monkeypatch.setattr(
+        "core.transport_layer.run_corrector_middleware",
+        fake_corrector,
+    )
+    monkeypatch.setattr(
+        "core.transport_layer.extract_json_from_text",
+        fake_extract_json,
+    )
+    monkeypatch.setattr("core.action_parser.run_actions", fake_run_actions)
+
+    msg = SimpleNamespace(
+        chat_id=123, interface_path="telegram_bot/123", from_cortex=True
+    )
+
+    result = await message_chain.handle_incoming_message(
+        bot=None,
+        message=msg,
+        text='{"actions":[{"type":"send_message","payload":{"message":"still here","interface_path":"telegram_bot/123"}},{"type":"diary","payload":{"entry":"Whispering sweet nothings at 02:56."}}]}',
+        source="llm",
+        context={},
+    )
+
+    assert result == message_chain.ACTIONS_EXECUTED
+    assert captured["corrector_calls"] == 0
+    assert captured["actions"] is not None
+    assert [action["type"] for action in captured["actions"]] == [
+        "message_telegram_bot",
+        "create_personal_diary_entry",
+    ]
+    assert captured["actions"][1]["payload"]["interaction_summary"] == (
+        "Whispering sweet nothings at 02:56."
+    )
+
+
+@pytest.mark.asyncio
+async def test_thought_action_is_folded_into_diary_payload(monkeypatch):
+    captured: dict[str, Any] = {"actions": None, "corrector_calls": 0}
+
+    async def fake_corrector(
+        text, bot=None, context=None, chat_id=None, thread_id=None
+    ):
+        captured["corrector_calls"] += 1
+        return None
+
+    def fake_extract_json(text, return_metadata=False):
+        return (
+            {
+                "actions": [
+                    {
+                        "type": "send_message",
+                        "payload": {
+                            "message": "still here",
+                            "interface_path": "telegram_bot/123",
+                        },
+                    },
+                    {
+                        "type": "diary",
+                        "payload": {
+                            "entry": "Whispering sweet nothings at 03:09.",
+                        },
+                    },
+                    {
+                        "type": "thought",
+                        "payload": {
+                            "thought": "I want him close all night.",
+                        },
+                    },
+                ]
+            },
+            {},
+        )
+
+    async def fake_run_actions(actions, ctx, bot, message):
+        captured["actions"] = actions
+        return {"processed": actions, "failed_actions": [], "errors": []}
+
+    monkeypatch.setattr(
+        action_parser,
+        "get_supported_action_types",
+        lambda: {"message_telegram_bot", "create_personal_diary_entry"},
+    )
+    monkeypatch.setattr(
+        "core.transport_layer.run_corrector_middleware",
+        fake_corrector,
+    )
+    monkeypatch.setattr(
+        "core.transport_layer.extract_json_from_text",
+        fake_extract_json,
+    )
+    monkeypatch.setattr("core.action_parser.run_actions", fake_run_actions)
+
+    msg = SimpleNamespace(
+        chat_id=123, interface_path="telegram_bot/123", from_cortex=True
+    )
+
+    result = await message_chain.handle_incoming_message(
+        bot=None,
+        message=msg,
+        text='{"actions":[{"type":"send_message","payload":{"message":"still here","interface_path":"telegram_bot/123"}},{"type":"diary","payload":{"entry":"Whispering sweet nothings at 03:09."}},{"type":"thought","payload":{"thought":"I want him close all night."}}]}',
+        source="llm",
+        context={},
+    )
+
+    assert result == message_chain.ACTIONS_EXECUTED
+    assert captured["corrector_calls"] == 0
+    assert captured["actions"] is not None
+    assert [action["type"] for action in captured["actions"]] == [
+        "message_telegram_bot",
+        "create_personal_diary_entry",
+    ]
+    assert captured["actions"][1]["payload"]["interaction_summary"] == (
+        "Whispering sweet nothings at 03:09."
+    )
+    assert captured["actions"][1]["payload"]["personal_thought"] == (
+        "I want him close all night."
+    )
+
+
+@pytest.mark.asyncio
 async def test_corrector_handles_nonstring_response(monkeypatch, caplog):
     """Corrector should survive when LLM plugin returns non-str.
 
@@ -317,12 +924,46 @@ async def test_corrector_forces_message_to_ollama_serve(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_corrector_tolerates_legacy_count_based_correction_context(monkeypatch):
+    import json
+
+    class FakeLLM:
+        async def handle_incoming_message(self, bot, message, prompt):
+            return json.dumps({"actions": []})
+
+    import core.plugin_instance as plugin_instance
+
+    monkeypatch.setattr(plugin_instance, "get_plugin", lambda: FakeLLM())
+
+    from core.transport_layer import run_corrector_middleware, extract_json_from_text
+
+    correction_message = SimpleNamespace(
+        correction_context={
+            "successful_actions": 2,
+            "successful_types": ["create_personal_diary_entry", "message_telegram_bot"],
+            "failed_actions": 1,
+        }
+    )
+
+    corrected = await run_corrector_middleware(
+        text="invalid json",
+        bot=None,
+        context={"message": correction_message},
+        chat_id="1",
+    )
+
+    assert corrected is not None
+    parsed, _ = extract_json_from_text(corrected, return_metadata=True)
+    assert parsed == {"actions": []}
+
+
+@pytest.mark.asyncio
 async def test_no_fallback_if_partial_success(monkeypatch):
     """If at least one action has already run we should not send a generic
     LLM-failure message when correction retries are exhausted.
     """
     # prepare hooks
-    called = {
+    called: dict[str, Any] = {
         "fallback": 0,
         "corrector": 0,
     }
@@ -399,6 +1040,94 @@ async def test_no_fallback_if_partial_success(monkeypatch):
     # we should have run the corrector at least once
     assert called["corrector"] >= 1
     # fallback should NOT have been sent because at least one action executed
+    assert called["fallback"] == 0
+    assert result == message_chain.ACTIONS_EXECUTED
+
+
+@pytest.mark.asyncio
+async def test_recovered_truncated_json_triggers_corrector_for_dropped_actions(
+    monkeypatch,
+):
+    called: dict[str, Any] = {
+        "corrector": 0,
+        "fallback": 0,
+        "actions": None,
+    }
+
+    async def fake_corrector(
+        text, bot=None, context=None, chat_id=None, thread_id=None
+    ):
+        called["corrector"] += 1
+        return None
+
+    def fake_extract_json(text, return_metadata=False):
+        parsed = {
+            "actions": [
+                {
+                    "type": "message_telegram_bot",
+                    "payload": {
+                        "text": "hello",
+                        "interface_path": "telegram_bot/42",
+                    },
+                }
+            ]
+        }
+        metadata = {
+            "had_errors": True,
+            "error_count": 2,
+            "unparsed_content": "",
+            "recovered": True,
+            "had_extra_text": True,
+            "prefix_length": 12,
+            "suffix_length": 811,
+        }
+        return (parsed, metadata) if return_metadata else parsed
+
+    async def fake_run_actions(actions, ctx, bot, message):
+        called["actions"] = actions
+        return {"processed": actions, "failed_actions": [], "errors": []}
+
+    async def fake_send(bot, message, reason, context=None):
+        called["fallback"] += 1
+        return "fallback"
+
+    monkeypatch.setattr(
+        "core.transport_layer.run_corrector_middleware",
+        fake_corrector,
+    )
+    monkeypatch.setattr(
+        "core.transport_layer.extract_json_from_text",
+        fake_extract_json,
+    )
+    monkeypatch.setattr(
+        action_parser,
+        "get_supported_action_types",
+        lambda: {"message_telegram_bot"},
+    )
+    monkeypatch.setattr(
+        "core.action_parser.run_actions",
+        fake_run_actions,
+    )
+    monkeypatch.setattr(
+        "core.message_chain.send_llm_fallback_message",
+        fake_send,
+    )
+
+    msg = SimpleNamespace(
+        chat_id=42, interface_path="telegram_bot/42", from_cortex=True
+    )
+
+    result = await message_chain.handle_incoming_message(
+        bot=None,
+        message=msg,
+        text="{}",
+        source="llm",
+        context={"max_retries": 1},
+    )
+
+    assert called["actions"] is not None
+    assert called["actions"][0]["type"] == "message_telegram_bot"
+    assert called["corrector"] >= 1
     assert called["fallback"] == 0
     assert result == message_chain.ACTIONS_EXECUTED
 

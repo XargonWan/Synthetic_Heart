@@ -9,7 +9,7 @@ that needs DB-backed archives.
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
@@ -45,7 +45,7 @@ async def create_archive(
     metadata: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     archive_id = uuid4().hex
-    created_at = datetime.utcnow().isoformat()
+    created_at = datetime.now(timezone.utc).isoformat()
     try:
         await init_chat_archives_table()
         async with get_conn_ctx() as conn:
@@ -90,15 +90,28 @@ async def list_archives(session_id: Optional[str] = None) -> List[Dict[str, Any]
                 rows = await cur.fetchall()
                 out: List[Dict[str, Any]] = []
                 for r in rows:
+                    if isinstance(r, dict):
+                        archive_id = r.get("id")
+                        archive_session_id = r.get("session_id")
+                        archive_name = r.get("name") or "Chat"
+                        created_at = r.get("created_at")
+                        message_count = r.get("message_count") or 0
+                    else:
+                        archive_id = r[0] if len(r) > 0 else None
+                        archive_session_id = r[1] if len(r) > 1 else None
+                        archive_name = (r[2] if len(r) > 2 else None) or "Chat"
+                        created_at = r[3] if len(r) > 3 else None
+                        message_count = r[4] if len(r) > 4 else 0
+
                     out.append(
                         {
-                            "id": r[0],
-                            "session_id": r[1],
-                            "name": r[2] or "Chat",
-                            "created_at": r[3].isoformat()
-                            if hasattr(r[3], "isoformat")
-                            else str(r[3]),
-                            "message_count": int(r[4]) if r[4] else 0,
+                            "id": archive_id,
+                            "session_id": archive_session_id,
+                            "name": archive_name,
+                            "created_at": created_at.isoformat()
+                            if hasattr(created_at, "isoformat")
+                            else str(created_at),
+                            "message_count": int(message_count) if message_count else 0,
                         }
                     )
                 return out

@@ -11,23 +11,14 @@ Escalation order
 1. **Auris** (file-based STT) — primary path for audio/*  mime types.
    Delegates to whatever ``ACTIVE_AURIS_ENGINE`` is configured.
 
-2. **Live engine fallback** — invoked when Auris is unavailable, returns
-   ``None``, or the mime type is not audio (e.g. video/mp4 processed via a
-   multimodal LLM).  Uses ``live_registry.find_engine_by_capabilities`` to
+2. **Iris** (vision) — primary path for image/* and video/* mime types.
+   Delegates to whatever ``ACTIVE_IRIS_ENGINE`` is configured.
+
+3. **Live engine fallback** — invoked when Auris/Iris is unavailable or
+   returns ``None``.  Uses ``live_registry.find_engine_by_capabilities`` to
    locate the first registered engine that exposes ``transcribe_file()``.
 
-   # TODO (Vision): insert a Vision plugin step between Auris and Live for
-   # image/* and video/* mime types once the Vision subsystem is implemented.
-   # The hook should look like:
-   #   if mime_type and mime_type.startswith(("image/", "video/")):
-   #       from core.plugin_registry import PLUGIN_REGISTRY
-   #       vision = PLUGIN_REGISTRY.get("vision_plugin")
-   #       if vision:
-   #           result = await vision.describe_media(file_path, mime_type)
-   #           if result:
-   #               return result
-
-3. **``None``** — all engines failed or were unavailable.  The caller is
+4. **``None``** — all engines failed or were unavailable.  The caller is
    responsible for providing a sensible placeholder text so the LLM receives
    at minimum a context hint (e.g. ``"[User sent a media message]"``).
 
@@ -75,6 +66,12 @@ async def dispatch_media(
     # Step 1 — Auris STT (primary path, audio/* only)
     # ------------------------------------------------------------------
     if mime_type and mime_type.startswith("audio"):
+        if _is_subsystem_inline("auris_plugin", "ACTIVE_AURIS_ENGINE"):
+            log_debug(
+                "[media_dispatcher] Auris inline mode: skipping transcription so "
+                "raw audio is forwarded to the LLM."
+            )
+            return None
         result = await _try_auris(file_path, mime_type)
         if result:
             log_info(
@@ -84,13 +81,25 @@ async def dispatch_media(
         log_debug("[media_dispatcher] Auris returned no transcription; escalating.")
 
     # ------------------------------------------------------------------
-    # TODO (Vision): Vision plugin hook — image/* / video/* mime types
-    # Insert Vision step here once the Vision subsystem is implemented.
-    # See module docstring for the expected interface contract.
+    # Step 2 — Iris vision (image/* and video/*)
     # ------------------------------------------------------------------
+    if mime_type and mime_type.startswith(("image/", "video/")):
+        if _is_subsystem_inline("iris_plugin", "ACTIVE_IRIS_ENGINE"):
+            log_debug(
+                "[media_dispatcher] Iris inline mode: skipping description so "
+                "raw media is forwarded to the LLM."
+            )
+            return None
+        result = await _try_iris(file_path, mime_type)
+        if result:
+            log_info(
+                f"[media_dispatcher] Iris vision description success ({len(result)} chars)."
+            )
+            return result
+        log_debug("[media_dispatcher] Iris returned no description; escalating.")
 
     # ------------------------------------------------------------------
-    # Step 2 — Live engine fallback (transcribe_file)
+    # Step 3 — Live engine fallback (transcribe_file)
     # ------------------------------------------------------------------
     result = await _try_live_fallback(file_path, mime_type)
     if result:
@@ -110,6 +119,36 @@ async def dispatch_media(
 # ---------------------------------------------------------------------------
 
 
+def _is_subsystem_inline(plugin_key: str, config_key: str) -> bool:
+    """Return ``True`` when the given input subsystem is set to ``"inline"``.
+
+    In ``inline`` mode the subsystem (Auris STT / Iris vision) is bypassed and
+    the raw media bytes are forwarded to the Cortex engine, so the dispatcher
+    must not transcribe/describe — including via the Live fallback.  Best-effort:
+    reads the live plugin instance first, then the config registry.
+    """
+    try:
+        from core.core_initializer import PLUGIN_REGISTRY
+
+        plug = PLUGIN_REGISTRY.get(plugin_key)
+        if plug is not None:
+            try:
+                plug.refresh_config()
+            except Exception:
+                pass
+            return str(getattr(plug, "_active_engine_name", "")) == "inline"
+    except Exception:
+        pass
+    try:
+        from core.config_manager import config_registry
+
+        return (
+            str(config_registry.get_value(config_key, "", value_type=str)) == "inline"
+        )
+    except Exception:
+        return False
+
+
 async def _try_auris(file_path: str, mime_type: str | None) -> str | None:
     """Try the configured Auris STT engine."""
     try:
@@ -124,6 +163,23 @@ async def _try_auris(file_path: str, mime_type: str | None) -> str | None:
         return result.text if result else None
     except Exception as exc:
         log_warning(f"[media_dispatcher] Auris error: {exc}")
+        return None
+
+
+async def _try_iris(file_path: str, mime_type: str | None) -> str | None:
+    """Try the configured Iris vision engine."""
+    try:
+        from core.core_initializer import PLUGIN_REGISTRY
+
+        iris = PLUGIN_REGISTRY.get("iris_plugin")
+        if iris is None:
+            log_debug("[media_dispatcher] Iris plugin not loaded.")
+            return None
+
+        result = await iris.describe_media(file_path, mime_type)
+        return result.description if result else None
+    except Exception as exc:
+        log_warning(f"[media_dispatcher] Iris error: {exc}")
         return None
 
 

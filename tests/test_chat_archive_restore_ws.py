@@ -66,15 +66,15 @@ async def test_restore_archive_replays_to_websocket_and_deletes_archive():
         patch(
             "core.chat_archives_db.load_archive",
             AsyncMock(return_value=archive_payload),
-        ) as mock_load,
+        ),
         patch(
             "core.chat_archives_db.create_archive",
             AsyncMock(return_value={"id": "arch-created"}),
-        ) as mock_create,
+        ),
         patch("core.chat_archives_db.delete_archive", AsyncMock()) as mock_delete,
         patch(
             "core.chat_history_cache.save_chat_message", AsyncMock(return_value=True)
-        ) as mock_save,
+        ),
         patch(
             "core.chat_history_cache.load_chat_history",
             AsyncMock(return_value=cached_msgs),
@@ -95,14 +95,20 @@ async def test_restore_archive_replays_to_websocket_and_deletes_archive():
     # The API should not return the raw 'messages' payload to avoid duplication
     assert '"messages":' not in body
 
-    # send_json should have been called twice, once for each message
-    # send_json should have been called twice, once for each message
-    assert mock_ws.send_json.call_count == 2
+    # Replay emits two message frames plus an archive:changed broadcast event.
+    payloads = [call.args[0] for call in mock_ws.send_json.call_args_list]
+    message_events = [
+        payload for payload in payloads if payload.get("type") == "message"
+    ]
+    archive_events = [
+        payload for payload in payloads if payload.get("type") == "archive:changed"
+    ]
+    assert len(message_events) == 2
+    assert len(archive_events) == 1
 
-    # Check call args for sender mapping: first 'user', second 'synth'
-    calls = mock_ws.send_json.call_args_list
-    first = calls[0][0][0]
-    second = calls[1][0][0]
+    # Check replayed message args for sender mapping: first 'user', second 'synth'
+    first = message_events[0]
+    second = message_events[1]
     assert first["type"] == "message"
     assert first["sender"] == "user"
     assert first["text"] == "Hello Alice"
@@ -148,16 +154,16 @@ async def test_restore_archive_with_empty_messages_keeps_archive():
         patch(
             "core.chat_archives_db.load_archive",
             AsyncMock(return_value=archive_payload),
-        ) as mock_load_empty,
+        ),
         patch(
             "core.chat_archives_db.create_archive",
             AsyncMock(return_value={"id": "arch-created-empty"}),
-        ) as mock_create_empty,
+        ),
         patch("core.chat_archives_db.delete_archive", AsyncMock()) as mock_delete_empty,
         patch(
             "core.chat_history_cache.save_chat_message",
             AsyncMock(side_effect=fake_save),
-        ) as mock_save_empty,
+        ),
         patch("core.chat_history_cache.load_chat_history", AsyncMock(return_value=[])),
         patch("core.chat_history_cache.clear_chat_history", AsyncMock()),
         patch("core.session_meta.set_session_meta", AsyncMock()) as mock_set_meta_empty,
@@ -175,9 +181,16 @@ async def test_restore_archive_with_empty_messages_keeps_archive():
     # The mocked delete should not have been called because saved_count == 0
     assert not mock_delete_empty.called
 
-    # No messages should have been sent since they were empty and not saved
-    # However _replay_history still sends messages from message_history if any; considered saved_count=0 so history should be empty and no send_json should occur
-    assert mock_ws.send_json.call_count == 0
+    # No replayed chat messages should have been sent for an empty restore.
+    payloads = [call.args[0] for call in mock_ws.send_json.call_args_list]
+    message_events = [
+        payload for payload in payloads if payload.get("type") == "message"
+    ]
+    archive_events = [
+        payload for payload in payloads if payload.get("type") == "archive:changed"
+    ]
+    assert len(message_events) == 0
+    assert len(archive_events) == 1
 
     # set_session_meta should have been called to clear the processing flag
     interface_path = f"synth_webui/{session_id}"
@@ -248,12 +261,12 @@ async def test_restore_archive_with_empty_messages_keeps_archive():
             patch(
                 "core.chat_archives_db.load_archive",
                 AsyncMock(return_value=archive_payload),
-            ) as mock_load,
+            ),
             patch(
                 "core.chat_archives_db.create_archive",
                 AsyncMock(return_value={"id": "arch-created"}),
-            ) as mock_create,
-            patch("core.chat_archives_db.delete_archive", AsyncMock()) as mock_delete,
+            ),
+            patch("core.chat_archives_db.delete_archive", AsyncMock()),
             patch(
                 "core.chat_history_cache.save_chat_message",
                 AsyncMock(side_effect=fake_save),
@@ -282,10 +295,17 @@ async def test_restore_archive_with_empty_messages_keeps_archive():
         _, kwargs2 = saved_calls[1]
         assert kwargs2.get("sender_name") == "self"
 
-        # The replay should have sent the second message as synth (replay mapping)
-        assert mock_ws.send_json.call_count == 2
-        calls = mock_ws.send_json.call_args_list
-        second = calls[1][0][0]
+        # The replay should have sent the second message as synth (replay mapping).
+        payloads = [call.args[0] for call in mock_ws.send_json.call_args_list]
+        message_events = [
+            payload for payload in payloads if payload.get("type") == "message"
+        ]
+        archive_events = [
+            payload for payload in payloads if payload.get("type") == "archive:changed"
+        ]
+        assert len(message_events) == 2
+        assert len(archive_events) == 1
+        second = message_events[1]
         assert second["sender"] == "synth"
 
 

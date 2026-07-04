@@ -8,7 +8,7 @@ from typing import Dict, List, Optional
 import aiomysql
 
 from core.db import get_conn_ctx
-from core.logging_utils import log_info, log_error
+from core.logging_utils import log_info, log_error, log_warning
 from core.core_initializer import register_plugin
 
 
@@ -87,7 +87,7 @@ async def get_recent_chats(limit: int = 10) -> List[Dict]:
                     if row["metadata"]:
                         try:
                             metadata = json.loads(row["metadata"])
-                        except:
+                        except Exception:
                             pass
                     result.append(
                         {
@@ -165,7 +165,9 @@ class RecentChatsPlugin:
             limit = payload.get("limit", 10)
             import asyncio
 
-            asyncio.create_task(self._send_recent_chats(bot, original_message, limit))
+            asyncio.create_task(
+                self._send_recent_chats(context, original_message, limit)
+            )
 
         elif action_type == "cleanup_old_chats":
             older_than_days = payload.get("older_than_days", 30)
@@ -173,14 +175,14 @@ class RecentChatsPlugin:
 
             asyncio.create_task(cleanup_old_chats(older_than_days))
 
-    async def _send_recent_chats(self, bot, original_message, limit):
-        """Send recent chats list to user."""
+    async def _send_recent_chats(self, context, original_message, limit):
+        """Return recent chats list as a message action."""
         try:
             chats = await get_recent_chats(limit)
             if chats:
-                response = "Recent chats:\n"
+                text = "Recent chats:\n"
                 for chat in chats:
-                    response += (
+                    text += (
                         f"• Chat {chat['chat_id']}: {time.ctime(chat['last_active'])}\n"
                     )
             else:
@@ -191,28 +193,55 @@ class RecentChatsPlugin:
 
                     global_msgs = await load_global_chat_history(limit=limit)
                     if global_msgs:
-                        response = "Recent chats from global history:\n"
+                        text = "Recent chats from global history:\n"
                         for msg in list(global_msgs)[:limit]:
                             ts = msg.get("timestamp", "unknown")
                             i_path = msg.get("interface_path", "unknown")
                             sender = msg.get(
                                 "sender_name", msg.get("sender_id", "unknown")
                             )
-                            text = msg.get("text", "").strip().replace("\n", " ")
-                            if len(text) > 120:
-                                text = text[:117] + "..."
-                            response += f"• [{ts}] {i_path} {sender}: {text}\n"
+                            msg_text = msg.get("text", "").strip().replace("\n", " ")
+                            if len(msg_text) > 120:
+                                msg_text = msg_text[:117] + "..."
+                            text += f"• [{ts}] {i_path} {sender}: {msg_text}\n"
                     else:
-                        response = "No recent chats found."
+                        text = "No recent chats found."
                 except Exception as db_e:
                     log_error(
                         f"[recent_chats] Failed to load global fallback history: {db_e}"
                     )
-                    response = "No recent chats found."
-
-            await bot.send_message(original_message.chat_id, response)
+                    text = "No recent chats found."
         except Exception as e:
             log_error(f"[recent_chats] Failed to send recent chats: {e}")
+            text = f"❌ Failed to get recent chats: {e}"
+        return self._build_message_action(text, context, original_message)
+
+    @staticmethod
+    def _build_message_action(text: str, context: dict, original_message) -> dict:
+        """Build a message action dict for interface-agnostic delivery."""
+        interface_path = None
+        if context and isinstance(context, dict):
+            interface_path = context.get("interface_path")
+        if not interface_path and original_message:
+            interface_path = getattr(original_message, "interface_path", None)
+        if not interface_path:
+            log_warning(
+                "[recent_chats] Cannot build message action: no interface_path available"
+            )
+            return None
+
+        interface_name = interface_path.split("/")[0] if interface_path else None
+        if not interface_name:
+            return None
+
+        action_type = f"message_{interface_name}"
+        return {
+            "type": action_type,
+            "payload": {
+                "text": text,
+                "interface_path": interface_path,
+            },
+        }
 
 
 PLUGIN_CLASS = RecentChatsPlugin

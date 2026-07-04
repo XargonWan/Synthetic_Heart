@@ -108,6 +108,84 @@ Each endpoint may be mapped to one or more subsystems:
 The endpoint card shows the current effective mapping. To change mapping,
 open the endpoint with the **Edit** button and update the capability checkboxes.
 
+Cortex extra config (advanced)
+------------------------------
+
+The ``Extra Config`` JSON field on a cortex endpoint accepts optional tuning
+keys. Common ones:
+
+- ``timeout`` (number): per-endpoint request timeout in seconds. Overrides the
+  global ``LLM_GENERATION_TIMEOUT_SEC`` for this endpoint.
+- ``disable_thinking`` (bool): send ``enable_thinking=False`` (Qwen3 / LM Studio)
+  to stop the model from spending the context window on chain-of-thought.
+- ``disable_tools`` (bool): stop advertising native function/tool-calling to this
+  endpoint and use the legacy in-prompt JSON-action protocol instead. The full
+  action catalog is folded into the system prompt, so nothing is lost — only the
+  delivery changes. Recommended for small local quants that ignore native
+  tool-calling and emit the action JSON in plain content anyway (advertising 49
+  tools tends to confuse them into replies with no ``message_*`` action). Pairs
+  well with ``force_json_object`` (with tools off, ``response_format`` is no
+  longer suppressed, so it actually applies to chat turns).
+- ``max_tokens`` (number): cap on completion length. An explicit value always
+  applies. When unset, a safe default (4096) is applied **only** to local-model
+  endpoints — those with ``disable_tools`` or ``force_action_grammar`` set; cloud
+  openai endpoints (xAI, OpenRouter, …) stay uncapped unless you set this. The cap
+  prevents a small local model stuck in a repetition loop from generating until it
+  fills the whole context window (observed: ~28k tokens / 20 minutes).
+- ``retry_attempts`` / ``retry_backoff`` / ``retry_on_timeout``: transient-error
+  retry behavior.
+
+Constrained JSON output (recommended for small local models)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Small local quants (llama.cpp / LM Studio Q4 models) frequently emit malformed
+action JSON — unescaped quotes or missing delimiters on long replies — which
+fails parsing and triggers corrector retries. Force the server to constrain
+decoding to valid JSON:
+
+- ``force_json_object`` (bool): adds ``response_format={"type": "json_object"}``.
+  The simplest, broadly-supported option; guarantees syntactically valid JSON.
+- ``response_format`` (object): forwarded verbatim, e.g. an explicit
+  ``{"type": "json_schema", ...}`` constraint. Takes precedence over
+  ``force_json_object``.
+- ``grammar`` (string): a llama.cpp GBNF grammar, sent via ``extra_body`` for the
+  strictest, schema-level constraint.
+- ``force_action_grammar`` (bool): auto-build and send a GBNF grammar for the
+  action-JSON shape (the ``type`` field is constrained to the exact set of
+  available action names). This is the **strongest** option for local models — the
+  model is physically forced to emit one well-formed
+  ``{"actions":[{"type":<known name>,"payload":{...}}]}`` object: no ``<think>``/
+  ``<thought>`` preamble, no malformed JSON, no invented/duplicated types, and no
+  repeated trailing objects (generation stops after the first object). Implies
+  ``disable_tools`` (a grammar constrains plain-content output). A manual
+  ``grammar`` takes precedence. If a turn ever fails after enabling it, remove the
+  key to fall back to the unconstrained path.
+
+  The grammar also covers callers that don't pass a typed prompt request — most
+  importantly the corrector's JSON-correction retries, which arrive as a raw
+  string prompt. For those the ``type`` enum falls back to the **full registered
+  action catalog** (rather than the per-turn scoped set), so correction retries
+  stay grammar-constrained instead of regressing to unconstrained JSON that a
+  small model cannot recover from. This fallback is gated on this flag, so other
+  engines' correctors are never affected.
+
+Example for a local llama.cpp endpoint::
+
+   {"disable_thinking": true, "disable_tools": true, "force_json_object": true}
+
+``disable_tools`` is usually the most impactful setting for small local quants:
+it removes the native-tool confusion (the common cause of replies that contain
+only a diary entry and no ``message_*`` action) and lets ``force_json_object``
+take effect on chat turns. For the hardest guarantee on a llama.cpp backend,
+prefer ``force_action_grammar`` over ``force_json_object`` (which many local
+servers silently ignore)::
+
+   {"disable_thinking": true, "force_action_grammar": true, "max_tokens": 4096}
+
+These are automatically dropped when native tool-calling is active for the
+request (tool-calling already constrains output and most servers reject the
+combination).
+
 Use cases
 ---------
 

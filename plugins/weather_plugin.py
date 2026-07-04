@@ -1,17 +1,18 @@
 import asyncio
+import functools
 import json
 import time
 import urllib.parse
 import urllib.request
 import urllib.error
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 import concurrent.futures
 
 from core.core_initializer import register_plugin
 from core.logging_utils import log_debug, log_info, log_warning, log_error
 from core.time_zone_utils import get_local_location, utc_to_local
-from core.config_manager import config_registry
+from core.config_manager import config_registry, ConfigVar
 from core.variables_engine import register_exposed_var
 
 # Injection priority for weather information
@@ -19,9 +20,18 @@ INJECTION_PRIORITY = 2  # High priority - weather is contextually important
 
 
 MAX_WEATHER_FETCH_RETRIES = 2
+# Hard cap on how long a single wttr.in request may block. Without this,
+# urllib.request.urlopen can hang indefinitely on a stalled connection,
+# which freezes the entire scheduler loop (blocking the daily report check).
+WEATHER_FETCH_TIMEOUT_SECONDS = 15
 DEFAULT_WEATHER_UNAVAILABLE = (
     "Meteo non disponibile al momento, riprova tra qualche minuto."
 )
+# Owner marker for the persistent daily-report scheduled event. The weather
+# plugin owns these events: on config change it clears all of them and creates
+# a fresh one, and it dispatches them itself (routing to the configured
+# interface) rather than through the generic event dispatcher.
+WEATHER_EVENT_CREATED_BY = "weather_plugin"
 
 
 def register_injection_priority():
@@ -107,10 +117,33 @@ class WeatherPlugin:
         self._last_fetch: float = 0.0
         self._update_task: Optional[asyncio.Task] = None
 
-        # Register configuration with config_registry
-        self.fetch_minutes = config_registry.get_value(
+        # Use ConfigVar for always-fresh reads from config_registry.
+        # ConfigVar fetches the latest value on every access, so it never
+        # goes out of sync — even if the value is updated in the DB after
+        # the plugin starts. This replaces the fragile listener-based pattern
+        # that could miss updates due to startup timing.
+        self._fetch_minutes_var = ConfigVar(
+            "WEATHER_FETCH_TIME", registry=config_registry
+        )
+        self._daily_report_enabled_var = ConfigVar(
+            "WEATHER_DAILY_REPORT_ENABLED", registry=config_registry
+        )
+        self._daily_report_time_var = ConfigVar(
+            "WEATHER_DAILY_REPORT_TIME", registry=config_registry
+        )
+        self._daily_report_language_var = ConfigVar(
+            "WEATHER_DAILY_REPORT_LANGUAGE", registry=config_registry
+        )
+        self._daily_report_interface_var = ConfigVar(
+            "WEATHER_DAILY_REPORT_INTERFACE", registry=config_registry
+        )
+
+        # Ensure these vars are registered in config_registry with proper defaults
+        # (ConfigVar only reads, doesn't register — so we do a get_value call to
+        # ensure each key is defined before any ConfigVar tries to read it).
+        config_registry.get_value(
             "WEATHER_FETCH_TIME",
-            60,  # Default 60 minutes as requested
+            60,
             label="Weather Fetch Interval",
             description="Minutes between weather data fetches",
             value_type=int,
@@ -118,7 +151,7 @@ class WeatherPlugin:
             component="weather_plugin",
             advanced=False,
         )
-        self.daily_report_enabled = config_registry.get_value(
+        config_registry.get_value(
             "WEATHER_DAILY_REPORT_ENABLED",
             False,
             label="Daily Weather Report",
@@ -128,7 +161,7 @@ class WeatherPlugin:
             component="weather_plugin",
             advanced=False,
         )
-        self.daily_report_time = config_registry.get_value(
+        config_registry.get_value(
             "WEATHER_DAILY_REPORT_TIME",
             "06:00",
             label="Daily Weather Report Time",
@@ -138,7 +171,7 @@ class WeatherPlugin:
             component="weather_plugin",
             advanced=False,
         )
-        self.daily_report_language = config_registry.get_value(
+        config_registry.get_value(
             "WEATHER_DAILY_REPORT_LANGUAGE",
             "",
             label="Daily Weather Report Language",
@@ -148,7 +181,7 @@ class WeatherPlugin:
             component="weather_plugin",
             advanced=False,
         )
-        self.daily_report_interface = config_registry.get_value(
+        config_registry.get_value(
             "WEATHER_DAILY_REPORT_INTERFACE",
             "synth_webui",
             label="Daily Weather Report Interface",
@@ -159,98 +192,46 @@ class WeatherPlugin:
             advanced=True,
         )
 
-        # Add listener to update fetch_minutes when config changes
-        def _update_fetch_minutes(value):
-            try:
-                self.fetch_minutes = int(value) if value is not None else 60
-                log_info(
-                    f"[weather_plugin] Fetch interval updated to {self.fetch_minutes} minutes"
-                )
-            except (ValueError, TypeError):
-                log_warning(
-                    f"[weather_plugin] Invalid WEATHER_FETCH_TIME value: {value}, using default 60"
-                )
-                self.fetch_minutes = 60
-
-        config_registry.add_listener("WEATHER_FETCH_TIME", _update_fetch_minutes)
-
-        def _update_daily_report_enabled(value):
-            try:
-                self.daily_report_enabled = bool(value)
-                log_info(
-                    f"[weather_plugin] Daily report enabled: {self.daily_report_enabled}"
-                )
-            except Exception:
-                self.daily_report_enabled = False
-
-        def _update_daily_report_interface(value):
-            try:
-                self.daily_report_interface = str(value) if value else ""
-                log_info(
-                    f"[weather_plugin] Daily report interface set to: {self.daily_report_interface or 'none'}"
-                )
-            except Exception:
-                self.daily_report_interface = ""
-
-        def _update_daily_report_time(value):
-            try:
-                self.daily_report_time = str(value) if value else "06:00"
-            except Exception:
-                self.daily_report_time = "06:00"
-            self._apply_daily_report_time()
-
-        def _update_daily_report_language(value):
-            try:
-                self.daily_report_language = str(value) if value else ""
-            except Exception:
-                self.daily_report_language = ""
-
-        config_registry.add_listener(
-            "WEATHER_DAILY_REPORT_ENABLED", _update_daily_report_enabled
-        )
-        config_registry.add_listener(
-            "WEATHER_DAILY_REPORT_INTERFACE", _update_daily_report_interface
-        )
-        config_registry.add_listener(
-            "WEATHER_DAILY_REPORT_TIME", _update_daily_report_time
-        )
-        config_registry.add_listener(
-            "WEATHER_DAILY_REPORT_LANGUAGE", _update_daily_report_language
-        )
-
         # Use a dedicated executor so we don't depend on the event loop's default executor
         # which may be shut down during interpreter shutdown.
         self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
         # Background scheduler task (managed as singleton per process)
         self._scheduler_task = None
         self._scheduler_running = False
-        self._last_daily_report_date = None
-        self._daily_report_hour = 6
-        self._daily_report_minute = 0
-        self._apply_daily_report_time()
+        # Last applied daily-report configuration snapshot. Used to detect config
+        # changes so the persistent scheduled event can be cleared and recreated.
+        # None means "not yet reconciled since process start".
+        self._last_report_config: Optional[tuple[bool, str, str, str]] = None
 
-    def _apply_daily_report_time(self) -> None:
-        raw = str(self.daily_report_time or "").strip()
-        hour = 6
-        minute = 0
-        if raw:
-            try:
-                parts = raw.split(":")
-                if len(parts) >= 2:
-                    hour = int(parts[0])
-                    minute = int(parts[1])
-                elif len(parts) == 1:
-                    hour = int(parts[0])
-                    minute = 0
-            except Exception:
-                hour = 6
-                minute = 0
-        if hour < 0 or hour > 23:
-            hour = 6
-        if minute < 0 or minute > 59:
-            minute = 0
-        self._daily_report_hour = hour
-        self._daily_report_minute = minute
+    @property
+    def fetch_minutes(self) -> int:
+        """Return fetch interval in minutes, always fresh from registry."""
+        raw = str(self._fetch_minutes_var.value or "60")
+        try:
+            return int(raw)
+        except (ValueError, TypeError):
+            return 60
+
+    @property
+    def daily_report_enabled(self) -> bool:
+        """Return whether daily report is enabled, always fresh from registry."""
+        raw = str(self._daily_report_enabled_var.value or "false")
+        return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+    @property
+    def daily_report_time(self) -> str:
+        """Return daily report time, always fresh from registry."""
+        return str(self._daily_report_time_var.value or "06:00")
+
+    @property
+    def daily_report_language(self) -> str:
+        """Return daily report language hint, always fresh from registry."""
+        return str(self._daily_report_language_var.value or "")
+
+    @property
+    def daily_report_interface(self) -> str:
+        """Return daily report interface ID, always fresh from registry."""
+        return str(self._daily_report_interface_var.value or "")
 
     # Plugin action registration
     def get_supported_action_types(self):
@@ -400,7 +381,12 @@ class WeatherPlugin:
 
                 try:
                     response = await loop.run_in_executor(
-                        self._executor, urllib.request.urlopen, url
+                        self._executor,
+                        functools.partial(
+                            urllib.request.urlopen,
+                            url,
+                            timeout=WEATHER_FETCH_TIMEOUT_SECONDS,
+                        ),
                     )
                     data_bytes = await loop.run_in_executor(
                         self._executor, response.read
@@ -554,24 +540,151 @@ class WeatherPlugin:
         self._scheduler_task = None
         log_info("[weather_plugin] Scheduler stopped")
 
+    @staticmethod
+    def _parse_report_time(report_time_str: Optional[str]) -> tuple[int, int]:
+        """Parse an ``HH:MM`` daily-report time into a clamped ``(hour, minute)``.
+
+        Defaults to ``(6, 0)`` and clamps to valid ranges on malformed input.
+        """
+        report_hour, report_minute = 6, 0
+        if report_time_str:
+            try:
+                parts = report_time_str.split(":")
+                if len(parts) >= 2:
+                    report_hour = int(parts[0])
+                    report_minute = int(parts[1])
+                elif len(parts) == 1:
+                    report_hour = int(parts[0])
+            except Exception:
+                pass
+        report_hour = max(0, min(23, report_hour))
+        report_minute = max(0, min(59, report_minute))
+        return report_hour, report_minute
+
+    async def _reconcile_weather_event(self) -> None:
+        """Ensure the persistent daily-report event matches current config.
+
+        Implements the clear+recreate / clear semantics:
+
+        * When the daily report is enabled (or its time/interface/language
+          changes), all pending weather events are deleted and a single new
+          ``daily`` event is created at the next occurrence of the configured
+          local time.
+        * When the daily report is disabled, all pending weather events are
+          deleted and none are recreated.
+
+        No-ops when the configuration is unchanged since the last reconcile.
+        """
+        current = (
+            bool(self.daily_report_enabled),
+            self.daily_report_time or "06:00",
+            (self.daily_report_interface or "").strip(),
+            (self.daily_report_language or "").strip(),
+        )
+        if current == self._last_report_config:
+            return
+
+        from core.db import (
+            delete_scheduled_events_by_created_by,
+            insert_scheduled_event,
+        )
+
+        enabled, report_time, _interface, _language = current
+
+        # Always clear existing weather events first (clear-then-recreate).
+        deleted = await delete_scheduled_events_by_created_by(WEATHER_EVENT_CREATED_BY)
+        log_info(
+            f"[weather_plugin] Reconcile: cleared {deleted} pending weather event(s) "
+            f"(enabled={enabled}, time={report_time})"
+        )
+
+        if enabled:
+            report_hour, report_minute = self._parse_report_time(report_time)
+            now_local = utc_to_local(datetime.utcnow())
+            occurrence = now_local.replace(
+                hour=report_hour, minute=report_minute, second=0, microsecond=0
+            )
+            # If today's time has already passed, schedule for tomorrow.
+            if occurrence <= now_local:
+                occurrence = occurrence + timedelta(days=1)
+
+            date_str = occurrence.date().isoformat()
+            time_str = f"{report_hour:02d}:{report_minute:02d}"
+            await insert_scheduled_event(
+                date=date_str,
+                time=time_str,
+                recurrence_type="daily",
+                description="[weather_report] Daily weather update",
+                created_by=WEATHER_EVENT_CREATED_BY,
+            )
+            log_info(
+                f"[weather_plugin] Reconcile: created daily weather event at "
+                f"{date_str} {time_str} local"
+            )
+
+        self._last_report_config = current
+
+    async def _dispatch_due_weather_events(self) -> None:
+        """Self-deliver any due weather events owned by this plugin.
+
+        The generic event dispatcher hard-codes the telegram_bot interface, so
+        the weather plugin dispatches its own events to honour the configured
+        interface. After a successful delivery the event is marked delivered,
+        which auto-reschedules the ``daily`` event to the next day.
+        """
+        from core.db import get_due_events_by_created_by, mark_event_delivered
+
+        try:
+            due = await get_due_events_by_created_by(WEATHER_EVENT_CREATED_BY)
+        except Exception as e:
+            log_warning(f"[weather_plugin] Failed to fetch due weather events: {e}")
+            return
+
+        for event in due:
+            event_id = event.get("id")
+            if await self._trigger_daily_report():
+                if event_id is not None:
+                    await mark_event_delivered(event_id)
+                    log_info(
+                        f"[weather_plugin] Delivered weather event {event_id}; "
+                        "rescheduled for next day"
+                    )
+            else:
+                log_warning(
+                    f"[weather_plugin] Daily report delivery failed for event "
+                    f"{event_id}; will retry next loop"
+                )
+
     async def _weather_loop(self):
-        """Background loop that updates weather periodically based on fetch_minutes."""
+        """Background loop: refresh weather, reconcile config, dispatch due events."""
         log_info("[weather_plugin] Weather background loop started")
+        # Reconcile once at startup so config changes made while the process was
+        # down are applied immediately.
+        try:
+            await self._reconcile_weather_event()
+        except Exception as e:
+            log_warning(f"[weather_plugin] Initial reconcile failed: {e}")
         try:
             while self._scheduler_running:
                 try:
-                    await self._ensure_weather()
-                    if self.daily_report_enabled:
-                        self._apply_daily_report_time()
-                        now_local = utc_to_local(datetime.utcnow())
-                        today_key = now_local.date().isoformat()
-                        if (
-                            now_local.hour == self._daily_report_hour
-                            and now_local.minute == self._daily_report_minute
-                        ):
-                            if self._last_daily_report_date != today_key:
-                                if await self._trigger_daily_report():
-                                    self._last_daily_report_date = today_key
+                    # Defensive timeout: even if a fetch hangs for any reason,
+                    # the loop must keep running so reconciliation and due-event
+                    # dispatch below are always reached.
+                    try:
+                        await asyncio.wait_for(
+                            self._ensure_weather(),
+                            timeout=(WEATHER_FETCH_TIMEOUT_SECONDS + 5)
+                            * MAX_WEATHER_FETCH_RETRIES,
+                        )
+                    except asyncio.TimeoutError:
+                        log_warning(
+                            "[weather_plugin] Weather fetch timed out; continuing loop"
+                        )
+
+                    # Apply any config changes (clear+recreate / clear).
+                    await self._reconcile_weather_event()
+                    # Deliver any due weather events (self-routed).
+                    await self._dispatch_due_weather_events()
                 except Exception as e:
                     log_warning(f"[weather_plugin] Error during scheduled update: {e}")
                 await asyncio.sleep(60)

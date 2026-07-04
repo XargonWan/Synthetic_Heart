@@ -1,0 +1,433 @@
+<section class="tab-panel" id="tab-engines" data-tab="engines" role="tabpanel">
+    <div class="settings-grid" style="flex-direction: column;">
+
+        <!-- ── External Endpoints CRUD ────────────────────────────────────── -->
+        <article class="card">
+            <h2>Engines</h2>
+            <div class="meta" style="margin-bottom:16px;">
+                Connect external AI services: Ollama, OpenAI, Gemini, Anthropic, or any OpenAI-compatible API, even self hosted.
+                Endpoints are auto-probed for capabilities and can be mapped to Cortex (chat/text, reasoning), Vox (voice, TTS), Auris (audio, STT), Iris (image/video vision), or Live (real-time, multimodal) subsystems.
+            </div>
+
+            <!-- Toolbar -->
+            <div style="display:flex; gap:10px; align-items:center; margin-bottom:18px; flex-wrap:wrap;">
+                <button id="ext-ep-add-btn" class="pill" style="font-weight:700;">+ Add Endpoint</button>
+                <button id="ext-ep-refresh-btn" class="pill secondary" title="Reload list">↺ Refresh</button>
+                <span id="ext-ep-status" class="meta" style="font-size:0.85rem; color:var(--muted);"></span>
+            </div>
+
+            <!-- Endpoint list -->
+            <div id="ext-ep-list" style="display:flex; flex-direction:column; gap:14px;">
+                <div class="meta" style="color:var(--muted);">Loading…</div>
+            </div>
+        </article>
+
+        <!-- ── Engine configuration ────────────────────────────────────────── -->
+        <article class="card">
+            <h2>Engine Configuration</h2>
+            <div class="meta" style="margin-bottom:14px;">Configure the active engine for each subsystem. Only engines you have added above are listed here.</div>
+
+            <!-- ── Cortex ────────────────────────────────────────────────────── -->
+            <h3 style="margin:0 0 6px; font-size:1rem; color:var(--muted); text-transform:uppercase; letter-spacing:0.06em;">Cortex</h3>
+            <div class="meta" style="margin-bottom:10px;">A <strong>Cortex</strong> is a category of runtime LLM backends (e.g. <em>llm_provider</em>, <em>agent</em>). Choose the Cortex kind first, then pick an engine.</div>
+            <div id="components-cortex">
+                <div class="meta" id="components-cortex-summary">Loading…</div>
+
+                <div class="meta" id="components-cortex-controls" style="display:flex; gap:10px; align-items:center; margin-top:10px; flex-wrap:wrap;">
+                    <select id="cortex-kind-select" style="min-width:200px;">
+                    </select>
+
+                    <select id="cortex-engine-select" style="min-width:360px; font-size:1rem;">
+                    </select>
+
+                    <!-- Model selector (populated dynamically from engine's supported_models) -->
+                    <div id="cortex-model-picker" style="position:relative; display:none;">
+                        <input id="cortex-model-search" type="text" placeholder="Search models…" autocomplete="off"
+                            style="min-width:320px;">
+                        <div id="cortex-model-dropdown" style="display:none; position:absolute; top:100%; left:0; right:0; max-height:300px; overflow-y:auto; border:1px solid var(--border); border-radius:8px; background:var(--bg-card,#1a1a2e); z-index:999; margin-top:2px;"></div>
+                    </div>
+
+                    <div id="cortex-engine-info" class="meta" style="min-width:260px;">
+                        <div style="font-weight:600;" id="cortex-engine-model">model: –</div>
+                        <div style="font-size:0.9rem; color:var(--muted);" id="cortex-engine-label">—</div>
+                        <div style="margin-top:6px;" id="cortex-engine-login-state">state: –</div>
+                    </div>
+                    <button id="cortex-login-btn" class="pill">Login</button>
+                    <div id="cortex-login-warning" class="meta" style="display:none; margin-top:8px; max-width:560px;">
+                        <div style="font-weight:600;">If the login button is not working please:</div>
+                        <ul style="margin:6px 0 0 18px;">
+                            <li>browse <span id="cortex-login-warning-selkies">https://{host}:{port}</span></li>
+                            <li>open the "Synth Browser" from the application menu</li>
+                            <li>browse to: <span id="cortex-login-warning-url">{login_url}</span></li>
+                            <li>login to the selected service</li>
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Per-endpoint extra config — shown only for external endpoints -->
+                <div id="cortex-engine-config-wrap" style="display:none; margin-top:14px; max-width:680px;">
+                    <label style="display:block; margin-bottom:4px; font-weight:600;">Engine Configuration <span style="color:var(--muted); font-weight:400; font-size:0.85rem;">(JSON — applies to this endpoint)</span></label>
+                    <textarea id="cortex-engine-config" rows="5" spellcheck="false" placeholder='{"disable_thinking": true, "force_json_object": true}'
+                        style="width:100%; padding:9px 12px; background:var(--background); color:var(--text); border:1px solid var(--border,#444); border-radius:8px; font-family:monospace; font-size:0.85rem; resize:vertical;"></textarea>
+                    <div style="margin-top:5px; font-size:0.8rem; color:var(--muted);">
+                        Cortex keys: <code>timeout</code> (request seconds), <code>max_tokens</code> (caps reply length),
+                        <code>disable_thinking</code>, <code>disable_tools</code> (use in-prompt JSON instead of native tools — best for small local models),
+                        and <code>force_action_grammar</code> (strongest — GBNF-constrains output to the action schema) /
+                        <code>force_json_object</code> / <code>grammar</code> to constrain output to valid JSON.
+                        Must be a JSON object; leave blank for defaults.
+                    </div>
+                    <div style="display:flex; gap:10px; align-items:center; margin-top:8px;">
+                        <button id="cortex-engine-config-save" class="pill" type="button">Save Config</button>
+                        <span id="cortex-engine-config-status" class="meta" style="font-size:0.85rem;"></span>
+                    </div>
+                </div>
+
+                <div class="components-list" id="components-cortex-list"></div>
+            </div>
+
+            <!-- ── Vox ────────────────────────────────────────────────────── -->
+            <div style="margin-top:28px; padding-top:20px; border-top:1px solid var(--border,#444);">
+                <h3 style="margin:0 0 6px; font-size:1rem; color:var(--muted); text-transform:uppercase; letter-spacing:0.06em;">Vox — Text to Speech</h3>
+                <div class="meta" style="margin-bottom:10px;">File-based TTS engines. Select the active engine using the dropdown below.</div>
+                <div id="vox-controls" style="display:flex; gap:12px; align-items:flex-start; margin-bottom:12px; flex-wrap:wrap;">
+                    <select id="vox-engine-select" style="min-width:220px;">
+                    </select>
+                    <!-- model picker shown when the active engine/endpoint exposes multiple models -->
+                    <select id="vox-model-select" style="min-width:200px; display:none;" title="Select the model used by the active Vox engine">
+                    </select>
+                    <!-- speaker selector shown when a Kitten model is active -->
+                    <select id="kitten-speaker-select" title="Kitten TTS — Speaker voice" style="min-width:160px; display:none;">
+                    </select>
+                    <button id="kitten-play-btn" title="Play sample" style="display:none; padding:8px 12px; font-weight:600;">▶</button>
+                    <button id="vox-manage-models-btn" class="pill secondary" title="Download, update or remove TTS models" style="padding:8px 14px; font-weight:600;">🗂 Manage Models</button>
+                    <div id="vox-engine-info" class="meta" style="min-width:260px; display:none;">
+                        <div style="font-weight:600;" id="vox-engine-label">—</div>
+                        <div style="font-size:0.9rem; color:var(--muted);" id="vox-engine-description">—</div>
+                    </div>
+                </div>
+                <div class="components-list" id="components-vox-list"><div class="meta">Loading…</div></div>
+            </div>
+
+            <!-- ── Auris ───────────────────────────────────────────────────── -->
+            <div style="margin-top:28px; padding-top:20px; border-top:1px solid var(--border,#444);">
+                <h3 style="margin:0 0 6px; font-size:1rem; color:var(--muted); text-transform:uppercase; letter-spacing:0.06em;">Auris — Speech to Text</h3>
+                <div class="meta" style="margin-bottom:10px;">File-based STT engines. Select the active engine using the dropdown below.</div>
+                <div id="auris-controls" style="display:flex; gap:12px; align-items:flex-start; margin-bottom:12px; flex-wrap:wrap;">
+                    <select id="auris-engine-select" style="min-width:220px;">
+                    </select>
+                    <!-- model picker shown when the active engine/endpoint exposes multiple models -->
+                    <select id="auris-model-select" style="min-width:200px; display:none;" title="Select the model used by the active Auris engine">
+                    </select>
+                    <!-- Vosk model picker populated from MODEL_MANAGER catalog (shows download status) -->
+                    <select id="auris-vosk-language" style="min-width:240px; display:none;">
+                    </select>
+                    <button id="auris-manage-models-btn" class="pill secondary" title="Download, update or remove STT models" style="padding:8px 14px; font-weight:600;">🗂 Manage Models</button>
+                    <div id="auris-engine-info" class="meta" style="min-width:260px; display:none;">
+                        <div style="font-weight:600;" id="auris-engine-label">—</div>
+                        <div style="font-size:0.9rem; color:var(--muted);" id="auris-engine-description">—</div>
+                    </div>
+                </div>
+                <div class="components-list" id="components-auris-list"><div class="meta">Loading…</div></div>
+            </div>
+
+            <!-- ── Iris ────────────────────────────────────────────────────── -->
+            <div style="margin-top:28px; padding-top:20px; border-top:1px solid var(--border,#444);">
+                <h3 style="margin:0 0 6px; font-size:1rem; color:var(--muted); text-transform:uppercase; letter-spacing:0.06em;">Iris — Image &amp; Video Understanding</h3>
+                <div class="meta" style="margin-bottom:10px;">Vision engines for analysing images and video frames. Select the active engine using the dropdown below.</div>
+                <div id="iris-controls" style="display:flex; gap:12px; align-items:flex-start; margin-bottom:12px; flex-wrap:wrap;">
+                    <select id="iris-engine-select" style="min-width:220px;">
+                    </select>
+                    <select id="iris-model-select" style="min-width:200px; display:none;" title="Select the model used by the active Iris engine">
+                    </select>
+                    <button id="iris-manage-models-btn" class="pill secondary" title="Download, update or remove vision models" style="padding:8px 14px; font-weight:600;">🗂 Manage Models</button>
+                    <div id="iris-engine-info" class="meta" style="min-width:260px; display:none;">
+                        <div style="font-weight:600;" id="iris-engine-label">—</div>
+                        <div style="font-size:0.9rem; color:var(--muted);" id="iris-engine-description">—</div>
+                    </div>
+                </div>
+                <div class="components-list" id="components-iris-list"><div class="meta">Loading…</div></div>
+            </div>
+
+            <!-- ── Live ────────────────────────────────────────────────────── -->
+            <div style="margin-top:28px; padding-top:20px; border-top:1px solid var(--border,#444);">
+                <h3 style="margin:0 0 6px; font-size:1rem; color:var(--muted); text-transform:uppercase; letter-spacing:0.06em;">Live — Real-time Streaming</h3>
+                <div class="meta" style="margin-bottom:10px;">Bidirectional streaming engines (audio in + TTS out in real time). VAD is handled by <code>core.vad_service</code> — not listed here.</div>
+                <div id="live-controls" style="display:flex; gap:12px; align-items:flex-start; margin-bottom:12px; flex-wrap:wrap;">
+                    <select id="live-engine-select" style="min-width:220px;">
+                    </select>
+                    <div id="live-engine-info" class="meta" style="min-width:260px; display:none;">
+                        <div style="font-weight:600;" id="live-engine-label">—</div>
+                        <div style="font-size:0.9rem; color:var(--muted);" id="live-engine-description">—</div>
+                    </div>
+                </div>
+                <!-- Live voice configuration (visible when a live engine is active) -->
+                <div id="live-voice-config" style="display:none; margin-bottom:14px; padding:12px; background:var(--card-bg,#1a1a2e); border:1px solid var(--border,#444); border-radius:8px;">
+                    <div style="font-size:0.85rem; font-weight:600; color:var(--muted); text-transform:uppercase; letter-spacing:0.05em; margin-bottom:10px;">Voice Settings</div>
+                    <div style="display:flex; flex-direction:column; gap:10px;">
+                        <div style="display:flex; flex-direction:column; gap:3px;">
+                            <label for="live-voice-name" style="font-size:0.85rem; font-weight:600;">Voice</label>
+                            <div style="font-size:0.8rem; color:var(--muted);">Prebuilt voice for Gemini Live sessions.</div>
+                            <select id="live-voice-name" style="padding:6px 10px; background:var(--background); color:var(--text); border:1px solid var(--primary); border-radius:6px; font-size:0.88rem; max-width:300px;">
+                                <optgroup label="Female">
+                                    <option value="Aoede">Aoede — Breezy</option>
+                                    <option value="Kore">Kore — Firm</option>
+                                    <option value="Leda">Leda — Youthful</option>
+                                    <option value="Zephyr">Zephyr — Bright</option>
+                                    <option value="Autonoe">Autonoe — Bright</option>
+                                    <option value="Achernar">Achernar — Soft</option>
+                                    <option value="Callirrhoe">Callirrhoe — Easy-going</option>
+                                    <option value="Despina">Despina — Smooth</option>
+                                    <option value="Erinome">Erinome — Clear</option>
+                                    <option value="Gacrux">Gacrux — Mature</option>
+                                    <option value="Laomedeia">Laomedeia — Upbeat</option>
+                                    <option value="Pulcherrima">Pulcherrima — Forward</option>
+                                    <option value="Sulafat">Sulafat — Warm</option>
+                                    <option value="Vindemiatrix">Vindemiatrix — Gentle</option>
+                                </optgroup>
+                                <optgroup label="Male">
+                                    <option value="Puck">Puck — Upbeat</option>
+                                    <option value="Charon">Charon — Informative</option>
+                                    <option value="Fenrir">Fenrir — Excitable</option>
+                                    <option value="Orus">Orus — Firm</option>
+                                    <option value="Achird">Achird — Friendly</option>
+                                    <option value="Algenib">Algenib — Gravelly</option>
+                                    <option value="Algieba">Algieba — Smooth</option>
+                                    <option value="Alnilam">Alnilam — Firm</option>
+                                    <option value="Enceladus">Enceladus — Breathy</option>
+                                    <option value="Iapetus">Iapetus — Clear</option>
+                                    <option value="Rasalgethi">Rasalgethi — Informative</option>
+                                    <option value="Sadachbia">Sadachbia — Lively</option>
+                                    <option value="Sadaltager">Sadaltager — Knowledgeable</option>
+                                    <option value="Schedar">Schedar — Even</option>
+                                    <option value="Umbriel">Umbriel — Easy-going</option>
+                                    <option value="Zubenelgenubi">Zubenelgenubi — Casual</option>
+                                </optgroup>
+                            </select>
+                        </div>
+                        <div style="display:flex; flex-direction:column; gap:3px;">
+                            <label for="live-voice-style" style="font-size:0.85rem; font-weight:600;">Voice Style Prompt</label>
+                            <div style="font-size:0.8rem; color:var(--muted);">Extra instructions to shape how the model speaks (tone, pacing, personality). Leave empty for default.</div>
+                            <textarea id="live-voice-style" rows="3" style="width:100%; max-width:500px; padding:6px 10px; background:var(--background); color:var(--text); border:1px solid var(--border,#444); border-radius:6px; font-family:monospace; font-size:0.85rem; resize:vertical;"></textarea>
+                        </div>
+                        <div style="display:flex; flex-direction:column; gap:8px; margin-top:6px; padding-top:10px; border-top:1px solid var(--border,#333);">
+                            <div style="font-size:0.85rem; font-weight:600; color:var(--muted); text-transform:uppercase; letter-spacing:0.05em;">Session Features</div>
+                            <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
+                                <input type="checkbox" id="live-affective-dialog" style="width:16px; height:16px; cursor:pointer;">
+                                <span style="font-size:0.85rem; font-weight:600;">Affective Dialog</span>
+                            </label>
+                            <div style="font-size:0.8rem; color:var(--muted); margin-top:-4px;">Model adapts its tone and emotion to match the user's expression and speaking style.</div>
+                            <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
+                                <input type="checkbox" id="live-proactive-audio" style="width:16px; height:16px; cursor:pointer;">
+                                <span style="font-size:0.85rem; font-weight:600;">Proactive Audio</span>
+                            </label>
+                            <div style="font-size:0.8rem; color:var(--muted); margin-top:-4px;">Model can choose not to respond when audio content is not relevant (e.g. background noise).</div>
+                            <div style="display:flex; flex-direction:column; gap:3px; margin-top:4px;">
+                                <label for="live-thinking-budget" style="font-size:0.85rem; font-weight:600;">Thinking Budget</label>
+                                <div style="font-size:0.8rem; color:var(--muted);">Internal reasoning tokens before responding (0 = disabled, higher = smarter but slower). Recommended: 1024–2048.</div>
+                                <input type="number" id="live-thinking-budget" min="0" max="8192" step="128" value="0" style="padding:6px 10px; background:var(--background); color:var(--text); border:1px solid var(--border,#444); border-radius:6px; font-size:0.88rem; max-width:140px;">
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="components-list" id="components-live-list"><div class="meta">Loading…</div></div>
+            </div>
+
+            <!-- ── Scope Overrides ──────────────────────────────────────── -->
+            <div style="margin-top:28px; padding-top:20px; border-top:1px solid var(--border,#444);">
+                <h3 style="margin:0 0 6px; font-size:1rem; color:var(--muted); text-transform:uppercase; letter-spacing:0.06em;">Scope Overrides</h3>
+                <div class="meta" style="margin-bottom:10px;">Override the active engine for specific contexts (Grillo, Trainer, Live). "Default" uses the global Cortex selection.</div>
+                <div id="cortex-scopes" style="display:flex; gap:16px; align-items:center; flex-wrap:wrap;">
+                    <!-- scope override selectors (Grillo / Trainer / Live) populated by JS -->
+                </div>
+            </div>
+        </article>
+
+    </div>
+
+    <!-- ── Add / Edit modal (2-step wizard) ───────────────────────────── -->
+    <div id="ext-ep-modal" style="display:none; position:fixed; inset:0; z-index:9000; background:rgba(0,0,0,0.6); align-items:center; justify-content:center;">
+        <div style="background:var(--bg-card,#1a1a2e); border:1px solid var(--border,#444); border-radius:14px; padding:28px 32px; min-width:440px; max-width:640px; width:93%; max-height:92vh; overflow-y:auto; box-shadow:0 8px 32px rgba(0,0,0,0.5);">
+            <h3 id="ext-ep-modal-title" style="margin:0 0 6px;">Add External Endpoint</h3>
+            <div id="ext-ep-modal-error" style="display:none; margin-bottom:14px; padding:10px 14px; background:rgba(192,57,43,0.15); border:1px solid var(--danger,#c0392b); border-radius:8px; color:var(--danger,#c0392b); font-size:0.9rem;"></div>
+
+            <!-- ── Step 1: provider picker ── -->
+            <div id="ext-ep-step-template">
+                <div class="meta" style="margin-bottom:16px; color:var(--muted);">Choose a provider to get started, or pick <strong>Custom Endpoint</strong> to configure manually.</div>
+                <div id="ext-ep-preset-loading" style="color:var(--muted); font-size:0.9rem;">Loading providers…</div>
+                <div id="ext-ep-preset-grid" style="display:grid; grid-template-columns:repeat(auto-fill,minmax(160px,1fr)); gap:12px; margin-bottom:20px;"></div>
+                <div style="display:flex; justify-content:flex-end;">
+                    <button type="button" id="ext-ep-modal-cancel-step1" class="pill secondary">Cancel</button>
+                </div>
+            </div>
+
+            <!-- ── Step 2: form (pre-filled from preset or edit) ── -->
+            <div id="ext-ep-step-form" style="display:none;">
+                <!-- Back button + provider name shown for add mode -->
+                <div id="ext-ep-form-provider-header" style="display:flex; align-items:center; gap:10px; margin-bottom:16px;">
+                    <button type="button" id="ext-ep-back-btn" class="pill secondary" style="padding:5px 12px; font-size:0.85rem;">← Change</button>
+                    <span id="ext-ep-form-provider-name" style="font-weight:600; font-size:1rem;"></span>
+                </div>
+
+                <form id="ext-ep-form" autocomplete="off" novalidate>
+                    <!-- Prevent browser autofill overlay from hijacking the endpoint probe form -->
+                    <input type="text" autocomplete="username" style="position:absolute; left:-9999px; top:-9999px;" tabindex="-1" aria-hidden="true" />
+                    <input type="password" autocomplete="current-password" style="position:absolute; left:-9999px; top:-9999px;" tabindex="-1" aria-hidden="true" />
+                    <input type="hidden" id="ext-ep-form-id" value="">
+
+                    <!-- API Key — shown only if requires_api_key or edit mode -->
+                    <div id="ext-ep-form-key-row" style="margin-bottom:14px;">
+                        <label style="display:block; margin-bottom:4px; font-weight:600;">
+                            API Key
+                            <span id="ext-ep-form-key-required-badge" style="color:var(--danger,#c0392b); font-size:0.8rem; margin-left:4px;"></span>
+                            <span style="color:var(--muted); font-weight:400;"> (stored encrypted)</span>
+                        </label>
+                        <input id="ext-ep-form-key" type="password" placeholder="paste your API key here" autocomplete="new-password"
+                            style="width:100%; padding:9px 12px; background:var(--background); color:var(--text); border:1px solid var(--primary); border-radius:8px; box-sizing:border-box;">
+                        <div id="ext-ep-form-key-hint" style="margin-top:5px; font-size:0.8rem; color:var(--muted);"></div>
+                    </div>
+
+                    <!-- Base URL — locked for known providers unless user unlocks -->
+                    <div style="margin-bottom:14px;">
+                        <label style="display:block; margin-bottom:4px; font-weight:600;">Base URL</label>
+                        <div style="display:flex; gap:6px; align-items:center;">
+                            <input id="ext-ep-form-url" type="url" placeholder="http://localhost:8000" autocomplete="off"
+                                style="flex:1; padding:9px 12px; background:var(--background); color:var(--text); border:1px solid var(--primary); border-radius:8px; box-sizing:border-box;">
+                            <button type="button" id="ext-ep-url-unlock-btn" title="Override URL"
+                                style="display:none; background:none; border:1px solid var(--border,#444); border-radius:8px; padding:7px 10px; cursor:pointer; color:var(--muted); font-size:0.9rem;">🔓</button>
+                        </div>
+                    </div>
+
+                    <!-- Name + Label — collapsible "Identity" section -->
+                    <details id="ext-ep-identity-details" style="margin-bottom:14px;">
+                        <summary style="cursor:pointer; font-weight:600; font-size:0.95rem; margin-bottom:8px; user-select:none;">Identity <span style="color:var(--muted); font-weight:400; font-size:0.85rem;">(name &amp; display label)</span></summary>
+                        <div style="padding-top:8px;">
+                            <label style="display:block; margin-bottom:4px; font-weight:600;">Name <span style="color:var(--muted); font-weight:400;">(unique identifier)</span></label>
+                            <input id="ext-ep-form-name" type="text" placeholder="e.g. my-gemini" autocomplete="off"
+                                style="width:100%; margin-bottom:12px; padding:9px 12px; background:var(--background); color:var(--text); border:1px solid var(--border,#444); border-radius:8px; box-sizing:border-box;">
+                            <label style="display:block; margin-bottom:4px; font-weight:600;">Display Label</label>
+                            <input id="ext-ep-form-label" type="text" placeholder="human-readable name" autocomplete="off"
+                                style="width:100%; padding:9px 12px; background:var(--background); color:var(--text); border:1px solid var(--border,#444); border-radius:8px; box-sizing:border-box;">
+                        </div>
+                    </details>
+
+                    <!-- Capabilities — collapsible override -->
+                    <details style="margin-bottom:14px;">
+                        <summary style="cursor:pointer; font-weight:600; font-size:0.95rem; margin-bottom:8px; user-select:none;">Capabilities <span style="color:var(--muted); font-weight:400; font-size:0.85rem;">(which subsystems can use this endpoint)</span></summary>
+                        <div id="ext-ep-form-capabilities" style="display:flex; gap:20px; flex-wrap:wrap; padding-top:8px;">
+                            <label style="display:flex; align-items:center; gap:6px; font-size:0.9rem; cursor:pointer;">
+                                <input type="checkbox" id="ext-ep-form-cap-cortex"> Cortex <span style="color:var(--muted); font-size:0.8rem;">(LLM / chat)</span>
+                            </label>
+                            <label style="display:flex; align-items:center; gap:6px; font-size:0.9rem; cursor:pointer;">
+                                <input type="checkbox" id="ext-ep-form-cap-vox"> Vox <span style="color:var(--muted); font-size:0.8rem;">(TTS)</span>
+                            </label>
+                            <label style="display:flex; align-items:center; gap:6px; font-size:0.9rem; cursor:pointer;">
+                                <input type="checkbox" id="ext-ep-form-cap-auris"> Auris <span style="color:var(--muted); font-size:0.8rem;">(STT)</span>
+                            </label>
+                            <label style="display:flex; align-items:center; gap:6px; font-size:0.9rem; cursor:pointer;">
+                                <input type="checkbox" id="ext-ep-form-cap-vision"> Iris <span style="color:var(--muted); font-size:0.8rem;">(image/video vision)</span>
+                            </label>
+                            <label style="display:flex; align-items:center; gap:6px; font-size:0.9rem; cursor:pointer;">
+                                <input type="checkbox" id="ext-ep-form-cap-live"> Live <span style="color:var(--muted); font-size:0.8rem;">(real-time streaming)</span>
+                            </label>
+                        </div>
+                    </details>
+
+                    <!-- Advanced — protocol -->
+                    <details style="margin-bottom:22px;">
+                        <summary style="cursor:pointer; font-weight:600; font-size:0.95rem; margin-bottom:8px; user-select:none;">Advanced</summary>
+                        <div style="padding-top:8px;">
+                            <label style="display:block; margin-bottom:4px; font-weight:600;">Protocol</label>
+                            <select id="ext-ep-form-protocol"
+                                style="width:100%; padding:9px 12px; background:var(--background); color:var(--text); border:1px solid var(--border,#444); border-radius:8px;">
+                                <option value="openai">OpenAI-compatible (Ollama, OpenRouter, …)</option>
+                                <option value="gemini">Google Gemini</option>
+                                <option value="anthropic">Anthropic Claude</option>
+                                <option value="custom">Custom</option>
+                            </select>
+                        </div>
+                    </details>
+
+                    <div style="display:flex; gap:10px; justify-content:flex-end;">
+                        <button type="button" id="ext-ep-modal-cancel" class="pill secondary">Cancel</button>
+                        <button type="submit" id="ext-ep-modal-save" class="pill">Save</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- ── Manage Models modal (shared by Vox / Auris / Iris) ──────────────── -->
+<div id="model-manager-modal" style="display:none; position:fixed; inset:0; z-index:9000; background:rgba(0,0,0,0.6); align-items:center; justify-content:center;">
+    <div style="background:var(--bg-card,#1a1a2e); border:1px solid var(--border,#444); border-radius:14px; padding:24px 28px; min-width:460px; max-width:720px; width:93%; max-height:88vh; overflow-y:auto; box-shadow:0 8px 32px rgba(0,0,0,0.5);">
+        <div style="display:flex; align-items:center; gap:12px; margin-bottom:6px;">
+            <h3 id="model-manager-title" style="margin:0; flex:1;">Manage Models</h3>
+            <button type="button" id="model-manager-close" class="pill secondary" style="padding:5px 12px; font-size:0.85rem;">Close</button>
+        </div>
+        <div class="meta" id="model-manager-subtitle" style="margin-bottom:16px; color:var(--muted);">Download, update or remove locally-managed models for this engine.</div>
+        <div id="model-manager-error" style="display:none; margin-bottom:14px; padding:10px 14px; background:rgba(192,57,43,0.15); border:1px solid var(--danger,#c0392b); border-radius:8px; color:var(--danger,#c0392b); font-size:0.9rem;"></div>
+        <div id="model-manager-list" style="display:flex; flex-direction:column; gap:10px;">
+            <div class="meta">Loading…</div>
+        </div>
+    </div>
+</div>
+
+<!-- ── Model row template (cloned by JS in the Manage Models modal) ────── -->
+<template id="model-manager-row-tpl">
+    <div class="mm-row" style="border:1px solid var(--border,#444); border-radius:10px; padding:12px 14px; background:var(--bg-card,#1a1a2e); display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
+        <div style="flex:1; min-width:200px;">
+            <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+                <span class="mm-name" style="font-weight:700;"></span>
+                <span class="mm-downloaded-badge badge" style="display:none; font-size:0.7rem; padding:2px 8px; border-radius:12px; background:var(--success,#27ae60); color:#fff;">Downloaded</span>
+                <span class="mm-size" style="font-size:0.78rem; color:var(--muted);"></span>
+            </div>
+            <div class="mm-desc" style="font-size:0.85rem; color:var(--muted); margin-top:3px;"></div>
+            <div class="mm-progress-wrap" style="display:none; margin-top:8px; height:6px; background:var(--border,#444); border-radius:4px; overflow:hidden;">
+                <div class="mm-progress-bar" style="height:100%; width:0%; background:var(--primary,#7b61ff); transition:width 0.3s;"></div>
+            </div>
+        </div>
+        <button class="mm-download-btn pill" style="padding:5px 12px; font-size:0.85rem;">Download</button>
+        <button class="mm-delete-btn pill" style="padding:5px 12px; font-size:0.85rem; background:var(--danger,#c0392b); color:#fff; display:none;">Delete</button>
+    </div>
+</template>
+
+<!-- ── Endpoint card template (cloned by JS) ───────────────────────────── -->
+<template id="ext-ep-card-tpl">
+    <div class="ext-ep-card" style="border:1px solid var(--border,#444); border-radius:10px; padding:16px 18px; background:var(--bg-card,#1a1a2e);">
+        <div style="display:flex; align-items:center; gap:10px; margin-bottom:10px; flex-wrap:wrap;">
+            <span class="ext-ep-label" style="font-weight:700; font-size:1.05rem;"></span>
+            <span class="ext-ep-protocol badge" style="font-size:0.75rem; padding:2px 8px; border-radius:12px; background:var(--primary,#7b61ff); color:#fff;"></span>
+            <span class="ext-ep-enabled-badge" style="font-size:0.75rem; padding:2px 8px; border-radius:12px;"></span>
+            <span class="ext-ep-probe-badge" style="font-size:0.75rem; padding:2px 8px; border-radius:12px; background:var(--border,#444);"></span>
+            <div style="flex:1;"></div>
+            <button class="ext-ep-edit-btn pill secondary" style="padding:5px 12px; font-size:0.85rem;">Edit</button>
+            <button class="ext-ep-toggle-btn pill" style="padding:5px 12px; font-size:0.85rem;"></button>
+            <button class="ext-ep-probe-btn pill" style="padding:5px 12px; font-size:0.85rem;">Probe</button>
+            <span class="ext-ep-probe-echo" style="font-size:0.85rem; margin-left:2px;"></span>
+            <button class="ext-ep-delete-btn pill" style="padding:5px 12px; font-size:0.85rem; background:var(--danger,#c0392b); color:#fff;">Delete</button>
+        </div>
+
+        <div style="color:var(--muted); font-size:0.85rem; margin-bottom:10px;" class="ext-ep-url"></div>
+
+        <!-- Capabilities + subsystem mapping -->
+        <div style="display:flex; gap:18px; flex-wrap:wrap; margin-bottom:12px;">
+            <div>
+                <div style="font-size:0.8rem; text-transform:uppercase; letter-spacing:0.06em; color:var(--muted); margin-bottom:6px;">Subsystem Mapping</div>
+                <div class="ext-ep-subsystems" style="display:flex; gap:8px; flex-wrap:wrap;"></div>
+            </div>
+        </div>
+
+        <!-- Model selector -->
+        <div class="ext-ep-model-row" style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+            <label style="font-size:0.85rem; font-weight:600; min-width:110px;">Available Models</label>
+            <select class="ext-ep-model-dropdown"
+                style="padding:6px 10px; background:var(--background); color:var(--text); border:1px solid var(--primary); border-radius:8px; min-width:220px; flex:1; max-width:400px;"></select>
+            <input class="ext-ep-model-select" type="text" autocomplete="off" placeholder="Enter a model name…"
+                style="display:none; padding:6px 10px; background:var(--background); color:var(--text); border:1px solid var(--primary); border-radius:8px; min-width:220px; flex:1; max-width:400px;">
+            <button class="ext-ep-model-test pill secondary" style="padding:5px 12px; font-size:0.85rem;">Test</button>
+            <span class="ext-ep-model-test-echo" style="font-size:0.85rem; margin-left:2px;"></span>
+        </div>
+
+        <div class="ext-ep-probe-time" style="font-size:0.78rem; color:var(--muted); margin-top:8px;"></div>
+    </div>
+</template>

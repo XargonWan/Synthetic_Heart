@@ -167,7 +167,8 @@ class ActionStateManager:
 
             # Get priorities
             old_entry = self._action_stack[target_index]
-            old_priority = PHASE_PRIORITIES.get(old_entry.phase, 0)
+            old_phase = old_entry.phase
+            old_priority = PHASE_PRIORITIES.get(old_phase, 0)
             new_priority = PHASE_PRIORITIES.get(new_phase, 0)
 
             # Check if new phase can interrupt actions above it
@@ -189,7 +190,7 @@ class ActionStateManager:
             old_entry.phase = new_phase
             log_info(
                 f"{LOG_PREFIX} Action phase updated: {action_id} "
-                f"{old_entry.phase.value} (priority={old_priority}) -> {new_phase.value} (priority={new_priority})"
+                f"{old_phase.value} (priority={old_priority}) -> {new_phase.value} (priority={new_priority})"
             )
             await self._notify_state_changed()
             return True

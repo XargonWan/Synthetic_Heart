@@ -1,0 +1,17 @@
+{
+  "provider_id": "openai",
+  "display_name": "OpenAI",
+  "description": "OpenAI GPT models via the OpenAI REST API",
+  "icon": "openai",
+  "protocol": "openai",
+  "base_url": "https://api.openai.com/v1",
+  "base_url_locked": true,
+  "requires_api_key": true,
+  "api_key_placeholder": "sk-…",
+  "api_key_hint": "Get your API key at https://platform.openai.com/account/api-keys",
+  "default_capabilities": { "cortex": true, "vox": false, "auris": false, "live": false, "vision": false },
+  "suggested_name": "openai",
+  "suggested_label": "OpenAI",
+  "extra_config": {},
+  "sort_order": 10
+}
