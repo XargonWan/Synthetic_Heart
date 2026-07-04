@@ -94,32 +94,23 @@ class TTSLipSyncPlugin(AIPluginBase):
 
     @staticmethod
     def get_supported_actions() -> dict:
-        """Register supported actions."""
-        return {
-            "tts_speak": {
-                "description": "Generate speech from text and dispatch to the active interface.",
-                "required_fields": ["text"],
-                "optional_fields": ["emo"],
-            }
-        }
+        """Register supported actions.
+
+        The ``tts_speak`` action is intentionally NOT exposed here: it is now
+        owned exclusively by the Vox plugin (``plugins/vox_plugin.py``).
+        Advertising it from two plugins made the model pick the wrong path and
+        double-registered the same action. This plugin keeps its internal
+        generation helpers (``handle_custom_action`` / ``_generate_audio``) for
+        legacy callers, but no longer publishes any model-facing action.
+        """
+        return {}
 
     def get_prompt_instructions(self, action_name: str) -> dict:
-        """Provide detailed instructions for the LLM."""
-        if action_name == "tts_speak":
-            return {
-                "description": "Generate speech audio from text. The audio will be automatically sent to the chat.",
-                "payload": {
-                    "text": {
-                        "type": "string",
-                        "description": "The text content to speak.",
-                    },
-                    "emo": {
-                        "type": "string",
-                        "description": "Optional emotion style.",
-                        "optional": True,
-                    },
-                },
-            }
+        """Provide detailed instructions for the LLM.
+
+        No model-facing actions are published by this plugin anymore
+        (``tts_speak`` is owned by Vox), so this always returns an empty dict.
+        """
         return {}
 
     def __init__(self):

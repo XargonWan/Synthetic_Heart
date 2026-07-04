@@ -207,6 +207,30 @@ def _get_wav_duration(path: Path) -> float | None:
     return None
 
 
+def is_vox_enabled() -> bool:
+    """Return True when a Vox TTS engine is active (not ``disabled``).
+
+    Reads the ``ACTIVE_VOX_ENGINE`` config value directly so callers (e.g.
+    interfaces building their action catalog) can decide whether to advertise
+    the ``send_as_voice`` flag, without needing a live plugin instance. When
+    Vox is disabled, ``send_as_voice`` is not offered to the model at all —
+    mirroring how Iris only exposes ``vision_describe`` when enabled.
+    """
+    try:
+        engine = str(
+            config_registry.get_value(
+                "ACTIVE_VOX_ENGINE",
+                "disabled",
+                value_type=str,
+                group="plugins",
+                component="vox_plugin",
+            )
+        )
+    except Exception:
+        return False
+    return engine.strip().lower() != "disabled"
+
+
 class VoxPlugin(AIPluginBase):
     """Core TTS + lip-sync plugin.  Interfaces and agents call ``speak()``."""
 
@@ -476,9 +500,7 @@ class VoxPlugin(AIPluginBase):
         # Derive lip-sync metadata from the audio bytes using the active engine.
         lipsync_data: dict | None = None
         try:
-            engine = VOX_REGISTRY.load_engine(
-                engine_name or self._active_engine_name
-            )
+            engine = VOX_REGISTRY.load_engine(engine_name or self._active_engine_name)
             get_ls = getattr(engine, "get_lipsync_data", None)
             if callable(get_ls):
                 lipsync_data = get_ls(path.read_bytes())
@@ -568,7 +590,14 @@ class VoxPlugin(AIPluginBase):
     def get_supported_actions() -> dict:
         return {
             "tts_speak": {
-                "description": "Generate speech from text and send it to the active interface.",
+                "description": (
+                    "Reply with a spoken voice message. Use this whenever the user asks "
+                    "you to answer with voice/audio, or whenever you decide a spoken reply "
+                    "fits better than plain text. The text you provide is turned into "
+                    "audio and delivered as a single voice message (with the text as "
+                    "caption). Works on any turn, including when the incoming message was "
+                    "typed text."
+                ),
                 "required_fields": ["text"],
                 "optional_fields": ["emo"],
             }
@@ -582,11 +611,20 @@ class VoxPlugin(AIPluginBase):
         if action_name == "tts_speak":
             return {
                 "description": (
-                    "Generate speech audio from text. The audio will be automatically "
-                    "dispatched to the chat with lip-sync animation."
+                    "Reply with a spoken voice message instead of (or in addition to) "
+                    "plain text. The provided text is synthesised into audio, lip-synced, "
+                    "and delivered to the chat as a single voice message whose caption is "
+                    "that same text. Choose this action when the user asks to be answered "
+                    "with voice/audio in any language, or whenever you judge a spoken reply "
+                    "is more appropriate. When you use it, put your full reply in 'text' "
+                    "and do NOT also emit a separate text-only message action \u2014 the "
+                    "voice message already carries your words."
                 ),
                 "payload": {
-                    "text": {"type": "string", "description": "Text to synthesise."},
+                    "text": {
+                        "type": "string",
+                        "description": "The reply to speak (also shown as the caption).",
+                    },
                     "emo": {
                         "type": "string",
                         "description": "Optional emotion style hint.",

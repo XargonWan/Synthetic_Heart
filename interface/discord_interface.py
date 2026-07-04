@@ -722,12 +722,25 @@ class DiscordInterface:
     @staticmethod
     def get_supported_actions() -> dict:
         """Return schema information for supported actions."""
+        from plugins.vox_plugin import is_vox_enabled
+
+        vox_on = is_vox_enabled()
+
+        message_optional = ["interface_path", "target", "reply_to_message_id"]
+        message_description = "Send a reply to a Discord channel."
+        if vox_on:
+            message_optional.append("send_as_voice")
+            message_description += (
+                " Set send_as_voice=true to deliver your reply as a spoken voice "
+                "note instead of plain text."
+            )
+
         return {
             "message_discord_bot": {
-                "description": "Send a text message to a Discord channel.",
+                "description": message_description,
                 # Prefer interface_path but accept legacy 'target' (validation handles either)
                 "required_fields": ["text"],
-                "optional_fields": ["interface_path", "target", "reply_to_message_id"],
+                "optional_fields": message_optional,
             },
             "join_voice_discord": {
                 "description": "Join a Discord voice channel.",
@@ -749,30 +762,47 @@ class DiscordInterface:
     @staticmethod
     def get_prompt_instructions(action_name: str) -> dict:
         if action_name == "message_discord_bot":
+            from plugins.vox_plugin import is_vox_enabled
+
+            vox_on = is_vox_enabled()
+
+            payload = {
+                "text": {
+                    "type": "string",
+                    "example": "Hello Discord!",
+                    "description": "The message text to send.",
+                },
+                "interface_path": {
+                    "type": "string",
+                    "example": "discord_bot/1234567890/9876543210",
+                    "description": "REQUIRED. Interface path from input.payload.source.interface_path. Format: 'discord_bot/guild_id/channel_id' or 'discord_bot/guild_id/channel_id/thread_id' or 'discord_bot/user_id' for DM.",
+                },
+                "reply_to_message_id": {
+                    "type": "integer",
+                    "example": 987654321,
+                    "description": "Optional ID of the message to reply to",
+                    "optional": True,
+                },
+            }
+            important_notes = [
+                "CRITICAL: ALWAYS use interface_path from input.payload.source.interface_path to reply in same conversation!",
+                "Never construct interface_path manually - use the exact value from input.payload.source.interface_path",
+            ]
+            if vox_on:
+                payload["send_as_voice"] = {
+                    "type": "boolean",
+                    "example": True,
+                    "description": "Optional. When true, your 'text' is synthesised into a spoken voice note and delivered as a single audio message (with the text as caption). Set it when the user asks to be answered with voice/audio in any language, or whenever you judge a spoken reply is more appropriate. Leave it out (or false) for a normal text reply.",
+                    "optional": True,
+                }
+                important_notes.append(
+                    "To reply with voice, keep using message_discord_bot with your full reply in 'text' and add send_as_voice=true - do NOT emit a separate audio action."
+                )
+
             return {
                 "description": "Send a message to a Discord channel.",
-                "payload": {
-                    "text": {
-                        "type": "string",
-                        "example": "Hello Discord!",
-                        "description": "The message text to send.",
-                    },
-                    "interface_path": {
-                        "type": "string",
-                        "example": "discord_bot/1234567890/9876543210",
-                        "description": "REQUIRED. Interface path from input.payload.source.interface_path. Format: 'discord_bot/guild_id/channel_id' or 'discord_bot/guild_id/channel_id/thread_id' or 'discord_bot/user_id' for DM.",
-                    },
-                    "reply_to_message_id": {
-                        "type": "integer",
-                        "example": 987654321,
-                        "description": "Optional ID of the message to reply to",
-                        "optional": True,
-                    },
-                },
-                "important_notes": [
-                    "CRITICAL: ALWAYS use interface_path from input.payload.source.interface_path to reply in same conversation!",
-                    "Never construct interface_path manually - use the exact value from input.payload.source.interface_path",
-                ],
+                "payload": payload,
+                "important_notes": important_notes,
             }
         if action_name == "join_voice_discord":
             return {
@@ -880,6 +910,10 @@ class DiscordInterface:
         reply_to = payload.get("reply_to_message_id")
         if reply_to is not None and not isinstance(reply_to, int):
             errors.append("payload.reply_to_message_id must be an int")
+
+        send_as_voice = payload.get("send_as_voice")
+        if send_as_voice is not None and not isinstance(send_as_voice, bool):
+            errors.append("payload.send_as_voice must be a boolean")
 
         return errors
 

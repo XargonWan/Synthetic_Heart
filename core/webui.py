@@ -1272,11 +1272,24 @@ class SynthWebUIInterface:
 
     @staticmethod
     def get_supported_actions() -> dict:
+        from plugins.vox_plugin import is_vox_enabled
+
+        vox_on = is_vox_enabled()
+
+        webui_optional = ["interface_path"]
+        webui_description = f"Send a reply to a {BRAND_NAME} session."
+        if vox_on:
+            webui_optional.append("send_as_voice")
+            webui_description += (
+                " Set send_as_voice=true to deliver your reply as spoken voice "
+                "(the avatar speaks it aloud) instead of plain text."
+            )
+
         return {
             "message_synth_webui": {
                 "required_fields": ["text"],
-                "optional_fields": ["interface_path"],
-                "description": f"Send a text message to a {BRAND_NAME} session.",
+                "optional_fields": webui_optional,
+                "description": webui_description,
             },
             "message_mate_engine": {
                 "required_fields": ["text"],
@@ -1293,20 +1306,33 @@ class SynthWebUIInterface:
     @staticmethod
     def get_prompt_instructions(action_name: str) -> dict:
         if action_name == "message_synth_webui":
+            from plugins.vox_plugin import is_vox_enabled
+
+            vox_on = is_vox_enabled()
+
+            payload = {
+                "text": {
+                    "type": "string",
+                    "example": "Ciao!",
+                    "description": "Message content to deliver",
+                },
+                "target": {
+                    "type": "string",
+                    "example": "session-id",
+                    "description": "Session identifier returned by the websocket",
+                },
+            }
+            if vox_on:
+                payload["send_as_voice"] = {
+                    "type": "boolean",
+                    "example": True,
+                    "description": "Optional. When true, your 'text' is synthesised and the avatar speaks it aloud (with the text shown as the caption bubble). Set it when the user asks to be answered with voice/audio in any language, or whenever a spoken reply is more appropriate. Leave it out (or false) for a normal text reply.",
+                    "optional": True,
+                }
+
             return {
                 "description": f"Send a message to the {BRAND_NAME} browser client.",
-                "payload": {
-                    "text": {
-                        "type": "string",
-                        "example": "Ciao!",
-                        "description": "Message content to deliver",
-                    },
-                    "target": {
-                        "type": "string",
-                        "example": "session-id",
-                        "description": "Session identifier returned by the websocket",
-                    },
-                },
+                "payload": payload,
             }
         if action_name == "message_mate_engine":
             return {
