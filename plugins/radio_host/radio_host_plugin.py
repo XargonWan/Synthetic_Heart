@@ -1613,9 +1613,7 @@ class RadioHostPlugin:
                 injector_result = await self._injector.inject_banter(text, style)
                 # Mirror the same voice to the WebUI avatar so any connected
                 # spectator sees and hears the synth speaking on air.
-                await self._broadcast_to_webui(
-                    injector_result.get("audio_path"), text
-                )
+                await self._broadcast_to_webui(injector_result.get("audio_path"), text)
             finally:
                 self._set_animation("idle")
             await self._log_activity(

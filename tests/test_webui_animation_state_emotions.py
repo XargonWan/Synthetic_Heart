@@ -44,9 +44,7 @@ async def test_broadcast_animation_state_summary_includes_emotions(monkeypatch):
         "fps": 30,
         "loop": {"start_frame": 0, "end_frame": 30},
     }
-    ah._current_animation_started_at = datetime.now(timezone.utc) - timedelta(
-        seconds=1
-    )
+    ah._current_animation_started_at = datetime.now(timezone.utc) - timedelta(seconds=1)
 
     await webui._broadcast_animation_state_summary(
         AnimationState.THINK, "Thinking.fbx", ah._current_animation_descriptor
