@@ -1985,27 +1985,56 @@ async def insert_scheduled_event(
                     )
                     return
 
+                is_postgres = _get_db_type() == "postgres"
+                # NOTE: The canonical ``scheduled_events`` schema (see
+                # ``event_plugin.ensure_table_exists`` and
+                # ``scripts/sql/app_main_postgres.sql``) only defines the columns
+                # below. The ``original_context`` /
+                # ``conversation_user_message`` / ``conversation_llm_response``
+                # parameters are accepted for backward compatibility but are not
+                # persisted because those columns do not exist in the live table
+                # on any backend. Do not add them back without also shipping a
+                # migration.
+                date_col = "date" if is_postgres else "`date`"
+                time_col = "time" if is_postgres else "`time`"
+
+                if is_postgres:
+                    # Postgres (asyncpg/psycopg) requires native date/time
+                    # objects for DATE / TIME columns; plain strings are
+                    # rejected. MySQL accepts the string form directly.
+                    try:
+                        date_value: object = datetime.strptime(date, "%Y-%m-%d").date()
+                    except ValueError:
+                        log_warning(
+                            f"[insert_scheduled_event] Invalid date format: {date}"
+                        )
+                        return
+                    try:
+                        time_value: object = datetime.strptime(time, "%H:%M").time()
+                    except ValueError:
+                        time_value = datetime.strptime(time, "%H:%M:%S").time()
+                    next_run_value: object = next_run_utc
+                else:
+                    date_value = date
+                    time_value = time
+                    next_run_value = next_run_utc.strftime("%Y-%m-%d %H:%M:%S")
+
                 await safe_db_execute(
                     cur,
-                    """
+                    f"""
                     INSERT INTO scheduled_events (
-                        `date`, `time`, next_run, recurrence_type, description, created_by,
-                        original_context, conversation_user_message, conversation_llm_response
+                        {date_col}, {time_col}, next_run, recurrence_type,
+                        description, created_by
                     )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s)
                     """,
                     (
-                        date,
-                        time,
-                        next_run_utc
-                        if _get_db_type() == "postgres"
-                        else next_run_utc.strftime("%Y-%m-%d %H:%M:%S"),
+                        date_value,
+                        time_value,
+                        next_run_value,
                         recurrence_type or "none",
                         description,
                         created_by,
-                        original_context,
-                        conversation_user_message,
-                        conversation_llm_response,
                     ),
                     ensure_fn=ensure_core_tables,
                 )
@@ -2165,9 +2194,17 @@ async def mark_event_delivered(event_id: int) -> bool:
                     next_run_dt = None
 
                 if repeat_type == "none":
+                    # Postgres' ``delivered`` is a boolean column; ``= 1`` raises
+                    # ``operator does not exist: boolean = integer``. Use the
+                    # backend-appropriate literal.
+                    delivered_sql = (
+                        "UPDATE scheduled_events SET delivered = TRUE WHERE id = %s"
+                        if _get_db_type() == "postgres"
+                        else "UPDATE scheduled_events SET delivered = 1 WHERE id = %s"
+                    )
                     await safe_db_execute(
                         cur,
-                        "UPDATE scheduled_events SET delivered = 1 WHERE id = %s",
+                        delivered_sql,
                         (event_id,),
                         ensure_fn=ensure_core_tables,
                     )
@@ -2203,20 +2240,86 @@ async def mark_event_delivered(event_id: int) -> bool:
                         )
                         return False
 
-                    new_iso = new_dt.astimezone(timezone.utc).strftime(
-                        "%Y-%m-%d %H:%M:%S"
+                    new_dt_utc = new_dt.astimezone(timezone.utc)
+                    # Postgres' ``next_run`` is a timestamp column and its driver
+                    # rejects string literals; pass a real datetime. MySQL accepts
+                    # either, so a datetime is safe for both backends.
+                    new_run_val: datetime | str = (
+                        new_dt_utc
+                        if _get_db_type() == "postgres"
+                        else new_dt_utc.strftime("%Y-%m-%d %H:%M:%S")
                     )
                     await safe_db_execute(
                         cur,
                         "UPDATE scheduled_events SET next_run = %s WHERE id = %s",
-                        (new_iso, event_id),
+                        (new_run_val, event_id),
                         ensure_fn=ensure_core_tables,
                     )
-                    log_info(f"[db] Event {event_id} rescheduled to {new_iso}")
+                    log_info(
+                        f"[db] Event {event_id} rescheduled to "
+                        f"{new_dt_utc.strftime('%Y-%m-%d %H:%M:%S')}"
+                    )
                     return True
     except Exception as e:
         log_error(f"[mark_event_delivered] Error: {e}")
         return False
+
+
+async def delete_scheduled_events_by_created_by(created_by: str) -> int:
+    """Delete all pending (undelivered) scheduled events created by a given owner.
+
+    Used by self-managed schedulers (e.g. the weather plugin) that own their
+    events and need to clear all future occurrences before recreating them.
+
+    Args:
+        created_by: Owner marker stored in ``scheduled_events.created_by``.
+
+    Returns:
+        Number of rows deleted (0 on error or when nothing matched).
+    """
+    await ensure_core_tables()
+
+    is_postgres = _get_db_type() == "postgres"
+    query = (
+        "DELETE FROM scheduled_events WHERE created_by = %s AND delivered = FALSE"
+        if is_postgres
+        else "DELETE FROM scheduled_events WHERE created_by = %s AND delivered = 0"
+    )
+    try:
+        async with get_conn_ctx() as conn:
+            async with conn.cursor() as cur:
+                await safe_db_execute(
+                    cur, query, (created_by,), ensure_fn=ensure_core_tables
+                )
+                deleted = cur.rowcount if cur.rowcount is not None else 0
+                log_info(
+                    f"[delete_scheduled_events_by_created_by] Deleted {deleted} "
+                    f"pending event(s) for created_by={created_by!r}"
+                )
+                return int(deleted)
+    except Exception as e:
+        log_error(f"[delete_scheduled_events_by_created_by] Error: {e}")
+        return 0
+
+
+async def get_due_events_by_created_by(
+    created_by: str, now: datetime | None = None, advance_minutes: int = 3
+) -> list[dict]:
+    """Return due (undelivered) scheduled events owned by a given creator.
+
+    Mirrors :func:`get_due_events` but scopes the result to a single owner so a
+    self-managed scheduler can dispatch only its own events.
+
+    Args:
+        created_by: Owner marker stored in ``scheduled_events.created_by``.
+        now: Current time (UTC). Defaults to current UTC time.
+        advance_minutes: Minutes to look ahead for events (default: 3).
+
+    Returns:
+        List of event dicts ready for dispatch (may be empty).
+    """
+    events = await get_due_events(now=now, advance_minutes=advance_minutes)
+    return [e for e in events if (e.get("created_by") or "") == created_by]
 
 
 def is_valid_datetime_format(date_str: str, time_str: str | None) -> bool:

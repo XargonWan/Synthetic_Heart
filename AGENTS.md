@@ -521,8 +521,16 @@ docker exec synth-dev tail -f /app/logs/synth.log | grep -E "\[grillo\]|grillo"
 ### `scheduled_events.delivered = 0` breaks on Postgres boolean columns  <!-- 2026-04-18 -->
 **Symptom:** Event scheduler logs `UndefinedFunctionError('operator does not exist: boolean = integer')` while polling due events.
 **Location:** `core/db.py` (`get_due_events`, query `WHERE delivered = 0 AND next_run <= %s`).
-**Status:** known, not fixed.
-**Notes:** The migrated Postgres schema uses a boolean for `delivered`, but the query still compares it to integer `0`. The Postgres path should query with `delivered = FALSE` (or equivalent boolean-safe SQL).
+**Status:** fixed (2026-07-04).
+**Notes:** The migrated Postgres schema uses a boolean for `delivered`, but the query compared it to integer `0`. Fixed: `get_due_events` / `get_due_events_by_created_by` now query `WHERE delivered = FALSE AND next_run <= %s`, and `mark_event_delivered`'s one-time branch sets `delivered = TRUE` on Postgres (`delivered = 1` on MySQL). See the daily-weather-spam entry below for the related datetime bug.
+
+---
+
+### Daily weather report spam — `mark_event_delivered` passes a string to a Postgres `timestamp` column  <!-- 2026-07-04 -->
+**Symptom:** The daily weather report was delivered repeatedly (~every 15s). Logs showed the plugin claiming success (`Delivered weather event 121; rescheduled for next day`) but NO `[db] Event 121 rescheduled to ...`, plus repeated `[mark_event_delivered] Error: invalid input for query argument $1: '2026-07-05 00:50:00' (expected a datetime.date or datetime.datetime instance, got 'str')`.
+**Location:** `core/db.py` `mark_event_delivered` (recurring `daily`/`weekly`/`monthly` reschedule branch); amplified by two independent dispatchers (generic `EventPlugin` scheduler ~30s + `plugins/weather_plugin.py` `_weather_loop` 60s).
+**Status:** fixed (2026-07-04).
+**Notes:** The recurring branch computed the next run as a `strftime` string and passed it to the `next_run` `timestamp` column. The asyncpg driver rejects string literals for timestamp columns, so the UPDATE failed silently inside the try/except → `next_run` stayed today + `delivered` stayed FALSE → both dispatchers kept re-delivering the same event forever. Fix: pass a real `datetime` (UTC) on Postgres, keep the `strftime` string only on MySQL — same backend-aware pattern already used in `insert_scheduled_event`. **Lesson:** every write to `scheduled_events.next_run` (timestamp) must pass a `datetime`/`date` object on Postgres; every filter on `.delivered` (boolean) must use `TRUE`/`FALSE`. Two dispatchers sharing one event means any unmarked event turns into rapid spam.
 
 ---
 
