@@ -224,8 +224,8 @@ class TestOrphanedActionLevelKeys(unittest.IsolatedAsyncioTestCase):
         text = (
             '{"actions": [{"type": "message_telegram_bot",'
             ' "payload": {"text": "Come here and get cozy"},'
-            ' "interface_path": "telegram_bot/5208932647",'
-            ' "chat_name": "Scar",'
+            ' "interface_path": "telegram_bot/5551234567",'
+            ' "chat_name": "Alice",'
             ' "reply_to_message_id": "1517052647"}]}'
         )
 
@@ -235,7 +235,7 @@ class TestOrphanedActionLevelKeys(unittest.IsolatedAsyncioTestCase):
             text=text,
             source="llm",
             context={
-                "interface_path": "telegram_bot/5208932647",
+                "interface_path": "telegram_bot/5551234567",
                 "interface": "telegram_bot",
             },
         )
@@ -246,8 +246,8 @@ class TestOrphanedActionLevelKeys(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(executed.get("type"), "message_telegram_bot")
         payload = executed.get("payload", {})
         self.assertEqual(payload.get("text"), "Come here and get cozy")
-        self.assertEqual(payload.get("interface_path"), "telegram_bot/5208932647")
-        self.assertEqual(payload.get("chat_name"), "Scar")
+        self.assertEqual(payload.get("interface_path"), "telegram_bot/5551234567")
+        self.assertEqual(payload.get("chat_name"), "Alice")
         # _normalize_payload converts numeric strings to int during validate_action
         self.assertEqual(payload.get("reply_to_message_id"), 1517052647)
 

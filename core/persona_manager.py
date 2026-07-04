@@ -1602,7 +1602,7 @@ Please resend your message with ONLY valid emotions from the list above."""
         if persona.profile:
             # Only prepend the SyntH identity anchor when the profile doesn't already
             # open with a first-person identity statement. Rich personas (e.g. "You are
-            # 2B, a woman...") carry their own framing and the anchor would conflict.
+            # Yui, a woman...") carry their own framing and the anchor would conflict.
             # The agency/meta behaviour is already covered by AUTONOMY GUIDELINES in the
             # JSON instructions block, so it is intentionally omitted here.
             profile_stripped = persona.profile.lstrip()

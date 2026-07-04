@@ -8,14 +8,14 @@ def test_normalize_text_field_alias_renames_message_text():
     rename a key. It must be fixed inline instead."""
     payload = {
         "message_text": "Oh really? Then I guess I have to find a way...",
-        "interface_path": "telegram_bot/5208932647",
+        "interface_path": "telegram_bot/5551234567",
     }
 
     _normalize_text_field_alias("message_telegram_bot", payload)
 
     assert payload == {
         "text": "Oh really? Then I guess I have to find a way...",
-        "interface_path": "telegram_bot/5208932647",
+        "interface_path": "telegram_bot/5551234567",
     }
 
 

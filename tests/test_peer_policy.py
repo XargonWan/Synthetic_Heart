@@ -69,35 +69,45 @@ def _enable_peer_mode(monkeypatch, names):
 
 
 def test_get_relay_wait_peer_returns_preceding_peer(monkeypatch):
-    """'2B, ... 2D, ...' -- 2D's own instance should wait on 2B (id 111)."""
-    _enable_peer_mode(monkeypatch, {111: "2B"})
-    monkeypatch.setattr("core.mention_utils.get_current_aliases", lambda: ["2D", "Dee"])
+    """'SynthA, ... SynthB, ...' -- SynthB's own instance should wait on SynthA (id 111)."""
+    _enable_peer_mode(monkeypatch, {111: "SynthA"})
+    monkeypatch.setattr(
+        "core.mention_utils.get_current_aliases", lambda: ["SynthB", "Bee"]
+    )
 
-    peer_id = peer_policy.get_relay_wait_peer("Hey 2b, and Dee, introduce yourselves")
+    peer_id = peer_policy.get_relay_wait_peer(
+        "Hey syntha, and Bee, introduce yourselves"
+    )
     assert peer_id == 111
 
 
 def test_get_relay_wait_peer_none_when_own_name_first(monkeypatch):
-    """'2D, ... 2B, ...' -- 2D is mentioned first, so 2D shouldn't wait on anyone."""
-    _enable_peer_mode(monkeypatch, {111: "2B"})
-    monkeypatch.setattr("core.mention_utils.get_current_aliases", lambda: ["2D", "Dee"])
+    """'SynthB, ... SynthA, ...' -- SynthB is mentioned first, so SynthB shouldn't wait on anyone."""
+    _enable_peer_mode(monkeypatch, {111: "SynthA"})
+    monkeypatch.setattr(
+        "core.mention_utils.get_current_aliases", lambda: ["SynthB", "Bee"]
+    )
 
-    peer_id = peer_policy.get_relay_wait_peer("Dee, say hi to 2b")
+    peer_id = peer_policy.get_relay_wait_peer("Bee, say hi to syntha")
     assert peer_id is None
 
 
 def test_get_relay_wait_peer_none_when_this_bot_not_mentioned(monkeypatch):
-    _enable_peer_mode(monkeypatch, {111: "2B"})
-    monkeypatch.setattr("core.mention_utils.get_current_aliases", lambda: ["2D", "Dee"])
+    _enable_peer_mode(monkeypatch, {111: "SynthA"})
+    monkeypatch.setattr(
+        "core.mention_utils.get_current_aliases", lambda: ["SynthB", "Bee"]
+    )
 
-    peer_id = peer_policy.get_relay_wait_peer("Hey 2b, how are you?")
+    peer_id = peer_policy.get_relay_wait_peer("Hey syntha, how are you?")
     assert peer_id is None
 
 
 def test_get_relay_wait_peer_none_when_peer_mode_disabled(monkeypatch):
     monkeypatch.setattr("core.peer_policy.is_peer_mode_enabled", lambda: False)
 
-    peer_id = peer_policy.get_relay_wait_peer("Hey 2b, and Dee, introduce yourselves")
+    peer_id = peer_policy.get_relay_wait_peer(
+        "Hey syntha, and Bee, introduce yourselves"
+    )
     assert peer_id is None
 
 
@@ -241,7 +251,7 @@ async def test_should_respond_to_peer_suppresses_within_cooldown(monkeypatch):
     cursor = _TimestampCursor(datetime.now(timezone.utc))
     monkeypatch.setattr("core.db.get_conn_ctx", lambda: _DummyConn(cursor))
 
-    msg = _DummyPeerMessage("Hey Dee, how's it going?")
+    msg = _DummyPeerMessage("Hey Bee, how's it going?")
     result = await peer_policy.should_respond_to_peer(msg, "my_bot", 999)
 
     assert result is False
@@ -254,7 +264,7 @@ async def test_should_respond_to_peer_allows_after_cooldown_expires(monkeypatch)
     cursor = _TimestampCursor(stale)
     monkeypatch.setattr("core.db.get_conn_ctx", lambda: _DummyConn(cursor))
 
-    msg = _DummyPeerMessage("Hey Dee, how's it going?")
+    msg = _DummyPeerMessage("Hey Bee, how's it going?")
     result = await peer_policy.should_respond_to_peer(msg, "my_bot", 999)
 
     assert result is True
@@ -266,7 +276,7 @@ async def test_should_respond_to_peer_allows_when_never_replied(monkeypatch):
     cursor = _TimestampCursor(None)
     monkeypatch.setattr("core.db.get_conn_ctx", lambda: _DummyConn(cursor))
 
-    msg = _DummyPeerMessage("Hey Dee, how's it going?")
+    msg = _DummyPeerMessage("Hey Bee, how's it going?")
     result = await peer_policy.should_respond_to_peer(msg, "my_bot", 999)
 
     assert result is True
@@ -281,7 +291,7 @@ async def test_should_respond_to_peer_cooldown_disabled_skips_db_check(monkeypat
 
     monkeypatch.setattr("core.db.get_conn_ctx", lambda: _boom())
 
-    msg = _DummyPeerMessage("Hey Dee, how's it going?")
+    msg = _DummyPeerMessage("Hey Bee, how's it going?")
     result = await peer_policy.should_respond_to_peer(msg, "my_bot", 999)
 
     assert result is True
@@ -301,7 +311,7 @@ async def test_should_respond_to_peer_reply_chain_break_precedes_cooldown_check(
     monkeypatch.setattr("core.db.get_conn_ctx", lambda: _boom())
 
     reply_to = SimpleNamespace(from_user=SimpleNamespace(id=999))
-    msg = _DummyPeerMessage("Hey Dee!", reply_to_message=reply_to)
+    msg = _DummyPeerMessage("Hey Bee!", reply_to_message=reply_to)
     result = await peer_policy.should_respond_to_peer(msg, "my_bot", 999)
 
     assert result is False

@@ -379,7 +379,7 @@ def _normalize_interface_path(path: str) -> str:
     entries as belonging to the same conversation as new entries.
 
     Only collapses when the last two path segments are identical, e.g.:
-        telegram_bot/5208932647/5208932647 → telegram_bot/5208932647
+        telegram_bot/5551234567/5551234567 → telegram_bot/5551234567
     Leaves all other paths untouched.
     """
     if not path:

@@ -156,9 +156,9 @@ async def test_load_persona_first_call_reads_db_not_getter_defaults(monkeypatch)
     get_persisted_value() so the first call always reflects the real DB content.
     """
     persisted = {
-        "SYNTH_NAME": "2D",
-        "SYNTH_ALIASES": ["SyntH", "Synthetic Heart", "2D", "Dee", "Angel"],
-        "SYNTH_PROFILE": "You are 2D, also called Dee.",
+        "SYNTH_NAME": "SynthB",
+        "SYNTH_ALIASES": ["SyntH", "Synthetic Heart", "SynthB", "Bee", "Angel"],
+        "SYNTH_PROFILE": "You are SynthB, also called Bee.",
         "SYNTH_LIKES": ["board games", "sunny days"],
         "SYNTH_DISLIKES": ["loud noises"],
     }
@@ -176,9 +176,9 @@ async def test_load_persona_first_call_reads_db_not_getter_defaults(monkeypatch)
     result = await manager.load_persona("default")
 
     assert result is not None
-    assert result.name == "2D"
-    assert result.aliases == ["SyntH", "Synthetic Heart", "2D", "Dee", "Angel"]
-    assert result.profile == "You are 2D, also called Dee."
+    assert result.name == "SynthB"
+    assert result.aliases == ["SyntH", "Synthetic Heart", "SynthB", "Bee", "Angel"]
+    assert result.profile == "You are SynthB, also called Bee."
     assert result.likes == ["board games", "sunny days"]
     assert result.dislikes == ["loud noises"]
 
@@ -192,7 +192,7 @@ async def test_load_persona_does_not_overwrite_persisted_profile_with_skin_json(
     profile from the skin's persona.json on every call whenever a matching skin
     folder existed, silently reverting any saved edit on the next restart."""
     persisted = {
-        "SYNTH_NAME": "2D",
+        "SYNTH_NAME": "SynthB",
         "SYNTH_ALIASES": [],
         "SYNTH_PROFILE": "Custom hand-edited profile that must survive reloads.",
         "SYNTH_LIKES": [],

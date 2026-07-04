@@ -956,7 +956,7 @@ def register_all():
         ui_type="number",
         description=(
             "Mention-order turn relay: when a message addresses multiple SyntHs in "
-            "sequence (e.g. '2B, ... 2D, ...'), the later-addressed instance waits up "
+            "sequence (e.g. 'SynthA, ... SynthB, ...'), the later-addressed instance waits up "
             "to this many seconds for the earlier one to actually post its reply before "
             "generating its own -- so the earlier reply is already in this instance's "
             "own chat history by the time it responds. Set to 0 to disable relay "

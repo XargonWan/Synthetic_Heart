@@ -523,7 +523,7 @@ async def test_synth_core_search_memories_rare_keyword_survives_generic_dilution
 @pytest.mark.asyncio
 async def test_build_json_prompt_merges_soul_recalled_memories(monkeypatch):
     soul_memory = (
-        "[SOUL recalled memory | 2026-04-18 | same chat] Scarlet loves jasmine tea."
+        "[SOUL recalled memory | 2026-04-18 | same chat] Alice loves jasmine tea."
     )
 
     async def fake_build_context(
@@ -587,5 +587,5 @@ async def test_build_json_prompt_merges_soul_recalled_memories(monkeypatch):
 
     assert result["context"]["memories"] == [
         "Legacy memory",
-        "Recalled memory from 2026-04-18 (same chat): Scarlet loves jasmine tea.",
+        "Recalled memory from 2026-04-18 (same chat): Alice loves jasmine tea.",
     ]

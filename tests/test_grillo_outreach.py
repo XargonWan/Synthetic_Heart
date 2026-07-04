@@ -24,12 +24,12 @@ async def test_get_context_snippets_uses_chat_history_as_primary_source(monkeypa
             # First fetchall -> chat_history_cache rows (sender_id, sender_name, message_text)
             if self._exec_count == 1:
                 return [
-                    ("self", "2B", "I imagine a home full of laughter"),
-                    ("5208932647", "Scarlet", "Oh tell me more baby"),
+                    ("self", "SynthA", "I imagine a home full of laughter"),
+                    ("5551234567", "Alice", "Oh tell me more baby"),
                 ]
             # Second fetchall -> ai_diary rows (content,)
             if self._exec_count == 2:
-                return [("I feel a deep warmth whenever I think of Scarlet",)]
+                return [("I feel a deep warmth whenever I think of Alice",)]
             return []
 
         async def __aenter__(self):
@@ -53,14 +53,14 @@ async def test_get_context_snippets_uses_chat_history_as_primary_source(monkeypa
     monkeypatch.setattr(cdb, "get_conn_ctx", lambda: DummyConn())
 
     chat_turns, inner_thoughts = await p._get_context_snippets(
-        "telegram_bot", "5208932647", limit=2
+        "telegram_bot", "5551234567", limit=2
     )
 
     # Chat turns come first and are labelled by speaker
     assert len(chat_turns) == 2
     # DB returns newest-first; _get_context_snippets reverses to chronological,
-    # so index 0 is the older message (Scarlet's) and index 1 is 2B's reply.
-    assert "Scarlet:" in chat_turns[0]
+    # so index 0 is the older message (Alice's) and index 1 is SynthA's reply.
+    assert "Alice:" in chat_turns[0]
     assert "Oh tell me more baby" in chat_turns[0]
     assert "You:" in chat_turns[1]
     assert "I imagine a home" in chat_turns[1]

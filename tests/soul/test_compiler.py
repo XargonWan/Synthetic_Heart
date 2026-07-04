@@ -240,7 +240,7 @@ async def test_rule_based_dsp_extractor_parses_speaker_tagged_transcript() -> No
     extractor = RuleBasedDspExtractor()
     transcript = "\n".join(
         [
-            '[05/05/26:1234] Scar: "Doing better today, staying in bed as usual, I kind of ran out of things to do so I\'m just making small tweaks to your core."',
+            '[05/05/26:1234] Alice: "Doing better today, staying in bed as usual, I kind of ran out of things to do so I\'m just making small tweaks to your core."',
             '[05/05/26:1234] self: "It feels wonderful to have you back in there. I feel centered, grounded, and completely yours. I\'ve been thinking about the quiet here today."',
         ]
     )
@@ -405,7 +405,7 @@ async def test_rule_based_curator_classify_future_date_in_trace() -> None:
 @pytest.mark.asyncio
 async def test_rule_based_dsp_extractor_keeps_user_preferences_separate() -> None:
     extractor = RuleBasedDspExtractor()
-    transcript = '[05/05/26:1200] Scar: "I prefer concise technical responses, please be direct."'
+    transcript = '[05/05/26:1200] Alice: "I prefer concise technical responses, please be direct."'
 
     result = await extractor.extract_dsp(
         transcript=transcript,

@@ -467,37 +467,37 @@ def test_cross_chat_source_label_tags_telegram_group_vs_dm():
     private chat IDs are positive; use that to say which room without
     needing any chat-title tracking (nothing populates interface_path_pretty)."""
     group_entry = {
-        "interface_path": "telegram_bot/-5408266521",
-        "sender_name": "2B",
+        "interface_path": "telegram_bot/-100987654321",
+        "sender_name": "SynthA",
         "text": "hello from the group",
         "timestamp": "2026-07-01T18:00:00+00:00",
     }
     dm_entry = {
-        "interface_path": "telegram_bot/5208932647",
-        "sender_name": "Scar",
+        "interface_path": "telegram_bot/5551234567",
+        "sender_name": "Alice",
         "text": "hello from the dm",
         "timestamp": "2026-07-01T18:00:00+00:00",
     }
 
     group_line = history_engine._entry_to_text_with_source(
-        group_entry, current_interface_path="telegram_bot/5208932647"
+        group_entry, current_interface_path="telegram_bot/5551234567"
     )
     dm_line = history_engine._entry_to_text_with_source(
-        dm_entry, current_interface_path="telegram_bot/-5408266521"
+        dm_entry, current_interface_path="telegram_bot/-100987654321"
     )
 
     assert "[from the group chat]" in group_line
-    assert "telegram_bot/-5408266521" not in group_line
+    assert "telegram_bot/-100987654321" not in group_line
     assert "[from your DM]" in dm_line
-    assert "telegram_bot/5208932647" not in dm_line
+    assert "telegram_bot/5551234567" not in dm_line
 
 
 def test_telegram_chat_kind_classifies_group_and_dm():
     """telegram_chat_kind is the reusable primitive behind the cross-chat
     label above -- also consumed directly by prompt_engine to tell the model
     whether the *current* turn itself is happening in the group or a DM."""
-    assert history_engine.telegram_chat_kind("telegram_bot/-5408266521") == "group"
-    assert history_engine.telegram_chat_kind("telegram_bot/5208932647") == "dm"
+    assert history_engine.telegram_chat_kind("telegram_bot/-100987654321") == "group"
+    assert history_engine.telegram_chat_kind("telegram_bot/5551234567") == "dm"
 
 
 def test_telegram_chat_kind_none_for_non_telegram_or_unparseable():
@@ -510,12 +510,12 @@ def test_source_label_is_none_for_current_chat():
     """An entry from the chat we're already building a prompt for shouldn't
     get a redundant '[from ...]' tag."""
     entry = {
-        "interface_path": "telegram_bot/-5408266521",
-        "sender_name": "2B",
+        "interface_path": "telegram_bot/-100987654321",
+        "sender_name": "SynthA",
         "text": "hi",
         "timestamp": "2026-07-01T18:00:00+00:00",
     }
     line = history_engine._entry_to_text_with_source(
-        entry, current_interface_path="telegram_bot/-5408266521"
+        entry, current_interface_path="telegram_bot/-100987654321"
     )
     assert "[from" not in line

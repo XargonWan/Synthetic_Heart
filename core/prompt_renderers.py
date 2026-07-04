@@ -34,7 +34,7 @@ if TYPE_CHECKING:
 def _build_runtime_prefix(ctx: RuntimeContext) -> str:
     """Compact runtime context prefix injected at the start of the current turn.
 
-    Example output: ``[scope:local | lang:en | time_of_day:evening | from:Scarlet]``
+    Example output: ``[scope:local | lang:en | time_of_day:evening | from:Alice]``
     followed by a newline, so the metadata bracket reads as a distinct line
     from the actual message text rather than running straight into it --
     the exact clock timestamp is deliberately excluded (see

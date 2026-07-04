@@ -118,7 +118,7 @@ class TestMessagePluginThreadHandling(unittest.IsolatedAsyncioTestCase):
                 },
             }
             original_message = SimpleNamespace(
-                chat_id=5208932647, message_id=42, thread_id=None
+                chat_id=5551234567, message_id=42, thread_id=None
             )
 
             await plugin._handle_message_action(
@@ -130,8 +130,8 @@ class TestMessagePluginThreadHandling(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual(len(fake_iface.sent), 1)
             sent_payload, _ = fake_iface.sent[0]
-            self.assertEqual(sent_payload["target"], 5208932647)
-            self.assertEqual(sent_payload["interface_path"], "telegram_bot/5208932647")
+            self.assertEqual(sent_payload["target"], 5551234567)
+            self.assertEqual(sent_payload["interface_path"], "telegram_bot/5551234567")
         finally:
             if orig_iface is None:
                 core_init.INTERFACE_REGISTRY.pop("telegram_bot", None)

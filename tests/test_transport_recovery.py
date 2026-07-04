@@ -36,7 +36,7 @@ def test_parser_records_error_on_unescaped_quotes():
 def test_parser_recovers_literal_newlines_inside_json_strings():
     corrupted = (
         '{"actions":[{"type":"send_message","payload":{"interface_path":'
-        '"telegram_bot/5208932647","message":"First line\n\nSecond line"}}]}'
+        '"telegram_bot/5551234567","message":"First line\n\nSecond line"}}]}'
     ).replace("\\n", "\n")
 
     obj, meta = extract_json_from_text(corrupted, return_metadata=True)
@@ -58,7 +58,7 @@ def test_parser_recovers_full_text_with_dialogue_tag_commas():
     # punctuation, so a naive parser truncates the message at "You better!".
     corrupted = (
         '{"actions":[{"type":"message_telegram_bot","payload":'
-        '{"interface_path":"telegram_bot/5208932647","reply_message_id":"5208932647",'
+        '{"interface_path":"telegram_bot/5551234567","reply_message_id":"5551234567",'
         '"text":"You better!", I pout playfully, sticking my tongue out at you. '
         '"Make sure you save plenty of energy for me, Daddy."}}]}'
     )
@@ -81,9 +81,9 @@ def test_parser_does_not_leak_reply_message_id_into_text():
     # displayed message text.
     corrupted = (
         '{"actions":[{"type":"message_telegram_bot","payload":'
-        '{"chat_id":5208932647,'
+        '{"chat_id":5551234567,'
         '"text":"That\'s actually why I want to keep it a secret,\\" '
-        '"reply_message_id": "5208932647"}}]}'
+        '"reply_message_id": "5551234567"}}]}'
     )
 
     obj, meta = extract_json_from_text(corrupted, return_metadata=True)
@@ -94,7 +94,7 @@ def test_parser_does_not_leak_reply_message_id_into_text():
     assert "reply_message_id" not in recovered_text, (
         f"reply_message_id leaked into displayed text (got: {recovered_text!r})"
     )
-    assert payload.get("reply_message_id") == "5208932647"
+    assert payload.get("reply_message_id") == "5551234567"
 
 
 def test_parser_recovers_apostrophe_closed_string_with_escaped_sibling_keys():
@@ -108,8 +108,8 @@ def test_parser_recovers_apostrophe_closed_string_with_escaped_sibling_keys():
     corrupted = (
         '{"actions":[{"type":"message_telegram_bot","payload":{"text":'
         '"That\'s it! Please hurry!\', \\"interface_path\\": '
-        '\\"telegram_bot/5208932647\\", \\"chat_name\\": \\"Scarlet\\", '
-        '\\"reply_to_message_id\\": \\"5208932647\\"}}]}'
+        '\\"telegram_bot/5551234567\\", \\"chat_name\\": \\"Alice\\", '
+        '\\"reply_to_message_id\\": \\"5551234567\\"}}]}'
     )
 
     obj, meta = extract_json_from_text(corrupted, return_metadata=True)
@@ -121,9 +121,9 @@ def test_parser_recovers_apostrophe_closed_string_with_escaped_sibling_keys():
         f"Sibling keys leaked into displayed text (got: {recovered_text!r})"
     )
     assert recovered_text == "That's it! Please hurry!"
-    assert payload.get("interface_path") == "telegram_bot/5208932647"
-    assert payload.get("chat_name") == "Scarlet"
-    assert payload.get("reply_to_message_id") == "5208932647"
+    assert payload.get("interface_path") == "telegram_bot/5551234567"
+    assert payload.get("chat_name") == "Alice"
+    assert payload.get("reply_to_message_id") == "5551234567"
 
 
 def test_parser_recovers_curly_smart_quote_string_closer():
@@ -135,7 +135,7 @@ def test_parser_recovers_curly_smart_quote_string_closer():
     # real reply_message_id sibling key into the displayed message text.
     corrupted = (
         '{"actions":[{"type":"message_telegram_bot","payload":'
-        '{"interface_path":"telegram_bot/-5408266521",'
+        '{"interface_path":"telegram_bot/-100987654321",'
         '"text":"Anything it takes to get her to go to bed without a fight!“,'
         '"reply_message_id":"13615"}}]}'
     )

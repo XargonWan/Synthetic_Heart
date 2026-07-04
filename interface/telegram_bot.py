@@ -643,7 +643,7 @@ async def handle_media_live(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # First thing: decide whether this media message is *actually* meant for
     # the bot.  Prior to 2026-03 the interface treated every piece of media as
     # directed which meant voice notes would be transcribed even if nobody had
-    # mentioned Rekku/aliases and we were in a group chat.  That behaviour
+    # mentioned the SyntH/aliases and we were in a group chat.  That behaviour
     # caused excessive churn and confused users when non‑directed audio popped
     # up in the queue.
     #
@@ -1425,7 +1425,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Two distinct mechanisms, both gated on peer mode + configured peer IDs:
     #
     # 1. Mention-order relay: if this message explicitly addresses another
-    #    SyntH before this one (e.g. "2B, ... 2D, ..."), wait for that peer to
+    #    SyntH before this one (e.g. "SynthA, ... SynthB, ..."), wait for that peer to
     #    actually post their reply before proceeding, so it's already in this
     #    instance's own chat history by the time this instance responds. This
     #    wait is backgrounded (see below) rather than inline.
@@ -2319,7 +2319,7 @@ class TelegramInterface:
                 },
                 "chat_name": {
                     "type": "string",
-                    "example": "Rekkus Hideout",
+                    "example": "Synth Hideout",
                     "description": "Alternative to interface_path for specifying the chat by name (will be resolved to interface_path)",
                     "optional": True,
                 },
@@ -2368,7 +2368,7 @@ class TelegramInterface:
                     },
                     "chat_name": {
                         "type": "string",
-                        "example": "Rekkus Hideout",
+                        "example": "Synth Hideout",
                         "description": "Alternative to interface_path for specifying the chat by name",
                         "optional": True,
                     },

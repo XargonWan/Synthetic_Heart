@@ -2486,8 +2486,6 @@ class DiscordInterface:
                                                 "Describe the visual content of this image as a brief scene note (2-4 sentences). "
                                                 "Focus only on: setting/background, what characters look like (hair color, clothing, posture, expression), "
                                                 "and the overall mood or atmosphere. "
-                                                "If a character has short white hair, call her '2B'. "
-                                                "If a character is male with ginger/red hair, call him 'Scarlet'. "
                                                 "Write in neutral, literary prose. Do not describe any explicit or adult content. "
                                                 "Output ONLY the scene description, no preamble."
                                             )

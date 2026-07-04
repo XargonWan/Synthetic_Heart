@@ -149,7 +149,7 @@ class RuleBasedMemCellExtractor:
 class RuleBasedDspExtractor:
     """Extract lightweight DSP facts from transcript text."""
 
-    _SELF_SPEAKER_LABELS = frozenset({"self", "synth", "assistant", "2b", "raine"})
+    _SELF_SPEAKER_LABELS = frozenset({"self", "synth", "assistant"})
 
     async def extract_dsp(
         self, *, transcript: str, current_date: date

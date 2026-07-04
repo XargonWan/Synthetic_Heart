@@ -508,7 +508,7 @@ class RadioHostPlugin:
         log_info("[radio_host] RadioHostPlugin stopped")
 
     def _get_synth_name(self) -> str:
-        """Return the configured synth name (e.g. 'SyntH', 'Rekku')."""
+        """Return the configured synth name (e.g. 'SyntH')."""
         return str(config_registry.get_value("SYNTH_NAME", "SyntH") or "SyntH")
 
     async def _ensure_running(self) -> None:

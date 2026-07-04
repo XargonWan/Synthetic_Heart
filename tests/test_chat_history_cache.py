@@ -418,12 +418,12 @@ async def test_load_chat_history_default_match_chat_level_false_is_exact_match_o
     monkeypatch.setattr(chat_history_cache, "get_conn_ctx", lambda: DummyConn())
     monkeypatch.setattr(chat_history_cache, "_get_history_limit", lambda default=10: 10)
 
-    await chat_history_cache.load_chat_history("telegram_bot/-5408266521")
+    await chat_history_cache.load_chat_history("telegram_bot/-100987654321")
 
     query, params = executed[0]
     assert "LIKE" not in query
     assert "WHERE interface_path = %s" in query
-    assert params == ("telegram_bot/-5408266521", 10)
+    assert params == ("telegram_bot/-100987654321", 10)
 
 
 @pytest.mark.asyncio
@@ -431,7 +431,7 @@ async def test_load_chat_history_match_chat_level_broadens_to_thread_suffixes(
     monkeypatch,
 ):
     """With match_chat_level=True, the WHERE clause must also match thread-
-    suffixed variants of the same chat (e.g. telegram_bot/-5408266521/237093590),
+    suffixed variants of the same chat (e.g. telegram_bot/-100987654321/237093590),
     using the same chat-key convention as peer_policy._chat_key."""
     executed: list[tuple[str, tuple[object, ...] | None]] = []
 
@@ -462,14 +462,14 @@ async def test_load_chat_history_match_chat_level_broadens_to_thread_suffixes(
     monkeypatch.setattr(chat_history_cache, "_get_history_limit", lambda default=10: 10)
 
     await chat_history_cache.load_chat_history(
-        "telegram_bot/-5408266521", match_chat_level=True
+        "telegram_bot/-100987654321", match_chat_level=True
     )
 
     query, params = executed[0]
     assert "WHERE (interface_path = %s OR interface_path LIKE %s)" in query
     assert params == (
-        "telegram_bot/-5408266521",
-        "telegram_bot/-5408266521/%",
+        "telegram_bot/-100987654321",
+        "telegram_bot/-100987654321/%",
         10,
     )
 

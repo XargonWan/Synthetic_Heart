@@ -298,8 +298,8 @@ that should respond immediately. Only secondary instances need a non-zero value.
 Mention-Order Relay (Addressing Multiple SyntHs in One Message)
 -----------------------------------------------------------------
 
-When a single message addresses more than one SyntH in sequence — e.g. "2B,
-tell me the plan. 2D, what do you think?" — the SyntHs should reply in the
+When a single message addresses more than one SyntH in sequence — e.g. "SynthA,
+tell me the plan. SynthB, what do you think?" — the SyntHs should reply in the
 order they were addressed, and the later one should be able to react to what
 the earlier one actually said. This is separate from turn coordination above
 (which only prevents an *accidental* double reply to the same undirected

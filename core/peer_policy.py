@@ -193,7 +193,7 @@ def get_peer_context_block() -> str | None:
         f"Known peers:\n{name_list}\n\n"
         "There is no separate channel for them: a peer's turn arrives in the same "
         "message flow as your trainer's and is marked with a `[PeerName]: ` prefix "
-        "at the very start of the message (e.g. `[2B]: ...`). That prefix always "
+        "at the very start of the message (e.g. `[SynthA]: ...`). That prefix always "
         "means the named peer said it — never your trainer — even though it shares "
         "the same message channel. A message with no such prefix is your trainer "
         "speaking directly.\n\n"
@@ -273,7 +273,7 @@ def get_relay_wait_peer(text: str) -> int | None:
     """Return the peer bot ID this instance should wait on before replying.
 
     Implements mention-order turn relay: when a single message addresses
-    multiple SyntHs in sequence (e.g. "2B, ... 2D, ..."), the later-addressed
+    multiple SyntHs in sequence (e.g. "SynthA, ... SynthB, ..."), the later-addressed
     instance should wait for the earlier one to actually post its reply
     before generating its own — so the earlier reply is already present in
     this instance's own chat history/context (added unconditionally when the
