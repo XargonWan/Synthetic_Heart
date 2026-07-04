@@ -11,9 +11,7 @@ def test_get_current_animation_state_timing_computed():
         "fps": 24,
         "loop": {"start_frame": 0, "end_frame": 48},
     }
-    ah._current_animation_started_at = datetime.now(timezone.utc) - timedelta(
-        seconds=2
-    )
+    ah._current_animation_started_at = datetime.now(timezone.utc) - timedelta(seconds=2)
 
     state = ah.get_current_animation_state()
     assert state["state"] == "think"

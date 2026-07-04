@@ -1295,6 +1295,51 @@ async def _handle_plugin_action(
                     )
                 except Exception:
                     pass
+
+                # === send_as_voice: deliver this reply as a spoken voice note ===
+                # When the model sets send_as_voice=true on a message_* action,
+                # route the text through Vox (TTS). Vox synthesises the audio and
+                # dispatches BOTH the audio and the caption text to the interface,
+                # so we must NOT also call send_message here (that would duplicate
+                # the text). If Vox is disabled or fails, Vox.speak() falls back to
+                # sending the text itself, so a plain reply is still delivered.
+                if bool(payload.get("send_as_voice")):
+                    try:
+                        from core.core_initializer import PLUGIN_REGISTRY
+                        from plugins.vox_plugin import VoxPlugin
+
+                        vox_plugin = None
+                        if isinstance(PLUGIN_REGISTRY, dict):
+                            for p in PLUGIN_REGISTRY.values():
+                                if isinstance(p, VoxPlugin):
+                                    vox_plugin = p
+                                    break
+
+                        if vox_plugin is not None:
+                            voice_ip = payload.get("interface_path") or getattr(
+                                original_message, "interface_path", None
+                            )
+                            log_info(
+                                f"[action_parser] 🎙️ send_as_voice=true — routing '{action_type}' "
+                                f"to Vox for interface '{plugin_iface}'"
+                            )
+                            await vox_plugin.speak(
+                                text=payload.get("text", "") or "",
+                                interface_path=voice_ip,
+                                context=context,
+                                original_message=original_message,
+                            )
+                            return None
+                        log_warning(
+                            "[action_parser] send_as_voice=true but no Vox plugin "
+                            "loaded — falling back to plain text send."
+                        )
+                    except Exception as e:
+                        log_error(
+                            f"[action_parser] send_as_voice routing failed: {repr(e)} "
+                            "— falling back to plain text send."
+                        )
+
                 log_info(
                     f"[action_parser] ✉️ Dispatching message action to interface '{plugin_iface}' via send_message"
                 )

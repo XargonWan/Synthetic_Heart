@@ -1272,11 +1272,25 @@ class SynthWebUIInterface:
 
     @staticmethod
     def get_supported_actions() -> dict:
+        from plugins.vox_plugin import is_vox_enabled
+
+        vox_on = is_vox_enabled()
+
+        webui_optional = ["interface_path"]
+        webui_description = f"Send a reply to a {BRAND_NAME} session."
+        if vox_on:
+            webui_optional.append("send_as_voice")
+            webui_description += (
+                " send_as_voice defaults to false. Only set send_as_voice=true when "
+                "the user explicitly asked for a voice/audio reply, or when they "
+                "just spoke to you by voice. Otherwise reply as plain text."
+            )
+
         return {
             "message_synth_webui": {
                 "required_fields": ["text"],
-                "optional_fields": ["interface_path"],
-                "description": f"Send a text message to a {BRAND_NAME} session.",
+                "optional_fields": webui_optional,
+                "description": webui_description,
             },
             "message_mate_engine": {
                 "required_fields": ["text"],
@@ -1293,20 +1307,33 @@ class SynthWebUIInterface:
     @staticmethod
     def get_prompt_instructions(action_name: str) -> dict:
         if action_name == "message_synth_webui":
+            from plugins.vox_plugin import is_vox_enabled
+
+            vox_on = is_vox_enabled()
+
+            payload = {
+                "text": {
+                    "type": "string",
+                    "example": "Ciao!",
+                    "description": "Message content to deliver",
+                },
+                "target": {
+                    "type": "string",
+                    "example": "session-id",
+                    "description": "Session identifier returned by the websocket",
+                },
+            }
+            if vox_on:
+                payload["send_as_voice"] = {
+                    "type": "boolean",
+                    "example": True,
+                    "description": "Optional, defaults to false. When true, your 'text' is synthesised and the avatar speaks it aloud (with the text shown as the caption bubble). Voice synthesis is slow, so use it SPARINGLY: only set it when the user EXPLICITLY asked to be answered with voice/audio (in any language), or when the user just spoke to you by voice. Do NOT set it just because it might be nice. For every ordinary reply, leave it out (or false) and answer as plain text.",
+                    "optional": True,
+                }
+
             return {
                 "description": f"Send a message to the {BRAND_NAME} browser client.",
-                "payload": {
-                    "text": {
-                        "type": "string",
-                        "example": "Ciao!",
-                        "description": "Message content to deliver",
-                    },
-                    "target": {
-                        "type": "string",
-                        "example": "session-id",
-                        "description": "Session identifier returned by the websocket",
-                    },
-                },
+                "payload": payload,
             }
         if action_name == "message_mate_engine":
             return {
@@ -2013,6 +2040,8 @@ class SynthWebUIInterface:
     async def serve_template_section(self, section: str):
         """Serve modular template sections for dynamic loading."""
         try:
+            import time
+
             # Validate section name to prevent path traversal
             allowed_sections = {
                 "home",
@@ -2027,6 +2056,7 @@ class SynthWebUIInterface:
                 "navbar",
                 "agent",
                 "engines",
+                "external_engines",
             }
             if section not in allowed_sections:
                 raise HTTPException(
@@ -2051,6 +2081,8 @@ class SynthWebUIInterface:
             # Apply basic replacements
             replacements = {
                 "%%BRAND_NAME%%": BRAND_NAME,
+                # cache-busting token so section scripts refresh on each render
+                "%%STATIC_VERSION%%": str(int(time.time())),
             }
 
             for key, value in replacements.items():
@@ -8641,6 +8673,15 @@ class SynthWebUIInterface:
             for _name in VOX_REGISTRY.get_available_engines():
                 _meta = VOX_REGISTRY.get_engine_meta(_name)
                 _caps = _meta.get("capabilities") or {}
+                _v_available_models: list[str] = []
+                _v_default_model: str | None = None
+                _v_instance = VOX_REGISTRY._instances.get(_name)
+                if _v_instance is not None and hasattr(_v_instance, "_endpoint"):
+                    _v_ep = _v_instance._endpoint
+                    _v_available_models = list(
+                        getattr(_v_ep, "available_models", None) or []
+                    )
+                    _v_default_model = getattr(_v_ep, "default_model", None)
                 vox_data.append(
                     {
                         "name": _name,
@@ -8652,6 +8693,8 @@ class SynthWebUIInterface:
                         "details": "Active" if _name == active_vox else "",
                         "error": None,
                         "active": _name == active_vox,
+                        "available_models": _v_available_models,
+                        "default_model": _v_default_model,
                     }
                 )
         except Exception as exc:
@@ -8710,6 +8753,15 @@ class SynthWebUIInterface:
             for _name in AURIS_REGISTRY.get_available_engines():
                 _meta = AURIS_REGISTRY.get_engine_meta(_name)
                 _caps = _meta.get("capabilities") or {}
+                _a_available_models: list[str] = []
+                _a_default_model: str | None = None
+                _a_instance = AURIS_REGISTRY._instances.get(_name)
+                if _a_instance is not None and hasattr(_a_instance, "_endpoint"):
+                    _a_ep = _a_instance._endpoint
+                    _a_available_models = list(
+                        getattr(_a_ep, "available_models", None) or []
+                    )
+                    _a_default_model = getattr(_a_ep, "default_model", None)
                 auris_data.append(
                     {
                         "name": _name,
@@ -8721,6 +8773,8 @@ class SynthWebUIInterface:
                         "details": "Active" if _name == active_auris else "",
                         "error": None,
                         "active": _name == active_auris,
+                        "available_models": _a_available_models,
+                        "default_model": _a_default_model,
                     }
                 )
         except Exception as exc:
@@ -8918,6 +8972,12 @@ class SynthWebUIInterface:
             "iris": iris_data,
             "iris_current_model": (
                 config_registry.get_value("IRIS_DEFAULT_MODEL", "") or ""
+            ),
+            "vox_current_model": (
+                config_registry.get_value("VOX_DEFAULT_MODEL", "") or ""
+            ),
+            "auris_current_model": (
+                config_registry.get_value("AURIS_DEFAULT_MODEL", "") or ""
             ),
             "live": live_data,
             "interfaces": interfaces_data,

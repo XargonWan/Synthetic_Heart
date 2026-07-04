@@ -915,13 +915,13 @@ async def test_external_cortex_engine_forwards_openai_tool_declarations():
     engine = ExternalCortexEngine(endpoint, cast(Any, FakeAdapter()))
     response = await engine.handle_incoming_message(None, None, prompt)
 
+    # Native tools are globally shelved (_NATIVE_TOOLS_ENABLED = False): all
+    # endpoints fall back to the in-prompt action protocol, so no native
+    # tools/tool_choice are forwarded and supports_tool_calling stays False.
     assert response == '{"actions": []}'
-    assert prompt.supports_tool_calling is True
-    assert captured["kwargs"]["tool_choice"] == "auto"
-    tools = captured["kwargs"]["tools"]
-    assert len(tools) == 1
-    assert tools[0]["type"] == "function"
-    assert tools[0]["function"]["name"] == "send_message"
+    assert prompt.supports_tool_calling is False
+    assert "tools" not in captured["kwargs"]
+    assert "tool_choice" not in captured["kwargs"]
 
 
 @pytest.mark.asyncio
@@ -1038,10 +1038,10 @@ async def test_external_cortex_engine_forwards_anthropic_tool_declarations():
     engine = ExternalCortexEngine(endpoint, cast(Any, FakeAdapter()))
     await engine.handle_incoming_message(None, None, prompt)
 
-    tools = captured["kwargs"]["tools"]
-    assert len(tools) == 1
-    assert tools[0]["name"] == "send_message"
-    assert captured["kwargs"]["tool_choice"] == {"type": "auto"}
+    # Native tools shelved globally: Anthropic endpoint also uses the in-prompt
+    # protocol, so no native tools/tool_choice are forwarded.
+    assert "tools" not in captured["kwargs"]
+    assert "tool_choice" not in captured["kwargs"]
 
 
 @pytest.mark.asyncio
@@ -1097,14 +1097,14 @@ async def test_external_cortex_engine_forwards_gemini_tool_declarations():
     engine = ExternalCortexEngine(endpoint, cast(Any, FakeAdapter()))
     response = await engine.handle_incoming_message(None, None, prompt)
 
+    # Native tools shelved globally: Gemini endpoint also uses the in-prompt
+    # protocol, so no native tools are forwarded and supports_tool_calling
+    # stays False. Model/message wiring is unchanged.
     assert response == '{"actions": []}'
-    assert prompt.supports_tool_calling is True
+    assert prompt.supports_tool_calling is False
     assert captured["model"] == "gemini-3.1-flash-lite-preview"
     assert captured["kwargs"]["timeout"] == 1800.0
-    tools = captured["kwargs"]["tools"]
-    assert len(tools) == 1
-    declarations = tools[0]["function_declarations"]
-    assert declarations[0]["name"] == "send_message"
+    assert "tools" not in captured["kwargs"]
     assert captured["messages"][0]["role"] == "system"
     assert captured["messages"][-1]["role"] == "user"
 
@@ -1155,8 +1155,15 @@ async def test_force_json_object_sets_response_format():
 
 
 @pytest.mark.asyncio
-async def test_response_format_dropped_when_tools_active():
-    """response_format must not be sent alongside native tool-calling."""
+async def test_response_format_kept_in_prompt_protocol_when_tools_shelved():
+    """Native tools are globally shelved (_NATIVE_TOOLS_ENABLED = False), so even
+    when tool_declarations are present the engine uses the in-prompt protocol:
+    no native tools are forwarded and response_format (force_json_object) is
+    applied to constrain the JSON-in-content reply.
+
+    (When native tools are re-enabled for the agentic feature, this must revert
+    to dropping response_format while tools are active.)
+    """
     from core.external_endpoints.bridges.cortex_bridge import ExternalCortexEngine
     from core.prompt_request import PromptRequest
 
@@ -1190,8 +1197,8 @@ async def test_response_format_dropped_when_tools_active():
     engine = ExternalCortexEngine(endpoint, cast(Any, FakeAdapter()))
     await engine.handle_incoming_message(None, None, prompt)
 
-    assert "tools" in captured["kwargs"]
-    assert "response_format" not in captured["kwargs"]
+    assert "tools" not in captured["kwargs"]
+    assert captured["kwargs"]["response_format"] == {"type": "json_object"}
 
 
 def test_strip_thinking_handles_thought_and_dangling_close():

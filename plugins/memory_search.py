@@ -778,4 +778,16 @@ class MemorySearchPlugin:
 
 
 # Export plugin class for dynamic import patterns
+#
+# PHASE 2 — Active in-turn recall (memory recall reliability work):
+# This plugin is currently dormant (PLUGIN_CLASS = None), so Synth cannot issue
+# an in-turn `memory_search` action to actively re-search her own memory when a
+# first passive lookup misses. Phase 1 improved *passive* recall (two-tier
+# AND-then-OR matching in core/synth_core_memory.search_memories + a real
+# language-agnostic tokenizer in core/synth_tagging.extract_tags routed as
+# keywords). If intermittent recall still occurs, Phase 2 is to reactivate this
+# action by setting `PLUGIN_CLASS = MemorySearchPlugin` below, giving the model
+# an explicit tool to look things up mid-turn. The latent SQL bugs here were
+# already fixed (2026-06-12), so reactivation is safe — but verify the action's
+# security level / prompt catalog exposure before enabling.
 PLUGIN_CLASS = None

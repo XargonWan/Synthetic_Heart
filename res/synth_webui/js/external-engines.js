@@ -605,7 +605,40 @@
             }
 
             await loadEndpoints();
-            window.SynthWebUI?.loadEnginesSummary?.();
+            // Refresh the engine/registry selectors (vox / auris / vision / live)
+            // so a newly-flagged (or unflagged) capability is reflected without a
+            // manual page reload.
+            //
+            // The selectors live in the *Engines* / *Components* tabs, NOT in this
+            // External Engines tab. loadEnginesSummary() (-> loadComponentsSummary)
+            // early-returns when none of the `components-*-list` elements are in the
+            // DOM, which is exactly the case while this tab is mounted. So awaiting
+            // it here does nothing on its own. We therefore:
+            //   1. Await it anyway — cheap, and it repopulates immediately in the
+            //      rare case the Engines tab is already mounted.
+            //   2. Invalidate the cached Engines/Components panels so the next time
+            //      the user opens them, loadSection re-fetches the template and
+            //      re-runs their initializer against fresh /api/components data
+            //      instead of showing stale (cached) selectors.
+            await window.SynthWebUI?.loadEnginesSummary?.();
+            try {
+                document
+                    .querySelectorAll(
+                        '.tab-panel[data-tab="engines"], .tab-panel[data-tab="components"]'
+                    )
+                    .forEach((panel) => {
+                        // Skip the panel that is currently mounted/active: if the
+                        // form was submitted from within the Engines tab itself,
+                        // loadEnginesSummary() above already repopulated its selects,
+                        // and clearing it here would blank out the live view.
+                        if (panel.classList.contains('active')) return;
+                        panel.dataset.loaded = '0';
+                        panel.dataset.loading = '0';
+                        while (panel.firstChild) panel.removeChild(panel.firstChild);
+                    });
+            } catch (e) {
+                console.debug('[synth_webui] engines/components cache invalidation skipped', e);
+            }
 
             const probe = response.probe || {};
             if (probe.status === 'failed') {

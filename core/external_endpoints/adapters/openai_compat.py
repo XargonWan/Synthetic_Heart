@@ -376,7 +376,9 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
             capabilities = self._normalize_capabilities(entry.get("capabilities", {}))
             return ModelInfo(
                 id=entry_id,
-                name=str(entry.get("name", entry_id) or entry.get("display_name", entry_id)),
+                name=str(
+                    entry.get("name", entry_id) or entry.get("display_name", entry_id)
+                ),
                 owned_by=str(entry.get("owned_by", "")),
                 capabilities=capabilities,
             )

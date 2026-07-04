@@ -1813,6 +1813,101 @@ async def handle_incoming_message(
                             if action_name in current_user_output_action_types:
                                 has_user_output_action = True
 
+                    # ------------------------------------------------------------------
+                    # LLM-CHOSEN VOICE REPLY (text turn): merge into a single voice note
+                    # ------------------------------------------------------------------
+                    # When the LLM itself decided to answer with `tts_speak` AND also
+                    # emitted a text-only message_* action for the same reply, we don't
+                    # want the user to receive both a text bubble and a separate audio
+                    # note. Mirror the voice-input behaviour: drop the standalone text
+                    # message and fold its text into the tts_speak as the caption.
+                    #
+                    # This lets the synth reply with voice on a *typed* request (e.g.
+                    # "answer me with a voice message") or whenever it chooses to speak,
+                    # driven purely by the LLM's action choice (no keyword detection).
+                    # Skipped for: WebUI (keeps its text bubble for the tts-play handler),
+                    # autonomous/internal turns (already stripped above), and voice-input
+                    # turns (handled by the auto-inject path below).
+                    if (
+                        has_tts
+                        and has_user_response
+                        and user_message_action
+                        and isinstance(actions, list)
+                    ):
+                        _merge_iface_prefix = (ctx.get("interface_path") or "").split(
+                            "/"
+                        )[0]
+                        _merge_is_voice_input = bool(ctx.get("is_voice_input", False))
+                        _merge_request_tts = bool(
+                            context
+                            and isinstance(context, dict)
+                            and context.get("request_tts")
+                        )
+                        # Only merge for LLM-driven voice replies on non-voice turns.
+                        # Voice-originated turns are merged by the auto-inject path, and
+                        # WebUI intentionally keeps the separate text bubble.
+                        if (
+                            _merge_iface_prefix != "synth_webui"
+                            and not _merge_is_voice_input
+                            and not _merge_request_tts
+                        ):
+                            # Find the LLM-emitted tts_speak that is NOT auto-injected.
+                            _llm_tts_action = None
+                            for _a in actions:
+                                if not isinstance(_a, dict):
+                                    continue
+                                if (_a.get("action") or _a.get("type")) != "tts_speak":
+                                    continue
+                                _a_payload = _a.get("payload")
+                                if not isinstance(_a_payload, dict):
+                                    _a_payload = {}
+                                if _a_payload.get("__auto_injected"):
+                                    continue
+                                _llm_tts_action = _a
+                                break
+
+                            if _llm_tts_action is not None:
+                                _tts_payload = _llm_tts_action.get("payload")
+                                if not isinstance(_tts_payload, dict):
+                                    _tts_payload = {}
+                                    _llm_tts_action["payload"] = _tts_payload
+                                _spoken_text = str(
+                                    _tts_payload.get("text") or ""
+                                ).strip()
+                                # Prefer the spoken text as caption; fall back to the
+                                # text-only message body if tts_speak carried no text.
+                                _msg_payload = (
+                                    user_message_action.get("payload")
+                                    if isinstance(user_message_action, dict)
+                                    else {}
+                                )
+                                if not isinstance(_msg_payload, dict):
+                                    _msg_payload = {}
+                                _msg_text = str(
+                                    _msg_payload.get("text")
+                                    or _msg_payload.get("content")
+                                    or _msg_payload.get("message")
+                                    or ""
+                                ).strip()
+                                _caption = _spoken_text or _msg_text
+                                if _caption:
+                                    if not _tts_payload.get("text"):
+                                        _tts_payload["text"] = _caption
+                                    _tts_payload["__merged_text"] = _caption
+                                    log_info(
+                                        "[message_chain] \U0001f3a4 LLM voice reply on text turn: "
+                                        f"merging text+audio into a single voice message for: {_caption[:30]}..."
+                                    )
+                                    # Remove standalone message_* actions; the voice
+                                    # message (audio + caption) replaces them.
+                                    actions[:] = [
+                                        a
+                                        for a in actions
+                                        if isinstance(a, dict)
+                                        and (a.get("action") or a.get("type"))
+                                        not in current_message_action_types
+                                    ]
+
                     # Auto-inject TTS if there's a user response but no tts_speak
                     # Only for actual user-facing interfaces (not internal like grillo)
                     if (
@@ -1930,7 +2025,15 @@ async def handle_incoming_message(
                                 tts_already_executed = True
 
                         # Determine if we should skip TTS
+                        # When the LLM explicitly set send_as_voice=true on the
+                        # message_* action, the audio is routed centrally in
+                        # action_parser (VoxPlugin.speak) and the plain text is
+                        # suppressed there. Auto-injecting tts_speak here as well
+                        # would produce a second spoken message, so skip it.
+                        _explicit_send_as_voice = bool(payload.get("send_as_voice"))
+
                         # Skip for: internal grillo beats, internal chats, system messages, autonomous messages, already-executed TTS,
+                        # an explicit send_as_voice request (handled in action_parser),
                         # or if the request_tts flag/feature is off
                         should_skip_tts = (
                             is_grillo_internal
@@ -1938,6 +2041,7 @@ async def handle_incoming_message(
                             or is_system_message
                             or is_autonomous
                             or tts_already_executed
+                            or _explicit_send_as_voice
                         )
                         # honor explicit request flag passed via context or wrapped message
                         _explicit_tts_request = bool(

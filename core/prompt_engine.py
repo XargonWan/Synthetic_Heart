@@ -226,7 +226,20 @@ _NON_USER_FACING_ACTION_HINTS = (
 )
 # Actions that are purely system/pipeline mechanisms and must never appear in
 # the model-visible actions block, regardless of plugin description text.
-_SYSTEM_ONLY_ACTION_NAMES: frozenset[str] = frozenset({"static_inject"})
+#
+# The audio_* / tts_speak actions remain callable internally (Vox routes voice
+# replies through them), but the model must never pick them directly: to reply
+# with voice it sets send_as_voice=true on the normal message_* action instead.
+# Advertising the raw audio actions caused the model to emit spoken TEXT in the
+# 'audio' field (expected a file path), so the voice was silently dropped.
+_SYSTEM_ONLY_ACTION_NAMES: frozenset[str] = frozenset(
+    {
+        "static_inject",
+        "audio_telegram_bot",
+        "audio_discord_bot",
+        "tts_speak",
+    }
+)
 _CONTEXT_SEGMENT_SPLIT_RE = re.compile(r"(?:\n\s*|\s+)---(?:\s*\n|\s+)")
 _SOUL_RECALLED_MEMORY_RE = re.compile(
     r"^\[SOUL recalled memory\s*\|\s*(?P<meta>[^\]]+)\]\s*(?P<body>.*)$",
@@ -1175,6 +1188,11 @@ async def build_prompt_request(
     # History-like context is now produced by HistoryEngine (plugin-centric aggregation)
 
     # === 2. Tags and memory lookup ===
+    # extract_tags returns salient content tokens (language-agnostic). These are
+    # matched against row *content* (keywords), NOT against the JSON tag columns:
+    # the auto-generated tag arrays rarely contain the raw message tokens, so
+    # passing them as tags would silently return nothing. See extract_tags docs
+    # and the two-tier fallback in search_memories.
     tags = extract_tags(text)
     expanded_tags = expand_tags(tags)
     memories = []
@@ -1190,13 +1208,13 @@ async def build_prompt_request(
             from core.synth_core_memory import search_memories
 
             memories = await search_memories(
-                tags=expanded_tags, limit=max(1, mem_limit), include_chat=True
+                keywords=expanded_tags, limit=max(1, mem_limit), include_chat=True
             )
         except Exception as e:
             log_warning(f"[json_prompt] search_memories failed: {e}")
             memories = []
         log_debug(
-            f"[json_prompt] ⏱️ Loaded {len(memories)} memories from tags in {time.time() - start_time:.2f}s"
+            f"[json_prompt] ⏱️ Loaded {len(memories)} memories from keywords in {time.time() - start_time:.2f}s"
         )
     # === Recon (prompt 0) contributions ===
     recon_contributions: list[dict] = []
