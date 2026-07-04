@@ -2013,6 +2013,8 @@ class SynthWebUIInterface:
     async def serve_template_section(self, section: str):
         """Serve modular template sections for dynamic loading."""
         try:
+            import time
+
             # Validate section name to prevent path traversal
             allowed_sections = {
                 "home",
@@ -2027,6 +2029,7 @@ class SynthWebUIInterface:
                 "navbar",
                 "agent",
                 "engines",
+                "external_engines",
             }
             if section not in allowed_sections:
                 raise HTTPException(
@@ -2051,6 +2054,8 @@ class SynthWebUIInterface:
             # Apply basic replacements
             replacements = {
                 "%%BRAND_NAME%%": BRAND_NAME,
+                # cache-busting token so section scripts refresh on each render
+                "%%STATIC_VERSION%%": str(int(time.time())),
             }
 
             for key, value in replacements.items():
@@ -8641,6 +8646,15 @@ class SynthWebUIInterface:
             for _name in VOX_REGISTRY.get_available_engines():
                 _meta = VOX_REGISTRY.get_engine_meta(_name)
                 _caps = _meta.get("capabilities") or {}
+                _v_available_models: list[str] = []
+                _v_default_model: str | None = None
+                _v_instance = VOX_REGISTRY._instances.get(_name)
+                if _v_instance is not None and hasattr(_v_instance, "_endpoint"):
+                    _v_ep = _v_instance._endpoint
+                    _v_available_models = list(
+                        getattr(_v_ep, "available_models", None) or []
+                    )
+                    _v_default_model = getattr(_v_ep, "default_model", None)
                 vox_data.append(
                     {
                         "name": _name,
@@ -8652,6 +8666,8 @@ class SynthWebUIInterface:
                         "details": "Active" if _name == active_vox else "",
                         "error": None,
                         "active": _name == active_vox,
+                        "available_models": _v_available_models,
+                        "default_model": _v_default_model,
                     }
                 )
         except Exception as exc:
@@ -8710,6 +8726,15 @@ class SynthWebUIInterface:
             for _name in AURIS_REGISTRY.get_available_engines():
                 _meta = AURIS_REGISTRY.get_engine_meta(_name)
                 _caps = _meta.get("capabilities") or {}
+                _a_available_models: list[str] = []
+                _a_default_model: str | None = None
+                _a_instance = AURIS_REGISTRY._instances.get(_name)
+                if _a_instance is not None and hasattr(_a_instance, "_endpoint"):
+                    _a_ep = _a_instance._endpoint
+                    _a_available_models = list(
+                        getattr(_a_ep, "available_models", None) or []
+                    )
+                    _a_default_model = getattr(_a_ep, "default_model", None)
                 auris_data.append(
                     {
                         "name": _name,
@@ -8721,6 +8746,8 @@ class SynthWebUIInterface:
                         "details": "Active" if _name == active_auris else "",
                         "error": None,
                         "active": _name == active_auris,
+                        "available_models": _a_available_models,
+                        "default_model": _a_default_model,
                     }
                 )
         except Exception as exc:
@@ -8918,6 +8945,12 @@ class SynthWebUIInterface:
             "iris": iris_data,
             "iris_current_model": (
                 config_registry.get_value("IRIS_DEFAULT_MODEL", "") or ""
+            ),
+            "vox_current_model": (
+                config_registry.get_value("VOX_DEFAULT_MODEL", "") or ""
+            ),
+            "auris_current_model": (
+                config_registry.get_value("AURIS_DEFAULT_MODEL", "") or ""
             ),
             "live": live_data,
             "interfaces": interfaces_data,

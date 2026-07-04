@@ -679,6 +679,11 @@
         if (window.SynthWebUI && typeof window.SynthWebUI.loadEnginesSummary === 'function') {
             window.SynthWebUI.loadEnginesSummary();
         }
+
+        // Wire the shared "Manage Models" modal (Vox / Auris / Iris buttons)
+        if (window.SynthWebUI && typeof window.SynthWebUI.initModelManager === 'function') {
+            window.SynthWebUI.initModelManager();
+        }
     }
 
     // Register with SynthWebUI — the init function name must match the pattern

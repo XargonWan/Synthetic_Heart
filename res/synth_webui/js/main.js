@@ -3203,6 +3203,63 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                     }
                     // ────────────────────────────────────────────────────────
 
+                    // ── Vox / Auris model selectors (generic, mirrors Iris) ───
+                    const setupAudioModelSelect = (modelSelId, engineSelId, engineList, currentModel, configKey, boundFlag) => {
+                        const modelSel = document.getElementById(modelSelId);
+                        const engineSel = document.getElementById(engineSelId);
+                        if (!modelSel) return;
+
+                        const populate = (engineName) => {
+                            const engine = (engineList || []).find((e) => e.name === engineName);
+                            const models = (engine && engine.available_models) ? engine.available_models : [];
+                            if (!models.length) {
+                                modelSel.style.display = 'none';
+                                modelSel.innerHTML = '';
+                                return;
+                            }
+                            modelSel.innerHTML = '';
+                            models.forEach((m) => {
+                                const opt = document.createElement('option');
+                                opt.value = m;
+                                opt.textContent = m;
+                                modelSel.appendChild(opt);
+                            });
+                            const saved = currentModel || (engine && engine.default_model) || '';
+                            modelSel.value = models.includes(saved) ? saved : models[0];
+                            modelSel.style.display = '';
+                        };
+
+                        if (engineSel) {
+                            populate(engineSel.value);
+                            if (!engineSel.dataset[boundFlag]) {
+                                engineSel.addEventListener('change', () => populate(engineSel.value));
+                                engineSel.dataset[boundFlag] = '1';
+                            }
+                        }
+
+                        if (!modelSel.dataset.bound) {
+                            modelSel.addEventListener('change', async () => {
+                                try {
+                                    const r = await fetch('/api/config', {
+                                        method: 'POST',
+                                        headers: { 'Content-Type': 'application/json' },
+                                        body: JSON.stringify({ key: configKey, value: modelSel.value }),
+                                    });
+                                    if (!r.ok) throw new Error('HTTP ' + r.status);
+                                    window.showToast && window.showToast('Model set to ' + modelSel.value);
+                                } catch (e) {
+                                    console.error('[synth_webui] Failed to set ' + configKey, e);
+                                    window.showToast && window.showToast('Failed to save model', true);
+                                }
+                            });
+                            modelSel.dataset.bound = '1';
+                        }
+                    };
+
+                    setupAudioModelSelect('vox-model-select', 'vox-engine-select', data.vox || [], data.vox_current_model || '', 'VOX_DEFAULT_MODEL', 'voxModelBound');
+                    setupAudioModelSelect('auris-model-select', 'auris-engine-select', data.auris || [], data.auris_current_model || '', 'AURIS_DEFAULT_MODEL', 'aurisModelBound');
+                    // ────────────────────────────────────────────────────────
+
                     // ── Live voice configuration ──────────────────────────────
                     const liveVoiceCfg = document.getElementById('live-voice-config');
                     const liveVoiceNameSel = document.getElementById('live-voice-name');
@@ -3929,6 +3986,190 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
             // Also expose as initEnginesTab so that the Engines tab triggers the engine selector UI
             function initEnginesTab() {
                 loadComponentsSummary();
+                initModelManager();
+            }
+
+            // ── Manage Models modal (shared by Vox / Auris / Iris) ──────────
+            function initModelManager() {
+                if (window.__synth_model_manager_initialized) return;
+                const modal = document.getElementById('model-manager-modal');
+                const listEl = document.getElementById('model-manager-list');
+                const titleEl = document.getElementById('model-manager-title');
+                const subtitleEl = document.getElementById('model-manager-subtitle');
+                const errorEl = document.getElementById('model-manager-error');
+                const closeBtn = document.getElementById('model-manager-close');
+                const rowTpl = document.getElementById('model-manager-row-tpl');
+                if (!modal || !listEl || !rowTpl) return;
+
+                const SUBSYSTEMS = {
+                    vox: { label: 'Vox — Text-to-Speech', tag: 'tts', prefix: 'vox_' },
+                    auris: { label: 'Auris — Speech-to-Text', tag: 'stt', prefix: 'auris_' },
+                    iris: { label: 'Iris — Vision', tag: 'vision', prefix: 'iris_' },
+                };
+                const pollTimers = {};
+
+                const showError = (msg) => {
+                    if (!errorEl) return;
+                    if (msg) { errorEl.textContent = msg; errorEl.style.display = ''; }
+                    else { errorEl.textContent = ''; errorEl.style.display = 'none'; }
+                };
+
+                const closeModal = () => {
+                    modal.style.display = 'none';
+                    Object.keys(pollTimers).forEach((k) => { clearInterval(pollTimers[k]); delete pollTimers[k]; });
+                };
+
+                if (closeBtn && !closeBtn.dataset.bound) {
+                    closeBtn.addEventListener('click', closeModal);
+                    closeBtn.dataset.bound = '1';
+                }
+                if (!modal.dataset.bound) {
+                    modal.addEventListener('click', (ev) => { if (ev.target === modal) closeModal(); });
+                    modal.dataset.bound = '1';
+                }
+
+                const belongsToSubsystem = (model, sub) => {
+                    const cfg = SUBSYSTEMS[sub];
+                    if (!cfg) return false;
+                    const tags = Array.isArray(model.tags) ? model.tags : [];
+                    if (tags.includes(cfg.tag)) return true;
+                    return typeof model.plugin_id === 'string' && model.plugin_id.startsWith(cfg.prefix);
+                };
+
+                const setDownloadingState = (row, model) => {
+                    const dlBtn = row.querySelector('.mm-download-btn');
+                    const delBtn = row.querySelector('.mm-delete-btn');
+                    const progWrap = row.querySelector('.mm-progress-wrap');
+                    const progBar = row.querySelector('.mm-progress-bar');
+                    const badge = row.querySelector('.mm-downloaded-badge');
+                    if (model.downloading) {
+                        dlBtn.textContent = 'Downloading…';
+                        dlBtn.disabled = true;
+                        if (delBtn) delBtn.style.display = 'none';
+                        if (progWrap) progWrap.style.display = '';
+                        if (progBar) progBar.style.width = Math.round((model.download_progress || 0) * 100) + '%';
+                    } else if (model.downloaded) {
+                        dlBtn.textContent = 'Re-download';
+                        dlBtn.disabled = false;
+                        if (delBtn) delBtn.style.display = '';
+                        if (progWrap) progWrap.style.display = 'none';
+                        if (badge) badge.style.display = '';
+                    } else {
+                        dlBtn.textContent = 'Download';
+                        dlBtn.disabled = false;
+                        if (delBtn) delBtn.style.display = 'none';
+                        if (progWrap) progWrap.style.display = 'none';
+                        if (badge) badge.style.display = 'none';
+                    }
+                };
+
+                const pollProgress = (modelId, row) => {
+                    if (pollTimers[modelId]) return;
+                    pollTimers[modelId] = setInterval(async () => {
+                        try {
+                            const r = await fetch('/api/models/' + encodeURIComponent(modelId) + '/progress');
+                            if (!r.ok) throw new Error('HTTP ' + r.status);
+                            const m = await r.json();
+                            setDownloadingState(row, m);
+                            if (!m.downloading) {
+                                clearInterval(pollTimers[modelId]);
+                                delete pollTimers[modelId];
+                                window.showToast && window.showToast(m.downloaded ? 'Model downloaded' : 'Download stopped');
+                            }
+                        } catch (e) {
+                            clearInterval(pollTimers[modelId]);
+                            delete pollTimers[modelId];
+                        }
+                    }, 1500);
+                };
+
+                const renderRow = (model) => {
+                    const frag = rowTpl.content.cloneNode(true);
+                    const row = frag.querySelector('.mm-row');
+                    row.querySelector('.mm-name').textContent = model.display_name || model.model_id;
+                    const desc = row.querySelector('.mm-desc');
+                    desc.textContent = model.description || '';
+                    const sizeEl = row.querySelector('.mm-size');
+                    sizeEl.textContent = model.size_mb ? '· ' + model.size_mb + ' MB' : '';
+                    setDownloadingState(row, model);
+
+                    const dlBtn = row.querySelector('.mm-download-btn');
+                    dlBtn.addEventListener('click', async () => {
+                        showError('');
+                        dlBtn.disabled = true;
+                        dlBtn.textContent = 'Starting…';
+                        try {
+                            const r = await fetch('/api/models/' + encodeURIComponent(model.model_id) + '/download', { method: 'POST' });
+                            if (!r.ok) throw new Error('HTTP ' + r.status);
+                            model.downloading = true;
+                            setDownloadingState(row, model);
+                            pollProgress(model.model_id, row);
+                        } catch (e) {
+                            showError('Failed to start download: ' + e.message);
+                            setDownloadingState(row, model);
+                        }
+                    });
+
+                    const delBtn = row.querySelector('.mm-delete-btn');
+                    delBtn.addEventListener('click', async () => {
+                        if (!window.confirm('Delete downloaded model "' + (model.display_name || model.model_id) + '"?')) return;
+                        showError('');
+                        delBtn.disabled = true;
+                        try {
+                            const r = await fetch('/api/models/' + encodeURIComponent(model.model_id), { method: 'DELETE' });
+                            if (!r.ok) throw new Error('HTTP ' + r.status);
+                            model.downloaded = false;
+                            setDownloadingState(row, model);
+                            window.showToast && window.showToast('Model removed');
+                        } catch (e) {
+                            showError('Failed to delete model: ' + e.message);
+                            delBtn.disabled = false;
+                        }
+                    });
+
+                    return frag;
+                };
+
+                const openModal = async (sub) => {
+                    const cfg = SUBSYSTEMS[sub];
+                    if (!cfg) return;
+                    showError('');
+                    if (titleEl) titleEl.textContent = 'Manage Models — ' + cfg.label;
+                    if (subtitleEl) subtitleEl.textContent = 'Download, update or remove locally-managed models for the ' + sub + ' subsystem.';
+                    listEl.innerHTML = '<div class="meta">Loading…</div>';
+                    modal.style.display = 'flex';
+                    try {
+                        const r = await fetch('/api/models');
+                        if (!r.ok) throw new Error('HTTP ' + r.status);
+                        const data = await r.json();
+                        const models = (Array.isArray(data) ? data : (data.models || [])).filter((m) => belongsToSubsystem(m, sub));
+                        listEl.innerHTML = '';
+                        if (!models.length) {
+                            listEl.innerHTML = '<div class="meta">No locally-managed models available for this subsystem.</div>';
+                            return;
+                        }
+                        models.forEach((m) => {
+                            listEl.appendChild(renderRow(m));
+                            if (m.downloading) {
+                                const row = listEl.lastElementChild;
+                                if (row) pollProgress(m.model_id, row);
+                            }
+                        });
+                    } catch (e) {
+                        listEl.innerHTML = '';
+                        showError('Failed to load models: ' + e.message);
+                    }
+                };
+
+                [['vox-manage-models-btn', 'vox'], ['auris-manage-models-btn', 'auris'], ['iris-manage-models-btn', 'iris']].forEach(([btnId, sub]) => {
+                    const btn = document.getElementById(btnId);
+                    if (btn && !btn.dataset.bound) {
+                        btn.addEventListener('click', () => openModal(sub));
+                        btn.dataset.bound = '1';
+                    }
+                });
+
+                window.__synth_model_manager_initialized = true;
             }
 
             function initLogsTab() {
@@ -4373,6 +4614,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
             window.SynthWebUI.initPluginsTab = initPluginsTab;
             window.SynthWebUI.initEnginesTab = initEnginesTab;
             window.SynthWebUI.loadEnginesSummary = loadComponentsSummary;
+            window.SynthWebUI.initModelManager = initModelManager;
             window.SynthWebUI.initLogsTab = initLogsTab;
             window.SynthWebUI.initAboutTab = initAboutTab;
 
