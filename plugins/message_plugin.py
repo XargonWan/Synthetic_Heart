@@ -417,6 +417,76 @@ class MessagePlugin:
         ):
             reply_to = original_message.message_id
 
+        # === Voice input forces a spoken reply ===
+        # Historically, when the incoming message was an audio/voice note the reply
+        # was always delivered as voice. Preserve that behaviour: if this turn was
+        # voice-originated (is_voice_input / request_tts) and Vox is enabled, force
+        # send_as_voice=true regardless of whether the model set it. WebUI has its
+        # own lipsync/VRM path and is excluded.
+        try:
+            _voice_input = isinstance(context, dict) and (
+                context.get("is_voice_input") or context.get("request_tts")
+            )
+            _is_webui = "webui" in (interface_name or "").lower()
+            if _voice_input and not _is_webui and not payload.get("send_as_voice"):
+                from plugins.vox_plugin import is_vox_enabled
+
+                if is_vox_enabled():
+                    log_info(
+                        "[message_plugin] Voice input detected — forcing "
+                        "send_as_voice=true for spoken reply."
+                    )
+                    payload["send_as_voice"] = True
+        except Exception as e:
+            log_debug(f"[message_plugin] Voice-input force check failed: {e}")
+
+        # === send_as_voice: deliver this reply as a spoken voice note ===
+        # message_* actions are routed through this plugin (not the interface's
+        # own send_message branch in action_parser), so the send_as_voice routing
+        # must live here too. When set, hand the text to Vox (TTS): Vox synthesises
+        # the audio AND dispatches both the audio and caption to the interface, so
+        # we must NOT also call handler.send_message() (that would duplicate the
+        # text). If Vox is disabled or fails, Vox.speak() falls back to sending the
+        # text itself, so a plain reply is still delivered.
+        if bool(payload.get("send_as_voice")):
+            try:
+                from core.core_initializer import PLUGIN_REGISTRY
+                from plugins.vox_plugin import VoxPlugin
+
+                vox_plugin = None
+                if isinstance(PLUGIN_REGISTRY, dict):
+                    for p in PLUGIN_REGISTRY.values():
+                        if isinstance(p, VoxPlugin):
+                            vox_plugin = p
+                            break
+
+                if vox_plugin is not None:
+                    voice_ip = (
+                        rebuilt_interface_path
+                        or interface_path
+                        or getattr(original_message, "interface_path", None)
+                    )
+                    log_info(
+                        f"[message_plugin] 🎙️ send_as_voice=true — routing '{action_type}' "
+                        f"to Vox for interface '{interface_name}'"
+                    )
+                    await vox_plugin.speak(
+                        text=text or "",
+                        interface_path=voice_ip,
+                        context=context,
+                        original_message=original_message,
+                    )
+                    return
+                log_warning(
+                    "[message_plugin] send_as_voice=true but no Vox plugin loaded "
+                    "— falling back to plain text send."
+                )
+            except Exception as e:
+                log_error(
+                    f"[message_plugin] send_as_voice routing failed: {repr(e)} "
+                    "— falling back to plain text send."
+                )
+
         send_payload = {"text": text, "target": target}
         if thread_id is not None:
             send_payload["thread_id"] = thread_id
