@@ -46,6 +46,7 @@ async def test_grillo_beat_types_exist() -> None:
         "self_reflection",
         "curiosity",
         "relationship",
+        "temporal_reflection",
     ]
 
     # Check _select_beat_type returns one of the expected types
@@ -163,7 +164,8 @@ async def test_grillo_outreach_prompt_generation() -> None:
     prompt = plugin._build_outreach_prompt(
         interface="telegram_bot",
         chat_id="123456",
-        context=["Test context 1", "Test context 2"],
+        chat_turns=["Test context 1", "Test context 2"],
+        inner_thoughts=[],
     )
 
     assert "SELF-INITIATED OUTREACH" in prompt
@@ -173,7 +175,33 @@ async def test_grillo_outreach_prompt_generation() -> None:
     assert "create_personal_diary_entry" in prompt
     assert "personal_thought" in prompt
     assert "emotions" in prompt
-    assert "Test context 1" in prompt
+    # Chat turns are already injected upstream as real conversation_history
+    # messages — the outreach prompt must not re-echo them verbatim (that
+    # would duplicate the same recent messages under a different labelling
+    # scheme). It should just point at the history instead.
+    assert "Test context 1" not in prompt
+    assert "conversation history just above" in prompt
+
+
+@pytest.mark.asyncio
+async def test_grillo_outreach_prompt_no_recent_conversation_fallback() -> None:
+    """When there is no recent chat history, the prompt should fall back to
+    letting the outreach come from how the model feels, instead of pointing
+    at a (nonexistent) conversation history."""
+    from plugins.grillo.grillo_outreach import GrilloOutreachPlugin
+
+    plugin = GrilloOutreachPlugin()
+
+    prompt = plugin._build_outreach_prompt(
+        interface="telegram_bot",
+        chat_id="123456",
+        chat_turns=[],
+        inner_thoughts=[],
+    )
+
+    assert "No recent conversation" in prompt
+    assert "let the outreach come from how you feel" in prompt
+    assert "conversation history just above" not in prompt
 
 
 @pytest.mark.asyncio

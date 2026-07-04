@@ -70,6 +70,7 @@ git_*.txt
 .ruff_cache
 _[Bb]uild
 .gitnexus
+.gitnexus-home
 opencode.json
 .claude
 .clinerules
@@ -78,7 +79,10 @@ opencode.json
 .gemini
 .vscode
 .zed
-
+api.py
 # Local installer outputs and downloaded packaging dependencies
 installer/Output/
 installer/vendor/*.msi
+# grok-api-mcp ships a prebuilt dist so workspaces only need `npm ci`, no build
+!mcp_servers/grok-api-mcp/dist/
+!mcp_servers/grok-api-mcp/dist/**

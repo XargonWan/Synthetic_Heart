@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from typing import Any
 
 
-from core import prompt_engine
+from core import history_engine, prompt_engine
 
 
 async def _dummy_gather(message, ctx):
@@ -31,7 +31,7 @@ def test_format_current_chat_history(monkeypatch):
     interface = "telegram_bot/123"
     context_memory = {interface: deque([])}
 
-    async def _fake_cache_load(ip):
+    async def _fake_cache_load(ip, match_chat_level: bool = False):
         assert ip == interface
         return deque([msg1, msg2])
 
@@ -75,7 +75,7 @@ def test_current_chat_history_respects_last_n(monkeypatch):
     context_memory = {interface: deque([])}
 
     # Force loader to return our two messages and let last_n=1 be applied
-    async def _fake_cache_load(ip):
+    async def _fake_cache_load(ip, match_chat_level: bool = False):
         assert ip == interface
         return deque([msg1, msg2])
 
@@ -99,8 +99,62 @@ def test_current_chat_history_respects_last_n(monkeypatch):
     assert "Bob" in entries[0]
 
 
+def test_lite_mode_history_limit_overrides_context_verbosity(monkeypatch):
+    """LITE_MODE_HISTORY_LIMIT is the WebUI-exposed dial next to the Lite Mode
+    toggle -- it must be authoritative while lite mode is on, not silently
+    capped by the separate, general CONTEXT_VERBOSITY dial."""
+    monkeypatch.setattr("core.action_parser.gather_static_injections", _dummy_gather)
+
+    def _fake_get_int(key, default):
+        if key == "CONTEXT_VERBOSITY":
+            return 2
+        if key == "LITE_MODE_HISTORY_LIMIT":
+            return 8
+        return default
+
+    monkeypatch.setattr("core.history_engine._get_int", _fake_get_int)
+    monkeypatch.setattr(
+        "core.history_engine._get_bool",
+        lambda key, default: True if key == "PROMPT_LITE_MODE" else default,
+    )
+
+    now = datetime.now(timezone.utc)
+    msgs = [
+        _make_msg(f"User{i}", f"Message {i}", now - timedelta(minutes=10 - i))
+        for i in range(6)
+    ]
+
+    interface = "telegram_bot/999"
+    context_memory = {interface: deque([])}
+
+    async def _fake_cache_load(ip, match_chat_level: bool = False):
+        assert ip == interface
+        return deque(msgs)
+
+    monkeypatch.setattr("core.chat_history_cache.load_chat_history", _fake_cache_load)
+
+    message = SimpleNamespace(
+        interface_path=interface,
+        text="test",
+        message_id=7,
+        from_user=SimpleNamespace(full_name="user", username="user"),
+        date=now,
+    )
+
+    res = asyncio.run(
+        prompt_engine.build_json_prompt(
+            message, context_memory, interface_name="telegram"
+        )
+    )
+    entries = res["context"].get("history_current_chat", [])
+    # All 6 available messages should come through -- capped by the lite-mode
+    # limit (8), not by the lower general CONTEXT_VERBOSITY (2).
+    assert len(entries) == 6
+
+
 def test_no_duplication_with_history_recent(monkeypatch):
     monkeypatch.setattr("core.action_parser.gather_static_injections", _dummy_gather)
+    monkeypatch.setattr("core.core_initializer.PLUGIN_REGISTRY", {})
     now = datetime.now(timezone.utc)
     msg = _make_msg("Carol", "Dup", now - timedelta(minutes=1))
 
@@ -147,7 +201,7 @@ def test_local_global_separation(monkeypatch):
     # in-memory chat_map contains the local message
     context_memory = {interface: deque([local_msg])}
 
-    async def _fake_cache_load(ip):
+    async def _fake_cache_load(ip, match_chat_level: bool = False):
         assert ip == interface
         return deque([local_msg])
 
@@ -203,7 +257,7 @@ def test_history_scope_local_only(monkeypatch):
     interface = "telegram_bot/555"
     context_memory = {interface: deque([local_msg])}
 
-    async def _fake_cache_load(ip):
+    async def _fake_cache_load(ip, match_chat_level: bool = False):
         return deque([local_msg])
 
     async def _fake_global_load(limit=10):
@@ -254,6 +308,7 @@ def test_unified_history_keeps_local_messages_when_global_tail_is_busy(monkeypat
         "core.history_engine._get_int",
         lambda key, default: 3 if key == "CONTEXT_VERBOSITY" else default,
     )
+    monkeypatch.setattr("core.core_initializer.PLUGIN_REGISTRY", {})
 
     now = datetime.now(timezone.utc)
     interface = "telegram_bot/777"
@@ -272,7 +327,7 @@ def test_unified_history_keeps_local_messages_when_global_tail_is_busy(monkeypat
         "discord_bot/3": deque([{**other_3, "interface_path": "discord_bot/3"}]),
     }
 
-    async def _fake_cache_load(ip):
+    async def _fake_cache_load(ip, match_chat_level: bool = False):
         assert ip == interface
         return deque([local_old, local_mid, local_new])
 
@@ -403,3 +458,64 @@ def test_load_chat_history_for_guild_queries(monkeypatch):
     assert "timestamp > %s" in cur2.last_query
     assert cur2.last_params[1] == "2026-02-01T00:00:00"
     assert cur2.last_params[-1] == 2
+
+
+def test_cross_chat_source_label_tags_telegram_group_vs_dm():
+    """Cross-chat history entries must be tagged with a readable room label,
+    not the raw interface_path -- otherwise the model has no way to tell
+    where an injected entry came from. Telegram group chat IDs are negative,
+    private chat IDs are positive; use that to say which room without
+    needing any chat-title tracking (nothing populates interface_path_pretty)."""
+    group_entry = {
+        "interface_path": "telegram_bot/-100987654321",
+        "sender_name": "SynthA",
+        "text": "hello from the group",
+        "timestamp": "2026-07-01T18:00:00+00:00",
+    }
+    dm_entry = {
+        "interface_path": "telegram_bot/5551234567",
+        "sender_name": "Alice",
+        "text": "hello from the dm",
+        "timestamp": "2026-07-01T18:00:00+00:00",
+    }
+
+    group_line = history_engine._entry_to_text_with_source(
+        group_entry, current_interface_path="telegram_bot/5551234567"
+    )
+    dm_line = history_engine._entry_to_text_with_source(
+        dm_entry, current_interface_path="telegram_bot/-100987654321"
+    )
+
+    assert "[from the group chat]" in group_line
+    assert "telegram_bot/-100987654321" not in group_line
+    assert "[from your DM]" in dm_line
+    assert "telegram_bot/5551234567" not in dm_line
+
+
+def test_telegram_chat_kind_classifies_group_and_dm():
+    """telegram_chat_kind is the reusable primitive behind the cross-chat
+    label above -- also consumed directly by prompt_engine to tell the model
+    whether the *current* turn itself is happening in the group or a DM."""
+    assert history_engine.telegram_chat_kind("telegram_bot/-100987654321") == "group"
+    assert history_engine.telegram_chat_kind("telegram_bot/5551234567") == "dm"
+
+
+def test_telegram_chat_kind_none_for_non_telegram_or_unparseable():
+    assert history_engine.telegram_chat_kind("discord_bot/123456") is None
+    assert history_engine.telegram_chat_kind("telegram_bot/not_a_number") is None
+    assert history_engine.telegram_chat_kind("telegram_bot") is None
+
+
+def test_source_label_is_none_for_current_chat():
+    """An entry from the chat we're already building a prompt for shouldn't
+    get a redundant '[from ...]' tag."""
+    entry = {
+        "interface_path": "telegram_bot/-100987654321",
+        "sender_name": "SynthA",
+        "text": "hi",
+        "timestamp": "2026-07-01T18:00:00+00:00",
+    }
+    line = history_engine._entry_to_text_with_source(
+        entry, current_interface_path="telegram_bot/-100987654321"
+    )
+    assert "[from" not in line

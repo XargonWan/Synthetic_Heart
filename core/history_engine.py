@@ -140,6 +140,17 @@ register_exposed_var(
     component="history_engine",
 )
 
+register_exposed_var(
+    "LITE_MODE_HISTORY_LIMIT",
+    label="Lite Mode History Limit (items)",
+    default=3,
+    value_type=int,
+    ui_type="number",
+    description="Max number of recent chat history / recap items to inject while Prompt Lite Mode is on. Overrides Context Verbosity while lite mode is active.",
+    scope="core",
+    component="history_engine",
+)
+
 
 def _get_int(key: str, default: int) -> int:
     try:
@@ -227,6 +238,39 @@ def _entry_to_text(entry: HistoryEntry) -> str:
     return f'[{_format_ts(ts)}] {sender}{reply_suffix}: "{safe_text}"'.strip()
 
 
+def telegram_chat_kind(path: str) -> str | None:
+    """Return ``"group"`` or ``"dm"`` for a telegram_bot interface_path.
+
+    Telegram chat IDs are negative for groups/supergroups and positive for
+    private chats -- a reliable signal that's already on every interface_path,
+    with no need to track chat titles (nothing in the codebase populates
+    those). Returns ``None`` for non-Telegram interfaces or an unparseable
+    chat id, where this convention doesn't apply.
+    """
+    parts = path.split("/")
+    if len(parts) >= 2 and parts[0] == "telegram_bot":
+        try:
+            chat_id = int(parts[1])
+        except ValueError:
+            return None
+        return "group" if chat_id < 0 else "dm"
+    return None
+
+
+def _friendly_interface_label(path: str) -> str:
+    """Best-effort human-readable label for a cross-chat source path.
+
+    Falls back to the raw path when :func:`telegram_chat_kind` can't
+    classify it (non-Telegram interfaces, unparseable chat id).
+    """
+    kind = telegram_chat_kind(path)
+    if kind == "group":
+        return "the group chat"
+    if kind == "dm":
+        return "your DM"
+    return path
+
+
 def _source_label(
     entry: HistoryEntry, current_interface_path: str | None = None
 ) -> str | None:
@@ -240,7 +284,7 @@ def _source_label(
     pretty = entry.get("interface_path_pretty")
     if pretty:
         return str(pretty)
-    return str(entry_path)
+    return _friendly_interface_label(str(entry_path))
 
 
 def _entry_to_text_with_source(
@@ -331,9 +375,13 @@ class HistoryEngine:
         verbosity = max(0, _get_int("CONTEXT_VERBOSITY", 10))
         thoughts_limit = max(0, _get_int("THOUGHTS_LIMIT", 5))
 
-        # In lite mode, aggressively cap limits for small/local models
+        # In lite mode, the dedicated lite-mode limit is authoritative -- it's
+        # the WebUI-exposed dial right next to the Lite Mode toggle, and
+        # min()-ing it against the general CONTEXT_VERBOSITY dial meant raising
+        # it above CONTEXT_VERBOSITY silently had no effect (the two dials
+        # look independent in the UI but weren't).
         if lite_mode:
-            verbosity = min(verbosity, 3)
+            verbosity = max(0, _get_int("LITE_MODE_HISTORY_LIMIT", 3))
             thoughts_limit = min(thoughts_limit, 2)
 
         enable_current = _get_bool("ENABLE_HISTORY_CURRENT_CHAT", True)
@@ -433,7 +481,7 @@ class HistoryEngine:
                             load_chat_history as cache_load,
                         )
 
-                        cached = await cache_load(interface_path)
+                        cached = await cache_load(interface_path, match_chat_level=True)
                         combined = list(msgs) + list(cached)
                         msgs = combined[-verbosity:]
                     except Exception as e:

@@ -2,7 +2,7 @@ import copy
 import json
 import re
 from collections.abc import Mapping, Sequence
-from typing import Any, Optional, Dict
+from typing import Any, Optional, Dict, Union, Tuple
 from core.logging_utils import log_debug, log_info, log_warning
 
 
@@ -115,7 +115,400 @@ def redact_multimodal_for_logging(obj: Any) -> Any:
     return _redact_multimodal_recursive(copy.deepcopy(obj))
 
 
-def extract_json_from_text(text: str, return_metadata: bool = False) -> Optional[Dict]:
+def _repair_premature_string_close(text: str) -> str:
+    """Repair JSON where the LLM closes a string value prematurely then continues
+    with literal \\n escape sequences and more text outside the string.
+
+    LLM produces (invalid JSON):
+        "key": "First paragraph." \\n\\nSecond paragraph.
+
+    After repair (valid JSON):
+        "key": "First paragraph.\\n\\nSecond paragraph."
+
+    The \\n sequences remain as JSON string escapes; the premature closing quote
+    is removed and a proper one is appended after the continuation text.
+    """
+    # Match: premature closing " + optional spaces + one or more literal \\n sequences
+    # + continuation text up to the next real newline, quote, or closing brace.
+    # In the regex, \\n matches the two-char sequence backslash+n in the text string.
+    # This pattern can only occur in already-invalid JSON, so false-positive risk is nil.
+    pattern = re.compile(r'"( *\\n)+([^\n"]*)')
+
+    def _fix(m: re.Match) -> str:
+        # m.group(0) starts with " (premature close), e.g. '" \\n\\nSome text'
+        # Drop the leading " and close properly after the continuation content.
+        body = m.group(0)[1:].rstrip()
+        return body + '"'
+
+    return pattern.sub(_fix, text)
+
+
+_APOSTROPHE_ESCAPED_TAIL_RE = re.compile(
+    r"'((?:,\s*\\\"[A-Za-z_][A-Za-z0-9_]*\\\"\s*:\s*"
+    r"(?:\\\"[^\"\\]*\\\"|-?\d+(?:\.\d+)?|true|false|null)\s*)+)"
+)
+
+
+def _repair_apostrophe_closed_escaped_tail(text: str) -> str:
+    """Repair JSON where the LLM closes a string value with an apostrophe
+    instead of a double quote, then continues with escaped-quote sibling
+    keys that were meant to be real JSON object keys, not string content.
+
+    LLM produces (invalid JSON):
+        "text": "Some reply!', \\"interface_path\\": \\"telegram_bot/1\\"}
+
+    After repair (valid JSON):
+        "text": "Some reply!", "interface_path": "telegram_bot/1"}
+
+    The apostrophe becomes the real closing quote, and the escaped quotes in
+    the trailing key/value run are unescaped back into real JSON structure.
+    A legitimate JSON string cannot contain an unescaped apostrophe directly
+    followed by an escaped-quote ``"key": value`` run like this, so the
+    false-positive risk is nil.
+    """
+
+    def _fix(m: re.Match) -> str:
+        tail = m.group(1)
+        return '"' + tail.replace('\\"', '"')
+
+    return _APOSTROPHE_ESCAPED_TAIL_RE.sub(_fix, text)
+
+
+_SMART_QUOTE_TRANSLATION = str.maketrans(
+    {
+        "“": '"',  # “ left double quotation mark
+        "”": '"',  # ” right double quotation mark
+        "‘": "'",  # ‘ left single quotation mark
+        "’": "'",  # ’ right single quotation mark
+    }
+)
+
+
+def _normalize_smart_quotes(text: str) -> str:
+    """Normalize Unicode curly quotes to their ASCII equivalents.
+
+    LLMs occasionally emit a curly quote (e.g. U+201C) where a straight
+    JSON string delimiter was intended. The repair scanners in this module
+    only recognize literal ASCII '"' (and ''') as structural boundaries, so
+    an unrecognized curly quote is treated as ordinary prose: the scanner
+    runs straight past it and silently swallows the next real JSON
+    key/value pair (e.g. reply_message_id) into the string value. Normalize
+    before any repair pass runs so a mistaken curly closer is recognized.
+    """
+    return text.translate(_SMART_QUOTE_TRANSLATION)
+
+
+_APOSTROPHE_SINGLE_QUOTED_TAIL_RE = re.compile(
+    r"'((?:[;,]\s*'[A-Za-z_][A-Za-z0-9_]*'\s*:\s*"
+    r"(?:'[^'\\]*'|-?\d+(?:\.\d+)?|true|false|null)\s*)+)"
+)
+
+
+def _repair_apostrophe_closed_single_quoted_tail(text: str) -> str:
+    """Repair JSON where the LLM closes a string value with an apostrophe,
+    then continues in Python-dict style with single-quoted sibling keys
+    that were meant to be real JSON object keys, not string content.
+
+    LLM produces (invalid JSON):
+        "text": "Some reply!'; 'reply_message_id': '13615'}
+
+    After repair (valid JSON):
+        "text": "Some reply!", "reply_message_id": "13615"}
+
+    The apostrophe becomes the real closing quote, the leading ';' or ','
+    separator becomes a JSON comma, and each single-quoted key/value pair
+    is converted to double-quoted JSON. A legitimate JSON string cannot
+    contain an unescaped apostrophe directly followed by a
+    ``'key': 'value'`` run like this, so the false-positive risk is nil.
+    """
+
+    def _fix(m: re.Match) -> str:
+        tail = m.group(1)
+        tail = re.sub(r"^[;,]", ",", tail)
+        tail = re.sub(r"'([^'\\]*)'", r'"\1"', tail)
+        return '"' + tail
+
+    return _APOSTROPHE_SINGLE_QUOTED_TAIL_RE.sub(_fix, text)
+
+
+def _repair_json_string_speech_quotes(raw: str) -> str:
+    """Re-escape unescaped speech-marker quotes inside known text-heavy JSON fields.
+
+    LLM roleplay responses frequently embed dialogue in double-quotes inside JSON
+    string values (e.g. ``"text": "She said "hello" and "goodbye""``), which
+    breaks the JSON parser.  This function scans known text-bearing fields and
+    re-escapes any ``"`` that is not a true string closer.
+
+    A ``"`` is a *true closer* when the next non-horizontal-whitespace character
+    is ``}``, ``]``, or end-of-string. A ``,`` or newline after ``"`` is only a
+    true closer when what follows (after skipping whitespace) is a closing
+    bracket or a ``"key":`` pattern — otherwise it's prose punctuation after
+    embedded dialogue (e.g. ``"spoken line," she said, "more dialogue"``) and
+    the quote is treated as embedded.
+
+    ``\"`` (backslash-quote) where the character following the pair is structural,
+    or immediately precedes a ``"key":`` pattern, is treated as a mistakenly-escaped
+    closer (the ``\\`` is stripped).
+
+    Real newline / carriage-return / tab characters inside the value are encoded
+    as their JSON escape sequences so the result is always valid JSON.
+    """
+
+    _FIELD_RE = re.compile(
+        r'"(?:text|content|personal_thought|interaction_summary|speech|reply|message|message_text)"'
+        r"\s*:\s*\"",
+        re.DOTALL,
+    )
+
+    def _is_structural(ch: str) -> bool:
+        return ch in ",}]"
+
+    def _looks_like_next_key(s: str, j: int) -> bool:
+        """True if ``s[j:]`` starts with a ``"key":`` pattern (next sibling key)."""
+        n = len(s)
+        if j >= n or s[j] != '"':
+            return False
+        key_end = j + 1
+        while key_end < n and s[key_end] != '"':
+            if s[key_end] == "\\":
+                key_end += 1
+            key_end += 1
+        colon = key_end + 1
+        while colon < n and s[colon] in " \t":
+            colon += 1
+        return colon < n and s[colon] == ":"
+
+    def _scan_value(s: str, pos: int) -> tuple[str, int]:
+        """Scan the string value starting just after the opening quote.
+
+        Returns ``(repaired_value_with_closing_quote, new_pos)`` where *new_pos*
+        is the index immediately after the closing quote that was emitted.
+        """
+        n = len(s)
+        out: list[str] = []
+        found_close = False
+        brace_depth = 0
+
+        while pos < n:
+            ch = s[pos]
+
+            if ch == "}" and brace_depth <= 0:
+                # Unbalanced closing brace: the dialogue never returned to a
+                # real double-quote closer (e.g. it switched to apostrophes
+                # for the rest of the line), so the scan ran past the field's
+                # real content into the JSON structure itself. Prose text
+                # essentially never contains a literal '}' with no matching
+                # '{' opened inside this value, so this can only be the
+                # payload's real closing brace — close the string here and
+                # leave the brace for the outer parser to consume.
+                out.append('"')
+                found_close = True
+                break
+
+            if ch == "\\":
+                nxt = s[pos + 1] if pos + 1 < n else ""
+                if nxt == '"':
+                    # \"  — peek past the pair to decide intent.
+                    j = pos + 2
+                    while j < n and s[j] in " \t":
+                        j += 1
+                    if j >= n or _is_structural(s[j]):
+                        # LLM mistakenly escaped the actual string closer,
+                        # followed by JSON punctuation. Drop the backslash;
+                        # emit just the closing quote.
+                        out.append('"')
+                        pos += 2
+                        found_close = True
+                        break
+                    elif _looks_like_next_key(s, j):
+                        # Mistakenly-escaped closer immediately followed by the
+                        # next sibling key with no separating comma in the
+                        # source (e.g. `secret,\" "reply_message_id": ...`).
+                        # Drop the backslash and insert the missing comma.
+                        out.append('",')
+                        pos += 2
+                        found_close = True
+                        break
+                    else:
+                        # Legitimate escape — keep verbatim.
+                        out.append('\\"')
+                        pos += 2
+                else:
+                    # Other escape sequence (\n, \t, \\, …) — copy both chars.
+                    out.append(ch)
+                    pos += 1
+                    if pos < n:
+                        out.append(s[pos])
+                        pos += 1
+
+            elif ch == '"':
+                # Skip horizontal whitespace to find the next meaningful char.
+                j = pos + 1
+                while j < n and s[j] in " \t":
+                    j += 1
+
+                if j >= n or s[j] in "}]":
+                    # True closer: followed by closing brace/bracket or end.
+                    out.append('"')
+                    pos += 1
+                    found_close = True
+                    break
+
+                elif s[j] == ",":
+                    # Ambiguous: a real JSON separator before the next key, or
+                    # just prose punctuation after embedded dialogue (e.g.
+                    # `"spoken line," she said, "more dialogue"`). Peek past
+                    # the comma for a real "key": pattern or closing bracket.
+                    k = j + 1
+                    while k < n and s[k] in " \t\n":
+                        k += 1
+                    if (k >= n or s[k] in "}]") or _looks_like_next_key(s, k):
+                        out.append('"')
+                        pos += 1
+                        found_close = True
+                        break
+                    else:
+                        # Prose comma after embedded dialogue — keep going.
+                        out.append('\\"')
+                        pos += 1
+
+                elif s[j] == "\n":
+                    # Newline after quote — check what the next non-blank line
+                    # looks like to decide if this is a true closer.
+                    k = j + 1
+                    while k < n and s[k] in " \t":
+                        k += 1
+                    if k >= n or s[k] in "}]":
+                        # Next line is a closing brace/bracket → true closer.
+                        out.append('"')
+                        pos += 1
+                        found_close = True
+                        break
+                    elif _looks_like_next_key(s, k):
+                        # Looks like a real key but the source has no comma
+                        # between the closing quote and the newline-led next
+                        # key → current " is the true closer; insert the
+                        # missing comma.
+                        out.append('",')
+                        pos += 1
+                        found_close = True
+                        break
+                    else:
+                        # Quoted speech (or other narrative) on the next line
+                        # → embedded quote.
+                        out.append('\\"')
+                        pos += 1
+
+                elif _looks_like_next_key(s, j):
+                    # Same-line case with no comma at all between the closing
+                    # quote and the next key (e.g. `"text": "foo" "next_key": ...`).
+                    out.append('",')
+                    pos += 1
+                    found_close = True
+                    break
+
+                elif s[j] == "{":
+                    # Stray opening brace where a comma should separate the
+                    # string from sibling keys (e.g. `"...Daddy..." {
+                    #   "interface_path": "..."`). Peek past the brace and
+                    # whitespace for a real "key": pattern — if found, this
+                    # quote is the true closer; drop the spurious brace and
+                    # insert the missing comma.
+                    k = j + 1
+                    while k < n and s[k] in " \t\n":
+                        k += 1
+                    if _looks_like_next_key(s, k):
+                        out.append('",')
+                        pos = k
+                        found_close = True
+                        break
+                    else:
+                        out.append('\\"')
+                        pos += 1
+
+                else:
+                    # Followed by non-structural, non-newline → embedded speech quote.
+                    out.append('\\"')
+                    pos += 1
+
+            elif ch == "\n":
+                out.append("\\n")
+                pos += 1
+            elif ch == "\r":
+                out.append("\\r")
+                pos += 1
+            elif ch == "\t":
+                out.append("\\t")
+                pos += 1
+            else:
+                if ch == "{":
+                    brace_depth += 1
+                elif ch == "}":
+                    brace_depth -= 1
+                out.append(ch)
+                pos += 1
+
+        if not found_close:
+            out.append('"')  # add missing closer if end-of-string was reached
+
+        return "".join(out), pos
+
+    result: list[str] = []
+    last = 0
+    for m in _FIELD_RE.finditer(raw):
+        val_start = m.end()
+        result.append(raw[last : m.end()])
+        repaired_val, new_pos = _scan_value(raw, val_start)
+        result.append(repaired_val)
+        last = new_pos
+    result.append(raw[last:])
+    return "".join(result)
+
+
+def _repair_inline_premature_string_close(text: str) -> str:
+    """Repair JSON where the LLM prematurely closes a string with " then continues
+    inline with space + text, potentially spanning multiple real newlines.
+
+    LLM produces (invalid JSON):
+        "text": "Mm-mmph!" I gasp, scratching at your thighs...
+                                                 (more lines)
+        "next_key": value
+
+    After repair (valid JSON):
+        "text": "Mm-mmph! I gasp, scratching at your thighs...\\n(more lines)"
+        "next_key": value
+
+    Real newlines in the continuation are encoded as \\n JSON escape sequences.
+    A trailing comma before the next property line is stripped.
+    """
+    # Match:
+    #   "           premature closing quote
+    #   ( [A-Za-z]  space + letter starts the inline continuation (not a JSON token)
+    #   [^"]*? )    rest of continuation, non-greedy, no embedded quotes
+    #   (,?)        capture optional trailing comma (must be restored after the fixed string)
+    #   [ \t]*      trailing whitespace
+    #   (?=\n[ \t]*["}])  lookahead: newline before next JSON key or closing brace
+    pattern = re.compile(
+        r'"( [A-Za-z][^"]*?)(,?)[ \t]*(?=\n[ \t]*["}])',
+        re.DOTALL,
+    )
+
+    def _fix(m: re.Match) -> str:
+        continuation = m.group(1)
+        trailing_comma = m.group(2)  # "," or ""
+        # Encode real newlines as JSON \\n escape sequences
+        encoded = continuation.replace("\n", "\\n")
+        # Escape any stray embedded double-quotes
+        encoded = encoded.replace('"', '\\"')
+        # Restore the comma so the next sibling key stays valid JSON
+        return encoded.rstrip() + '"' + trailing_comma
+
+    return pattern.sub(_fix, text)
+
+
+def extract_json_from_text(
+    text: str, return_metadata: bool = False
+) -> Union[Optional[Dict], Tuple[Optional[Dict], Dict[str, Any]]]:
     """Extract the first valid JSON object or array from text.
 
     This function is smart enough to extract JSON even when LLMs (like Gemini)
@@ -164,8 +557,23 @@ def extract_json_from_text(text: str, return_metadata: bool = False) -> Optional
             cleaned_text = cleaned_text[:-3]  # Remove ```
         cleaned_text = cleaned_text.strip()
 
-    # Also try original text in case cleaning broke something
-    texts_to_try = [cleaned_text, text.strip()]
+    # Apply targeted repairs for premature string close patterns produced by LLMs.
+    # Pass 0: normalize curly/smart quotes so a mistaken closer is recognized
+    # Pass 1: literal \\n sequences outside the string  ("value." \\n\\nmore)
+    # Pass 2: apostrophe used as a string closer, followed by an escaped-quote
+    #         or single-quoted run of sibling keys that belong outside the string
+    # Pass 3: re-escape unescaped speech quotes inside text-heavy fields
+    repaired_text = _normalize_smart_quotes(cleaned_text)
+    repaired_text = _repair_premature_string_close(repaired_text)
+    repaired_text = _repair_apostrophe_closed_escaped_tail(repaired_text)
+    repaired_text = _repair_apostrophe_closed_single_quoted_tail(repaired_text)
+    repaired_text = _repair_json_string_speech_quotes(repaired_text)
+    if repaired_text != cleaned_text:
+        log_debug("[extract_json_from_text] Applied premature string close repair")
+        texts_to_try = [repaired_text, cleaned_text, text.strip()]
+    else:
+        # Also try original text in case cleaning broke something
+        texts_to_try = [cleaned_text, text.strip()]
 
     decoder = json.JSONDecoder()
     found_json = None
@@ -257,8 +665,8 @@ def extract_json_from_text(text: str, return_metadata: bool = False) -> Optional
 
     # Log results based on what we found
     if metadata.get("had_extra_text", False):
-        prefix_len = metadata.get("prefix_length", 0)
-        suffix_len = metadata.get("suffix_length", 0)
+        prefix_len = int(metadata.get("prefix_length", 0))
+        suffix_len = int(metadata.get("suffix_length", 0))
         log_info(
             f"[extract_json_from_text] ✅ Extracted JSON with {prefix_len + suffix_len} extra chars (prefix: {prefix_len}, suffix: {suffix_len})"
         )

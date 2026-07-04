@@ -1,11 +1,15 @@
+from typing import Optional
+
 import pytest
 
 from plugins.grillo.grillo_outreach import GrilloOutreachPlugin
 
 
 @pytest.mark.asyncio
-async def test_get_context_snippets_pulls_memories(monkeypatch):
-    """_get_context_snippets should return both diary snippets and memory snippets (from `memories`)."""
+async def test_get_context_snippets_uses_chat_history_as_primary_source(monkeypatch):
+    """_get_context_snippets should return chat turns (primary) and diary thoughts
+    (secondary) as separate lists.  The chat turns come from chat_history_cache and
+    are in chronological order; diary entries are the emotional colour-only fallback."""
 
     p = GrilloOutreachPlugin()
 
@@ -14,16 +18,18 @@ async def test_get_context_snippets_pulls_memories(monkeypatch):
             self._exec_count = 0
 
         async def execute(self, *args, **kwargs):
-            # Track which query was executed (first -> ai_diary, second -> memories)
             self._exec_count += 1
 
         async def fetchall(self):
-            # First fetchall -> ai_diary rows (content, interface, chat_id)
+            # First fetchall -> chat_history_cache rows (sender_id, sender_name, message_text)
             if self._exec_count == 1:
-                return [("diary content here", "telegram_bot", "12345")]
-            # Second fetchall -> memories rows (content,)
+                return [
+                    ("self", "SynthA", "I imagine a home full of laughter"),
+                    ("5551234567", "Alice", "Oh tell me more baby"),
+                ]
+            # Second fetchall -> ai_diary rows (content,)
             if self._exec_count == 2:
-                return [("a memorable event happened",), ("another memory",)]
+                return [("I feel a deep warmth whenever I think of Alice",)]
             return []
 
         async def __aenter__(self):
@@ -42,20 +48,26 @@ async def test_get_context_snippets_pulls_memories(monkeypatch):
         def cursor(self):
             return DummyCursor()
 
-    def mock_get_conn_ctx():
-        return DummyConn()
-
     import core.db as cdb
 
-    monkeypatch.setattr(cdb, "get_conn_ctx", mock_get_conn_ctx)
+    monkeypatch.setattr(cdb, "get_conn_ctx", lambda: DummyConn())
 
-    snippets = await p._get_context_snippets(limit=2)
+    chat_turns, inner_thoughts = await p._get_context_snippets(
+        "telegram_bot", "5551234567", limit=2
+    )
 
-    # Should include at least one diary snippet and at least one memory snippet.
-    # Memories are tagged "(memory)"; diary snippets are emitted as raw recollections
-    # (no log-style "[interface]" prefix) so the outreach prompt reads less detached.
-    assert any(s.startswith("(memory)") for s in snippets)
-    assert any("diary content here" in s for s in snippets)
+    # Chat turns come first and are labelled by speaker
+    assert len(chat_turns) == 2
+    # DB returns newest-first; _get_context_snippets reverses to chronological,
+    # so index 0 is the older message (Alice's) and index 1 is SynthA's reply.
+    assert "Alice:" in chat_turns[0]
+    assert "Oh tell me more baby" in chat_turns[0]
+    assert "You:" in chat_turns[1]
+    assert "I imagine a home" in chat_turns[1]
+
+    # Diary entries are inner thoughts (secondary)
+    assert len(inner_thoughts) == 1
+    assert "deep warmth" in inner_thoughts[0]
 
 
 @pytest.mark.asyncio
@@ -66,8 +78,10 @@ async def test_generate_outreach_beat_records_target_metadata(monkeypatch):
     async def fake_get_target_interface_and_chat():
         return "telegram_bot", "12345"
 
-    async def fake_get_context_snippets(limit: int = 5):
-        return ["one", "two"]
+    async def fake_get_context_snippets(
+        interface: str, chat_id: Optional[str], limit: int = 5
+    ):
+        return (["one", "two"], [])
 
     async def fake_create_activity_log(*args, **kwargs):
         captured["kwargs"] = kwargs

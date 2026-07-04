@@ -29,6 +29,7 @@ getting started.
    features
    cortex
    interfaces
+   peer_synths
    plugins
    external_endpoints
    auris_vox

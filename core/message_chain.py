@@ -291,7 +291,7 @@ def _auto_inject_interface_path(actions: list, interface_path: Optional[str]) ->
 
     Args:
         actions: List of action dicts to process
-        interface_path: The interface path from context (e.g., 'telegram_bot/5208932647')
+        interface_path: The interface path from context (e.g., 'telegram_bot/5551234567')
 
     Returns:
         The same list with interface_path injected in-place where missing
@@ -347,7 +347,7 @@ def _normalize_message_unknown(actions: list, interface_path: Optional[str]) -> 
 
     Args:
         actions: List of action dicts to normalize
-        interface_path: The interface path (e.g., 'telegram_bot/5208932647')
+        interface_path: The interface path (e.g., 'telegram_bot/5551234567')
 
     Returns:
         The same list with any 'message_unknown' types corrected in-place
@@ -355,7 +355,7 @@ def _normalize_message_unknown(actions: list, interface_path: Optional[str]) -> 
     if not actions or not interface_path:
         return actions
 
-    # Extract interface prefix from path (e.g., 'telegram_bot' from 'telegram_bot/5208932647')
+    # Extract interface prefix from path (e.g., 'telegram_bot' from 'telegram_bot/5551234567')
     interface_prefix = (
         interface_path.split("/")[0] if "/" in interface_path else interface_path
     )
@@ -1928,7 +1928,7 @@ async def handle_incoming_message(
                         chat_id = ctx.get("chat_id")
 
                         # interface_path must have a chat_id suffix to be user-facing
-                        # e.g., "telegram_bot/5208932647" not just "telegram_bot"
+                        # e.g., "telegram_bot/5551234567" not just "telegram_bot"
                         is_user_facing = interface_path and any(
                             interface_path.startswith(f"{iface}/")
                             for iface in user_facing_interfaces

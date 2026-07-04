@@ -135,10 +135,10 @@ def test_get_entries_with_person_uses_postgres_jsonb(monkeypatch):
     monkeypatch.setattr(ai_diary, "_fetchall", fake_fetchall)
     monkeypatch.setattr(ai_diary, "_run", lambda coro: asyncio.run(coro))
 
-    assert ai_diary.get_entries_with_person("Scar", limit=5) == []
+    assert ai_diary.get_entries_with_person("Alice", limit=5) == []
     assert "::jsonb ? %s" in str(captured["query"])
     assert "JSON_CONTAINS" not in str(captured["query"])
-    assert captured["params"] == ("Scar", 5)
+    assert captured["params"] == ("Alice", 5)
 
 
 def test_clip_for_column_noop_when_under_limit():

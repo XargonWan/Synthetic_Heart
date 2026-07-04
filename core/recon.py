@@ -602,6 +602,7 @@ async def gather_recon_contributions(
     needs_language = "language_hint" in keys_set
     needs_tone = "tone_hint" in keys_set
 
+    llm_text = None
     parsed: dict[str, Any] | None = None
     cached_hint = _get_cached_hint(cache_key)
     if cached_hint:

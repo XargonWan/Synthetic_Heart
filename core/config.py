@@ -453,7 +453,58 @@ async def get_active_cortex_engine(scope: str | None = None) -> str:
 
         reg = get_cortex_registry()
         available = set(reg.get_available_engines())
+
+        # "anthropic" is a real, always-registered built-in engine, so the
+        # staleness check below never fires for it -- but without
+        # ANTHROPIC_API_KEY configured it doesn't raise, it silently returns a
+        # fixed "not configured" string as if it were a genuine completion.
+        # The JSON corrector then retries against the same broken engine and
+        # loops forever on that identical string (see FIXED_ISSUES.md:
+        # "BASE_CORTEX silently reverted to anthropic"). Treat it as
+        # unavailable whenever no key is configured so the self-heal path
+        # below runs instead of quietly returning a guaranteed-broken engine.
+        if (
+            "anthropic" in available
+            and not str(
+                config_registry.get_value("ANTHROPIC_API_KEY", "") or ""
+            ).strip()
+        ):
+            available.discard("anthropic")
+
         if chosen not in available:
+            # Before treating this as a genuinely stale/removed engine, check
+            # whether it's a still-configured external endpoint (e.g. Venice2)
+            # that simply hasn't (re)registered into the in-memory
+            # CortexRegistry yet -- this happens transiently around startup or
+            # endpoint edits. Persisting the fallback below in that case would
+            # silently and *permanently* discard the user's real selection,
+            # since get_default_engine() just returns whichever built-in engine
+            # module sorts first on disk (currently "anthropic") -- not a
+            # meaningful default. See AGENTS.md SS12 for the incident this guards
+            # against (BASE_CORTEX kept reverting to anthropic).
+            try:
+                from core.external_endpoints.registry import (
+                    get_external_endpoint_registry,
+                )
+
+                endpoints = await get_external_endpoint_registry().list_endpoints(
+                    enabled_only=True
+                )
+                if chosen in {ep.engine_name() for ep in endpoints}:
+                    log_warning(
+                        f"[config] ⚠️ Cortex engine '{chosen}' is a configured "
+                        "external endpoint not yet registered in the CortexRegistry "
+                        "-- keeping it instead of silently switching away."
+                    )
+                    log_debug(
+                        f"[config] 🧠 Active Cortex ({scope or 'base'}): {chosen}"
+                    )
+                    return chosen
+            except Exception as ext_exc:
+                log_warning(
+                    f"[config] Failed to check external endpoints for '{chosen}': {ext_exc}"
+                )
+
             # Stale engine name in DB (e.g. removed engine from a previous branch).
             # Fall back to the registry default rather than leaving the system broken.
             updates: list[tuple[str, str]] = []
@@ -465,6 +516,24 @@ async def get_active_cortex_engine(scope: str | None = None) -> str:
                     fallback = reg.get_default_engine()
                 except ValueError:
                     raise ValueError(f"Cortex engine '{chosen}' is not registered")
+                if fallback == "anthropic":
+                    # get_default_engine() has no concept of credential
+                    # availability -- it just returns whichever built-in
+                    # engine module sorts first on disk, which is
+                    # "anthropic". If no key is configured this is a
+                    # guaranteed-broken pick. Reuse whichever engine is
+                    # already validly configured for the sibling
+                    # trainer/grillo scope on this same instance instead of
+                    # guessing at an arbitrary external endpoint.
+                    for sibling_key in ("TRAINER_CORTEX", "GRILLO_CORTEX"):
+                        sibling = config_registry.get_value(sibling_key, "Default")
+                        if (
+                            sibling
+                            and sibling not in ("Default", "None")
+                            and sibling in available
+                        ):
+                            fallback = sibling
+                            break
                 if use_override and override_key is not None:
                     updates.append((override_key, "Default"))
                 if base != fallback:

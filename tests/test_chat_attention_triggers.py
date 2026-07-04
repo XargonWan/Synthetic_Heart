@@ -21,10 +21,10 @@ async def test_custom_sleep_trigger_puts_chat_to_sleep(monkeypatch):
     """When CHAT_SLEEP_COMMANDS contains a phrase, a message with that phrase should put chat to sleep."""
     chat_id = 999123
 
-    # Make the configuration return 'bye 2b' as the sleep trigger
+    # Make the configuration return 'bye synth' as the sleep trigger
     monkeypatch.setattr(
         "core.chat_attention.config_registry.get_value",
-        lambda k, d=None, **kwargs: "bye 2b" if k == "CHAT_SLEEP_COMMANDS" else "",
+        lambda k, d=None, **kwargs: "bye synth" if k == "CHAT_SLEEP_COMMANDS" else "",
     )
 
     trainer_id = 555
@@ -33,7 +33,7 @@ async def test_custom_sleep_trigger_puts_chat_to_sleep(monkeypatch):
             id=trainer_id, username="Xargon", full_name="Xargon Test"
         ),
         chat=SimpleNamespace(id=chat_id, type="private"),
-        text="bye 2b",
+        text="bye synth",
         message_id=1,
         message_thread_id=None,
         caption=None,
@@ -80,7 +80,7 @@ async def test_custom_sleep_trigger_puts_chat_to_sleep(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_empty_config_does_not_trigger_sleep(monkeypatch):
-    """If CHAT_SLEEP_COMMANDS is empty, phrases like 'bye 2b' should NOT put chat to sleep."""
+    """If CHAT_SLEEP_COMMANDS is empty, phrases like 'bye synth' should NOT put chat to sleep."""
     chat_id = 999124
 
     # Ensure no configured triggers
@@ -97,7 +97,7 @@ async def test_empty_config_does_not_trigger_sleep(monkeypatch):
             id=trainer_id, username="Xargon", full_name="Xargon Test"
         ),
         chat=SimpleNamespace(id=chat_id, type="private"),
-        text="bye 2b",
+        text="bye synth",
         message_id=1,
         message_thread_id=None,
         caption=None,

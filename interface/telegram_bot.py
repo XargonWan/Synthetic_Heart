@@ -2,6 +2,7 @@
 
 import os
 import re
+import sys
 import asyncio
 import time
 from inspect import isawaitable
@@ -10,7 +11,7 @@ from telegram import Update, Bot
 
 # Some test environments may not expose all exception names from python-telegram-bot
 try:
-    from telegram.error import TelegramError, RetryAfter, BadRequest, TimedOut
+    from telegram.error import TelegramError, RetryAfter, BadRequest, TimedOut, Conflict
 except Exception:
     # Provide safe fallbacks so the module imports in tests without the real library
     class TelegramError(Exception):
@@ -23,6 +24,9 @@ except Exception:
         pass
 
     class TimedOut(Exception):
+        pass
+
+    class Conflict(Exception):
         pass
 
 
@@ -639,7 +643,7 @@ async def handle_media_live(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # First thing: decide whether this media message is *actually* meant for
     # the bot.  Prior to 2026-03 the interface treated every piece of media as
     # directed which meant voice notes would be transcribed even if nobody had
-    # mentioned Rekku/aliases and we were in a group chat.  That behaviour
+    # mentioned the SyntH/aliases and we were in a group chat.  That behaviour
     # caused excessive churn and confused users when non‑directed audio popped
     # up in the queue.
     #
@@ -1062,6 +1066,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         log_warning(f"[telegram_bot] Failed to add message to context: {e}")
         # Continue processing even if context tracking fails
 
+    try:
+        from core.peer_policy import notify_message_arrived
+
+        notify_message_arrived(interface_path)
+    except Exception as e:
+        log_debug(f"[telegram_bot] notify_message_arrived failed (non-fatal): {e}")
+
     # Animation lifecycle is handled centrally by the core message queue (enqueue -> THINK,
     # generation start -> WRITE/TALK, generation end -> IDLE). Telegram should not broadcast
     # a 'think' state here, otherwise messages that are ignored/pre-filtered would still
@@ -1354,56 +1365,135 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         log_debug("Not a trainer reply - continuing to queue forwarding")
 
-    # === PRIORITY 4: Forward to centralized queue (default behavior) ===
-    log_debug(
-        f"🔴 [PRIORITY 4 START] About to forward message to queue: '{text}' from user {user_id}"
-    )
-    log_debug("🔴 [PRIORITY 4] Checking message_queue module availability")
-
-    # NOTE: Do NOT modify message.thread_id - Message objects are immutable in python-telegram-bot
-    # The message_queue.enqueue() function will extract message_thread_id directly
-    log_debug(
-        f"🔴 [PRIORITY 4] Message has message_thread_id={getattr(message, 'message_thread_id', None)}"
-    )
-
-    log_debug("🔴 [PRIORITY 4] About to call message_queue.enqueue()...")
-    try:
-        log_debug("🔴 [PRIORITY 4] Calling message_queue.enqueue now...")
-
-        # Wrap message to add wake/sleep flag for prompt engine.
-        # Pass `text` explicitly so media captions survive: a Telegram photo/
-        # video stores its caption in `.caption`, not `.text`, so without this
-        # the current turn would look caption-less downstream (the `text` local
-        # above already resolves `message.text or message.caption`).
-        wrapped_message = MessageWrapper(
-            message,
-            text=text,
-            is_wake_sleep_command=is_wake_sleep_command,
-            # Flag: tells message_chain to auto-inject TTS only for voice-originated messages.
-            is_voice_input=bool(
-                getattr(message, "voice", None) or getattr(message, "video_note", None)
-            ),
-        )
-
-        await message_queue.enqueue(
-            context.bot,
-            wrapped_message,
-            interface_id="telegram_bot",
-            original_message=message,
-            skip_mention_check=directed,
-        )
-
+    # === PRIORITY 4 (defined early so PRIORITY 3.5's relay wait can defer to
+    # it in the background): Forward to centralized queue (default behavior).
+    async def _forward_to_queue() -> None:
         log_debug(
-            "🔴 [PRIORITY 4 SUCCESS] Message successfully enqueued - processing should continue in queue"
+            f"🔴 [PRIORITY 4 START] About to forward message to queue: '{text}' from user {user_id}"
+        )
+        log_debug("🔴 [PRIORITY 4] Checking message_queue module availability")
+
+        # NOTE: Do NOT modify message.thread_id - Message objects are immutable in python-telegram-bot
+        # The message_queue.enqueue() function will extract message_thread_id directly
+        log_debug(
+            f"🔴 [PRIORITY 4] Message has message_thread_id={getattr(message, 'message_thread_id', None)}"
         )
 
-    except Exception as e:
-        log_error(f"🔴 [PRIORITY 4 ERROR] message_queue enqueue failed: {repr(e)}", e)
-        log_error(f"🔴 [PRIORITY 4 ERROR] Exception type: {type(e)}", e)
-        import traceback
+        log_debug("🔴 [PRIORITY 4] About to call message_queue.enqueue()...")
+        try:
+            log_debug("🔴 [PRIORITY 4] Calling message_queue.enqueue now...")
 
-        log_error(f"🔴 [PRIORITY 4 ERROR] Traceback: {traceback.format_exc()}", e)
-        await message.reply_text("⚠️ Error processing message.")
+            # Wrap message to add wake/sleep flag for prompt engine.
+            # Pass `text` explicitly so media captions survive: a Telegram photo/
+            # video stores its caption in `.caption`, not `.text`, so without this
+            # the current turn would look caption-less downstream (the `text` local
+            # above already resolves `message.text or message.caption`).
+            wrapped_message = MessageWrapper(
+                message,
+                text=text,
+                is_wake_sleep_command=is_wake_sleep_command,
+                # Flag: tells message_chain to auto-inject TTS only for voice-originated messages.
+                is_voice_input=bool(
+                    getattr(message, "voice", None)
+                    or getattr(message, "video_note", None)
+                ),
+            )
+
+            await message_queue.enqueue(
+                context.bot,
+                wrapped_message,
+                interface_id="telegram_bot",
+                original_message=message,
+                skip_mention_check=directed,
+            )
+
+            log_debug(
+                "🔴 [PRIORITY 4 SUCCESS] Message successfully enqueued - processing should continue in queue"
+            )
+
+        except Exception as e:
+            log_error(
+                f"🔴 [PRIORITY 4 ERROR] message_queue enqueue failed: {repr(e)}", e
+            )
+            log_error(f"🔴 [PRIORITY 4 ERROR] Exception type: {type(e)}", e)
+            import traceback
+
+            log_error(f"🔴 [PRIORITY 4 ERROR] Traceback: {traceback.format_exc()}", e)
+            await message.reply_text("⚠️ Error processing message.")
+
+    # === PRIORITY 3.5: Peer turn coordination / mention-order relay (shared group RP) ===
+    # Two distinct mechanisms, both gated on peer mode + configured peer IDs:
+    #
+    # 1. Mention-order relay: if this message explicitly addresses another
+    #    SyntH before this one (e.g. "SynthA, ... SynthB, ..."), wait for that peer to
+    #    actually post their reply before proceeding, so it's already in this
+    #    instance's own chat history by the time this instance responds. This
+    #    wait is backgrounded (see below) rather than inline.
+    #
+    # 2. Turn floor (fallback when no explicit relay ordering is present):
+    #    set SYNTH_PEER_TURN_FLOOR_SECONDS=0 on the primary instance (responds
+    #    immediately) and to a value safely above typical LLM response time on
+    #    every secondary instance (e.g. 20 for a 7-12s LLM). The secondary
+    #    waits the floor, then checks whether the primary already posted; if
+    #    so it yields its own turn entirely.
+    if message.chat.type in ("group", "supergroup"):
+        try:
+            from core.peer_policy import (
+                get_peer_ids,
+                get_relay_wait_peer,
+                is_peer_mode_enabled,
+                peer_already_responded,
+                wait_for_peer_reply,
+            )
+
+            if is_peer_mode_enabled() and get_peer_ids():
+                _relay_peer = get_relay_wait_peer(text) if text else None
+                if _relay_peer is not None:
+                    # python-telegram-bot processes updates sequentially by
+                    # default (no concurrent_updates here) -- an inline
+                    # `await wait_for_peer_reply(...)` would block this same
+                    # dispatch loop from ever receiving the peer's actual
+                    # reply, so the wait could only ever resolve by timing
+                    # out, never by detecting the reply early. Backgrounding
+                    # it frees the loop to process the peer's reply update
+                    # right away, which fires notify_message_arrived() and
+                    # wakes this task almost immediately.
+                    log_debug(
+                        f"[telegram_bot] Relay ordering: peer {_relay_peer} must reply "
+                        "first -- backgrounding the wait so it doesn't block this "
+                        "bot's own update dispatch"
+                    )
+
+                    async def _wait_then_forward(_peer: int = _relay_peer) -> None:
+                        await wait_for_peer_reply(
+                            interface_path, _peer, since=message.date
+                        )
+                        await _forward_to_queue()
+
+                    asyncio.create_task(_wait_then_forward())
+                    return
+                else:
+                    _floor = float(
+                        config_registry.get_value("SYNTH_PEER_TURN_FLOOR_SECONDS", 0.0)
+                    )
+                    if _floor > 0:
+                        log_debug(
+                            f"[telegram_bot] Peer turn stagger: secondary waiting {_floor:.1f}s"
+                        )
+                        await asyncio.sleep(_floor)
+                        if await peer_already_responded(
+                            interface_path, since=message.date
+                        ):
+                            log_debug(
+                                "[telegram_bot] Peer already responded to this trigger — yielding turn"
+                            )
+                            return
+        except Exception as _peer_turn_err:
+            log_debug(
+                f"[telegram_bot] Peer turn coordination skipped (non-fatal): {_peer_turn_err}"
+            )
+
+    await _forward_to_queue()
 
 
 async def handle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1711,10 +1801,43 @@ def _schedule_start_bot_retry(delay_seconds: float = 30.0) -> None:
     )
 
 
+async def stop_bot() -> None:
+    """Stop the Telegram polling task in a controlled, isolated sequence.
+
+    Cancelling and awaiting our own wrapper task here - instead of leaving it to
+    asyncio.run()'s blanket task cancellation - lets python-telegram-bot's own
+    app.stop()/updater.stop() sequence (invoked from _run_polling_loop's finally
+    block) finish before its internal fetcher task can be independently cancelled
+    by that same blanket sweep. Otherwise app.stop() ends up collecting a fetcher
+    task result that was torn down out from under it, which PTB logs as a noisy
+    (but harmless) CancelledError traceback.
+    """
+    global _polling_task, _bot_retry_task, _bot_started
+
+    if _bot_retry_task is not None and not _bot_retry_task.done():
+        _bot_retry_task.cancel()
+        try:
+            await _bot_retry_task
+        except asyncio.CancelledError:
+            pass
+    _bot_retry_task = None
+
+    if _polling_task is not None and not _polling_task.done():
+        _polling_task.cancel()
+        try:
+            await _polling_task
+        except asyncio.CancelledError:
+            pass
+    _polling_task = None
+    _bot_started = False
+
+
 def _is_transient_startup_error(exc: Exception) -> bool:
     if isinstance(exc, (TimedOut, TimeoutError, asyncio.TimeoutError, OSError)):
         return True
-    return isinstance(exc, TelegramError) and not isinstance(exc, BadRequest)
+    return isinstance(exc, TelegramError) and not isinstance(
+        exc, (BadRequest, Conflict)
+    )
 
 
 async def _cleanup_failed_startup_app(app: object | None) -> None:
@@ -1818,6 +1941,16 @@ async def start_bot() -> bool:
             .read_timeout(30.0)
             .write_timeout(30.0)
             .pool_timeout(10.0)
+            # PTB defaults the get_updates connection pool to a single
+            # connection with a 1s pool_timeout. On shutdown/restart, the
+            # in-flight long-poll connection may still be tearing down when
+            # PTB's own cleanup call tries to ack the last batch of updates,
+            # so that single slot isn't free yet -> PoolTimeout, and the
+            # updates get suppressed-but-unacked (re-delivered on next
+            # start). Give the updates pool room to hold a second connection
+            # so cleanup never has to wait on the poll connection to close.
+            .get_updates_connection_pool_size(4)
+            .get_updates_pool_timeout(10.0)
             .build()
         )
         log_info("[telegram_bot] Telegram application built successfully")
@@ -1847,6 +1980,13 @@ async def start_bot() -> bool:
             update: object, context: ContextTypes.DEFAULT_TYPE
         ) -> None:
             """Log errors caused by updates."""
+            if isinstance(context.error, Conflict):
+                log_error(
+                    "[telegram_bot] ⚠️ Conflict: another bot instance is already polling "
+                    "with this token. Each SyntH instance must use a unique BOTFATHER_TOKEN. "
+                    "Telegram does not allow two bots to poll the same token simultaneously."
+                )
+                return
             log_error(
                 f"[telegram_bot] Exception while handling an update: {context.error}"
             )
@@ -1881,7 +2021,17 @@ async def start_bot() -> bool:
             log_error(f"[telegram_bot] Error in polling loop: {repr(e)}")
             raise
         finally:
-            log_info("[telegram_bot] Polling loop task ending...")
+            log_info(
+                "[telegram_bot] Polling loop task ending — stopping application..."
+            )
+            try:
+                await _cleanup_failed_startup_app(app)
+            except asyncio.CancelledError:
+                log_warning(
+                    "[telegram_bot] App cleanup interrupted by second cancellation"
+                )
+            except Exception as cleanup_exc:
+                log_debug(f"[telegram_bot] Error during polling cleanup: {cleanup_exc}")
 
     startup_attempts = 3
     last_error: Exception | None = None
@@ -2095,6 +2245,14 @@ class TelegramInterface:
                 f"[telegram_interface] Telegram interface not ready: {self.disabled_reason}"
             )
 
+    async def stop(self) -> None:
+        """Stop the Telegram interface in an orderly, isolated sequence.
+
+        See stop_bot() for why this must run to completion before asyncio.run()'s
+        blanket task cancellation, rather than being left to it.
+        """
+        await stop_bot()
+
     def _disable(self, reason: str) -> None:
         """Mark interface as disabled with a reason."""
         self.is_enabled = False
@@ -2161,7 +2319,7 @@ class TelegramInterface:
                 },
                 "chat_name": {
                     "type": "string",
-                    "example": "Rekkus Hideout",
+                    "example": "Synth Hideout",
                     "description": "Alternative to interface_path for specifying the chat by name (will be resolved to interface_path)",
                     "optional": True,
                 },
@@ -2210,7 +2368,7 @@ class TelegramInterface:
                     },
                     "chat_name": {
                         "type": "string",
-                        "example": "Rekkus Hideout",
+                        "example": "Synth Hideout",
                         "description": "Alternative to interface_path for specifying the chat by name",
                         "optional": True,
                     },
@@ -2904,7 +3062,21 @@ def reload_interface():
 # Auto-start Telegram bot at import time if configured
 # This is only for backwards compatibility when running outside of core_initializer
 # Normally, initialize_interface() will be called by the core after config load
-if telegram_interface is None and BOTFATHER_TOKEN and _parse_trainer_id_from_config():
+# Skip entirely when running under pytest — tests import this module but must never
+# touch a live Telegram token.
+#
+# Force early evaluation of BOTFATHER_TOKEN so _load_definition_sync runs now,
+# setting env_override=True if the token is in env. Without this, load_all_from_db
+# runs first and marks the definition loaded with value=None (DB default), making
+# _load_definition_sync a no-op and leaving the bot permanently disabled.
+_botfather_configured = bool(BOTFATHER_TOKEN)
+_under_pytest = "pytest" in sys.modules
+if (
+    not _under_pytest
+    and telegram_interface is None
+    and _botfather_configured
+    and _parse_trainer_id_from_config()
+):
     log_info("[telegram_bot] Legacy autostart: creating interface at import time")
     initialize_interface()
 

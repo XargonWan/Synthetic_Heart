@@ -203,16 +203,23 @@ When `eyes_closed > 0.5`, blink and saccade loops are automatically suspended un
 
 ## 8. Development Workflow
 
-### First-time setup after cloning
+### First-time setup after cloning (per workspace)
+
+This repo is routinely checked out in **parallel workspaces** (e.g. `D:\dev\D15` and `D:\dev\B15`, one SyntH instance each). Everything machine- or instance-specific is deliberately per-workspace: `.env` (all API keys/DB config), `.gitnexus/` + `.gitnexus-home/` (code-intelligence index + registry), and `mcp_servers/grok-api-mcp/node_modules/`. None of these travel through git, so each fresh clone (or a clone that never ran setup) needs:
 
 ```bash
-uv sync                   # install all dependencies including MCP server deps
-npx gitnexus analyze      # build the code intelligence index (one-time, ~1-2 min)
+uv sync                                              # 1. python deps, incl. MCP server deps
+GITNEXUS_HOME=.gitnexus-home npx gitnexus analyze --skip-agents-md   # 2. build THIS workspace's code index (~1 min)
+cd mcp_servers/grok-api-mcp && npm ci --omit=dev && cd ../..          # 3. grok-api-docs runtime deps (dist/ is committed prebuilt)
 ```
 
-MCP servers (`synth-logs`, `synth-db`, `synth-cortex`, `gitnexus`, `affine`) are pre-configured in `.mcp.json` and `.vscode/mcp.json` — no manual setup needed after the above two commands.
+PowerShell variant for step 2: `$env:GITNEXUS_HOME=".gitnexus-home"; npx gitnexus analyze --skip-agents-md`
 
-> **Affine MCP one-time credential setup:** credentials are stored in `~/.config/affine-mcp/config`, not in the repo. If running on a new machine, write the file (see §8a below).
+Why the env var: GitNexus keys repos by **folder basename** in a registry, and by default that registry is global (`~/.gitnexus/registry.json`) — two clones both named `synthetic_heart` collide there and tools silently resolve to whichever clone registered first. `.mcp.json` therefore launches the gitnexus MCP with `GITNEXUS_HOME=.gitnexus-home` (a workspace-local registry holding exactly this clone), and every manual `gitnexus` CLI run must set the same variable or it will read/write the wrong registry. Always pass `--skip-agents-md` too: the gitnexus sections in AGENTS.md/CLAUDE.md are maintained by hand (the tool would inject volatile symbol counts that churn on every reindex — its `--no-stats` flag is broken, the code reads `noStats` but commander sets `stats`).
+
+MCP servers (`synth-logs`, `synth-db`, `synth-cortex`, `synth-langfuse`, `gitnexus`, `grok-api-docs`, `langfuse`, `affine`) are all pre-configured in `.mcp.json` with workspace-relative paths — after the three commands above everything works. The `langfuse`/`synth-langfuse` servers read `LANGFUSE_HOST` + `LANGFUSE_PUBLIC_KEY` + `LANGFUSE_SECRET_KEY` from this workspace's `.env`.
+
+> **Affine MCP one-time credential setup:** credentials are stored in `~/.config/affine-mcp/config`, not in the repo (per-machine, shared by all workspaces). If running on a new machine, write the file (see §8a below).
 
 ### §8a. Affine MCP — Project Planning Board
 
@@ -274,7 +281,7 @@ affine-mcp doctor
 1. `uv run ruff format .`
 2. `uv run ruff check --fix .`
 3. `uv run ty check <files_you_edited>` — scoped only, never the whole repo.
-4. `uv run pytest`
+4. `uv run pytest tests/<tests_covering_what_you_touched>` — scoped only, **never the bare full suite** (see §9).
 
 If any step fails, fix it before proceeding.
 
@@ -286,7 +293,7 @@ If any step fails, fix it before proceeding.
   `"⚠️ Stuck on [Error]. Requesting human or advanced model intervention."`
 - **Type hints required.** All Python functions need complete annotations (params + return).
 - **Cross-platform policy.** Default runtime is Linux containers. No Windows/macOS-specific primary code paths. Platform-specific logic only as a secondary, guarded case (`sys.platform`).
-- **Read logs if a bug fix is requested**": always read container logs or logs folder if some issue raises and the user asks your bug fixing in order to find the real cause of the issue, do not reply with guesses but with a real analisys of the logs and the code
+- **Read logs if a bug fix is requested:** always read container logs or the logs folder when the user asks for a bug fix, in order to find the real cause of the issue. Do not reply with guesses — base conclusions on a real analysis of the logs and the code.
 - **No keyword-based implementations.**
   Never design or implement features whose behavior depends primarily on detecting specific words, phrases, trigger terms, or regular expression matches, as this won't work in a multi language environment.
   Avoid logic such as:
@@ -302,7 +309,28 @@ If any step fails, fix it before proceeding.
 
 - All persistent tests go in `tests/`. Throwaway tests may live at the repo root but must be deleted when done.
 - Config: `pytest.ini` — `asyncio_mode = auto`, markers: `asyncio`, `slow`, `integration`.
-- Run: `uv run pytest`
+
+### Run scoped tests — never the bare full suite
+
+**Default: run only the test files covering what you changed:**
+
+```bash
+uv run pytest tests/test_<area_you_touched>.py
+```
+
+Do **not** run a bare `uv run pytest`. Three reasons:
+
+1. **It takes ~5 minutes** and adds no signal for a scoped change.
+2. **Selenium is not installed or configured in this workspace.** `tests/plugins/test_selenium_ttsfree.py` fails at *collection* with `ModuleNotFoundError: No module named 'selenium'` — there is no way to make it pass here, so it must always be excluded.
+3. **The full ordering has ~3 known order-dependent failures** from `config_registry` singleton pollution (see §12, "Order-dependent test failures in full pytest runs") that are not caused by your change.
+
+If a broad regression sweep is explicitly requested, run:
+
+```bash
+uv run pytest --ignore=tests/plugins/test_selenium_ttsfree.py
+```
+
+and triage any order-dependent failures against §12 (re-run the failing file alone, or `git stash` A/B) before assuming a regression.
 
 ### Testing via Ollama API
 
@@ -326,7 +354,7 @@ Monitor: `docker exec synth-dev tail -f /app/logs/synth.log | grep -E "run_actio
 ---
 
 ## 10. Documentation
-After any substatnial code change or feature addition evaluate a documentation update.
+After any substantial code change or feature addition evaluate a documentation update.
 
 - Location of Wiki/Documentation: `docs/` (Sphinx, ReadTheDocs format, English).
 - README.md is located in the project root
@@ -343,7 +371,7 @@ docker compose up -d --build
 ```
 
 **Dev container restart:**
-Some devs might want to have a developemnt deploy, usually called `docker-compose-dev.yml`
+Some devs might want to have a development deploy, usually called `docker-compose-dev.yml`
 ```bash
 docker compose -f docker-compose-dev.yml --env-file .env-dev up -d --build && rm -rf logs/dev/*
 ```
@@ -371,18 +399,58 @@ docker exec synth-dev tail -f /app/logs/synth.log | grep -E "\[grillo\]|grillo"
 
 ---
 
+### `test_chat_attention_triggers.py` start_bot tests fail: FakeBuilder missing `get_updates_connection_pool_size`  <!-- 2026-07-03 -->
+**Symptom:** `test_start_bot_failure_resets_state_and_schedules_retry` and `test_start_bot_retries_transient_timeout_inline` fail with `AttributeError("'FakeBuilder' object has no attribute 'get_updates_connection_pool_size'")` — the interface's `disabled_reason` becomes `Startup failed: AttributeError(...)` instead of the expected timeout/retry text.
+**Location:** `tests/test_chat_attention_triggers.py` (`FakeBuilder` stub), `interface/telegram_bot.py` (`start_bot` builder chain).
+**Status:** known, not fixed — pre-existing, found (and verified unrelated) during the 2026-07-03 upstream merge: the merge touched neither file; the builder call was added by commit `83415cef` ("widen get_updates connection pool") without updating the test stub.
+**Notes:** Mechanical fix: give `FakeBuilder` a `get_updates_connection_pool_size(...)` chainable passthrough like its other builder methods. Left undone to keep the upstream merge free of unrelated changes.
+
+---
+
+### `cortex_api.log` never logs the actual system prompt content — can't verify context injection from logs alone  <!-- 2026-07-01 -->
+**Symptom:** Every request entry in `cortex_api.log` (and the `cortex_read`/`cortex_analyze` MCP tools built on it) shows the system message as a placeholder, e.g. `"content": "<string: 16146 chars>"` — the real text is never written to the log, only its length. `cortex_search`'s payload/response text search therefore also cannot match anything inside the system prompt (it only sees the placeholder).
+**Location:** whatever call in `core/cortex_api_logger.py` serializes the outbound request before writing it (the truncation happens before the write, not in a display layer — confirmed by reading the raw log file directly, not just the MCP tool output).
+**Status:** known, not investigated further — found incidentally while trying to verify whether `UNIFIED_HISTORY` cross-chat merging (`core/history_engine.py`) actually injected another interface_path's history into a given session's system prompt (`core/prompt_engine.py::_build_context_summary`, `"[Recent context from other conversations]"` block). Could not confirm either way from the trace/log alone.
+**Notes:** If you need to debug what's actually inside a system prompt (history_recent injection, peer instruction block, persona content, etc.), don't rely on `cortex_read`/`cortex_search`/raw log grep for the system message — it's opaque. Either add temporary debug logging in `core/prompt_engine.py::_build_context_summary` / `build_prompt_request`, or inspect `history_engine.build_context()`'s return value directly. The history-merging code itself (`load_global_chat_history`, `unified_candidates` split into `local_lines`/`other_lines` in `history_engine.py`) looked correctly wired on read-through: it queries the synth's own `chat_history_cache` table across all interface_paths with no cross-chat filtering, so DM and group history for the *same* synth should merge by default (`UNIFIED_HISTORY` defaults to `1`/on). Two separate SyntH instances each have their own DB/table, so this only merges within one instance; cross-instance awareness depends on Telegram actually delivering a peer's messages here at all — see the entry below.
+
+---
+
+### Telegram bots can't see each other's messages until "Bot-to-Bot Communication Mode" is enabled in BotFather  <!-- 2026-07-01, corrected 2026-07-01 -->
+**Symptom:** In a two-SyntH Telegram group (SynthA + SynthB), one instance's own `chat_history_cache` had **zero rows ever** with `sender_id` equal to the other instance's bot ID — not just in one conversation window, across the entire table's history — despite the peer bot visibly replying in the group and `SYNTH_PEERS` being configured correctly. `synth.log` had zero mentions of that bot ID anywhere either, meaning the update never reached the application layer at all. Symptoms this caused: the receiving instance's LLM prompt never contained the peer's replies, and any wait/poll logic checking for a peer response (turn floor, mention-order relay) always burned its full timeout before giving up, since the awaited row could never appear.
+**Location:** platform-level (Telegram Bot API itself), not a bug in this repo. `interface/telegram_bot.py::handle_message` has no `is_bot` filter anywhere, and `core/chat_context_manager.py::add_message_to_context` is called unconditionally near the top of `handle_message` before any mention/peer-policy logic runs — so once an update from the peer bot actually arrives, it's saved like any other message. The fix is entirely a Telegram-side setting, not a code change.
+**Status:** root cause identified and documented (2026-07-01). **Correction (same day):** an earlier version of this entry claimed this needed a custom HTTP relay between instances (`core/peer_relay.py` + a WebUI endpoint) — that was reverted as unnecessary over-engineering after checking https://core.telegram.org/bots/features#bot-to-bot-communication. Telegram has a native opt-in for exactly this: enable **Bot-to-Bot Communication Mode** for each bot via BotFather, AND make sure each bot has Group Privacy Mode disabled (or admin rights) in the shared group (the communication mode alone only unlocks explicit `/command@OtherBot` mentions and direct replies; full plain-message visibility needs privacy-disabled-or-admin on top). See `docs/peer_synths.rst` "Bot-to-Bot Communication Mode". No code in this repo needed to change for delivery itself — `peer_already_responded`'s column-name fix and the mention-order relay (`get_relay_wait_peer`/`wait_for_peer_reply` in `core/peer_policy.py`) from the same debugging session are still valid and still needed; only the "how does the peer's message physically arrive" part was wrong.
+**Notes:** If a future agent is asked to debug "peer SyntH doesn't see the other's replies" again: first check whether Bot-to-Bot Communication Mode is enabled in BotFather for both bots, and whether each has Group Privacy Mode disabled or admin rights — don't assume a code fix is needed, and don't reach for a custom relay/webhook without checking this Telegram-native setting first. Group privacy mode being disabled (confirmed via *human* messages arriving fine in the same chat) does **not** by itself extend to other bots' messages — the separate Bot-to-Bot Communication Mode toggle is required in addition.
+
+---
+
+### Order-dependent test failures in full pytest runs (`config_registry` / global-state pollution)  <!-- 2026-06-11, updated 2026-07-01 -->
+**Symptom:** A full `uv run pytest` run fails a small, shifting set of tests that all pass when their file is run in isolation. Recurring offenders: `test_vox_defaults.py::test_active_vox_engine_default_is_kitten` and `test_vox_plugin.py::test_active_vox_engine_default_is_kitten` (e.g. `assert 'disabled' == 'kitten'`), plus a third slot that varies by run/ordering — observed as `test_db_cutover::test_cutover_runs_backup_and_migration`, `test_grillo_prevent_duplicates::test_grillo_suppresses_when_last_is_synth`, `test_grillo_beat_system::test_grillo_beat_types_exist`, `test_exposed_variables_static::test_no_direct_getenv_for_exposed_vars`, and `test_exposed_variables_style::test_exposed_variable_label_and_description_style` at various times.
+**Location:** `core/config_manager.py` (`config_registry` is a process-wide singleton) and the exposed-variable registry; global state leaking between test modules.
+**Status:** known, pre-existing — confirmed via `git stash` A/B (on commits `e4558376` and `afdaea0`) that the vox pair fails identically on unmodified `develop`, so it is not caused by any specific feature change.
+**Notes:** Whichever test runs first in the full ordering leaks the *real* DB-loaded value (`ACTIVE_VOX_ENGINE = "disabled"`, per the live config table) into `config_registry._definitions`, and it's never reset before the default-expecting test runs. When triaging a full-suite run, re-run the failing file alone (and/or `git stash` A/B) before assuming a regression. Related leaks: local `.env` values (e.g. `SYNTH_PRIMARY_DB=soul`) bleed into tests that don't pin them — `tests/test_db_preflight.py` monkeypatches `core.db._get_db_type` for this reason — and `tests/test_message_queue.py` `test_enqueue_*` tests hit the live DB configured in `.env` and time out when it is slow/unreachable (verified unrelated to code changes via stash A/B); `tests/test_exposed_variables_audit.py::test_exposed_variables_have_label_description_and_component` fails the same way when the DB host doesn't resolve (`getaddrinfo failed`, re-verified 2026-07-04 via stash A/B). Real fix would be a per-test reset/fixture for `config_registry` (or at least the affected definitions) instead of process-wide state; out of scope so far.
+
+---
+
+### `grillo_impl.create_activity_log` writes to a table that doesn't exist on Postgres  <!-- 2026-07-01 -->
+**Symptom:** `[grillo] create_activity_log failed: relation "grillo_activity_log" does not exist` on every grillo beat.
+**Location:** `plugins/grillo/grillo_impl.py:525` (`create_activity_log`); the live Postgres "soul" DB has `radio_activity_log` but no `grillo_activity_log` (confirmed via `list_tables()` — `radio_activity_log` exists with both a stale `timestamptz` and a working `timestamp` column, see `FIXED_ISSUES.md` "Postgres DDL translator…"; `grillo_activity_log` is simply absent).
+**Status:** known, not investigated further — found incidentally while debugging the unrelated `timestamp`/`timestamptz` column-rename bug; out of scope for that fix.
+**Notes:** Likely candidates, not verified: (a) a rename from `grillo_activity_log` → `radio_activity_log` happened in the radio_host refactor and `grillo_impl.py` was missed, or (b) the two are meant to be genuinely separate tables and `grillo_activity_log`'s `CREATE TABLE IF NOT EXISTS` simply never runs on the Postgres path (it's defined in `tools/database_fix.py`'s `TABLE_DEFINITIONS`, which is a MariaDB-only `pymysql` script — not part of `core/db.py`'s Postgres `init_db()`/`ensure_plugin_tables()` preflight, so on the Postgres backend it would never get created at all). Next agent: check `git log -p` for `grillo_activity_log` vs `radio_activity_log` to see if it was a rename, and check whether `grillo_impl.py` has (or needs) its own Postgres-path table-init call analogous to `ai_diary`/`emotion_manager`.
+
+---
+
+### Unit tests can write real rows into the live `ai_diary` table  <!-- 2026-07-01 -->
+**Symptom:** Grillo diary-consolidation prompts contain literal test fixtures interleaved with real diary content — e.g. langfuse trace `312a3ac5-03c2-40e6-bf91-25ce25e127b9` (2026-07-01 diary_consolidation beat) shows "Ciao Xargon!", "Hello", "Performed multiple actions: 1 use_animation, 1 create_personal_diary_entry", "Performed message_telegram_bot action" — each duplicated (two test runs same day) — mixed into the day's real fragments.
+**Location:** `tests/test_message_chain.py:97` (hardcoded LLM response `"Ciao Xargon!"`), `tests/test_chat_attention_triggers.py` / `tests/test_telegram_sleep_bypass.py` (fixture username `Xargon`) all exercise `core/message_chain.py::handle_incoming_message` → `core/action_parser.py::_create_diary_entry_for_actions` (auto-diary hook, runs unconditionally after every processed action list, line 1974) → `plugins/ai_diary.py::create_personal_diary_entry` → `_upsert_diary_impl` (line 662). `tests/conftest.py` has no DB isolation fixture — only an animation-handler singleton reset and a temp backups dir.
+**Status:** known, not fixed.
+**Notes:** Tests mock `run_action`/`run_corrector_middleware` but never mock `plugins.ai_diary` or `core.db.get_conn_ctx`, and `add_diary_entry` lazy-inits/auto-creates the `ai_diary` table if missing (plugins/ai_diary.py:836-877) — so any test run against a reachable MariaDB (no dedicated test DB/config found) contaminates the live diary. Confirmed via DB: `ai_diary` id 4322 (2026-07-01) is already a single consolidated row and `ai_diary_archive` has zero rows for that date — consistent with `_upsert_diary_impl`'s same-day upsert-with-`---`-append design (one row per day, not separate fragment rows), so the test noise was appended straight into *today's* live content blob rather than creating archivable rows. The Grillo consolidator LLM happened to filter all the garbage out of the merged prose this time (verified the persisted `update_diary_entry` output has no test artifacts), so no permanent contamination landed — but that's not guaranteed, and it burns ~800 extra prompt tokens per beat. This is a **different, still-open** issue from `FIXED_ISSUES.md`'s "Automatic diary logging could create internal `diary_consolidation` noise rows" (2026-05-04 fix only skips the consolidation beat's own self-generated noise via `context.get("beat_type") == "diary_consolidation"`, `core/action_parser.py:1986-1993` — it does not address tests hitting the real DB). Real fix would be an autouse fixture in `tests/conftest.py` mocking `plugins.ai_diary.create_personal_diary_entry`/`add_diary_entry` (or pointing tests at an isolated DB).
+
+---
+
 ### GBNF action grammar — hard constraint for local cortex output  <!-- 2026-06-21 -->
 **What:** `force_action_grammar: true` in an openai_compat endpoint's `extra_config` makes `cortex_bridge` auto-build a GBNF grammar (`core/external_endpoints/action_grammar.py:build_actions_gbnf`) whose `type` enum is the exact set of actions offered for the request, and send it via `extra_body.grammar`. llama.cpp then constrains decoding so the model can only emit one well-formed `{"actions":[{"type":<known>,"payload":{...}}]}` object — no `<think>`/`<thought>` preamble (output must start with `{`), no malformed JSON, no invented/combined/duplicated types, and generation stops after the first object (kills the repetition cascade). This is the real fix for the whole class of local-model output failures; `force_json_object` is best-effort and silently ignored by many llama.cpp builds.
 **Scope/safety:** opt-in per endpoint and only wired through the OPENAI-protocol path — other engines (gemini/anthropic/xai) are untouched. Implies the in-prompt protocol (`_disable_tools()` returns true for it, since a grammar constrains *content*, not tool_calls). A manual `extra_config.grammar` takes precedence; `response_format` is dropped when a grammar is present (redundant/conflicting). Payload schemas are intentionally NOT encoded (only `payload ::= object`) — encoding all 49 action schemas would be enormous/brittle.
 **Caveat:** the grammar is generated, not validated against a live llama.cpp here. If a malformed grammar ever slips in, the server rejects the request and the turn fails — remove `force_action_grammar` to fall back. The builder fails safe (returns `None` → no grammar) on any internal error.
-
----
-
-### Local model 20-min runaway + leaked `<thought>` (json_object not enforced)  <!-- 2026-06-21 -->
-**Symptom:** A single chat turn took ~20 min and logged a malformed thinking tag plus cascading repeated `message_telegram_bot` outputs; only the first message was delivered. Trace: 1240s elapsed, `prompt 4887 + completion 27881 ≈ 32768` — the model generated until it **filled its entire 32k context window**.
-**Location:** `core/external_endpoints/adapters/openai_compat.py` (`_strip_thinking`, `chat_completion`); `core/external_endpoints/bridges/cortex_bridge.py` (`_extra_api_kwargs`).
-**Status:** mitigated (2026-06-21).
-**Notes:** Two independent causes. (1) The model ignored `enable_thinking=False` and emitted reasoning terminated by `</thought>`; `_strip_thinking` only matched `<think>`/`<thinking>`, not `<thought>`, nor a dangling closing tag (open tag dropped), so it leaked into content (JSON was still extracted after it, so the first reply went out). Fixed: regex now covers `thought` and a leading `^.*?</…>` dangling close. (2) **`response_format: json_object` is NOT enforced by this llama.cpp/model** — the output contained reasoning + prose + repeated JSON objects, i.e. free-form, so `force_json_object` is effectively a no-op here. With **no `max_tokens`**, a repetition loop ran to the context limit. Fixed: a default `max_tokens` (4096) is applied by `cortex_bridge._extra_api_kwargs()` — **only for local-model endpoints** (`disable_tools` / `force_action_grammar`); an explicit `extra_config.max_tokens` always wins, and cloud openai endpoints (xai, openrouter) stay uncapped (scoping tightened 2026-06-21 — every endpoint here is `protocol: openai`, so the blanket adapter default was wrong). The only *hard* JSON constraint for this server remains a GBNF `grammar` (already forwardable via `extra_config.grammar`); `json_object` should be treated as best-effort on local backends.
 
 ---
 
@@ -455,14 +523,6 @@ docker exec synth-dev tail -f /app/logs/synth.log | grep -E "\[grillo\]|grillo"
 
 ---
 
-### Order-dependent test failures in full pytest runs  <!-- 2026-06-11 -->
-**Symptom:** `test_db_cutover::test_cutover_runs_backup_and_migration`, `test_exposed_variables_static::test_no_direct_getenv_for_exposed_vars`, `test_exposed_variables_style::test_exposed_variable_label_and_description_style`, `test_vox_defaults::test_active_vox_engine_default_is_kitten`, and `test_vox_plugin::test_active_vox_engine_default_is_kitten` fail in a full `uv run pytest` run (e.g. `assert 'disabled' == 'kitten'`) but all pass when their files are run in isolation. The affected set shifts slightly between runs (`test_grillo_beat_system::test_grillo_beat_types_exist` has also tripped this way).
-**Location:** `tests/` (config-registry / exposed-vars global state leaking between test modules)
-**Status:** known — pre-existing, not tied to any single commit.
-**Notes:** The `config_registry` and exposed-variable registry are process-global; earlier tests register or mutate vars (e.g. `ACTIVE_VOX_ENGINE` ends up `'disabled'`) that later default-assertion tests then see. When triaging a full-suite run, re-run the failing file alone before assuming a regression. Also note: local `.env` values (e.g. `SYNTH_PRIMARY_DB=soul`) leak into tests that don't pin them — `tests/test_db_preflight.py` now monkeypatches `core.db._get_db_type` for this reason. The reverse also happens: `tests/test_message_queue.py` `test_enqueue_*` tests hit the live DB configured in `.env` and time out when it is slow/unreachable (they pass standalone only with a responsive DB; verified unrelated to code changes via stash A/B).
-
----
-
 ### `ai_diary` — user_message column overflow  <!-- 2026-04-13 -->
 **Symptom:** `(1406, "Data too long for column 'user_message' at row 1")` appearing repeatedly in `synth.log`, originating from `ai_diary.py` `_upsert_diary_impl`.
 **Location:** `plugins/ai_diary.py`, `init-db.sql` (`ai_diary` table, `user_message` column)
@@ -482,8 +542,8 @@ docker exec synth-dev tail -f /app/logs/synth.log | grep -E "\[grillo\]|grillo"
 ### `cortex_api.log` is section-format, not standard  <!-- 2026-04-13 -->
 **Symptom:** Searching `cortex_api` via MCP returns truncated banner lines only; full LLM payloads are cut at 400 chars.
 **Location:** `logs/cortex_api.log`, `mcp_servers/synth_logs.py` (`_LARGE_PAYLOAD_FILES`)
-**Status:** known limitation — no structured parser tool exists yet for this format.
-**Notes:** The file uses `==` and `--` banner sections (`REQUEST`, `RESPONSE`, `SEND`, `RECV`). Level/time filters don't work on it. For LLM debugging, search for the banner headers (e.g. `search_logs("REQUEST", log_files=["cortex_api"])`) to find timestamps, then correlate with `synth.log` by time.
+**Status:** mitigated — the `synth-cortex` MCP server now parses this format into structured sessions.
+**Notes:** The file uses `==` and `--` banner sections (`REQUEST`, `RESPONSE`, `SEND`, `RECV`). Level/time filters in `synth-logs` still don't work on it. For LLM debugging, use the `synth-cortex` MCP tools (`cortex_sessions` / `cortex_analyze` / `cortex_read` / `cortex_search`) instead of grepping the raw file. Caveat: the system prompt content is never written to this log — only its length (see the dedicated §12 entry).
 
 ---
 
@@ -542,27 +602,11 @@ docker exec synth-dev tail -f /app/logs/synth.log | grep -E "\[grillo\]|grillo"
 
 ---
 
-### `schedule_message send_at` path imports missing `get_local_tz` helper  <!-- 2026-04-18 -->
-**Symptom:** Absolute-time reminders can fail before scheduling with an import error when `schedule_message.payload.send_at` is used.
-**Location:** `plugins/event_plugin.py` (`_handle_schedule_message_payload`, import `from core.time_zone_utils import get_local_tz`).
-**Status:** known, not fixed.
-**Notes:** There is no `get_local_tz` symbol in `core.time_zone_utils`. Relative-delay scheduling (`send_in`) is unaffected, but `send_at` parsing needs to use an existing timezone helper or inline timezone resolution.
-
----
-
-### `event_plugin` interface-path reminder delivery still calls stale `run_action` signature  <!-- 2026-04-18 -->
-**Symptom:** Reminder delivery via `interface_path` can log a `run_action()` argument error instead of sending the message.
-**Location:** `plugins/event_plugin.py` (`_send_via_interface_path`) vs `core/action_parser.py` (`run_action(action, context, bot, original_message)`).
-**Status:** known, not fixed.
-**Notes:** The call site still uses the old two-argument form (`run_action(action, message)`). This path needs the same context/bot/original-message signature update that other callers already received.
-
----
-
 ### `test_selenium_ttsfree.py` blocks broad pytest without optional Selenium dependency  <!-- 2026-04-18 -->
 **Symptom:** `uv run pytest` can fail during collection with `ModuleNotFoundError: No module named 'selenium'` from `tests/plugins/test_selenium_ttsfree.py` after it falls back to `plugins_dev.selenium_ttsfree`.
 **Location:** `tests/plugins/test_selenium_ttsfree.py`, `plugins_dev/selenium_ttsfree.py`
-**Status:** known, not fixed.
-**Notes:** Environments without the optional Selenium package cannot collect this test module. For broad regression sweeps, either install `selenium` or ignore this file explicitly (for example `uv run pytest --ignore=tests/plugins/test_selenium_ttsfree.py`).
+**Status:** known, not fixed — and Selenium is deliberately **not installed/configured in this workspace**, so this test can never pass here.
+**Notes:** Environments without the optional Selenium package cannot collect this test module. Always exclude it (`uv run pytest --ignore=tests/plugins/test_selenium_ttsfree.py`) — but prefer scoped test runs in the first place, per §9.
 
 ---
 
@@ -587,22 +631,6 @@ docker exec synth-dev tail -f /app/logs/synth.log | grep -E "\[grillo\]|grillo"
 **Location:** Docker Compose runtime state after switching to the Postgres-first stack; stale orphan containers such as `synth-soul-db` and `synth-db-backup` can survive from the older topology.
 **Status:** known / operational workaround.
 **Notes:** In the observed failure, the current `synth-db` service could not bind host port `5432` because orphan `synth-soul-db` still owned it. `docker compose up -d --force-recreate synth-db synth` then left `synth` and `synth-legacy-db` on `synth_network` while `synth-db` never came up correctly, so `synth` could resolve `synth-legacy-db` but not `synth-db`. Safe recovery was: stop the orphan containers without deleting volumes, then rerun `docker compose up -d --force-recreate synth-db synth`. After that, `docker exec synth getent hosts synth-db synth-legacy-db` resolved both hosts and `https://localhost:8000` returned `200 OK` again.
-
----
-
-### `vrm-viewer.mjs` fails standalone `node --check` near idle-finish handler  <!-- 2026-05-12 -->
-**Symptom:** Running `node --check res/synth_webui/js/vrm-viewer.mjs` reports `SyntaxError: Unexpected token '{'` at `stopAction(actionName)`, after source text around `Finished idle animation -> starting next:` appears structurally corrupted.
-**Location:** `res/synth_webui/js/vrm-viewer.mjs`, idle-finish / `stopAction` boundary around the `Finished idle animation -> starting next` block.
-**Status:** fixed.
-**Notes:** The corruption was in the tail of `startAction()`: the idle-finish handler lost its closing control-flow and overwrote the single-clip action path before `stopAction()`. The block was reconstructed and `node --check res/synth_webui/js/vrm-viewer.mjs` now passes again on `feat/karada-v2`.
-
----
-
-### WebUI phase logs could hide valid THINKING/WRITING transitions  <!-- 2026-04-22 -->
-**Symptom:** During debugging it could look like WebUI never entered `THINKING` / `WRITING`, because the browser console only logged `vrm_animation` messages and the backend phase-promotion log could misleadingly print `WRITING -> WRITING` even when the real transition was `THINKING -> WRITING`.
-**Location:** `core/action_state_manager.py`, `res/synth_webui/js/chat-window.mjs`
-**Status:** fixed.
-**Notes:** `ActionStateManager.update_phase()` now snapshots the old phase before mutation, and the chat window now logs incoming `action_state` WebSocket events so frontend and backend traces can be correlated directly.
 
 ---
 
@@ -662,33 +690,6 @@ docker exec synth-dev tail -f /app/logs/synth.log | grep -E "\[grillo\]|grillo"
 
 ---
 
-### VRM eyes stay OPEN during `think` — blink suppression zeroes the closure morph via case/alias variants  <!-- 2026-07-02 -->
-**Symptom:** Synth's VRM avatar shows eyes OPEN during the `think` animation state even though the think descriptor declares `eyes_closed: 1.0`. The LOGICAL target was correct (`_expressionState['blink'] = 0.85`, `_eyesState` locked with `duration: 3600000`, `_blinkLoopRunning: false`) but the VRM blendshape read `expressionManager.getValue('blink') = 0`.
-**Location:** `res/synth_webui/js/vrm-viewer.mjs` — the eyes-closed blink-suppression block in `applyExpressionsForFrame` (was ~line 1969).
-**Root cause:** When `eyesClosedRequestedMax > 0.5`, a suppression block zeroes a hardcoded list of blink alias keys (`'eye_blink_left', ..., 'blink', 'blinkLeft', 'blinkRight', 'Blink', 'BlinkLeft', 'BlinkRight'`) unless the key is in `eyesClosedResolvedTargets`. For Rei, `blendshape_map['eyes_closed'] = 'blink'`, so `eyesClosedResolvedTargets` contained the lowercase `'blink'` — protected. BUT the list also contains `'Blink'` (capitalized), which was NOT in the protected set, so `desired['Blink'] = 0` was set. `_resolveFaceKeys('Blink')` resolves to the SAME concrete VRM expression `blink`, so `_setFaceValue('Blink', 0)` → `em.setValue('blink', 0)` overwrote the intended `0.85` closure that had been written moments earlier in the same frame. Instrumenting `em.setValue` showed the exact sequence: `['blink', 0.255]` (correct) immediately followed by `['Blink', 0]` and `['blink', 0]` (the alias suppression re-zeroing the same morph). The low-level setter chain (`ctrl.setValue` / `_setFaceValue`) was always fine — the fault was purely the alias/case collision in the suppression list.
-**Status:** fixed 2026-07-02 (deployed to container, NOT committed).
-**Notes:** Fix resolves BOTH the suppression aliases AND the protected `eyesClosedResolvedTargets` to concrete VRM keys via `_resolveFaceKeys`, then only zeroes a suppression alias when its resolved keys do NOT overlap the protected closure morphs. Verified via synchronous `applyExpressionsForFrame` drives: `blink` ramps `0.43 → 0.83 → 0.85` and holds at `0.85`; `em.getValue('blink') = 0.85`; no re-zeroing writes; `_blinkLoopRunning: false`; `_eyesState` stays `locked:true, duration:3600000`. Deploy step: `docker cp res/synth_webui/js/vrm-viewer.mjs synth:/app/res/synth_webui/js/vrm-viewer.mjs` (host JS edits do NOT reach the browser otherwise). This completes the think-eyes-closure work alongside EDIT 1/EDIT 2 (logical `_eyesState` lock, prevent autoblink restart) and EDIT 3 (duration-aware failsafe in `_setEyesState`).
-
----
-
-### VRM eyes stay CLOSED during `write`/`idle` after `think` — stale-state race in async persona load  <!-- 2026-07-02 -->
-**Symptom:** After the think-eyes-closure fix (entry above), Synth's VRM avatar shows eyes CLOSED during the `write` (or `idle`) state instead of `think` — i.e. the closure "leaks" into the next state. User report: "ora il synth chiude gli occhi in writing però, o forse non va proprio in thinking, le animazioni sono veloci" (closure appears in the wrong state; feels worse when animations are fast/short). Note: the `write` state has NO `.fbx.json` descriptor (only `Texting.fbx` / `Texting While Standing.fbx`), so it can never declare `eyes_closed` on its own — any closure there is leaked.
-**Location:** `res/synth_webui/js/vrm-viewer.mjs` — `applyAnimationState`, inside the async `_loadPersonaForSkin(...).then(persona => { ... })` callback (was ~line 1191, the `this._lastAnimationState = state;` after pushing persona_override expressions).
-**Root cause:** `applyAnimationState` sets `this._lastAnimationState = state` synchronously (good), then kicks off an ASYNC `_loadPersonaForSkin().then()` that, on resolution, pushes the persona `animation_overrides` (for Rei's `think`: a persistent `eyes_closed` expression with `end_frame: 1000000000, priority: 90`) onto `state.expressions` and RE-WRITES `this._lastAnimationState = state`. The `.then()` closure captures the `state` argument by reference. When animations are fast/short, the sequence is: think arrives → starts async persona load → idle/write arrives → synchronously sets `_lastAnimationState = idleState` → THEN think's persona promise resolves and clobbers `_lastAnimationState` back to the obsolete `thinkState`, re-applying its persistent `eyes_closed` override. The per-frame ticker then reads the stale think state and holds `blink ≈ 0.85` with `_eyesState` locked (`duration: 3600000`) during write/idle. Live proof: display read `Remote: idle` while `_lastAnimationState.action === 'think'` with 2 expressions and `emBlink 0.85`.
-**Status:** fixed 2026-07-02 (deployed to container, NOT committed).
-**Notes:** Fix adds a stale-state guard at the top of the persona `.then()`: `if (this._lastAnimationState !== state) { return; }` — if a newer state has already replaced `_lastAnimationState`, abort before re-writing it or re-applying overrides. Verified via synchronous Playwright drives: (a) FAST race think→idle → `_lastAnimationState.action = 'idle'`, `expressions = 0`, `_eyesState = {value:0, locked:false, duration:null}`, `em.getValue('blink') = 0` (eyes OPEN), `_blinkLoopRunning: true`; (b) think alone still closes → `_lastAnimationState.action = 'think'`, override applied, `_eyesState` locked `duration:3600000`, `em.getValue('blink')` ramps to `0.85`, blink loop suppressed. Deploy step: `docker cp res/synth_webui/js/vrm-viewer.mjs synth:/app/res/synth_webui/js/vrm-viewer.mjs`.
-
----
-
-### VRM eyes stay CLOSED after `think` because the animation engine never forwards non-rich states  <!-- 2026-07-02 -->
-**Symptom:** Live use only (survived both prior fixes): the avatar shows eyes CLOSED while the Debug panel reads `Remote: idle` (or `write`). Handler inspection: `_lastAnimationState.action === 'think'`, `_eyesState {value:1, locked:true, duration:3600000}`, blink held closed — i.e. the handler is frozen in the previous `think` state even though the backend has already broadcast `idle`/`write`. Synthetic Playwright drives of `applyAnimationState` did NOT reproduce it (they bypass the engine forwarding path).
-**Location:** `res/synth_webui/js/vrm-animation-engine.mjs` — `_forwardDescriptorExpressions(state, descriptor, startedAt)` (called once from `playAnimation`, ~line 319).
-**Root cause:** `_forwardDescriptorExpressions` computed `hasRich = !!(descriptor.expressions || descriptor.blink || descriptor.eye_movement || typeof descriptor.lipsync === 'boolean')` and did `if (!hasRich) return;`. States without a rich descriptor (`write` has NO `.fbx.json`; a bare `idle` has no facial data) hit that early return, so the engine NEVER called `handler.applyAnimationState(...)` for them. Consequently `_lastAnimationState` was never updated and the `think` eyes-closed lock (`_eyesState.duration = 3600000`) from the previous rich state was never cleared → eyes stayed shut through write/idle. The Debug `Remote:` display updates via an independent WS path, so it correctly showed `idle` while the handler was still on `think` (display ≠ handler state).
-**Status:** fixed 2026-07-02 (deployed to container via `docker cp`, NOT committed).
-**Notes:** Fix: in the `!hasRich` branch, instead of returning, build a minimal expression-free state (`{ action: stateName, animation, phase, clip:{fps}, timing:{started_at,time_in_clip:0,current_frame:0}, expressions: [], blink: null, eye_movement: null, lipsync: false, source: 'karada_engine_descriptor' }`) and call `handler.applyAnimationState(minimalState)` before returning. This forces the handler to update `_lastAnimationState` and run `_resetEyesSmoothly`, reopening the eyes (the new state declares no `eyes_closed`). Safe because `skins/Rei/persona.json` `animation_overrides` closes eyes ONLY for `Think` — forwarding a bare write/idle adds no closure. Verified LIVE: forced the exact stuck-think lock (`{value:1,locked:true,duration:3600000}` while `Remote: idle`), then a real backend beat transitioned write→idle and the handler followed → `_lastAnimationState.action = 'idle'`, `_eyesState {value:0.6→0, locked:false, duration:210}`, `_blinkLoopRunning: true`, avatar eyes visibly OPEN in the screenshot. Deploy step: `docker cp res/synth_webui/js/vrm-animation-engine.mjs synth:/app/res/synth_webui/js/vrm-animation-engine.mjs`. Lesson: synthetic `applyAnimationState` drives cannot validate the engine→handler forwarding gate — reproduce via the real backend flow.
-
----
-
 ### Correction system re-sends `message_*` on non-message action failures, causing duplicate Telegram messages  <!-- 2026-06-26 -->
 **Symptom:** User receives two identical (or near-identical) replies on Telegram for a single message. Langfuse shows 3 traces in rapid succession: a broken primary generation, a first correction that sends the message, then a second correction that sends a second message.
 **Location:** `core/transport_layer.py` `run_corrector_middleware`; correction prompt assembly.
@@ -698,34 +699,11 @@ docker exec synth-dev tail -f /app/logs/synth.log | grep -E "\[grillo\]|grillo"
 
 ---
 
-### Gemma-4 missing closing `}` for action dict → diary payload selected as `parsed`  <!-- 2026-06-26 -->
-**Symptom:** message_chain logs `Normalizing action-key dictionary format` + `Added 6 synthetic action(s) for unregistered top-level key(s): interaction_summary, content, personal_thought, emotions, context_tags, involved_users` (the diary payload's own fields). Immediately followed by 12 unsupported action types, a correction, and eventual delivery. Trace: `ab6930e3-1689-48c6-a284-ea927c31695a`.
-**Location:** `core/transport_layer.py` `extract_json_from_text`; triggered by gemma-4-uncensored (Venice) output.
-**Root cause:** Gemma-4 sometimes emits the diary action dict without its closing `}`, so the outer `{"actions": [...], "type": "message_telegram_bot", ...}` is also malformed. The raw_decode scan falls back to the diary *payload* dict (minimum extra-chars parseable candidate). That dict has no `actions` key → message_chain normalizes its 6 fields as fake action types, then the unregistered-top-level-keys block doubles them to 12 → correction fires.
-**Status:** fixed 2026-06-26 — `json_repair` now also runs when `found_json` is a dict without `"actions"` (not just when nothing is found). It fixes the missing brace, json_repair returns a list `[outer_with_actions, use_animation]`, the list is detected and merged back into a single dict with `"actions"` containing all recovered actions. `syntax_repaired=True` in metadata; `had_errors=False`; no correction needed.
-**Notes:** The fix is in `extract_json_from_text` — the `_json_repair_needed` condition block at the bottom of the outer scan loop (outside all `if not found_json:` guards). Also: `json_repair` was NOT the cause of this trace (confirmed — no `json_repair` log entry exists; the bug predates the json_repair integration).
-
----
-
 ### Admin/maintenance actions leak into non-lite in-prompt catalogs for local endpoints  <!-- 2026-06-27 -->
 **Symptom:** When `PROMPT_LITE_MODE=false` and a local endpoint uses `disable_tools: true` or `force_action_grammar: true`, the `=== AVAILABLE ACTIONS ===` block injected by `_inject_actions_into_prompt` contains ~44 actions including admin/maintenance ones that should never appear in a normal chat prompt: `soul_force_compile`, `soul_force_rollup`, `soul_get_status`, `soul_run_curator`, `bio_full_request`, `bio_update`, `block_user`, `unblock_user`, `cleanup_old_chats`, `cleanup_old_mappings`, `compact_now`, `ensure_chat`, `resolve_chat`, `get_recent_chats`, `list_chats`, `decay_emotions`, `set_emotion`, `sync_emotions_from_all_sources`, `update_emotion_from_tags`, `static_inject`, `send_mate_message`, `trigger_weather_report`, `schedule_message`, and others.
 **Location:** `core/external_endpoints/bridges/cortex_bridge.py` `_inject_actions_into_prompt`; `core/prompt_engine.py` `_derive_default_prompt_action_types`, `_is_non_user_facing_action`.
 **Status:** known — cross-interface `message_*` leak and `PROMPT_LITE_MODE` bypass both fixed 2026-06-27; admin action leak in non-lite mode is open.
 **Notes:** The pre-filter (`_derive_default_prompt_action_types`) only excludes actions whose source matches a *registered* interface name. Plugin-provided actions (sources: `soul`, `bio`, `blocklist`, etc.) have no matching interface, so they pass through for every interface. `_is_non_user_facing_action` can exclude them if their brief/description contains "admin only", "deprecated", or "internal" — but most admin actions don't use those keywords. Two fix approaches: **(A) Tag at the plugin level** — add `"admin only"` to the brief of admin actions in each plugin's `get_supported_actions()`, so the existing guard in `_is_non_user_facing_action` catches them with zero new plumbing. **(B) Add an `admin_only` flag** to the action schema contract and update `_is_non_user_facing_action` to check it — cleaner but requires a schema change. Approach (A) is simpler. `PROMPT_LITE_MODE=true` already filters all these actions — the issue only affects non-lite local endpoints.
-
----
-
-### Recon `parse_recon_response` missing `_raw_llm_text` on 4 plugins  <!-- 2026-06-27 -->
-**Symptom:** `Recon plugin ReconMemoryRecollectorPlugin parse failed: parse_recon_response() got an unexpected keyword argument '_raw_llm_text'` — and same for log_reader, tone_evaluator, language_evaluator. Crashes the entire recon dispatch for that plugin group, producing zero recon contributions.
-**Location:** `plugins/recon_memory_recollector.py`, `plugins/recon_log_reader.py`, `plugins/recon_tone_evaluator.py`, `plugins/recon_language_evaluator.py` — all `parse_recon_response()` signatures.
-**Status:** fixed.
-**Notes:** `core/recon.py:747` passes `_raw_llm_text=llm_text` as a keyword arg to all recon plugins. Four plugins didn't accept it. `recon_web_search.py` already had it (was fixed earlier). The fix adds `_raw_llm_text: str | None = None` as the last keyword parameter.
-
-### Server-side LLM errors skip correction loop  <!-- 2026-06-27 -->
-**Symptom:** When the LLM engine returns a non-recoverable error (e.g. `Logprobs not supported` from selenium-llm-engine proxying Gemini), the correction loop in `message_chain.py` would call the corrector 2+ times, each hitting the same dead engine and waiting for timeout (~120s each), before finally sending a fallback message.
-**Location:** `core/message_chain.py` (correction loop, line ~2365).
-**Status:** fixed.
-**Notes:** The fix adds a pre-check in the correction loop: if the LLM return text contains a known server-error marker (`logprobs not supported`, `internal server error`, `service unavailable`, `5xx` gateway errors), skip directly to the fallback message. The `Logprobs not supported` error itself comes from the selenium-llm-engine (not SyntH) — the OpenAI SDK it uses internally sends `logprobs` to Gemini, which rejects it. Fix the selenium-llm-engine to strip/not-set `logprobs` in its OpenAI-compatible adapter.
 
 ---
 
@@ -799,7 +777,7 @@ All keys stored in the `config` table and accessible via `config_registry.get_va
 | `SYNTH_PROFILE` | Synth's persona profile text (injected into every prompt) |
 | `SYNTH_ALIASES` | Comma-separated name aliases Synth responds to |
 | `SYNTH_AUTONOMY_MODE` | Autonomy level: `disabled`, `always_ask`, `whitelist`, `always_approve` |
-| `TRAINER_CHAT_ID` | `interface_path` of the trainer (Scarlet) — used for direct notifications |
+| `TRAINER_CHAT_ID` | `interface_path` of the trainer — used for direct notifications |
 | `LOG_CHAT_ID` | `interface_path` to send ERROR/WARNING log notifications to |
 | `LOG_CHAT_INTERFACE` | Interface name for LogChat delivery |
 | `LOG_CHAT_THREAD_ID` | Thread ID for LogChat (Discord threads etc.) |
@@ -841,9 +819,9 @@ All keys stored in the `config` table and accessible via `config_registry.get_va
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **synthetic_heart** (10324 symbols, 33256 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **synthetic_heart**. Use the GitNexus MCP tools to understand code, assess impact, and navigate safely. The index and registry are **per-workspace** (`.gitnexus/` + `.gitnexus-home/`, both gitignored) — see §8 for the one-time setup each clone needs.
 
-> If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
+> If any GitNexus tool warns the index is stale (or errors with "No indexed repositories"), re-run the per-workspace analyze command from §8 first.
 
 ## Always Do
 
@@ -911,21 +889,17 @@ Before completing any code modification task, verify:
 
 ## Keeping the Index Fresh
 
-After committing code changes, the GitNexus index becomes stale. Re-run analyze to update it:
+After committing code changes, the GitNexus index becomes stale. Re-run analyze to update it — **always with the per-workspace registry and `--skip-agents-md`** (see §8 for why):
 
 ```bash
-npx gitnexus analyze
+GITNEXUS_HOME=.gitnexus-home npx gitnexus analyze --skip-agents-md
 ```
 
-If the index previously included embeddings, preserve them by adding `--embeddings`:
+PowerShell: `$env:GITNEXUS_HOME=".gitnexus-home"; npx gitnexus analyze --skip-agents-md`
 
-```bash
-npx gitnexus analyze --embeddings
-```
+If the index previously included embeddings, preserve them by adding `--embeddings`. To check whether embeddings exist, inspect `.gitnexus/meta.json` — the `stats.embeddings` field shows the count (0 means no embeddings). **Running analyze without `--embeddings` will delete any previously generated embeddings.**
 
-To check whether embeddings exist, inspect `.gitnexus/meta.json` — the `stats.embeddings` field shows the count (0 means no embeddings). **Running analyze without `--embeddings` will delete any previously generated embeddings.**
-
-> Claude Code users: A PostToolUse hook handles this automatically after `git commit` and `git merge`.
+> There is no automatic reindex hook in these workspaces — re-run the command above manually after committing.
 
 ## CLI
 

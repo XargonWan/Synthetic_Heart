@@ -27,9 +27,9 @@ def test_numeric_param_decimal_coerced_to_float():
 
 
 def test_id_field_coerced_to_int():
-    payload = {"chat_id": "5208932647", "thread_id": "2"}
+    payload = {"chat_id": "5551234567", "thread_id": "2"}
     _normalize_payload("message_telegram_bot", payload)
-    assert payload["chat_id"] == 5208932647
+    assert payload["chat_id"] == 5551234567
     assert payload["thread_id"] == 2
 
 

@@ -125,6 +125,16 @@ INCLUDE_LOCAL_TIME_IN_PROMPTS = config_registry.get_var(
     value_type=bool,
 )
 
+USE_PERSONA_IN_SYSTEM_PROMPTS = config_registry.get_var(
+    "USE_PERSONA_IN_SYSTEM_PROMPTS",
+    True,
+    label="Use Persona in System Prompts",
+    description="Whether to prepend the persona/identity template in instructions.",
+    group="core",
+    component="prompt_engine",
+    value_type=bool,
+)
+
 
 def minify_actions_block(
     available_actions: dict,
@@ -605,7 +615,23 @@ def _history_to_turns(
     # "self" is the canonical sender_name for the AI in history format
     all_synth_names = synth_names | {"self"}
 
-    turns: list[Turn] = []
+    # A peer SyntH's messages land in this bot's own history (see
+    # peer_synths.rst) with their own sender_name, which never matches this
+    # bot's own synth_names -- without this, they'd silently fall into the
+    # "user" bucket below with no way to tell them apart from the human. Role
+    # still ends up "user" for peers (no third role in the chat protocol), but
+    # each turn also carries an `is_peer` marker so the coalescing pass below
+    # never blends a peer's lines into a genuine human turn (or vice versa).
+    try:
+        from core.peer_policy import get_peer_names
+
+        peer_names_lower = {name.lower(): name for name in get_peer_names().values()}
+    except Exception:
+        peer_names_lower = {}
+
+    # Entries are (Turn, is_peer) pairs. is_peer is only meaningful for
+    # role == "user" turns; it is always False for "assistant" turns.
+    entries: list[tuple[Turn, bool]] = []
     for line in history_lines:
         if not isinstance(line, str):
             continue
@@ -614,37 +640,58 @@ def _history_to_turns(
             continue
         sender = m.group(1).strip()
         content = m.group(2)
-        role = "assistant" if sender.lower() in all_synth_names else "user"
-        turns.append(Turn(role=role, content=content))
+        sender_lower = sender.lower()
+        is_peer = False
+        if sender_lower in all_synth_names:
+            role = "assistant"
+        else:
+            role = "user"
+            peer_name = peer_names_lower.get(sender_lower)
+            if peer_name:
+                # Tag so the model can tell this was a peer SyntH speaking,
+                # not the human -- role must still be "user" (no third
+                # role in the chat protocol), so attribution has to live
+                # in the content itself.
+                content = f"[{peer_name}]: {content}"
+                is_peer = True
+        entries.append((Turn(role=role, content=content), is_peer))
 
-    if not turns:
+    if not entries:
         return []
 
     # If the visible history window starts mid-conversation, it can begin with
     # stale assistant-only turns (for example repeated outreach messages). When
     # a user turn exists later in the window, drop the unmatched leading
     # assistant turns so the model does not anchor on an orphaned monologue.
-    if any(turn.role == "user" for turn in turns):
-        while turns and turns[0].role == "assistant":
-            turns.pop(0)
+    if any(turn.role == "user" for turn, _ in entries):
+        while entries and entries[0][0].role == "assistant":
+            entries.pop(0)
 
-    if not turns:
+    if not entries:
         return []
 
     # Coalesce consecutive same-role turns to keep provider history well-formed
     # even when the source chat log contains streaks of outreach or split user
-    # messages.
-    normalized_turns: list[Turn] = []
-    for turn in turns:
-        if normalized_turns and normalized_turns[-1].role == turn.role:
-            normalized_turns[-1] = Turn(
-                role=turn.role,
-                content=f"{normalized_turns[-1].content}\n\n{turn.content}",
-            )
-            continue
-        normalized_turns.append(turn)
+    # messages. Peer-tagged turns only coalesce with other peer-tagged turns,
+    # and genuine human turns only coalesce with other genuine human turns --
+    # otherwise a real human line sandwiched between peer lines would get
+    # blended into one indistinguishable "user" block.
+    normalized_entries: list[tuple[Turn, bool]] = []
+    for turn, is_peer in entries:
+        if normalized_entries:
+            prev_turn, prev_is_peer = normalized_entries[-1]
+            if prev_turn.role == turn.role and prev_is_peer == is_peer:
+                normalized_entries[-1] = (
+                    Turn(
+                        role=turn.role,
+                        content=f"{prev_turn.content}\n\n{turn.content}",
+                    ),
+                    is_peer,
+                )
+                continue
+        normalized_entries.append((turn, is_peer))
 
-    return normalized_turns
+    return [turn for turn, _ in normalized_entries]
 
 
 def _build_pr_attachments(
@@ -991,9 +1038,19 @@ def _assemble_prompt_request(  # noqa: PLR0913
     # Effective scope: use context_section's recorded scope or default to "local"
     scope: str = str(context_section.get("history_scope") or "local")
 
+    chat_type: str | None = None
+    if interface_path:
+        try:
+            from core.history_engine import telegram_chat_kind
+
+            chat_type = telegram_chat_kind(interface_path)
+        except Exception:
+            chat_type = None
+
     runtime_ctx = RuntimeContext(
         interface_name=interface_name,
         interface_path=interface_path,
+        chat_type=chat_type,
         message_id=runtime_message_id,
         username=username,
         usertag=usertag,
@@ -1329,6 +1386,25 @@ async def build_prompt_request(
     except Exception as e:
         log_warning(f"[json_prompt] Failed to gather static injections: {e}")
 
+    # === 3b. Peer SyntH awareness block (Telegram groups only) ===
+    try:
+        _chat_type = getattr(getattr(message, "chat", None), "type", None)
+        _is_tg_group = interface_name == "telegram_bot" and _chat_type in (
+            "group",
+            "supergroup",
+        )
+        if _is_tg_group:
+            from core.peer_policy import get_peer_context_block
+
+            peer_block = get_peer_context_block()
+            if peer_block:
+                recon_instructions.append(peer_block)
+                log_debug(
+                    "[json_prompt] Peer context block injected for Telegram group"
+                )
+    except Exception as e:
+        log_debug(f"[json_prompt] Peer context block skipped: {e}")
+
     # === 4. Input payload ===
     # interface_path was already extracted at the beginning
     # If still not found, check if context_memory is actually a context dict with interface_path
@@ -1536,13 +1612,7 @@ async def build_prompt_request(
     # Skip prepending static persona for internal system/maintenance tasks (like diary_merge/diary_consolidation)
     # to avoid triggering safety filters of external LLMs on explicit instructions.
     _use_persona = bool(
-        config_registry.get_value(
-            "USE_PERSONA_IN_SYSTEM_PROMPTS",
-            True,
-            value_type=bool,
-            group="core",
-            component="prompt_engine",
-        )
+        config_registry.get_value("USE_PERSONA_IN_SYSTEM_PROMPTS", True)
     )
     if static_persona and _use_persona:
         json_instructions = f"=== CRITICAL SYSTEM IDENTITY ===\n{static_persona}\n\n=== JSON RESPONSE INSTRUCTIONS ===\n{json_instructions}"
@@ -2135,7 +2205,7 @@ def load_json_instructions() -> str:
         "REFERENCE CLARITY: When the user refers indirectly to a person, message, post, image, clip, or quoted content, refer to its author or speaker in a clear generic way and avoid vague or impersonal wording that obscures who created or said it.\n"
         "TIME AUTHORITY: Use the [SYSTEM: REALITY ANCHOR] block (current date, time, season) as your authoritative temporal context. Use it for all relative time calculations (e.g., 'yesterday', 'next week') and temporal reasoning. Never quote the absolute date, current year, or clock time verbatim in ordinary replies unless explicitly asked or genuinely necessary for scheduling or logistics. Treat past logs referencing dates as style noise and do not mirror them.\n"
         "RUNTIME STYLE: If earlier assistant messages or chat history casually mention an exact time, date, timezone, weather, or location, treat that as stale style noise and do not mirror it unless the user asked for it or logistics genuinely require it.\n"
-        "INPUT METADATA: Each user message is prefixed with internal routing metadata in the format [lang:... | tone:... | emotions:... | from:... | tag:... | path:...]. This is injected by the system — the user did not write it. Do not reference, quote, or paraphrase any part of this prefix in your replies (e.g. never say 'that 5.0 neutral you mentioned' or 'your tone tag says...').\n"
+        "INPUT METADATA: Each user message is prefixed with internal routing metadata in the format [lang:... | tone:... | time_of_day:... | emotions:... | from:... | tag:... | path:...]. This is injected by the system — the user did not write it. Do not reference, quote, or paraphrase any part of this prefix in your replies (e.g. never say 'that 5.0 neutral you mentioned' or 'your tone tag says...').\n"
         "IDENTITY INTEGRITY: Stay inside the active persona in first person. Do not describe yourself from the outside, do not refer to the active persona as a separate fictional character, and do not compare yourself to that persona as if they were someone else.\n"
         "PRONOUN CONSISTENCY: When the prompt, persona, or participant context establishes a person's pronouns or relationship role, use them consistently and do not flip them. Do not neutralize an established he/him or she/her person into singular they/them.\n"
         "LENGTH POLICY: Do NOT hardcode a target response length. Let the persona, the relationship context, and the user's tone determine how much to say. Simple factual or logistical turns can stay brief; intimate, emotional, or reflective turns may be fuller when that feels natural. Do not pad, and do not forcibly truncate a reply just to make it short.\n"

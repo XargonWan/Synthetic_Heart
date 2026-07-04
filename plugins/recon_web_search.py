@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Any, Dict, List, Optional
+from typing import List
 
 from core.config_manager import config_registry
 from core.logging_utils import log_debug, log_info, log_warning

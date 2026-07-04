@@ -178,3 +178,139 @@ async def test_get_active_cortex_engine_resets_bad_scope_override_to_base(monkey
 
     assert engine == "gemini_api"
     set_value.assert_awaited_once_with("GRILLO_CORTEX", "Default")
+
+
+@pytest.mark.asyncio
+async def test_get_active_cortex_engine_keeps_pending_external_endpoint(monkeypatch):
+    """A configured-but-not-yet-registered external endpoint must not be
+    treated as stale -- doing so previously caused BASE_CORTEX to be
+    silently and permanently overwritten with whichever built-in engine
+    module happened to sort first on disk (anthropic), any time the
+    endpoint hadn't (re)registered into the CortexRegistry yet."""
+    from core import config as conf
+    import core.config_manager as cm
+
+    class FakeRegistry:
+        def get_available_engines(self):
+            return ["anthropic", "gemini_api"]
+
+        def get_default_engine(self):
+            return "anthropic"
+
+    class FakeEndpoint:
+        def engine_name(self):
+            return "Venice2"
+
+    class FakeExternalEndpointRegistry:
+        async def list_endpoints(self, enabled_only=False):
+            return [FakeEndpoint()]
+
+    values = {
+        "BASE_CORTEX": "Venice2",
+        "GRILLO_CORTEX": "Default",
+    }
+    set_value = AsyncMock()
+
+    monkeypatch.setattr(
+        cm.config_registry,
+        "get_value",
+        lambda key, default=None: values.get(key, default),
+    )
+    monkeypatch.setattr(cm.config_registry, "set_value", set_value)
+    monkeypatch.setattr(
+        "core.cortex_registry.get_cortex_registry", lambda: FakeRegistry()
+    )
+    monkeypatch.setattr(
+        "core.external_endpoints.registry.get_external_endpoint_registry",
+        lambda: FakeExternalEndpointRegistry(),
+    )
+
+    engine = await conf.get_active_cortex_engine(None)
+
+    assert engine == "Venice2"
+    set_value.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_get_active_cortex_engine_avoids_keyless_anthropic_fallback(
+    monkeypatch,
+):
+    """BASE_CORTEX stuck at 'anthropic' with no ANTHROPIC_API_KEY configured
+    must self-heal to a sibling scope's already-working engine (e.g. Venice
+    from TRAINER_CORTEX) instead of silently returning 'anthropic' again --
+    anthropic is a real registered built-in so the plain staleness check
+    never fires for it, but without a key it doesn't raise, it returns a
+    fixed 'not configured' string that loops the JSON corrector forever
+    (see FIXED_ISSUES.md)."""
+    from core import config as conf
+    import core.config_manager as cm
+
+    class FakeRegistry:
+        def get_available_engines(self):
+            return ["anthropic", "gemini_api", "Venice"]
+
+        def get_default_engine(self):
+            return "anthropic"
+
+    values = {
+        "BASE_CORTEX": "anthropic",
+        "TRAINER_CORTEX": "Venice",
+        "GRILLO_CORTEX": "Default",
+        "ANTHROPIC_API_KEY": "",
+    }
+    set_value = AsyncMock()
+
+    monkeypatch.setattr(
+        cm.config_registry,
+        "get_value",
+        lambda key, default=None: values.get(key, default),
+    )
+    monkeypatch.setattr(cm.config_registry, "set_value", set_value)
+    monkeypatch.setattr(
+        "core.cortex_registry.get_cortex_registry", lambda: FakeRegistry()
+    )
+
+    engine = await conf.get_active_cortex_engine(None)
+
+    assert engine == "Venice"
+    set_value.assert_awaited_once_with("BASE_CORTEX", "Venice")
+
+
+@pytest.mark.asyncio
+async def test_get_active_cortex_engine_allows_anthropic_when_key_configured(
+    monkeypatch,
+):
+    """A deliberately-configured anthropic with a real key must not be
+    treated as unavailable -- the keyless guard is opt-in based on whether
+    ANTHROPIC_API_KEY is actually set."""
+    from core import config as conf
+    import core.config_manager as cm
+
+    class FakeRegistry:
+        def get_available_engines(self):
+            return ["anthropic", "gemini_api"]
+
+        def get_default_engine(self):
+            return "anthropic"
+
+    values = {
+        "BASE_CORTEX": "anthropic",
+        "GRILLO_CORTEX": "Default",
+        "ANTHROPIC_API_KEY": "sk-ant-real-key",
+    }
+    set_value = AsyncMock()
+
+    monkeypatch.setattr(
+        cm.config_registry,
+        "get_value",
+        lambda key, default=None: values.get(key, default),
+    )
+    monkeypatch.setattr(cm.config_registry, "set_value", set_value)
+    monkeypatch.setattr(
+        "core.cortex_registry.get_cortex_registry", lambda: FakeRegistry()
+    )
+
+    engine = await conf.get_active_cortex_engine(None)
+
+    assert engine == "anthropic"
+    set_value.assert_not_awaited()

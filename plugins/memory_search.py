@@ -379,7 +379,7 @@ class MemorySearchPlugin:
                 where_clauses_mem.append("(" + " OR ".join(token_clauses) + ")")
 
             # For ai_diary search personal_thought/interaction_summary/user_message only.
-            # NOTE: ai_diary.content holds Rekku's own response text, NOT user memories —
+            # NOTE: ai_diary.content holds the SyntH's own response text, NOT user memories —
             # including it causes self-referential "hallucinated recall" where the model
             # receives its previous responses as if they were genuine memory snippets.
             diary_token_clauses: List[str] = []
@@ -484,7 +484,7 @@ class MemorySearchPlugin:
             # memories: 1 LIKE per token
             mem_param_count = num_tokens if where_clauses_mem else 0
             # ai_diary: 3 LIKEs per token (personal_thought, interaction_summary, user_message)
-            # ai_diary.content is excluded — it holds Rekku's own responses, not user memories.
+            # ai_diary.content is excluded — it holds the SyntH's own responses, not user memories.
             diary_param_count = num_tokens * 3 if where_clauses_diary else 0
             # chat_history_cache: 1 LIKE per token
             chat_param_count = num_tokens if where_clauses_chat else 0

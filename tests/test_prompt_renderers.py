@@ -147,6 +147,44 @@ class TestOpenAIRenderer:
         assert "lang:en" in last
         assert "from:Tester" in last
 
+    def test_runtime_prefix_includes_time_of_day(self) -> None:
+        req = _basic_request()
+        req.runtime_ctx.time_of_day = "evening"
+        renderer = OpenAIRenderer(req)
+
+        messages = renderer.render()
+
+        assert "time_of_day:evening" in messages[-1]["content"]
+
+    def test_runtime_prefix_includes_chat_type(self) -> None:
+        req = _basic_request()
+        req.runtime_ctx.chat_type = "dm"
+        renderer = OpenAIRenderer(req)
+
+        messages = renderer.render()
+
+        assert "chat:dm" in messages[-1]["content"]
+
+    def test_runtime_prefix_omits_chat_type_when_unset(self) -> None:
+        req = _basic_request()
+        renderer = OpenAIRenderer(req)
+
+        messages = renderer.render()
+
+        assert "chat:" not in messages[-1]["content"]
+
+    def test_runtime_prefix_separated_from_text_by_newline(self) -> None:
+        req = _basic_request()
+        renderer = OpenAIRenderer(req)
+
+        messages = renderer.render()
+        last = messages[-1]["content"]
+
+        assert last.startswith("[")
+        bracket_end = last.index("]")
+        assert last[bracket_end + 1] == "\n"
+        assert last.endswith("How are you?")
+
     def test_no_tools_when_disabled(self) -> None:
         req = _basic_request(supports_tool_calling=False)
         req.tool_declarations = [_make_tool()]

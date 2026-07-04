@@ -288,6 +288,26 @@ async def enqueue(
             # If anything goes wrong, fall back to original directed decision
             pass
 
+        # Refresh the alias-triggered attention window (no-op unless
+        # CHAT_ATTENTION_WINDOW_SECONDS > 0). Deliberately excludes private
+        # chats (irrelevant there) and bot senders (peer SyntH messages must
+        # never seed or extend this chat's attention window).
+        if directed:
+            try:
+                from core.chat_attention import mark_engaged
+
+                sender = getattr(message, "from_user", None)
+                sender_is_bot = bool(getattr(sender, "is_bot", False))
+                chat_type = (
+                    getattr(message.chat, "type", None)
+                    if hasattr(message, "chat")
+                    else None
+                )
+                if not sender_is_bot and chat_type != "private":
+                    mark_engaged(getattr(message, "chat_id", None))
+            except Exception:
+                pass
+
         if not directed:
             log_debug("[QUEUE] DEBUG: Message not directed to bot - ignoring")
             if reason == "missing_human_count":
