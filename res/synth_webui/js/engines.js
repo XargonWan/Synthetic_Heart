@@ -40,6 +40,13 @@
         if (el) { el.textContent = msg; el.style.color = color || ''; }
     }
 
+    // Status shown inside the add/edit modal (visible even if the page status
+    // bar is scrolled out of view).
+    function setModalStatus(msg, color) {
+        const el = document.getElementById('ext-ep-modal-status');
+        if (el) { el.textContent = msg; el.style.color = color || 'var(--muted)'; }
+    }
+
     function subsystemLabel(key) {
         return { cortex: 'Cortex', vox: 'Vox', auris: 'Auris', live: 'Live', vision: 'Vision' }[key] || key;
     }
@@ -536,6 +543,10 @@
             if (cb) cb.checked = !!caps[k];
         }
 
+        // On add, capabilities are detected automatically by the probe — hide the manual override.
+        const capsDetails = document.getElementById('ext-ep-capabilities-details');
+        if (capsDetails) { capsDetails.style.display = 'none'; capsDetails.open = false; }
+
         const header = document.getElementById('ext-ep-form-provider-header');
         const provName = document.getElementById('ext-ep-form-provider-name');
         const backBtn = document.getElementById('ext-ep-back-btn');
@@ -559,6 +570,7 @@
 
     function openModalEdit(ep) {
         setModalError('');
+        setModalStatus('');
         document.getElementById('ext-ep-modal-title').textContent = 'Edit Endpoint';
 
         setField('ext-ep-form-id', ep.id);
@@ -587,6 +599,10 @@
             if (cb) cb.checked = !!smap[k];
         }
 
+        // In edit mode the capabilities override is available.
+        const capsDetails = document.getElementById('ext-ep-capabilities-details');
+        if (capsDetails) capsDetails.style.display = '';
+
         const header = document.getElementById('ext-ep-form-provider-header');
         if (header) header.style.display = 'none';
 
@@ -600,6 +616,7 @@
 
     async function openModalAdd() {
         setModalError('');
+        setModalStatus('');
         showStep(1);
         showModal();
 
@@ -653,19 +670,25 @@
         if (!id && !name) { setModalError('Name is required.'); return; }
         if (!base_url) { setModalError('Base URL is required.'); return; }
 
-        // Collect capability checkboxes into subsystem_map
-        const subsystem_map = {};
-        for (const k of ['cortex', 'vox', 'auris', 'vision', 'live']) {
-            const cb = document.getElementById(`ext-ep-form-cap-${k}`);
-            if (cb) subsystem_map[k] = cb.checked;
+        const payload = { display_label, protocol, base_url };
+        if (!id) {
+            // Add mode: capabilities are auto-detected by the probe — do not send subsystem_map.
+            payload.name = name;
+        } else {
+            // Edit mode: honor the manual capability overrides.
+            const subsystem_map = {};
+            for (const k of ['cortex', 'vox', 'auris', 'vision', 'live']) {
+                const cb = document.getElementById(`ext-ep-form-cap-${k}`);
+                if (cb) subsystem_map[k] = cb.checked;
+            }
+            payload.subsystem_map = subsystem_map;
         }
-
-        const payload = { display_label, protocol, base_url, subsystem_map };
-        if (!id) payload.name = name;
         if (key) payload.api_key = key;
 
         try {
-            setStatus('Saving and probing…', '');
+            // Show progress inside the modal so it is visible even when the
+            // page status bar is scrolled out of view.
+            setModalStatus('Saving and probing…', '');
             let response;
             if (id) {
                 response = await apiFetch(`/api/external-endpoints/${id}`, {
@@ -692,9 +715,10 @@
                     'Check that the base URL is accessible from inside the container ' +
                     '(use host.docker.internal instead of localhost if needed).'
                 );
-                setStatus('');
+                setModalStatus('');
             } else {
                 // Probe succeeded — close modal and show summary in status bar
+                setModalStatus('');
                 closeModal();
                 const modelsCount = (probe.models || []).length;
                 const pingEcho = probe.ping_echo ? ` | Ping reply: "${probe.ping_echo}"` : '';
@@ -705,7 +729,7 @@
             }
         } catch (err) {
             setModalError('Error: ' + err.message);
-            setStatus('');
+            setModalStatus('');
         }
     }
 

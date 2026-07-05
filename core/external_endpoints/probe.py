@@ -16,7 +16,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from core.external_endpoints.models import EndpointProtocol, ExternalEndpoint
-from core.logging_utils import log_debug, log_warning
+from core.logging_utils import log_debug, log_info, log_warning
 
 
 @dataclass
@@ -141,8 +141,9 @@ async def probe_endpoint(endpoint: ExternalEndpoint, api_key: str = "") -> Probe
     Returns a :class:`ProbeResult` regardless of success or failure.  Never
     raises — errors are captured in ``ProbeResult.error_message``.
     """
-    log_debug(
-        f"[probe] Probing endpoint '{endpoint.name}' (protocol={endpoint.protocol})"
+    log_info(
+        f"[probe] Probing endpoint '{endpoint.name}' "
+        f"(protocol={endpoint.protocol}, base_url={endpoint.base_url!r})"
     )
 
     try:

@@ -21,7 +21,7 @@ from core.cortex_api_logger import (
     log_cortex_request,
     log_cortex_response,
 )
-from core.logging_utils import log_debug, log_warning
+from core.logging_utils import log_debug, log_info, log_warning
 
 from core.external_endpoints.adapters.base import (
     BaseProtocolAdapter,
@@ -410,11 +410,30 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
             return True
         return False
 
+    @staticmethod
+    def _supports_cortex_capability(model: ModelInfo) -> bool:
+        """Return True when the model can serve a chat/cortex request.
+
+        Structural only (declared ``cortex`` capability, ``model_type == 'llm'``
+        or a text output modality) — never keyword matching on the model name,
+        so it stays correct across providers and languages. Endpoints that emit
+        no such metadata (plain OpenAI ``/models``) leave everything falsy, in
+        which case the caller falls back to the first available model.
+        """
+        if model.capabilities.get("cortex"):
+            return True
+        if (model.model_type or "").lower() == "llm":
+            return True
+        if "text" in {m.lower() for m in (model.output_modalities or [])}:
+            return True
+        return False
+
     async def _resolve_probe_model(
         self,
         *,
         models: list[ModelInfo] | None = None,
         prefer_vision: bool = False,
+        prefer_cortex: bool = False,
     ) -> str | None:
         model_infos = models
         if model_infos is None:
@@ -426,6 +445,15 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
         if prefer_vision:
             for model in model_infos:
                 if model.id and self._supports_vision_capability(model):
+                    return model.id
+
+        # Prefer a chat-capable model for the cortex ping. Endpoints like
+        # Harmony list non-chat models first (e.g. an audio-conversion model),
+        # and sending one of those as the ping ``model`` yields a misleading
+        # "model_not_found" error (Harmony returns HTTP 404 for that).
+        if prefer_cortex:
+            for model in model_infos:
+                if model.id and self._supports_cortex_capability(model):
                     return model.id
 
         for model in model_infos:
@@ -493,7 +521,7 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
 
         for path in self._http_model_paths():
             url = self._resolve_http_url(path)
-            log_debug(f"[openai_compat] trying HTTP GET {url}")
+            log_info(f"[probe] list_models → GET {url}")
             try:
                 async with aiohttp.ClientSession() as session:
                     async with session.get(
@@ -884,7 +912,28 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
         effective_timeout = float(
             timeout if timeout is not None else (self._timeout or 30.0)
         )
-        request_model = model or await self._resolve_probe_model() or "default"
+        # The cortex ping must run against a chat-capable model. An explicit
+        # ``model`` (e.g. the endpoint's configured ``default_model``) may be a
+        # media-only model such as an audio-conversion one, which providers like
+        # Harmony reject at the chat endpoint. If the supplied model is not
+        # cortex-capable, resolve a chat-capable one instead so the cortex probe
+        # reflects real chat connectivity rather than an unrelated model error.
+        request_model = model
+        if request_model:
+            try:
+                model_infos = await self.list_models()
+            except Exception:
+                model_infos = []
+            supplied = next(
+                (m for m in model_infos if m.id == request_model),
+                None,
+            )
+            if supplied is not None and not self._supports_cortex_capability(supplied):
+                request_model = None
+        if not request_model:
+            request_model = (
+                await self._resolve_probe_model(prefer_cortex=True) or "default"
+            )
         payload: dict[str, Any] = {
             "model": request_model,
             "messages": [{"role": "user", "content": "ping"}],
@@ -899,8 +948,8 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
         try:
             async with aiohttp.ClientSession() as session:
                 for chat_url in self._http_chat_urls():
-                    log_debug(
-                        f"[openai_compat] ping_test → POST {chat_url} model={payload['model']}"
+                    log_info(
+                        f"[probe] ping_test → POST {chat_url} model={payload['model']}"
                     )
                     try:
                         async with session.post(
@@ -929,6 +978,33 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
                                         f"structured 503 — endpoint reachable, model at capacity"
                                     )
                                     return True, ""
+                                # 401/403 mean the chat path EXISTS and the endpoint is
+                                # reachable — the request was rejected for auth reasons
+                                # (missing/expired/invalid API key), not a wrong path.
+                                # Stop iterating so we surface the real auth error instead
+                                # of falling through to non-existent paths and reporting a
+                                # misleading 404.
+                                if resp.status in (401, 403):
+                                    log_warning(
+                                        f"[openai_compat] ping_test {chat_url}: "
+                                        f"HTTP {resp.status} — endpoint reachable but "
+                                        f"authentication failed (check API key)"
+                                    )
+                                    return False, last_err
+                                # A 404 whose body is a structured JSON error means
+                                # the chat path EXISTS and the request was parsed —
+                                # the model just wasn't found (some providers, e.g.
+                                # Harmony, use 404 for "model_not_found"). Stop here
+                                # so we surface the real model error instead of
+                                # falling through to other paths and masking it.
+                                if resp.status == 404 and body.lstrip().startswith("{"):
+                                    log_warning(
+                                        f"[openai_compat] ping_test {chat_url}: "
+                                        f"HTTP 404 with structured body — endpoint "
+                                        f"reachable but model '{payload['model']}' "
+                                        f"was rejected: {body[:200]}"
+                                    )
+                                    return False, last_err
                                 continue
                             try:
                                 data = await resp.json()
@@ -1012,6 +1088,7 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
         # --- Vox: probe /audio/speech with a tiny payload ---
         for path in self._http_tts_paths():
             url = self._resolve_http_url(path)
+            log_info(f"[probe] vox (TTS) → POST {url}")
             try:
                 async with aiohttp.ClientSession() as session:
                     async with session.post(
@@ -1040,6 +1117,7 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
             data.add_field("model", "whisper-1")
             for path in self._http_stt_paths():
                 url = self._resolve_http_url(path)
+                log_info(f"[probe] auris (STT) → POST {url}")
                 try:
                     async with aiohttp.ClientSession() as session:
                         async with session.post(
