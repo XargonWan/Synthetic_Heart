@@ -62,10 +62,30 @@ class ExternalVoxEngine(VoxEngineBase):
         extra = self._endpoint.extra_config or {}
         voice = extra.get("tts_voice") or kwargs.get("voice")
 
+        # Resolve the TTS model for this endpoint.  Multi-modal endpoints (e.g.
+        # Harmony) use a dedicated ``tts_model`` in ``extra_config`` because the
+        # endpoint's ``default_model`` is reserved for the cortex/text engine and
+        # is not a valid text-to-speech model.
+        if "model" not in kwargs:
+            tts_model = extra.get("tts_model") or self._endpoint.default_model
+            if tts_model:
+                kwargs["model"] = tts_model
+
+        # Some single-speaker TTS models (e.g. KittenTTS) require an explicit
+        # language.  Allow it to be configured per-endpoint.
+        if "language" not in kwargs:
+            tts_language = extra.get("tts_language")
+            if tts_language:
+                kwargs["language"] = tts_language
+
         coro = self._adapter.generate_tts(text, voice=voice, **kwargs)
         try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
+            try:
+                running_loop = asyncio.get_running_loop()
+            except RuntimeError:
+                running_loop = None
+
+            if running_loop is not None:
                 # If called from an already-running loop (e.g. FastAPI), schedule
                 # it as a task and block synchronously via a Future.
                 import concurrent.futures
@@ -84,7 +104,9 @@ class ExternalVoxEngine(VoxEngineBase):
                 asyncio.ensure_future(_run())
                 return future.result(timeout=60)
             else:
-                return loop.run_until_complete(coro)
+                # No running loop in this thread (e.g. called via
+                # ``asyncio.to_thread``): run the coroutine to completion here.
+                return asyncio.run(coro)
         except Exception:
             return None
 
