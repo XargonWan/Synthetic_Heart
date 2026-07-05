@@ -49,6 +49,7 @@ dist/
 build/
 site/
 logs/
+core/chat_paths.json
 skins/2B/
 skins/2B/persona.json
 skins/Rekku

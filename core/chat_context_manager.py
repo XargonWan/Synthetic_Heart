@@ -193,6 +193,7 @@ async def add_message_to_context(
     # This tracks the last activity time for each chat without requiring LLM reasoning
     try:
         from plugins.recent_chats import update_chat_activity
+        from core.recent_chats import set_chat_path
 
         # Extract chat_id from interface_path (format: interface/chat_id/thread_id)
         parts = interface_path.split("/")
@@ -205,6 +206,10 @@ async def add_message_to_context(
                 "interface_path": interface_path,
             },
         )
+        # Keep the chat_id -> interface_path map current so consumers of
+        # recent_chats.get_last_active_chats (e.g. grillo outreach targeting)
+        # can resolve a chat_id back to a routable interface path.
+        set_chat_path(chat_id, interface_path)
     except Exception as e:
         log_debug(f"[context_manager] Failed to update chat activity: {e}")
 
