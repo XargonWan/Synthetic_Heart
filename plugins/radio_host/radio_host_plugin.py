@@ -1293,6 +1293,7 @@ class RadioHostPlugin:
                     "or make a playful comment according your personality and current mood. "
                     f"Say something about the song NOW PLAYING ('{curr_title}'), "
                     "not the one that just finished. "
+                    "Treat jingles, sweepers, and bumpers as non-musical content and ignore them."
                     "Be yourself — your personality, your mood, your sense of humor. "
                     f"NEVER say '{prev_title}' is now playing or coming up next.",
                     f"CRITICAL: Mention the now-playing song ('{curr_title}') by name. "
