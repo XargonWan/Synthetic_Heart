@@ -376,91 +376,17 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
             return [value.lower()]
         return []
 
-    @staticmethod
-    def _parse_languages(entry: dict[str, Any]) -> list[dict[str, str]]:
-        """Extract supported languages from a model entry, if declared.
-
-        Handles ``speech_options.languages`` = ``[{"code","name"}, ...]`` and a
-        flat ``languages`` list of codes. Deterministic — no keyword matching.
-        """
-        raw: Any = None
-        speech = entry.get("speech_options")
-        if isinstance(speech, dict):
-            raw = speech.get("languages")
-        if raw is None:
-            raw = entry.get("languages")
-        result: list[dict[str, str]] = []
-        if isinstance(raw, (list, tuple)):
-            for item in raw:
-                if isinstance(item, dict):
-                    code = str(item.get("code", "") or "")
-                    if code:
-                        result.append(
-                            {"code": code, "name": str(item.get("name", code) or code)}
-                        )
-                elif isinstance(item, str) and item:
-                    result.append({"code": item, "name": item})
-        return result
-
-    def _derive_model_subsystems(
-        self,
-        *,
-        model_type: str,
-        input_modalities: list[str],
-        output_modalities: list[str],
-    ) -> dict[str, bool]:
-        """Map structured model metadata onto SyntH subsystems.
-
-        Purely structural (model_type + modality arrays), never keyword-based,
-        so it works across languages and naming conventions.
-        """
-        mt = (model_type or "").lower()
-        in_mods = set(input_modalities)
-        out_mods = set(output_modalities)
-        caps: dict[str, bool] = {}
-
-        # cortex: an LLM (or any text->text generator)
-        if mt == "llm" or ("text" in in_mods and "text" in out_mods):
-            caps["cortex"] = True
-        # vox (TTS): produces audio from text
-        if mt == "tts" or ("text" in in_mods and "audio" in out_mods):
-            caps["vox"] = True
-        # auris (STT): audio -> text
-        if mt == "stt" or ("audio" in in_mods and "text" in out_mods):
-            caps["auris"] = True
-        # vision: consumes image or video
-        if "image" in in_mods or "video" in in_mods:
-            caps["vision"] = True
-        return caps
-
     def _parse_model_entry(self, entry: Any) -> ModelInfo:
         # Some OpenAI-compatible endpoints return dict-like entries, others
         # return SDK model objects. Support both.
         if isinstance(entry, dict):
-            entry_id = str(entry.get("id", "") or entry.get("model_id", "") or "")
-            declared_caps = self._normalize_capabilities(entry.get("capabilities", {}))
-            model_type = str(entry.get("model_type", "") or "")
-            input_modalities = self._as_str_list(entry.get("input_modalities"))
-            output_modalities = self._as_str_list(entry.get("output_modalities"))
-            languages = self._parse_languages(entry)
-            # Merge explicitly-declared caps with those derived from structure.
-            capabilities = self._derive_model_subsystems(
-                model_type=model_type,
-                input_modalities=input_modalities,
-                output_modalities=output_modalities,
-            )
-            capabilities.update(declared_caps)
+            entry_id = str(entry.get("id", "") or "")
+            capabilities = self._normalize_capabilities(entry.get("capabilities", {}))
             return ModelInfo(
                 id=entry_id,
-                name=str(
-                    entry.get("name", entry_id) or entry.get("display_name", entry_id)
-                ),
+                name=str(entry.get("name", entry_id) or entry_id),
                 owned_by=str(entry.get("owned_by", "")),
                 capabilities=capabilities,
-                model_type=model_type,
-                input_modalities=input_modalities,
-                output_modalities=output_modalities,
-                languages=languages,
             )
         entry_id = getattr(entry, "id", "") or ""
         capabilities = self._normalize_capabilities(getattr(entry, "capabilities", {}))

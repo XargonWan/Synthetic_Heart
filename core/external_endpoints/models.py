@@ -14,6 +14,7 @@ class EndpointProtocol(str, Enum):
     OPENAI = "openai"
     GEMINI = "gemini"
     ANTHROPIC = "anthropic"
+    HARMONY = "harmony"
     CUSTOM = "custom"
 
 

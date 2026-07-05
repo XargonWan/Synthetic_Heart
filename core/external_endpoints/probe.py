@@ -85,6 +85,22 @@ def get_adapter_for_endpoint(
         base_url = endpoint.base_url or "https://api.anthropic.com"
         return AnthropicAdapter(api_key=api_key, base_url=base_url)
 
+    if proto == EndpointProtocol.HARMONY:
+        from core.external_endpoints.adapters.harmony_ai_adapter import (
+            HarmonyAIAdapter,
+        )
+
+        if not endpoint.base_url:
+            raise ValueError(
+                f"[probe] Endpoint '{endpoint.name}' (harmony) requires a base_url."
+            )
+        timeout = float((endpoint.extra_config or {}).get("timeout", 300.0))
+        return HarmonyAIAdapter(
+            base_url=endpoint.base_url,
+            api_key=api_key,
+            timeout=timeout,
+        )
+
     if proto == EndpointProtocol.CUSTOM:
         if endpoint.extra_config.get("legacy_http_tts"):
             from core.external_endpoints.adapters.custom_tts_adapter import (
