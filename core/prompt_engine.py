@@ -6,6 +6,7 @@ import random
 import re
 import time as time_module
 
+from core.beat_utils import is_outbound_beat
 from core.db import _get_db_type, get_conn_ctx
 from core.synth_tagging import extract_tags, expand_tags
 from core.logging_utils import log_debug, log_info, log_warning, log_error
@@ -1230,14 +1231,14 @@ async def build_prompt_request(
         or (isinstance(context_memory, dict) and context_memory.get("grillo_beat"))
         or (interface_path and str(interface_path).startswith("grillo"))
     )
-    # Outreach beats target an external interface (e.g. telegram_bot) —
-    # they need recon (memory search) and should NOT be treated as internal.
+    # Outbound beats (observer) target an external interface (e.g. telegram_bot)
+    # — they need recon (memory search) and should NOT be treated as internal.
     _beat_type = (
         (isinstance(context_memory, dict) and context_memory.get("beat_type"))
         or getattr(message, "beat_type", None)
         or ""
     )
-    is_grillo_internal = _is_grillo_beat and _beat_type != "outreach"
+    is_grillo_internal = _is_grillo_beat and not is_outbound_beat(_beat_type)
 
     try:
         from core.recon import (

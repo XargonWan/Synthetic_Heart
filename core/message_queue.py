@@ -11,6 +11,7 @@ import traceback
 from types import SimpleNamespace
 
 from core import plugin_instance, rate_limit, recent_chats
+from core.beat_utils import is_outbound_beat
 from core.logging_utils import log_debug, log_error, log_warning, log_info
 from core.mention_utils import is_message_for_bot
 from core.reaction_handler import react_when_mentioned, get_reaction_emoji
@@ -66,7 +67,7 @@ def _should_cancel_low_priority_on_user_message(context: object) -> bool:
     context_dict = cast(dict[str, object], context)
     return not (
         bool(context_dict.get("grillo_beat"))
-        and context_dict.get("beat_type") == "outreach"
+        and is_outbound_beat(context_dict.get("beat_type"))
     )
 
 

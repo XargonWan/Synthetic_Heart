@@ -11,9 +11,9 @@ message for LLM processing using the same pattern as other Grillo beats.
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from core.core_initializer import register_plugin
 from core.logging_utils import log_info, log_debug, log_warning, log_error
@@ -22,6 +22,7 @@ from core.variables_engine import register_exposed_var
 
 from plugins.grillo.common_instructions import (
     GRILLO_INSTRUCTIONS as OBSERVER_INSTRUCTIONS,
+    OBSERVER_PROACTIVE_INSTRUCTIONS,
 )
 
 
@@ -47,6 +48,30 @@ register_exposed_var(
     scope="plugins",
     component="grillo_chat_observer",
     advanced=True,
+    tags=["plugin"],
+)
+
+register_exposed_var(
+    "GRILLO_OBSERVER_SELF_COOLDOWN_DAYS",
+    label="Grillo Observer Self-Cooldown (days)",
+    default=3,
+    value_type=int,
+    ui_type="number",
+    description="Anti-spam guard: a conversation whose last message came from the synth is FORBIDDEN for proactive messaging for this many days",
+    scope="plugins",
+    component="grillo_chat_observer",
+    tags=["plugin"],
+)
+
+register_exposed_var(
+    "GRILLO_OBSERVER_ACTIVITY_WINDOW_DAYS",
+    label="Grillo Observer Activity Window (days)",
+    default=14,
+    value_type=int,
+    ui_type="number",
+    description="Anti-dead-chat gate: a conversation is eligible for decay-driven proactivity only if it had genuine human activity within this many days",
+    scope="plugins",
+    component="grillo_chat_observer",
     tags=["plugin"],
 )
 
@@ -143,6 +168,32 @@ class GrilloChatObserverPlugin:
                 advanced=True,
             )
         )
+        # Anti-spam self-cooldown: number of days a path is off-limits for
+        # proactive messaging if its most recent message came from the synth.
+        self.self_cooldown_days = int(
+            config_registry.get_value(
+                "GRILLO_OBSERVER_SELF_COOLDOWN_DAYS",
+                3,
+                label="Grillo Observer Self-Cooldown (days)",
+                description="Anti-spam guard: a conversation whose last message came from the synth is forbidden for proactive messaging for this many days",
+                value_type=int,
+                group="grillo",
+                component="grillo_chat_observer",
+            )
+        )
+        # Anti-dead-chat gate: a path is eligible for decay-driven proactivity
+        # only if it had genuine human activity within this many days.
+        self.activity_window_days = int(
+            config_registry.get_value(
+                "GRILLO_OBSERVER_ACTIVITY_WINDOW_DAYS",
+                14,
+                label="Grillo Observer Activity Window (days)",
+                description="Anti-dead-chat gate: a conversation is eligible for decay-driven proactivity only if it had genuine human activity within this many days",
+                value_type=int,
+                group="grillo",
+                component="grillo_chat_observer",
+            )
+        )
         # persistent storage of last-run timestamp - survives restarts
         self._last_run_ts = float(
             config_registry.get_value(
@@ -187,6 +238,14 @@ class GrilloChatObserverPlugin:
         config_registry.add_listener(
             "GRILLO_OBSERVER_SELF_WINDOW",
             lambda v: setattr(self, "self_skip_window", float(v)),
+        )
+        config_registry.add_listener(
+            "GRILLO_OBSERVER_SELF_COOLDOWN_DAYS",
+            lambda v: setattr(self, "self_cooldown_days", int(v)),
+        )
+        config_registry.add_listener(
+            "GRILLO_OBSERVER_ACTIVITY_WINDOW_DAYS",
+            lambda v: setattr(self, "activity_window_days", int(v)),
         )
         config_registry.add_listener(
             "GRILLO_OBSERVER_LAST_RUN_TS",
@@ -321,43 +380,72 @@ class GrilloChatObserverPlugin:
                         max_ts_epoch = None
 
                 if cnt == 0:
+                    # No fresh non-self traffic. Rather than going passive, this
+                    # is precisely the "vacuum of initiative" the observer is
+                    # meant to overcome: proceed on a decay-driven basis so the
+                    # synth can be proactive. The anti-dead-chat and
+                    # self-cooldown gates in _collect_eligible_targets keep this
+                    # from spamming silent or synth-dominated conversations.
+                    decay_driven = True
                     log_debug(
-                        "[grillo_chat_observer] No new non-self messages since last_run; skipping"
+                        "[grillo_chat_observer] No new non-self messages since last_run; entering decay-driven proactive mode"
                     )
-                    return
                 else:
+                    decay_driven = False
                     log_debug(
                         f"[grillo_chat_observer] Found {cnt} new non-self messages since last_run; proceeding"
                     )
 
             except Exception as e:
+                decay_driven = False
                 log_debug(
                     f"[grillo_chat_observer] Direct DB check failed; falling back to checker: {e}"
                 )
-                # Fallback to non-consuming peek
+                # Fallback to non-consuming peek. Even if the checker reports no
+                # updates we still proceed in decay-driven mode (the gates below
+                # protect against spam), so a silent network no longer blocks
+                # proactivity.
                 try:
                     from core.chat_update_checker import check_for_updates_once
 
                     chk = await check_for_updates_once(consume=False)
                     if not chk.get("updated"):
+                        decay_driven = True
                         log_debug(
-                            "[grillo_chat_observer] No new messages after fallback; skipping observer run"
+                            "[grillo_chat_observer] No new messages after fallback; entering decay-driven proactive mode"
                         )
-                        return
                 except Exception as e2:
+                    decay_driven = True
                     log_debug(
-                        f"[grillo_chat_observer] Chat update checker fallback failed; proceeding: {e2}"
+                        f"[grillo_chat_observer] Chat update checker fallback failed; proceeding in decay-driven mode: {e2}"
                     )
 
             fragments = await self._collect_recent_snippets(self.samples)
-            if not fragments:
-                log_debug("[grillo_chat_observer] No fragments found; skipping")
+
+            # Per-path metadata for routable, anti-spam-aware proactivity.
+            targets = await self._collect_eligible_targets(self.samples)
+            eligible_targets = [t for t in targets if t.get("eligible")]
+
+            # In decay-driven mode there is no fresh traffic to react to, so we
+            # need at least one eligible target to speak into; otherwise the
+            # whole network is either dead or on cooldown and we stay silent.
+            if not fragments and not eligible_targets:
+                log_debug(
+                    "[grillo_chat_observer] No fragments and no eligible targets; skipping"
+                )
+                return
+            if decay_driven and not eligible_targets:
+                log_debug(
+                    "[grillo_chat_observer] Decay-driven run but no eligible targets (dead/cooldown); skipping"
+                )
                 return
 
-            if self.store_memories:
+            if self.store_memories and fragments:
                 await self._store_passive_memories(fragments)
 
-            prompt = self._build_observer_prompt(fragments)
+            prompt = self._build_observer_prompt(
+                fragments, eligible_targets, decay_driven
+            )
 
             # Activity log entry
             activity_log_id = None
@@ -399,6 +487,8 @@ class GrilloChatObserverPlugin:
                     "beat_type": "observer",
                     "activity_log_id": activity_log_id,
                     "grillo_snippets": fragments,
+                    "grillo_targets": eligible_targets,
+                    "decay_driven": decay_driven,
                     "propose_only": bool(self.propose_only),
                     "include_memories": True,
                 }
@@ -531,6 +621,117 @@ class GrilloChatObserverPlugin:
             log_error(f"[grillo_chat_observer] Error collecting snippets: {e}")
             return []
 
+    async def _collect_eligible_targets(self, limit: int) -> List[Dict[str, Any]]:
+        """Build per-path metadata for proactivity decisions (network-agnostic).
+
+        For each recently active conversation returns a dict with:
+        - ``interface_path``: the routable path (e.g. ``telegram_bot/123``)
+        - ``last_sender``: who sent the most recent message
+        - ``last_from_self``: whether the synth spoke last
+        - ``age_seconds``: absolute time delta since the last message
+        - ``eligible``: True only if there was genuine human (non-self)
+          activity within ``activity_window_days`` (anti-dead-chat gate) AND the
+          self-cooldown (``self_cooldown_days``) is not currently active.
+        - ``cooldown_active``: True when the synth spoke last within cooldown.
+
+        The activation-frame prompt uses this to pick a precise
+        ``interface_path`` where a void was detected, instead of routing to a
+        placeholder. No roles or interface names are hardcoded.
+        """
+        targets: List[Dict[str, Any]] = []
+        try:
+            import core.recent_chats as recent_chats
+            from core.chat_history_cache import load_chat_history
+
+            now = datetime.now(timezone.utc)
+            activity_cutoff = now - timedelta(days=self.activity_window_days)
+            cooldown_cutoff = now - timedelta(days=self.self_cooldown_days)
+
+            last = await recent_chats.get_last_active_chats_verbose(limit * 2)
+            for chat_id, _name in last:
+                if len(targets) >= limit:
+                    break
+                chat_path = (
+                    recent_chats.get_chat_path(chat_id) or f"telegram_bot/{chat_id}"
+                )
+                # Skip live voice paths — audio-only, cannot receive text.
+                if "_live_" in chat_path:
+                    continue
+                try:
+                    messages = await load_chat_history(chat_path)
+                except Exception:
+                    continue
+                if not messages:
+                    continue
+
+                last_msg = messages[-1] if isinstance(messages[-1], dict) else {}
+                last_sender = str(
+                    last_msg.get("sender_name")
+                    or last_msg.get("sender_id")
+                    or "unknown"
+                )
+                last_from_self = last_sender in ("self", "synth")
+
+                # Age of the most recent message.
+                age_seconds: Optional[float] = None
+                last_ts = self._parse_ts(last_msg.get("timestamp"))
+                if last_ts is not None:
+                    age_seconds = (now - last_ts).total_seconds()
+
+                # Anti-spam self-cooldown: synth spoke last within the window.
+                cooldown_active = bool(
+                    last_from_self
+                    and last_ts is not None
+                    and last_ts >= cooldown_cutoff
+                )
+
+                # Anti-dead-chat gate: genuine human activity within window.
+                has_recent_human = False
+                for msg in reversed(list(messages)):
+                    if not isinstance(msg, dict):
+                        continue
+                    sender = msg.get("sender_name") or msg.get("sender_id") or ""
+                    if sender in ("self", "synth", "-1"):
+                        continue
+                    ts = self._parse_ts(msg.get("timestamp"))
+                    if ts is not None and ts >= activity_cutoff:
+                        has_recent_human = True
+                        break
+
+                eligible = has_recent_human and not cooldown_active
+
+                targets.append(
+                    {
+                        "interface_path": chat_path,
+                        "last_sender": last_sender,
+                        "last_from_self": last_from_self,
+                        "age_seconds": age_seconds,
+                        "cooldown_active": cooldown_active,
+                        "has_recent_human": has_recent_human,
+                        "eligible": eligible,
+                    }
+                )
+        except Exception as e:
+            log_error(f"[grillo_chat_observer] Error collecting targets: {e}")
+        return targets
+
+    @staticmethod
+    def _parse_ts(value: Any) -> Optional[datetime]:
+        """Parse a chat_history timestamp into an aware UTC datetime."""
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            return (
+                value.replace(tzinfo=timezone.utc)
+                if value.tzinfo is None
+                else value.astimezone(timezone.utc)
+            )
+        try:
+            ts = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            return ts.replace(tzinfo=timezone.utc) if ts.tzinfo is None else ts
+        except Exception:
+            return None
+
     async def _store_passive_memories(self, snippets: List[str]) -> None:
         """Persist observer snippets as passive memories when enabled."""
         try:
@@ -554,12 +755,45 @@ class GrilloChatObserverPlugin:
         except Exception as e:
             log_warning(f"[grillo_chat_observer] Memory storage failed: {e}")
 
-    def _build_observer_prompt(self, snippets: List[str]) -> str:
+    def _build_observer_prompt(
+        self,
+        snippets: List[str],
+        targets: Optional[List[Dict[str, Any]]] = None,
+        decay_driven: bool = False,
+    ) -> str:
         header = "[G.R.I.L.L.O. CHAT OBSERVER] Below are recent chat snippets from across conversations. Analyze and propose any actions that would be helpful."
 
         body = "\n\nSnippets:\n"
-        for i, s in enumerate(snippets, 1):
-            body += f"{i}. {s}\n"
+        if snippets:
+            for i, s in enumerate(snippets, 1):
+                body += f"{i}. {s}\n"
+        else:
+            body += "(no fresh snippets — the network is quiet)\n"
+
+        # Render the eligible routing targets so the model can pick a real,
+        # precise interface_path instead of hallucinating one.
+        targets_block = ""
+        if targets:
+            targets_block = "\n\nELIGIBLE TARGETS (routable interface_path values you may reach out to):\n"
+            for t in targets:
+                path = t.get("interface_path", "")
+                age = t.get("age_seconds")
+                try:
+                    age_h = f"{float(age) / 3600.0:.1f}h" if age is not None else "?"
+                except Exception:
+                    age_h = "?"
+                cd = "ON-COOLDOWN(OFF-LIMITS)" if t.get("cooldown_active") else "ok"
+                last = t.get("last_sender") or "?"
+                targets_block += f"- interface_path={path} | idle={age_h} | last_sender={last} | cooldown={cd}\n"
+        else:
+            targets_block = "\n\nELIGIBLE TARGETS: (none currently eligible — do NOT reach out to anyone)\n"
+
+        decay_note = ""
+        if decay_driven:
+            decay_note = (
+                "\n\nNOTE: There is no fresh incoming traffic right now. If — and only if — you have a genuine internal reason, "
+                'you may proactively reach out to one of the eligible targets above. Otherwise return {"actions": []}.\n'
+            )
 
         # Ask the LLM to think like a helpful participant: choose which recent message(s) you'd naturally reply to and propose short, human replies.
         propose_clause = (
@@ -573,11 +807,18 @@ class GrilloChatObserverPlugin:
             " Return ONLY a JSON object with an 'actions' array (see examples below)."
         )
 
-        # Use configured synth name in examples to avoid hardcoding 'G.R.I.L.L.O.'
-        _synth_name = str(config_registry.get_var("SYNTH_NAME", "SyntH"))
-
-        # Keep the propose clause short and rely on OBSERVER_INSTRUCTIONS for friendly examples and required JSON format
-        prompt = header + body + propose_clause + OBSERVER_INSTRUCTIONS
+        # Keep the propose clause short and rely on OBSERVER_INSTRUCTIONS for
+        # friendly examples and required JSON format, then append the proactive
+        # activation-frame instructions.
+        prompt = (
+            header
+            + body
+            + targets_block
+            + decay_note
+            + propose_clause
+            + OBSERVER_INSTRUCTIONS
+            + OBSERVER_PROACTIVE_INSTRUCTIONS
+        )
         return prompt
 
 

@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any
 
 from core.ai_plugin_base import AIPluginBase
+from core.beat_utils import is_outbound_beat
 from core.config_manager import config_registry
 from core.core_initializer import register_plugin, INTERFACE_REGISTRY
 from core.facial_expression_parser import (
@@ -654,10 +655,10 @@ class VoxPlugin(AIPluginBase):
     ) -> dict[str, Any]:
         payload = action.get("payload", {})
 
-        # Skip TTS for Grillo internal beats
-        is_grillo_internal = context.get("grillo_beat", False) and context.get(
-            "beat_type"
-        ) not in ("outreach", None)
+        # Skip TTS for Grillo internal beats (outbound beats speak)
+        is_grillo_internal = context.get("grillo_beat", False) and not is_outbound_beat(
+            context.get("beat_type")
+        )
         if is_grillo_internal:
             return {"status": "skipped", "reason": "grillo_internal_beat"}
 

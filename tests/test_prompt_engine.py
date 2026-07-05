@@ -567,7 +567,7 @@ def test_prompt_request_mode_is_grillo_for_grillo_beat(monkeypatch):
     assert "DO NOT emit any message_* action" in result.get("instructions", "")
 
 
-def test_prompt_request_attaches_for_grillo_outreach_with_string_message_id(
+def test_prompt_request_attaches_for_grillo_observer_with_string_message_id(
     monkeypatch,
 ):
     async def dummy_gather(message, ctx):
@@ -577,8 +577,8 @@ def test_prompt_request_attaches_for_grillo_outreach_with_string_message_id(
 
     message = SimpleNamespace(
         chat_id="123456",
-        text="[G.R.I.L.L.O. OUTREACH] check in",
-        message_id="grillo_outreach_0",
+        text="[G.R.I.L.L.O. CHAT OBSERVER] check in",
+        message_id="grillo_observer_0",
         from_user=SimpleNamespace(full_name="grillo", username="grillo"),
         date=datetime.now(timezone.utc),
         interface_path="telegram_bot/123456",
@@ -587,14 +587,14 @@ def test_prompt_request_attaches_for_grillo_outreach_with_string_message_id(
     result = asyncio.run(
         build_json_prompt(
             message,
-            {"grillo_beat": True, "beat_type": "outreach"},
+            {"grillo_beat": True, "beat_type": "observer"},
             interface_name="telegram_bot",
         )
     )
 
     assert "__prompt_request" in result
     pr = result["__prompt_request"]
-    assert pr.current_text == "[G.R.I.L.L.O. OUTREACH] check in"
+    assert pr.current_text == "[G.R.I.L.L.O. CHAT OBSERVER] check in"
     assert pr.runtime_ctx.interface_path == "telegram_bot/123456"
     assert pr.runtime_ctx.message_id is None
 
