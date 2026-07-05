@@ -2056,7 +2056,6 @@ class SynthWebUIInterface:
                 "navbar",
                 "agent",
                 "engines",
-                "external_engines",
             }
             if section not in allowed_sections:
                 raise HTTPException(
@@ -5620,6 +5619,7 @@ class SynthWebUIInterface:
                 status=result.status,
                 capabilities=result.capabilities,
                 models=result.models,
+                models_metadata=result.models_metadata,
             )
             return {
                 "status": result.status,
@@ -8675,6 +8675,7 @@ class SynthWebUIInterface:
                 _caps = _meta.get("capabilities") or {}
                 _v_available_models: list[str] = []
                 _v_default_model: str | None = None
+                _v_models_meta: list[dict] = []
                 _v_instance = VOX_REGISTRY._instances.get(_name)
                 if _v_instance is not None and hasattr(_v_instance, "_endpoint"):
                     _v_ep = _v_instance._endpoint
@@ -8682,6 +8683,7 @@ class SynthWebUIInterface:
                         getattr(_v_ep, "available_models", None) or []
                     )
                     _v_default_model = getattr(_v_ep, "default_model", None)
+                    _v_models_meta = list(getattr(_v_ep, "models_metadata", None) or [])
                 vox_data.append(
                     {
                         "name": _name,
@@ -8695,6 +8697,7 @@ class SynthWebUIInterface:
                         "active": _name == active_vox,
                         "available_models": _v_available_models,
                         "default_model": _v_default_model,
+                        "models_meta": _v_models_meta,
                     }
                 )
         except Exception as exc:
@@ -8755,6 +8758,7 @@ class SynthWebUIInterface:
                 _caps = _meta.get("capabilities") or {}
                 _a_available_models: list[str] = []
                 _a_default_model: str | None = None
+                _a_models_meta: list[dict] = []
                 _a_instance = AURIS_REGISTRY._instances.get(_name)
                 if _a_instance is not None and hasattr(_a_instance, "_endpoint"):
                     _a_ep = _a_instance._endpoint
@@ -8762,6 +8766,7 @@ class SynthWebUIInterface:
                         getattr(_a_ep, "available_models", None) or []
                     )
                     _a_default_model = getattr(_a_ep, "default_model", None)
+                    _a_models_meta = list(getattr(_a_ep, "models_metadata", None) or [])
                 auris_data.append(
                     {
                         "name": _name,
@@ -8775,6 +8780,7 @@ class SynthWebUIInterface:
                         "active": _name == active_auris,
                         "available_models": _a_available_models,
                         "default_model": _a_default_model,
+                        "models_meta": _a_models_meta,
                     }
                 )
         except Exception as exc:
@@ -8887,6 +8893,7 @@ class SynthWebUIInterface:
                 _caps = _meta.get("capabilities") or {}
                 _available_models: list[str] = []
                 _default_model: str | None = None
+                _models_meta: list[dict] = []
                 _instance = IRIS_REGISTRY.get_instance(_name)
                 if _instance is not None and hasattr(_instance, "_endpoint"):
                     _ep = _instance._endpoint
@@ -8894,6 +8901,7 @@ class SynthWebUIInterface:
                         getattr(_ep, "available_models", None) or []
                     )
                     _default_model = getattr(_ep, "default_model", None)
+                    _models_meta = list(getattr(_ep, "models_metadata", None) or [])
                 iris_data.append(
                     {
                         "name": _name,
@@ -8907,6 +8915,7 @@ class SynthWebUIInterface:
                         "active": _name == active_iris,
                         "available_models": _available_models,
                         "default_model": _default_model,
+                        "models_meta": _models_meta,
                     }
                 )
         except Exception as exc:

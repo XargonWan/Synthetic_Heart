@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS external_endpoints (
     capabilities JSON,
     subsystem_map JSON,
     available_models JSON,
+    models_metadata JSON,
     default_model VARCHAR(255),
     probe_status VARCHAR(50) NOT NULL DEFAULT 'never',
     last_probe_at DATETIME,
@@ -44,11 +45,22 @@ CREATE TABLE IF NOT EXISTS external_endpoints (
 
 
 async def _ensure_table() -> None:
-    from core.db import get_conn_ctx
+    from core.db import _get_db_type, get_conn_ctx
 
     async with get_conn_ctx() as conn:
         async with conn.cursor() as cur:
             await cur.execute(_CREATE_TABLE_SQL)
+            # Idempotent migration for tables created before models_metadata
+            # existed. Both MariaDB (10.0+) and Postgres support the
+            # IF NOT EXISTS form. Postgres stores JSON in a TEXT column here.
+            col_type = "TEXT" if _get_db_type() == "postgres" else "JSON"
+            try:
+                await cur.execute(
+                    "ALTER TABLE external_endpoints "
+                    f"ADD COLUMN IF NOT EXISTS models_metadata {col_type}"
+                )
+            except Exception as exc:
+                logger.debug("models_metadata column migration skipped/failed: %s", exc)
         try:
             await conn.commit()
         except Exception:
@@ -325,6 +337,7 @@ class ExternalEndpointRegistry:
         status: str,
         capabilities: dict[str, bool],
         models: list[str],
+        models_metadata: list[dict] | None = None,
     ) -> None:
         """Persist probe results and sync registries."""
         from core.db import get_conn_ctx
@@ -338,13 +351,14 @@ class ExternalEndpointRegistry:
                     """
                     UPDATE external_endpoints
                     SET probe_status = %s, capabilities = %s, available_models = %s,
-                        last_probe_at = %s, updated_at = %s
+                        models_metadata = %s, last_probe_at = %s, updated_at = %s
                     WHERE id = %s
                     """,
                     (
                         status,
                         json.dumps(capabilities),
                         json.dumps(models),
+                        json.dumps(models_metadata or []),
                         now,
                         now,
                         endpoint_id,

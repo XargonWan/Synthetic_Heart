@@ -577,11 +577,12 @@ async def test_set_probe_result_uses_datetime_objects_for_probe_timestamps(
     assert params[0] == "success"
     assert params[1] == '{"cortex": true}'
     assert params[2] == '["gemini-3-flash-preview"]'
-    assert isinstance(params[3], datetime)
+    assert params[3] == "[]"
     assert isinstance(params[4], datetime)
-    assert params[3].tzinfo == timezone.utc
+    assert isinstance(params[5], datetime)
     assert params[4].tzinfo == timezone.utc
-    assert params[5] == 5
+    assert params[5].tzinfo == timezone.utc
+    assert params[6] == 5
     assert captured["committed"] is True
 
 

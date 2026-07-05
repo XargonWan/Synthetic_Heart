@@ -3250,6 +3250,59 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                     setupRegistrySelect('iris-engine-select', 'iris-engine-info', 'iris-engine-label', 'iris-engine-description',  data.iris || [], 'ACTIVE_IRIS_ENGINE');
                     setupRegistrySelect('live-engine-select', 'live-engine-info', 'live-engine-label', 'live-engine-description',  data.live || [], 'LIVE_CORTEX');  // persist selected live engine via LIVE_CORTEX config
 
+                    // ── Per-model metadata helpers (capability filter + language flags) ──
+                    // Deterministic language-code → flag emoji map. Codes coming from
+                    // speech_options.languages[].code may be lower- or uppercase
+                    // (OpenVoice uses EN/ZH/…). We normalize to lowercase and map the
+                    // language to a representative regional flag. No keyword matching —
+                    // this is a fixed lookup on a structured ISO-ish code.
+                    const LANG_FLAG_MAP = {
+                        en: '🇬🇧', it: '🇮🇹', zh: '🇨🇳', ja: '🇯🇵', ko: '🇰🇷',
+                        es: '🇪🇸', fr: '🇫🇷', de: '🇩🇪', pt: '🇵🇹', ru: '🇷🇺',
+                        ar: '🇸🇦', hi: '🇮🇳', nl: '🇳🇱', pl: '🇵🇱', tr: '🇹🇷',
+                        sv: '🇸🇪', no: '🇳🇴', da: '🇩🇰', fi: '🇫🇮', cs: '🇨🇿',
+                        el: '🇬🇷', he: '🇮🇱', th: '🇹🇭', vi: '🇻🇳', id: '🇮🇩',
+                        uk: '🇺🇦', ro: '🇷🇴', hu: '🇭🇺',
+                    };
+                    const MAX_FLAGS = 6;
+                    const langCodeToFlag = (code) => {
+                        if (!code) return '';
+                        const key = String(code).trim().toLowerCase().split(/[-_]/)[0];
+                        return LANG_FLAG_MAP[key] || '';
+                    };
+                    // Build the "<name> 🇬🇧🇮🇹…(+X)" label suffix from a model's metadata.
+                    const modelFlagSuffix = (meta) => {
+                        if (!meta || !Array.isArray(meta.languages) || !meta.languages.length) return '';
+                        const flags = [];
+                        const seen = new Set();
+                        for (const lang of meta.languages) {
+                            const code = (lang && (lang.code || lang)) || '';
+                            const flag = langCodeToFlag(code);
+                            if (flag && !seen.has(flag)) { seen.add(flag); flags.push(flag); }
+                        }
+                        if (!flags.length) return '';
+                        if (flags.length <= MAX_FLAGS) return ' ' + flags.join('');
+                        return ' ' + flags.slice(0, MAX_FLAGS).join('') + ' +' + (flags.length - MAX_FLAGS);
+                    };
+                    // Filter a model list to those whose metadata reports a given
+                    // capability true. Models without metadata are kept (permissive)
+                    // so endpoints that never returned rich metadata still list models.
+                    const filterModelsByCapability = (models, metaList, capKey) => {
+                        const metaById = new Map();
+                        (metaList || []).forEach((m) => {
+                            if (m && (m.id || m.model_id)) metaById.set(m.id || m.model_id, m);
+                        });
+                        // If no metadata at all, keep everything.
+                        if (!metaById.size) return models.map((m) => ({ id: m, meta: null }));
+                        return models
+                            .map((m) => ({ id: m, meta: metaById.get(m) || null }))
+                            .filter(({ meta }) => {
+                                if (!meta) return true; // permissive for unknown models
+                                const caps = meta.capabilities || {};
+                                return !!caps[capKey];
+                            });
+                    };
+
                     // ── Iris model selector ──────────────────────────────────
                     const irisModelSel = document.getElementById('iris-model-select');
                     const irisEngineSel = document.getElementById('iris-engine-select');
@@ -3257,22 +3310,25 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                     const populateIrisModelSelect = (engineName) => {
                         if (!irisModelSel) return;
                         const engine = (data.iris || []).find((e) => e.name === engineName);
-                        const models = (engine && engine.available_models) ? engine.available_models : [];
-                        if (!models.length) {
+                        const allModels = (engine && engine.available_models) ? engine.available_models : [];
+                        const metaList = (engine && engine.models_meta) ? engine.models_meta : [];
+                        const entries = filterModelsByCapability(allModels, metaList, 'vision');
+                        if (!entries.length) {
                             irisModelSel.style.display = 'none';
                             irisModelSel.innerHTML = '';
                             return;
                         }
                         irisModelSel.innerHTML = '';
-                        models.forEach((m) => {
+                        entries.forEach(({ id, meta }) => {
                             const opt = document.createElement('option');
-                            opt.value = m;
-                            opt.textContent = m;
+                            opt.value = id;
+                            opt.textContent = id + modelFlagSuffix(meta);
                             irisModelSel.appendChild(opt);
                         });
+                        const ids = entries.map((e) => e.id);
                         // Pre-select: prefer the saved global IRIS_DEFAULT_MODEL, then engine default
                         const saved = data.iris_current_model || (engine && engine.default_model) || '';
-                        irisModelSel.value = models.includes(saved) ? saved : models[0];
+                        irisModelSel.value = ids.includes(saved) ? saved : ids[0];
                         irisModelSel.style.display = '';
                     };
 
@@ -3304,28 +3360,31 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                     // ────────────────────────────────────────────────────────
 
                     // ── Vox / Auris model selectors (generic, mirrors Iris) ───
-                    const setupAudioModelSelect = (modelSelId, engineSelId, engineList, currentModel, configKey, boundFlag) => {
+                    const setupAudioModelSelect = (modelSelId, engineSelId, engineList, currentModel, configKey, boundFlag, capKey) => {
                         const modelSel = document.getElementById(modelSelId);
                         const engineSel = document.getElementById(engineSelId);
                         if (!modelSel) return;
 
                         const populate = (engineName) => {
                             const engine = (engineList || []).find((e) => e.name === engineName);
-                            const models = (engine && engine.available_models) ? engine.available_models : [];
-                            if (!models.length) {
+                            const allModels = (engine && engine.available_models) ? engine.available_models : [];
+                            const metaList = (engine && engine.models_meta) ? engine.models_meta : [];
+                            const entries = filterModelsByCapability(allModels, metaList, capKey);
+                            if (!entries.length) {
                                 modelSel.style.display = 'none';
                                 modelSel.innerHTML = '';
                                 return;
                             }
                             modelSel.innerHTML = '';
-                            models.forEach((m) => {
+                            entries.forEach(({ id, meta }) => {
                                 const opt = document.createElement('option');
-                                opt.value = m;
-                                opt.textContent = m;
+                                opt.value = id;
+                                opt.textContent = id + modelFlagSuffix(meta);
                                 modelSel.appendChild(opt);
                             });
+                            const ids = entries.map((e) => e.id);
                             const saved = currentModel || (engine && engine.default_model) || '';
-                            modelSel.value = models.includes(saved) ? saved : models[0];
+                            modelSel.value = ids.includes(saved) ? saved : ids[0];
                             modelSel.style.display = '';
                         };
 
@@ -3356,8 +3415,8 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                         }
                     };
 
-                    setupAudioModelSelect('vox-model-select', 'vox-engine-select', data.vox || [], data.vox_current_model || '', 'VOX_DEFAULT_MODEL', 'voxModelBound');
-                    setupAudioModelSelect('auris-model-select', 'auris-engine-select', data.auris || [], data.auris_current_model || '', 'AURIS_DEFAULT_MODEL', 'aurisModelBound');
+                    setupAudioModelSelect('vox-model-select', 'vox-engine-select', data.vox || [], data.vox_current_model || '', 'VOX_DEFAULT_MODEL', 'voxModelBound', 'vox');
+                    setupAudioModelSelect('auris-model-select', 'auris-engine-select', data.auris || [], data.auris_current_model || '', 'AURIS_DEFAULT_MODEL', 'aurisModelBound', 'auris');
                     // ────────────────────────────────────────────────────────
 
                     // ── Live voice configuration ──────────────────────────────

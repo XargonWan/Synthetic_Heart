@@ -409,11 +409,15 @@
 
         <div style="color:var(--muted); font-size:0.85rem; margin-bottom:10px;" class="ext-ep-url"></div>
 
-        <!-- Capabilities + subsystem mapping -->
-        <div style="display:flex; gap:18px; flex-wrap:wrap; margin-bottom:12px;">
+        <!-- Capabilities (auto-detected) + Overrides (manual) -->
+        <div style="margin-bottom:12px;">
+            <div style="margin-bottom:12px;">
+                <div style="font-size:0.8rem; text-transform:uppercase; letter-spacing:0.06em; color:var(--muted); margin-bottom:6px;">Capabilities <span style="text-transform:none; letter-spacing:0; font-size:0.75rem;">(auto-detected)</span></div>
+                <div class="ext-ep-capabilities" style="display:flex; gap:8px; flex-wrap:wrap;"></div>
+            </div>
             <div>
-                <div style="font-size:0.8rem; text-transform:uppercase; letter-spacing:0.06em; color:var(--muted); margin-bottom:6px;">Subsystem Mapping</div>
-                <div class="ext-ep-subsystems" style="display:flex; gap:8px; flex-wrap:wrap;"></div>
+                <div style="font-size:0.8rem; text-transform:uppercase; letter-spacing:0.06em; color:var(--muted); margin-bottom:6px;">Overrides <span style="text-transform:none; letter-spacing:0; font-size:0.75rem;">(force a subsystem on)</span></div>
+                <div class="ext-ep-overrides" style="display:flex; gap:16px; flex-wrap:wrap;"></div>
             </div>
         </div>
 

@@ -122,6 +122,7 @@ CREATE TABLE IF NOT EXISTS external_endpoints (
     capabilities JSON,
     subsystem_map JSON,
     available_models JSON,
+    models_metadata JSON,
     default_model VARCHAR(255),
     probe_status VARCHAR(50) NOT NULL DEFAULT 'never',
     last_probe_at DATETIME,
