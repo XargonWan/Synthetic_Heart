@@ -1456,6 +1456,71 @@ async def ensure_core_tables() -> None:
             _db_initialized = True
 
 
+# Grillo audit tables. MariaDB dialect: on Postgres these are run through the
+# compat cursor, whose DDL translator rewrites AUTO_INCREMENT/JSON/ENUM/ENGINE
+# and strips the inline INDEX lines (see db_backends._translate_create_table),
+# so the equivalent indexes are created explicitly in init_grillo_tables().
+_GRILLO_ACTIVITY_LOG_DDL = """
+    CREATE TABLE IF NOT EXISTS grillo_activity_log (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        beat_type VARCHAR(50) NOT NULL,
+        prompt_text TEXT NOT NULL,
+        response_text LONGTEXT,
+        diary_entry_id INT,
+        executed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        metadata JSON,
+        suppressed_count INT DEFAULT 0,
+        INDEX idx_executed_at (executed_at),
+        INDEX idx_beat_type (beat_type),
+        INDEX idx_diary_entry (diary_entry_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+    """
+
+_GRILLO_ACTION_EXECS_DDL = """
+    CREATE TABLE IF NOT EXISTS grillo_action_execs (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        activity_log_id INT NOT NULL,
+        action_index INT NOT NULL,
+        action_type VARCHAR(150) NOT NULL,
+        payload JSON,
+        status ENUM('pending','processed','failed') NOT NULL DEFAULT 'pending',
+        error_text TEXT,
+        result JSON,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        INDEX idx_activity_log_id (activity_log_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+    """
+
+_GRILLO_PG_INDEX_DDL: tuple[str, ...] = (
+    "CREATE INDEX IF NOT EXISTS idx_grillo_activity_executed_at"
+    " ON grillo_activity_log (executed_at)",
+    "CREATE INDEX IF NOT EXISTS idx_grillo_activity_beat_type"
+    " ON grillo_activity_log (beat_type)",
+    "CREATE INDEX IF NOT EXISTS idx_grillo_activity_diary_entry"
+    " ON grillo_activity_log (diary_entry_id)",
+    "CREATE INDEX IF NOT EXISTS idx_grillo_execs_activity_log_id"
+    " ON grillo_action_execs (activity_log_id)",
+)
+
+
+async def init_grillo_tables() -> None:
+    """Create the grillo audit tables (idempotent, MariaDB and Postgres).
+
+    grillo_activity_log is the audit trail for autonomous beats (WebUI
+    History > Grillo, dream recall, diary linking, suppression notes);
+    grillo_action_execs tracks per-action execution status per beat.
+    """
+    async with get_conn_ctx() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(_GRILLO_ACTIVITY_LOG_DDL)
+            await cur.execute(_GRILLO_ACTION_EXECS_DDL)
+            if _get_db_type() == "postgres":
+                for index_sql in _GRILLO_PG_INDEX_DDL:
+                    await cur.execute(index_sql)
+            await conn.commit()
+
+
 async def ensure_plugin_tables() -> None:
     """Ensure plugin-managed tables exist (idempotent).
 
@@ -1483,6 +1548,16 @@ async def ensure_plugin_tables() -> None:
                     log_warning(
                         f"[db] Postgres preflight init skipped for {module_name}.{attr_name}: {init_err}"
                     )
+            # The grillo audit tables' DDL lives in the MariaDB-only block
+            # below, which this branch never reaches — without this call the
+            # Postgres runtime has no grillo_activity_log/grillo_action_execs
+            # and every beat runs as an unauditable black box.
+            try:
+                await init_grillo_tables()
+            except Exception as init_err:
+                log_warning(
+                    f"[db] Postgres preflight init skipped for grillo tables: {init_err}"
+                )
             log_debug("[db] ensure_plugin_tables completed (postgres path)")
             return
 
@@ -1625,42 +1700,11 @@ async def ensure_plugin_tables() -> None:
                     """
                 )
 
-                # grillo tables (init-db.sql + plugin may expect them)
-                await cur.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS grillo_activity_log (
-                        id INT AUTO_INCREMENT PRIMARY KEY,
-                        beat_type VARCHAR(50) NOT NULL,
-                        prompt_text TEXT NOT NULL,
-                        response_text LONGTEXT,
-                        diary_entry_id INT,
-                        executed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                        metadata JSON,
-                        suppressed_count INT DEFAULT 0,
-                        INDEX idx_executed_at (executed_at),
-                        INDEX idx_beat_type (beat_type),
-                        INDEX idx_diary_entry (diary_entry_id)
-                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-                    """
-                )
-
-                await cur.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS grillo_action_execs (
-                        id INT AUTO_INCREMENT PRIMARY KEY,
-                        activity_log_id INT NOT NULL,
-                        action_index INT NOT NULL,
-                        action_type VARCHAR(150) NOT NULL,
-                        payload JSON,
-                        status ENUM('pending','processed','failed') NOT NULL DEFAULT 'pending',
-                        error_text TEXT,
-                        result JSON,
-                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-                        INDEX idx_activity_log_id (activity_log_id)
-                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-                    """
-                )
+                # grillo tables (init-db.sql + plugin may expect them);
+                # shared DDL constants, also used by init_grillo_tables()
+                # for the Postgres preflight path above.
+                await cur.execute(_GRILLO_ACTIVITY_LOG_DDL)
+                await cur.execute(_GRILLO_ACTION_EXECS_DDL)
 
                 # agent tables (init-db.sql)
                 await cur.execute(
