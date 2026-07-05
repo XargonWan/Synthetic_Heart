@@ -16,6 +16,11 @@ import json
 from core.core_initializer import register_plugin
 from core.action_parser import CORRECTOR_RETRIES
 
+# Owners of scheduled events that are self-dispatched by their own plugin.
+# The generic scheduler MUST skip these to avoid double delivery: the owning
+# plugin fetches and delivers them itself (honouring its configured interface).
+_SELF_MANAGED_EVENT_OWNERS: frozenset[str] = frozenset({"weather_plugin"})
+
 
 class EventPlugin(AIPluginBase):
     """Plugin that stores future events without using an LLM."""
@@ -814,6 +819,28 @@ class EventPlugin(AIPluginBase):
         try:
             log_debug("[EventPlugin] Starting due events check...")
             due_events = await get_due_events()
+
+            # Skip events owned by self-managed plugins (e.g. weather_plugin),
+            # which dispatch their own events to the correct interface. Without
+            # this filter both the generic scheduler and the owning plugin would
+            # deliver the same event, causing duplicate messages and a skipped
+            # reschedule day.
+            if due_events:
+                skipped = [
+                    e
+                    for e in due_events
+                    if e.get("created_by") in _SELF_MANAGED_EVENT_OWNERS
+                ]
+                if skipped:
+                    log_debug(
+                        f"[event_plugin] Skipping {len(skipped)} self-managed "
+                        f"event(s) owned by {_SELF_MANAGED_EVENT_OWNERS}"
+                    )
+                due_events = [
+                    e
+                    for e in due_events
+                    if e.get("created_by") not in _SELF_MANAGED_EVENT_OWNERS
+                ]
 
             if due_events:
                 log_info(

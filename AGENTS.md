@@ -594,6 +594,22 @@ docker exec synth-dev tail -f /app/logs/synth.log | grep -E "\[grillo\]|grillo"
 
 ---
 
+### Weather report delivered twice + on the wrong day — two dispatchers both deliver weather events  <!-- 2026-07-05 -->
+**Symptom:** After the 2026-07-04 spam fix (which stopped the every-15s loop), the daily weather report still arrived **twice** in quick succession, delivered to `telegram_bot` instead of the configured `synth_webui` interface, and the **next day's report was silently skipped**. Logs showed the same event rescheduled twice ~14s apart: `Event 134 rescheduled to 2026-07-06` (generic `EventPlugin` scheduler) then `Event 134 rescheduled to 2026-07-07` (weather plugin) + a `Delivered weather event 134`.
+**Location:** `plugins/event_plugin.py` `_check_and_execute_events` (the generic scheduler); `plugins/weather_plugin.py` `_dispatch_due_weather_events`.
+**Status:** fixed (2026-07-05).
+**Notes:** Root cause is the residual double-dispatch the 2026-07-04 note warned about. `EventPlugin._check_and_execute_events()` called `get_due_events()` (ALL due events, no owner filter) and delivered weather events via `_deliver_event_to_llm`, which **hard-codes the `telegram_bot` interface** — while `weather_plugin._dispatch_due_weather_events()` ALSO fetched and delivered the same event via `get_due_events_by_created_by("weather_plugin")` on its configured interface. Both marked it delivered and rescheduled it, so the event jumped forward TWO days (today's second delivery advanced `next_run` past tomorrow). Fix: `event_plugin.py` now defines `_SELF_MANAGED_EVENT_OWNERS = frozenset({"weather_plugin"})` and `_check_and_execute_events` filters out any due event whose structured `created_by` field is in that set BEFORE dispatching — so only the owning plugin delivers its own events. Filtering is on the `created_by` column (available because `get_due_events` does `SELECT *` → `dict(row)`), **not** on message text, respecting the no-keyword-matching rule. To register a new self-dispatching plugin, add its `created_by` value to `_SELF_MANAGED_EVENT_OWNERS`.
+
+---
+
+### Weather report "wrong time" is a timezone/config issue, not a bug  <!-- 2026-07-05 -->
+**Symptom:** User expected the report at 06:50 but it arrived ~09:48. Config `WEATHER_DAILY_REPORT_TIME` was `09:50` and the `synth` container runs with `TZ=Asia/Tokyo` (JST).
+**Location:** config registry key `WEATHER_DAILY_REPORT_TIME`; `core/time_zone_utils.py` `get_local_timezone`/`utc_to_local` (resolves the local tz from the `TZ` env / timezone config); `core/db.py` `get_due_events` `advance_minutes=3` look-ahead.
+**Status:** working as designed — no code change.
+**Notes:** `WEATHER_DAILY_REPORT_TIME` is interpreted in the **project/local timezone** (`TZ`, here `Asia/Tokyo`), so `09:50` means 09:50 JST (= 02:50 CEST), not 06:50. The report also fires ~2-3 min early because `get_due_events` uses a `advance_minutes=3` look-ahead window to absorb LLM latency (09:50 − 3 min = 09:47/09:48). To change the delivery time, set `WEATHER_DAILY_REPORT_TIME` to the desired **local (JST) time**, or change `TZ`/the timezone config to the user's own timezone and set the value accordingly. Do NOT try to "fix" the conversion in code — it correctly follows the configured `TZ`.
+
+---
+
 ### `emotion_manager` can mix offset-aware DB timestamps with naive `datetime.now()`  <!-- 2026-04-18 -->
 **Symptom:** Runtime logs show `Error getting emotion state: can't subtract offset-naive and offset-aware datetimes`.
 **Location:** `plugins/emotion_manager.py` (`get_emotion_state`, `get_all_emotion_states`, and related decay logic using `datetime.now()` against DB timestamps).
