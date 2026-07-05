@@ -1383,52 +1383,6 @@ async def _heal_cortex_config(cur: Any) -> None:
         )
 
 
-_LEGACY_TIMESTAMPTZ_TABLES = (
-    "ai_diary",
-    "ai_diary_archive",
-    "chat_history_cache",
-    "emotion_diary",
-    "emotion_state",
-    "memories",
-    "message_map",
-)
-
-
-async def _heal_legacy_timestamptz_columns(cur: Any) -> None:
-    """Rename the legacy `timestamptz` column back to `timestamp`.
-
-    A regex bug in db_backends._translate_create_table (now fixed) matched
-    the `timestamp` column name itself, not just the `TIMESTAMP`/`DATETIME`
-    type keyword, when translating MariaDB DDL for Postgres. Tables created
-    on Postgres while that bug was live still carry the bad column name;
-    this repairs them in place on first startup after the fix.
-    """
-    for table in _LEGACY_TIMESTAMPTZ_TABLES:
-        try:
-            await cur.execute(
-                "SELECT 1 FROM information_schema.columns "
-                "WHERE table_name = %s AND column_name = 'timestamptz'",
-                (table,),
-            )
-            if not await cur.fetchone():
-                continue
-
-            await cur.execute(
-                "SELECT 1 FROM information_schema.columns "
-                "WHERE table_name = %s AND column_name = 'timestamp'",
-                (table,),
-            )
-            if await cur.fetchone():
-                # Both columns present (e.g. already healed elsewhere) - leave alone.
-                continue
-
-            await cur.execute(
-                f'ALTER TABLE "{table}" RENAME COLUMN "timestamptz" TO "timestamp"'
-            )
-        except Exception:
-            pass
-
-
 async def init_db() -> None:
     """Asynchronously initialize essential runtime database tables."""
     async with get_conn_ctx() as conn:
@@ -1436,16 +1390,6 @@ async def init_db() -> None:
             # Ensure we have a cursor to run schema creation for core tables
             async with conn.cursor() as cur:
                 if _get_db_type() == "postgres":
-                    # Must run before the schema statements below: several of them
-                    # are `CREATE INDEX IF NOT EXISTS ... (timestamp ...)` against
-                    # tables that already exist (so their CREATE TABLE is a no-op)
-                    # but still carry the legacy `timestamptz` column name - those
-                    # index statements would fail and abort the whole loop below
-                    # before a heal placed after it could ever run.
-                    try:
-                        await _heal_legacy_timestamptz_columns(cur)
-                    except Exception:
-                        pass  # best-effort; tables may not exist yet on a fresh install
                     for statement in _load_sql_statements(
                         _runtime_postgres_schema_path()
                     ):
