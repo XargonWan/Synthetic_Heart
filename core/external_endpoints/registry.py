@@ -284,10 +284,19 @@ class ExternalEndpointRegistry:
     async def set_subsystem_map(
         self, endpoint_id: int, mapping: dict[str, bool]
     ) -> None:
-        """Persist a user-defined subsystem mapping and re-sync registries."""
+        """Persist a user-defined subsystem mapping and re-sync registries.
+
+        An override is *force-on only*: it may only turn a subsystem ON that
+        auto-detection missed. Turning a subsystem "off" is expressed by the
+        *absence* of its key (the endpoint then falls back to its probed
+        capabilities). We therefore drop any falsy entries so a stored ``false``
+        can never mask an auto-detected capability.
+        """
         from core.db import get_conn_ctx
 
         await self._ensure()
+
+        cleaned = {k: True for k, v in mapping.items() if v}
 
         async with get_conn_ctx() as conn:
             async with conn.cursor() as cur:
@@ -295,7 +304,7 @@ class ExternalEndpointRegistry:
                     "UPDATE external_endpoints SET subsystem_map = %s, "
                     "updated_at = %s WHERE id = %s",
                     (
-                        json.dumps(mapping),
+                        json.dumps(cleaned),
                         datetime.now(timezone.utc),
                         endpoint_id,
                     ),
