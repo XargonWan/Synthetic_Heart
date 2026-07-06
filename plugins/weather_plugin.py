@@ -721,16 +721,36 @@ class WeatherPlugin:
                 await self._update_weather()
 
             from core.auto_response import request_llm_delivery
+            from core.config import get_trainer_id
 
             language_hint = ""
             if self.daily_report_language:
                 language_hint = f"Write the update in {self.daily_report_language}. "
 
+            # Resolve the trainer's target on the configured interface so the LLM
+            # is told exactly where to send the message. Without an explicit
+            # delivery target and a message action instruction, local models may
+            # store the bulletin (e.g. as a diary entry) instead of sending it.
+            trainer_id = get_trainer_id(interface_id)
+            delivery_hint = ""
+            if trainer_id is not None:
+                interface_path = f"{interface_id}/{trainer_id}"
+                delivery_hint = (
+                    "The trainer asks you to send them this weather update as a "
+                    f"message on interface_path '{interface_path}'. Emit a message "
+                    "action addressed to that interface_path. "
+                )
+            else:
+                log_warning(
+                    f"[weather_plugin] No trainer configured for interface "
+                    f"'{interface_id}'; delivery target cannot be pinned"
+                )
+
             prompt = (
                 f"It is {self.daily_report_time or '06:00'} local time. "
-                f"{language_hint}Use the weather data provided in context to create "
-                "a short, friendly daily weather update. Keep it concise and professional. "
-                f"Weather data: {self._cached_weather}"
+                f"{language_hint}{delivery_hint}Use the weather data provided in context "
+                "to create a short, friendly daily weather update. Keep it concise and "
+                f"professional. Weather data: {self._cached_weather}"
             )
 
             success = await request_llm_delivery(
@@ -768,9 +788,28 @@ class WeatherPlugin:
                 await self._update_weather()
 
             from core.auto_response import request_llm_delivery
+            from core.config import get_trainer_id
+
+            # Pin the trainer's delivery target so the LLM emits a message action
+            # to the right interface_path instead of storing the bulletin.
+            trainer_id = get_trainer_id(interface_id)
+            delivery_hint = ""
+            if trainer_id is not None:
+                interface_path = f"{interface_id}/{trainer_id}"
+                delivery_hint = (
+                    "The trainer asks you to send them this weather update as a "
+                    f"message on interface_path '{interface_path}'. Emit a message "
+                    "action addressed to that interface_path. "
+                )
+            else:
+                log_warning(
+                    f"[weather_plugin] No trainer configured for interface "
+                    f"'{interface_id}'; delivery target cannot be pinned"
+                )
 
             prompt = (
-                "Manual weather report request. Use the weather data in context to create a short, "
+                "Manual weather report request. "
+                f"{delivery_hint}Use the weather data in context to create a short, "
                 "friendly update. Keep it concise. Weather data: "
                 f"{self._cached_weather}"
             )
