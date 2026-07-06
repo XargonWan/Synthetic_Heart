@@ -231,9 +231,81 @@ class HarmonyAIAdapter(OpenAICompatAdapter):
                         audio = self._decode_harmony_audio(result)
                         if audio is not None:
                             return audio
+                        # Language-unsupported fallback: if the model rejected
+                        # the requested language, retry once with a supported
+                        # one (preferring English) before giving up.
+                        fallback_language = self._pick_fallback_language(
+                            result, payload.get("language")
+                        )
+                        if fallback_language is not None:
+                            log_warning(
+                                f"[harmony_ai] TTS language "
+                                f"{payload.get('language')!r} unsupported by "
+                                f"{model!r}; retrying with "
+                                f"{fallback_language!r}"
+                            )
+                            retry_payload = dict(payload)
+                            retry_payload["language"] = fallback_language
+                            async with session.post(
+                                url,
+                                json=retry_payload,
+                                headers=headers,
+                                timeout=aiohttp.ClientTimeout(total=120),
+                            ) as retry_resp:
+                                if retry_resp.status == 200:
+                                    retry_result = await retry_resp.json()
+                                    audio = self._decode_harmony_audio(retry_result)
+                                    if audio is not None:
+                                        return audio
+                                else:
+                                    detail = await retry_resp.text()
+                                    log_warning(
+                                        f"[harmony_ai] TTS retry {url} returned "
+                                        f"{retry_resp.status}: {detail[:200]}"
+                                    )
             except Exception as exc:
                 log_debug(f"[harmony_ai] TTS request failed ({url}): {exc}")
         return None
+
+    @staticmethod
+    def _pick_fallback_language(result: Any, requested_language: Any) -> str | None:
+        """Extract a fallback language from a Harmony TTS error envelope.
+
+        When a single-speaker model rejects the requested language it returns
+        an error envelope whose message lists the supported languages, e.g.
+        ``The model `openvoice_v2` only supports the following languages:
+        EN,ZH,ES,FR,JA.``  This parses that list (structured API output, not
+        user intent) and returns the best fallback — English if available,
+        otherwise the first supported language — or ``None`` when no list is
+        present or the requested language is already supported.
+        """
+        if not isinstance(result, dict):
+            return None
+        if "error" not in result and result.get("object") != "error":
+            return None
+        message = result.get("message")
+        if not isinstance(message, str):
+            return None
+        marker = "following languages:"
+        idx = message.lower().find(marker)
+        if idx < 0:
+            return None
+        tail = message[idx + len(marker) :]
+        # Keep only the language-code segment (letters, commas, spaces).
+        codes: list[str] = []
+        for token in tail.replace(".", ",").split(","):
+            code = token.strip().upper()
+            if code.isalpha():
+                codes.append(code)
+        if not codes:
+            return None
+        requested = str(requested_language or "").upper()
+        if requested and requested in codes:
+            # Already supported — the failure was something else.
+            return None
+        if "EN" in codes:
+            return "EN"
+        return codes[0]
 
     # ------------------------------------------------------------------
     # STT (Harmony JSON body: base64 input_audio)
