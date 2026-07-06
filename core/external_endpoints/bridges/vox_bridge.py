@@ -71,12 +71,15 @@ class ExternalVoxEngine(VoxEngineBase):
             if tts_model:
                 kwargs["model"] = tts_model
 
-        # Some single-speaker TTS models (e.g. KittenTTS) require an explicit
-        # language.  Allow it to be configured per-endpoint.
-        if "language" not in kwargs:
-            tts_language = extra.get("tts_language")
-            if tts_language:
-                kwargs["language"] = tts_language
+        # Some single-speaker TTS models (e.g. KittenTTS) accept only a fixed
+        # set of languages (often just ``default``).  When the endpoint pins a
+        # ``tts_language`` it is a hard model constraint and MUST override any
+        # language the caller auto-detected from the text — otherwise the model
+        # rejects the request (e.g. Harmony/kitten-tts-nano returns "only
+        # supports the following languages: default") and no audio is produced.
+        tts_language = extra.get("tts_language")
+        if tts_language:
+            kwargs["language"] = tts_language
 
         coro = self._adapter.generate_tts(text, voice=voice, **kwargs)
         try:

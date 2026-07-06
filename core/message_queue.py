@@ -1028,9 +1028,17 @@ async def _consumer_loop() -> None:
                         _queued_msg = final.get("message")
                         if getattr(_queued_msg, "is_voice_input", False):
                             context["is_voice_input"] = True
+                            # For voice-originated input there is no textual
+                            # "writing" phase — the reply is spoken. Keep the
+                            # avatar in THINK during generation instead of
+                            # switching to WRITE (transcription is not a write).
+                            context.setdefault(
+                                "animation_state_on_generation_start", "think"
+                            )
                         else:
                             # remove stale flag if present
                             context.pop("is_voice_input", None)
+                            context.pop("animation_state_on_generation_start", None)
 
                         # Propagate explicit request_tts flag (e.g. from handle_media_live wrap)
                         if getattr(_queued_msg, "request_tts", False):

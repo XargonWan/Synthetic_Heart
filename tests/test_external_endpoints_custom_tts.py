@@ -132,3 +132,52 @@ def test_external_vox_engine_uses_tts_extra_config():
     assert engine.output_format == "pcm"
     assert engine.sample_rate == 16000
     assert engine.channels == 2
+
+
+class _RecordingTTSAdapter:
+    """Adapter stub that records the kwargs forwarded to ``generate_tts``."""
+
+    def __init__(self) -> None:
+        self.captured_kwargs: dict[str, object] = {}
+        self._engine_label = ""
+
+    async def generate_tts(
+        self, text: str, voice: object = None, **kwargs: object
+    ) -> bytes:
+        self.captured_kwargs = {"voice": voice, **kwargs}
+        return b"audio"
+
+
+def test_endpoint_tts_language_overrides_caller_language():
+    """A pinned ``tts_language`` must override the caller's auto-detected language.
+
+    Regression: single-speaker models (e.g. kitten-tts-nano) accept only a fixed
+    language set. The endpoint's configured ``tts_language`` is a hard model
+    constraint and must win over the language the caller detected from the text.
+    """
+    endpoint = ExternalEndpoint(
+        id=3,
+        name="pinned_lang_tts",
+        display_label="Pinned Language TTS",
+        protocol=EndpointProtocol.CUSTOM,
+        base_url="http://example.com/tts",
+        api_key_enc=None,
+        enabled=True,
+        capabilities={},
+        subsystem_map={"vox": True},
+        available_models=[],
+        default_model=None,
+        probe_status="never",
+        last_probe_at=None,
+        extra_config={"tts_language": "default", "tts_model": "kitten-tts-nano"},
+    )
+
+    adapter = _RecordingTTSAdapter()
+    engine = ExternalVoxEngine(endpoint, adapter=adapter)
+
+    # Caller auto-detected Italian; the endpoint pins "default".
+    result = engine.generate_tts("Ciao", language="it")
+
+    assert result == b"audio"
+    assert adapter.captured_kwargs["language"] == "default"
+    assert adapter.captured_kwargs["model"] == "kitten-tts-nano"

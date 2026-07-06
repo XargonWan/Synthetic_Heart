@@ -422,14 +422,14 @@ class MessagePlugin:
         # Historically, when the incoming message was an audio/voice note the reply
         # was always delivered as voice. Preserve that behaviour: if this turn was
         # voice-originated (is_voice_input / request_tts) and Vox is enabled, force
-        # send_as_voice=true regardless of whether the model set it. WebUI has its
-        # own lipsync/VRM path and is excluded.
+        # send_as_voice=true regardless of whether the model set it. This also
+        # applies to the WebUI: Vox dispatches audio + lip-sync to the WebUI
+        # client, so a voice-originated turn gets a spoken reply there too.
         try:
             _voice_input = isinstance(context, dict) and (
                 context.get("is_voice_input") or context.get("request_tts")
             )
-            _is_webui = "webui" in (interface_name or "").lower()
-            if _voice_input and not _is_webui and not payload.get("send_as_voice"):
+            if _voice_input and not payload.get("send_as_voice"):
                 from plugins.vox_plugin import is_vox_enabled
 
                 if is_vox_enabled():

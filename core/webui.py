@@ -4319,7 +4319,22 @@ class SynthWebUIInterface:
 
         For WebUI this approximates 'LLM started responding', so we switch THINK->WRITE
         as early as possible (before the final message is sent).
+
+        For voice-originated input (Auris STT) there is no textual writing phase —
+        the reply is spoken — so the avatar stays in THINK during generation.
         """
+        # Detect voice-originated input; if so we keep THINK instead of WRITE.
+        _is_voice_input = False
+        try:
+            _ctx = kwargs.get("context")
+            if isinstance(_ctx, dict) and _ctx.get("is_voice_input"):
+                _is_voice_input = True
+            _msg = kwargs.get("message")
+            if not _is_voice_input and getattr(_msg, "is_voice_input", False):
+                _is_voice_input = True
+        except Exception:
+            _is_voice_input = False
+
         # Switch THINK -> WRITE when generation actually starts, but ensure THINK
         # remains visible for a short minimum window to avoid being skipped.
         try:
@@ -4394,13 +4409,16 @@ class SynthWebUIInterface:
                     )
 
             if writing_pushed and self.persona_manager:
+                # Voice input has no textual writing phase — keep the avatar in
+                # THINK during generation (the reply is spoken via Vox).
+                _anim_state = "think" if _is_voice_input else "write"
                 try:
                     await self.persona_manager.set_animation_state(
-                        "write", session_id=session_id
+                        _anim_state, session_id=session_id
                     )
                 except Exception as anim_exc:
                     log_debug(
-                        f"{LOG_PREFIX} Failed to set 'write' animation (generation_start): {anim_exc}"
+                        f"{LOG_PREFIX} Failed to set '{_anim_state}' animation (generation_start): {anim_exc}"
                     )
         except Exception as exc:
             log_debug(f"{LOG_PREFIX} on_generation_start failed: {exc}")
