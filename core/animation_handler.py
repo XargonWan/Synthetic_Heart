@@ -2055,6 +2055,80 @@ class KaradaStateServer:
     # Audio state tracking (for late-joining clients)
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _derive_audio_url(audio_path: str) -> str:
+        """Derive a client-accessible ``/static/...`` URL from a filesystem path.
+
+        Audio is stored under the WebUI ``/static`` mount, e.g.
+        ``res/synth_webui/static/audio/tts/vox_123.wav`` →
+        ``/static/audio/tts/vox_123.wav``.  Falls back to
+        ``/static/audio/tts/<filename>`` when no ``static`` segment is present.
+        """
+        try:
+            p = Path(audio_path)
+            parts_list = list(p.parts)
+            try:
+                idx = parts_list.index("static")
+                return "/" + "/".join(parts_list[idx:])
+            except ValueError:
+                return "/static/audio/tts/" + p.name
+        except Exception:
+            return "/static/audio/tts/" + str(audio_path).rsplit("/", 1)[-1]
+
+    async def broadcast_audio(
+        self,
+        audio_path: str,
+        lipsync_data: Optional[Dict] = None,
+        audio_duration_s: Optional[float] = None,
+        text: Optional[str] = None,
+    ) -> None:
+        """Broadcast a TTS audio-play command to *every* connected client.
+
+        This is the **single source of truth** for "the avatar is speaking".
+        The audio-play action is performed here on the server and distributed
+        to all registered transports (WebUI today, an Android app or XR headset
+        tomorrow — every client is just another transport).  It also records
+        the state via :meth:`set_current_audio` so clients that connect while
+        the clip is still playing catch up automatically.
+
+        Callers (e.g. the Vox plugin) must NOT iterate individual client
+        connections themselves — they hand the audio to this method and the
+        server fans it out.  Best-effort; never raises.
+
+        Args:
+            audio_path:       Filesystem path to the generated audio file.
+            lipsync_data:     Optional phoneme/timing dict for the animator.
+            audio_duration_s: Duration of the clip in seconds.
+            text:             Optional caption (forwarded in the payload; the
+                              chat-bubble persistence is an interface concern,
+                              handled separately by the originating interface).
+        """
+        url = self._derive_audio_url(audio_path)
+
+        payload: Dict[str, Any] = {"type": "tts-play", "url": url}
+        if text is not None:
+            payload["text"] = text
+        if lipsync_data:
+            payload["lipsync"] = lipsync_data
+        if audio_duration_s is not None:
+            payload["audio_duration_s"] = audio_duration_s
+
+        if self._has_any_transport():
+            for transport in self._transports:
+                try:
+                    await transport.broadcast_audio(payload)
+                except Exception as exc:  # pragma: no cover - best effort
+                    log_warning(
+                        f"[KaradaStateServer] failed to broadcast audio via "
+                        f"{type(transport).__name__}: {exc}"
+                    )
+
+        # Record for late-joining clients (auto-clears after the clip ends).
+        try:
+            self.set_current_audio(url, audio_duration_s, lipsync_data)
+        except Exception:
+            pass
+
     def set_current_audio(
         self,
         url: Optional[str],

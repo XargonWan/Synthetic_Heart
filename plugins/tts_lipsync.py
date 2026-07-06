@@ -377,6 +377,27 @@ class TTSLipSyncPlugin(AIPluginBase):
                         f"[tts_lipsync] Dispatching audio to {iface_name} ({interface_path})"
                     )
 
+                    # The Karada state server is the single source of truth for
+                    # "the avatar is speaking". Hand the audio to the server so
+                    # it fans out a tts-play command to *every* connected client
+                    # (WebUI today, an Android app / XR headset tomorrow),
+                    # regardless of which interface originated this turn. We
+                    # never iterate client connections here.
+                    try:
+                        from core.animation_handler import get_karada_state_server
+
+                        text_caption = payload.get("__merged_text") or payload.get(
+                            "text"
+                        )
+                        await get_karada_state_server().broadcast_audio(
+                            audio_path=str(local_path),
+                            text=text_caption,
+                        )
+                    except Exception as exc:
+                        log_warning(
+                            f"[tts_lipsync] Karada broadcast_audio failed: {exc}"
+                        )
+
                     if iface_name == "discord_bot" and hasattr(
                         target_iface, "send_message"
                     ):

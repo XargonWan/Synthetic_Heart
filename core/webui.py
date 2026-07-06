@@ -4250,41 +4250,13 @@ class SynthWebUIInterface:
                     f"{LOG_PREFIX} send_tts_audio: failed to send caption message for session {sid}: {exc}"
                 )
 
-        payload: Dict[str, Any] = {"type": "tts-play", "url": url}
-        if text is not None:
-            payload["text"] = text
-        if lipsync_data:
-            payload["lipsync"] = lipsync_data
-        if audio_duration_s is not None:
-            payload["audio_duration_s"] = audio_duration_s
-
-        # "Single body" principle: broadcast TTS audio to ALL connected
-        # clients, not just the requesting session.  Every viewer should
-        # hear the same voice coming from the shared avatar.
-        delivered = False
-        for target_sid, target_ws in list(self.connections.items()):
-            try:
-                await target_ws.send_json(payload)
-                delivered = True
-            except Exception as exc:
-                log_warning(
-                    f"{LOG_PREFIX} send_tts_audio failed for session {target_sid}: {exc}"
-                )
-        if delivered:
-            log_info(
-                f"{LOG_PREFIX} TTS audio broadcast to {len(self.connections)} session(s): {url}"
-            )
-
-        # Track current audio in KaradaStateServer for late-joining clients
-        if hasattr(self, "animation_handler") and self.animation_handler:
-            try:
-                self.animation_handler.set_current_audio(
-                    url, audio_duration_s, lipsync_data
-                )
-            except Exception:
-                pass
-
-        return delivered
+        # NOTE: the actual ``tts-play`` broadcast to all clients and the
+        # ``set_current_audio`` bookkeeping for late-joiners are performed by
+        # the Karada state server (the single source of truth for "the avatar
+        # is speaking"), which the Vox plugin drives directly. This method only
+        # persists/renders the WebUI-specific chat caption above so we do NOT
+        # broadcast the audio again here (that would double-play the clip).
+        return True
 
     async def _webui_clear_pending_thinking(self, session_id: str) -> None:
         pending = self._pending_thinking_actions.get(session_id)

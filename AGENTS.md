@@ -135,6 +135,20 @@ register_iris_engine("my_engine", __name__, capabilities={"vision": True}, label
 
 The `AnimationHandler` (`core/animation_handler.py`) manages VRM avatar animations with state-based triggering.
 
+### The Karada state server is the single source of truth
+
+**`KaradaStateServer` (`core/animation_handler.py`, accessed via `get_karada_state_server()`) is the single source of truth for everything the avatar does — animation, face, expressions, and audio/"speaking" state.** It owns that state and *distributes* it to every connected client through a transport abstraction (`KaradaTransport` in `core/karada_transport.py`; the WebSocket implementation is `core/karada_ws_transport.py`).
+
+Clients are passive receivers. The WebUI is **just a client** — and any future client (Android app, XR headset, etc.) is another one. When a new client connects it must be able to read the current server state and catch up (late-join replay via `get_current_audio()` / current animation).
+
+**Rules:**
+
+- Plugins and interfaces must **NEVER** iterate individual client connections to push avatar state. Always drive the server.
+- To make the avatar speak, call `await get_karada_state_server().broadcast_audio(audio_path=..., lipsync_data=..., audio_duration_s=..., text=...)`. The server fans a `tts-play` command out to **all** transports and records the audio so late-joiners catch up. This is the *only* place that broadcasts speaking state.
+- This holds regardless of which interface originated the turn (e.g. an audio received via Telegram while the WebUI is open) and whether the turn was automatic or explicitly triggered.
+- Interface-specific *native* delivery (Telegram `audio_telegram_bot`, Discord audio, the WebUI chat caption bubble) is a separate concern handled by each interface — it must not re-broadcast the shared avatar audio.
+- To add a new client type, implement a new `KaradaTransport` and register it with the server. Do **not** add per-client logic in plugins.
+
 ### States & Flow
 
 ```

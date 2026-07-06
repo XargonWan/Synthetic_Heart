@@ -191,6 +191,7 @@ Always follow this order — it prevents reading code you don't need:
 - **Plugins** subclass `PluginBase` or `AIPluginBase`. Removing one never breaks the system.
 - **Interfaces** (Telegram, Discord, Matrix) forward I/O into the chain. Never bypass it.
 - **Animations** use logical state names (`think`, `write`, `idle`), never raw file paths.
+- **Karada state server is the single source of truth** for all avatar state (animation, face, expressions, audio/speaking). Clients (WebUI, future Android/XR) are passive receivers. To make the avatar speak, call `await get_karada_state_server().broadcast_audio(...)` — plugins must NEVER iterate client connections. See AGENTS.md §7.
 
 See `AGENTS.md` for the full architecture reference, animation system details, plugin contracts, and container/infra notes.
 

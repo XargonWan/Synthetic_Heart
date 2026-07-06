@@ -538,43 +538,28 @@ class VoxPlugin(AIPluginBase):
 
         audio_duration_s = _get_wav_duration(path)
 
-        # Reach every connected session so all spectators see/hear the avatar.
-        sessions = list(getattr(webui, "connections", {}) or {})
-        if not sessions:
-            log_debug(
-                "[vox_plugin] broadcast_audio_to_webui: no connected WebUI clients."
-            )
-            return False
+        # Distribute via the Karada state server (single source of truth) so
+        # every connected client (WebUI, and any future client) sees/hears the
+        # shared avatar speak with lip-sync and the talking animation state.
+        try:
+            from core.animation_handler import get_karada_state_server
 
-        delivered = False
-        for sid in sessions:
-            send_kwargs: dict[str, Any] = {
-                "session_id": sid,
-                "audio_path": str(path),
-                "text": text,
-                "lipsync_data": lipsync_data,
-            }
-            if audio_duration_s is not None:
-                send_kwargs["audio_duration_s"] = audio_duration_s
-            try:
-                ok = await webui.send_tts_audio(**send_kwargs)
-                delivered = delivered or bool(ok)
-            except TypeError as exc:
-                if "audio_duration_s" not in str(exc):
-                    raise
-                send_kwargs.pop("audio_duration_s", None)
-                ok = await webui.send_tts_audio(**send_kwargs)
-                delivered = delivered or bool(ok)
-            except Exception as exc:
-                log_warning(
-                    f"[vox_plugin] broadcast_audio_to_webui failed for {sid}: {exc}"
+            karada = get_karada_state_server()
+            if not karada or not karada.has_connected_clients():
+                log_debug(
+                    "[vox_plugin] broadcast_audio_to_webui: no connected clients."
                 )
-            # send_tts_audio itself broadcasts to all clients, so one
-            # successful call is sufficient.
-            if delivered:
-                break
-
-        return delivered
+                return False
+            await karada.broadcast_audio(
+                audio_path=str(path),
+                lipsync_data=lipsync_data,
+                audio_duration_s=audio_duration_s,
+                text=text,
+            )
+            return True
+        except Exception as exc:
+            log_warning(f"[vox_plugin] broadcast_audio_to_webui failed: {exc}")
+            return False
 
     # ------------------------------------------------------------------
     # Language detection helper (used by recon and other components)
@@ -867,6 +852,20 @@ class VoxPlugin(AIPluginBase):
                 )
                 return
 
+            # The Karada state server is the single source of truth for
+            # "the avatar is speaking". Hand the audio to the server and let it
+            # fan out a tts-play command to *every* connected client (WebUI
+            # today, an Android app / XR headset tomorrow). This happens for
+            # every turn regardless of which interface originated it (e.g. an
+            # audio received via Telegram while the WebUI is open) and whether
+            # it was automatic or explicitly triggered. We never iterate client
+            # connections here — the server distributes to all transports.
+            await self._broadcast_audio_to_clients(
+                audio_path=audio_path,
+                lipsync_data=lipsync_data,
+                audio_duration_s=audio_duration_s,
+            )
+
             if iface_name == "synth_webui" and hasattr(target_iface, "send_tts_audio"):
                 session_id = levels[0] if levels else None
                 if session_id:
@@ -938,6 +937,34 @@ class VoxPlugin(AIPluginBase):
 
         except Exception as exc:
             log_error(f"[vox_plugin] Dispatch error: {exc}")
+
+    async def _broadcast_audio_to_clients(
+        self,
+        audio_path: Path,
+        lipsync_data: dict | None,
+        audio_duration_s: float | None,
+    ) -> None:
+        """Hand generated audio to the Karada state server for distribution.
+
+        The Karada state server is the single source of truth for the
+        "avatar is speaking" state: it fans a ``tts-play`` command out to every
+        registered transport (all connected clients) and records the current
+        audio so late-joining clients catch up. We never iterate individual
+        client connections here. Best-effort; never raises.
+        """
+        try:
+            from core.animation_handler import get_karada_state_server
+
+            karada = get_karada_state_server()
+            if not karada:
+                return
+            await karada.broadcast_audio(
+                audio_path=str(audio_path),
+                lipsync_data=lipsync_data,
+                audio_duration_s=audio_duration_s,
+            )
+        except Exception as exc:
+            log_debug(f"[vox_plugin] _broadcast_audio_to_clients error: {exc}")
 
     async def _send_fallback(
         self, text: str, interface_path: str | None
