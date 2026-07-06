@@ -11,6 +11,7 @@ from core.core_initializer import register_plugin, INTERFACE_REGISTRY
 from core.config_manager import config_registry
 from core.variables_engine import register_exposed_var
 from core.logging_utils import log_info, log_warning, log_error, log_debug
+from core.beat_utils import is_outbound_beat
 
 
 register_exposed_var(
@@ -194,10 +195,10 @@ class TTSLipSyncPlugin(AIPluginBase):
 
     async def execute_action(self, action: dict, context: dict, bot, original_message):
         """Execute TTS action and optionally dispatch to interface."""
-        # Check if this is a Grillo internal beat (not outreach) - skip TTS
-        is_grillo_internal = context.get("grillo_beat", False) and context.get(
-            "beat_type"
-        ) not in ("outreach", None)
+        # Check if this is a Grillo internal beat (outbound beats speak) - skip TTS
+        is_grillo_internal = context.get("grillo_beat", False) and not is_outbound_beat(
+            context.get("beat_type")
+        )
         if is_grillo_internal:
             log_info(
                 f"[tts_lipsync] Skipping TTS for Grillo internal beat: {context.get('beat_type')}"

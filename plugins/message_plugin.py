@@ -6,6 +6,7 @@ from difflib import SequenceMatcher
 from core.logging_utils import log_debug, log_info, log_warning, log_error
 from core.core_initializer import INTERFACE_REGISTRY
 from core.config_manager import config_registry
+from core.beat_utils import is_outbound_beat
 
 
 class MessagePlugin:
@@ -94,7 +95,7 @@ class MessagePlugin:
         """
         try:
             if isinstance(context, dict) and (
-                context.get("beat_type") == "outreach"
+                is_outbound_beat(context.get("beat_type"))
                 or context.get("grillo_beat")
                 or context.get("activity_log_id")
                 or context.get("grillo_activity_log_id")
@@ -241,10 +242,10 @@ class MessagePlugin:
                 rebuilt_interface_path = f"{interface_name}/{target}"
 
         # --- Grillo Suppression Logic ---
-        # Outreach beats are EXEMPT from suppression: their purpose is to
-        # initiate conversation, so silencing them defeats the feature.
-        is_outreach = (
-            isinstance(context, dict) and context.get("beat_type") == "outreach"
+        # Outbound beats (observer) are EXEMPT from suppression: their purpose is
+        # to initiate conversation, so silencing them defeats the feature.
+        is_outbound = isinstance(context, dict) and is_outbound_beat(
+            context.get("beat_type")
         )
         activity_log_id = None
         if isinstance(context, dict):
@@ -253,7 +254,7 @@ class MessagePlugin:
             )
 
         if (
-            not is_outreach
+            not is_outbound
             and isinstance(context, dict)
             and (
                 context.get("grillo_beat")

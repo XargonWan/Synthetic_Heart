@@ -141,7 +141,7 @@ async def test_queue_rebinds_to_current_event_loop():
 
 
 @pytest.mark.asyncio
-async def test_outreach_background_task_is_not_cancelled_by_user_message(
+async def test_observer_background_task_is_not_cancelled_by_user_message(
     monkeypatch,
 ):
     import core.plugin_instance as pi
