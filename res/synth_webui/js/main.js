@@ -3930,11 +3930,12 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                         const tab = btn.getAttribute('data-tab');
                         if (!tab) return;
                         try {
-                            setActiveTab(tab);
                             try { window.activeTab = tab; if (localStorage && localStorage.setItem) localStorage.setItem('synth-webui-active-tab', tab); } catch (e) { /* ignore */ }
 
                             // If the desktop is embedded in an iframe, post a message to request a section load
                             if (window.SynthConfig && window.SynthConfig.DESKTOP_IFRAME) {
+                                // Reveal immediately for the iframe shell; it manages its own content.
+                                setActiveTab(tab);
                                 try {
                                     const iframe = document.getElementById('desktop-iframe');
                                     if (iframe && iframe.contentWindow) {
@@ -3942,9 +3943,12 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                                     }
                                 } catch (e) { /* ignore */ }
                             } else {
+                                // Load the section content BEFORE revealing the panel, so the user
+                                // never sees an empty panel on the first click of a lazy tab.
                                 if (window.SynthWebUI && typeof window.SynthWebUI.loadSection === 'function') {
                                     await window.SynthWebUI.loadSection(tab);
                                 }
+                                setActiveTab(tab);
                             }
 
                             if (tab === 'history' && window.SynthWebUI && typeof window.SynthWebUI.initHistoryTab === 'function') {
@@ -3955,6 +3959,8 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                             _adjustPageScroll(tab);
                         } catch (e) {
                             console.warn('[synth_webui] tab switch failed', e);
+                            // On failure, still reveal the panel so the user isn't stuck on a stale tab.
+                            try { setActiveTab(tab); } catch (_) { /* ignore */ }
                         }
                     });
                 });
@@ -4000,24 +4006,33 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                 } catch (e) { /* ignore */ }
 
                 // Restore last active tab and load its section once.
+                let restoredTab = 'home';
                 try {
                     const saved = (localStorage && localStorage.getItem && localStorage.getItem('synth-webui-active-tab')) || 'home';
+                    restoredTab = saved;
                     setActiveTab(saved);
                     try { setupDesktopIframe(saved); } catch (e) { /* ignore */ }
                     // Ensure page scroll state matches the restored tab (fix for settings not scrollable)
                     try { _adjustPageScroll(saved); } catch (e) { /* ignore */ }
                 } catch (e) {
+                    restoredTab = 'home';
                     setActiveTab('home');
                     try { setupDesktopIframe('home'); } catch (e) { /* ignore */ }
                 }
 
                 try {
                     if (window.SynthWebUI && typeof window.SynthWebUI.loadSection === 'function') {
+                        // Always warm the history tab (chat history is needed early).
                         window.SynthWebUI.loadSection('history').then(() => {
                             if (window.SynthWebUI && typeof window.SynthWebUI.initHistoryTab === 'function') {
                                 window.SynthWebUI.initHistoryTab();
                             }
                         });
+                        // Also load the restored active tab so a page reload lands on visible content
+                        // instead of an empty panel (only 'history' was warmed before).
+                        if (restoredTab && restoredTab !== 'history' && restoredTab !== 'home') {
+                            window.SynthWebUI.loadSection(restoredTab).catch(() => { /* ignore */ });
+                        }
                     }
                 } catch (e) { /* ignore */ }
 
