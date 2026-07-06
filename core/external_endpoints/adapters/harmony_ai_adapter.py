@@ -264,7 +264,10 @@ class HarmonyAIAdapter(OpenAICompatAdapter):
                                         f"{retry_resp.status}: {detail[:200]}"
                                     )
             except Exception as exc:
-                log_debug(f"[harmony_ai] TTS request failed ({url}): {exc}")
+                log_warning(
+                    f"[harmony_ai] TTS request failed ({url}): "
+                    f"{type(exc).__name__}: {exc}"
+                )
         return None
 
     @staticmethod

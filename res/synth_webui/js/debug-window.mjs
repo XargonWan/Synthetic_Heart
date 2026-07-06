@@ -134,6 +134,15 @@ export function createDebugWindow() {
                         <div id="synth-debug-inject-expr-list" style="margin-top:6px;font-size:11px;color:var(--text-soft);line-height:1.6;">Loading…</div>
                     </details>
                 </div>
+                <div class="card" style="margin:0;">
+                    <h2 style="margin:0 0 8px 0;">Vox Test</h2>
+                    <div style="font-size:11px;color:var(--text-soft);margin-bottom:6px;line-height:1.3;">Synthesise text through the active Vox (TTS) engine to test the selected voice/model. The result is played on the avatar.</div>
+                    <textarea id="synth-debug-vox-test-text" rows="2" placeholder="Type something for Synth to say…" style="width:100%;padding:6px;border-radius:8px;background:rgba(255,255,255,0.02);border:1px solid var(--border);color:var(--text);font-family:inherit;font-size:13px;resize:vertical;"></textarea>
+                    <div style="display:flex;gap:8px;margin-top:8px;align-items:center;">
+                        <button id="synth-debug-vox-test-send" class="pill" type="button" style="flex:1;">Speak</button>
+                    </div>
+                    <div id="synth-debug-vox-test-status" style="margin-top:6px;font-size:11px;color:var(--text-soft);display:none;"></div>
+                </div>
             </div>
         `;
             return panel;
@@ -1172,6 +1181,69 @@ export function createDebugWindow() {
                         exprListEl.textContent = 'Error loading expressions';
                     }
                 })();
+            }
+        } catch (e) { /* ignore */ }
+
+        // Bind Vox test controls
+        try {
+            const voxTestText = win.querySelector('#synth-debug-vox-test-text');
+            const voxTestSendBtn = win.querySelector('#synth-debug-vox-test-send');
+            const voxTestStatus = win.querySelector('#synth-debug-vox-test-status');
+
+            const showVoxTestStatus = (msg, isError) => {
+                if (!voxTestStatus) return;
+                voxTestStatus.textContent = msg;
+                voxTestStatus.style.display = 'block';
+                voxTestStatus.style.color = isError ? '#ff6b6b' : 'var(--text-soft)';
+                setTimeout(() => { voxTestStatus.style.display = 'none'; }, 4000);
+            };
+
+            if (voxTestSendBtn && voxTestText) {
+                let voxTestController = null;
+                const doVoxTest = async () => {
+                    // If a request is already in flight, this click means "Stop".
+                    if (voxTestController) {
+                        voxTestController.abort();
+                        return;
+                    }
+                    const text = (voxTestText.value || '').trim();
+                    if (!text) { showVoxTestStatus('Empty text', true); return; }
+                    voxTestController = new AbortController();
+                    voxTestSendBtn.textContent = 'Stop';
+                    try {
+                        const res = await fetch(_apiBase + '/api/debug/tts_test', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ text: text }),
+                            signal: voxTestController.signal,
+                        });
+                        if (res.ok) {
+                            const data = await res.json().catch(() => ({}));
+                            const eng = data.engine ? ` [${data.engine}]` : '';
+                            showVoxTestStatus(
+                                data.delivered ? `Spoken${eng}` : `Generated${eng} (no client to play)`,
+                                false,
+                            );
+                        } else {
+                            const err = await res.json().catch(() => ({}));
+                            showVoxTestStatus(err.error || err.detail || ('Error ' + res.status), true);
+                        }
+                    } catch (e) {
+                        if (e && e.name === 'AbortError') {
+                            showVoxTestStatus('Stopped', false);
+                        } else {
+                            showVoxTestStatus('Network error', true);
+                        }
+                    } finally {
+                        voxTestController = null;
+                        voxTestSendBtn.disabled = false;
+                        voxTestSendBtn.textContent = 'Speak';
+                    }
+                };
+                voxTestSendBtn.addEventListener('click', doVoxTest);
+                voxTestText.addEventListener('keydown', (ev) => {
+                    if (ev.key === 'Enter' && !ev.shiftKey) { ev.preventDefault(); doVoxTest(); }
+                });
             }
         } catch (e) { /* ignore */ }
 

@@ -3543,8 +3543,54 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
 
                     // ── Kitten TTS speaker selector ───────────────────────────
                     const kittenSpeakerSelect = document.getElementById('kitten-speaker-select');
+                    const kittenModelSelect = document.getElementById('kitten-model-select');
                     const kittenPlayBtn = document.getElementById('kitten-play-btn');
                     let kittenSpeakerList = [];
+                    let kittenModelList = [];
+
+                    function populateKittenModels(currentValue) {
+                        if (!kittenModelSelect) return;
+                        kittenModelSelect.innerHTML = '';
+                        if (!kittenModelList.length) {
+                            const opt = document.createElement('option');
+                            opt.value = '';
+                            opt.textContent = 'No downloaded models';
+                            opt.disabled = true;
+                            opt.selected = true;
+                            kittenModelSelect.appendChild(opt);
+                            return;
+                        }
+                        let matched = false;
+                        kittenModelList.forEach(m => {
+                            const opt = document.createElement('option');
+                            opt.value = m.model_id;
+                            opt.textContent = m.display_name || m.model_id;
+                            if (String(currentValue) === m.model_id) {
+                                opt.selected = true;
+                                matched = true;
+                            }
+                            kittenModelSelect.appendChild(opt);
+                        });
+                        if (!matched && kittenModelSelect.options.length) {
+                            kittenModelSelect.selectedIndex = 0;
+                        }
+                    }
+
+                    async function loadKittenModels() {
+                        try {
+                            const r = await fetch('/api/models?plugin_id=vox_kitten');
+                            if (r.ok) {
+                                const data = await r.json();
+                                const models = Array.isArray(data.models) ? data.models : [];
+                                kittenModelList = models.filter(m => m.downloaded === true);
+                            } else {
+                                kittenModelList = [];
+                            }
+                        } catch (e) {
+                            console.error('[synth_webui] failed to load kitten models', e);
+                            kittenModelList = [];
+                        }
+                    }
 
                     function populateKittenSpeakers(currentValue) {
                         if (!kittenSpeakerSelect) return;
@@ -3575,25 +3621,31 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                         if (!kittenSpeakerSelect) return;
                         const voxSel = document.getElementById('vox-engine-select');
                         if (voxSel && voxSel.value === 'kitten') {
-                            // ensure we have the speaker list before populating
+                            // ensure we have the speaker + model lists before populating
                             await loadKittenSpeakers();
+                            await loadKittenModels();
+                            if (kittenModelSelect) kittenModelSelect.style.display = '';
                             kittenSpeakerSelect.style.display = '';
                             kittenPlayBtn.style.display = '';
                             try {
                                 const r = await fetch('/api/config');
                                 if (r.ok) {
                                     const cfg = await r.json();
-                                    const item = Array.isArray(cfg.items)
-                                        ? cfg.items.find(i => i.key === 'KITTEN_VOICE')
-                                        : null;
-                                    populateKittenSpeakers(item && item.value ? item.value : 'en_1');
+                                    const items = Array.isArray(cfg.items) ? cfg.items : [];
+                                    const voiceItem = items.find(i => i.key === 'KITTEN_VOICE');
+                                    populateKittenSpeakers(voiceItem && voiceItem.value ? voiceItem.value : 'en_1');
+                                    const modelItem = items.find(i => i.key === 'KITTEN_MODEL');
+                                    populateKittenModels(modelItem && modelItem.value ? modelItem.value : 'builtin');
                                 } else {
                                     populateKittenSpeakers('en_1');
+                                    populateKittenModels('builtin');
                                 }
                             } catch (e) {
                                 populateKittenSpeakers('en_1');
+                                populateKittenModels('builtin');
                             }
                         } else {
+                            if (kittenModelSelect) kittenModelSelect.style.display = 'none';
                             kittenSpeakerSelect.style.display = 'none';
                             if (kittenPlayBtn) kittenPlayBtn.style.display = 'none';
                         }
@@ -3615,6 +3667,24 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                         });
                         kittenSpeakerSelect.dataset.bound = '1';
                     }
+                    if (kittenModelSelect && !kittenModelSelect.dataset.bound) {
+                        kittenModelSelect.addEventListener('change', async () => {
+                            const model = kittenModelSelect.value;
+                            if (!model) return;
+                            try {
+                                await fetch('/api/config', {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({ key: 'KITTEN_MODEL', value: model })
+                                });
+                                window.showToast && window.showToast('Kitten model set to ' + model);
+                            } catch (e) {
+                                console.error('[synth_webui] Failed to set KITTEN_MODEL', e);
+                                window.showToast && window.showToast('Failed to save model', true);
+                            }
+                        });
+                        kittenModelSelect.dataset.bound = '1';
+                    }
                     if (kittenPlayBtn && !kittenPlayBtn.dataset.bound) {
                         kittenPlayBtn.addEventListener('click', () => {
                             const code = kittenSpeakerSelect.value;
@@ -3623,6 +3693,9 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                         });
                         kittenPlayBtn.dataset.bound = '1';
                     }
+                    // Expose a refresh hook so the Manage-Models modal can rebuild the
+                    // downloaded-model combo after a download/delete without a page reload.
+                    window.refreshKittenModelSelect = updateKittenControlsVisibility;
                     // show kitten controls now + wire engine change event
                     updateKittenControlsVisibility();
                     const voxEngineSel = document.getElementById('vox-engine-select');
@@ -4278,6 +4351,11 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                                 clearInterval(pollTimers[modelId]);
                                 delete pollTimers[modelId];
                                 window.showToast && window.showToast(m.downloaded ? 'Model downloaded' : 'Download stopped');
+                                // Refresh the Kitten downloaded-model combo so a freshly
+                                // downloaded model appears without a page reload.
+                                if (m.downloaded && typeof window.refreshKittenModelSelect === 'function') {
+                                    window.refreshKittenModelSelect();
+                                }
                             }
                         } catch (e) {
                             clearInterval(pollTimers[modelId]);
@@ -4324,6 +4402,11 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                             model.downloaded = false;
                             setDownloadingState(row, model);
                             window.showToast && window.showToast('Model removed');
+                            // Refresh the Kitten downloaded-model combo so the removed
+                            // model disappears without a page reload.
+                            if (typeof window.refreshKittenModelSelect === 'function') {
+                                window.refreshKittenModelSelect();
+                            }
                         } catch (e) {
                             showError('Failed to delete model: ' + e.message);
                             delBtn.disabled = false;

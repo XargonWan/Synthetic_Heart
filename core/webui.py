@@ -673,6 +673,7 @@ class SynthWebUIInterface:
         # Debug endpoints (only enabled when WEB_DEBUG=1)
         self.app.get("/api/debug/db_pool")(self.db_pool_debug)
         self.app.post("/api/debug/inject_message")(self.debug_inject_message)
+        self.app.post("/api/debug/tts_test")(self.debug_tts_test)
         self.app.get("/api/debug/expressions")(self.debug_expressions)
         self.app.post("/api/config")(self.update_config_entry)
         # Cortex-aware endpoints
@@ -1984,6 +1985,83 @@ class SynthWebUIInterface:
         if errors:
             resp["warnings"] = errors
         return JSONResponse(resp)
+
+    async def debug_tts_test(self, request: Request) -> JSONResponse:
+        """Synthesise arbitrary text through the active Vox (TTS) engine.
+
+        Used by the Debug window to test the currently selected Vox engine /
+        model: the text is synthesised and the resulting audio is broadcast to
+        the shared avatar (Karada state server) so it can be heard on every
+        connected WebUI client. Gated by ``WEB_DEBUG=1``.
+
+        JSON body: ``{"text": "...", "engine": "optional-engine-name"}``.
+        """
+        web_debug = os.getenv("WEB_DEBUG", "0").lower()
+        if web_debug not in ("1", "true", "yes"):
+            raise HTTPException(status_code=403, detail="Debug endpoints disabled")
+
+        try:
+            body: Dict[str, Any] = await request.json()
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+        text: str = (body.get("text") or "").strip()
+        if not text:
+            raise HTTPException(status_code=400, detail="'text' is required")
+
+        engine_name: Optional[str] = body.get("engine") or None
+
+        from core.core_initializer import PLUGIN_REGISTRY
+
+        vox = PLUGIN_REGISTRY.get("vox_plugin")
+        if vox is None:
+            return JSONResponse(
+                {
+                    "error": (
+                        "Vox TTS subsystem is not loaded. Select a Vox engine "
+                        "via ACTIVE_VOX_ENGINE."
+                    )
+                },
+                status_code=503,
+            )
+
+        try:
+            # Generate only — do not dispatch through the normal interface path.
+            result = await vox.speak(
+                text,
+                engine_name=engine_name,
+                allow_fallback=False,
+                generate_only=True,
+            )
+            status = result.get("status") if isinstance(result, dict) else None
+            if status != "success":
+                reason = (
+                    result.get("reason", status) if isinstance(result, dict) else status
+                )
+                return JSONResponse(
+                    {"error": f"TTS generation failed: {reason}"},
+                    status_code=422,
+                )
+
+            audio_path = result.get("audio_path")
+            used_engine = engine_name or getattr(vox, "_active_engine_name", None)
+
+            delivered = False
+            if audio_path:
+                delivered = await vox.broadcast_audio_to_webui(
+                    audio_path, text=text, engine_name=engine_name
+                )
+
+            log_info(
+                f"{LOG_PREFIX} 🔊 Debug Vox test: engine={used_engine}, "
+                f"delivered={delivered}, text={text[:60]!r}"
+            )
+            return JSONResponse(
+                {"status": "ok", "engine": used_engine, "delivered": delivered}
+            )
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} debug_tts_test error: {exc}")
+            return JSONResponse({"error": str(exc)}, status_code=500)
 
     async def debug_expressions(self, request: Request) -> JSONResponse:
         """Return the list of valid facial expressions for the active persona.

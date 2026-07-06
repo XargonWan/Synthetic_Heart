@@ -299,6 +299,14 @@ _KITTEN_MODELS: list[ModelSpec] = [
 for _kspec in _KITTEN_MODELS:
     MODEL_MANAGER.register(_kspec)
 
+# Map MODEL_MANAGER model ids (e.g. "kitten-tts-nano-0.8") to the HuggingFace
+# repo id the KittenTTS package expects (e.g. "KittenML/kitten-tts-nano-0.8").
+# The WebUI stores the model_id in KITTEN_MODEL; the engine translates it here
+# before instantiating the model.
+_MODEL_ID_TO_HF_REPO: dict[str, str] = {
+    _spec.model_id: _spec.hf_repo_id for _spec in _KITTEN_MODELS if _spec.hf_repo_id
+}
+
 # ---------------------------------------------------------------------------
 # Localised sample texts used by KittenVoxEngine.sample()
 # The {voice} placeholder is replaced with the actual speaker name so
@@ -321,15 +329,19 @@ _SAMPLE_TEXTS: dict[str, str] = {
 # ---------------------------------------------------------------------------
 # Expose engine settings in the WebUI → Components section
 # ---------------------------------------------------------------------------
-# model selector kept for compatibility but has no effect
+# Model selector — the value is a MODEL_MANAGER model id (or the "builtin"
+# sentinel) resolved to a HuggingFace repo id by _get_model().
 register_exposed_var(
     "KITTEN_MODEL",
     label="Kitten TTS — Model",
     default=_DEFAULT_MODEL,
     value_type=str,
     ui_type="select",
-    options=[_DEFAULT_MODEL],
-    description=("Which KittenTTS model variant to use (ignored by local engine)."),
+    options=[_DEFAULT_MODEL] + [spec.model_id for spec in _KITTEN_MODELS],
+    description=(
+        "Which KittenTTS model variant to use. The WebUI Vox controls populate "
+        "this from the downloaded models."
+    ),
     scope="plugins",
     component="vox_plugin",
     advanced=False,
@@ -391,16 +403,20 @@ _model_cache_lock = threading.Lock()
 def _get_model(model_id: str) -> Any | None:
     """Return a cached ``LocalKittenTTS`` instance for *model_id*.
 
-    For the real kittentts package, *model_id* is forwarded to the constructor
-    as a HuggingFace repository ID (e.g. ``"KittenML/kitten-tts-nano-0.8"``
-    or the sentinel ``"builtin"`` which maps to the compact int8 variant).
+    *model_id* may be a MODEL_MANAGER model id (e.g. ``"kitten-tts-nano-0.8"``),
+    which is translated to its HuggingFace repo id before instantiation, the
+    sentinel ``"builtin"`` (maps to the compact default variant), or a raw
+    HuggingFace repo id / local dir which is passed through unchanged.
     """
     with _model_cache_lock:
         if model_id in _model_cache:
             return _model_cache[model_id]
 
+    # Translate a MODEL_MANAGER model id to the HF repo id the package expects.
+    effective_id = _MODEL_ID_TO_HF_REPO.get(model_id, model_id)
+
     try:
-        instance = LocalKittenTTS(model_id)  # real pkg maps "builtin" → default
+        instance = LocalKittenTTS(effective_id)  # real pkg maps "builtin" → default
         with _model_cache_lock:
             _model_cache[model_id] = instance
         return instance
