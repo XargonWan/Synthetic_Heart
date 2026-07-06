@@ -30,6 +30,7 @@ from typing import Any, Dict, Optional, cast
 
 from core.logging_utils import log_debug, log_info, log_warning, log_error
 from core.config_manager import config_registry
+from core.beat_utils import is_outbound_beat
 
 # Result constants
 ACTIONS_EXECUTED = "ACTIONS_EXECUTED"
@@ -829,9 +830,9 @@ async def handle_incoming_message(
 
         is_internal_chat = chat_id == -1 or chat_id == "-1" or str(chat_id) == "-1"
 
-        is_grillo_internal = ctx.get("grillo_beat", False) and ctx.get(
-            "beat_type"
-        ) not in ("outreach", None)
+        is_grillo_internal = ctx.get("grillo_beat", False) and not is_outbound_beat(
+            ctx.get("beat_type")
+        )
 
         # Prompt-scoped turns (e.g. vision_describe, delivery prompts) restrict the
         # LLM to specific action types; if no message_* type is allowed, the LLM
@@ -1940,12 +1941,12 @@ async def handle_incoming_message(
                             chat_id == -1 or chat_id == "-1" or str(chat_id) == "-1"
                         )
 
-                        # Check if this is a Grillo internal beat (not outreach)
+                        # Check if this is a Grillo internal beat (not outbound)
                         # Only internal Grillo beats (self_reflection, curiosity, etc.) skip TTS
-                        # Outreach beats ARE user-facing and SHOULD get TTS
-                        is_grillo_internal = ctx.get("grillo_beat", False) and ctx.get(
-                            "beat_type"
-                        ) not in ("outreach", None)
+                        # Outbound beats (observer) ARE user-facing and SHOULD get TTS
+                        is_grillo_internal = ctx.get(
+                            "grillo_beat", False
+                        ) and not is_outbound_beat(ctx.get("beat_type"))
 
                         # Check for autonomous messages (Grillo outreach, dreams, etc.)
                         # These are system-initiated, not user-response, so they shouldn't get TTS

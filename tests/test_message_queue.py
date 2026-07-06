@@ -210,7 +210,7 @@ async def test_enqueue_recovers_grillo_activity_id_from_synthetic_message_id(
 
     msg = SimpleNamespace(
         chat_id=5551234567,
-        message_id="grillo_outreach_6364",
+        message_id="grillo_observer_6364",
         from_user=SimpleNamespace(id=-1),
         chat=SimpleNamespace(
             type="private",
@@ -219,7 +219,7 @@ async def test_enqueue_recovers_grillo_activity_id_from_synthetic_message_id(
             username=None,
             first_name=None,
         ),
-        text="background outreach",
+        text="background observer",
     )
 
     await message_queue.run()

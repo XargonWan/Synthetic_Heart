@@ -26,6 +26,7 @@ from typing import Any
 import requests
 
 from core.ai_plugin_base import AIPluginBase
+from core.beat_utils import is_outbound_beat
 from core.config_manager import config_registry
 from core.cortex_api_logger import log_cortex_request, log_cortex_response
 from core.logging_utils import log_debug, log_error, log_info, log_warning
@@ -1447,7 +1448,7 @@ class OpenRouterPlugin(AIPluginBase):
         # actions to reach the target interface (e.g. telegram_bot).
         is_grillo_internal = is_grillo and (
             not isinstance(prompt_dict, dict)
-            or prompt_dict.get("beat_type", "internal") != "outreach"
+            or not is_outbound_beat(prompt_dict.get("beat_type"))
         )
 
         if is_grillo_internal:

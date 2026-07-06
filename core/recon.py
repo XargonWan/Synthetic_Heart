@@ -5,6 +5,7 @@ import time
 from typing import Any, Dict, List, Tuple
 from core.logging_utils import log_debug, log_info, log_warning
 from core.config_manager import config_registry
+from core.beat_utils import is_outbound_beat
 
 _RECON_HINT_CACHE: dict[str, dict[str, Any]] = {}
 _lingua_detector: Any | None = None
@@ -559,18 +560,17 @@ async def gather_recon_contributions(
         message=message, context_memory=context_memory
     )
 
-    # For outreach beats the "text" is an internal Grillo prompt (in English)
-    # which would mislead language detection.  Use only local chat history.
-    _is_outreach = (
-        isinstance(context_memory, dict)
-        and context_memory.get("beat_type") == "outreach"
+    # For outbound beats (observer) the "text" is an internal Grillo prompt (in
+    # English) which would mislead language detection.  Use only local history.
+    _is_outbound = isinstance(context_memory, dict) and is_outbound_beat(
+        context_memory.get("beat_type")
     )
-    if _is_outreach:
+    if _is_outbound:
         user_message_section = (
-            "(System-generated outreach prompt — ignore for language detection)"
+            "(System-generated proactive prompt — ignore for language detection)"
         )
         log_debug(
-            "[recon] Outreach beat detected: excluding prompt text from "
+            "[recon] Outbound beat detected: excluding prompt text from "
             "language detection"
         )
     else:
@@ -595,7 +595,7 @@ async def gather_recon_contributions(
     local_language = None
     if use_local_precheck:
         local_language = _detect_language_locally(user_message_section)
-        if not local_language and _is_outreach:
+        if not local_language and _is_outbound:
             local_language = _detect_language_locally(local_text)
 
     keys_set = set(keys)
