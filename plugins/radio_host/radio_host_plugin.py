@@ -1697,6 +1697,70 @@ class RadioHostPlugin:
             return JSONResponse({"error": "file missing"}, status_code=404)
         return FileResponse(audio_path, media_type="audio/wav")
 
+    async def get_live_status(self) -> dict[str, Any] | None:
+        """Return the current live radio status for prompt injection / recon.
+
+        Reads the in-memory state held by the running :class:`TrackMonitor`
+        (current/next track, listeners, playlist) plus station/schedule info.
+        When the monitor has not populated a current track yet, a single live
+        ``get_nowplaying`` fetch is attempted as a fallback.
+
+        Returns ``None`` when the radio is disabled or not configured, so the
+        caller can cleanly skip injection.
+        """
+        if not self._enabled or not self._has_runtime_config():
+            return None
+
+        online = bool(self._running and self._has_runtime_config())
+
+        current_title: str | None = None
+        current_artist: str | None = None
+        current_playlist: str = ""
+        next_title: str | None = None
+        next_artist: str | None = None
+        listeners: int | None = None
+
+        if self._monitor is not None:
+            current_title = self._monitor.current_track_title
+            current_artist = self._monitor.current_track_artist
+            current_playlist = self._monitor.current_playlist or ""
+            next_title = self._monitor.next_track_title
+            next_artist = self._monitor.next_track_artist
+            if self._monitor.listener_data_available:
+                listeners = self._monitor.current_listeners
+
+        # Fallback: if the monitor has no current track yet, fetch it live once.
+        if not current_title and self._client.configured:
+            try:
+                np = await self._client.get_nowplaying(self._station_id)
+                now_playing = (np or {}).get("now_playing") or {}
+                song = now_playing.get("song") or {}
+                current_title = song.get("title") or current_title
+                current_artist = song.get("artist") or current_artist
+                current_playlist = now_playing.get("playlist") or current_playlist
+                playing_next = (np or {}).get("playing_next") or {}
+                next_song = playing_next.get("song") or {}
+                next_title = next_song.get("title") or next_title
+                next_artist = next_song.get("artist") or next_artist
+                listeners_obj = (np or {}).get("listeners") or {}
+                if listeners is None and "total" in listeners_obj:
+                    listeners = listeners_obj.get("total")
+            except Exception as e:
+                log_warning(f"[radio_host] get_live_status live fetch failed: {e}")
+
+        return {
+            "online": online,
+            "enabled": self._enabled,
+            "station_name": self._station_name or "",
+            "schedule_description": self._schedule_desc or "",
+            "current_track_title": current_title or "",
+            "current_track_artist": current_artist or "",
+            "current_playlist": current_playlist,
+            "next_track_title": next_title or "",
+            "next_track_artist": next_artist or "",
+            "listeners": listeners,
+        }
+
     async def _build_radio_data(self) -> dict[str, Any]:
         activities: list[dict[str, Any]] = []
         try:
