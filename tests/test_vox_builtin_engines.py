@@ -15,7 +15,8 @@ def test_builtin_vox_engines_registered() -> None:
             VOX_REGISTRY.unregister_engine(name)
         VoxPlugin()
         engines = set(VOX_REGISTRY.get_available_engines())
-        # chatterbox is now a development-only engine and should not be imported
+        # Only kitten is a built-in engine; other TTS models come from
+        # external endpoints (e.g. Harmony).
         assert engines == {"kitten"}
     finally:
         VOX_REGISTRY._engine_modules.clear()

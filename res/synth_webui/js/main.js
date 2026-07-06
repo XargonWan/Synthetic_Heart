@@ -3299,6 +3299,12 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                             .filter(({ meta }) => {
                                 if (!meta) return true; // permissive for unknown models
                                 const caps = meta.capabilities || {};
+                                // Permissive when the endpoint declares no
+                                // capabilities for this model (common for TTS
+                                // models whose metadata reports an empty
+                                // capabilities object, e.g. Harmony's kitten /
+                                // openvoice / chatterbox_multilingual entries).
+                                if (!Object.keys(caps).length) return true;
                                 return !!caps[capKey];
                             });
                     };
@@ -3360,7 +3366,12 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                     // ────────────────────────────────────────────────────────
 
                     // ── Vox / Auris model selectors (generic, mirrors Iris) ───
-                    const setupAudioModelSelect = (modelSelId, engineSelId, engineList, currentModel, configKey, boundFlag, capKey) => {
+                    // The chosen model is persisted into the external endpoint's
+                    // extra_config (tts_model / stt_model) via
+                    // /api/components/<subsystem>/model — the legacy
+                    // VOX_DEFAULT_MODEL / AURIS_DEFAULT_MODEL config keys are dead
+                    // (never read by the bridges) and are no longer written here.
+                    const setupAudioModelSelect = (modelSelId, engineSelId, engineList, currentModel, saveUrl, boundFlag, capKey) => {
                         const modelSel = document.getElementById(modelSelId);
                         const engineSel = document.getElementById(engineSelId);
                         if (!modelSel) return;
@@ -3398,16 +3409,21 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
 
                         if (!modelSel.dataset.bound) {
                             modelSel.addEventListener('change', async () => {
+                                const engineName = engineSel ? engineSel.value : '';
+                                if (!engineName) {
+                                    window.showToast && window.showToast('Select an engine first', true);
+                                    return;
+                                }
                                 try {
-                                    const r = await fetch('/api/config', {
+                                    const r = await fetch(saveUrl, {
                                         method: 'POST',
                                         headers: { 'Content-Type': 'application/json' },
-                                        body: JSON.stringify({ key: configKey, value: modelSel.value }),
+                                        body: JSON.stringify({ engine: engineName, model: modelSel.value }),
                                     });
                                     if (!r.ok) throw new Error('HTTP ' + r.status);
                                     window.showToast && window.showToast('Model set to ' + modelSel.value);
                                 } catch (e) {
-                                    console.error('[synth_webui] Failed to set ' + configKey, e);
+                                    console.error('[synth_webui] Failed to set model via ' + saveUrl, e);
                                     window.showToast && window.showToast('Failed to save model', true);
                                 }
                             });
@@ -3415,8 +3431,8 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                         }
                     };
 
-                    setupAudioModelSelect('vox-model-select', 'vox-engine-select', data.vox || [], data.vox_current_model || '', 'VOX_DEFAULT_MODEL', 'voxModelBound', 'vox');
-                    setupAudioModelSelect('auris-model-select', 'auris-engine-select', data.auris || [], data.auris_current_model || '', 'AURIS_DEFAULT_MODEL', 'aurisModelBound', 'auris');
+                    setupAudioModelSelect('vox-model-select', 'vox-engine-select', data.vox || [], data.vox_current_model || '', '/api/components/vox/model', 'voxModelBound', 'vox');
+                    setupAudioModelSelect('auris-model-select', 'auris-engine-select', data.auris || [], data.auris_current_model || '', '/api/components/auris/model', 'aurisModelBound', 'auris');
                     // ────────────────────────────────────────────────────────
 
                     // ── Live voice configuration ──────────────────────────────
@@ -4149,8 +4165,13 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
             }
 
             // ── Manage Models modal (shared by Vox / Auris / Iris) ──────────
+            // NOTE: this must be idempotent and re-run every time the Engines
+            // section is (re-)rendered — the section HTML is re-injected on each
+            // navigation, producing fresh button/modal DOM nodes. A global
+            // "initialized" guard would leave the new buttons unbound and make
+            // them appear broken. All internal bindings are guarded per-element
+            // via dataset.bound, so re-running is safe.
             function initModelManager() {
-                if (window.__synth_model_manager_initialized) return;
                 const modal = document.getElementById('model-manager-modal');
                 const listEl = document.getElementById('model-manager-list');
                 const titleEl = document.getElementById('model-manager-title');
@@ -4228,7 +4249,15 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                         try {
                             const r = await fetch('/api/models/' + encodeURIComponent(modelId) + '/progress');
                             if (!r.ok) throw new Error('HTTP ' + r.status);
-                            const m = await r.json();
+                            const raw = await r.json();
+                            // The /progress endpoint reports `in_progress` and `progress`,
+                            // while setDownloadingState expects `downloading` and
+                            // `download_progress`. Normalise the field names here.
+                            const m = {
+                                downloaded: raw.downloaded,
+                                downloading: raw.in_progress,
+                                download_progress: raw.progress,
+                            };
                             setDownloadingState(row, m);
                             if (!m.downloading) {
                                 clearInterval(pollTimers[modelId]);
@@ -4304,7 +4333,10 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                         const models = (Array.isArray(data) ? data : (data.models || [])).filter((m) => belongsToSubsystem(m, sub));
                         listEl.innerHTML = '';
                         if (!models.length) {
-                            listEl.innerHTML = '<div class="meta">No locally-managed models available for this subsystem.</div>';
+                            const emptyMsg = sub === 'iris'
+                                ? 'Iris has no locally-managed models — vision runs through external endpoints only (e.g. selenium-llm-engine). Configure it in the External Engines section.'
+                                : 'No locally-managed models available for this subsystem.';
+                            listEl.innerHTML = '<div class="meta">' + emptyMsg + '</div>';
                             return;
                         }
                         models.forEach((m) => {
@@ -4327,8 +4359,6 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                         btn.dataset.bound = '1';
                     }
                 });
-
-                window.__synth_model_manager_initialized = true;
             }
 
             function initLogsTab() {

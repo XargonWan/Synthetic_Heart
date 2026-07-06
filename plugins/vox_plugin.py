@@ -965,7 +965,6 @@ class VoxPlugin(AIPluginBase):
     def _import_builtin_engines() -> None:
         """Import built-in Vox engine modules so they self-register."""
         builtins = [
-            # chatterbox moved to _dev; not imported by default
             "plugins.vox_engines.kitten",
         ]
 

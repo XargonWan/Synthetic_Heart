@@ -681,6 +681,10 @@ class SynthWebUIInterface:
         self.app.post("/api/components/cortex/login")(self.cortex_login)
         # Model selection for cortex engines
         self.app.post("/api/components/cortex/model")(self.set_cortex_model)
+        # Model selection for external Vox / Auris engines (persist the chosen
+        # model into the endpoint's extra_config so the bridge picks it up).
+        self.app.post("/api/components/vox/model")(self.set_vox_model)
+        self.app.post("/api/components/auris/model")(self.set_auris_model)
         # Run component actions on demand (e.g., Run Now button)
         self.app.post("/api/components/run")(self.run_component)
         self.app.get("/api/logchat/info")(self.get_logchat_info)
@@ -9148,6 +9152,98 @@ class SynthWebUIInterface:
         log_info(f"{LOG_PREFIX} Model for '{engine_name}' set to '{model_name}'")
         return JSONResponse(
             {"status": "ok", "engine": engine_name, "model": model_name}
+        )
+
+    async def _set_external_media_model(
+        self,
+        request: Request,
+        registry_getter,
+        extra_config_key: str,
+        subsystem: str,
+    ) -> JSONResponse:
+        """Persist a model selection for an external Vox/Auris engine.
+
+        The bridge reads the chosen model from the endpoint's
+        ``extra_config`` (``tts_model`` for Vox, ``stt_model`` for Auris) with
+        a fallback to ``default_model``. We therefore merge the value into the
+        endpoint's ``extra_config`` and let ``update_endpoint`` re-sync the
+        live registry so a running instance picks up the change without a
+        restart.
+        """
+        try:
+            data = await request.json()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="Invalid JSON payload") from exc
+
+        engine_name = str(data.get("engine") or "").strip()
+        model_name = str(data.get("model") or "").strip()
+        if not engine_name or not model_name:
+            raise HTTPException(status_code=400, detail="Missing 'engine' or 'model'")
+
+        try:
+            registry = registry_getter()
+            instance = registry.load_engine(engine_name)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} unable to access {subsystem} registry: {exc}")
+            raise HTTPException(
+                status_code=500, detail=f"Unable to access {subsystem} registry"
+            ) from exc
+
+        endpoint = (
+            getattr(instance, "_endpoint", None) if instance is not None else None
+        )
+        if endpoint is None:
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    f"Engine '{engine_name}' is not an external endpoint engine "
+                    f"and does not support model selection"
+                ),
+            )
+
+        try:
+            from core.external_endpoints.registry import (
+                get_external_endpoint_registry,
+            )
+
+            ep_registry = get_external_endpoint_registry()
+            merged = dict(endpoint.extra_config or {})
+            merged[extra_config_key] = model_name
+            await ep_registry.update_endpoint(endpoint.id, extra_config=merged)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            log_error(
+                f"{LOG_PREFIX} failed to set {subsystem} model '{model_name}' "
+                f"on '{engine_name}': {exc}"
+            )
+            raise HTTPException(
+                status_code=500, detail=f"Failed to set model: {exc}"
+            ) from exc
+
+        log_info(
+            f"{LOG_PREFIX} {subsystem} model for '{engine_name}' set to '{model_name}'"
+        )
+        return JSONResponse(
+            {"status": "ok", "engine": engine_name, "model": model_name}
+        )
+
+    async def set_vox_model(self, request: Request) -> JSONResponse:
+        """Set the active TTS model for an external Vox engine."""
+        from core.vox_registry import VOX_REGISTRY
+
+        return await self._set_external_media_model(
+            request, lambda: VOX_REGISTRY, "tts_model", "Vox"
+        )
+
+    async def set_auris_model(self, request: Request) -> JSONResponse:
+        """Set the active STT model for an external Auris engine."""
+        from core.auris_registry import AURIS_REGISTRY
+
+        return await self._set_external_media_model(
+            request, lambda: AURIS_REGISTRY, "stt_model", "Auris"
         )
 
     async def cortex_login(self, request: Request):
