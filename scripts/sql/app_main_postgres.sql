@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS external_endpoints (
     capabilities TEXT,
     subsystem_map TEXT,
     available_models TEXT,
+    models_metadata TEXT,
     default_model TEXT,
     probe_status TEXT NOT NULL DEFAULT 'never',
     last_probe_at TIMESTAMPTZ,

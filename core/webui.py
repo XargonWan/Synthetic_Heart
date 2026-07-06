@@ -2056,7 +2056,6 @@ class SynthWebUIInterface:
                 "navbar",
                 "agent",
                 "engines",
-                "external_engines",
             }
             if section not in allowed_sections:
                 raise HTTPException(
@@ -4320,7 +4319,22 @@ class SynthWebUIInterface:
 
         For WebUI this approximates 'LLM started responding', so we switch THINK->WRITE
         as early as possible (before the final message is sent).
+
+        For voice-originated input (Auris STT) there is no textual writing phase —
+        the reply is spoken — so the avatar stays in THINK during generation.
         """
+        # Detect voice-originated input; if so we keep THINK instead of WRITE.
+        _is_voice_input = False
+        try:
+            _ctx = kwargs.get("context")
+            if isinstance(_ctx, dict) and _ctx.get("is_voice_input"):
+                _is_voice_input = True
+            _msg = kwargs.get("message")
+            if not _is_voice_input and getattr(_msg, "is_voice_input", False):
+                _is_voice_input = True
+        except Exception:
+            _is_voice_input = False
+
         # Switch THINK -> WRITE when generation actually starts, but ensure THINK
         # remains visible for a short minimum window to avoid being skipped.
         try:
@@ -4395,13 +4409,16 @@ class SynthWebUIInterface:
                     )
 
             if writing_pushed and self.persona_manager:
+                # Voice input has no textual writing phase — keep the avatar in
+                # THINK during generation (the reply is spoken via Vox).
+                _anim_state = "think" if _is_voice_input else "write"
                 try:
                     await self.persona_manager.set_animation_state(
-                        "write", session_id=session_id
+                        _anim_state, session_id=session_id
                     )
                 except Exception as anim_exc:
                     log_debug(
-                        f"{LOG_PREFIX} Failed to set 'write' animation (generation_start): {anim_exc}"
+                        f"{LOG_PREFIX} Failed to set '{_anim_state}' animation (generation_start): {anim_exc}"
                     )
         except Exception as exc:
             log_debug(f"{LOG_PREFIX} on_generation_start failed: {exc}")
@@ -5620,6 +5637,7 @@ class SynthWebUIInterface:
                 status=result.status,
                 capabilities=result.capabilities,
                 models=result.models,
+                models_metadata=result.models_metadata,
             )
             return {
                 "status": result.status,
@@ -8675,6 +8693,7 @@ class SynthWebUIInterface:
                 _caps = _meta.get("capabilities") or {}
                 _v_available_models: list[str] = []
                 _v_default_model: str | None = None
+                _v_models_meta: list[dict] = []
                 _v_instance = VOX_REGISTRY._instances.get(_name)
                 if _v_instance is not None and hasattr(_v_instance, "_endpoint"):
                     _v_ep = _v_instance._endpoint
@@ -8682,6 +8701,7 @@ class SynthWebUIInterface:
                         getattr(_v_ep, "available_models", None) or []
                     )
                     _v_default_model = getattr(_v_ep, "default_model", None)
+                    _v_models_meta = list(getattr(_v_ep, "models_metadata", None) or [])
                 vox_data.append(
                     {
                         "name": _name,
@@ -8695,6 +8715,7 @@ class SynthWebUIInterface:
                         "active": _name == active_vox,
                         "available_models": _v_available_models,
                         "default_model": _v_default_model,
+                        "models_meta": _v_models_meta,
                     }
                 )
         except Exception as exc:
@@ -8755,6 +8776,7 @@ class SynthWebUIInterface:
                 _caps = _meta.get("capabilities") or {}
                 _a_available_models: list[str] = []
                 _a_default_model: str | None = None
+                _a_models_meta: list[dict] = []
                 _a_instance = AURIS_REGISTRY._instances.get(_name)
                 if _a_instance is not None and hasattr(_a_instance, "_endpoint"):
                     _a_ep = _a_instance._endpoint
@@ -8762,6 +8784,7 @@ class SynthWebUIInterface:
                         getattr(_a_ep, "available_models", None) or []
                     )
                     _a_default_model = getattr(_a_ep, "default_model", None)
+                    _a_models_meta = list(getattr(_a_ep, "models_metadata", None) or [])
                 auris_data.append(
                     {
                         "name": _name,
@@ -8775,6 +8798,7 @@ class SynthWebUIInterface:
                         "active": _name == active_auris,
                         "available_models": _a_available_models,
                         "default_model": _a_default_model,
+                        "models_meta": _a_models_meta,
                     }
                 )
         except Exception as exc:
@@ -8887,6 +8911,7 @@ class SynthWebUIInterface:
                 _caps = _meta.get("capabilities") or {}
                 _available_models: list[str] = []
                 _default_model: str | None = None
+                _models_meta: list[dict] = []
                 _instance = IRIS_REGISTRY.get_instance(_name)
                 if _instance is not None and hasattr(_instance, "_endpoint"):
                     _ep = _instance._endpoint
@@ -8894,6 +8919,7 @@ class SynthWebUIInterface:
                         getattr(_ep, "available_models", None) or []
                     )
                     _default_model = getattr(_ep, "default_model", None)
+                    _models_meta = list(getattr(_ep, "models_metadata", None) or [])
                 iris_data.append(
                     {
                         "name": _name,
@@ -8907,6 +8933,7 @@ class SynthWebUIInterface:
                         "active": _name == active_iris,
                         "available_models": _available_models,
                         "default_model": _default_model,
+                        "models_meta": _models_meta,
                     }
                 )
         except Exception as exc:

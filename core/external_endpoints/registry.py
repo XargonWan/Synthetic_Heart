@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS external_endpoints (
     capabilities JSON,
     subsystem_map JSON,
     available_models JSON,
+    models_metadata JSON,
     default_model VARCHAR(255),
     probe_status VARCHAR(50) NOT NULL DEFAULT 'never',
     last_probe_at DATETIME,
@@ -44,11 +45,22 @@ CREATE TABLE IF NOT EXISTS external_endpoints (
 
 
 async def _ensure_table() -> None:
-    from core.db import get_conn_ctx
+    from core.db import _get_db_type, get_conn_ctx
 
     async with get_conn_ctx() as conn:
         async with conn.cursor() as cur:
             await cur.execute(_CREATE_TABLE_SQL)
+            # Idempotent migration for tables created before models_metadata
+            # existed. Both MariaDB (10.0+) and Postgres support the
+            # IF NOT EXISTS form. Postgres stores JSON in a TEXT column here.
+            col_type = "TEXT" if _get_db_type() == "postgres" else "JSON"
+            try:
+                await cur.execute(
+                    "ALTER TABLE external_endpoints "
+                    f"ADD COLUMN IF NOT EXISTS models_metadata {col_type}"
+                )
+            except Exception as exc:
+                logger.debug("models_metadata column migration skipped/failed: %s", exc)
         try:
             await conn.commit()
         except Exception:
@@ -284,10 +296,19 @@ class ExternalEndpointRegistry:
     async def set_subsystem_map(
         self, endpoint_id: int, mapping: dict[str, bool]
     ) -> None:
-        """Persist a user-defined subsystem mapping and re-sync registries."""
+        """Persist a user-defined subsystem mapping and re-sync registries.
+
+        An override is *force-on only*: it may only turn a subsystem ON that
+        auto-detection missed. Turning a subsystem "off" is expressed by the
+        *absence* of its key (the endpoint then falls back to its probed
+        capabilities). We therefore drop any falsy entries so a stored ``false``
+        can never mask an auto-detected capability.
+        """
         from core.db import get_conn_ctx
 
         await self._ensure()
+
+        cleaned = {k: True for k, v in mapping.items() if v}
 
         async with get_conn_ctx() as conn:
             async with conn.cursor() as cur:
@@ -295,7 +316,7 @@ class ExternalEndpointRegistry:
                     "UPDATE external_endpoints SET subsystem_map = %s, "
                     "updated_at = %s WHERE id = %s",
                     (
-                        json.dumps(mapping),
+                        json.dumps(cleaned),
                         datetime.now(timezone.utc),
                         endpoint_id,
                     ),
@@ -316,6 +337,7 @@ class ExternalEndpointRegistry:
         status: str,
         capabilities: dict[str, bool],
         models: list[str],
+        models_metadata: list[dict] | None = None,
     ) -> None:
         """Persist probe results and sync registries."""
         from core.db import get_conn_ctx
@@ -329,13 +351,14 @@ class ExternalEndpointRegistry:
                     """
                     UPDATE external_endpoints
                     SET probe_status = %s, capabilities = %s, available_models = %s,
-                        last_probe_at = %s, updated_at = %s
+                        models_metadata = %s, last_probe_at = %s, updated_at = %s
                     WHERE id = %s
                     """,
                     (
                         status,
                         json.dumps(capabilities),
                         json.dumps(models),
+                        json.dumps(models_metadata or []),
                         now,
                         now,
                         endpoint_id,

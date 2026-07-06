@@ -409,6 +409,7 @@ async def test_run_auto_probe_uses_300_second_default(monkeypatch):
         status="success",
         capabilities={"cortex": True},
         models=["gemini-3-flash-preview"],
+        models_metadata=[],
         ping_echo="pong",
         error_message="",
     )
@@ -434,6 +435,7 @@ async def test_run_auto_probe_uses_300_second_default(monkeypatch):
         status="success",
         capabilities={"cortex": True},
         models=["gemini-3-flash-preview"],
+        models_metadata=[],
     )
 
 

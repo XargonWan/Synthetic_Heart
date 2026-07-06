@@ -40,8 +40,42 @@
         if (el) { el.textContent = msg; el.style.color = color || ''; }
     }
 
+    // Status shown inside the add/edit modal (visible even if the page status
+    // bar is scrolled out of view).
+    function setModalStatus(msg, color) {
+        const el = document.getElementById('ext-ep-modal-status');
+        if (el) { el.textContent = msg; el.style.color = color || 'var(--muted)'; }
+    }
+
     function subsystemLabel(key) {
         return { cortex: 'Cortex', vox: 'Vox', auris: 'Auris', live: 'Live', vision: 'Vision' }[key] || key;
+    }
+
+    // Map lowercase ISO language codes → flag emoji (fixed lookup, no keyword parsing).
+    const LANG_FLAG_MAP = {
+        en: '🇬🇧', 'en-us': '🇺🇸', 'en-gb': '🇬🇧', it: '🇮🇹', es: '🇪🇸', fr: '🇫🇷',
+        de: '🇩🇪', pt: '🇵🇹', 'pt-br': '🇧🇷', nl: '🇳🇱', ru: '🇷🇺', ja: '🇯🇵',
+        ko: '🇰🇷', zh: '🇨🇳', 'zh-cn': '🇨🇳', 'zh-tw': '🇹🇼', ar: '🇸🇦', hi: '🇮🇳',
+        tr: '🇹🇷', pl: '🇵🇱', sv: '🇸🇪', da: '🇩🇰', fi: '🇫🇮', no: '🇳🇴',
+        cs: '🇨🇿', el: '🇬🇷', he: '🇮🇱', th: '🇹🇭', vi: '🇻🇳', uk: '🇺🇦', id: '🇮🇩',
+    };
+    const MAX_FLAGS = 6;
+
+    function langCodeToFlag(code) {
+        if (!code) return '';
+        return LANG_FLAG_MAP[String(code).toLowerCase()] || '';
+    }
+
+    // Build a trailing " 🇬🇧🇮🇹…" suffix from a model's metadata languages list.
+    function modelFlagSuffix(meta) {
+        if (!meta || !Array.isArray(meta.languages)) return '';
+        const flags = [];
+        for (const code of meta.languages) {
+            const flag = langCodeToFlag(code);
+            if (flag && !flags.includes(flag)) flags.push(flag);
+            if (flags.length >= MAX_FLAGS) break;
+        }
+        return flags.length ? ' ' + flags.join('') : '';
     }
 
     function protocolBadgeColor(proto) {
@@ -119,20 +153,43 @@
         // URL
         card.querySelector('.ext-ep-url').textContent = ep.base_url;
 
-        // Subsystems
-        const subsysEl = card.querySelector('.ext-ep-subsystems');
-        const effectiveMap = ep.effective_subsystem_map || {};
-        for (const [key, val] of Object.entries(effectiveMap)) {
-            const pill = document.createElement('label');
-            pill.style.cssText = 'display:flex;align-items:center;gap:4px;cursor:pointer;font-size:0.85rem;';
-            const cb = document.createElement('input');
-            cb.type = 'checkbox';
-            cb.checked = !!val;
-            cb.dataset.key = key;
-            cb.addEventListener('change', () => handleSubsystemToggle(ep.id, key, cb.checked, card));
-            pill.appendChild(cb);
-            pill.append(subsystemLabel(key));
-            subsysEl.appendChild(pill);
+        // Capabilities — auto-detected labels (green = supported, grey = not)
+        const capEl = card.querySelector('.ext-ep-capabilities');
+        if (capEl) {
+            const capabilities = ep.capabilities || {};
+            for (const key of ['cortex', 'vox', 'auris', 'vision', 'live']) {
+                const val = !!capabilities[key];
+                const badge = document.createElement('span');
+                badge.style.cssText = [
+                    'display:inline-flex', 'align-items:center', 'gap:4px',
+                    'font-size:0.8rem', 'padding:2px 9px', 'border-radius:12px',
+                    val ? 'background:var(--success-bg,#155724);color:#d4edda;' : 'background:var(--border,#444);color:var(--muted);',
+                ].join(';');
+                badge.textContent = subsystemLabel(key);
+                capEl.appendChild(badge);
+            }
+        }
+
+        // Overrides — manual checkboxes that FORCE a subsystem on even if it
+        // was not auto-detected. Off by default: an override only makes sense as
+        // an explicit "use it as X anyway" opt-in.
+        const ovrEl = card.querySelector('.ext-ep-overrides');
+        if (ovrEl) {
+            const subsystemMap = ep.subsystem_map || {};
+            for (const key of ['cortex', 'vox', 'auris', 'vision', 'live']) {
+                const label = document.createElement('label');
+                label.style.cssText = 'display:inline-flex;align-items:center;gap:6px;font-size:0.85rem;cursor:pointer;';
+                const cb = document.createElement('input');
+                cb.type = 'checkbox';
+                // Only reflect an explicit override that was actually saved; a
+                // subsystem that is merely auto-detected must NOT appear ticked.
+                cb.checked = subsystemMap[key] === true;
+                cb.dataset.key = key;
+                cb.addEventListener('change', () => handleSubsystemToggle(ep.id, key, cb.checked, card));
+                label.appendChild(cb);
+                label.appendChild(document.createTextNode(subsystemLabel(key)));
+                ovrEl.appendChild(label);
+            }
         }
 
         // Model selector — dropdown (probed models) + custom text input fallback
@@ -142,6 +199,16 @@
 
         const models = Array.isArray(ep.available_models) ? ep.available_models : [];
         const current = ep.default_model || '';
+
+        // Per-model metadata (languages, capabilities) keyed by model id, used to
+        // append language-flag emoji to each option.
+        const metaList = Array.isArray(ep.models_metadata)
+            ? ep.models_metadata
+            : (Array.isArray(ep.models_meta) ? ep.models_meta : []);
+        const metaById = {};
+        for (const meta of metaList) {
+            if (meta && meta.id) metaById[meta.id] = meta;
+        }
 
         // Populate the dropdown: a leading placeholder, all probed models, then a
         // "custom" entry that reveals the free-text input.
@@ -156,7 +223,7 @@
         for (const m of models) {
             const opt = document.createElement('option');
             opt.value = m;
-            opt.textContent = m;
+            opt.textContent = m + modelFlagSuffix(metaById[m]);
             modelDropdown.appendChild(opt);
         }
 
@@ -278,14 +345,36 @@
         try {
             const current = _endpoints.find(e => e.id === id);
             if (!current) return;
-            const overrides = { ...(current.subsystem_map || {}), [key]: value };
-            await apiFetch(`/api/external-endpoints/${id}/mapping`, {
+            setStatus('Saving…', '');
+            // An override only ever FORCES a subsystem on. Unchecking does not
+            // force it off — it drops the override so the endpoint falls back to
+            // what it auto-announced. So set the key when checked, and remove it
+            // entirely (rather than storing false) when unchecked.
+            const overrides = { ...(current.subsystem_map || {}) };
+            if (value) {
+                overrides[key] = true;
+            } else {
+                delete overrides[key];
+            }
+            const resp = await apiFetch(`/api/external-endpoints/${id}/mapping`, {
                 method: 'PUT',
                 body: JSON.stringify(overrides),
             });
-            // Update local state without full reload
-            current.subsystem_map = overrides;
-            current.effective_subsystem_map = { ...(current.capabilities || {}), ...overrides };
+            // Prefer the server's authoritative endpoint payload so the UI
+            // reflects exactly what was persisted (including any recomputed
+            // effective_subsystem_map). Fall back to a local merge if absent.
+            const saved = resp && resp.endpoint ? resp.endpoint : null;
+            const idx = _endpoints.findIndex(e => e.id === id);
+            if (saved && idx !== -1) {
+                _endpoints[idx] = saved;
+            } else {
+                current.subsystem_map = overrides;
+                current.effective_subsystem_map = { ...(current.capabilities || {}), ...overrides };
+            }
+            // Re-render so the change is visible without a page refresh.
+            renderList();
+            setStatus('Saved ✓', 'var(--success,#27ae60)');
+            setTimeout(() => setStatus(''), 1500);
         } catch (e) {
             setStatus('Error: ' + e.message, 'var(--danger,#c0392b)');
             await loadEndpoints(); // revert UI
@@ -454,6 +543,10 @@
             if (cb) cb.checked = !!caps[k];
         }
 
+        // On add, capabilities are detected automatically by the probe — hide the manual override.
+        const capsDetails = document.getElementById('ext-ep-capabilities-details');
+        if (capsDetails) { capsDetails.style.display = 'none'; capsDetails.open = false; }
+
         const header = document.getElementById('ext-ep-form-provider-header');
         const provName = document.getElementById('ext-ep-form-provider-name');
         const backBtn = document.getElementById('ext-ep-back-btn');
@@ -477,6 +570,7 @@
 
     function openModalEdit(ep) {
         setModalError('');
+        setModalStatus('');
         document.getElementById('ext-ep-modal-title').textContent = 'Edit Endpoint';
 
         setField('ext-ep-form-id', ep.id);
@@ -505,6 +599,10 @@
             if (cb) cb.checked = !!smap[k];
         }
 
+        // In edit mode the capabilities override is available.
+        const capsDetails = document.getElementById('ext-ep-capabilities-details');
+        if (capsDetails) capsDetails.style.display = '';
+
         const header = document.getElementById('ext-ep-form-provider-header');
         if (header) header.style.display = 'none';
 
@@ -518,6 +616,7 @@
 
     async function openModalAdd() {
         setModalError('');
+        setModalStatus('');
         showStep(1);
         showModal();
 
@@ -571,19 +670,25 @@
         if (!id && !name) { setModalError('Name is required.'); return; }
         if (!base_url) { setModalError('Base URL is required.'); return; }
 
-        // Collect capability checkboxes into subsystem_map
-        const subsystem_map = {};
-        for (const k of ['cortex', 'vox', 'auris', 'vision', 'live']) {
-            const cb = document.getElementById(`ext-ep-form-cap-${k}`);
-            if (cb) subsystem_map[k] = cb.checked;
+        const payload = { display_label, protocol, base_url };
+        if (!id) {
+            // Add mode: capabilities are auto-detected by the probe — do not send subsystem_map.
+            payload.name = name;
+        } else {
+            // Edit mode: honor the manual capability overrides.
+            const subsystem_map = {};
+            for (const k of ['cortex', 'vox', 'auris', 'vision', 'live']) {
+                const cb = document.getElementById(`ext-ep-form-cap-${k}`);
+                if (cb) subsystem_map[k] = cb.checked;
+            }
+            payload.subsystem_map = subsystem_map;
         }
-
-        const payload = { display_label, protocol, base_url, subsystem_map };
-        if (!id) payload.name = name;
         if (key) payload.api_key = key;
 
         try {
-            setStatus('Saving and probing…', '');
+            // Show progress inside the modal so it is visible even when the
+            // page status bar is scrolled out of view.
+            setModalStatus('Saving and probing…', '');
             let response;
             if (id) {
                 response = await apiFetch(`/api/external-endpoints/${id}`, {
@@ -610,9 +715,10 @@
                     'Check that the base URL is accessible from inside the container ' +
                     '(use host.docker.internal instead of localhost if needed).'
                 );
-                setStatus('');
+                setModalStatus('');
             } else {
                 // Probe succeeded — close modal and show summary in status bar
+                setModalStatus('');
                 closeModal();
                 const modelsCount = (probe.models || []).length;
                 const pingEcho = probe.ping_echo ? ` | Ping reply: "${probe.ping_echo}"` : '';
@@ -623,7 +729,7 @@
             }
         } catch (err) {
             setModalError('Error: ' + err.message);
-            setStatus('');
+            setModalStatus('');
         }
     }
 

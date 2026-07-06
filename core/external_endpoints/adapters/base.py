@@ -10,12 +10,37 @@ from typing import Any, AsyncIterator
 
 @dataclass
 class ModelInfo:
-    """Minimal model descriptor returned by an adapter."""
+    """Model descriptor returned by an adapter.
+
+    ``capabilities`` holds the SyntH subsystems (cortex/vox/auris/vision/live)
+    the model supports, derived from structured metadata when available.
+    ``model_type`` / ``input_modalities`` / ``output_modalities`` mirror the
+    richer fields some OpenAI-compatible endpoints expose on ``/v1/models``.
+    ``languages`` is a list of ``{"code": ..., "name": ...}`` dicts for
+    speech-capable models.
+    """
 
     id: str
     name: str
     owned_by: str = ""
     capabilities: dict[str, bool] = field(default_factory=dict)
+    model_type: str = ""
+    input_modalities: list[str] = field(default_factory=list)
+    output_modalities: list[str] = field(default_factory=list)
+    languages: list[dict[str, str]] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialise to a JSON-safe dict for persistence / WebUI."""
+        return {
+            "id": self.id,
+            "name": self.name,
+            "owned_by": self.owned_by,
+            "capabilities": self.capabilities,
+            "model_type": self.model_type,
+            "input_modalities": self.input_modalities,
+            "output_modalities": self.output_modalities,
+            "languages": self.languages,
+        }
 
 
 @dataclass

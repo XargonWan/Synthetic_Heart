@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
@@ -14,6 +14,7 @@ class EndpointProtocol(str, Enum):
     OPENAI = "openai"
     GEMINI = "gemini"
     ANTHROPIC = "anthropic"
+    HARMONY = "harmony"
     CUSTOM = "custom"
 
 
@@ -45,6 +46,7 @@ class ExternalEndpoint:
     probe_status: str  # 'never' | 'pending' | 'success' | 'failed'
     last_probe_at: str | None
     extra_config: dict[str, Any]
+    models_metadata: list[dict[str, Any]] = field(default_factory=list)
 
     def effective_subsystem_map(self) -> dict[str, bool]:
         """Merge auto-probed capabilities with manual user overrides.
@@ -92,6 +94,7 @@ class ExternalEndpoint:
             capabilities=_json(row.get("capabilities"), {}),
             subsystem_map=_json(row.get("subsystem_map"), {}),
             available_models=_json(row.get("available_models"), []),
+            models_metadata=_json(row.get("models_metadata"), []),
             default_model=row.get("default_model"),
             probe_status=row.get("probe_status") or "never",
             last_probe_at=row.get("last_probe_at"),
@@ -115,6 +118,7 @@ class ExternalEndpoint:
             "subsystem_map": self.subsystem_map,
             "effective_subsystem_map": self.effective_subsystem_map(),
             "available_models": self.available_models,
+            "models_metadata": self.models_metadata,
             "default_model": self.default_model,
             "probe_status": self.probe_status,
             "last_probe_at": str(last_probe) if last_probe else None,

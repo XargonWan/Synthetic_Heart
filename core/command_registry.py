@@ -361,13 +361,89 @@ async def _resolve_cortex_choice(choice_raw: str) -> str:
         raise ValueError(f"❌ Cortex `{choice}` not found.")
 
 
+def _get_engine_models(engine_name: str) -> list[str]:
+    """Return the list of models supported by *engine_name*.
+
+    Returns an empty list when the engine is not loaded or does not expose
+    model selection.
+    """
+    from core.cortex_registry import get_cortex_registry
+
+    try:
+        instance = get_cortex_registry().get_engine(engine_name)
+    except Exception:
+        return []
+    if instance is None or not hasattr(instance, "get_supported_models"):
+        return []
+    try:
+        return list(instance.get_supported_models() or [])
+    except Exception:
+        return []
+
+
+def _get_engine_current_model(engine_name: str) -> str | None:
+    """Return the currently selected model for *engine_name*, or ``None``."""
+    from core.cortex_registry import get_cortex_registry
+
+    try:
+        instance = get_cortex_registry().get_engine(engine_name)
+    except Exception:
+        return None
+    if instance is None or not hasattr(instance, "get_current_model"):
+        return None
+    try:
+        return instance.get_current_model()
+    except Exception:
+        return None
+
+
+async def _apply_cortex_model(engine_name: str, model_name: str) -> str:
+    """Set *model_name* as the active model for *engine_name* and persist it.
+
+    Returns the applied model name. Raises ``ValueError`` with a
+    user-friendly message on failure.
+    """
+    from core.cortex_registry import get_cortex_registry
+
+    instance = get_cortex_registry().get_engine(engine_name)
+    if instance is None:
+        raise ValueError(f"❌ Engine `{engine_name}` is not loaded.")
+    if not hasattr(instance, "set_current_model"):
+        raise ValueError(f"❌ Engine `{engine_name}` does not support model selection.")
+    try:
+        instance.set_current_model(model_name)
+    except ValueError as exc:
+        raise ValueError(f"❌ {exc}") from exc
+
+    # Persist model selection to the DB for external endpoint engines.
+    try:
+        from core.external_endpoints.bridges.cortex_bridge import ExternalCortexEngine
+
+        if isinstance(instance, ExternalCortexEngine):
+            from core.external_endpoints.registry import (
+                get_external_endpoint_registry,
+            )
+
+            await get_external_endpoint_registry().set_default_model(
+                instance._endpoint.id, model_name
+            )
+    except Exception:
+        # Non-fatal: the runtime model is set even if DB persistence fails.
+        pass
+
+    return model_name
+
+
 async def cortex_command(*args) -> str:
     """Handle Cortex switching command.
 
     Usage:
       `/cortex` -> list registered cortex kinds and their engines (kind/engine)
+      `/cortex list` -> list every engine grouped by kind with its models
+      `/cortex list <engine>` -> list only the models of that engine
       `/cortex <kind>/<engine>` -> set by fully-qualified name
       `/cortex <engine>` -> set by short name if unambiguous
+      `/cortex <engine> <model>` -> set the engine and its active model
 
     If the short name is ambiguous across cortex kinds, the command will ask
     the user to disambiguate using the fully-qualified form.  When invoked
@@ -410,6 +486,44 @@ async def cortex_command(*args) -> str:
             (kk for kk, lst in kind_map.items() if eng in lst), None
         )
         reverse_map.setdefault(eng, []).append(k or "unknown")
+
+    # `/cortex list` and `/cortex list <engine>` -> show engines with models.
+    if args and str(args[0]).strip().lower() == "list":
+        if len(args) >= 2:
+            # single-engine listing
+            try:
+                engine_name = await _resolve_cortex_choice(str(args[1]).strip())
+            except ValueError as ve:
+                return str(ve)
+            models = _get_engine_models(engine_name)
+            current = _get_engine_current_model(engine_name)
+            lines = [f"*Models for `{engine_name}`:*"]
+            if not models:
+                lines.append("_No models available for this engine._")
+            else:
+                for m in models:
+                    marker = " ✅" if m == current else ""
+                    lines.append(f"• `{m}`{marker}")
+            return "\n".join(lines)
+
+        # full listing: every engine grouped by kind with its models
+        lines = ["*Available Cortex Engines and models:*"]
+        for k in sorted(kind_map.keys()):
+            engines = kind_map.get(k) or []
+            if not engines:
+                continue
+            lines.append(f"\n{k}:")
+            for e in sorted(engines):
+                current = _get_engine_current_model(e)
+                lines.append(f"• `{k}/{e}`")
+                models = _get_engine_models(e)
+                if models:
+                    for m in models:
+                        marker = " ✅" if m == current else ""
+                        lines.append(f"    - `{m}`{marker}")
+                else:
+                    lines.append("    - _no models available_")
+        return "\n".join(lines)
 
     # No-arg -> list by kind/engine with scope info.  We display the
     # *raw* override value for grillo/trainer so that when the setting is
@@ -464,6 +578,7 @@ async def cortex_command(*args) -> str:
         return "\n".join(lines)
 
     choice_raw = str(args[0]).strip()
+    model_arg = str(args[1]).strip() if len(args) >= 2 else None
 
     try:
         selected_engine = await _resolve_cortex_choice(choice_raw)
@@ -478,9 +593,31 @@ async def cortex_command(*args) -> str:
         from core.config import switch_active_cortex_engine
 
         await switch_active_cortex_engine(selected_engine, use_hot_swap=True)
-        return f"✅ Cortex engine dynamically updated to `{selected_engine}`."
     except Exception as e:
         return f"❌ Error loading plugin: {e}"
+
+    # Optionally apply a specific model on the newly-selected engine.
+    if model_arg:
+        try:
+            applied_model = await _apply_cortex_model(selected_engine, model_arg)
+        except ValueError as ve:
+            return (
+                f"✅ Cortex engine dynamically updated to `{selected_engine}`, "
+                f"but the model was not changed.\n{ve}"
+            )
+        return (
+            f"✅ Cortex engine dynamically updated to `{selected_engine}` "
+            f"model `{applied_model}`."
+        )
+
+    # No explicit model: include the engine's current/default model when known.
+    current_model = _get_engine_current_model(selected_engine)
+    if current_model:
+        return (
+            f"✅ Cortex engine dynamically updated to `{selected_engine}` "
+            f"model `{current_model}`."
+        )
+    return f"✅ Cortex engine dynamically updated to `{selected_engine}`."
 
 
 # Register cortex command after function is defined

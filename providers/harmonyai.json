@@ -1,0 +1,17 @@
+{
+  "provider_id": "harmonyai",
+  "display_name": "Harmony AI",
+  "description": "Harmony AI cloud — OpenAI-compatible chat/embeddings plus proprietary JSON audio (TTS voice cloning + STT) and rich model metadata",
+  "icon": "harmony",
+  "protocol": "harmony",
+  "base_url": "https://beta.api.project-harmony.ai/v1",
+  "base_url_locked": false,
+  "requires_api_key": true,
+  "api_key_placeholder": "sb_cloud_…",
+  "api_key_hint": "Use a Harmony cloud API key (starts with 'sb_cloud_'). Get one at https://beta.cloud.project-harmony.ai",
+  "default_capabilities": { "cortex": true, "vox": true, "auris": true, "live": false, "vision": false },
+  "suggested_name": "harmonyai",
+  "suggested_label": "Harmony AI",
+  "extra_config": {},
+  "sort_order": 60
+}

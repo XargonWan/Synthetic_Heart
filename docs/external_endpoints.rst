@@ -108,6 +108,36 @@ Each endpoint may be mapped to one or more subsystems:
 The endpoint card shows the current effective mapping. To change mapping,
 open the endpoint with the **Edit** button and update the capability checkboxes.
 
+Media subsystem models (Vox / Auris / Iris)
+-------------------------------------------
+
+Cortex resolves its model from the endpoint's ``default_model`` / model list, but
+the media subsystems (Vox, Auris, Iris) do **not**: their model — and, for TTS,
+the voice and language — must be supplied explicitly in the endpoint's
+``Extra Config`` JSON. This is required whenever a single endpoint serves both
+cortex and a media subsystem, because ``default_model`` is usually a chat model
+(or, for multi-modal providers such as Harmony, a non-media default like
+``voicefixer``) that the audio/vision route cannot use.
+
+Recognised per-subsystem keys:
+
+- ``stt_model`` (Auris): the speech-to-text model, e.g.
+  ``faster-whisper-large-v3-turbo``.
+- ``tts_model`` (Vox): the text-to-speech model, e.g. ``kitten-tts-nano``.
+- ``tts_voice`` (Vox): the voice name (provider-specific, e.g. ``Luna``).
+- ``tts_language`` (Vox): the language code; single-speaker models such as
+  KittenTTS require ``default``.
+
+If a media key is absent the bridge falls back to ``default_model``; when that
+default is not a valid media model the provider returns no audio/text (observed
+as the *"Transcription returned no text"* error on Auris). Example for a Harmony
+endpoint mapped to both cortex and the audio subsystems::
+
+   {"stt_model": "faster-whisper-large-v3-turbo", "tts_model": "kitten-tts-nano", "tts_voice": "Luna", "tts_language": "default"}
+
+After saving, set ``ACTIVE_AURIS_ENGINE`` / ``ACTIVE_VOX_ENGINE`` to the endpoint
+``Name`` to register it as the active STT / TTS engine.
+
 Cortex extra config (advanced)
 ------------------------------
 

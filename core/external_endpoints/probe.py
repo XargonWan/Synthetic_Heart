@@ -16,7 +16,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from core.external_endpoints.models import EndpointProtocol, ExternalEndpoint
-from core.logging_utils import log_debug, log_warning
+from core.logging_utils import log_debug, log_info, log_warning
 
 
 @dataclass
@@ -26,6 +26,7 @@ class ProbeResult:
     status: str  # 'success' | 'failed'
     capabilities: dict[str, bool] = field(default_factory=dict)
     models: list[str] = field(default_factory=list)
+    models_metadata: list[dict] = field(default_factory=list)
     error_message: str = ""
     ping_echo: str = ""
 
@@ -84,6 +85,22 @@ def get_adapter_for_endpoint(
         base_url = endpoint.base_url or "https://api.anthropic.com"
         return AnthropicAdapter(api_key=api_key, base_url=base_url)
 
+    if proto == EndpointProtocol.HARMONY:
+        from core.external_endpoints.adapters.harmony_ai_adapter import (
+            HarmonyAIAdapter,
+        )
+
+        if not endpoint.base_url:
+            raise ValueError(
+                f"[probe] Endpoint '{endpoint.name}' (harmony) requires a base_url."
+            )
+        timeout = float((endpoint.extra_config or {}).get("timeout", 300.0))
+        return HarmonyAIAdapter(
+            base_url=endpoint.base_url,
+            api_key=api_key,
+            timeout=timeout,
+        )
+
     if proto == EndpointProtocol.CUSTOM:
         if endpoint.extra_config.get("legacy_http_tts"):
             from core.external_endpoints.adapters.custom_tts_adapter import (
@@ -124,8 +141,9 @@ async def probe_endpoint(endpoint: ExternalEndpoint, api_key: str = "") -> Probe
     Returns a :class:`ProbeResult` regardless of success or failure.  Never
     raises — errors are captured in ``ProbeResult.error_message``.
     """
-    log_debug(
-        f"[probe] Probing endpoint '{endpoint.name}' (protocol={endpoint.protocol})"
+    log_info(
+        f"[probe] Probing endpoint '{endpoint.name}' "
+        f"(protocol={endpoint.protocol}, base_url={endpoint.base_url!r})"
     )
 
     try:
@@ -147,6 +165,7 @@ async def probe_endpoint(endpoint: ExternalEndpoint, api_key: str = "") -> Probe
 
     capabilities: dict[str, bool] = {}
     models: list[str] = []
+    models_metadata: list[dict] = []
     ping_echo: str = ""
     errors: list[str] = []
 
@@ -159,6 +178,15 @@ async def probe_endpoint(endpoint: ExternalEndpoint, api_key: str = "") -> Probe
     try:
         model_infos = await model_task
         models = [m.id for m in model_infos]
+        # Preserve per-model metadata (type, modalities, languages, caps) so it
+        # can be persisted and used to filter engine selectors in the WebUI.
+        models_metadata = [m.to_dict() for m in model_infos if getattr(m, "id", "")]
+        # Derive endpoint-level capabilities as the union of its models' caps.
+        # Generalizes the previous vision-only union to cortex/vox/auris/vision.
+        for m in model_infos:
+            for cap_name, cap_val in (m.capabilities or {}).items():
+                if cap_val:
+                    capabilities[cap_name] = True
     except Exception as exc:
         errors.append(f"models: {exc}")
         log_warning(f"[probe] list_models failed for '{endpoint.name}': {exc}")
@@ -188,6 +216,7 @@ async def probe_endpoint(endpoint: ExternalEndpoint, api_key: str = "") -> Probe
         status="success",
         capabilities=capabilities,
         models=models,
+        models_metadata=models_metadata,
         error_message="; ".join(errors),
         ping_echo=ping_echo,
     )

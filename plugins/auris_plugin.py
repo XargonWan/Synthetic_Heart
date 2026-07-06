@@ -282,7 +282,7 @@ class AurisPlugin(AIPluginBase):
         """Re-read exposed variables (allows WebUI hot-changes)."""
         try:
             # active engine may be "disabled" to deactivate the subsystem
-            self._active_engine_name = str(
+            active_engine = str(
                 config_registry.get_value(
                     "ACTIVE_AURIS_ENGINE",
                     "vosk",
@@ -290,7 +290,11 @@ class AurisPlugin(AIPluginBase):
                     group="plugins",
                     component="auris_plugin",
                 )
-            )
+            ).strip()
+            # An empty/whitespace stored value (e.g. a blank DB row) would make
+            # engine resolution fail with "Unknown engine: ''"; fall back to the
+            # default engine so a blank config does not break transcription.
+            self._active_engine_name = active_engine or "vosk"
             import json
 
             raw_settings = config_registry.get_value(
