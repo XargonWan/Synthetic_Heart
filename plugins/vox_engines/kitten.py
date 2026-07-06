@@ -11,8 +11,9 @@ When ``kittentts`` is unavailable the engine will refuse to synthesize and
 log an error telling the operator to install the package via
 ``uv add kittentts`` or add it to the project dependencies.
 
-The model manager already knows about ``kitten-tts-nano-0.8``; the real
-package may download and cache models under ``SYNTH_MODELS_DIR``.
+This module registers ``kitten-tts-nano-0.8`` with the model manager at
+import time so it appears in the WebUI "Manage Models" list; the real
+package downloads and caches models under ``SYNTH_MODELS_DIR``.
 """
 
 from __future__ import annotations
@@ -27,7 +28,7 @@ from core.logging_utils import log_error, log_info
 from core.variables_engine import register_exposed_var
 from core.vox_registry import register_vox_engine
 from plugins.vox_base import VoxEngineBase
-from core.model_manager import VoiceSpec
+from core.model_manager import MODEL_MANAGER, ModelSpec, VoiceSpec
 
 # Import strategy: try the real kittentts package installed via uv/pip first.
 # Only fall back to the vendored gTTS stub when the real package is absent.
@@ -253,6 +254,50 @@ _KITTEN_VOICES: list[str] = [v.name for v in _KITTEN_VOICE_META]
 _DEFAULT_VOICE = "Bella"
 _DEFAULT_MODEL = "builtin"
 _SAMPLE_RATE = 24000
+
+# ---------------------------------------------------------------------------
+# KittenTTS model catalog — registered with MODEL_MANAGER at import time so it
+# appears in the WebUI "Manage Models" list for the Vox subsystem. The model
+# is downloaded from HuggingFace on demand (see MODEL_MANAGER.download).
+# ---------------------------------------------------------------------------
+_KITTEN_MODELS: list[ModelSpec] = [
+    # Nano is the default model: it is auto-downloaded on first use when no
+    # other KittenTTS model is present (see _DEFAULT_KITTENTTS_MODEL).
+    ModelSpec(
+        model_id="kitten-tts-nano-0.8",
+        plugin_id="vox_kitten",
+        display_name="KittenTTS Nano 0.8 (default)",
+        description="Compact multi-voice neural TTS model (~25 MB, ONNX, CPU). "
+        "Default model — downloaded automatically on first use.",
+        tags=["tts", "local", "cpu"],
+        size_mb=25,
+        voices_meta=_KITTEN_VOICE_META,
+        hf_repo_id="KittenML/kitten-tts-nano-0.8",
+    ),
+    ModelSpec(
+        model_id="kitten-tts-mini-0.8",
+        plugin_id="vox_kitten",
+        display_name="KittenTTS Mini 0.8",
+        description="Higher-quality multi-voice neural TTS model (ONNX, CPU).",
+        tags=["tts", "local", "cpu"],
+        size_mb=80,
+        voices_meta=_KITTEN_VOICE_META,
+        hf_repo_id="KittenML/kitten-tts-mini-0.8",
+    ),
+    ModelSpec(
+        model_id="kitten-tts-micro-0.8",
+        plugin_id="vox_kitten",
+        display_name="KittenTTS Micro 0.8",
+        description="Ultra-compact multi-voice neural TTS model (ONNX, CPU).",
+        tags=["tts", "local", "cpu"],
+        size_mb=15,
+        voices_meta=_KITTEN_VOICE_META,
+        hf_repo_id="KittenML/kitten-tts-micro-0.8",
+    ),
+]
+
+for _kspec in _KITTEN_MODELS:
+    MODEL_MANAGER.register(_kspec)
 
 # ---------------------------------------------------------------------------
 # Localised sample texts used by KittenVoxEngine.sample()
