@@ -445,10 +445,15 @@ def extract_json_from_text(
                 # Calculate total extra characters
                 extra_chars = len(prefix) + len(suffix)
 
-                # Skip if prefix looks like explanatory text (common LLM patterns)
+                # Detect explanatory prefixes (common LLM patterns like a bare
+                # "JSON" token or "Here is the JSON:" before the object).  These
+                # are NOT real extra content, so their length must not penalise
+                # the candidate — otherwise the full top-level object (preceded
+                # by e.g. "JSON") loses to a smaller *nested* sub-object that
+                # happens to have no explanatory prefix, silently dropping keys.
                 if (
                     prefix and len(prefix.split()) <= 3
-                ):  # Skip prefixes like "json", "here is", etc.
+                ):  # Prefixes like "json", "here is", etc.
                     prefix_lower = prefix.lower().strip()
                     if prefix_lower in [
                         "json",
@@ -461,9 +466,11 @@ def extract_json_from_text(
                         ("here is", "the json", "json:", "output:")
                     ):
                         log_debug(
-                            f"[extract_json_from_text] Skipping JSON with explanatory prefix: '{prefix}'"
+                            f"[extract_json_from_text] Ignoring explanatory prefix '{prefix}' when scoring candidate"
                         )
-                        continue
+                        # Discount the explanatory prefix so this candidate is
+                        # scored purely on its suffix (real trailing content).
+                        extra_chars = len(suffix)
 
                 # Prefer clean JSON (no extra text)
                 if extra_chars == 0:
