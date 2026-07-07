@@ -772,3 +772,83 @@ async def test_deannounce_target_not_expired_on_fetch_failure(
     expired = await plugin._deannounce_target_expired("I Tried")
 
     assert expired is False
+
+
+@pytest.mark.asyncio
+async def test_clean_gap_deferred_past_bumper_in_transition_gap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When a short bumper/jingle is bridging the transition gap, the clean
+    gap opens only when it finishes.  The resolved timestamp must be pushed
+    into the future by roughly the bumper's remaining time so the spoken
+    de-announce airs after the jingle, not overlapping it."""
+    import time as _time
+
+    plugin = _plugin_with_nowplaying(
+        monkeypatch,
+        {
+            "now_playing": {
+                "song": {"title": "Station Bumper"},
+                "playlist": "jingles",
+                "duration": 12,
+                "elapsed": 4,
+            }
+        },
+    )
+
+    resolved = await plugin._resolve_clean_gap_end_ts(song_end_ts=0.0)
+
+    # Bumper has ~8s remaining, so the clean gap opens ~8s from now.
+    assert resolved > _time.time() + 6.0
+
+
+@pytest.mark.asyncio
+async def test_clean_gap_is_now_when_real_track_already_on_air(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If a real (non-bumper) track is already on air when we check, the clean
+    gap is now — the resolver targets the current moment rather than waiting."""
+    import time as _time
+
+    plugin = _plugin_with_nowplaying(
+        monkeypatch,
+        {
+            "now_playing": {
+                "song": {"title": "Some Full Song"},
+                "playlist": "default",
+                "duration": 180,
+                "elapsed": 10,
+            }
+        },
+    )
+
+    resolved = await plugin._resolve_clean_gap_end_ts(song_end_ts=0.0)
+
+    assert abs(resolved - _time.time()) < 2.0
+
+
+@pytest.mark.asyncio
+async def test_clean_gap_falls_back_to_song_end_on_fetch_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A persistent nowplaying fetch failure must fail safe: the resolver
+    returns the original song_end_ts so a legitimate de-announce still airs."""
+    _patch_radio_config(monkeypatch)
+    plugin = radio_module.RadioHostPlugin()
+    plugin._enabled = True
+    plugin._running = True
+    plugin._station_id = "1"
+
+    fake_client = MagicMock()
+    fake_client.get_nowplaying = AsyncMock(side_effect=RuntimeError("api down"))
+    plugin._client = fake_client
+
+    async def _instant_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(radio_module.asyncio, "sleep", _instant_sleep)
+
+    fallback = 12345.0
+    resolved = await plugin._resolve_clean_gap_end_ts(song_end_ts=fallback)
+
+    assert resolved == fallback

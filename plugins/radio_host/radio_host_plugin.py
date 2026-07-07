@@ -1036,18 +1036,22 @@ class RadioHostPlugin:
         except Exception:
             return {"title": "", "artist": ""}
 
-    async def _wait_for_bumper_end(self, song_end_ts: float) -> None:
-        """After *song_end_ts*, poll AzuraCast and wait until any
-        bumper/jingle that started playing at song end finishes.
-        Returns when a real song is playing (or a reasonable timeout).
-        """
-        # First, wait until song_end_ts (the winding-down song ends)
-        now = _time.time()
-        if song_end_ts > now:
-            await asyncio.sleep(song_end_ts - now)
+    async def _resolve_clean_gap_end_ts(self, song_end_ts: float) -> float:
+        """Return the timestamp of the next *clean* transition gap.
 
-        # Now poll to detect if something short (bumper/jingle) started.
-        # Wait up to 30 seconds for it to finish.
+        The winding-down song ends at *song_end_ts*, but AzuraCast/AutoDJ
+        frequently drops a short bumper/jingle straight into that gap.  If we
+        start streaming the announcement exactly at *song_end_ts* it overlaps
+        the jingle and the beginning of the speech is cut off (the listener
+        only hears the second half).
+
+        This polls nowplaying and, if a bumper/jingle is bridging the gap,
+        returns the timestamp when it finishes — i.e. the start of the *next*
+        clean gap — so the broadcaster can target that instead.  When no
+        bumper is present it returns *song_end_ts* unchanged.  Fails safe by
+        returning *song_end_ts* on any error or timeout so a legitimate
+        de-announce is never suppressed.
+        """
         max_wait = 30.0
         polled = 0.0
         while polled < max_wait:
@@ -1057,7 +1061,9 @@ class RadioHostPlugin:
                 track = current.get("song", {}) or {}
                 title = track.get("title", "") or ""
                 if "is speaking" in title.lower():
-                    return  # Our own banter is playing — proceed
+                    # Our own banter is already on air — target the current
+                    # gap so we don't stack another announcement on top.
+                    return _time.time()
                 playlist = current.get("playlist", "") or ""
                 elapsed = float(current.get("elapsed", 0) or 0)
                 duration = float(current.get("duration", 0) or 0)
@@ -1068,23 +1074,20 @@ class RadioHostPlugin:
                 is_jingle_playlist = "jingle" in playlist_lower
                 if is_bumper or is_jingle_playlist or is_short:
                     log_info(
-                        f"[radio_host] Bumper/jingle detected during transition gap; "
-                        f"waiting... ({remaining:.0f}s remaining of '{title}')"
+                        f"[radio_host] Bumper/jingle in transition gap; "
+                        f"deferring broadcast to its end "
+                        f"({remaining:.0f}s remaining of '{title}')"
                     )
-                    # Wait for it to finish or timeout
-                    wait = min(max(remaining, 1.0), max_wait - polled)
-                    if wait > 0.5:
-                        await asyncio.sleep(wait)
-                    polled += wait
-                    continue
-                # Real song is playing — proceed with broadcast
-                return
+                    # The clean gap opens when this bumper finishes.
+                    return _time.time() + max(remaining, 0.0)
+                # A real (non-bumper) track is already on air — the clean gap
+                # is now, target immediately rather than wait.
+                return _time.time()
             except Exception:
                 await asyncio.sleep(1.0)
                 polled += 1.0
-        log_info(
-            "[radio_host] Bumper/jingle wait timeout; proceeding with broadcast anyway"
-        )
+        log_info("[radio_host] Bumper/jingle check timeout; broadcasting at song end")
+        return song_end_ts
 
     async def _inject_winding_down_banter(
         self,
@@ -1148,11 +1151,21 @@ class RadioHostPlugin:
             # gap rather than an estimate made before generation started.
             song_end_ts = await self._recompute_song_end_ts(song_end_ts)
 
-            # Step 4: wait until ~2 s before song end, then hand off to the
-            # timed broadcaster which connects the WebDJ (taking over from the
-            # AutoDJ during the song's final seconds) and starts streaming
-            # exactly at song end -- in the clean gap, before the next queued
-            # track has begun.
+            # Step 3c: the target song ends at song_end_ts, but AzuraCast often
+            # drops a short bumper/jingle straight into that gap.  Streaming
+            # exactly at song_end_ts would overlap the jingle and cut off the
+            # start of the speech (listener hears only the second half).  Wait
+            # for the song to actually end, then resolve the *clean* gap that
+            # opens after any bumper/jingle, and target that instead.
+            now = _time.time()
+            if song_end_ts > now:
+                await asyncio.sleep(song_end_ts - now)
+            song_end_ts = await self._resolve_clean_gap_end_ts(song_end_ts)
+
+            # Step 4: wait until ~2 s before the clean gap opens, then hand off
+            # to the timed broadcaster which connects the WebDJ and starts
+            # streaming exactly at the gap -- before the next queued track has
+            # begun and after any bridging jingle has finished.
             lead_time_s = 2.0
             now = _time.time()
             connect_at = song_end_ts - lead_time_s
