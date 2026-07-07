@@ -61,7 +61,7 @@ register_exposed_var(
 register_exposed_var(
     "TOUCH_EVENT_FLUSH_COOLDOWN_S",
     label="Touch Event Flush Cooldown (s)",
-    default=15,
+    default=10,
     value_type=int,
     ui_type="number",
     description=(
