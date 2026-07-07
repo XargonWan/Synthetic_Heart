@@ -64,6 +64,28 @@ CREATE TABLE IF NOT EXISTS grillo_action_execs (
     FOREIGN KEY (activity_log_id) REFERENCES grillo_activity_log(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+-- Karada Touch Events Table
+-- Records WebUI 3D-interaction events (environment/window taps and touches on
+-- the Synth avatar) so Synth is aware of physical interaction with her Karada.
+-- Environment/window rows are transient (~10 min TTL); synth_touch rows are
+-- retained for a sliding 24h window for later reflection.
+CREATE TABLE IF NOT EXISTS karada_touch_events (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    interface_path VARCHAR(255) NOT NULL,
+    session_id VARCHAR(255),
+    event_type VARCHAR(50) NOT NULL,
+    body_part VARCHAR(100),
+    raw_part VARCHAR(100),
+    username VARCHAR(255),
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    expires_at DATETIME NOT NULL,
+    flushed BOOLEAN NOT NULL DEFAULT 0,
+    attached BOOLEAN NOT NULL DEFAULT 0,
+    INDEX idx_kte_expires (expires_at),
+    INDEX idx_kte_flushed (flushed, event_type),
+    INDEX idx_kte_iface (interface_path)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 -- Agent Activity Log Table (for Agent plugin proposals/approvals/executions)
 CREATE TABLE IF NOT EXISTS agent_activity_log (
     id INT AUTO_INCREMENT PRIMARY KEY,

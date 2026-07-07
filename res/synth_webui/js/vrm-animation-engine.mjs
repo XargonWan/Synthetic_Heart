@@ -282,6 +282,11 @@ function playAnimation(params) {
         currentAction.fadeOut(CROSSFADE_DURATION);
     }
 
+    // A section-less descriptor with `play_once: true` (e.g. touch/Surprised)
+    // must play ONCE and return to idle, never loop. Idle itself is always a
+    // looping state regardless of any descriptor flag.
+    const playOnce = !!(descriptor && descriptor.play_once) && state !== IDLE_FALLBACK_STATE;
+
     // Create new action
     currentClip = clip;
     currentAction = mixer.clipAction(clip);
@@ -302,6 +307,15 @@ function playAnimation(params) {
             currentAction.play();
             currentSection = 'loop';
         }
+    } else if (playOnce) {
+        // One-shot, section-less clip: play a single time then fall back to idle.
+        currentAction.loop = THREE.LoopOnce;
+        currentAction.clampWhenFinished = true;
+        currentAction.reset();
+        currentAction.fadeIn(CROSSFADE_DURATION);
+        currentAction.play();
+        currentSection = 'loop';
+        _scheduleReturnToIdle(currentAction);
     } else {
         // No descriptor structure - just play the clip
         currentAction.reset();
@@ -413,6 +427,64 @@ function _forwardDescriptorExpressions(stateName, descriptor, startedAt) {
     } catch (e) {
         console.warn('[KaradaEngine] Failed to forward descriptor expressions:', e);
     }
+}
+
+/**
+ * Resolve the idle animation clip from the shared VRM animation cache so a
+ * one-shot animation can fall back to idle without the server re-sending it.
+ * @returns {THREE.AnimationClip|null}
+ */
+function _resolveIdleClip() {
+    if (idleClip) return idleClip;
+    try {
+        if (typeof window !== 'undefined'
+            && window.VRMAnimations
+            && typeof window.VRMAnimations._getCachedAnimation === 'function') {
+            return window.VRMAnimations._getCachedAnimation(IDLE_FALLBACK_STATE, null) || null;
+        }
+    } catch (e) { /* ignore */ }
+    return null;
+}
+
+/**
+ * Register a one-time `finished` handler on the mixer for a play-once action.
+ * When that specific action completes, transition back to idle. A short timer
+ * acts as a safety net in case the `finished` event is missed (e.g. the action
+ * is replaced by a new state before it fires).
+ * @param {THREE.AnimationAction} oneShotAction - The play-once action to watch
+ */
+function _scheduleReturnToIdle(oneShotAction) {
+    if (!mixer || !oneShotAction) return;
+
+    const clip = oneShotAction.getClip();
+    const durationS = clip && Number.isFinite(clip.duration) ? clip.duration : 2.0;
+
+    const onFinished = (event) => {
+        if (event.action !== oneShotAction) return; // not our action
+        mixer.removeEventListener('finished', onFinished);
+        // Only fall back if this one-shot is still the active action; a newer
+        // state may have already replaced it.
+        if (currentAction === oneShotAction) {
+            const clipIdle = _resolveIdleClip();
+            if (clipIdle) {
+                transitionToIdle(clipIdle);
+            }
+        }
+    };
+
+    mixer.addEventListener('finished', onFinished);
+
+    // Safety net: if the event never arrives, force the fallback shortly after
+    // the clip's natural duration (plus the crossfade).
+    setTimeout(() => {
+        mixer.removeEventListener('finished', onFinished);
+        if (currentAction === oneShotAction) {
+            const clipIdle = _resolveIdleClip();
+            if (clipIdle) {
+                transitionToIdle(clipIdle);
+            }
+        }
+    }, (durationS + CROSSFADE_DURATION) * 1000 + 250);
 }
 
 /**
