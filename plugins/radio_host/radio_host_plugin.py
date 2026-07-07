@@ -26,6 +26,12 @@ from .track_monitor import TrackMonitor
 AUDIO_STORAGE_DIR = _Path("/app/tmp_tts/radio_host")
 AUDIO_KEEP_COUNT = 30
 
+# On-the-fly de-announce generation runs through the async message-queue /
+# beat pipeline (LLM + TTS), which routinely takes 30-45s end-to-end.  Poll
+# long enough to actually capture our own generation instead of timing out.
+_ON_THE_FLY_POLL_TIMEOUT_S = 60.0
+_ON_THE_FLY_POLL_INTERVAL_S = 0.25
+
 register_exposed_var(
     "RADIO_HOST_ENABLED",
     label="Radio Host Enabled",
@@ -727,7 +733,19 @@ class RadioHostPlugin:
         next_artist: str | None,
         queue_ahead: list[dict[str, str]] | None,
     ) -> None:
-        """Pre-generate banter for upcoming transitions from queue data."""
+        """Pre-generate banter for upcoming transitions from queue data.
+
+        No-op when ``RADIO_HOST_NEXT_SONG_ANNOUNCEMENT`` is disabled: in
+        de-announce mode the winding-down handler always generates its own
+        de-announce on the fly, so pre-generated *transition* banter is
+        never wanted.  Worse, transition banter is keyed by its ``from``
+        track ``(prev_title, prev_artist)`` — the same key the de-announce
+        generator polls — so a leftover transition entry would be popped
+        and broadcast, airing an announcement of the NEXT song while the
+        current one is still playing.
+        """
+        if not self._next_song_announcement:
+            return
         if queue_ahead and len(queue_ahead) >= 2:
             transitions_to_pregen = min(len(queue_ahead), 3)
             for i in range(transitions_to_pregen):
@@ -1075,8 +1093,17 @@ class RadioHostPlugin:
         curr_artist: str,
         song_end_ts: float,
     ) -> None:
-        """Background task: TTS + ffmpeg, then broadcast once the song ends
-        and any bumper/jingle in the transition gap has finished playing."""
+        """Background task: TTS + ffmpeg, then broadcast timed so the LiveDJ
+        connects *before* the current song ends and the audio flows into the
+        clean AutoDJ->LiveDJ gap.
+
+        Connecting after the song has already ended (the old approach) let the
+        AutoDJ start the *next* track first; the LiveDJ connection then cut it
+        off mid-play and, on disconnect, the AutoDJ resumed from the track
+        *after* that -- effectively skipping a song.  Connecting a couple of
+        seconds before song end makes the transition land in the natural gap so
+        no queued track is skipped.
+        """
         self._set_animation("speak")
         try:
             # Step 1: generate TTS audio immediately
@@ -1087,22 +1114,60 @@ class RadioHostPlugin:
                 log_error("[radio_host] TTS failed for winding-down banter")
                 return
 
-            # Step 2: wait for song end + bumper gap to clear.
-            # This replaces the old fixed-timestamp approach which could
-            # cause banter to play over AutoDJ bumpers/jingles.
-            await self._wait_for_bumper_end(song_end_ts)
+            # Step 2: convert to WebM up front so the WebDJ connection can start
+            # streaming the instant the song ends, with no conversion latency in
+            # the critical transition window.
+            webm_data = await self._client.convert_audio_to_webm(
+                audio_path, gain_db=self._gain_db
+            )
+            if webm_data is None:
+                log_error("[radio_host] WebM conversion failed for winding-down banter")
+                return
 
-            # Step 3: now broadcast into the clean gap.
-            # broadcast_banter handles ffmpeg conversion internally.
+            # Step 3: TTS + conversion (and, for on-the-fly de-announces, the
+            # LLM generation itself) take a variable amount of time.  If they
+            # took longer than the winding-down window, the song we set out to
+            # de-announce may have already finished AND the next track already
+            # started.  De-announcing then would land in the wrong gap and
+            # reference a song the listener stopped hearing tracks ago (e.g. it
+            # would de-announce a track while a completely different, later song
+            # is on air).  Detect that and abandon the injection instead of
+            # deferring it to the end of the *next* song.
+            if await self._deannounce_target_expired(curr_title):
+                log_info(
+                    f"[radio_host] Skipping winding-down injection for "
+                    f"'{curr_title}': its transition gap already passed "
+                    f"(a later track is now on air)"
+                )
+                return
+
+            # Step 3b: TTS + conversion take a variable amount of time, so the
+            # song_end_ts computed at winding-down detection is now stale.
+            # Re-fetch nowplaying to recompute how long is actually left on
+            # the currently-playing song, so the broadcast lands in the real
+            # gap rather than an estimate made before generation started.
+            song_end_ts = await self._recompute_song_end_ts(song_end_ts)
+
+            # Step 4: wait until ~2 s before song end, then hand off to the
+            # timed broadcaster which connects the WebDJ (taking over from the
+            # AutoDJ during the song's final seconds) and starts streaming
+            # exactly at song end -- in the clean gap, before the next queued
+            # track has begun.
+            lead_time_s = 2.0
+            now = _time.time()
+            connect_at = song_end_ts - lead_time_s
+            if connect_at > now:
+                await asyncio.sleep(connect_at - now)
+
             synth_name = self._get_synth_name()
-            result = await self._client.broadcast_banter(
+            result = await self._client.broadcast_webm_at(
+                webm_data=webm_data,
                 station_shortcode=self._station_id,
-                audio_path=audio_path,
+                song_end_ts=song_end_ts,
                 username=self._streamer_username,
                 password=self._streamer_password,
                 title=f"{synth_name} is speaking",
                 artist="",
-                gain_db=self._gain_db,
             )
 
             # Mirror the same voice to the WebUI avatar so any connected
@@ -1122,6 +1187,77 @@ class RadioHostPlugin:
             log_error(f"[radio_host] Winding-down injection failed: {e}")
         finally:
             self._set_animation("idle")
+
+    async def _recompute_song_end_ts(self, fallback_song_end_ts: float) -> float:
+        """Re-derive when the currently-playing song will end.
+
+        TTS generation and audio conversion take a variable amount of time, so
+        the ``song_end_ts`` computed when winding-down was first detected is
+        stale by the time we are ready to broadcast.  Re-fetch nowplaying and
+        recompute ``now + remaining`` from the live ``elapsed``/``duration`` of
+        the track that is actually playing.
+
+        Returns the refreshed timestamp, or ``fallback_song_end_ts`` if
+        nowplaying is unavailable or does not expose usable timing.
+        """
+        try:
+            np = await self._client.get_nowplaying(self._station_id)
+            current = np.get("now_playing", {}) or {}
+            remaining = current.get("remaining")
+            if remaining is None:
+                duration = current.get("duration", 0) or 0
+                elapsed = current.get("elapsed", 0) or 0
+                remaining = duration - elapsed
+            remaining = float(remaining)
+            if remaining <= 0:
+                # Song already ended (or timing unusable); broadcast now.
+                return _time.time()
+            return _time.time() + remaining
+        except Exception as e:
+            log_warning(f"[radio_host] Could not recompute song end time: {e}")
+            return fallback_song_end_ts
+
+    async def _deannounce_target_expired(self, target_title: str) -> bool:
+        """Return True if *target_title* is no longer the track whose end we
+        are about to fill.
+
+        A de-announce is only meaningful in the gap right after the target
+        song ends.  If banter generation (LLM + TTS + conversion) outran the
+        winding-down window, the target song has already finished *and* a
+        later track is on air.  We compare the live ``now_playing`` title
+        against the target: if a different, non-bumper song is playing, the
+        gap is gone and we should abandon the injection rather than defer it
+        to the end of the current (wrong) track.
+
+        Returns False (proceed) when nowplaying is unavailable or when the
+        target is still on air / a short bumper is bridging the gap, so a
+        transient fetch failure never suppresses a legitimate de-announce.
+        """
+        if not target_title:
+            return False
+        try:
+            np = await self._client.get_nowplaying(self._station_id)
+            current = np.get("now_playing", {}) or {}
+            song = current.get("song", {}) or {}
+            current_title = str(song.get("title", "") or "")
+            if not current_title or current_title == target_title:
+                # Still on the target song (or timing unknown) — proceed.
+                return False
+            # A different track is on air.  If it is a short bumper/jingle
+            # bridging the gap, the de-announce still lands correctly, so keep
+            # going; otherwise the real next song has begun and the gap is gone.
+            playlist = str(current.get("playlist", "") or "").lower()
+            duration = float(current.get("duration", 0) or 0)
+            is_short = 0 < duration < 45
+            is_bumper = "bumper" in playlist or "jingle" in playlist
+            if is_short or is_bumper:
+                return False
+            return True
+        except Exception as e:
+            log_warning(
+                f"[radio_host] Could not verify de-announce target freshness: {e}"
+            )
+            return False
 
     _MAX_PENDING_BANTER = 8
 
@@ -1178,10 +1314,14 @@ class RadioHostPlugin:
             pre_generate=True,
             deannounce_only=deannounce_only,
         )
-        # Poll _pending_banter for up to ~5s waiting for the LLM response
+        # Poll _pending_banter waiting for the LLM response.  The banter is
+        # generated asynchronously through the message queue / beat pipeline,
+        # which routinely takes 30-45s end-to-end (LLM + TTS).  A short poll
+        # (the previous ~5s) always timed out, so the de-announce silently
+        # failed.  Wait long enough to actually capture our own generation.
         key = (prev_title, prev_artist)
-        for _ in range(20):
-            await asyncio.sleep(0.25)
+        for _ in range(int(_ON_THE_FLY_POLL_TIMEOUT_S / _ON_THE_FLY_POLL_INTERVAL_S)):
+            await asyncio.sleep(_ON_THE_FLY_POLL_INTERVAL_S)
             banter = self._pending_banter.pop(key, None)
             if banter:
                 return banter
