@@ -3,11 +3,7 @@
         <header class="section-header">
           <h2>Activity</h2>
           <nav class="sub-nav" role="tablist">
-            <button class="sub-nav-btn active" data-subtab="interactions" role="tab" aria-selected="true">
-              <span class="icon">🗂️</span>
-              <span>Interactions</span>
-            </button>
-            <button class="sub-nav-btn" data-subtab="diary" role="tab" aria-selected="false">
+            <button class="sub-nav-btn active" data-subtab="diary" role="tab" aria-selected="true">
               <span class="icon">📔</span>
               <span>Diary</span>
             </button>
@@ -32,30 +28,8 @@
 
         <div class="sub-tabs-container">
 
-      <!-- Interactions Sub-Tab -->
-      <div class="sub-tab-panel active" id="subtab-interactions" data-subtab="interactions">
-        <div class="section-controls">
-          <input type="text" id="history-interactions-search" placeholder="Search interactions..." class="search-input" />
-          <select id="history-interactions-sort" class="sort-select">
-            <option value="desc">Newest First</option>
-            <option value="asc">Oldest First</option>
-          </select>
-          <label class="control-label">
-            <input type="checkbox" id="history-interactions-archived" />
-            Show Archived
-          </label>
-        </div>
-        <div id="history-interactions-content" class="history-container">
-          <div class="loading-state">
-            <div class="loading-spinner"></div>
-            <p>Loading interactions...</p>
-          </div>
-        </div>
-        <div id="history-interactions-pagination" class="pagination-controls"></div>
-      </div>
-
       <!-- Diary Sub-Tab -->
-      <div class="sub-tab-panel" id="subtab-diary" data-subtab="diary">
+      <div class="sub-tab-panel active" id="subtab-diary" data-subtab="diary">
         <div class="section-controls">
           <input type="text" id="history-diary-search" placeholder="Search diary..." class="search-input" />
           <select id="history-diary-sort" class="sort-select">
@@ -153,9 +127,13 @@
       .history-wrapper {
         display: flex;
         flex-direction: column;
-        height: 100%;
         width: 100%;
-        min-height: calc(100vh - var(--topbar-height, 120px));
+        /* Anchor the wrapper to the viewport height so the absolutely-positioned
+           .sub-tab-panel (and its pagination footer) have a resolved height to
+           fill. Using min-height alone let the wrapper grow with long content,
+           pushing the pagination controls below the visible area ("tagliata"). */
+        height: calc(100vh - var(--topbar-height, 120px));
+        min-height: 0;
       }
 
       .section-header {
@@ -730,6 +708,8 @@
         align-items: center;
         gap: 0.5rem;
         padding: 1rem;
+        /* Keep the footer pinned and never let the scrolling list squeeze it out. */
+        flex-shrink: 0;
         border-top: 1px solid transparent;
         border-image: linear-gradient(90deg, var(--accent), var(--accent-dark)) 1;
       }

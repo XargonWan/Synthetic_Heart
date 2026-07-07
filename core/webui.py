@@ -210,26 +210,6 @@ class SynthWebUIInterface:
         self.http_port = (
             http_port if (self.tls_enabled and http_port != self.port) else None
         )
-        # Selkies desktop ports used for UI hints
-        # Selkies: prefer HTTPS; HTTP port is optional and will only be set
-        # if the environment explicitly defines SELKIES_HTTP_PORT.
-        try:
-            # Default host-exposed Selkies HTTPS port is 3006 (docker-compose mapping).
-            # Respect SELKIES_HTTPS_PORT if explicitly provided in the environment.
-            self.selkies_https_port = int(os.getenv("SELKIES_HTTPS_PORT", "3006"))
-        except Exception:
-            self.selkies_https_port = 3006
-
-        if "SELKIES_HTTP_PORT" in os.environ:
-            try:
-                raw_http_port = os.getenv("SELKIES_HTTP_PORT")
-                self.selkies_http_port = int(raw_http_port) if raw_http_port else None
-            except Exception:
-                self.selkies_http_port = None
-        else:
-            self.selkies_http_port = None
-        # Selkies host (allow overriding via env)
-        self.selkies_host = os.getenv("SELKIES_HOST", "127.0.0.1")
         # Log streaming options
         self.log_source_path = None
         self.log_wait_seconds = 20
@@ -706,15 +686,12 @@ class SynthWebUIInterface:
         self.app.post("/api/chat/session_meta")(self.set_session_meta)
         self.app.get("/api/chat/session_meta")(self.get_session_meta)
         # History API endpoints (unified diary, grillo, chat history)
-        self.app.get("/api/history/interactions")(self.history_interactions)
         self.app.get("/api/history/diary")(self.history_diary)
         self.app.get("/api/history/grillo")(self.history_grillo)
         self.app.get("/api/history/dreams")(self.history_dreams)
         self.app.get("/api/history/chat")(self.history_chat)
         self.app.get("/api/log-failures")(self.list_log_failures)
         self.app.delete("/api/log-failures/{failure_id}")(self.delete_log_failure)
-        self.app.get("/api/selkies")(self.get_selkies_config)
-        self.app.get("/api/selkies/health")(self.get_selkies_health)
 
         # Agent tasks endpoints (Agent Loop persistence & control)
         self.app.get("/api/agent/tasks")(self.list_agent_tasks)
@@ -1530,64 +1507,6 @@ class SynthWebUIInterface:
             raise HTTPException(
                 status_code=500, detail="Unable to render Synthetic Heart"
             ) from exc
-
-    async def _probe_selkies_protocol(self) -> dict:
-        """Probe local Selkies ports to determine if HTTPS or HTTP is reachable.
-
-        Returns a dict: { 'protocol': 'https'|'http'|'none', 'details': str }
-        This is a best-effort check intended to improve UI hints; it must not
-        block for long (uses short timeouts).
-        """
-        import ssl
-        import socket
-
-        host = getattr(self, "selkies_host", "127.0.0.1") or "127.0.0.1"
-
-        # Build a prioritized list of ports to probe:
-        # 1) configured host-exposed ports (selkies_https_port / selkies_http_port)
-        # 2) container defaults (3001 = HTTPS, 3000 = HTTP) as a last resort
-        candidate_ports = []
-        if getattr(self, "selkies_https_port", None):
-            candidate_ports.append((int(self.selkies_https_port), "https"))
-        if getattr(self, "selkies_http_port", None):
-            candidate_ports.append((int(self.selkies_http_port), "http"))
-
-        # Container defaults (try HTTPS container port first)
-        candidate_ports.extend([(3001, "https"), (3000, "http")])
-
-        https_err = ""
-        http_err = ""
-        for port, proto in candidate_ports:
-            try:
-                if proto == "https":
-                    ctx = ssl.create_default_context()
-                    ctx.check_hostname = False
-                    ctx.verify_mode = ssl.CERT_NONE
-                    with socket.create_connection((host, port), timeout=1) as sock:
-                        with ctx.wrap_socket(sock, server_hostname=host):
-                            return {
-                                "protocol": "https",
-                                "details": f"TLS handshake succeeded on port {port}",
-                                "port": port,
-                            }
-                else:
-                    with socket.create_connection((host, port), timeout=1) as sock:
-                        return {
-                            "protocol": "http",
-                            "details": f"Plain TCP connect succeeded on port {port}",
-                            "port": port,
-                        }
-            except Exception as e:
-                if proto == "https":
-                    https_err = str(e)
-                else:
-                    http_err = str(e)
-
-        return {
-            "protocol": "none",
-            "details": f"https_err={https_err}; http_err={http_err}",
-            "port": None,
-        }
 
     def _get_chat_resizable(self) -> bool:
         """Return whether chat should be resizable (from config/DB)."""
@@ -5151,38 +5070,6 @@ class SynthWebUIInterface:
             }
         )
 
-    async def get_selkies_config(self):
-        """Return Selkies configuration for dynamic URL construction."""
-        payload = {"https_port": self.selkies_https_port, "host": self.selkies_host}
-        if getattr(self, "selkies_http_port", None):
-            payload["http_port"] = self.selkies_http_port
-
-        # Best-effort probe to detect which protocol is actually reachable
-        try:
-            probe = await asyncio.get_event_loop().run_in_executor(
-                None, self._probe_selkies_protocol
-            )
-            payload["detected_protocol"] = probe.get("protocol")
-            payload["detected_details"] = probe.get("details")
-            payload["detected_port"] = probe.get("port")
-        except Exception:
-            payload["detected_protocol"] = "unknown"
-            payload["detected_port"] = None
-
-        return JSONResponse(payload)
-
-    async def get_selkies_health(self):
-        """Return a health probe result for Selkies (reachable protocol and details)."""
-        try:
-            probe = await asyncio.get_event_loop().run_in_executor(
-                None, self._probe_selkies_protocol
-            )
-            return JSONResponse(
-                {"ok": probe.get("protocol") in ("https", "http"), **probe}
-            )
-        except Exception as exc:
-            return JSONResponse({"ok": False, "protocol": "none", "details": str(exc)})
-
     async def get_animations_for_type(self, skin: str, animation_type: str):
         """Return list of animation files for a specific skin and animation type.
 
@@ -6515,156 +6402,6 @@ class SynthWebUIInterface:
         except Exception as exc:
             log_error(f"{LOG_PREFIX} Failed to delete archived diary entries: {exc}")
             raise HTTPException(status_code=500, detail=str(exc))
-
-    async def history_interactions(self, request: Request):
-        """Return interaction-log data from ai_diary for the History > Interactions sub-tab.
-
-        Only the metadata fields (interaction_summary, personal_thought, emotions,
-        involved_users) are returned — NOT the diary prose (content), which belongs
-        exclusively to the Diary tab.
-        """
-        params = request.query_params
-
-        def _bounded_int(value: Any, default: int, minimum: int, maximum: int) -> int:
-            try:
-                parsed = int(value)
-            except (TypeError, ValueError):
-                return default
-            return max(minimum, min(maximum, parsed))
-
-        page = _bounded_int(params.get("page"), default=1, minimum=1, maximum=1000)
-        per_page = _bounded_int(
-            params.get("per_page"), default=10, minimum=1, maximum=30
-        )  # Ridotto a 10 per pagina, max 30
-        search = params.get("search", "").strip()
-        include_archived = params.get("include_archived", "false").lower() == "true"
-        sort = params.get("sort", "desc")
-
-        try:
-            from core.db import get_conn_ctx
-
-            offset = (page - 1) * per_page
-            order = "DESC" if sort == "desc" else "ASC"
-
-            # Strategy: skip COUNT(*) for better performance, use approximate count
-            entries = []
-            total_count = 0
-
-            async with get_conn_ctx() as conn:
-                async with conn.cursor() as cur:
-                    # Interactions shows only metadata — NOT the diary prose (content).
-                    # Search searches only interaction_summary.
-                    if search:
-                        search_term = f"%{search}%"
-                        where_clause = "WHERE interaction_summary LIKE %s"
-                        search_params = [search_term]
-                    else:
-                        where_clause = ""
-                        search_params = []
-
-                    # Simplified query without archived for speed (most common case)
-                    if not include_archived:
-                        query = f"""
-                            SELECT id, interaction_summary, personal_thought,
-                                   timestamp,
-                                   JSON_EXTRACT(emotions, '$[0].type') AS primary_emotion,
-                                   JSON_LENGTH(involved_users) AS user_count
-                            FROM ai_diary
-                            {where_clause}
-                            ORDER BY timestamp {order}
-                            LIMIT %s OFFSET %s
-                        """
-                        params_list = search_params + [per_page + 1, offset]
-
-                        await cur.execute(query, params_list)
-                        rows = await cur.fetchall()
-
-                        has_more = len(rows) > per_page
-                        if has_more:
-                            rows = rows[:per_page]
-
-                        if page == 1 and not has_more:
-                            total_count = len(rows)
-                        else:
-                            total_count = (
-                                offset + len(rows) + (per_page if has_more else 0)
-                            )
-                    else:
-                        query = f"""
-                            SELECT * FROM (
-                                (SELECT id, interaction_summary, personal_thought,
-                                        timestamp,
-                                        JSON_EXTRACT(emotions, '$[0].type') AS primary_emotion,
-                                        JSON_LENGTH(involved_users) AS user_count,
-                                        0 AS archived
-                                FROM ai_diary
-                                {where_clause}
-                                ORDER BY timestamp {order}
-                                LIMIT {per_page * 2})
-                                UNION ALL
-                                (SELECT id, interaction_summary, personal_thought,
-                                        timestamp,
-                                        JSON_EXTRACT(emotions, '$[0].type'),
-                                        JSON_LENGTH(involved_users),
-                                        1 AS archived
-                                FROM ai_diary_archive
-                                {where_clause}
-                                ORDER BY timestamp {order}
-                                LIMIT {per_page * 2})
-                            ) AS combined
-                            ORDER BY timestamp {order}
-                            LIMIT %s OFFSET %s
-                        """
-                        params_list = (
-                            search_params * 2 + [per_page + 1, offset]
-                            if search_params
-                            else [per_page + 1, offset]
-                        )
-
-                        await cur.execute(query, params_list)
-                        rows = await cur.fetchall()
-
-                        has_more = len(rows) > per_page
-                        if has_more:
-                            rows = rows[:per_page]
-                        total_count = offset + len(rows) + (per_page if has_more else 0)
-
-                    # Build response — row indices: 0=id,1=interaction_summary,2=personal_thought,
-                    # 3=timestamp,4=primary_emotion,5=user_count,[6=archived]
-                    for row in rows:
-                        timestamp_str = self._dt_to_utc_iso(row[3])
-
-                        entries.append(
-                            {
-                                "id": row[0],
-                                "interaction_summary": row[1],
-                                "personal_thought": row[2],
-                                "timestamp": timestamp_str,
-                                "primary_emotion": row[4],
-                                "user_count": row[5] or 0,
-                                "archived": bool(row[6]) if len(row) > 6 else False,
-                            }
-                        )
-
-            # Calculate total_pages from total_count
-            total_pages = (
-                (total_count + per_page - 1) // per_page if total_count > 0 else 1
-            )
-
-            return JSONResponse(
-                {
-                    "success": True,
-                    "entries": entries,
-                    "page": page,
-                    "per_page": per_page,
-                    "total_count": total_count,
-                    "total_pages": total_pages,
-                }
-            )
-
-        except Exception as exc:
-            log_error(f"{LOG_PREFIX} Failed to fetch interactions history: {exc}")
-            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
 
     async def history_diary(self, request: Request):
         """Return one entry per day for the History > Diary sub-tab (daily consolidated view)."""
@@ -8704,50 +8441,6 @@ class SynthWebUIInterface:
                     "error": meta["error"],
                 }
             )
-
-        # Add Selkies Web Desktop as a special hardcoded component
-        # Prefer explicit SELKIES_HTTPS_PORT/SELKIES_HTTP_PORT env vars when deciding protocol
-        # If SELKIES_HTTPS_PORT is set, prefer https regardless of SECURE_CONNECTION value.
-        # This avoids accidental inversion when docker/env mappings differ from runtime.
-        if os.getenv("SELKIES_HTTPS_PORT"):
-            selkies_protocol = "https"
-            selkies_port = self.selkies_https_port
-        elif os.getenv("SELKIES_HTTP_PORT"):
-            selkies_protocol = "http"
-            selkies_port = self.selkies_http_port
-        else:
-            selkies_protocol = (
-                "https" if os.getenv("SECURE_CONNECTION", "0") == "1" else "http"
-            )
-            selkies_port = (
-                self.selkies_https_port
-                if selkies_protocol == "https"
-                else self.selkies_http_port
-            )
-
-        # Mark as dynamic - JavaScript will construct the full URL client-side
-        interfaces_data.append(
-            {
-                "name": "selkies_desktop",
-                "display_name": "Selkies Web Desktop",
-                "description": "Web-based VNC desktop environment for visual interaction with the SyntH container. Provides full desktop access with Chrome browser.",
-                "actions": [
-                    {
-                        "name": "login",
-                        "description": "Open Selkies login page in a new tab",
-                        "required_fields": [],
-                        "optional_fields": [],
-                    }
-                ],
-                "status": "success",
-                "details": f"Available at {selkies_protocol}://[host]:{selkies_port}",
-                "error": None,
-                "url": None,  # Will be set client-side
-                "is_external": True,
-                "selkies_protocol": selkies_protocol,
-                "selkies_port": selkies_port,
-            }
-        )
 
         # Deduplicate interfaces by name to avoid duplicates when modules are scanned multiple times
         seen = set()

@@ -4,8 +4,7 @@
 // History tab state and helpers (migrated from inline template)
 const historyState = {
     _initialized: false,
-    currentSubTab: 'interactions',
-    interactions: { page: 1, per_page: 20, search: '', include_archived: false, sort: 'desc' },
+    currentSubTab: 'diary',
     diary: { page: 1, per_page: 30, search: '', sort: 'desc' },
     grillo: { page: 1, per_page: 20, search: '', beat_type: '', sort: 'desc' },
     dreams: { page: 1, per_page: 15, search: '', sort: 'desc' },
@@ -28,10 +27,10 @@ function initializeHistoryTab() {
     }
     allSubTabs.forEach((tab, idx) => { tab.classList.remove('active'); });
 
-    const diaryPanel = document.getElementById('subtab-interactions');
+    const diaryPanel = document.getElementById('subtab-diary');
     if (diaryPanel) {
         diaryPanel.classList.add('active');
-        historyState.currentSubTab = 'interactions';
+        historyState.currentSubTab = 'diary';
     }
 
     const subNavButtons = document.querySelectorAll('.sub-nav-btn[data-subtab]');
@@ -86,14 +85,6 @@ function initializeHistoryTab() {
 
 
     // Controls
-    document.getElementById('history-interactions-search')?.addEventListener('input', SynthUtils.debounce(() => {
-        historyState.interactions.search = document.getElementById('history-interactions-search').value;
-        historyState.interactions.page = 1; loadHistoryInteractions();
-    }, 500));
-
-    document.getElementById('history-interactions-sort')?.addEventListener('change', () => { historyState.interactions.sort = document.getElementById('history-interactions-sort').value; historyState.interactions.page = 1; loadHistoryInteractions(); });
-    document.getElementById('history-interactions-archived')?.addEventListener('change', () => { historyState.interactions.include_archived = document.getElementById('history-interactions-archived').checked; historyState.interactions.page = 1; loadHistoryInteractions(); });
-
     document.getElementById('history-diary-search')?.addEventListener('input', SynthUtils.debounce(() => {
         historyState.diary.search = document.getElementById('history-diary-search').value;
         historyState.diary.page = 1; loadHistoryDiary();
@@ -112,12 +103,11 @@ function initializeHistoryTab() {
     document.getElementById('history-chat-search')?.addEventListener('input', SynthUtils.debounce(() => { historyState.chat.search = document.getElementById('history-chat-search').value; historyState.chat.page = 1; loadHistoryChat(); }, 500));
     document.getElementById('history-chat-sort')?.addEventListener('change', () => { historyState.chat.sort = document.getElementById('history-chat-sort').value; historyState.chat.page = 1; loadHistoryChat(); });
 
-    // Load initial interactions data
-    loadHistoryInteractions();
+    // Load initial diary data
+    loadHistoryDiary();
 }
 
 function loadHistoryData(subtab) {
-    if (subtab === 'interactions') return loadHistoryInteractions();
     if (subtab === 'diary') return loadHistoryDiary();
     if (subtab === 'grillo') return loadHistoryGrillo();
     if (subtab === 'dreams') return loadHistoryDreams();
@@ -125,34 +115,6 @@ function loadHistoryData(subtab) {
     if (subtab === 'agent') {
         try { if (window.SynthWebUI && typeof window.SynthWebUI.initAgentTab === 'function') window.SynthWebUI.initAgentTab(); } catch (e) { /* ignore */ }
         return;
-    }
-}
-
-async function loadHistoryInteractions() {
-    const content = document.getElementById('history-interactions-content'); if (!content) return;
-    console.log('[History] loadHistoryInteractions called with state:', historyState.interactions);
-    content.innerHTML = '<div class="loading-state"><div class="loading-spinner"></div><p>Loading interactions...</p></div>';
-    const params = new URLSearchParams({ page: historyState.interactions.page, per_page: historyState.interactions.per_page, search: historyState.interactions.search, include_archived: historyState.interactions.include_archived, sort: historyState.interactions.sort });
-    try {
-        const response = await fetch(`/api/history/interactions?${params}`);
-        const data = await response.json();
-        console.log('[History] interactions response:', data);
-        if (data && data.success && Array.isArray(data.entries) && data.entries.length > 0) {
-            content.innerHTML = data.entries.map(entry => renderInteractionEntry(entry)).join('');
-            content.classList.add('history-populated');
-            try { content.scrollTop = 0; content.tabIndex = -1; setTimeout(() => { try { content.focus(); } catch (e) {} }, 50); } catch (e) {}
-            renderPagination('interactions', data.page, data.total_pages, data.total_count);
-        } else if (data && data.success) {
-            content.classList.remove('history-populated');
-            content.innerHTML = '<div class="empty-state"><div class="icon">🗂️</div><p>No interactions found</p></div>';
-        } else {
-            console.warn('[History] interactions response indicates failure or unexpected shape:', data);
-            content.classList.remove('history-populated');
-            content.innerHTML = '<div class="empty-state"><div class="icon">⚠️</div><p>Failed to load interactions</p></div>';
-        }
-    } catch (error) {
-        console.error('Failed to load interactions history:', error);
-        content.innerHTML = '<div class="empty-state"><div class="icon">⚠️</div><p>Failed to load interactions</p></div>';
     }
 }
 
@@ -314,30 +276,6 @@ async function loadHistoryChat() {
     }
 }
 
-function renderInteractionEntry(entry) {
-    const timestamp = formatTimestamp(entry.timestamp);
-    const archived = entry.archived ? ' archived' : '';
-    // Interactions shows interaction_summary as main body — NOT the diary prose (content).
-    let safeSummary = escapeHtml(entry.interaction_summary || '').replace(/^[\s\u00A0]+/, '').replace(/[\n\r]+$/, '');
-    const summaryIsLong = safeSummary.split('\n').length > 6 || safeSummary.length > 800;
-    const longClass = summaryIsLong ? ' history-entry-content--limited' : '';
-    let safeThought = escapeHtml(entry.personal_thought || '').replace(/^[\s\u00A0]+/, '').replace(/[\n\r]+$/, '');
-
-    return `
-        <div class="history-entry${archived}">
-            <div class="history-entry-header">
-                <div class="history-entry-meta">
-                    <div class="history-entry-date">📅 ${timestamp}</div>
-                </div>
-            </div>
-            <div class="history-entry-content${longClass}">${safeSummary || '<em style="opacity:0.5">No summary available</em>'}</div>
-            ${safeThought ? `<div class="history-entry-detail"><strong>💭 Thought:</strong> ${safeThought}</div>` : ''}
-            ${entry.primary_emotion ? `<div class="history-entry-detail"><strong>😊 Emotion:</strong> ${entry.primary_emotion}</div>` : ''}
-            ${entry.user_count > 0 ? `<div class="history-entry-detail"><strong>👥 With:</strong> ${entry.user_count} user${entry.user_count > 1 ? 's' : ''}</div>` : ''}
-        </div>
-    `;
-}
-
 function renderDiaryDayEntry(entry) {
     const ts = entry.timestamp ? new Date(entry.timestamp) : null;
     const dayLabel = ts ? ts.toLocaleDateString(undefined, { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' }) : '—';
@@ -411,9 +349,9 @@ function renderGrilloActions(actions) {
         return `
             <div class="grillo-actions">
                 <div class="grillo-actions-header">
-                    <span>Azioni Grillo</span>
+                    <span>Grillo Actions</span>
                 </div>
-                <div class="history-entry-detail" style="margin: 0; opacity: 0.7;"><em>Nessuna azione proposta</em></div>
+                <div class="history-entry-detail" style="margin: 0; opacity: 0.7;"><em>No actions proposed</em></div>
             </div>
         `;
     }
@@ -445,7 +383,7 @@ function renderGrilloActions(actions) {
     return `
         <div class="grillo-actions">
             <div class="grillo-actions-header">
-                <span>Azioni Grillo</span>
+                <span>Grillo Actions</span>
                 ${countChips ? `<div class="grillo-actions-counts">${countChips}</div>` : ''}
             </div>
             <div class="grillo-actions-list">${items}</div>
@@ -494,6 +432,9 @@ function renderPagination(type, currentPage, totalPages, totalCount) {
 }
 
 function changePage(type, newPage) { historyState[type].page = newPage; loadHistoryData(type); }
+// Expose to the global scope so the inline onclick="changePage(...)" handlers in
+// renderPagination() can reach it (this file runs inside an IIFE).
+window.changePage = changePage;
 
 function debounce(func, wait) { let timeout; return function executedFunction(...args) { const later = () => { clearTimeout(timeout); func(...args); }; clearTimeout(timeout); timeout = setTimeout(later, wait); }; }
 
