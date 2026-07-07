@@ -145,6 +145,11 @@ class KaradaStateServer:
         self._current_audio_lipsync: Optional[Dict] = None
         self._current_audio_started_at: Optional[datetime] = None
         self._audio_clear_task: Optional[asyncio.Task] = None
+        # Talk animation: driven strictly by the audio lifecycle so the "talk"
+        # animation plays *during* the actual speech (i.e. while the TTS audio
+        # is playing), never before it starts nor after it ends. The return task
+        # transitions the avatar back to idle when the clip finishes.
+        self._talk_return_task: Optional[asyncio.Task] = None
         # Face state: authoritative snapshot of the last face values broadcast
         # to clients. Keys are normalized blendshape/emotion values in the 0..1
         # range and reused for reconnect/full-state sync.
@@ -2128,6 +2133,57 @@ class KaradaStateServer:
             self.set_current_audio(url, audio_duration_s, lipsync_data)
         except Exception:
             pass
+
+        # Drive the TALK animation for the exact span of the audio: start it now
+        # (the clip is playing) and schedule the return to idle when the clip
+        # ends. This guarantees the talk animation runs *during* the speech,
+        # not before it starts nor after it finishes.
+        try:
+            self._start_talk_animation(audio_duration_s)
+        except Exception:
+            pass
+
+    def _start_talk_animation(self, audio_duration_s: Optional[float]) -> None:
+        """Play the TALK animation for the duration of the current audio clip.
+
+        Anchored to :meth:`broadcast_audio` — the single choke point where
+        "the avatar is speaking" begins. The animation starts synchronously with
+        the audio broadcast and is scheduled to return to idle after
+        ``audio_duration_s`` so it lines up with the end of the speech. Uses the
+        auto-context (``context_id=None``) so it shares the same lifecycle lane
+        as the think -> write -> idle phases and is superseded by any explicit
+        higher-priority overlay (e.g. a touch/emote context). Best-effort.
+        """
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+
+        # Cancel a pending return from a previous clip so overlapping broadcasts
+        # keep the avatar in TALK rather than snapping back to idle mid-speech.
+        if self._talk_return_task and not self._talk_return_task.done():
+            self._talk_return_task.cancel()
+            self._talk_return_task = None
+
+        loop.create_task(self.play_animation(AnimationState.TALK, session_id=None))
+
+        if audio_duration_s and audio_duration_s > 0:
+            self._talk_return_task = loop.create_task(
+                self._return_from_talk(audio_duration_s)
+            )
+
+    async def _return_from_talk(self, delay: float) -> None:
+        """Return the avatar to idle when the talk audio finishes."""
+        try:
+            await asyncio.sleep(delay)
+            # Only leave TALK if we're still in it (an explicit overlay or a
+            # newer lifecycle phase may have taken over in the meantime).
+            if self.current_state == AnimationState.TALK:
+                await self.play_animation(AnimationState.IDLE, session_id=None)
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:  # pragma: no cover - best effort
+            log_debug(f"[KaradaStateServer] _return_from_talk error: {exc}")
 
     def set_current_audio(
         self,
