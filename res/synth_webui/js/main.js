@@ -454,6 +454,14 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                 if (!entry || !entry.winbox) return;
                 const isMax = !!(entry.winbox.max || entry.winbox.maximized);
                 if (!isMax) return;
+                // WinBox stores the pre-maximize geometry so restore() can bring
+                // the window back. Passing keep=true to resize()/move() applies the
+                // change to the DOM ONLY, without updating WinBox's internal
+                // width/height/x/y. This is essential: without keep the maximize
+                // adjustment would overwrite the stored "normal" geometry, so a
+                // later restore would snap to the maximized size instead of the
+                // user's original size.
+                const KEEP = true;
                 try {
                     // Prefer using the dedicated desktop root size when available so
                     // maximized windows fill the exact desktop area (no right/bottom gaps).
@@ -464,8 +472,8 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                         const top = Math.round(r.top || getTopbarHeight() || 0);
                         const width = Math.max(120, Math.round(r.width || entry.winbox.width || 0));
                         const height = Math.max(120, Math.round(r.height || entry.winbox.height || 0));
-                        try { entry.winbox.move(left, top); } catch (e) { /* ignore */ }
-                        try { entry.winbox.resize(width, height); } catch (e) { /* ignore */ }
+                        try { entry.winbox.move(left, top, KEEP); } catch (e) { /* ignore */ }
+                        try { entry.winbox.resize(width, height, KEEP); } catch (e) { /* ignore */ }
                         // Compensate if the DOM rect is still smaller than requested (rounding/border issues)
                         try {
                             const winEl = entry.winbox.window || entry.winbox.dom || entry.winbox.g || null;
@@ -474,7 +482,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                                 const dw = width - Math.round(rect.width || 0);
                                 const dh = height - Math.round(rect.height || 0);
                                 if ((dw > 0) || (dh > 0)) {
-                                    try { entry.winbox.resize(width + (dw > 0 ? 1 : 0), height + (dh > 0 ? 1 : 0)); } catch (e) { /* ignore */ }
+                                    try { entry.winbox.resize(width + (dw > 0 ? 1 : 0), height + (dh > 0 ? 1 : 0), KEEP); } catch (e) { /* ignore */ }
                                 }
                             }
                         } catch (e) { /* ignore */ }
@@ -487,8 +495,8 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                 const viewport = getViewportSize();
                 const width = viewport.width || entry.winbox.width || 0;
                 const height = Math.max(120, (viewport.height || entry.winbox.height || 0) - top);
-                try { entry.winbox.move(0, top); } catch (e) { /* ignore */ }
-                try { entry.winbox.resize(width, height); } catch (e) { /* ignore */ }
+                try { entry.winbox.move(0, top, KEEP); } catch (e) { /* ignore */ }
+                try { entry.winbox.resize(width, height, KEEP); } catch (e) { /* ignore */ }
                 try {
                     const winEl = entry.winbox.window || entry.winbox.dom || entry.winbox.g || null;
                     if (winEl && winEl.getBoundingClientRect) {
@@ -496,7 +504,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                         const dw = width - Math.round(rect.width || 0);
                         const dh = height - Math.round(rect.height || 0);
                         if ((dw > 0) || (dh > 0)) {
-                            try { entry.winbox.resize(width + (dw > 0 ? 1 : 0), height + (dh > 0 ? 1 : 0)); } catch (e) { /* ignore */ }
+                            try { entry.winbox.resize(width + (dw > 0 ? 1 : 0), height + (dh > 0 ? 1 : 0), KEEP); } catch (e) { /* ignore */ }
                         }
                     }
                 } catch (e) { /* ignore */ }
@@ -630,10 +638,15 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                     const minWidth = 260;
                     const minHeight = 120;
 
-                    let newWidth = Math.round(rect.width || entry.winbox.width || minWidth);
-                    let newHeight = Math.round(rect.height || entry.winbox.height || minHeight);
-                    let newLeft = Math.round(rect.left || (entry.winbox.x || 0));
-                    let newTop = Math.round(rect.top || (entry.winbox.y || 0));
+                    // Prefer WinBox's internal geometry as the source of truth.
+                    // The DOM getBoundingClientRect() can be stale immediately
+                    // after a resize()/move() (e.g. during restoreState), which
+                    // would otherwise cause the clamp to snap the window back to
+                    // its previous/default geometry.
+                    let newWidth = Math.round(entry.winbox.width || rect.width || minWidth);
+                    let newHeight = Math.round(entry.winbox.height || rect.height || minHeight);
+                    let newLeft = Math.round(typeof entry.winbox.x === 'number' ? entry.winbox.x : (rect.left || 0));
+                    let newTop = Math.round(typeof entry.winbox.y === 'number' ? entry.winbox.y : (rect.top || 0));
 
                     // If window is wider/taller than viewport, shrink it (respecting min)
                     if (newWidth > viewport.width) newWidth = Math.max(minWidth, viewport.width - 40);
@@ -896,7 +909,38 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                     } else {
                         entry.minimized = false;
                         entry.winbox.show();
-                        entry.winbox.restore();
+                        // Only call restore() when the window was actually
+                        // maximized/minimized. For a window that is already in
+                        // its normal state, restore() reapplies WinBox's stored
+                        // (default) geometry and clobbers the rect we just
+                        // applied above.
+                        if (entry.winbox.max || entry.winbox.min) {
+                            entry.winbox.restore();
+                        }
+                        // Re-apply the saved rect AFTER show()/restore() so the
+                        // restored geometry wins, then clamp only to keep it
+                        // inside the viewport.
+                        if (rectRaw) {
+                            try {
+                                const savedRect = JSON.parse(rectRaw);
+                                const hasW = typeof savedRect.width === 'number' && savedRect.width >= 260;
+                                const hasH = typeof savedRect.height === 'number' && savedRect.height >= 180;
+                                if (hasW && hasH) {
+                                    entry.winbox.resize(savedRect.width, savedRect.height);
+                                } else if (hasW) {
+                                    entry.winbox.resize(savedRect.width, entry.winbox.height);
+                                } else if (hasH) {
+                                    entry.winbox.resize(entry.winbox.width, savedRect.height);
+                                }
+                                if (typeof savedRect.left === 'number' || typeof savedRect.top === 'number') {
+                                    const topbar2 = getTopbarHeight() || 0;
+                                    const left2 = typeof savedRect.left === 'number' ? savedRect.left : entry.winbox.x;
+                                    let top2 = typeof savedRect.top === 'number' ? savedRect.top : entry.winbox.y;
+                                    if (top2 < topbar2) top2 = topbar2;
+                                    entry.winbox.move(left2, top2);
+                                }
+                            } catch (e) { /* ignore */ }
+                        }
                         try { clampEntryToViewport(entry); } catch (e) { /* ignore */ }
                     }
                 } catch (e) { /* ignore */ }

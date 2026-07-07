@@ -220,6 +220,8 @@
         border-bottom: 1px solid transparent;
         border-image: linear-gradient(90deg, var(--accent), var(--accent-dark)) 1;
         flex-wrap: wrap;
+        /* Fixed header row; only .history-container scrolls between it and the footer. */
+        flex-shrink: 0;
       }
 
       .search-input, .filter-select, .sort-select {
