@@ -307,6 +307,10 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
         try {
             const _initial = (localStorage && localStorage.getItem && localStorage.getItem(TAB_KEY)) || (document.querySelector && document.querySelector('.nav-btn.active') && document.querySelector('.nav-btn.active').getAttribute('data-tab')) || 'home';
             window.activeTab = window.activeTab || _initial;
+            // Seed <body data-active-tab> at init so tab-scoped CSS (e.g. the
+            // home-only minimized-window dock bar) is correct before the first
+            // navigation, and matches window.activeTab.
+            try { document.body.setAttribute('data-active-tab', window.activeTab); } catch (e) { /* ignore */ }
             // Create a global var for non-module scripts
             if (typeof activeTab === 'undefined') {
                 // eslint-disable-next-line no-unused-vars
@@ -829,15 +833,20 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                 if (!entry || !entry.winbox) return;
                 try {
                     const { stableStateKey, stableRectKey, sessionStateKey, sessionRectKey } = getWindowStorageKeys(id);
+                    // Detect minimize from BOTH our internal flag and WinBox's native
+                    // state: the window can be minimized via WinBox's own title-bar
+                    // control (which does not go through our minimize(id) helper and so
+                    // never sets entry.minimized). Trust winbox.min as source of truth.
+                    const isMinimized = !!(entry.minimized || entry.winbox.min);
                     let state = 'normal';
-                    if (entry.minimized) state = 'minimized';
+                    if (isMinimized) state = 'minimized';
                     else if (entry.winbox.max) state = 'maximized';
                     try { localStorage.setItem(stableStateKey, state); } catch (e) { /* ignore */ }
                     if (sessionStateKey) {
                         try { localStorage.setItem(sessionStateKey, state); } catch (e) { /* ignore */ }
                     }
 
-                    const storedRect = (entry.winbox.max || entry.minimized) ? entry.lastNormalRect : null;
+                    const storedRect = (entry.winbox.max || isMinimized) ? entry.lastNormalRect : null;
                     const payload = {
                         left: Math.round((storedRect && storedRect.x) || entry.winbox.x || 0),
                         top: Math.round((storedRect && storedRect.y) || entry.winbox.y || 0),
@@ -997,7 +1006,35 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                         try { applyMaximizeConstraints(entry); } catch (e) { /* ignore */ }
                         try { saveState(opts.id); } catch (e) { /* ignore */ }
                     },
+                    onminimize: function() {
+                        // Persist the minimized state when the user minimizes via
+                        // WinBox's own title-bar control (bypasses our minimize helper).
+                        try { entry.minimized = true; } catch (e) { /* ignore */ }
+                        // Surface a dock button in the minimized stack so the window
+                        // remains recoverable (WinBox's native minimize does not go
+                        // through our minimize(id) helper, so without this the window
+                        // would be hidden with no way to bring it back).
+                        try {
+                            const dock = ensureDock();
+                            const btn = ensureDockButton(entry);
+                            if (btn) {
+                                btn.style.display = 'flex';
+                                if (dock) dock.appendChild(btn);
+                            }
+                        } catch (e) { /* ignore */ }
+                        try { saveState(opts.id); } catch (e) { /* ignore */ }
+                    },
                     onrestore: function() {
+                        try { entry.minimized = false; } catch (e) { /* ignore */ }
+                        // Hide/remove the dock button now that the window is visible again.
+                        try {
+                            if (entry.dockButton) {
+                                entry.dockButton.style.display = 'none';
+                                if (entry.dockButton.parentElement) {
+                                    entry.dockButton.parentElement.removeChild(entry.dockButton);
+                                }
+                            }
+                        } catch (e) { /* ignore */ }
                         // Defer all post-restore work so WinBox fully completes its own restore
                         // sequence before we touch resize/move (avoids re-entrant freeze).
                         setTimeout(() => {
@@ -1093,6 +1130,12 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                 try { applyViewportInsets(entry); } catch (e) { /* ignore */ }
                 try { clampEntryToViewport(entry); } catch (e) { /* ignore */ }
                 try { captureNormalRect(entry); } catch (e) { /* ignore */ }
+                // Restore the persisted geometry AND window state (normal /
+                // maximized / minimized) saved in localStorage. Without this the
+                // window always opens in its default normal state after a refresh,
+                // so a window the user had minimized would reappear un-minimized.
+                // Deferred so WinBox finishes its own creation sequence first.
+                setTimeout(() => { try { restoreState(opts.id); } catch (e) { /* ignore */ } }, 0);
                 return winbox;
             }
 
@@ -2396,6 +2439,36 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
             }
         }
         window.refreshConfigWithRetries = window.refreshConfigWithRetries || refreshConfigWithRetries;
+
+        // -----------------------------------------------------------------------------
+        // -----------------------------------------------------------------------------
+        // WinBox window taps: make Synth glance at the cursor + record the
+        // low-value interaction. Delegated document-level listener because WinBox
+        // windows are created dynamically and sit above the 3D canvas.
+        // -----------------------------------------------------------------------------
+        (function(){
+            'use strict';
+            try {
+                let __lastWinTap = 0;
+                document.addEventListener('pointerdown', (ev) => {
+                    try {
+                        const target = ev.target;
+                        if (!target || typeof target.closest !== 'function') return;
+                        if (!target.closest('.winbox')) return;
+                        const now = Date.now();
+                        // Debounce so dragging/resizing a window does not spam.
+                        if (now - __lastWinTap < 800) return;
+                        __lastWinTap = now;
+                        if (typeof window.__synthTriggerFollowMouseGaze === 'function') {
+                            window.__synthTriggerFollowMouseGaze(ev.clientX, ev.clientY);
+                        }
+                        if (typeof window.__synthSendInteraction === 'function') {
+                            window.__synthSendInteraction('window_tap', 'webui.window_tap');
+                        }
+                    } catch (_e) { /* ignore */ }
+                }, { passive: true, capture: true });
+            } catch (_e) { /* ignore */ }
+        })();
 
         // -----------------------------------------------------------------------------
         // Core UI wiring (navigation + chat controls + WebSocket)
@@ -3950,6 +4023,10 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
 
             function setActiveTab(tab) {
                 if (!tab) return;
+                // Expose the active tab on <body> so CSS can scope surfaces to a
+                // specific view (e.g. the minimized-window dock bar shows on home
+                // only). Kept in sync with window.activeTab / localStorage.
+                try { document.body.setAttribute('data-active-tab', tab); } catch (e) { /* ignore */ }
                 const buttons = document.querySelectorAll('.nav-btn[data-tab]');
                 const panels = document.querySelectorAll('.tab-panel[data-tab]');
                 buttons.forEach(btn => {
@@ -4030,10 +4107,14 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                         const gapVal = headerStyle ? (headerStyle.columnGap || headerStyle.gap || '0') : '0';
                         const headerGap = Number.parseFloat(gapVal) || 0;
 
-                        // Reset states and ensure nav is closed by default
-                        header.classList.remove('topbar--compact', 'topbar--wrap', 'nav-open');
+                        // Remember whether the user has the collapsed menu open, so a layout
+                        // recompute (e.g. triggered by the ResizeObserver when the open nav
+                        // changes the header size) does not silently snap the menu shut.
+                        const wasNavOpen = header.classList.contains('nav-open');
                         const hamburger = header.querySelector('.hamburger');
-                        if (hamburger) hamburger.setAttribute('aria-expanded', 'false');
+
+                        // Reset layout states. nav-open is restored below only if still compact.
+                        header.classList.remove('topbar--compact', 'topbar--wrap', 'nav-open');
 
                         const headerWidth = header.getBoundingClientRect().width || 0;
                         const brandWidth = brand.getBoundingClientRect().width || 0;
@@ -4056,7 +4137,21 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                         if (compact && brandText) {
                             header.classList.add('topbar--compact');
                             // avoid adding wrap when compact: we prefer hamburger + collapsed nav
+                            // Preserve a menu the user had open: re-apply nav-open instead of
+                            // letting an incidental ResizeObserver recompute close it.
+                            if (wasNavOpen) {
+                                header.classList.add('nav-open');
+                                if (nav) nav.classList.add('open');
+                                if (hamburger) hamburger.setAttribute('aria-expanded', 'true');
+                            } else {
+                                if (nav) nav.classList.remove('open');
+                                if (hamburger) hamburger.setAttribute('aria-expanded', 'false');
+                            }
                         } else {
+                            // No longer compact: the hamburger is hidden, so fully close the
+                            // collapsed menu state to avoid a stale open panel.
+                            if (nav) nav.classList.remove('open');
+                            if (hamburger) hamburger.setAttribute('aria-expanded', 'false');
                             const brandWidthCompact = brand.getBoundingClientRect().width || 0;
                             const availableCompact = Math.max(0, headerWidth - paddingLeft - paddingRight - brandWidthCompact - headerGap);
                             const wrap = navRequired > (availableCompact + tolerance);

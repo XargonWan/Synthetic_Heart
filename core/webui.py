@@ -1246,6 +1246,58 @@ class SynthWebUIInterface:
             source=str(source),
         )
 
+        # Record the touch on the Synth avatar as a Karada interaction event.
+        try:
+            from core.karada_touch_events import record_touch_event, EVENT_SYNTH_TOUCH
+
+            raw_part = payload.get("part") or payload.get("mapped_part")
+            await record_touch_event(
+                session_id=session_id,
+                interface_path=f"{INTERFACE_NAME}/{session_id}",
+                event_type=EVENT_SYNTH_TOUCH,
+                raw_part=str(raw_part) if raw_part and raw_part != "unknown" else None,
+                username=self._get_session_username(),
+            )
+        except Exception as rec_exc:
+            log_debug(f"{LOG_PREFIX} Failed to record synth_touch event: {rec_exc}")
+
+    def _get_session_username(self) -> str:
+        """Best-effort display name for the interacting WebUI user."""
+        try:
+            from core.config import TRAINER_NAME
+
+            if TRAINER_NAME and TRAINER_NAME != "Trainer":
+                return str(TRAINER_NAME)
+        except Exception:
+            pass
+        return "Trainer"
+
+    async def _handle_interaction_event(
+        self, session_id: str, payload: Dict[str, Any]
+    ) -> None:
+        """Record a non-avatar 3D interaction (environment or window tap)."""
+        try:
+            from core.karada_touch_events import (
+                record_touch_event,
+                EVENT_ENVIRONMENT_TAP,
+                EVENT_WINDOW_TAP,
+            )
+
+            subtype = payload.get("subtype") or payload.get("interaction")
+            if subtype == "window_tap":
+                event_type = EVENT_WINDOW_TAP
+            else:
+                event_type = EVENT_ENVIRONMENT_TAP
+
+            await record_touch_event(
+                session_id=session_id,
+                interface_path=f"{INTERFACE_NAME}/{session_id}",
+                event_type=event_type,
+                username=self._get_session_username(),
+            )
+        except Exception as exc:
+            log_debug(f"{LOG_PREFIX} Failed to record interaction event: {exc}")
+
     # ------------------------------------------------------------------
     # Interface metadata
     # ------------------------------------------------------------------
@@ -2369,6 +2421,14 @@ class SynthWebUIInterface:
                     except Exception as touch_exc:
                         log_warning(
                             f"{LOG_PREFIX} Failed to handle touch interaction from {session_id}: {touch_exc}"
+                        )
+                    continue
+                if msg_type == "interaction":
+                    try:
+                        await self._handle_interaction_event(session_id, payload)
+                    except Exception as inter_exc:
+                        log_warning(
+                            f"{LOG_PREFIX} Failed to handle interaction event from {session_id}: {inter_exc}"
                         )
                     continue
 
@@ -3655,6 +3715,14 @@ class SynthWebUIInterface:
             )
             return
         for item in history:
+            # Karada 3D-interaction events are recorded into chat history purely
+            # for LLM context; they must never surface as visible chat bubbles.
+            try:
+                _meta = item.get("metadata") if isinstance(item, dict) else None
+                if isinstance(_meta, dict) and _meta.get("karada_touch"):
+                    continue
+            except Exception:
+                pass
             # Normalize history item to expected format: {type:'message', sender:'synth'|'user', text: '...'}
             try:
                 sender = item.get("sender") if isinstance(item, dict) else None
@@ -9801,6 +9869,17 @@ class SynthWebUIInterface:
                         f"{LOG_PREFIX} Exception while getting persona manager: {pm_exc_outer}"
                     )
                     self.persona_manager = None
+
+            # Start the periodic Karada touch-event cleanup task.
+            try:
+                from core.karada_touch_events import start_cleanup_task
+
+                start_cleanup_task()
+                log_debug(f"{LOG_PREFIX} Karada touch-event cleanup task started")
+            except Exception as kte_exc:
+                log_warning(
+                    f"{LOG_PREFIX} Failed to start Karada cleanup task: {kte_exc}"
+                )
 
             if self.autostart:
                 log_info(
