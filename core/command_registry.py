@@ -137,6 +137,7 @@ async def help_command() -> str:
         "`/wake` – Enable normal routing in this chat\n"
         "`/sleep` – Ignore non-command messages in this chat\n"
         "`/status` – Show wake/sleep status for this chat\n"
+        "`/get_interface_path` – Show the interface_path of the current chat\n"
         "`/diary [days]` – View synth's diary entries (default: 7 days)\n"
         "`/purge_map [days]` – Purge old mappings\n"
         "`/clean_chat_link <chat_id>` – Remove the link between a chat and conversation.\n"
@@ -283,10 +284,53 @@ async def status_command(interface_context=None) -> str:
     return f"🤖 Status: {status_text}"
 
 
+async def get_interface_path_command(interface_context=None) -> str:
+    """Report the interface_path of the chat where the command was issued."""
+    from core.interface_path_utils import build_interface_path
+
+    interface_id, update, _context = await _resolve_interface_context(interface_context)
+
+    if interface_id == "telegram_bot" and update:
+        chat = getattr(update, "effective_chat", None)
+        message = getattr(update, "effective_message", None)
+        chat_id = chat.id if chat else None
+        if chat_id is None:
+            return "⚠️ Unable to determine chat."
+        thread_id = getattr(message, "message_thread_id", None) if message else None
+        interface_path = build_interface_path(
+            "telegram_bot",
+            str(chat_id),
+            str(thread_id) if thread_id else None,
+        )
+        return f"📍 Interface path: `{interface_path}`"
+
+    if isinstance(interface_context, dict):
+        interaction = interface_context.get("discord_interaction")
+        if interaction is not None:
+            guild = getattr(interaction, "guild", None)
+            channel = getattr(interaction, "channel", None)
+            guild_id = getattr(guild, "id", None)
+            channel_id = getattr(channel, "id", None)
+            if guild_id:
+                interface_path = build_interface_path(
+                    "discord_bot",
+                    str(guild_id),
+                    str(channel_id) if channel_id else None,
+                )
+            else:
+                user = getattr(interaction, "user", None)
+                user_id = getattr(user, "id", None)
+                interface_path = build_interface_path("discord_bot", str(user_id))
+            return f"📍 Interface path: `{interface_path}`"
+
+    return "📍 Interface path unavailable for this interface."
+
+
 register_command("wake", wake_command)
 register_command("awake", wake_command)
 register_command("sleep", sleep_command)
 register_command("status", status_command)
+register_command("get_interface_path", get_interface_path_command)
 
 
 async def _resolve_cortex_choice(choice_raw: str) -> str:
@@ -458,10 +502,33 @@ async def cortex_command(*args) -> str:
     )
     from core.cortex_registry import get_cortex_registry
 
-    # resolve active engines across scopes
-    base = await get_active_cortex_engine(None)
-    grillo = await get_active_cortex_engine("grillo")
-    trainer = await get_active_cortex_engine("trainer")
+    async def _safe_active(scope: str | None) -> str:
+        """Resolve the active engine for *scope*, degrading gracefully.
+
+        ``get_active_cortex_engine`` re-raises when the configured engine is
+        unresolvable (e.g. a stale ``BASE_CORTEX`` pointing at an engine that
+        is no longer registered).  We must never let that abort the command:
+        otherwise listing (``/cortex``, ``/cortex list``) would break exactly
+        when the user needs it most to fix the broken setting.  Fall back to
+        the raw configured value, or a placeholder, so listing still renders.
+        """
+        try:
+            return await get_active_cortex_engine(scope)
+        except Exception:
+            from core.config import config_registry
+
+            key = {
+                None: "BASE_CORTEX",
+                "grillo": "GRILLO_CORTEX",
+                "trainer": "TRAINER_CORTEX",
+            }.get(scope, "BASE_CORTEX")
+            raw = config_registry.get_value(key, "Default")
+            return f"{raw} (unresolved)" if raw not in (None, "") else "unresolved"
+
+    # resolve active engines across scopes (degrade gracefully on failure)
+    base = await _safe_active(None)
+    grillo = await _safe_active("grillo")
+    trainer = await _safe_active("trainer")
 
     reg = get_cortex_registry()
 
@@ -497,13 +564,15 @@ async def cortex_command(*args) -> str:
                 return str(ve)
             models = _get_engine_models(engine_name)
             current = _get_engine_current_model(engine_name)
-            lines = [f"*Models for `{engine_name}`:*"]
+            lines = [f"*Models for `{engine_name}` (Cortex):*"]
             if not models:
                 lines.append("_No models available for this engine._")
             else:
                 for m in models:
                     marker = " ✅" if m == current else ""
                     lines.append(f"• `{m}`{marker}")
+            lines.append("")
+            lines.append(f"To switch: `/cortex {engine_name} <model>`")
             return "\n".join(lines)
 
         # full listing: every engine grouped by kind with its models
@@ -543,12 +612,6 @@ async def cortex_command(*args) -> str:
         grillo_display = _fmt_override("grillo", grillo)
         trainer_display = _fmt_override("trainer", trainer)
 
-        lines: list[str] = ["*Active Cortex engines:*"]
-        # show base engine separately from any live override
-        lines.append(f"• base: `{base}`")
-        # trainer and grillo overrides always shown (even if Default)
-        lines.append(f"• trainer override: `{trainer_display}`")
-        lines.append(f"• grillo override: `{grillo_display}`")
         # optionally show live override when configured and different from base
         try:
             from core.config import config_registry
@@ -556,23 +619,35 @@ async def cortex_command(*args) -> str:
             live_override = config_registry.get_value("LIVE_CORTEX", "Default")
         except Exception:
             live_override = "Default"
+
+        lines: list[str] = [
+            f"*Active Cortex engine:* `{base}`",
+            f"• trainer override: `{trainer_display}`",
+            f"• grillo override: `{grillo_display}`",
+        ]
         if (
             live_override
             and live_override not in ("Default", "", None)
             and live_override != base
         ):
             lines.append(f"• live override: `{live_override}`")
-        lines.append("\n*Available Cortex Engines:*")
+
+        lines.append("")
+        lines.append("*Available Cortex engines:*")
+        has_engines = False
         for k in sorted(kind_map.keys()):
             engines = kind_map.get(k) or []
             if not engines:
                 continue
-            lines.append(f"\n{k}:")
+            has_engines = True
             for e in sorted(engines):
-                lines.append(f"• `{k}/{e}`")
-        lines.append(
-            "\nTo change base: `/cortex <kind>/<engine>` or `/cortex <engine>` (if unambiguous)"
-        )
+                marker = " ✅" if e == base else ""
+                lines.append(f"• `{k}/{e}`{marker}")
+        if not has_engines:
+            lines.append("_No engines registered._")
+
+        lines.append("")
+        lines.append("To switch: `/cortex <engine>` or `/cortex <engine> <model>`")
         lines.append("To override grillo: `/cortex_grillo <engine>`")
         lines.append("To override trainer: `/cortex_trainer <engine>`")
         return "\n".join(lines)
@@ -709,6 +784,240 @@ async def cortex_trainer_command(*args) -> str:
 register_command("cortex_live", cortex_live_alias)
 register_command("cortex_grillo", cortex_grillo_command)
 register_command("cortex_trainer", cortex_trainer_command)
+
+
+# ---------------------------------------------------------------------------
+# Media subsystem commands: /vox /auris /iris /live
+#
+# All four mirror the /cortex UX:
+#   /<cmd>                    -> list every registered engine (active marked)
+#   /<cmd> <engine>           -> list that engine's models (current marked)
+#   /<cmd> <engine> <model>   -> switch the active engine AND its model
+#
+# Engines come from the per-subsystem registry (VOX/AURIS/IRIS/LIVE_REGISTRY).
+# Models come from the external-endpoint registry (available_models); local
+# engines that are not external endpoints simply expose no models.
+# ---------------------------------------------------------------------------
+
+
+async def _media_endpoint_models(engine_name: str) -> tuple[list[str], str | None]:
+    """Return ``(available_models, default_model)`` for an external endpoint.
+
+    Returns ``([], None)`` when *engine_name* is not an external endpoint
+    (e.g. a bundled local engine) or on any lookup failure.
+    """
+    try:
+        from core.external_endpoints.registry import get_external_endpoint_registry
+
+        endpoint = await get_external_endpoint_registry().get_endpoint_by_name(
+            engine_name
+        )
+    except Exception:
+        return [], None
+    if endpoint is None:
+        return [], None
+    return list(endpoint.available_models or []), endpoint.default_model
+
+
+async def _media_set_endpoint_model(engine_name: str, model: str) -> None:
+    """Persist *model* as the default for external endpoint *engine_name*.
+
+    Silently no-ops when the engine is not an external endpoint.
+    """
+    try:
+        from core.external_endpoints.registry import get_external_endpoint_registry
+
+        registry = get_external_endpoint_registry()
+        endpoint = await registry.get_endpoint_by_name(engine_name)
+        if endpoint is not None:
+            await registry.set_default_model(endpoint.id, model)
+    except Exception:
+        pass
+
+
+async def _media_command(
+    label: str,
+    config_key: str,
+    engines: list[str],
+    default_engine: str,
+    args: tuple,
+) -> str:
+    """Shared handler for the /vox /auris /iris /live commands.
+
+    Args:
+        label:          Human-readable subsystem name for headings.
+        config_key:     Config registry key holding the active engine.
+        engines:        Registered engine names for this subsystem.
+        default_engine: Fallback value if the config key is unset.
+        args:           Raw command arguments.
+    """
+    from core.config import config_registry
+
+    try:
+        active = str(
+            config_registry.get_value(config_key, default_engine, value_type=str)
+        )
+    except Exception:
+        active = default_engine
+
+    # No-arg -> list every registered engine, marking the active one.
+    if not args:
+        lines = [
+            f"*Active {label} engine:* `{active}`",
+            "",
+            f"*Available {label} engines:*",
+        ]
+        if not engines:
+            lines.append("_No engines registered._")
+        else:
+            for name in sorted(engines):
+                marker = " ✅" if name == active else ""
+                lines.append(f"• `{name}`{marker}")
+        lines.append("")
+        lines.append(
+            f"To switch: `/{label.lower()} <engine>` or `/{label.lower()} <engine> <model>`"
+        )
+        return "\n".join(lines)
+
+    engine_arg = str(args[0]).strip()
+    model_arg = str(args[1]).strip() if len(args) >= 2 else None
+
+    # Resolve the engine name (exact, else case-insensitive substring).
+    if engine_arg in engines:
+        engine_name = engine_arg
+    else:
+        candidates = [e for e in engines if engine_arg.lower() in e.lower()]
+        exact = [e for e in candidates if e.lower() == engine_arg.lower()]
+        if len(exact) == 1:
+            engine_name = exact[0]
+        elif len(candidates) == 1:
+            engine_name = candidates[0]
+        elif len(candidates) > 1:
+            hint = "\n".join(f"/{label.lower()} {c}" for c in sorted(candidates))
+            return (
+                f"❌ Found multiple matching {label} engines for "
+                f"'{engine_arg}'. Which one did you mean?\n{hint}"
+            )
+        else:
+            avail = ", ".join(f"`{e}`" for e in sorted(engines)) or "_(none)_"
+            return f"❌ {label} engine `{engine_arg}` not found. Available: {avail}"
+
+    models, current_model = await _media_endpoint_models(engine_name)
+
+    # `/<cmd> <engine>` -> list that engine's models.
+    if model_arg is None:
+        lines = [f"*Models for `{engine_name}` ({label}):*"]
+        if not models:
+            lines.append("_No models available for this engine._")
+        else:
+            for m in models:
+                marker = " ✅" if m == current_model else ""
+                lines.append(f"• `{m}`{marker}")
+        lines.append("")
+        lines.append(f"To switch: `/{label.lower()} {engine_name} <model>`")
+        return "\n".join(lines)
+
+    # `/<cmd> <engine> <model>` -> switch active engine AND model.
+    if models and model_arg not in models:
+        avail = ", ".join(f"`{m}`" for m in models)
+        return (
+            f"❌ Model `{model_arg}` not available for `{engine_name}`. "
+            f"Available: {avail}"
+        )
+
+    try:
+        await config_registry.set_value(config_key, engine_name)
+    except Exception as exc:
+        return f"❌ Failed to switch {label} engine: {exc}"
+
+    await _media_set_endpoint_model(engine_name, model_arg)
+
+    return (
+        f"✅ {label} engine switched to `{engine_name}` model `{model_arg}`.\n"
+        f"_Note: media engines are applied on next use; a restart guarantees a full re-sync._"
+    )
+
+
+async def vox_command(*args) -> str:
+    """Show or switch the active Vox (TTS) engine and model.
+
+    Usage:
+      `/vox`                    -> list registered TTS engines (active marked)
+      `/vox <engine>`           -> list that engine's models
+      `/vox <engine> <model>`   -> switch active engine and model
+    """
+    from core.vox_registry import VOX_REGISTRY
+
+    return await _media_command(
+        label="Vox",
+        config_key="ACTIVE_VOX_ENGINE",
+        engines=VOX_REGISTRY.get_available_engines(),
+        default_engine="disabled",
+        args=args,
+    )
+
+
+async def auris_command(*args) -> str:
+    """Show or switch the active Auris (STT) engine and model.
+
+    Usage:
+      `/auris`                    -> list registered STT engines (active marked)
+      `/auris <engine>`           -> list that engine's models
+      `/auris <engine> <model>`   -> switch active engine and model
+    """
+    from core.auris_registry import AURIS_REGISTRY
+
+    return await _media_command(
+        label="Auris",
+        config_key="ACTIVE_AURIS_ENGINE",
+        engines=AURIS_REGISTRY.get_available_engines(),
+        default_engine="disabled",
+        args=args,
+    )
+
+
+async def iris_command(*args) -> str:
+    """Show or switch the active Iris (vision) engine and model.
+
+    Usage:
+      `/iris`                    -> list registered vision engines (active marked)
+      `/iris <engine>`           -> list that engine's models
+      `/iris <engine> <model>`   -> switch active engine and model
+    """
+    from core.iris_registry import IRIS_REGISTRY
+
+    return await _media_command(
+        label="Iris",
+        config_key="ACTIVE_IRIS_ENGINE",
+        engines=IRIS_REGISTRY.get_available_engines(),
+        default_engine="disabled",
+        args=args,
+    )
+
+
+async def live_command(*args) -> str:
+    """Show or switch the active Live (real-time audio) engine and model.
+
+    Usage:
+      `/live`                    -> list registered live engines (active marked)
+      `/live <engine>`           -> list that engine's models
+      `/live <engine> <model>`   -> switch active engine and model
+    """
+    from core.live_registry import LIVE_REGISTRY
+
+    return await _media_command(
+        label="Live",
+        config_key="LIVE_CORTEX",
+        engines=LIVE_REGISTRY.get_available_engines(),
+        default_engine="disabled",
+        args=args,
+    )
+
+
+register_command("vox", vox_command)
+register_command("auris", auris_command)
+register_command("iris", iris_command)
+register_command("live", live_command)
 
 
 async def model_command(*args) -> str:
