@@ -83,17 +83,6 @@ _ATTACHMENT_TEXT_EXTENSIONS = (
 
 _LEGACY_BUILD_JSON_PROMPT_WARNED = False
 
-# Chat history limit
-CHAT_HISTORY_LIMIT = config_registry.get_var(
-    "CHAT_HISTORY",
-    10,
-    label="Chat History Length",
-    description="Number of recent messages to include in chat history context.",
-    group="core",
-    component="conversation",
-    value_type=int,
-)
-
 # How many recent messages to include in the explicit current chat recap
 CHAT_RECAP_LAST_N = config_registry.get_var(
     "CHAT_RECAP_LAST_N",
@@ -1640,6 +1629,21 @@ async def build_prompt_request(
             )
         if recon_instructions:
             recon_prefixes.extend([str(r) for r in recon_instructions if r])
+
+        # Surface recon snippets (e.g. live radio status) directly in the
+        # instructions. They are also carried inside context.recon.snippets,
+        # but models frequently ignore that nested field; stating the live
+        # data explicitly makes it usable in the reply.
+        recon_snippet_texts = [
+            str(s.get("content")).strip()
+            for s in recon_snippets
+            if isinstance(s, dict) and s.get("content")
+        ]
+        if recon_snippet_texts:
+            recon_prefixes.append(
+                "Live contextual data (already gathered for you, treat as current fact): "
+                + " | ".join(recon_snippet_texts)
+            )
 
         if recon_prefixes:
             json_instructions = " ".join(recon_prefixes) + " " + json_instructions
