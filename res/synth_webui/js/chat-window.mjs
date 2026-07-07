@@ -176,10 +176,32 @@ function _attachChatAutoResize(winbox, mount) {
     const getMaxH = () => Math.floor(window.innerHeight * 0.65);
     let _rafId = null;
 
+    // Once the user manually resizes the chat window (or a saved size was
+    // restored on load), stop auto-fitting the height so the user's chosen size
+    // is preserved. Auto-grow is a convenience default only, not a size the user
+    // explicitly picked.
+    let _userSized = false;
+    try {
+        // A previously persisted rect means the user had already chosen a size.
+        if (localStorage.getItem(`${CHAT_RECT_KEY}-chat`)) _userSized = true;
+    } catch (e) { /* ignore */ }
+
+    // Detect manual resize: WinBox resize handles live inside the window element.
+    try {
+        const winEl = winbox.window || winbox.dom || winbox.g || null;
+        if (winEl) {
+            winEl.querySelectorAll('.wb-n, .wb-s, .wb-w, .wb-e, .wb-nw, .wb-ne, .wb-sw, .wb-se').forEach((h) => {
+                h.addEventListener('pointerdown', () => { _userSized = true; }, { passive: true });
+            });
+        }
+    } catch (e) { /* ignore */ }
+
     function _resize() {
         _rafId = null;
         try {
-            // Don't interfere while the user has minimized/maximized
+            // Don't interfere while the user has minimized/maximized, or once the
+            // user (or a restored session) has settled on an explicit size.
+            if (_userSized) return;
             if (winbox.min || winbox.max || winbox.full) return;
 
             const header = mount.querySelector('.synth-chat-header');
