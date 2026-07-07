@@ -6724,7 +6724,15 @@ function _sampleVisemeTimeline(timeline, currentTime) {
 
 function render() {
     requestAnimationFrame(render);
-    const delta = clock.getDelta();
+    // Clamp the frame delta. When the Home tab is hidden (e.g. the user
+    // navigates to Activity and back) the browser throttles/suspends
+    // requestAnimationFrame, so on resume clock.getDelta() returns the entire
+    // elapsed time (potentially many seconds). Feeding that huge delta into
+    // currentVRM.update()/currentMixer.update() jumps the expression manager,
+    // blink/lookAt state and mixer far ahead in a single frame, which is what
+    // leaves the eyes in a "strange" state after switching tabs. A single ~2
+    // frame budget (0.05s) keeps animation advancing normally on resume.
+    const delta = Math.min(clock.getDelta(), 0.05);
 
     // Update Karada v2 Animation Engine
     updateEngine();
