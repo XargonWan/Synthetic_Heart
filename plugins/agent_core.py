@@ -26,7 +26,7 @@ try:
         ui_type="boolean",
         description="Enable the Agent plugin (PoC)",
         scope="agent",
-        component="agent_core",
+        component="agent",
     )
     register_exposed_var(
         "AGENT_APPROVAL_MODE",
@@ -36,7 +36,7 @@ try:
         ui_type="string",
         description="Approval mode for agent proposals (always_approve|whitelist|always_ask|disabled)",
         scope="agent",
-        component="agent_core",
+        component="agent",
     )
     register_exposed_var(
         "AGENT_SHELL_WHITELIST",
@@ -46,7 +46,7 @@ try:
         ui_type="string",
         description="Comma-separated list of approved shell commands for the agent",
         scope="agent",
-        component="agent_core",
+        component="agent",
     )
     register_exposed_var(
         "AGENT_CONTAINER_REQUIRED",
@@ -56,7 +56,7 @@ try:
         ui_type="boolean",
         description="Require containerized environment to run risky actions",
         scope="agent",
-        component="agent_core",
+        component="agent",
     )
     register_exposed_var(
         "AGENT_NOTIFY_TRAINER",
@@ -66,7 +66,7 @@ try:
         ui_type="boolean",
         description="Notify the trainer when the agent creates a proposal.",
         scope="agent",
-        component="agent_core",
+        component="agent",
     )
 except Exception:
     # tests may run before variables engine is available

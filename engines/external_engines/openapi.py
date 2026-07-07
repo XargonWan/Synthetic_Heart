@@ -47,43 +47,8 @@ _LEGACY_DICT_PROMPT_WARNED = False
 try:
     from core.variables_engine import register_exposed_var
 
-    # Core settings
-    register_exposed_var(
-        "OPENAPI_BASE_URL",
-        label="OpenAPI Base URL",
-        default="http://localhost:8081/v1",
-        value_type=str,
-        ui_type="string",
-        description="Base URL for the OpenAI-compatible endpoint (e.g., http://localhost:8081/v1 for Ollama).",
-        scope="llm",
-        component="openapi",
-        tags=["cortex_engine"],
-        needs_component_reload=True,
-    )
-    register_exposed_var(
-        "OPENAPI_API_KEY",
-        label="API Key (Optional)",
-        default="",
-        value_type=str,
-        ui_type="password",
-        description="Bearer token for authentication (leave empty for local endpoints like Ollama).",
-        scope="llm",
-        component="openapi",
-        tags=["cortex_engine", "sensitive"],
-        needs_component_reload=True,
-    )
-    register_exposed_var(
-        "OPENAPI_DEFAULT_MODEL",
-        label="Default Model",
-        default="llama3",
-        value_type=str,
-        ui_type="combobox",
-        description="Model name to use (e.g., llama3 for Ollama, local-model for LM Studio).",
-        scope="llm",
-        component="openapi",
-        tags=["cortex_engine"],
-        needs_component_reload=False,
-    )
+    # Base URL, API key and default model live in the Engines tab
+    # (external_endpoints), not in Settings.
 
     # Advanced settings
     register_exposed_var(
@@ -237,6 +202,7 @@ OPENAPI_BASE_URL = config_registry.get_var(
     description="Base URL for the OpenAI-compatible endpoint.",
     group="llm",
     component="openapi",
+    hidden=True,
 )
 
 OPENAPI_API_KEY = config_registry.get_var(
@@ -247,6 +213,7 @@ OPENAPI_API_KEY = config_registry.get_var(
     group="llm",
     component="openapi",
     sensitive=True,
+    hidden=True,
 )
 
 OPENAPI_DEFAULT_MODEL = config_registry.get_var(
@@ -256,6 +223,7 @@ OPENAPI_DEFAULT_MODEL = config_registry.get_var(
     description="Model name to use.",
     group="llm",
     component="openapi",
+    hidden=True,
 )
 
 OPENAPI_TIMEOUT = config_registry.get_var(

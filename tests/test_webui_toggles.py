@@ -61,7 +61,6 @@ def test_exposed_vars_component_assignments():
         "RESTRICT_ACTIONS": "core",
         "TRAINER_IDS": "core",
         "PROMPT_LOCATION": "core",
-        "CHAT_HISTORY": "conversation",
         "DIARY_HISTORY_DAYS": "diary",
         "REACT_WHEN_MENTIONED": "reactions",
         "SYNTH_PROFILE": "persona",
@@ -102,6 +101,7 @@ def test_synth_current_animation_is_readonly():
     defn = config_registry._definitions.get("SYNTH_CURRENT_ANIMATION")
     assert defn is not None, "SYNTH_CURRENT_ANIMATION missing from registry"
     assert getattr(defn, "readonly", False) is True
+    assert getattr(defn, "hidden", False) is True
 
 
 def test_card_content_wrapper_and_collapser_exists():

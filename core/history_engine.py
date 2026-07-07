@@ -209,16 +209,11 @@ def _entry_to_text(entry: HistoryEntry) -> str:
     )
     ts = entry.get("timestamp") or entry.get("date") or ""
 
-    # Diary-like dicts
+    # Diary-like dicts: inject only the interaction summary, never the raw
+    # personal thought.
     if "interaction_summary" in entry or "personal_thought" in entry:
         summary = entry.get("interaction_summary") or ""
-        thought = entry.get("personal_thought") or ""
-        parts = []
-        if summary:
-            parts.append(f"summary: {summary}")
-        if thought:
-            parts.append(f"thought: {thought}")
-        body = " | ".join(parts) or (text or "")
+        body = f"summary: {summary}" if summary else (text or "")
         return f"[diary {_format_ts(ts)}] {body}".strip()
 
     # Reply context annotation (40-char truncation for LLM readability)

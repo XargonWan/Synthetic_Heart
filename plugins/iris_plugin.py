@@ -23,68 +23,45 @@ from core.config_manager import config_registry
 from core.core_initializer import register_plugin
 from core.iris_registry import IRIS_REGISTRY
 from core.logging_utils import log_error, log_info, log_warning
-from core.variables_engine import register_exposed_var
 from plugins.iris_base import IrisResult
 
 # ---------------------------------------------------------------------------
-# Exposed config variables
+# Config variables (hidden from Settings — Iris is configured via the Engines
+# tab / external_endpoints, not the Settings page).
 # ---------------------------------------------------------------------------
 
 
-register_exposed_var(
+config_registry.get_value(
     "ACTIVE_IRIS_ENGINE",
-    label="Active Iris Engine",
-    default="disabled",
+    "disabled",
     value_type=str,
-    ui_type="string",
-    description=(
-        "Name of the active Iris vision engine (e.g. 'selenium-llm-engine'). "
-        "Set to 'disabled' to turn off the Iris subsystem."
-    ),
-    scope="plugins",
+    group="plugins",
     component="iris_plugin",
-    advanced=False,
+    hidden=True,
 )
-
-register_exposed_var(
+config_registry.get_value(
     "IRIS_ENGINE_SETTINGS",
-    label="Iris Engine Settings (JSON)",
-    default="{}",
+    "{}",
     value_type=str,
-    ui_type="string",
-    description="Optional JSON dict of per-engine settings passed to the active Iris engine.",
-    scope="plugins",
+    group="plugins",
     component="iris_plugin",
-    advanced=True,
+    hidden=True,
 )
-
-register_exposed_var(
+config_registry.get_value(
     "IRIS_DEFAULT_PROMPT",
-    label="Iris Default Prompt",
-    default="Describe this image in detail.",
+    "Describe this image in detail.",
     value_type=str,
-    ui_type="string",
-    description=(
-        "Default instruction sent to the vision engine when no explicit prompt "
-        "is provided by the action payload."
-    ),
-    scope="plugins",
+    group="plugins",
     component="iris_plugin",
-    advanced=True,
+    hidden=True,
 )
-register_exposed_var(
+config_registry.get_value(
     "IRIS_DEFAULT_MODEL",
-    label="Iris Default Model",
-    default="",
+    "",
     value_type=str,
-    ui_type="string",
-    description=(
-        "Optional model name used for Iris vision requests. "
-        "When set, this model is used instead of the endpoint's default model."
-    ),
-    scope="plugins",
+    group="plugins",
     component="iris_plugin",
-    advanced=True,
+    hidden=True,
 )
 
 # ---------------------------------------------------------------------------

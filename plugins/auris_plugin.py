@@ -20,85 +20,56 @@ from core.auris_registry import AURIS_REGISTRY
 from core.config_manager import config_registry
 from core.core_initializer import register_plugin
 from core.logging_utils import log_error, log_info, log_warning
-from core.variables_engine import register_exposed_var
 from plugins.auris_base import AurisTranscriptResult
 
 # ---------------------------------------------------------------------------
-# Exposed config variables
+# Config variables (hidden from Settings)
 # ---------------------------------------------------------------------------
+#
+# Auris engine selection, default model and per-engine settings now live in the
+# Engines tab (media-subsystem selectors), not in Settings. These keys remain
+# readable at runtime via ``config_registry.get_value`` but are registered
+# hidden so they no longer surface in the Settings UI.
 
-
-register_exposed_var(
+config_registry.get_value(
     "ACTIVE_AURIS_ENGINE",
-    label="Active Auris Engine",
-    default="vosk",
+    "vosk",
     value_type=str,
-    ui_type="string",
-    description=(
-        "Name of the active Auris STT engine (file-based only, e.g. 'vosk'). "
-        "Set to 'disabled' to turn off the Auris subsystem. For real-time streaming use the Live subsystem."
-    ),
-    scope="plugins",
+    group="plugins",
     component="auris_plugin",
-    advanced=False,
+    hidden=True,
 )
-
-register_exposed_var(
+config_registry.get_value(
     "AURIS_ENGINE_SETTINGS",
-    label="Auris Engine Settings (JSON)",
-    default="{}",
+    "{}",
     value_type=str,
-    ui_type="string",
-    description="Optional JSON dict of per-engine settings passed to the active Auris engine.",
-    scope="plugins",
+    group="plugins",
     component="auris_plugin",
-    advanced=True,
+    hidden=True,
 )
-
-register_exposed_var(
+config_registry.get_value(
     "VOSK_MODEL_PATH",
-    label="Vosk Model Path",
-    default="",
+    "",
     value_type=str,
-    ui_type="string",
-    description=(
-        "Path to a Vosk model directory.  Leave blank to use the default "
-        "~/.cache/vosk/vosk-model-small-en-us (auto-downloaded on first use)."
-    ),
-    scope="plugins",
+    group="plugins",
     component="auris_plugin",
-    advanced=True,
+    hidden=True,
 )
-
-register_exposed_var(
+config_registry.get_value(
     "VOSK_LANGUAGE",
-    label="Vosk Language",
-    default="en-us",
+    "en-us",
     value_type=str,
-    ui_type="string",
-    description=(
-        "Language code used when auto-downloading a Vosk model. "
-        "The WebUI shows a dropdown when the active Auris engine is vosk."
-    ),
-    scope="plugins",
+    group="plugins",
     component="auris_plugin",
-    advanced=True,
+    hidden=True,
 )
-
-register_exposed_var(
+config_registry.get_value(
     "MODEL_AUTO_DOWNLOAD",
-    label="Auto‑download models",
-    default=True,
+    True,
     value_type=bool,
-    ui_type="boolean",
-    description=(
-        "When enabled, Auris will automatically fetch missing models from the "
-        "Model Manager when they are needed (e.g. a Vosk STT model). "
-        "If disabled, you must manually download models via the WebUI."
-    ),
-    scope="plugins",
+    group="plugins",
     component="auris_plugin",
-    advanced=True,
+    hidden=True,
 )
 
 

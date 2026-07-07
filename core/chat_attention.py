@@ -44,14 +44,14 @@ register_exposed_var(
 register_exposed_var(
     "CHAT_ATTENTION_WINDOW_SECONDS",
     label="Attention Window (seconds)",
-    default=0,
+    default=180,
     value_type=int,
     ui_type="number",
     description=(
         "After the alias/mention triggers a response, keep replying to this chat "
         "without requiring the alias again for this many seconds of activity. "
-        "Each directed reply refreshes the window. Set to 0 to disable (default): "
-        "the alias/mention is then required on every message, as before. Useful "
+        "Each directed reply refreshes the window. Set to 0 to disable: "
+        "the alias/mention is then required on every message. Useful "
         "for multi-turn roleplay so the SyntH doesn't need to be re-addressed on "
         "every line. Never applies to messages from peer SyntH bots (see peer_policy) "
         "-- those always require their own explicit peer-policy match."

@@ -104,44 +104,8 @@ DEFAULT_MODEL = "grok-4-1-fast-reasoning"
 try:
     from core.variables_engine import register_exposed_var
 
-    register_exposed_var(
-        "XAI_API_KEY",
-        label="XAI API Key",
-        default="",
-        value_type=str,
-        ui_type="password",
-        description="API key for xAI Grok (https://console.x.ai/).",
-        scope="llm",
-        component="xai_grok",
-        tags=["cortex_engine", "sensitive"],
-        needs_component_reload=True,
-    )
-    register_exposed_var(
-        "XAI_BASE_URL",
-        label="XAI Base URL",
-        default="https://api.x.ai",
-        value_type=str,
-        ui_type="string",
-        description="Base URL for the xAI API (change only for proxies).",
-        scope="llm",
-        component="xai_grok",
-        tags=["cortex_engine"],
-        advanced=True,
-        needs_component_reload=True,
-    )
-    register_exposed_var(
-        "XAI_DEFAULT_MODEL",
-        label="Default Model",
-        default=DEFAULT_MODEL,
-        value_type=str,
-        ui_type="combobox",
-        options=list(MODEL_CONFIGS.keys()),
-        description="Default Grok model to use when no scope/action override matches.",
-        scope="llm",
-        component="xai_grok",
-        tags=["cortex_engine"],
-        needs_component_reload=False,
-    )
+    # API key, base URL and default model live in the Engines tab
+    # (external_endpoints), not in Settings.
     register_exposed_var(
         "XAI_MAX_TOKENS",
         label="Max Output Tokens",
@@ -168,6 +132,7 @@ XAI_API_KEY = config_registry.get_var(
     group="llm",
     component="xai_grok",
     sensitive=True,
+    hidden=True,
 )
 
 XAI_BASE_URL = config_registry.get_var(
@@ -178,6 +143,7 @@ XAI_BASE_URL = config_registry.get_var(
     group="llm",
     component="xai_grok",
     advanced=True,
+    hidden=True,
 )
 
 XAI_DEFAULT_MODEL = config_registry.get_var(
@@ -187,6 +153,7 @@ XAI_DEFAULT_MODEL = config_registry.get_var(
     description="Default Grok model.",
     group="llm",
     component="xai_grok",
+    hidden=True,
 )
 
 XAI_MAX_TOKENS = config_registry.get_var(

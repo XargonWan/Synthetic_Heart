@@ -427,6 +427,7 @@ def register_all():
         scope="synth",
         component="animation",
         readonly=True,
+        hidden=True,
     )
 
     # WebUI accent color (picker + presets)
@@ -774,17 +775,6 @@ def register_all():
         scope="grillo",
         component="grillo",
         advanced=False,
-    )
-
-    register_exposed_var(
-        "CHAT_HISTORY",
-        label="Chat History Length",
-        default=10,
-        value_type=int,
-        ui_type="number",
-        description="Number of recent messages to include in chat history context.",
-        scope="core",
-        component="conversation",
     )
 
     register_exposed_var(

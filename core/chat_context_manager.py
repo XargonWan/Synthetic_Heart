@@ -115,17 +115,6 @@ def get_or_create_chat_context(interface_path: str) -> deque:
     interface_path = _resolve_context_path(interface_path)
 
     if interface_path not in _context_memory:
-        # Keep legacy exposed var for backward compatibility, but prefer the
-        # unified global verbosity setting.
-        config_registry.get_var(
-            "CHAT_HISTORY_LIMIT",
-            10,
-            label="Chat History Limit",
-            description="(Legacy) Number of messages to keep in memory per chat. Prefer CONTEXT_VERBOSITY.",
-            group="core",
-            component="chat_context_manager",
-        )
-
         limit = None
         for key in ("CONTEXT_VERBOSITY", "CHAT_HISTORY", "CHAT_HISTORY_LIMIT"):
             try:

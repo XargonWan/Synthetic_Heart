@@ -41,43 +41,8 @@ _LEGACY_DICT_PROMPT_WARNED = False
 try:
     from core.variables_engine import register_exposed_var
 
-    register_exposed_var(
-        "OPENROUTER_API_KEY",
-        label="OpenRouter API Key",
-        default="",
-        value_type=str,
-        ui_type="password",
-        description="API key for OpenRouter (https://openrouter.ai/keys).",
-        scope="llm",
-        component="openrouter",
-        tags=["cortex_engine", "sensitive"],
-        needs_component_reload=True,
-    )
-    register_exposed_var(
-        "OPENROUTER_BASE_URL",
-        label="OpenRouter Base URL",
-        default="https://openrouter.ai/api/v1",
-        value_type=str,
-        ui_type="string",
-        description="Base URL for the OpenRouter API.",
-        scope="llm",
-        component="openrouter",
-        tags=["cortex_engine"],
-        advanced=True,
-        needs_component_reload=True,
-    )
-    register_exposed_var(
-        "OPENROUTER_DEFAULT_MODEL",
-        label="Default Model",
-        default="x-ai/grok-4.1-fast",
-        value_type=str,
-        ui_type="combobox",
-        description="Default OpenRouter model used when no scope/action override matches.",
-        scope="llm",
-        component="openrouter",
-        tags=["cortex_engine"],
-        needs_component_reload=False,
-    )
+    # API key, base URL and default model live in the Engines tab
+    # (external_endpoints), not in Settings.
     register_exposed_var(
         "OPENROUTER_DISABLE_TOOLS",
         label="Disable Tools",
@@ -156,6 +121,7 @@ OPENROUTER_API_KEY = config_registry.get_var(
     group="llm",
     component="openrouter",
     sensitive=True,
+    hidden=True,
 )
 
 OPENROUTER_BASE_URL = config_registry.get_var(
@@ -166,6 +132,7 @@ OPENROUTER_BASE_URL = config_registry.get_var(
     group="llm",
     component="openrouter",
     advanced=True,
+    hidden=True,
 )
 
 OPENROUTER_DEFAULT_MODEL = config_registry.get_var(
@@ -175,6 +142,7 @@ OPENROUTER_DEFAULT_MODEL = config_registry.get_var(
     description="Default OpenRouter model.",
     group="llm",
     component="openrouter",
+    hidden=True,
 )
 
 OPENROUTER_DISABLE_TOOLS = config_registry.get_var(

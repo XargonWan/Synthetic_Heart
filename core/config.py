@@ -198,6 +198,7 @@ LIVE_SYNC_CHAT_HISTORY = config_registry.get_var(
     group="core",
     component="live",
     value_type=bool,
+    advanced=True,
 )
 
 LIVE_HISTORY_SYNC_INTERVAL = config_registry.get_var(
@@ -211,6 +212,7 @@ LIVE_HISTORY_SYNC_INTERVAL = config_registry.get_var(
     group="core",
     component="live",
     value_type=int,
+    advanced=True,
 )
 
 # ----------------------------------------------------------------------
@@ -287,6 +289,7 @@ _register_exposed_var(
         "Umbriel",
         "Zubenelgenubi",
     ],
+    hidden=True,
 )
 
 _register_exposed_var(
@@ -302,6 +305,7 @@ _register_exposed_var(
     ),
     scope="live",
     component="cortex_live",
+    hidden=True,
 )
 
 # Live session feature toggles

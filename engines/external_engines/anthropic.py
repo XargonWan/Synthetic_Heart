@@ -79,47 +79,11 @@ ANTHROPIC_API_VERSION = "2023-06-01"
 # ---------------------------------------------------------------------------
 # WebUI variable registration
 # ---------------------------------------------------------------------------
+# API key, base URL and default model live in the Engines tab
+# (external_endpoints), not in Settings. Only the max-tokens knob is exposed.
 try:
     from core.variables_engine import register_exposed_var
 
-    register_exposed_var(
-        "ANTHROPIC_API_KEY",
-        label="Anthropic API Key",
-        default="",
-        value_type=str,
-        ui_type="password",
-        description="API key for Anthropic Claude (https://console.anthropic.com/keys).",
-        scope="llm",
-        component="anthropic",
-        tags=["cortex_engine", "sensitive"],
-        needs_component_reload=True,
-    )
-    register_exposed_var(
-        "ANTHROPIC_BASE_URL",
-        label="Anthropic Base URL",
-        default="https://api.anthropic.com",
-        value_type=str,
-        ui_type="string",
-        description="Base URL for the Anthropic API (change only for proxies).",
-        scope="llm",
-        component="anthropic",
-        tags=["cortex_engine"],
-        advanced=True,
-        needs_component_reload=True,
-    )
-    register_exposed_var(
-        "ANTHROPIC_DEFAULT_MODEL",
-        label="Default Model",
-        default=DEFAULT_MODEL,
-        value_type=str,
-        ui_type="combobox",
-        options=list(MODEL_CONFIGS.keys()),
-        description="Default Claude model to use when no scope/action override matches.",
-        scope="llm",
-        component="anthropic",
-        tags=["cortex_engine"],
-        needs_component_reload=False,
-    )
     register_exposed_var(
         "ANTHROPIC_MAX_TOKENS",
         label="Max Output Tokens",
@@ -146,6 +110,7 @@ ANTHROPIC_API_KEY = config_registry.get_var(
     group="llm",
     component="anthropic",
     sensitive=True,
+    hidden=True,
 )
 
 ANTHROPIC_BASE_URL = config_registry.get_var(
@@ -156,6 +121,7 @@ ANTHROPIC_BASE_URL = config_registry.get_var(
     group="llm",
     component="anthropic",
     advanced=True,
+    hidden=True,
 )
 
 ANTHROPIC_DEFAULT_MODEL = config_registry.get_var(
@@ -165,6 +131,7 @@ ANTHROPIC_DEFAULT_MODEL = config_registry.get_var(
     description="Default Claude model.",
     group="llm",
     component="anthropic",
+    hidden=True,
 )
 
 ANTHROPIC_MAX_TOKENS = config_registry.get_var(

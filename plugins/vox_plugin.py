@@ -38,7 +38,6 @@ from core.facial_expression_parser import (
     parse_facial_expressions,
 )
 from core.logging_utils import log_debug, log_error, log_info, log_warning
-from core.variables_engine import register_exposed_var
 from core.vox_registry import VOX_REGISTRY
 
 # ---------------------------------------------------------------------------
@@ -102,86 +101,61 @@ def _detect_language(text: str) -> str | None:
 
 
 # ---------------------------------------------------------------------------
-# Exposed config variables
+# Config variables (hidden from Settings)
 # ---------------------------------------------------------------------------
+#
+# Vox engine selection, default model and fallback-to-text now live in the
+# Engines tab (external_endpoints / media-subsystem selectors), not in Settings.
+# These keys remain readable at runtime via ``config_registry.get_value`` but
+# are registered hidden so they no longer surface in the Settings UI.
 
-
-register_exposed_var(
+config_registry.get_value(
     "ACTIVE_VOX_ENGINE",
-    label="Active Vox Engine",
-    default="kitten",
+    "disabled",
     value_type=str,
-    ui_type="string",
-    description=(
-        "Name of the active Vox TTS engine (e.g. 'disabled', 'kitten', 'http'). "
-        "Set to 'disabled' to turn off speech output."
-    ),
-    scope="plugins",
+    group="plugins",
     component="vox_plugin",
-    advanced=False,
+    hidden=True,
 )
-
-register_exposed_var(
+config_registry.get_value(
     "VOX_ENGINE_SETTINGS",
-    label="Vox Engine Settings (JSON)",
-    default="{}",
+    "{}",
     value_type=str,
-    ui_type="string",
-    description="Optional JSON dict of per-engine settings forwarded to the active Vox engine.",
-    scope="plugins",
+    group="plugins",
     component="vox_plugin",
-    advanced=True,
+    hidden=True,
 )
-
-register_exposed_var(
+config_registry.get_value(
     "VOX_OUTPUT_DIR",
-    label="Vox Audio Output Directory",
-    default="res/synth_webui/static/audio/tts",
+    "res/synth_webui/static/audio/tts",
     value_type=str,
-    ui_type="string",
-    description="Directory where generated TTS audio files are stored.",
-    scope="plugins",
+    group="plugins",
     component="vox_plugin",
-    advanced=True,
+    hidden=True,
 )
-
-register_exposed_var(
+config_registry.get_value(
     "VOX_TIMEOUT_SECONDS",
-    label="Vox Generation Timeout (s)",
-    default=300,
+    300,
     value_type=int,
-    ui_type="number",
-    description="Timeout for TTS generation requests in seconds.",
-    scope="plugins",
+    group="plugins",
     component="vox_plugin",
-    advanced=True,
+    hidden=True,
 )
-
-register_exposed_var(
+config_registry.get_value(
     "VOX_FALLBACK_TO_TEXT",
-    label="Vox Fallback to Text",
-    default=True,
+    True,
     value_type=bool,
-    ui_type="boolean",
-    description="Send a plain-text message when TTS generation fails.",
-    scope="plugins",
+    group="plugins",
     component="vox_plugin",
-    advanced=False,
+    hidden=True,
 )
-
-register_exposed_var(
+config_registry.get_value(
     "VOX_AUDIO_CACHE_SIZE",
-    label="Vox Audio Cache Size",
-    default=40,
+    40,
     value_type=int,
-    ui_type="number",
-    description=(
-        "Maximum number of TTS audio clips the WebUI keeps in memory for replay. "
-        "When the limit is exceeded, older clips are silently dropped. Default: 40."
-    ),
-    scope="plugins",
+    group="plugins",
     component="vox_plugin",
-    advanced=True,
+    hidden=True,
 )
 
 # Legacy aliases (read by the HTTP engine via its original config keys)

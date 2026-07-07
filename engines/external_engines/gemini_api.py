@@ -48,39 +48,8 @@ except ImportError:
     )
 
 
-# Register Gemini API Key configuration (always visible so it can be set before activation)
-try:
-    from core.variables_engine import register_exposed_var
-
-    register_exposed_var(
-        "GEMINI_API_KEY",
-        label="Gemini API Key",
-        default="",
-        value_type=str,
-        ui_type="password",
-        description="API key for Google Gemini models.",
-        scope="llm",
-        component="gemini_api",
-        tags=["cortex_engine", "sensitive"],
-        needs_component_reload=True,
-    )
-    register_exposed_var(
-        "GEMINI_API_BASE_URL",
-        label="Gemini API Base URL",
-        default="https://generativelanguage.googleapis.com",
-        value_type=str,
-        ui_type="string",
-        description="Base URL for the Gemini REST API.",
-        scope="llm",
-        component="gemini_api",
-        tags=["cortex_engine"],
-        advanced=True,
-        needs_component_reload=True,
-    )
-except Exception:
-    # Fail silently during import-time if variables engine isn't ready
-    pass
-
+# Gemini API key and base URL live in the Engines tab (external_endpoints),
+# not in Settings. They remain readable via config_registry / env.
 GEMINI_API_KEY = config_registry.get_var(
     "GEMINI_API_KEY",
     "",
@@ -89,6 +58,7 @@ GEMINI_API_KEY = config_registry.get_var(
     group="llm",
     component="gemini_api",
     sensitive=True,
+    hidden=True,
 )
 
 GEMINI_API_BASE_URL = config_registry.get_var(
@@ -101,6 +71,7 @@ GEMINI_API_BASE_URL = config_registry.get_var(
     component="gemini_api",
     tags=["cortex_engine"],
     advanced=True,
+    hidden=True,
 )
 
 # Model configuration — Gemini 3.x family (April 2026)
@@ -293,25 +264,8 @@ def _set_gemini_model(value: str) -> None:
     set_current_model(model)
 
 
-try:
-    from core.variables_engine import register_exposed_var
-
-    register_exposed_var(
-        "GEMINI_MODEL",
-        label="Gemini Model",
-        default=DEFAULT_MODEL,
-        value_type=str,
-        ui_type="select",
-        options=list(MODEL_CONFIGS.keys()),
-        description="Active Gemini model used by gemini_api.",
-        scope="llm",
-        component="gemini_api",
-        tags=["cortex_engine"],
-        needs_component_reload=False,
-    )
-except Exception:
-    pass
-
+# The active Gemini model lives in the Engines tab (external_endpoints),
+# not in Settings. It remains readable via config_registry / env.
 GEMINI_MODEL = config_registry.get_var(
     "GEMINI_MODEL",
     DEFAULT_MODEL,
@@ -321,8 +275,7 @@ GEMINI_MODEL = config_registry.get_var(
     group="llm",
     component="gemini_api",
     tags=["cortex_engine"],
-    # We remove static choices to allow dynamic discovery to reflect in the UI
-    # The WebUI Engines tab uses get_supported_models() which is dynamic.
+    hidden=True,
     getter=_get_gemini_model,
     setter=_set_gemini_model,
 )
