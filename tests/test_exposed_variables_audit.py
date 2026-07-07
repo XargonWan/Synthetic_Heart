@@ -20,7 +20,6 @@ def test_exposed_variables_have_label_description_and_component():
         "MATRIX_": "matrix_chat",
         "TELEGRAM_": "telegram_bot",
         "DISCORD_": "discord_bot",
-        "SELKIES_": "selkies",
         "SYNTH_": "persona",
         "RECON_": "recon",
     }
