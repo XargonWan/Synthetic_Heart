@@ -94,18 +94,60 @@ def test_seconds_until_next_run_returns_int():
     assert 0 <= sec <= 24 * 3600
 
 
-@pytest.mark.asyncio
-async def test_recall_last_dream_tags_deliver_to_llm(monkeypatch):
-    """_recall_last_dream marks its result so the action parser voices it back
-    to the LLM (fetch-only action whose answer is the reply)."""
+def test_recall_last_dream_is_a_recon_not_an_action():
+    """recall_last_dream is a Recon contribution, not a standalone action."""
     p = GrilloDreamPlugin()
+    # No longer advertised as an action.
+    assert "recall_last_dream" not in p.get_supported_action_types()
+    assert "recall_last_dream" not in p.get_supported_actions()
+    assert "static_inject" in p.get_supported_action_types()
+    # Now exposes the Recon plugin contract.
+    assert p.get_recon_key() == "recall_last_dream"
+    assert isinstance(p.get_recon_instruction(), str)
+
+
+def test_extract_dream_text_from_action_envelope():
+    """The dream text is pulled from the JSON action payload content."""
+    envelope = (
+        '{"actions": [{"type": "create_personal_diary_entry", '
+        '"payload": {"content": "A corridor of code narrowed around me."}}]}'
+    )
+    assert (
+        GrilloDreamPlugin._extract_dream_text(envelope)
+        == "A corridor of code narrowed around me."
+    )
+    assert GrilloDreamPlugin._extract_dream_text(None) is None
+    assert GrilloDreamPlugin._extract_dream_text("not json") is None
+
+
+@pytest.mark.asyncio
+async def test_parse_recon_response_skips_when_not_requested():
+    """When the Recon call does not flag a dream request, contribute nothing."""
+    p = GrilloDreamPlugin()
+    assert await p.parse_recon_response({"wants_dream": False}) == []
+    assert await p.parse_recon_response({}) == []
+    assert await p.parse_recon_response(None) == []
+
+
+@pytest.mark.asyncio
+async def test_parse_recon_response_contributes_last_dream(monkeypatch):
+    """When flagged, contribute the extracted last-dream text as a snippet."""
+    import datetime as _dt
+
+    p = GrilloDreamPlugin()
+
+    envelope = (
+        '{"actions": [{"type": "create_personal_diary_entry", '
+        '"payload": {"content": "I dreamt of a red cat on the wire."}}]}'
+    )
+    executed_at = _dt.datetime(2026, 1, 1, 5, 0, 0)
 
     class DummyCursor:
         async def execute(self, *args, **kwargs):
             pass
 
         async def fetchone(self):
-            return None  # no dream on record -> the "not found" branch
+            return (envelope, None, executed_at)
 
         async def __aenter__(self):
             return self
@@ -127,7 +169,44 @@ async def test_recall_last_dream_tags_deliver_to_llm(monkeypatch):
 
     monkeypatch.setattr(cdb, "get_conn_ctx", lambda: DummyConn())
 
-    result = await p._recall_last_dream()
-    assert result["deliver_to_llm"] is True
-    assert result["dream_content"] is None
-    assert "No recent dreams" in result["message"]
+    result = await p.parse_recon_response({"wants_dream": True})
+    assert len(result) == 1
+    contrib = result[0]
+    assert contrib["type"] == "snippet"
+    assert contrib["source"] == "grillo_dream"
+    assert "I dreamt of a red cat on the wire." in contrib["content"]
+
+
+@pytest.mark.asyncio
+async def test_parse_recon_response_no_dream_on_record(monkeypatch):
+    """When no dream exists, contribute nothing even if requested."""
+    p = GrilloDreamPlugin()
+
+    class DummyCursor:
+        async def execute(self, *args, **kwargs):
+            pass
+
+        async def fetchone(self):
+            return None
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class DummyConn:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        def cursor(self):
+            return DummyCursor()
+
+    import core.db as cdb
+
+    monkeypatch.setattr(cdb, "get_conn_ctx", lambda: DummyConn())
+
+    assert await p.parse_recon_response({"wants_dream": True}) == []

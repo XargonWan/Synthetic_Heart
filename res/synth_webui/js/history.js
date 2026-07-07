@@ -8,6 +8,7 @@ const historyState = {
     interactions: { page: 1, per_page: 20, search: '', include_archived: false, sort: 'desc' },
     diary: { page: 1, per_page: 30, search: '', sort: 'desc' },
     grillo: { page: 1, per_page: 20, search: '', beat_type: '', sort: 'desc' },
+    dreams: { page: 1, per_page: 15, search: '', sort: 'desc' },
     chat: { page: 1, per_page: 50, search: '', interface_path: '', sort: 'desc' }
 };
 
@@ -104,6 +105,9 @@ function initializeHistoryTab() {
     document.getElementById('history-grillo-beat-type')?.addEventListener('change', () => { historyState.grillo.beat_type = document.getElementById('history-grillo-beat-type').value; historyState.grillo.page = 1; loadHistoryGrillo(); });
     document.getElementById('history-grillo-sort')?.addEventListener('change', () => { historyState.grillo.sort = document.getElementById('history-grillo-sort').value; historyState.grillo.page = 1; loadHistoryGrillo(); });
 
+    document.getElementById('history-dreams-search')?.addEventListener('input', SynthUtils.debounce(() => { historyState.dreams.search = document.getElementById('history-dreams-search').value; historyState.dreams.page = 1; loadHistoryDreams(); }, 500));
+    document.getElementById('history-dreams-sort')?.addEventListener('change', () => { historyState.dreams.sort = document.getElementById('history-dreams-sort').value; historyState.dreams.page = 1; loadHistoryDreams(); });
+
     document.getElementById('history-chat-interface')?.addEventListener('change', () => { historyState.chat.interface_path = document.getElementById('history-chat-interface').value; historyState.chat.page = 1; loadHistoryChat(); });
     document.getElementById('history-chat-search')?.addEventListener('input', SynthUtils.debounce(() => { historyState.chat.search = document.getElementById('history-chat-search').value; historyState.chat.page = 1; loadHistoryChat(); }, 500));
     document.getElementById('history-chat-sort')?.addEventListener('change', () => { historyState.chat.sort = document.getElementById('history-chat-sort').value; historyState.chat.page = 1; loadHistoryChat(); });
@@ -116,6 +120,7 @@ function loadHistoryData(subtab) {
     if (subtab === 'interactions') return loadHistoryInteractions();
     if (subtab === 'diary') return loadHistoryDiary();
     if (subtab === 'grillo') return loadHistoryGrillo();
+    if (subtab === 'dreams') return loadHistoryDreams();
     if (subtab === 'chat') return loadHistoryChat();
     if (subtab === 'agent') {
         try { if (window.SynthWebUI && typeof window.SynthWebUI.initAgentTab === 'function') window.SynthWebUI.initAgentTab(); } catch (e) { /* ignore */ }
@@ -223,6 +228,54 @@ async function loadHistoryGrillo() {
         console.error('Failed to load grillo history:', error);
         content.innerHTML = '<div class="empty-state"><div class="icon">⚠️</div><p>Failed to load grillo activity</p></div>';
     }
+}
+
+async function loadHistoryDreams() {
+    const content = document.getElementById('history-dreams-content'); if (!content) return;
+    console.log('[History] loadHistoryDreams called with state:', historyState.dreams);
+    content.innerHTML = '<div class="loading-state"><div class="loading-spinner"></div><p>Loading dreams...</p></div>';
+    const params = new URLSearchParams({ page: historyState.dreams.page, per_page: historyState.dreams.per_page, search: historyState.dreams.search, sort: historyState.dreams.sort });
+    try {
+        const response = await fetch(`/api/history/dreams?${params}`);
+        const data = await response.json();
+        console.log('[History] dreams response:', data);
+        if (data && data.success && Array.isArray(data.entries) && data.entries.length > 0) {
+            content.innerHTML = data.entries.map(entry => renderDreamEntry(entry)).join('');
+            content.classList.add('history-populated');
+            try { content.scrollTop = 0; content.tabIndex = -1; setTimeout(() => { try { content.focus(); } catch (e) {} }, 50); } catch (e) {}
+            renderPagination('dreams', data.page, data.total_pages, data.total_count);
+        } else if (data && data.success) {
+            content.classList.remove('history-populated');
+            content.innerHTML = '<div class="empty-state"><div class="icon">🌙</div><p>No dreams found</p></div>';
+        } else {
+            console.warn('[History] dreams response indicates failure or unexpected shape:', data);
+            content.classList.remove('history-populated');
+            content.innerHTML = '<div class="empty-state"><div class="icon">⚠️</div><p>Failed to load dreams</p></div>';
+        }
+    } catch (error) {
+        console.error('Failed to load dreams history:', error);
+        content.innerHTML = '<div class="empty-state"><div class="icon">⚠️</div><p>Failed to load dreams</p></div>';
+    }
+}
+
+function renderDreamEntry(entry) {
+    const timestamp = formatTimestamp(entry.executed_at);
+    let safeContent = escapeHtml(entry.content || '');
+    safeContent = safeContent.replace(/^[\s\u00A0]+/, '').replace(/[\n\r]+$/, '');
+    const contentIsLong = safeContent.split('\n').length > 8 || safeContent.length > 800;
+    const contentClass = contentIsLong ? ' history-entry-content--limited' : '';
+
+    return `
+        <div class="history-entry">
+            <div class="history-entry-header">
+                <div class="history-entry-meta">
+                    <div class="history-entry-date">🌙 ${timestamp}</div>
+                </div>
+            </div>
+            <div class="history-entry-content${contentClass}">${safeContent || '<em style="opacity:0.5">No dream content</em>'}</div>
+            ${entry.has_diary && entry.diary_entry_id ? `<div class="history-entry-detail" style="margin-top: 0.75rem; opacity: 0.7;"><small>📝 Diary entry ID: ${entry.diary_entry_id}</small></div>` : ''}
+        </div>
+    `;
 }
 
 async function loadHistoryChat() {

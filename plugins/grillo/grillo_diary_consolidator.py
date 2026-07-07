@@ -1,13 +1,16 @@
 """Grillo beat plugin: daily diary consolidation.
 
 This plugin is intended to be called from the G.R.I.L.L.O. beat scheduler.
-It checks recent diary days (including today) for entries that still contain
-fragments ("---") or that consist of multiple rows, and asks the LLM to
-consolidate them into a single coherent daily diary entry.
+It checks recent *completed* diary days (never today, which is still being
+written) for entries that still contain fragments ("---") or that consist of
+multiple rows, and asks the LLM to consolidate them into a single coherent
+daily diary entry.
 
-Each invocation processes up to 3 days: today + the 2 most recent
-unconsolidated days going backward.  Over successive runs every historical
-day is eventually cleaned up.
+Each invocation processes a single day: the most recent unconsolidated day
+before today, going backward.  This guarantees the two days immediately
+preceding today are cleaned up first (highest priority) and keeps each
+consolidation prompt small enough for the LLM to complete reliably.  Over
+successive runs every historical day is eventually cleaned up.
 """
 
 from __future__ import annotations
@@ -28,8 +31,12 @@ class GrilloDiaryConsolidatorPlugin:
     # This must match the beat type used by the main Grillo scheduler.
     BEAT_TYPE = "diary_consolidation"
 
-    # Max days to consolidate per invocation (today + 2 older = 3)
-    MAX_DAYS_PER_RUN = 3
+    # Days to consolidate per invocation. Kept at 1 so each run targets the
+    # single most recent unconsolidated day *before* today: this prioritises
+    # the days immediately preceding today and keeps the prompt small enough
+    # for the LLM to complete reliably (large multi-day prompts were failing
+    # to produce any output).
+    MAX_DAYS_PER_RUN = 1
 
     def __init__(self):
         self.enabled = config_registry.get_value(
@@ -94,10 +101,11 @@ class GrilloDiaryConsolidatorPlugin:
     async def build_prompt(self) -> Optional[str]:
         """Build a consolidation prompt for the most recent unmerged diary day(s).
 
-        Scans up to ``MAX_DAYS_PER_RUN`` days from newest to oldest (including
-        today) and produces a single prompt asking the LLM to consolidate all
-        of them.  Each day gets its own ``update_diary_entry`` action in the
-        response JSON.
+        Scans up to ``MAX_DAYS_PER_RUN`` days from newest to oldest, *excluding
+        today*, and produces a single prompt asking the LLM to consolidate
+        them.  Each day gets its own ``update_diary_entry`` action in the
+        response JSON.  The newest completed day (typically yesterday) is
+        always processed first.
         """
         if not self.enabled:
             return None
@@ -112,8 +120,11 @@ class GrilloDiaryConsolidatorPlugin:
         """Return up to *max_days* unconsolidated diary days (newest first).
 
         Each element is a tuple ``(day, entry_id, combined, row_count)``.
-        Includes today.  Only returns days whose content still contains the
-        ``---`` fragment separator OR have more than one row.
+        Today is excluded (it is still being written); only *completed* days
+        before today are eligible, newest first, so the days immediately
+        preceding today are consolidated with the highest priority.  Only
+        returns days whose content still contains the ``---`` fragment
+        separator OR have more than one row.
         """
         cutoff = date.today() - timedelta(days=self.lookback_days)
         try:
@@ -129,7 +140,7 @@ class GrilloDiaryConsolidatorPlugin:
                                 COUNT(*) AS row_count
                             FROM ai_diary
                             WHERE DATE(timestamp) >= %s
-                              AND DATE(timestamp) <= CURDATE()
+                              AND DATE(timestamp) < CURDATE()
                             GROUP BY DATE(timestamp)
                         ) t
                         WHERE row_count > 1 OR combined LIKE '%%---%%'

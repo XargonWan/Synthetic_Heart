@@ -709,6 +709,7 @@ class SynthWebUIInterface:
         self.app.get("/api/history/interactions")(self.history_interactions)
         self.app.get("/api/history/diary")(self.history_diary)
         self.app.get("/api/history/grillo")(self.history_grillo)
+        self.app.get("/api/history/dreams")(self.history_dreams)
         self.app.get("/api/history/chat")(self.history_chat)
         self.app.get("/api/log-failures")(self.list_log_failures)
         self.app.delete("/api/log-failures/{failure_id}")(self.delete_log_failure)
@@ -6927,6 +6928,128 @@ class SynthWebUIInterface:
 
         except Exception as exc:
             log_error(f"{LOG_PREFIX} Failed to fetch grillo history: {exc}")
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+
+    @staticmethod
+    def _extract_dream_text(response_text: Any) -> str | None:
+        """Extract the readable dream text from a dream beat's response_text.
+
+        Dream beats store the LLM output as a JSON action envelope in
+        grillo_activity_log.response_text, where the actual dream lives in the
+        create_personal_diary_entry action's payload.content. The linked diary
+        entry (diary_entry_id) is a separate interaction diary, NOT the dream,
+        so we must read the dream text from here.
+        """
+        if not response_text or not isinstance(response_text, str):
+            return None
+        import json as _json
+
+        try:
+            data = _json.loads(response_text)
+        except (ValueError, TypeError):
+            return None
+        if not isinstance(data, dict):
+            return None
+        actions = data.get("actions")
+        if not isinstance(actions, list):
+            return None
+        for action in actions:
+            if not isinstance(action, dict):
+                continue
+            payload = action.get("payload")
+            if isinstance(payload, dict):
+                content = payload.get("content")
+                if isinstance(content, str) and content.strip():
+                    return content.strip()
+        return None
+
+    async def history_dreams(self, request: Request):
+        """Return dream beats for the History > Dreams sub-tab."""
+        params = request.query_params
+
+        def _bounded_int(value: Any, default: int, minimum: int, maximum: int) -> int:
+            try:
+                parsed = int(value)
+            except (TypeError, ValueError):
+                return default
+            return max(minimum, min(maximum, parsed))
+
+        page = _bounded_int(params.get("page"), default=1, minimum=1, maximum=1000)
+        per_page = _bounded_int(
+            params.get("per_page"), default=15, minimum=1, maximum=50
+        )
+        search = params.get("search", "").strip()
+        sort = params.get("sort", "desc")
+
+        try:
+            from core.db import get_conn_ctx
+
+            offset = (page - 1) * per_page
+            order = "DESC" if sort == "desc" else "ASC"
+
+            where_conditions = ["g.beat_type = %s"]
+            where_params: list[Any] = ["dream"]
+
+            if search:
+                # The dream text lives inside g.response_text (JSON action payload),
+                # not in the linked diary entry, so search there.
+                where_conditions.append("g.response_text LIKE %s")
+                where_params.append(f"%{search}%")
+
+            where_clause = " AND ".join(where_conditions)
+
+            entries = []
+            async with get_conn_ctx() as conn:
+                async with conn.cursor() as cur:
+                    query = f"""
+                        SELECT g.id,
+                               g.response_text as response_text,
+                               g.diary_entry_id,
+                               g.executed_at,
+                               d.content as diary_content
+                        FROM grillo_activity_log g
+                        LEFT JOIN ai_diary d ON g.diary_entry_id = d.id
+                        WHERE {where_clause}
+                        ORDER BY g.executed_at {order}
+                        LIMIT %s OFFSET %s
+                    """
+
+                    await cur.execute(query, where_params + [per_page + 1, offset])
+                    rows = await cur.fetchall()
+
+                    has_more = len(rows) > per_page
+                    if has_more:
+                        rows = rows[:per_page]
+
+                    for row in rows:
+                        executed_at_str = self._dt_to_utc_iso(row[3])
+                        dream_text = self._extract_dream_text(row[1]) or row[4] or ""
+                        entries.append(
+                            {
+                                "id": row[0],
+                                "content": dream_text,
+                                "diary_entry_id": row[2],
+                                "executed_at": executed_at_str,
+                                "has_diary": row[2] is not None,
+                            }
+                        )
+
+            total_count = offset + len(rows) + (per_page if has_more else 0)
+            total_pages = (total_count + per_page - 1) // per_page
+
+            return JSONResponse(
+                {
+                    "success": True,
+                    "entries": entries,
+                    "page": page,
+                    "per_page": per_page,
+                    "total_count": total_count,
+                    "total_pages": total_pages,
+                }
+            )
+
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to fetch dreams history: {exc}")
             return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
 
     async def history_chat(self, request: Request):

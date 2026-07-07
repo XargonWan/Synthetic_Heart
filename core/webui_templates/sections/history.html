@@ -15,6 +15,10 @@
               <span class="icon">🦗</span>
               <span>Grillo</span>
             </button>
+            <button class="sub-nav-btn" data-subtab="dreams" role="tab" aria-selected="false">
+              <span class="icon">🌙</span>
+              <span>Dreams</span>
+            </button>
             <button class="sub-nav-btn" data-subtab="chat" role="tab" aria-selected="false">
               <span class="icon">💬</span>
               <span>Chat</span>
@@ -92,6 +96,24 @@
           </div>
         </div>
         <div id="history-grillo-pagination" class="pagination-controls"></div>
+      </div>
+
+      <!-- Dreams Sub-Tab -->
+      <div class="sub-tab-panel" id="subtab-dreams" data-subtab="dreams">
+        <div class="section-controls">
+          <input type="text" id="history-dreams-search" placeholder="Search dreams..." class="search-input" />
+          <select id="history-dreams-sort" class="sort-select">
+            <option value="desc">Newest First</option>
+            <option value="asc">Oldest First</option>
+          </select>
+        </div>
+        <div id="history-dreams-content" class="history-container">
+          <div class="loading-state">
+            <div class="loading-spinner"></div>
+            <p>Loading dreams...</p>
+          </div>
+        </div>
+        <div id="history-dreams-pagination" class="pagination-controls"></div>
       </div>
 
       <!-- Chat Sub-Tab -->
