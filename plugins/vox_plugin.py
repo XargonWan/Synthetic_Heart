@@ -401,14 +401,15 @@ class VoxPlugin(AIPluginBase):
         if audio_duration_s is not None:
             log_debug(f"[vox_plugin] audio duration: {audio_duration_s:.2f}s")
 
-        # --- Leave THINK the moment speech starts ---
-        # The audio has been synthesised: the "deciding what to say" phase is over
-        # and the avatar is about to speak. For voice-originated turns the avatar
-        # was kept in THINK during generation (there is no textual WRITE phase), so
-        # transition it to the speaking (WRITE) state now — before dispatch — rather
-        # than waiting for generation end. Best-effort, never blocks the pipeline.
-        if not generate_only:
-            await self._enter_speaking_state()
+        # --- Stay in THINK until speech actually starts ---
+        # The audio has been synthesised, but for voice-originated turns there is
+        # no textual WRITE phase: the avatar is kept in THINK during generation
+        # and must go straight to TALK the instant the audio begins playing. That
+        # TALK transition is owned by the Karada state server, which fires it from
+        # ``broadcast_audio()`` — the single choke point where the clip starts and
+        # its exact duration is known. Setting WRITE here produced a spurious
+        # animation flash *before* the synthesis was heard, so it is intentionally
+        # not done: we let THINK hold until ``broadcast_audio()`` starts TALK.
 
         # --- Dispatch to interface (skip for internal callers like radio host) ---
         if not generate_only:
@@ -442,25 +443,6 @@ class VoxPlugin(AIPluginBase):
         if lipsync_data is not None:
             result["lipsync_data"] = lipsync_data
         return result
-
-    async def _enter_speaking_state(self) -> None:
-        """Transition the avatar out of THINK into the speaking (WRITE) state.
-
-        Called right before dispatching synthesised audio: the "deciding what to
-        say" phase is finished and the avatar is about to speak. For voice turns
-        the avatar is held in THINK during generation, so this is the correct
-        moment to leave it — before the reply is delivered, not at generation end.
-        Broadcast globally (``session_id=None``) so every connected WebUI client
-        reflects the transition. Best-effort; never raises.
-        """
-        try:
-            from core.persona_manager import get_persona_manager
-
-            pm = get_persona_manager()
-            if pm:
-                await pm.set_animation_state("write", session_id=None)
-        except Exception as exc:
-            log_debug(f"[vox_plugin] Failed to set speaking animation state: {exc}")
 
     # ------------------------------------------------------------------
     # WebUI broadcast for already-generated audio (e.g. radio host)
