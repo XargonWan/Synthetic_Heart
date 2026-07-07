@@ -2899,6 +2899,59 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                                 }
                             } catch (e) { /* ignore UI helper errors */ }
 
+                            // Special: "Run Now" button for the Grillo diary consolidator.
+                            // Enqueues a diary_consolidation beat immediately without
+                            // changing the day-selection logic (never today; most recent
+                            // unconsolidated day first).
+                            try {
+                                if (item && item.name === 'grillo_diary_consolidator') {
+                                    const runBtn = document.createElement('button');
+                                    runBtn.className = 'pill';
+                                    runBtn.textContent = 'Run Now';
+                                    runBtn.title = 'Enqueue a diary consolidation beat now';
+                                    runBtn.style.marginLeft = '8px';
+                                    runBtn.addEventListener('click', async (ev) => {
+                                        ev.stopPropagation();
+                                        ev.preventDefault();
+                                        runBtn.disabled = true;
+                                        const originalText = runBtn.textContent;
+                                        runBtn.textContent = 'Scheduling…';
+                                        try {
+                                            const resp = await fetch('/api/components/run', {
+                                                method: 'POST',
+                                                headers: { 'Content-Type': 'application/json' },
+                                                body: JSON.stringify({ name: 'grillo_diary_consolidator', action: 'run_now' })
+                                            });
+                                            let body = null;
+                                            try { body = await resp.json(); } catch (e) { /* ignore */ }
+                                            const result = (body && body.result) || {};
+                                            if (resp.ok && result.status === 'scheduled') {
+                                                runBtn.textContent = `Scheduled (priority ${result.priority})`;
+                                            } else if (result.status === 'empty') {
+                                                runBtn.textContent = 'Nothing to do';
+                                            } else if (result.status === 'disabled') {
+                                                runBtn.textContent = 'Disabled';
+                                            } else {
+                                                const msg = (result && result.message) || (body && body.detail) || 'Failed';
+                                                runBtn.textContent = 'Error';
+                                                console.error('[synth_webui] Diary consolidation Run Now failed:', msg);
+                                                alert(`Diary consolidation Run Now failed: ${msg}`);
+                                            }
+                                        } catch (err) {
+                                            console.error('[synth_webui] Diary consolidation Run Now request failed', err);
+                                            runBtn.textContent = 'Error';
+                                            alert('Diary consolidation Run Now request failed.');
+                                        } finally {
+                                            setTimeout(() => {
+                                                runBtn.textContent = originalText;
+                                                runBtn.disabled = false;
+                                            }, 4000);
+                                        }
+                                    });
+                                    summaryActions.appendChild(runBtn);
+                                }
+                            } catch (e) { /* ignore UI helper errors */ }
+
                             summary.appendChild(summaryActions);
                             details.appendChild(summary);
 

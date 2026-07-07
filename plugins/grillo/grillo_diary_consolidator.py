@@ -228,5 +228,72 @@ class GrilloDiaryConsolidatorPlugin:
     def get_supported_actions(self) -> dict:
         return {}
 
+    async def run_now(self, payload: Optional[dict] = None) -> dict:
+        """Enqueue a diary consolidation beat immediately (WebUI "Run Now").
+
+        Builds the consolidation prompt using the unchanged day-selection logic
+        (never today; most recent unconsolidated day first) and enqueues it as a
+        ``diary_consolidation`` beat via the official Grillo low-priority queue
+        API. Returns a status dict reporting the queue priority so the WebUI can
+        display "scheduled with priority X".
+        """
+        if not self.enabled:
+            return {
+                "status": "disabled",
+                "message": "Diary consolidation is disabled in configuration.",
+            }
+
+        prompt = await self.build_prompt()
+        if not prompt:
+            return {
+                "status": "empty",
+                "message": ("No unconsolidated diary days found to process right now."),
+            }
+
+        try:
+            from core.core_initializer import PLUGIN_REGISTRY
+
+            grillo = None
+            for candidate in ("grillo_plugin", "grillo_impl"):
+                inst = PLUGIN_REGISTRY.get(candidate)
+                if inst is not None and hasattr(inst, "_enqueue_with_low_priority"):
+                    grillo = inst
+                    break
+            if grillo is None:
+                log_error(
+                    "[grillo_diary_consolidator] Grillo scheduler plugin unavailable; "
+                    "cannot enqueue diary consolidation beat."
+                )
+                return {
+                    "status": "error",
+                    "message": "Grillo scheduler is not available.",
+                }
+
+            await grillo._enqueue_with_low_priority(prompt, self.BEAT_TYPE)
+        except Exception as exc:  # pragma: no cover - defensive
+            log_error(
+                f"[grillo_diary_consolidator] Failed to enqueue diary consolidation: {exc}"
+            )
+            return {
+                "status": "error",
+                "message": f"Failed to enqueue diary consolidation: {exc}",
+            }
+
+        # LOW_PRIORITY beats are enqueued at priority value 2 (see
+        # core/message_queue.py LOW_PRIORITY). Report it so the WebUI can show
+        # "scheduled with priority X".
+        from core.message_queue import LOW_PRIORITY
+
+        log_info(
+            f"[grillo_diary_consolidator] Diary consolidation beat scheduled "
+            f"with priority {LOW_PRIORITY} (Run Now)"
+        )
+        return {
+            "status": "scheduled",
+            "priority": LOW_PRIORITY,
+            "beat_type": self.BEAT_TYPE,
+            "message": f"Diary consolidation scheduled with priority {LOW_PRIORITY}.",
+        }
+
 
 PLUGIN_CLASS = GrilloDiaryConsolidatorPlugin

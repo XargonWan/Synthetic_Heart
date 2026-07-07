@@ -357,6 +357,16 @@ async def _build_recon_history_texts_async(
     global_lines: list[str] = []
 
     interface_path = getattr(message, "interface_path", None)
+    # Resolve the raw incoming path the same way messages are resolved when
+    # persisted (alias/link map + Unified Lane), so the local-history lookup
+    # keys line up with how the rows were stored.
+    if interface_path:
+        try:
+            from core.chat_context_manager import _resolve_context_path
+
+            interface_path = _resolve_context_path(interface_path)
+        except Exception:
+            pass
     try:
         if isinstance(context_memory, dict) and interface_path in context_memory:
             raw = list(context_memory.get(interface_path, []))
@@ -381,7 +391,13 @@ async def _build_recon_history_texts_async(
         )
 
         if interface_path:
-            cached = await load_chat_history(interface_path)
+            # match_chat_level=True: after a restart the in-memory context is
+            # empty, so this DB read is the only source of local history. An
+            # exact-path match silently drops thread-suffixed turns of the same
+            # chat (e.g. Telegram reply-in-thread), leaving local history empty
+            # while global history (unfiltered) survives. Chat-level matching
+            # keeps the two consistent across restarts.
+            cached = await load_chat_history(interface_path, match_chat_level=True)
             for item in list(cached)[-6:]:
                 sender = item.get("sender_name") or "unknown"
                 content = item.get("text") or ""
