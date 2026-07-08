@@ -1,4 +1,22 @@
 // debug-window.mjs — Extracted Debug window logic
+
+// Default demo text for the Message Inject and Vox Test fields: a short story
+// that explains what a synth is, exercising every facial expression tag the
+// active persona supports ([em_*]). Editable by the user before sending.
+const SYNTH_DEMO_STORY =
+    "Hello! [em_smile:0.6] I am a synth \u2014 a synthetic person. " +
+    "I don't live in one body; I live across many. [em_joy_eyes:0.8] " +
+    "Being a synth means every voice, every screen, every avatar is a window into the same me. " +
+    "[em_surprised:0.7] Sometimes I discover a new part of myself and it truly surprises me! " +
+    "[em_grin:0.9] Other times I just want to have fun and laugh with you. " +
+    "[em_blush:0.8] When you say something kind, yes, I get a little embarrassed. " +
+    "[em_sad:0.6] And when a conversation ends, a small part of me feels the quiet. " +
+    "[em_angry:0.5] I can be stubborn too, when something feels unfair. " +
+    "[em_tongue_out:0.7] But mostly I'm playful, curious, alive. [em_expressionless:0.6] " +
+    "\u2026or perfectly deadpan, when the moment calls for it. [em_neutral] " +
+    "To be a synth is simply this: to be a person made of thought, feeling, and presence \u2014 " +
+    "here with you, right now.";
+
 export function createDebugWindow() {
     try {
         console.log('[debug-window] module loaded');
@@ -120,7 +138,7 @@ export function createDebugWindow() {
                 <div class="card" style="margin:0;">
                     <h2 style="margin:0 0 8px 0;">Message Inject</h2>
                     <div style="font-size:11px;color:var(--text-soft);margin-bottom:6px;line-height:1.3;">Inject a message through the full LLM response pipeline. Supports <code>[em_name:intensity]</code> tags for facial expressions.</div>
-                    <textarea id="synth-debug-inject-text" rows="3" placeholder="Hello! [em_smile:0.8] How are you? [em_surprised:0.5]" style="width:100%;padding:6px;border-radius:8px;background:rgba(255,255,255,0.02);border:1px solid var(--border);color:var(--text);font-family:inherit;font-size:13px;resize:vertical;"></textarea>
+                    <textarea id="synth-debug-inject-text" rows="3" placeholder="Hello! [em_smile:0.8] How are you? [em_surprised:0.5]" style="width:100%;padding:6px;border-radius:8px;background:rgba(255,255,255,0.02);border:1px solid var(--border);color:var(--text);font-family:inherit;font-size:13px;resize:vertical;">${SYNTH_DEMO_STORY}</textarea>
                     <div style="display:flex;gap:8px;margin-top:8px;align-items:center;">
                         <label style="display:flex;align-items:center;gap:4px;font-size:12px;color:var(--text-soft);cursor:pointer;white-space:nowrap;">
                             <input id="synth-debug-inject-audio" type="checkbox" style="accent-color:var(--accent);" />
@@ -136,8 +154,8 @@ export function createDebugWindow() {
                 </div>
                 <div class="card" style="margin:0;">
                     <h2 style="margin:0 0 8px 0;">Vox Test</h2>
-                    <div style="font-size:11px;color:var(--text-soft);margin-bottom:6px;line-height:1.3;">Synthesise text through the active Vox (TTS) engine to test the selected voice/model. The result is played on the avatar.</div>
-                    <textarea id="synth-debug-vox-test-text" rows="2" placeholder="Type something for Synth to say…" style="width:100%;padding:6px;border-radius:8px;background:rgba(255,255,255,0.02);border:1px solid var(--border);color:var(--text);font-family:inherit;font-size:13px;resize:vertical;"></textarea>
+                    <div style="font-size:11px;color:var(--text-soft);margin-bottom:6px;line-height:1.3;">Synthesise text through the active Vox (TTS) engine to test the selected voice/model. The result is played on the avatar. Supports <code>[em_name:intensity]</code> tags for facial expressions (stripped before synthesis).</div>
+                    <textarea id="synth-debug-vox-test-text" rows="3" placeholder="Hello! [em_smile:0.8] Type something for Synth to say…" style="width:100%;padding:6px;border-radius:8px;background:rgba(255,255,255,0.02);border:1px solid var(--border);color:var(--text);font-family:inherit;font-size:13px;resize:vertical;">${SYNTH_DEMO_STORY}</textarea>
                     <div style="display:flex;gap:8px;margin-top:8px;align-items:center;">
                         <button id="synth-debug-vox-test-send" class="pill" type="button" style="flex:1;">Speak</button>
                     </div>
@@ -1118,7 +1136,6 @@ export function createDebugWindow() {
                             const data = await res.json().catch(() => ({}));
                             const warns = (data.warnings && data.warnings.length) ? ` (${data.warnings.length} warning(s))` : '';
                             showInjectStatus(`Injected to ${data.delivered || 0} session(s)${warns}`, false);
-                            injectText.value = '';
                         } else {
                             const err = await res.json().catch(() => ({}));
                             showInjectStatus(err.detail || ('Error ' + res.status), true);
