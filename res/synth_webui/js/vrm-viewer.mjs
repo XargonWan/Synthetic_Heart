@@ -7799,10 +7799,13 @@ try {
         const _synthDbgElem = document.getElementById('synth-debug');
         const _dbgEnabled = _synthDbgElem && (_synthDbgElem.dataset.debugEnabled === '1' || _synthDbgElem.dataset.debugEnabled === 'true');
         if (_dbgEnabled) {
-            // Load consolidated debug window module and create window (async)
+            // Load consolidated debug window module and create window (async).
+            // Cache-bust the dynamic import so a normal reload always fetches
+            // the current module instead of a stale browser-cached ES module.
             (async () => {
                 try {
-                    const mod = await import('/js/debug-window.mjs');
+                    const _dbgCacheBust = (window.SYNTH_ASSET_VERSION || Date.now());
+                    const mod = await import(`/js/debug-window.mjs?v=${_dbgCacheBust}`);
                     try { if (mod && typeof mod.createDebugWindow === 'function') mod.createDebugWindow(); } catch (e) { /* ignore */ }
                 } catch (e) { console.warn('[synth_webui] Failed to import debug-window module', e); }
             })();
