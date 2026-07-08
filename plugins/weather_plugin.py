@@ -258,9 +258,15 @@ class WeatherPlugin:
         if action_type == "trigger_weather_report":
             target_path = payload.get("interface_path")
             target_iface = payload.get("interface_id")
-            if not target_iface and isinstance(target_path, str) and "/" in target_path:
-                target_iface = target_path.split("/")[0]
-            if not target_iface:
+            # Prefer the full interface_path when provided: it pins the exact
+            # recipient. _trigger_manual_report splits it into the registry name
+            # and the explicit delivery target internally.
+            target = None
+            if isinstance(target_path, str) and target_path.strip():
+                target = target_path.strip()
+            elif isinstance(target_iface, str) and target_iface.strip():
+                target = target_iface.strip()
+            if not target:
                 log_warning(
                     "[weather_plugin] trigger_weather_report missing interface_id/interface_path"
                 )
@@ -269,7 +275,7 @@ class WeatherPlugin:
                     "message": "interface_id or interface_path required",
                 }
 
-            success = await self._trigger_manual_report(target_iface)
+            success = await self._trigger_manual_report(target)
             return {"status": "success" if success else "failed"}
 
         return {"error": "Unknown action"}
@@ -691,20 +697,59 @@ class WeatherPlugin:
         finally:
             log_info("[weather_plugin] Weather background loop exiting")
 
+    @staticmethod
+    def _split_interface_target(raw: str) -> tuple[str, str | None]:
+        """Split a configured interface value into (interface_name, explicit_path).
+
+        The configured value may be either a bare interface name
+        (e.g. ``telegram_bot``) or a full interface_path that already pins the
+        recipient (e.g. ``telegram_bot/31321637``). The registry is keyed by the
+        bare interface name, so the name (before the first ``/``) is used for the
+        registry lookup, while the full value — when it contains a target — is
+        returned as the explicit delivery path.
+        """
+        value = (raw or "").strip()
+        if "/" in value:
+            interface_name = value.split("/", 1)[0]
+            return interface_name, value
+        return value, None
+
+    def _resolve_delivery_path(
+        self, interface_name: str, explicit_path: str | None = None
+    ) -> str | None:
+        """Resolve the interface_path to deliver the weather report to.
+
+        Ordered, data-driven, with no per-interface hardcoding:
+        1. an explicit path already configured on the interface value
+        2. the trainer configured for this interface (TRAINER_IDS)
+
+        Returns ``None`` when neither resolves.
+        """
+        if explicit_path:
+            return explicit_path
+        from core.config import get_trainer_id
+
+        trainer_id = get_trainer_id(interface_name)
+        if trainer_id is not None:
+            return f"{interface_name}/{trainer_id}"
+        return None
+
     async def _trigger_daily_report(self) -> bool:
         """Trigger a daily weather announcement via the LLM."""
         try:
-            interface_id = (self.daily_report_interface or "").strip()
-            if not interface_id:
+            raw_interface = (self.daily_report_interface or "").strip()
+            if not raw_interface:
                 log_warning(
                     "[weather_plugin] Daily report interface not configured; skipping announcement"
                 )
                 return False
 
+            interface_name, explicit_path = self._split_interface_target(raw_interface)
+
             try:
                 from core.core_initializer import INTERFACE_REGISTRY
 
-                interface = INTERFACE_REGISTRY.get(interface_id)
+                interface = INTERFACE_REGISTRY.get(interface_name)
             except Exception as e:
                 log_warning(
                     f"[weather_plugin] Failed to resolve interface registry: {e}"
@@ -713,7 +758,7 @@ class WeatherPlugin:
 
             if interface is None:
                 log_warning(
-                    f"[weather_plugin] Interface '{interface_id}' not available; skipping announcement"
+                    f"[weather_plugin] Interface '{interface_name}' not available; skipping announcement"
                 )
                 return False
 
@@ -721,20 +766,18 @@ class WeatherPlugin:
                 await self._update_weather()
 
             from core.auto_response import request_llm_delivery
-            from core.config import get_trainer_id
 
             language_hint = ""
             if self.daily_report_language:
                 language_hint = f"Write the update in {self.daily_report_language}. "
 
-            # Resolve the trainer's target on the configured interface so the LLM
-            # is told exactly where to send the message. Without an explicit
-            # delivery target and a message action instruction, local models may
-            # store the bulletin (e.g. as a diary entry) instead of sending it.
-            trainer_id = get_trainer_id(interface_id)
+            # Resolve the delivery target so the LLM is told exactly where to
+            # send the message. Without an explicit delivery target and a message
+            # action instruction, local models may store the bulletin (e.g. as a
+            # diary entry) instead of sending it.
+            interface_path = self._resolve_delivery_path(interface_name, explicit_path)
             delivery_hint = ""
-            if trainer_id is not None:
-                interface_path = f"{interface_id}/{trainer_id}"
+            if interface_path is not None:
                 delivery_hint = (
                     "The trainer asks you to send them this weather update as a "
                     f"message on interface_path '{interface_path}'. Emit a message "
@@ -742,8 +785,8 @@ class WeatherPlugin:
                 )
             else:
                 log_warning(
-                    f"[weather_plugin] No trainer configured for interface "
-                    f"'{interface_id}'; delivery target cannot be pinned"
+                    f"[weather_plugin] No delivery target could be resolved for "
+                    f"interface '{interface_name}'; delivery target cannot be pinned"
                 )
 
             prompt = (
@@ -775,12 +818,14 @@ class WeatherPlugin:
     async def _trigger_manual_report(self, interface_id: str) -> bool:
         """Trigger a weather report on demand via LLM."""
         try:
+            interface_name, explicit_path = self._split_interface_target(interface_id)
+
             from core.core_initializer import INTERFACE_REGISTRY
 
-            interface = INTERFACE_REGISTRY.get(interface_id)
+            interface = INTERFACE_REGISTRY.get(interface_name)
             if interface is None:
                 log_warning(
-                    f"[weather_plugin] Interface '{interface_id}' not available for manual report"
+                    f"[weather_plugin] Interface '{interface_name}' not available for manual report"
                 )
                 return False
 
@@ -788,14 +833,12 @@ class WeatherPlugin:
                 await self._update_weather()
 
             from core.auto_response import request_llm_delivery
-            from core.config import get_trainer_id
 
-            # Pin the trainer's delivery target so the LLM emits a message action
-            # to the right interface_path instead of storing the bulletin.
-            trainer_id = get_trainer_id(interface_id)
+            # Pin the delivery target so the LLM emits a message action to the
+            # right interface_path instead of storing the bulletin.
+            interface_path = self._resolve_delivery_path(interface_name, explicit_path)
             delivery_hint = ""
-            if trainer_id is not None:
-                interface_path = f"{interface_id}/{trainer_id}"
+            if interface_path is not None:
                 delivery_hint = (
                     "The trainer asks you to send them this weather update as a "
                     f"message on interface_path '{interface_path}'. Emit a message "
@@ -803,8 +846,8 @@ class WeatherPlugin:
                 )
             else:
                 log_warning(
-                    f"[weather_plugin] No trainer configured for interface "
-                    f"'{interface_id}'; delivery target cannot be pinned"
+                    f"[weather_plugin] No delivery target could be resolved for "
+                    f"interface '{interface_name}'; delivery target cannot be pinned"
                 )
 
             prompt = (
