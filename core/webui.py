@@ -38,6 +38,7 @@ from fastapi import (
 )
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, Response
 from fastapi.staticfiles import StaticFiles
+from starlette.websockets import WebSocketState
 
 from core.core_initializer import register_interface
 from core.logging_utils import _LOG_FILE, log_debug, log_error, log_info, log_warning
@@ -98,6 +99,28 @@ mimetypes.init()
 mimetypes.add_type("text/javascript", ".js")
 mimetypes.add_type("text/javascript", ".mjs")
 mimetypes.add_type("application/json", ".json")
+
+
+def _clean_env(name: str, default: Optional[str] = None) -> Optional[str]:
+    """Read an env var, stripping inline ``# comment`` suffixes and whitespace.
+
+    Some launchers (notably the VS Code/Antigravity Python integration, which
+    injects the workspace ``.env`` with its own parser) leave inline comments
+    inside the value, e.g. ``'8088   # HTTPS port'``. Because the app loads
+    ``.env`` with ``override=False``, such a poisoned value wins over the
+    correctly parsed file — so sanitize here and warn instead of failing
+    silently downstream (see AGENTS.md §12, 2026-07-09).
+    """
+    raw = os.getenv(name, default)
+    if raw is None:
+        return None
+    cleaned = raw.split("#", 1)[0].strip()
+    if cleaned != raw.strip():
+        log_warning(
+            f"{LOG_PREFIX} Env var {name} contained an inline comment; "
+            f"using {cleaned!r} (raw value was {raw!r})"
+        )
+    return cleaned
 
 
 class SynthWebUIInterface:
@@ -166,14 +189,15 @@ class SynthWebUIInterface:
         # Runtime/configurable attributes with sensible defaults
         # Autostart can be disabled for tests/dev harnesses.
         self.autostart = bool(autostart)
-        self.host = os.getenv("SYNTH_WEBUI_HOST", "0.0.0.0")
+        self.host = _clean_env("SYNTH_WEBUI_HOST", "0.0.0.0") or "0.0.0.0"
         self.log_level = os.getenv("SYNTH_WEBUI_LOG_LEVEL", "info")
         # TLS / HTTPS configuration
         # By default expose the WebUI over HTTPS unless explicitly disabled.
         # This makes the default developer experience minimal and secure.
-        self.tls_enabled = (
-            os.getenv("SYNTH_WEBUI_TLS", os.getenv("SECURE_CONNECTION", "1")) == "1"
-        )
+        tls_flag = _clean_env("SYNTH_WEBUI_TLS")
+        if tls_flag is None:
+            tls_flag = _clean_env("SECURE_CONNECTION", "1")
+        self.tls_enabled = tls_flag == "1"
         self.tls_certfile = os.getenv("SYNTH_WEBUI_CERTFILE", None)
         self.tls_keyfile = os.getenv("SYNTH_WEBUI_KEYFILE", None)
         # Port configuration
@@ -181,22 +205,32 @@ class SynthWebUIInterface:
         # - SYNTH_WEBUI_HTTPS_PORT: HTTPS/TLS port (only used when TLS is enabled)
         # Backward compatible fallbacks:
         # - SYNTH_WEBUI_PORT / PORT
-        raw_http_port = os.getenv(
-            "SYNTH_WEBUI_HTTP_PORT",
-            os.getenv("SYNTH_WEBUI_PORT", os.getenv("PORT", "8080")),
-        )
+        raw_http_port = _clean_env("SYNTH_WEBUI_HTTP_PORT")
+        if raw_http_port is None:
+            raw_http_port = _clean_env("SYNTH_WEBUI_PORT")
+        if raw_http_port is None:
+            raw_http_port = _clean_env("PORT", "8080")
         try:
-            http_port = int(raw_http_port)
+            http_port = int(raw_http_port or "8080")
         except Exception:
+            log_warning(
+                f"{LOG_PREFIX} Could not parse HTTP port {raw_http_port!r}; "
+                f"falling back to 8080"
+            )
             http_port = 8080
 
         https_port = None
         if self.tls_enabled:
-            raw_https_port = os.getenv("SYNTH_WEBUI_HTTPS_PORT", None)
+            raw_https_port = _clean_env("SYNTH_WEBUI_HTTPS_PORT")
             if raw_https_port:
                 try:
                     https_port = int(raw_https_port)
                 except Exception:
+                    log_warning(
+                        f"{LOG_PREFIX} Could not parse HTTPS port "
+                        f"{raw_https_port!r}; serving HTTPS on the HTTP port "
+                        f"{http_port} instead"
+                    )
                     https_port = http_port
             else:
                 # If no explicit HTTPS port is provided, keep historical behavior
@@ -2407,6 +2441,7 @@ class SynthWebUIInterface:
         client_type: str = "unknown"
         client_capabilities: List[str] = ["url_fetch"]
         missing_assets: List[str] = []
+        hello_disconnect = False
 
         try:
             raw_hello = await asyncio.wait_for(websocket.receive_text(), timeout=0.3)
@@ -2437,12 +2472,29 @@ class SynthWebUIInterface:
             log_debug(
                 f"{LOG_PREFIX} No hello from {session_id} within timeout, proceeding"
             )
+        except WebSocketDisconnect:
+            # Client dropped during the handshake (page reload / reconnect
+            # churn). Skip the state push and the receive loop — attempting
+            # either on a closed socket logs a spurious warning ("Failed to
+            # push VRM state ... after 'websocket.close'") followed by an
+            # error ("Cannot call 'receive' once a disconnect message has
+            # been received").
+            hello_disconnect = True
         except Exception as hello_exc:
             log_debug(f"{LOG_PREFIX} Hello handling error (non-fatal): {hello_exc}")
 
+        # The disconnect can also be consumed without raising (e.g. the
+        # ``wait_for`` cancellation races the close frame), so double-check
+        # the socket state rather than trusting the exception alone.
+        if (
+            websocket.client_state is not WebSocketState.CONNECTED
+            or websocket.application_state is not WebSocketState.CONNECTED
+        ):
+            hello_disconnect = True
+
         # Push full VRM state to the newly connected client
         try:
-            if self.animation_handler:
+            if self.animation_handler and not hello_disconnect:
                 full_state = await self.animation_handler.get_full_state()
 
                 # 1) VRM model
@@ -2487,9 +2539,16 @@ class SynthWebUIInterface:
                 f"{LOG_PREFIX} Failed to push VRM state to session {session_id}: {push_exc}"
             )
 
-        log_info(f"{LOG_PREFIX} Client connected: {session_id} (type={client_type})")
+        if not hello_disconnect:
+            log_info(
+                f"{LOG_PREFIX} Client connected: {session_id} (type={client_type})"
+            )
 
         try:
+            if hello_disconnect:
+                # Route through the normal disconnect path so the shared
+                # cleanup in ``finally`` runs exactly once.
+                raise WebSocketDisconnect(code=1000)
             while True:
                 data = await websocket.receive_text()
                 try:
