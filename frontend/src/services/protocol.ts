@@ -51,7 +51,10 @@ export interface VrmPreloadMessage {
   type: 'vrm_preload'
   state: string
   file: string | null
-  descriptor?: string | null
+  /** Unlike `vrm_animation_v2`, the server puts the parsed descriptor-data
+   * *object* here (`animation_handler.py::_preload_animation`), not an id
+   * string. Treat a string as a resolvable id, anything else as opaque. */
+  descriptor?: string | Record<string, unknown> | null
 }
 
 export interface VrmFaceMessage {

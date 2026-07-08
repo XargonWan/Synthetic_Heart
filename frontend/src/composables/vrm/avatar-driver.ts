@@ -102,14 +102,18 @@ export async function createAvatarDriver(
 
   function applyPreloadEvent(event: VrmPreloadMessage): void {
     void (async () => {
-      if (event.descriptor) {
+      // `descriptor` is only an id when it's a string; `vrm_preload` events
+      // carry the descriptor-data object instead (see protocol.ts) — for
+      // those the already-resolved `file` path is the thing to warm.
+      if (typeof event.descriptor === 'string' && event.descriptor) {
         const entry = await resolveAnimationDescriptor(event.descriptor)
-        if (entry?.animation_url)
+        if (entry?.animation_url) {
           void cache.preload(entry.animation_url).catch(() => {})
+          return
+        }
       }
-      else if (event.file) {
+      if (event.file)
         void cache.preload(event.file).catch(() => {})
-      }
     })()
   }
 
