@@ -385,6 +385,24 @@ docker exec synth-dev tail -f /app/logs/synth.log | grep -E "\[grillo\]|grillo"
 
 ---
 
+### Inline comments in `.env` poison values when launching from the IDE — and `.env` itself can't fix it  <!-- 2026-07-09 -->
+**Symptom:** A numeric env var silently misbehaves even though `.env` looks correct and `dotenv_values()` parses it fine. Observed as: `SYNTH_WEBUI_HTTPS_PORT=8088   # comment` → the running process's env literally contains `'8088     # comment'` → `int()` fails in `core/webui.py` → silent fallback served HTTPS on the HTTP port and nothing on 8088 (an evening of "empty response"/"connection refused" debugging).
+**Location:** Any `.env` value with an inline `#` comment. Root cause is two-layer: (1) VS Code/Antigravity's Python integration injects the workspace `.env` into terminals/processes with a parser that does **not** strip inline comments; (2) `core/logging_utils.py`/`core/config.py` call `load_dotenv(override=False)`, so the properly-parsed value never overrides the poisoned one already in the environment.
+**Status:** fixed for the webui config path (2026-07-09): `core/webui.py::_clean_env` strips inline `#` suffixes from host/TLS/port vars and logs a WARNING naming the variable; unparsable ports also warn instead of failing silently. Other subsystems reading env vars directly remain exposed.
+**Notes:** Debug this class of problem by reading the *live process* env, not the file: `uv run --with psutil python -c "import psutil; print(psutil.Process(<pid>).environ())"`. Rule of thumb for this repo: comments in `.env` go on their own lines, always.
+
+### `blocklist` rejects webui users: UUID session ids bound against an integer `user_id` column  <!-- 2026-07-08 -->
+**Symptom:** Every webui-originated message logs `[blocklist] Failed to check if user <uuid> is blocked: invalid input for query argument $1: '<uuid>' ('str' object cannot be interpreted as an integer)`. Fail-open (`is_user_blocked` returns False on error), so nothing user-visible breaks — but it's one ERROR log line per webui message, and webui users can never actually be blocked.
+**Location:** `plugins/blocklist.py::is_user_blocked` (typed `user_id: int`), callers pass webui session UUIDs (strings); `blocklist.user_id` is an integer column sized for Telegram ids.
+**Status:** known, not fixed — diagnosis only (2026-07-08).
+**Notes:** Fix direction: either widen the column + type to string (user ids are interface-scoped strings elsewhere in the codebase), or skip the blocklist check for non-numeric ids. Watch for the same assumption in anything else keyed on Telegram-style numeric user ids.
+
+### Windows host runs spam `--- Logging error ---` / `UnicodeEncodeError: 'charmap' codec` for any log line with non-ASCII  <!-- 2026-07-08 -->
+**Symptom:** When SyntH runs directly on the Windows host (e.g. `scripts/run_webui.py` from a terminal), every log message containing `✓`, emoji, etc. produces a multi-line `--- Logging error ---` traceback (`cp1252.py ... charmap_encode`) on the console handler; the file handlers are fine. Also surfaces as `[QUEUE] Error adding reaction: 'charmap' codec can't encode character '\U0001f440'` in `synth.log`.
+**Location:** `core/logging_utils.py` console `StreamHandler` (inherits the terminal's cp1252 encoding); the Linux container is unaffected (UTF-8).
+**Status:** known, not fixed — cosmetic, host-only.
+**Notes:** If it ever needs fixing: set `PYTHONIOENCODING=utf-8` for host runs (or wire the console handler with `errors="replace"`). Don't strip the emoji from log messages — they're load-bearing grep anchors in several debug flows.
+
 ### Frontend builds from IDE agent shells silently bake the theme hue (chromatic preset env sniffing)  <!-- 2026-07-08 -->
 **Symptom:** The `/stage` theme-hue slider does nothing: `--chromatic-hue` updates on `<html>` but every `primary-*` color keeps the default hue. The built CSS contains literal `oklch(... 220.44 ...)` values instead of `var(--chromatic-hue)` references. `pnpm build` output looks identical otherwise — screenshots pass casual review.
 **Location:** `@proj-airi/unocss-preset-chromatic` `dist/index.node.mjs` (bakes colors when `VSCODE_ESM_ENTRYPOINT` contains `"extensionHostProcess"`, a heuristic for the UnoCSS VSCode extension); guard: `frontend/chromatic-env-guard.ts`, imported first in `frontend/uno.config.ts`.
