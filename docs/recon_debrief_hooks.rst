@@ -102,6 +102,50 @@ Examples
   `instruction` to be injected into the prompt (see `plugins/` for
   examples like `recon_log_reader.py`).
 
+Video transcription (Recon Video Transcriber)
+---------------------------------------------
+The ``recon_video_transcriber`` plugin (``plugins/recon_video_transcriber.py``)
+transcribes videos referenced in a conversation and attaches the result to the
+prompt as a ``snippet`` contribution (the only recon type surfaced by the
+prompt engine besides ``memory`` and ``instruction``).
+
+How it works:
+
+1. The shared Recon LLM call is asked (via ``get_recon_instruction``) to
+   reconstruct a list of *canonical* YouTube watch URLs from the user's
+   message. This handles bare video IDs (e.g. ``aoP81h68Xkk``) and malformed
+   links (e.g. ``htps:/youtube.com/watch?v=...``) — no keyword or regex
+   intent matching is used, so it works in any language.
+2. ``parse_recon_response`` validates each candidate URL *structurally* with
+   :func:`core.media_extract.is_youtube_url`, and also looks for a local video
+   file referenced on the incoming message's ``raw_data`` (keys
+   ``media_path`` / ``file_path`` / ``attachment_path`` / ``video_path``).
+3. For each source it obtains a transcript:
+
+   - YouTube → existing subtitles (fast path) or downloaded audio → Auris STT.
+   - Local file → audio extracted via ``ffmpeg`` → Auris STT.
+   - Optionally a visual description via Iris (local files only).
+
+Because URL reconstruction runs on the message *text*, the primary use case
+("transcribe this YouTube video") works on **every** interface (Telegram,
+Discord, WebUI, Ollama API) with no interface-specific changes. Local video
+visual passes require the interface to expose the downloaded file path on the
+message's ``raw_data`` and keep the file alive until Recon runs.
+
+Configuration flags:
+
+- ``RECON_VIDEO_TRANSCRIBER_RECON_ENABLED`` (bool, default: True)
+- ``RECON_VIDEO_MAX_SECONDS`` (int, default: 1800; 0 = no limit) — skip videos
+  longer than this to stay within ``RECON_TIMEOUT``.
+- ``RECON_VIDEO_INCLUDE_VISION`` (bool, default: True) — also run an Iris
+  visual description for local video files.
+- ``RECON_VIDEO_SNIPPET_MAX_CHARS`` (int, default: 12000; 0 = no limit) —
+  truncate each transcript to avoid bloating the prompt.
+
+Dependencies: ``yt-dlp`` (YouTube fetch + subtitles) and ``ffmpeg`` (audio
+extraction). The subtitle fast-path avoids downloading/transcoding audio when
+captions are available.
+
 Testing & compatibility
 ------------------------
 - Recon contributions are optional; if no recon-capable plugins are

@@ -801,6 +801,23 @@ docker exec synth-dev tail -f /app/logs/synth.log | grep -E "\[grillo\]|grillo"
 
 ---
 
+### Recon Video Transcriber — YouTube works everywhere, local-video visual pass is not wired into interfaces  <!-- 2026-07-06 -->
+**What:** `plugins/recon_video_transcriber.py` (recon key `video_media`) transcribes videos and attaches the result to the prompt as a `type:"snippet"` recon contribution. Two paths: (1) **YouTube** — the recon LLM reconstructs a canonical `https://www.youtube.com/watch?v=<id>` from bare IDs or malformed URLs in the message text (structural validation only via `core/media_extract.py:is_youtube_url`, NO regex intent detection), then `fetch_youtube()` grabs subtitles (fast path) or downloads audio and runs Auris STT. (2) **Local video file** — `extract_audio_from_video()` (ffmpeg) → Auris STT, optionally an Iris visual description.
+**Scope/limitation:** The YouTube-from-text path needs NO interface changes and works on **every** interface (the URL lives in the message text the recon LLM already sees). The **local-video** path is intentionally NOT wired into any interface: Telegram deletes the downloaded video before recon runs (interface `telegram_bot.py` ~L873), and Discord/WebUI would each need extra file-lifecycle plumbing that was deliberately not added (repo discipline — no speculative wiring). `RECON_VIDEO_INCLUDE_VISION` only matters once a local video path is actually passed on `message.raw_data` (keys `media_path`/`file_path`/`attachment_path`/`video_path`).
+**Config:** `RECON_VIDEO_TRANSCRIBER_RECON_ENABLED` (True), `RECON_VIDEO_MAX_SECONDS` (1800; 0 = no limit), `RECON_VIDEO_INCLUDE_VISION` (True), `RECON_VIDEO_SNIPPET_MAX_CHARS` (12000; 0 = no limit). Deps: `yt-dlp` (added via `uv add`), `ffmpeg` (already in container). `RECON_TIMEOUT` (180s) is mitigated by the subtitle fast-path + the duration cap.
+**Status:** implemented + validated (ruff/ty/pytest green; 14 tests in `tests/test_recon_video_transcriber.py`). Not yet exercised against a live container.
+
+---
+
+### Recon "si incarta" on YouTube Shorts with no subtitles — blocking yt-dlp/ffmpeg froze the async recon loop  <!-- 2026-07-08 -->
+**Symptom:** A specific Shorts link (`https://youtube.com/shorts/Rm7f2J5YTjw?si=...`, video "LE MADRI E LA TECNOLOGIA", 71s, NO subtitles) never got transcribed and the whole message pipeline appeared to hang ("si è incartato il recon"). No recon parse-failure or yt-dlp error in the logs — the pipeline just stalled.
+**Location:** `plugins/recon_video_transcriber.py` `_process_youtube` (`fetch_youtube(...)`) and `_process_local` (`extract_audio_from_video(...)`); dispatched via `core/recon.py` `gather_recon_contributions` → `await plugin.parse_recon_response(...)` (L754), which awaits every recon plugin **sequentially in the main event loop**.
+**Status:** fixed 2026-07-08 (code); needs `docker compose up -d --build` to activate (edits don't hot-reload).
+**Root cause:** `core/media_extract.py:fetch_youtube` and `extract_audio_from_video` are **synchronous/blocking** (yt-dlp metadata probe + audio download, ffmpeg), but were called *directly* inside the async `_process_youtube`/`_process_local`. Because `recon.py` awaits each plugin's `parse_recon_response` in the main loop, a blocking call there freezes the ENTIRE event loop — not just recon, but the whole message chain — for the full download duration. `is_youtube_url` correctly accepts `/shorts/<id>` (structural check; the `?si=` param is harmless), so URL validation was never the issue. The trigger is specifically Shorts (and any video) **without ready subtitles**: the subtitle fast-path is skipped, forcing a synchronous audio download that can take many seconds and stall everything.
+**Fix:** wrap the blocking helpers in `asyncio.to_thread` — `await asyncio.to_thread(fetch_youtube, url, ...)` and `await asyncio.to_thread(extract_audio_from_video, video_path)`. This offloads the I/O to a worker thread so the event loop keeps serving other recon plugins and the message pipeline. **Lesson (reinforces the harmony STT entry):** any sync/blocking helper (yt-dlp, ffmpeg, requests, subprocess) called from an async recon plugin MUST go through `asyncio.to_thread` — awaiting it directly blocks the shared recon loop for every interface.
+
+---
+
 ## 13. Database Quick Reference
 
 > Tables are created inline in `core/db.py` and each plugin — **`init-db.sql` only seeds a subset.** If you need a table's full column list, `grep -A20 "CREATE TABLE IF NOT EXISTS <name>"` in the relevant file.
@@ -888,6 +905,10 @@ All keys stored in the `config` table and accessible via `config_registry.get_va
 | `RECON_MAX_RESULTS` | Max results for recon/search operations |
 | `RECON_TIMEOUT` | Timeout for recon operations |
 | `RECON_LOG_READER_LINES` | Lines to read for log recon actions |
+| `RECON_VIDEO_TRANSCRIBER_RECON_ENABLED` | Enable the Recon video transcriber plugin |
+| `RECON_VIDEO_MAX_SECONDS` | Skip videos longer than this (s; 0 = no limit) |
+| `RECON_VIDEO_INCLUDE_VISION` | Also run Iris visual description for local video files |
+| `RECON_VIDEO_SNIPPET_MAX_CHARS` | Truncate each transcript snippet (0 = no limit) |
 | `VOSK_MODEL_PATH` | Path to VOSK STT model |
 | `CHAT_SLEEP_COMMANDS` | Commands that put Synth into sleep/quiet mode |
 | `CHAT_WAKE_COMMANDS` | Commands that wake Synth from sleep mode |
