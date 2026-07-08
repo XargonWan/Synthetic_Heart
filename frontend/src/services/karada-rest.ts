@@ -1,8 +1,11 @@
 /**
  * Typed client for the public Karada REST surface (`core/karada_api.py`).
  * All URLs are relative — same-origin in production (/stage) and proxied by
- * Vite in development.
+ * Vite in development. Every call goes through `withApiToken()` since this
+ * whole surface sits behind `rest_router`'s `_require_api_token` dependency
+ * when `settings.apiToken` is configured — see lib/api-token.ts.
  */
+import { withApiToken } from '@/lib/api-token'
 
 export interface KaradaAnimationState {
   state?: string
@@ -65,7 +68,7 @@ export interface SkinInfo {
 }
 
 async function getJson<T>(url: string): Promise<T> {
-  const resp = await fetch(url, { cache: 'no-store' })
+  const resp = await fetch(withApiToken(url), { cache: 'no-store' })
   if (!resp.ok)
     throw new Error(`GET ${url} -> ${resp.status}`)
   return await resp.json() as T
@@ -112,7 +115,7 @@ export async function postAction(
   action: string,
   options: { priority?: number, context_id?: string, loop?: boolean } = {},
 ): Promise<void> {
-  const resp = await fetch('/api/karada/action', {
+  const resp = await fetch(withApiToken('/api/karada/action'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ action, ...options }),

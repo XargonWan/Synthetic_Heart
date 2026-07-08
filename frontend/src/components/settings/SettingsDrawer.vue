@@ -65,6 +65,19 @@ const presets = Object.keys(CAMERA_PRESETS) as Array<keyof typeof CAMERA_PRESETS
         >
       </section>
 
+      <section class="flex flex-col gap-2">
+        <h3 class="text-xs uppercase tracking-wide text-white/50">
+          Access token
+        </h3>
+        <input
+          v-model.trim="settings.apiToken"
+          type="password"
+          autocomplete="off"
+          placeholder="Only needed if the server requires one"
+          class="w-full rounded-lg bg-white/10 px-2 py-1.5 text-xs text-white placeholder:text-white/30 focus:outline-none focus:ring-1 focus:ring-primary-400"
+        >
+      </section>
+
       <p class="mt-auto text-[11px] leading-relaxed text-white/40">
         SyntH Stage — connects to this server's <code>/ws</code> and
         <code>/api/karada</code> endpoints. Portions ported from

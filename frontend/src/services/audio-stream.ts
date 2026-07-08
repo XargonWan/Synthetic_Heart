@@ -11,6 +11,7 @@
  * the default voice path buffers the clip and POSTs it to
  * `/api/audio/upload` instead (see lib/audio/voice-recorder.ts).
  */
+import { apiTokenQuery } from '@/lib/api-token'
 
 export interface AudioStreamEvents {
   onReady?: () => void
@@ -44,7 +45,8 @@ export class AudioStreamClient {
 
   async open(): Promise<void> {
     const proto = window.location.protocol === 'https:' ? 'wss' : 'ws'
-    const ws = new WebSocket(`${proto}://${window.location.host}/api/audio/stream`)
+    const query = apiTokenQuery()
+    const ws = new WebSocket(`${proto}://${window.location.host}/api/audio/stream${query ? `?${query}` : ''}`)
     ws.binaryType = 'arraybuffer'
     this.ws = ws
 

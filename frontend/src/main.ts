@@ -4,6 +4,7 @@ import { createApp } from 'vue'
 import App from './App.vue'
 import { useAudioStore } from './stores/audio'
 import { useChatStore } from './stores/chat'
+import { useConnectionStore } from './stores/connection'
 import { useMicStore } from './stores/mic'
 
 import '@unocss/reset/tailwind.css'
@@ -21,4 +22,5 @@ app.mount('#app')
   audio: useAudioStore(),
   chat: useChatStore(),
   mic: useMicStore(),
+  connection: useConnectionStore(),
 }

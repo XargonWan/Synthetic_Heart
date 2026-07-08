@@ -180,3 +180,32 @@ Read this before touching ports, TLS, or the trainer's proxy setup.
 - **A stale scratch `scripts/run_webui.py` had been squatting `127.0.0.1:8088` for days** (killed 2026-07-09). If ports behave inexplicably, check `netstat` for leftover scratch instances first, and read the *live process* env with psutil (AGENTS.md §12) before trusting `.env`.
 - `frontend/dist/` on disk is current (includes the preload fix); it's served directly, so frontend fixes are live without a backend restart.
 - Suggested next steps are unchanged (§6), with **auth UX (§6.4) now the top pick**: the agreed direction is a pairing-token flow (server generates token → QR/URL → wire `settings.apiToken` into `synth-ws.ts` + REST clients), with a Capacitor wrapper as the longer-term secure-webapp answer (discussion 2026-07-09).
+
+---
+
+## 10. 2026-07-09 — §6.4 auth UX wiring done (frontend-only, no backend changes)
+
+`settings.apiToken` now actually reaches every gated endpoint instead of sitting unused in the Pinia store:
+
+- New `frontend/src/lib/api-token.ts` — `apiTokenQuery()` / `withApiToken(url)`, both reading `useSettingsStore().apiToken` and building a `?token=` query string (query param chosen over the `Authorization` header so REST and WS call sites share one mechanism and cross-origin calls don't trigger CORS preflight).
+- `stores/connection.ts::connect()` passes `apiTokenQuery()` into `SynthWs`'s `query` option, so `/ws` actually sends the token now.
+- `services/karada-rest.ts::getJson()` and `postAction()` route through `withApiToken()` — covers every `/api/karada/*` call (`fetchFullState`, `fetchAnimationManifest`, `resolveDescriptor`, `fetchSkins`, `postAction`). **`activateSkin()` deliberately untouched** — `POST /api/skins/{name}/activate` lives directly on `self.app` in `core/webui.py`, not on `karada_api.py`'s token-gated `rest_router`, so it was never actually gated (checked by reading the route registration, not assumed).
+- `services/audio-stream.ts` appends the same query string to the `/api/audio/stream` WS URL. **`services/audio-upload.ts` (`POST /api/audio/upload`) deliberately untouched** — also registered directly on `self.app`, no `_require_api_token` dependency, not gated today. If someone gates it later, this client needs the same treatment.
+- `components/settings/SettingsDrawer.vue` gained an "Access token" password input (there was previously no UI at all for the field — it was only reachable via devtools localStorage).
+- `stores/connection.ts` gained a `watch(() => useSettingsStore().apiToken, …)` that tears down and re-dials the live `SynthWs` when the token changes, so editing it in Settings takes effect immediately — a `SynthWs` instance otherwise keeps reconnecting with whatever query string it was constructed with, which would've meant "type token, still stuck reconnecting until you reload the page."
+- `main.ts`'s debug hook (`window.__stage`) gained a `connection` entry (was `audio`/`chat`/`mic` only) — needed to observe `connection.status` from Playwright/console without a UI; kept, matches the existing "manual console sessions and Playwright scripts drive the stores directly" convention.
+
+**Verified live**, not just typecheck/build, against a scratch backend (`SYNTH_WEBUI_TLS=0 SYNTH_WEBUI_HTTP_PORT=8091 SYNTH_WEBUI_API_TOKEN=stagetest123 uv run python scripts/run_webui.py`, killed after):
+- No token configured, server requires one → `connection.status` stays `reconnecting`, `/api/karada/state` → 401.
+- Correct token (set via `localStorage.setItem('synth-stage/api-token', …)`, matching what the new UI field writes) → `connection.status` → `connected`, `/api/karada/state` → 200.
+- Wrong token → `reconnecting` / 401, same as no token.
+- Typing the correct token into the actual Settings-drawer input (Playwright driving the real DOM, not localStorage directly) took the connection from `reconnecting` to `connected` with no page reload — confirms the live-reconnect watcher works, not just the initial-connect wiring.
+
+New script kept for future manual QA: `frontend/scripts/auth-ux-ui-check.mjs` (drives the Settings-drawer token input end-to-end; complements `m6-auth-check.mjs`, which only exercised raw WS URLs, not the app's own store/UI wiring).
+
+Validation: `pnpm typecheck` + `pnpm build` clean (no new errors; the `[INVALID_ANNOTATION]` rolldown/vueuse warnings are pre-existing upstream noise, unrelated to this change). No backend files touched, so no `ruff`/`ty`/`pytest` re-run was needed this round.
+
+**Not done / still open:**
+- The full pairing-token flow (server-generated token, QR/URL handoff) from the 2026-07-09 discussion — this pass only wired the *storage → transport* half; token issuance/rotation UX is still manual (paste a token that matches `SYNTH_WEBUI_API_TOKEN` server-side).
+- `/api/audio/upload` and `/api/skins/{name}/activate` remain unauthenticated regardless of `SYNTH_WEBUI_API_TOKEN` — noted above, not fixed (out of scope: frontend can't gate what the backend doesn't check; would need a `core/webui.py` change plus the usual backend validation pass).
+- Capacitor wrapper — untouched, longer-term item per §6.6.
