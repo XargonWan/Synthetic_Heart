@@ -180,7 +180,7 @@ Config & Miscellaneous
 Ollama‑Compatibility Server
 ---------------------------
 
-When the ``ollama_compat_server`` interface is enabled, SyntH speaks the same
+When the ``openai_api_server`` interface is enabled, SyntH speaks the same
 HTTP protocol as an Ollama daemon.  The following endpoints are implemented
 (usually on port ``11435`` by default):
 
