@@ -92,6 +92,9 @@ const __synthHeadPitchGain = 2.4;
 const __synthHeadFollowInnerRad = 1.40; // ~80deg: full follow up to here
 const __synthHeadFollowOuterRad = 2.10; // ~120deg: fully disengaged past here
 let __synthTmpHeadPitchQuat = null;
+// Scratch quaternion used to strip the previously applied additive glance off
+// the head bone, so the additive rotation never accumulates into a spin.
+let __synthTmpHeadUndoQuat = null;
 let __synthTmpRight = null;
 const __synthTouchOverlayContextId = '__webui_touch_overlay';
 const __synthTouchOverlayPriority = 11;
@@ -434,6 +437,7 @@ function initVRMViewer() {
     __synthTmpHeadQuatParent = new THREE.Quaternion();
     __synthTmpHeadDesiredQuat = new THREE.Quaternion();
     __synthTmpHeadPitchQuat = new THREE.Quaternion();
+    __synthTmpHeadUndoQuat = new THREE.Quaternion();
     __synthTmpRight = new THREE.Vector3(1, 0, 0);
     __synthTmpHeadMat = new THREE.Matrix4();
 
@@ -1585,29 +1589,73 @@ class AnimationHandler {
     // emotions read as subtle micro-expressions instead of a maxed-out face.
     // While speaking (talk / lipsync) the full value is preserved so Synth can
     // be more expressive. Gating is purely action-state based (no keywords).
+    // Emotion presets whose VRM blendshape opens/stretches the mouth. While
+    // speaking these stack on top of the lipsync visemes and leave the mouth
+    // gaping, so their intensity is capped during audio playback. This is
+    // per-blendshape calibration (mouth-affecting presets on this model), not
+    // keyword/intent detection: the same cap applies regardless of language.
+    _mouthOpeningEmotionCap(key) {
+        // Maps a lowercased emotion preset name -> max intensity allowed while
+        // speaking. Presets not listed here keep full intensity (they do not
+        // move the mouth). null => not a mouth-opening preset.
+        switch (key) {
+            case 'relaxed':
+            case 'happy':
+            case 'joy':
+            case 'fun':
+            case 'surprised':
+            case 'surprise':
+            case 'excited':
+            case 'laugh':
+                return 0.12;
+            default:
+                return null;
+        }
+    }
+
     _scaleRemoteEmotionForState(name, value) {
         try {
             const v = Math.max(0, Math.min(1, Number(value) || 0));
             if (v <= 0) return v;
             if (this._isNonEmotionalFaceKey(name)) return v;
 
-            const currentActionKey = (this.currentActionName && typeof this.currentActionName === 'string')
-                ? String(this.currentActionName).toLowerCase()
-                : (this.currentActionKey ? String(this.currentActionKey).toLowerCase() : null);
-            const isSpeaking = !!this._lipsyncEnabled || currentActionKey === 'talk';
+            // The face is driven ONLY by real lipsync + the emotion engine. The
+            // 'talk' body animation moves the BODY, not the face, so it must not
+            // force a "speaking" face on its own. Expressiveness is unlocked when
+            // the voice is actually audible in the browser — the same signal that
+            // drives the mouth visemes — OR when the server flags lipsync active.
+            // Using __synthIsLipSyncing keeps the full-intensity face aligned to
+            // real audio playback (not the earlier body 'talk' clip nor a
+            // possibly-desynced server flag), restoring lipsync accuracy.
+            const audioSpeaking = (typeof window !== 'undefined' && !!window.__synthIsLipSyncing);
+            const isSpeaking = audioSpeaking || !!this._lipsyncEnabled;
 
-            // Speaking: keep full expressiveness so Synth can emote while talking.
-            if (isSpeaking) return v;
+            // Speaking: keep full expressiveness so Synth can emote while talking,
+            // EXCEPT mouth-opening emotion presets (relaxed/happy/surprised/...),
+            // which open the mouth on this model and therefore stack on top of
+            // the lipsync visemes. At full intensity they leave the mouth gaping
+            // open during speech, so cap them to a moderate value while the voice
+            // is audible — the visemes still drive the actual mouth motion, the
+            // emotion just adds a slight, natural openness. Non-mouth presets
+            // (sad, angry, fear, ...) keep full intensity.
+            if (isSpeaking) {
+                const speakKey = String(name || '').toLowerCase();
+                const cap = this._mouthOpeningEmotionCap(speakKey);
+                if (cap !== null) return Math.min(v, cap);
+                return v;
+            }
             // Every non-speaking state (idle, think, write, touch, ...) shows the
             // base emotion only as a subtle micro-expression. Passing the full
             // value through for non-idle states (e.g. 'write') let 'relaxed' open
             // the mouth at full intensity, producing an unnatural face while typing.
 
             // Micro-expression: keep the emotion perceptible but subtle.
-            // 'relaxed' partially opens the mouth on this model, so cap it lower.
+            // Mouth-opening presets partially open the mouth on this model, so
+            // cap them lower even at rest to avoid an unnatural resting face.
             const k = String(name || '').toLowerCase();
-            const subtleCeil = (k === 'relaxed') ? 0.06 : 0.18;
-            const subtleFloor = (k === 'relaxed') ? 0.02 : 0.05;
+            const opensMouth = this._mouthOpeningEmotionCap(k) !== null;
+            const subtleCeil = opensMouth ? 0.06 : 0.18;
+            const subtleFloor = opensMouth ? 0.02 : 0.05;
             return Math.min(subtleCeil, subtleFloor + v * (subtleCeil - subtleFloor));
         } catch (e) {
             return Math.max(0, Math.min(1, Number(value) || 0));
@@ -1811,7 +1859,12 @@ class AnimationHandler {
                     : null);
             const hasExplicitFacialExpression = this._hasActiveFacialExpressionSource();
             const isIdleLikeAction = !currentActionKey || currentActionKey === 'idle';
-            const suppressBaseEmotionLayers = hasExplicitFacialExpression || this._lipsyncEnabled || currentActionKey === 'talk';
+            // The face is owned by lipsync + the emotion engine. The 'talk' body
+            // animation must NOT suppress the base emotion layer on its own — only
+            // an explicit facial expression, active lipsync, or real audio playback
+            // (the signal that also drives the mouth visemes) does.
+            const audioSpeaking = (typeof window !== 'undefined' && !!window.__synthIsLipSyncing);
+            const suppressBaseEmotionLayers = hasExplicitFacialExpression || this._lipsyncEnabled || audioSpeaking;
 
             // Background emotional expression: idle only, subtle only, and never while
             // a speech-tag expression or lipsync is actively driving the face.
@@ -5888,6 +5941,90 @@ let idleTimeout = null;
 
 const clock = new THREE.Clock();
 
+// Distanza camera "base" lungo l'asse di vista dal target (0,1.2,0):
+// la posa iniziale è (0,1.4,2.2) con target (0,1.2,0) → distanza ≈ 2.21.
+// La memorizziamo per poterla riscalare in base all'aspect ratio.
+const BASE_CAMERA_DISTANCE = 2.21;
+const CAMERA_TARGET_Y = 1.2;
+
+// Adatta il framing (distanza camera) all'aspect ratio corrente. In una
+// finestra portrait/stretta (es. il PiP a 360×640) il FOV verticale fisso a
+// 30° non basta a contenere tutto il corpo, quindi il modello risulta
+// "tranciato". Indietreggiando la camera aumentiamo la porzione verticale
+// visibile e l'intero corpo rientra nel frame.
+// Target verticale per il framing portrait a figura intera. Il modello va
+// da ~1.5 (testa, orecchie/antenne incluse) a 0 (piedi): alziamo un po' il
+// target (~0.79) e arretriamo quanto basta (scaleCap 1.52) per contenere
+// l'INTERA testa — orecchie comprese — vicino al bordo alto e i piedi vicino
+// al bordo basso, con margini minimi e senza tagliare nulla.
+const PORTRAIT_TARGET_Y = 0.79;
+
+function fitFramingForAspect() {
+    try {
+        if (!camera || typeof camera.aspect !== 'number') return;
+        const aspect = camera.aspect;
+        // Riposizioniamo la camera SOLO in portrait (finestra più alta che
+        // larga, tipicamente il PiP). In landscape/quadrato non tocchiamo la
+        // camera così da preservare lo zoom/rotazione impostati dall'utente
+        // tramite gli OrbitControls nella WebUI principale.
+        if (aspect >= 1) return;
+        // Override live per tuning (impostabile da console): {targetY, scaleCap}
+        const ov = (typeof window !== 'undefined' && window.__vrmFramingOverride) || null;
+        const targetY = ov && typeof ov.targetY === 'number' ? ov.targetY : PORTRAIT_TARGET_Y;
+        const scaleCap = ov && typeof ov.scaleCap === 'number' ? ov.scaleCap : 1.52;
+        // Con FOV verticale fisso, per contenere l'intera figura in una
+        // finestra stretta dobbiamo indietreggiare in proporzione a quanto la
+        // finestra è più alta che larga.
+        const scale = Math.min(scaleCap, 1 / aspect);
+        const dist = BASE_CAMERA_DISTANCE * scale;
+        // Vista quasi frontale verso il centro corpo (targetY).
+        const dirY = 0.05;
+        const dirZ = 2.2;
+        const dirLen = Math.hypot(dirY, dirZ) || 1;
+        camera.position.set(
+            0,
+            targetY + (dirY / dirLen) * dist,
+            (dirZ / dirLen) * dist,
+        );
+        if (controls && controls.target) {
+            controls.target.set(0, targetY, 0);
+            controls.update();
+        }
+        camera.lookAt(0, targetY, 0);
+        camera.updateProjectionMatrix();
+    } catch (e) {
+        console.warn('[synth_webui] fitFramingForAspect failed:', e);
+    }
+}
+window.fitVRMFramingForAspect = fitFramingForAspect; // Esposto per il PiP.
+
+// Salva/ripristina la posa della camera (posizione). Usato dal PiP per
+// preservare lo zoom/rotazione della WebUI principale mentre in portrait la
+// camera viene indietreggiata per mostrare tutto il corpo.
+window.saveVRMCameraPose = function saveVRMCameraPose() {
+    try {
+        if (!camera) return null;
+        const pose = { x: camera.position.x, y: camera.position.y, z: camera.position.z };
+        if (controls && controls.target) {
+            pose.tx = controls.target.x;
+            pose.ty = controls.target.y;
+            pose.tz = controls.target.z;
+        }
+        return pose;
+    } catch (e) { return null; }
+};
+window.restoreVRMCameraPose = function restoreVRMCameraPose(pose) {
+    try {
+        if (!camera || !pose) return;
+        camera.position.set(pose.x, pose.y, pose.z);
+        if (controls && controls.target && typeof pose.tx === 'number') {
+            controls.target.set(pose.tx, pose.ty, pose.tz);
+            controls.update();
+        }
+        camera.updateProjectionMatrix();
+    } catch (e) { /* ignore */ }
+};
+
 function resizeRenderer() {
     const width = canvas.clientWidth;
     const height = canvas.clientHeight || 1;
@@ -5895,6 +6032,7 @@ function resizeRenderer() {
         renderer.setSize(width, height, false);
         camera.aspect = width / height;
         camera.updateProjectionMatrix();
+        fitFramingForAspect();
     }
 }
 window.addEventListener('resize', resizeRenderer);
@@ -6722,8 +6860,38 @@ function _sampleVisemeTimeline(timeline, currentTime) {
     };
 }
 
-function render() {
-    requestAnimationFrame(render);
+// Generazione del render loop. Serve a poter "riavviare" il loop quando lo
+// scheduler PiP muore (chiusura della finestra Picture-in-Picture): i frame
+// già schedulati sul rAF della finestra PiP morta non scatteranno più, quindi
+// alla chiusura riavviamo il loop sulla finestra principale. Il token di
+// generazione garantisce che al massimo un solo loop resti attivo (i frame di
+// generazioni precedenti terminano da soli).
+let renderGeneration = 0;
+
+function render(generation) {
+    // Frame appartenente a una generazione superata (es. dopo un kick di
+    // riavvio): interrompi silenziosamente questo loop.
+    if (generation !== renderGeneration) {
+        return;
+    }
+    // Schedule the next frame. When Synth is ejected into a Document
+    // Picture-in-Picture window, pip-window.mjs sets __synthRafScheduler to
+    // that window's requestAnimationFrame. The PiP window is a real, always
+    // on-screen window, so its rAF keeps firing at full frame rate even when
+    // the opener tab loses focus or is hidden — this keeps the avatar
+    // rendering while the browser is in the background. When not in PiP we
+    // fall back to the normal window.requestAnimationFrame.
+    const gen = generation;
+    try {
+        const scheduler = window.__synthRafScheduler;
+        if (typeof scheduler === 'function') {
+            scheduler(() => render(gen));
+        } else {
+            requestAnimationFrame(() => render(gen));
+        }
+    } catch (e) {
+        requestAnimationFrame(() => render(gen));
+    }
     // Clamp the frame delta. When the Home tab is hidden (e.g. the user
     // navigates to Activity and back) the browser throttles/suspends
     // requestAnimationFrame, so on resume clock.getDelta() returns the entire
@@ -6756,15 +6924,25 @@ function render() {
                 for (let i = lo; i <= hi; i++) voiceSum += data[i];
                 const voiceVolume = voiceSum / ((hi - lo + 1) * 255.0);
 
-                // Gain curve: moderate threshold + controlled multiplier.
-                // Caps at ~0.7 to avoid the oversized "frog mouth" effect.
-                const rawMouth = Math.max(0, (voiceVolume - 0.02) * 3.0);
-                const mouthOpen = Math.max(0, Math.min(0.7, rawMouth));
+                // The FFT amplitude is used ONLY as a voice-activity GATE
+                // (mouth open while there is voice, closed on silence). The
+                // actual mouth OPENING amount is a FIXED value we choose, not
+                // derived from the volume — the audio decides the *shape*
+                // (which viseme), we decide *how open*. This avoids the mouth
+                // amplitude tracking loudness spikes and looking erratic.
+                const LIPSYNC_FIXED_OPEN = 0.42; // fixed mouth aperture while speaking
+                const rawMouth = Math.max(0, (voiceVolume - 0.06) * 3.2);
+                // Binary-ish gate: any voice above the gate → full fixed open.
+                const gate = rawMouth > 0 ? LIPSYNC_FIXED_OPEN : 0;
 
-                // Per-frame smoothing (lerp α ≈ 0.35) for natural motion.
+                // Per-frame smoothing so the fixed aperture ramps in/out
+                // gently instead of snapping. Fast release (close quickly) +
+                // slightly slower attack for natural motion.
                 if (!window.__synthLipSyncPrev) window.__synthLipSyncPrev = 0;
-                const alpha = 0.35;
-                const smoothed = window.__synthLipSyncPrev + (mouthOpen - window.__synthLipSyncPrev) * alpha;
+                const alpha = gate < window.__synthLipSyncPrev ? 0.6 : 0.4;
+                const lerped = window.__synthLipSyncPrev + (gate - window.__synthLipSyncPrev) * alpha;
+                // Hard-snap tiny residuals to zero so the mouth truly closes.
+                const smoothed = lerped < 0.03 ? 0 : lerped;
                 window.__synthLipSyncPrev = smoothed;
 
                 // ── Text-based viseme shape selection ───────────────────
@@ -7090,10 +7268,49 @@ function render() {
                 : null;
             if (headNode) {
                 if (!headNode.userData) headNode.userData = {};
-                // Cache the animation's local head rotation so we blend relative
-                // to the current animated pose, not accumulate.
+                // Recover the animation's CLEAN local head rotation before we
+                // blend the additive glance onto it. CRITICAL: we cannot simply
+                // read headNode.quaternion here, because the frame before we may
+                // have written `base * additive` into it. The animation mixer
+                // only overwrites the head bone when the ACTIVE clip has a head
+                // track *at full weight* — the base idle sits at a low floor
+                // weight (~0.12), so the head bone often retains the additive
+                // rotation from the previous frame. Caching that as the new base
+                // makes the glance accumulate every frame and the head spins
+                // without bound (observed: base yaw diverging past ±180°). Undo
+                // the previously applied additive (if any) to reconstruct the
+                // true animated pose, then cache THAT as the base.
+                //
+                // CRUCIAL: the mixer may or may not overwrite the head bone on
+                // any given frame, depending on whether the active clip carries
+                // a full-weight head track. We therefore MUST detect which case
+                // we are in instead of blindly stripping the previous additive:
+                //   - If headNode.quaternion still equals what WE wrote last
+                //     frame (base_prev * additive_prev), the mixer left the bone
+                //     alone -> strip additive_prev to recover the clean pose.
+                //   - If it differs, the mixer already re-wrote a fresh, clean
+                //     animated pose this frame -> use it as-is. Stripping the
+                //     additive here would drive the base toward -additive, which
+                //     cancels the glance (observed: additive +21deg, base -21deg,
+                //     net head yaw ~0 -> "follow-gaze looks disabled").
                 const baseQuat = (headNode.userData.__synthBaseQuat ||= headNode.quaternion.clone());
-                baseQuat.copy(headNode.quaternion);
+                const prevAdditive = headNode.userData.__synthAppliedAdditive;
+                const lastComposed = headNode.userData.__synthLastComposedQuat;
+                const mixerLeftBoneUntouched = !!(prevAdditive && lastComposed
+                    && Math.abs(headNode.quaternion.x - lastComposed.x) < 1e-6
+                    && Math.abs(headNode.quaternion.y - lastComposed.y) < 1e-6
+                    && Math.abs(headNode.quaternion.z - lastComposed.z) < 1e-6
+                    && Math.abs(headNode.quaternion.w - lastComposed.w) < 1e-6);
+                if (mixerLeftBoneUntouched) {
+                    // Bone unchanged since our last write: it still holds
+                    // base_prev * additive_prev. Strip additive_prev⁻¹ to get
+                    // the clean animated pose back.
+                    __synthTmpHeadUndoQuat.copy(prevAdditive).invert();
+                    baseQuat.copy(headNode.quaternion).multiply(__synthTmpHeadUndoQuat);
+                } else {
+                    // Mixer re-wrote a fresh clean pose (or first frame): trust it.
+                    baseQuat.copy(headNode.quaternion);
+                }
 
                 const dt = Number.isFinite(delta) ? delta : 0.016;
                 // Lazy, non-robotic smoothing: a low time-constant so the head
@@ -7223,12 +7440,27 @@ function render() {
                     // to actually tip up; the opposite sign inverted the gaze.
                     __synthTmpHeadPitchQuat.setFromAxisAngle(__synthTmpRight, appliedPitch);
                     // Compose on top of the animated base pose: base * yaw * pitch.
-                    headNode.quaternion.copy(baseQuat)
-                        .multiply(__synthTmpHeadDesiredQuat)
-                        .multiply(__synthTmpHeadPitchQuat);
+                    // Record the composed additive (yaw * pitch) so the next frame
+                    // can strip it back off and recover the clean animated pose,
+                    // preventing the base from accumulating into a spin.
+                    const applied = (headNode.userData.__synthAppliedAdditive ||= __synthTmpHeadDesiredQuat.clone());
+                    applied.copy(__synthTmpHeadDesiredQuat).multiply(__synthTmpHeadPitchQuat);
+                    headNode.quaternion.copy(baseQuat).multiply(applied);
+                    // Snapshot exactly what we wrote, so next frame can tell
+                    // whether the mixer overwrote the bone (fresh clean pose) or
+                    // left our composed value in place (needs additive stripped).
+                    if (!headNode.userData.__synthLastComposedQuat) {
+                        headNode.userData.__synthLastComposedQuat = headNode.quaternion.clone();
+                    } else {
+                        headNode.userData.__synthLastComposedQuat.copy(headNode.quaternion);
+                    }
                 } else {
-                    // Neutral: keep the animated pose (baseQuat already applied).
+                    // Neutral: keep the animated pose (baseQuat already applied)
+                    // and clear the recorded additive so the next frame reads the
+                    // pose as-is without stripping anything.
                     headNode.quaternion.copy(baseQuat);
+                    headNode.userData.__synthAppliedAdditive = null;
+                    headNode.userData.__synthLastComposedQuat = null;
                 }
             }
         }
@@ -7238,7 +7470,22 @@ function render() {
     resizeRenderer();
     renderer.render(scene, camera);
 }
-render();
+render(renderGeneration);
+
+// Riavvia il render loop sulla finestra principale. Usato dal PiP alla
+// chiusura: quando la finestra Picture-in-Picture viene chiusa, l'ultimo frame
+// era stato schedulato sul suo requestAnimationFrame (ora morto), quindi il
+// loop si fermerebbe. Incrementando la generazione avviamo un nuovo loop
+// pulito sulla finestra principale (i frame della vecchia generazione, se mai
+// scattassero, terminano subito).
+window.kickVRMRenderLoop = function kickVRMRenderLoop() {
+    try {
+        renderGeneration += 1;
+        render(renderGeneration);
+    } catch (e) {
+        console.warn('[synth_webui] kickVRMRenderLoop failed:', e);
+    }
+};
 
 // Expose animation functions globally for message chain integration
 window.VRMAnimations = {

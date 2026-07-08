@@ -731,14 +731,17 @@
         .home-vrm-overlay {
             position: absolute;
             inset: 0;
+            z-index: 40;
             display: flex;
             align-items: center;
             justify-content: center;
             pointer-events: none;
-            color: rgba(245, 245, 255, 0.6);
-            font-size: 0.95rem;
+            color: rgba(245, 245, 255, 0.85);
+            font-size: 1rem;
             text-transform: uppercase;
             letter-spacing: 0.08em;
+            text-align: center;
+            padding: 1rem;
         }
         /* VRM loading / summoning screen */
         #vrm-loading-overlay {

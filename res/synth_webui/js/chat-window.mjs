@@ -1184,13 +1184,33 @@ export function initChatUI() {
             window.__synthLipSyncDuration = (typeof audioDuration === 'number' && audioDuration > 0) ? audioDuration : null;
             window.__synthLipSyncTimeline = null;
 
-            const audio = new Audio(url);
+            // Host window for audio playback. When Synth is ejected into a
+            // Document Picture-in-Picture window, pip-window.mjs sets
+            // __synthAudioWindow to that window so the voice plays *from* the
+            // PiP window (the avatar's mouth is there). Both the Audio element
+            // and the AudioContext must come from the same window/realm, so we
+            // recreate the cached AudioContext whenever the host window changes.
+            const hostWin = (window.__synthAudioWindow && window.__synthAudioWindow.AudioContext)
+                ? window.__synthAudioWindow
+                : window;
+            const AudioCtor = hostWin.Audio || window.Audio;
+            const audio = new AudioCtor(url);
             window.__synthLipSyncAudio = audio;
 
             // Set up Web Audio API analyser for lipsync
             try {
+                const AudioContextCtor = hostWin.AudioContext || hostWin.webkitAudioContext
+                    || window.AudioContext || window.webkitAudioContext;
+                if (window.__synthLipSyncCtx && window.__synthLipSyncCtxWindow !== hostWin) {
+                    // Host window changed (PiP eject/return): the old context is
+                    // bound to the previous window, so close it and build a new
+                    // one in the current host window.
+                    try { window.__synthLipSyncCtx.close(); } catch (_) { /* ignore */ }
+                    window.__synthLipSyncCtx = null;
+                }
                 if (!window.__synthLipSyncCtx) {
-                    window.__synthLipSyncCtx = new (window.AudioContext || window.webkitAudioContext)();
+                    window.__synthLipSyncCtx = new AudioContextCtor();
+                    window.__synthLipSyncCtxWindow = hostWin;
                 }
                 const ctx = window.__synthLipSyncCtx;
                 if (ctx.state === 'suspended') ctx.resume();
@@ -1212,13 +1232,28 @@ export function initChatUI() {
 
             // Guard: only the *current* audio instance may toggle lipsync
             const thisAudio = audio;
+            // Re-evaluate the emotion→face scaling as soon as speaking state
+            // flips, so full expressiveness is unlocked/relocked in sync with
+            // real audio playback rather than waiting for the next WS state.
+            const reapplyFace = () => {
+                try {
+                    if (window.animationHandler
+                        && typeof window.animationHandler._reapplyRemoteFaceValues === 'function') {
+                        window.animationHandler._reapplyRemoteFaceValues();
+                    }
+                } catch (e) { /* ignore */ }
+            };
             audio.addEventListener('play', () => {
-                if (window.__synthLipSyncAudio === thisAudio) window.__synthIsLipSyncing = true;
+                if (window.__synthLipSyncAudio === thisAudio) {
+                    window.__synthIsLipSyncing = true;
+                    reapplyFace();
+                }
             });
             const stopLipsync = () => {
                 if (window.__synthLipSyncAudio === thisAudio) {
                     window.__synthIsLipSyncing = false;
                     window.__synthLipSyncTimeline = null;
+                    reapplyFace();
                 }
             };
             audio.addEventListener('ended', stopLipsync);
@@ -1233,6 +1268,71 @@ export function initChatUI() {
                     window.__synthPendingAudio.push({ url, text, audioDuration });
                 }
             });
+        }
+
+        // ── Talk animation anchored to real audio playback ────────────────
+        // Starts the "talk" body clip when the avatar's voice actually begins
+        // playing in the browser, instead of firing on WS-message arrival
+        // (which precedes audio decode/autoplay). Falls back to starting the
+        // clip after a short delay if no audio 'play' event arrives (e.g. TTS
+        // disabled, autoplay blocked, or audio dropped) so the body never
+        // stays frozen. The server stays authoritative on WHICH state.
+        function __synthPlayTalkAnchoredToAudio(playPayload) {
+            const _TALK_ANCHOR_FALLBACK_MS = 1200;
+            const _TALK_ANCHOR_POLL_MS = 50;
+            // Each anchor attempt gets its own token so a newer talk broadcast
+            // supersedes a pending one and any listener bound to a stale attempt
+            // is ignored.
+            const token = (window.__synthTalkAnchorToken || 0) + 1;
+            window.__synthTalkAnchorToken = token;
+            let started = false;
+            let boundAudio = null;
+            let onPlay = null;
+            const cleanup = () => {
+                if (boundAudio && onPlay) {
+                    try { boundAudio.removeEventListener('play', onPlay); } catch (e) { /* ignore */ }
+                }
+                boundAudio = null;
+                onPlay = null;
+            };
+            const start = () => {
+                if (started) return;
+                if (window.__synthTalkAnchorToken !== token) { cleanup(); return; } // superseded
+                started = true;
+                cleanup();
+                try { window.karadaPlayAnimation(playPayload); } catch (e) { /* ignore */ }
+            };
+
+            // The talk WS message can arrive before OR after the matching
+            // tts-play (which creates the new Audio element). Bind the 'play'
+            // listener to whatever the current audio element is, and keep
+            // re-checking so we latch onto the *new* element once tts-play
+            // swaps it in. If it's already audible, start right away.
+            const bindTo = (audio) => {
+                if (!audio || audio === boundAudio) return;
+                cleanup();
+                boundAudio = audio;
+                if (!audio.paused && audio.currentTime > 0) { start(); return; }
+                onPlay = () => start();
+                audio.addEventListener('play', onPlay);
+            };
+
+            const startTs = (typeof performance !== 'undefined' && performance.now)
+                ? performance.now() : Date.now();
+            const poll = () => {
+                if (started || window.__synthTalkAnchorToken !== token) { cleanup(); return; }
+                bindTo(window.__synthLipSyncAudio);
+                const now = (typeof performance !== 'undefined' && performance.now)
+                    ? performance.now() : Date.now();
+                if (now - startTs >= _TALK_ANCHOR_FALLBACK_MS) {
+                    // Fallback: audio never actually played (disabled/blocked/lost).
+                    // Don't leave the body frozen — start the talk clip anyway.
+                    start();
+                    return;
+                }
+                setTimeout(poll, _TALK_ANCHOR_POLL_MS);
+            };
+            poll();
         }
 
         function connectWs() {
@@ -1380,14 +1480,69 @@ export function initChatUI() {
                             }
 
                             if (clip && window.karadaPlayAnimation) {
-                                window.karadaPlayAnimation({
+                                const playPayload = {
                                     state: data.state,
                                     animationFile: animationRef,
                                     descriptor: descriptorData,
                                     descriptorId: data.descriptor || null,
                                     startedAt: data.started_at,
                                     clip: clip,
-                                });
+                                };
+                                // The server is authoritative on WHICH state to play,
+                                // but the client owns WHEN it starts. The "talk" body
+                                // animation must line up with the moment the avatar's
+                                // voice actually becomes audible in the browser — not
+                                // with the (earlier) arrival of this WS message, which
+                                // races ahead of audio decode/autoplay. Anchor the talk
+                                // clip to the real audio 'play' event; every other state
+                                // (think/write/idle) plays immediately as before.
+                                if (data.state === 'talk') {
+                                    __synthPlayTalkAnchoredToAudio(playPayload);
+                                } else {
+                                    window.karadaPlayAnimation(playPayload);
+                                }
+                            } else if (window.karadaPlayAnimation) {
+                                // The requested state has no resolvable clip (e.g. the
+                                // animation files for that state were removed from disk).
+                                // Instead of dead-ending with only a warning and leaving
+                                // the avatar frozen in its previous pose, gracefully fall
+                                // back to idle so the body keeps moving.
+                                console.warn(
+                                    '[chat-window] Karada v2 clip unavailable, falling back to idle:',
+                                    data.state, animationRef,
+                                );
+                                let idleClip = null;
+                                try {
+                                    if (window.VRMAnimations
+                                        && typeof window.VRMAnimations._getCachedAnimation === 'function') {
+                                        idleClip = window.VRMAnimations._getCachedAnimation('idle', null);
+                                    }
+                                } catch (e) { /* ignore */ }
+                                if (!idleClip && window.animationHandler
+                                    && typeof window.animationHandler._awaitAnimationReady === 'function') {
+                                    try {
+                                        idleClip = await window.animationHandler._awaitAnimationReady(
+                                            'idle', null, 8000,
+                                        );
+                                    } catch (e) { /* ignore */ }
+                                }
+                                if (idleClip) {
+                                    try {
+                                        window.karadaPlayAnimation({
+                                            state: 'idle',
+                                            animationFile: null,
+                                            descriptor: null,
+                                            descriptorId: null,
+                                            startedAt: data.started_at,
+                                            clip: idleClip,
+                                        });
+                                    } catch (e) { /* ignore */ }
+                                } else {
+                                    console.warn(
+                                        '[chat-window] Idle fallback clip also unavailable; leaving current pose:',
+                                        data.state,
+                                    );
+                                }
                             } else {
                                 console.warn('[chat-window] Karada v2 clip unavailable, skipping animation:', data.state, animationRef);
                             }
