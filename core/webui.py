@@ -1966,6 +1966,10 @@ class SynthWebUIInterface:
         the shared avatar (Karada state server) so it can be heard on every
         connected WebUI client. Gated by ``WEB_DEBUG=1``.
 
+        Supports ``[em_*]`` facial expression tags: they are stripped before
+        synthesis (so they are never spoken) and drive the avatar's facial
+        expression timeline, synchronised to the real audio duration.
+
         JSON body: ``{"text": "...", "engine": "optional-engine-name"}``.
         """
         web_debug = os.getenv("WEB_DEBUG", "0").lower()
@@ -1982,6 +1986,14 @@ class SynthWebUIInterface:
             raise HTTPException(status_code=400, detail="'text' is required")
 
         engine_name: Optional[str] = body.get("engine") or None
+
+        # Parse [em_*] facial expression tags so the Vox test can drive the
+        # avatar's face in sync with the synthesised audio. vox.speak() strips
+        # the tags before synthesis, so we parse them here purely to schedule
+        # the expression timeline after the audio duration is known.
+        from core.facial_expression_parser import parse_facial_expressions
+
+        clean_text, em_events = parse_facial_expressions(text)
 
         from core.core_initializer import PLUGIN_REGISTRY
 
@@ -2017,16 +2029,33 @@ class SynthWebUIInterface:
 
             audio_path = result.get("audio_path")
             used_engine = engine_name or getattr(vox, "_active_engine_name", None)
+            audio_duration_s = (
+                result.get("audio_duration_s") if isinstance(result, dict) else None
+            )
 
             delivered = False
             if audio_path:
                 delivered = await vox.broadcast_audio_to_webui(
-                    audio_path, text=text, engine_name=engine_name
+                    audio_path, text=clean_text, engine_name=engine_name
                 )
+
+            # Drive the facial expression timeline for any [em_*] tags,
+            # synchronised to the real audio duration.
+            if em_events and delivered:
+                try:
+                    interface_path = f"{INTERFACE_NAME}/debug-vox-test"
+                    vox._schedule_expression_timeline(
+                        em_events, clean_text, interface_path, audio_duration_s
+                    )
+                except Exception as exc:
+                    log_debug(
+                        f"{LOG_PREFIX} debug_tts_test expression timeline error: {exc}"
+                    )
 
             log_info(
                 f"{LOG_PREFIX} 🔊 Debug Vox test: engine={used_engine}, "
-                f"delivered={delivered}, text={text[:60]!r}"
+                f"delivered={delivered}, em_tags={len(em_events)}, "
+                f"text={clean_text[:60]!r}"
             )
             return JSONResponse(
                 {"status": "ok", "engine": used_engine, "delivered": delivered}
