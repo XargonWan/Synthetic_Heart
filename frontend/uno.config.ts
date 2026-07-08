@@ -1,5 +1,7 @@
 // Theme approach (chromatic preset + hue variable) adapted from Project AIRI's
 // shared uno.config.ts — https://github.com/moeru-ai/airi (MIT). See NOTICE.md.
+import './chromatic-env-guard' // MUST stay above the preset import
+
 import { presetChromatic } from '@proj-airi/unocss-preset-chromatic'
 import {
   defineConfig,

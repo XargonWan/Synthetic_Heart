@@ -69,7 +69,7 @@ Every milestone was checked against a **live backend**, not just `pnpm build`, u
 | M2 — animation engine | Idle loop, think intro→loop→outro with crossfade, no T-pose, on **three 0.184** (legacy uses 0.160 — this was the explicit risk gate, it passed) | `m2-action-check.mjs` |
 | M3 — chat + facial layer | Full text conversation, phase indicator (thinking/writing), **eyes actually close during `think`** (this was a documented bug in the legacy viewer, AGENTS.md §12 — the new facial layer fixes it as a side effect) | `m3-chat-check.mjs` |
 | M4 — voice | TTS playback + lipsync (visemes tracked a synthetic AM tone's envelope correctly, 0.24→0.63→0.25), mic reaches `listening` state with Chrome's fake-device flag | `m4-voice-check.mjs` (note: this script's mic architecture assumptions were later found wrong and the underlying code was fixed — see §5, bug #1) |
-| M5 — polish | Skin selector with real thumbnails + correct active-skin highlight, settings drawer, theme hue slider (live), loading screen with real byte progress, transparent mode (`?transparent=1`, confirmed via computed style) | `m5-polish-check.mjs` |
+| M5 — polish | Skin selector with real thumbnails + correct active-skin highlight, settings drawer, theme hue slider (live), loading screen with real byte progress, transparent mode (`?transparent=1`, confirmed via computed style) | `m5-polish-check.mjs` (⚠ the hue-slider "verification" was screenshot-only and was in fact broken in the shipped build, and the skin selector never switched the stage's model — both fixed 2026-07-08, see §8) |
 | M6 — hardening | Token auth on REST confirmed (401 without token, 200 with); WS auth confirmed on both `/ws` and `/api/karada/ws` (open/reject correctly) after fixing a FastAPI bug (§5, bug #2); clean prod build served from `/stage` | `m6-auth-check.mjs` |
 
 Backend edits passed `uv run ruff format/check`, scoped `uv run ty check` (no new diagnostics beyond pre-existing `_AnimStub` noise already documented in AGENTS.md §12), and the scoped test `tests/test_karada_state_server.py -k router` (3 passed).
@@ -146,3 +146,17 @@ To spin up a scratch backend for manual testing (not your normal container):
 ```bash
 uv run python scripts/run_webui.py   # HTTPS on :8000 by default; see the script for env var overrides
 ```
+
+---
+
+## 8. 2026-07-08 follow-up — three user-reported /stage bugs, all fixed
+
+Reported after the checkpoint: skin switch did nothing, theme-hue slider did nothing, mic died with `Cannot read properties of undefined (reading 'getUserMedia')`. All three reproduced with `frontend/scripts/repro-issues.mjs` (kept, reusable) and fixed:
+
+1. **Skin switch — backend never broadcast `vrm_model`.** `POST /api/skins/{name}/activate` (`core/webui.py::activate_skin`) set the active VRM and played the skin-change animation but never called `animation_handler.set_vrm_model()`, so no client got a `vrm_model` event. The legacy webui masked this by calling its own `refreshModels()` after the POST; the stage relies on the broadcast (its SkinSelector comment claimed the server broadcasts — it didn't, until now). Fixed by broadcasting in `activate_skin`, same pattern as `set_active_vrm_endpoint`. Verified on a scratch backend: clicking a skin tile now yields a `vrm_model` WS frame and the stage downloads + swaps the model. (Legacy webui is unaffected: its `vrm_model` handler calls `window.refreshVRM`, which is defined nowhere — guarded no-op.)
+2. **Theme hue — colors were baked at build time.** The AIRI chromatic preset's Node entry bakes the hue into static oklch colors when `VSCODE_ESM_ENTRYPOINT` contains `extensionHostProcess` (UnoCSS IDE-extension heuristic). In-IDE agent shells export exactly that, so the previous `pnpm build` shipped CSS that ignored `--chromatic-hue`. Fixed with `frontend/chromatic-env-guard.ts` (strips the var; imported first in `uno.config.ts`) + rebuild. Full writeup in AGENTS.md §12.
+3. **Mic — insecure context.** `navigator.mediaDevices` doesn't exist over plain `http://` on non-localhost origins (the user's LAN URL). Not a code bug; `stores/mic.ts::start()` now fails fast with "Microphone needs a secure context — open the stage over HTTPS or via localhost" instead of the opaque TypeError. AGENTS.md §12 entry added; the legacy webui has the same limitation, unguarded.
+
+Validation: `ruff format/check` clean; `ty check core/webui.py` shows only the pre-existing `_AnimStub` noise (the new `set_vrm_model` call matches the diagnostic already present for the older call site); `tests/test_webui_vrm_defaults.py` + `tests/test_karada_state_server.py` — 29 passed. Frontend: `pnpm typecheck` + `pnpm build` clean; hue + skin switch + mic guard all re-verified live via Playwright (hue against the running instance on :8088, skin broadcast against a scratch backend on :8091, mic guard against `http://192.168.1.69:8088`).
+
+**Note for the trainer:** the running SyntH instance still has the old backend code — restart it to pick up the skin-switch fix. The frontend fix is already live (`frontend/dist/` is served from disk).

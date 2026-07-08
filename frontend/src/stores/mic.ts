@@ -74,6 +74,18 @@ export const useMicStore = defineStore('mic', () => {
   async function start(): Promise<void> {
     if (state.value === 'listening' || state.value === 'starting')
       return
+
+    // getUserMedia only exists in secure contexts (https:// or localhost).
+    // Over plain http on a LAN address `navigator.mediaDevices` is undefined,
+    // which would otherwise surface as an opaque TypeError.
+    if (!navigator.mediaDevices?.getUserMedia) {
+      error.value = window.isSecureContext
+        ? 'This browser does not support microphone capture.'
+        : 'Microphone needs a secure context — open the stage over HTTPS or via localhost.'
+      state.value = 'error'
+      return
+    }
+
     state.value = 'starting'
     error.value = null
 

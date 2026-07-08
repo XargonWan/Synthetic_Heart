@@ -10450,6 +10450,18 @@ class SynthWebUIInterface:
             )
             raise HTTPException(status_code=500, detail="Failed to activate skin")
 
+        # Broadcast the new model so connected clients reload it live. Without
+        # this only clients that poll (legacy webui's refreshModels) notice the
+        # swap; the stage frontend relies entirely on the vrm_model broadcast.
+        try:
+            if self.animation_handler:
+                await self.animation_handler.set_vrm_model(
+                    f"/avatars/{target.name}", target.name
+                )
+                log_debug(f"{LOG_PREFIX} Broadcast vrm_model: {target.name}")
+        except Exception as vrm_exc:
+            log_warning(f"{LOG_PREFIX} Failed to broadcast vrm_model: {vrm_exc}")
+
         # Trigger skin_change animation so the avatar plays a transition animation
         # after the frontend reloads the VRM model.
         try:
