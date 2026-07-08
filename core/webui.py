@@ -2082,17 +2082,33 @@ class SynthWebUIInterface:
 
         from core.persona_manager import get_persona_manager
 
-        persona_json: Optional[Dict[str, Any]] = None
         pm = get_persona_manager()
-        if pm and getattr(pm, "_current_persona", None):
-            try:
-                persona_json = pm._load_persona_json(pm._current_persona.name)
-            except Exception:
-                persona_json = None
 
-        expr_section: Dict[str, Any] = (
-            persona_json.get("facial_expressions", {}) if persona_json else {}
-        )
+        def _load_expressions(skin_name: str) -> Dict[str, Any]:
+            if not pm:
+                return {}
+            try:
+                pj = pm._load_persona_json(skin_name)
+            except Exception:
+                return {}
+            if not pj:
+                return {}
+            return pj.get("facial_expressions", {}) or {}
+
+        # Prefer the active persona's expressions.  Dynamically loaded skins
+        # (e.g. ``temp``) or the ``default`` persona may not declare any, so
+        # fall back to the canonical reference skin ``Rei`` — the same skin the
+        # animation system uses as its resolution fallback (see AGENTS.md §7) —
+        # rather than a partial hardcoded list.
+        active_name: Optional[str] = None
+        if pm and getattr(pm, "_current_persona", None):
+            active_name = getattr(pm._current_persona, "name", None)
+
+        expr_section: Dict[str, Any] = {}
+        if active_name:
+            expr_section = _load_expressions(active_name)
+        if not expr_section:
+            expr_section = _load_expressions("Rei")
         if not expr_section:
             expr_section = {
                 n: {"description": n}
