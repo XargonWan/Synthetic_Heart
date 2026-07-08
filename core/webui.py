@@ -1250,7 +1250,13 @@ class SynthWebUIInterface:
         try:
             from core.karada_touch_events import record_touch_event, EVENT_SYNTH_TOUCH
 
-            raw_part = payload.get("part") or payload.get("mapped_part")
+            # Prefer the precise catalog zone id resolved by the frontend 3D
+            # zoning; fall back to the raw node name / heuristic label.
+            raw_part = (
+                payload.get("precise_id")
+                or payload.get("part")
+                or payload.get("mapped_part")
+            )
             await record_touch_event(
                 session_id=session_id,
                 interface_path=f"{INTERFACE_NAME}/{session_id}",
