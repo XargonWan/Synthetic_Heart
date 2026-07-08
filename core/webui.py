@@ -455,6 +455,50 @@ class SynthWebUIInterface:
             log_warning(
                 f"{LOG_PREFIX} VRM directory does not exist, /avatars endpoint NOT mounted"
             )
+
+        # Mount the SyntH Stage frontend (frontend/dist) at /stage when built.
+        # The Stage app is an optional standalone Vue client (see frontend/README.md);
+        # the backend runs fine without it, so this mount is best-effort.
+        stage_dist = Path(__file__).resolve().parent.parent / "frontend" / "dist"
+        if stage_dist.exists():
+            try:
+                self.app.mount(
+                    "/stage",
+                    StaticFiles(directory=str(stage_dist), html=True),
+                    name="synth-stage",
+                )
+                log_info(f"{LOG_PREFIX} Mounted /stage to {stage_dist}")
+            except Exception as exc:
+                log_warning(f"{LOG_PREFIX} Failed to mount /stage: {exc}")
+        else:
+            log_info(
+                f"{LOG_PREFIX} Stage frontend not built, /stage NOT mounted ({stage_dist})"
+            )
+
+        # Optional CORS for cross-origin Stage clients (e.g. Capacitor apps).
+        # Gated on SYNTH_WEBUI_CORS_ORIGINS (comma-separated origins); default
+        # empty -> middleware not added, existing behaviour unchanged. Same-origin
+        # deployments (/stage) and the Vite dev proxy do not need this.
+        cors_origins = [
+            origin.strip()
+            for origin in os.getenv("SYNTH_WEBUI_CORS_ORIGINS", "").split(",")
+            if origin.strip()
+        ]
+        if cors_origins:
+            try:
+                from starlette.middleware.cors import CORSMiddleware
+
+                self.app.add_middleware(
+                    CORSMiddleware,  # type: ignore[arg-type]
+                    allow_origins=cors_origins,
+                    allow_credentials=True,
+                    allow_methods=["*"],
+                    allow_headers=["*"],
+                )
+                log_info(f"{LOG_PREFIX} CORS enabled for origins: {cors_origins}")
+            except Exception as exc:
+                log_warning(f"{LOG_PREFIX} Failed to add CORS middleware: {exc}")
+
         if self.vrm_dir.exists():
             log_debug(f"{LOG_PREFIX} VRM directory is_dir: {self.vrm_dir.is_dir()}")
             log_debug(
@@ -496,8 +540,11 @@ class SynthWebUIInterface:
             try:
                 from core.karada_api import create_karada_router
 
-                karada_router = create_karada_router(self.animation_handler)
+                karada_router, karada_ws_router = create_karada_router(
+                    self.animation_handler
+                )
                 self.app.include_router(karada_router)
+                self.app.include_router(karada_ws_router)
                 log_info(f"{LOG_PREFIX} Karada API router mounted at /api/karada/")
             except Exception as karada_exc:
                 log_warning(
@@ -2302,6 +2349,16 @@ class SynthWebUIInterface:
     # WebSocket logic
     # ------------------------------------------------------------------
     async def websocket_endpoint(self, websocket: WebSocket):
+        from core.karada_api import _configured_api_token, _token_from_websocket
+
+        expected_token = _configured_api_token()
+        if (
+            expected_token is not None
+            and _token_from_websocket(websocket) != expected_token
+        ):
+            await websocket.close(code=4401, reason="Invalid or missing API token")
+            return
+
         try:
             client_info = getattr(websocket, "client", None)
             log_debug(f"{LOG_PREFIX} Incoming websocket connection from: {client_info}")
@@ -3086,6 +3143,16 @@ class SynthWebUIInterface:
         - ``{"type": "vad",     "signal": "speech_start"|"speech_end"}`` — VAD events.
         - ``{"type": "error",   "detail": "..."}`` — error notification.
         """
+        from core.karada_api import _configured_api_token, _token_from_websocket
+
+        expected_token = _configured_api_token()
+        if (
+            expected_token is not None
+            and _token_from_websocket(websocket) != expected_token
+        ):
+            await websocket.close(code=4401, reason="Invalid or missing API token")
+            return
+
         await websocket.accept()
         session_id = f"ws_{uuid.uuid4().hex}"
         live_engine = None  # only set when using LIVE_REGISTRY

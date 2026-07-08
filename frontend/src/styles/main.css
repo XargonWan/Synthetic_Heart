@@ -1,0 +1,14 @@
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+  overscroll-behavior: none;
+}
+
+/* Transparent mode (?transparent=1) — used for OBS browser sources and
+   desktop-companion overlays. The stage canvas renders with alpha. */
+body.transparent,
+body.transparent #app {
+  background: transparent !important;
+}

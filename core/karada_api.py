@@ -8,18 +8,27 @@ Usage::
 
     from core.karada_api import create_karada_router
 
-    router = create_karada_router(animation_handler)
-    app.include_router(router)
+    rest_router, ws_router = create_karada_router(animation_handler)
+    app.include_router(rest_router)
+    app.include_router(ws_router)
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    Request,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.responses import JSONResponse
 
 from core.animation_handler import AnimationState
@@ -28,6 +37,39 @@ from core.logging_utils import log_info, log_warning
 
 if TYPE_CHECKING:
     from core.animation_handler import KaradaStateServer
+
+
+def _configured_api_token() -> Optional[str]:
+    """Optional bearer token gating ``/api/karada/*``.
+
+    Unset (default) means no auth — matches the rest of the WebUI surface,
+    which has no auth layer today. Set ``SYNTH_WEBUI_API_TOKEN`` to require
+    ``Authorization: Bearer <token>`` or ``?token=<token>`` on every request.
+    """
+    token = os.getenv("SYNTH_WEBUI_API_TOKEN", "").strip()
+    return token or None
+
+
+def _token_from_request(request: Request) -> Optional[str]:
+    auth = request.headers.get("authorization", "")
+    if auth.lower().startswith("bearer "):
+        return auth[7:].strip()
+    return request.query_params.get("token")
+
+
+async def _require_api_token(request: Request) -> None:
+    expected = _configured_api_token()
+    if expected is None:
+        return
+    if _token_from_request(request) != expected:
+        raise HTTPException(status_code=401, detail="Invalid or missing API token")
+
+
+def _token_from_websocket(websocket: WebSocket) -> Optional[str]:
+    auth = websocket.headers.get("authorization", "")
+    if auth.lower().startswith("bearer "):
+        return auth[7:].strip()
+    return websocket.query_params.get("token")
 
 
 # ---------------------------------------------------------------------------
@@ -137,15 +179,29 @@ def invalidate_manifest_cache() -> None:
 def create_karada_router(
     handler: "KaradaStateServer",
     skins_root: Optional[Path] = None,
-) -> APIRouter:
-    """Create a FastAPI router with all Karada public endpoints.
+) -> tuple[APIRouter, APIRouter]:
+    """Create the FastAPI routers with all Karada public endpoints.
+
+    Returns a ``(rest_router, ws_router)`` pair — callers must
+    ``app.include_router()`` both. They are kept separate because
+    FastAPI/Starlette applies an ``APIRouter``'s own ``dependencies=`` to
+    every route added to it, including websocket routes; a ``Depends()``
+    typed for HTTP ``Request`` cannot resolve against a websocket-scope ASGI
+    connection and raises inside dependency resolution instead of cleanly
+    rejecting the handshake. The WS route does its own token check instead
+    (see ``karada_ws`` below).
 
     Args:
         handler: The :class:`KaradaStateServer` singleton.
         skins_root: Path to the ``skins/`` directory.  If ``None`` it is
                     inferred as ``<project_root>/skins``.
     """
-    router = APIRouter(prefix="/api/karada", tags=["karada"])
+    router = APIRouter(
+        prefix="/api/karada",
+        tags=["karada"],
+        dependencies=[Depends(_require_api_token)],
+    )
+    ws_router = APIRouter(prefix="/api/karada", tags=["karada"])
     if skins_root is None:
         skins_root = Path(__file__).resolve().parent.parent / "skins"
 
@@ -306,7 +362,7 @@ def create_karada_router(
 
     # == WebSocket stream ===================================================
 
-    @router.websocket("/ws")
+    @ws_router.websocket("/ws")
     async def karada_ws(websocket: WebSocket) -> None:
         """Dedicated WebSocket for Karada state streaming.
 
@@ -320,6 +376,14 @@ def create_karada_router(
             Server → {"type": "model", ...}
             Client → {"type": "action", "action": "touch", ...}
         """
+        expected_token = _configured_api_token()
+        if (
+            expected_token is not None
+            and _token_from_websocket(websocket) != expected_token
+        ):
+            await websocket.close(code=4401, reason="Invalid or missing API token")
+            return
+
         await websocket.accept()
         import uuid as _uuid
 
@@ -376,4 +440,4 @@ def create_karada_router(
             api_transport.remove(session_id)
             log_info(f"[KaradaAPI] Client disconnected: {session_id}")
 
-    return router
+    return router, ws_router
