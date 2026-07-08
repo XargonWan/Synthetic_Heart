@@ -3071,11 +3071,25 @@ def reload_interface():
     return initialize_interface()
 
 
-# Auto-start Telegram bot at import time if configured
-# This is only for backwards compatibility when running outside of core_initializer
-# Normally, initialize_interface() will be called by the core after config load
-# Skip entirely when running under pytest — tests import this module but must never
-# touch a live Telegram token.
+# Register the Telegram interface at import time if configured, so it's present
+# in INTERFACE_REGISTRY by the time core_initializer._start_interfaces() runs and
+# calls .start() -> start_bot() on it (core/core_initializer.py:527-550). That is
+# the only path that actually starts the bot now.
+#
+# This block used to *also* schedule start_bot() itself here via
+# loop.create_task(), as a "backwards compatibility for running outside of
+# core_initializer" fallback. In practice core_initializer always runs (it's the
+# only entry point, see main.py), so that fallback was firing on every single
+# startup *in addition to* core_initializer's own start() call a few seconds
+# later. Two concurrent Application/Updater instances both long-polling the same
+# bot token raced each other for the getUpdates connection, surfacing as
+# `telegram.error.Conflict: terminated by other getUpdates request` -- most
+# visibly on restart, when one instance's shutdown cleanup collided with the
+# other's active poll. Removed; start_bot()'s own _bot_started/_bot_starting
+# guards make it safe to call exactly once, from TelegramInterface.start() only.
+#
+# Skip entirely when running under pytest — tests import this module but must
+# never touch a live Telegram token.
 #
 # Force early evaluation of BOTFATHER_TOKEN so _load_definition_sync runs now,
 # setting env_override=True if the token is in env. Without this, load_all_from_db
@@ -3089,35 +3103,14 @@ if (
     and _botfather_configured
     and _parse_trainer_id_from_config()
 ):
-    log_info("[telegram_bot] Legacy autostart: creating interface at import time")
+    log_info("[telegram_bot] Registering interface at import time")
     initialize_interface()
 
     if telegram_interface and telegram_interface.is_enabled:
         log_info(
-            "[telegram_bot] BOTFATHER_TOKEN and trainer ID configured - scheduling Telegram bot startup"
+            "[telegram_bot] BOTFATHER_TOKEN and trainer ID configured - "
+            "core_initializer will start the bot"
         )
-
-        # Schedule the bot to start when an event loop becomes available
-        def _schedule_telegram_startup():
-            """Schedule Telegram bot startup in the event loop."""
-            try:
-                import asyncio
-
-                loop = asyncio.get_running_loop()
-                loop.create_task(start_bot())
-                log_info("[telegram_bot] Telegram bot startup task scheduled")
-            except RuntimeError:
-                # No event loop yet - will be handled by the main application
-                log_debug(
-                    "[telegram_bot] No event loop running, bot will start when application initializes"
-                )
-
-        # Try to schedule immediately
-        try:
-            _schedule_telegram_startup()
-        except Exception as e:
-            log_debug(f"[telegram_bot] Could not schedule startup immediately: {e}")
-            # This is expected during import - the main app will handle it
     else:
         reason = (
             telegram_interface.disabled_reason
