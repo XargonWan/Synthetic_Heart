@@ -1951,6 +1951,18 @@ async def start_bot() -> bool:
             # so cleanup never has to wait on the poll connection to close.
             .get_updates_connection_pool_size(4)
             .get_updates_pool_timeout(10.0)
+            # get_updates() uses a *separate* HTTPXRequest from the one
+            # configured above, so it doesn't inherit read/connect/write_timeout
+            # and silently falls back to PTB's aggressive 5s defaults. That's
+            # fine for normal long-polling (the poll's own `timeout` value gets
+            # added on top), but the shutdown cleanup call
+            # (Updater._get_updates_cleanup) uses timeout=0 with no padding, so
+            # it only gets the bare 5s — easily blown by a slow/loaded network
+            # moment during shutdown, logged as a suppressed ReadTimeout. Give
+            # it the same headroom as the general request pool.
+            .get_updates_connect_timeout(30.0)
+            .get_updates_read_timeout(30.0)
+            .get_updates_write_timeout(30.0)
             .build()
         )
         log_info("[telegram_bot] Telegram application built successfully")
