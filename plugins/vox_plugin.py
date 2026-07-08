@@ -312,18 +312,18 @@ class VoxPlugin(AIPluginBase):
             )
             return {"status": "error", "reason": "tts_failed_no_fallback_allowed"}
 
-        # --- Clean text for the engine ---
-        clean = _EMOJI_RE.sub("", text)
-        clean = _MULTI_SPACE_RE.sub(" ", clean).strip()
-        if not clean:
-            return {"status": "skipped", "reason": "empty_text"}
-
-        # --- Strip [em_*] facial expression tags ---
+        # --- Strip [em_*] facial expression tags FIRST ---
         # Tags must be removed before synthesis so they don't appear as
         # spoken text.  The parsed events are kept for optional scheduling
         # of the facial expression timeline and for emotion-aware engines.
-        clean, em_events = parse_facial_expressions(clean)
-        clean = clean.strip()
+        # This MUST run before the emoji/symbol cleanup below: _EMOJI_RE strips
+        # square brackets, which would break the ``[em_*]`` tag pattern and
+        # leave the bare ``em_smile:0.6`` text to be spoken aloud.
+        clean, em_events = parse_facial_expressions(text)
+
+        # --- Clean text for the engine ---
+        clean = _EMOJI_RE.sub("", clean)
+        clean = _MULTI_SPACE_RE.sub(" ", clean).strip()
         if not clean:
             return {"status": "skipped", "reason": "empty_text"}
 
