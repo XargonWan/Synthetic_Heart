@@ -9703,6 +9703,15 @@ class SynthWebUIInterface:
                 port=self.port,
                 log_level=self.log_level or "info",
                 lifespan="off",
+                # Uvicorn's default (None) waits indefinitely for open
+                # connections to close on SIGINT before server.serve()
+                # returns. The stage keeps long-lived WebSockets open
+                # (karada state broadcast, mic streaming for barge-in) that
+                # don't close promptly, which blocks serve() forever — and
+                # until it returns, uvicorn never hands SIGINT back to
+                # main.py's own shutdown handler, so the whole app hangs.
+                # Bound it so one Ctrl+C is enough.
+                timeout_graceful_shutdown=5,
             )
             if self.tls_enabled and self.tls_certfile and self.tls_keyfile:
                 log_info(
