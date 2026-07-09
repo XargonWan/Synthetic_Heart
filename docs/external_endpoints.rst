@@ -127,16 +127,22 @@ Recognised per-subsystem keys:
 - ``tts_voice`` (Vox): the voice name (provider-specific, e.g. ``Luna``).
 - ``tts_language`` (Vox): the language code; single-speaker models such as
   KittenTTS require ``default``.
+- ``iris_model`` (Iris): the image/video description (vision) model, e.g.
+  ``gemma4-meromero-26b-a4b``. Must be a vision-capable model — a non-vision
+  default (such as the audio-conversion ``voicefixer``) yields no description
+  (observed as Iris failing to see images).
 
 If a media key is absent the bridge falls back to ``default_model``; when that
-default is not a valid media model the provider returns no audio/text (observed
-as the *"Transcription returned no text"* error on Auris). Example for a Harmony
-endpoint mapped to both cortex and the audio subsystems::
+default is not a valid media model the provider returns no audio/text/description
+(observed as the *"Transcription returned no text"* error on Auris, or Iris
+failing to describe an image). Example for a Harmony endpoint mapped to cortex
+and every media subsystem::
 
-   {"stt_model": "faster-whisper-large-v3-turbo", "tts_model": "kitten-tts-nano", "tts_voice": "Luna", "tts_language": "default"}
+   {"stt_model": "faster-whisper-large-v3-turbo", "tts_model": "kitten-tts-nano", "tts_voice": "Luna", "tts_language": "default", "iris_model": "gemma4-meromero-26b-a4b"}
 
-After saving, set ``ACTIVE_AURIS_ENGINE`` / ``ACTIVE_VOX_ENGINE`` to the endpoint
-``Name`` to register it as the active STT / TTS engine.
+After saving, set ``ACTIVE_AURIS_ENGINE`` / ``ACTIVE_VOX_ENGINE`` /
+``ACTIVE_IRIS_ENGINE`` to the endpoint ``Name`` to register it as the active
+STT / TTS / vision engine.
 
 Cortex extra config (advanced)
 ------------------------------

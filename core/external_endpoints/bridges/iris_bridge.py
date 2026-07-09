@@ -56,6 +56,15 @@ class ExternalIrisEngine(IrisEngineBase):
         if not image_bytes:
             return None
 
+        # Resolve the vision model for this endpoint.  Multi-modal endpoints
+        # (e.g. Harmony) use a dedicated ``iris_model`` in ``extra_config``
+        # because the endpoint's ``default_model`` is reserved for the
+        # cortex/text engine and the caller-supplied ``model`` may be a global
+        # ``IRIS_DEFAULT_MODEL`` belonging to a different engine (and thus not a
+        # valid image-description model, e.g. an audio-conversion model).
+        extra = self._endpoint.extra_config or {}
+        vision_model = extra.get("iris_model") or model or self._endpoint.default_model
+
         request_timeout = self._get_request_timeout()
         try:
             text = await asyncio.wait_for(
@@ -63,7 +72,7 @@ class ExternalIrisEngine(IrisEngineBase):
                     image_bytes,
                     mime_type=mime_type,
                     prompt=prompt,
-                    model=model or self._endpoint.default_model,
+                    model=vision_model,
                 ),
                 timeout=request_timeout,
             )
@@ -73,7 +82,11 @@ class ExternalIrisEngine(IrisEngineBase):
                 f"after {request_timeout}s"
             )
             return None
-        except Exception:
+        except Exception as exc:
+            log_warning(
+                f"[iris_bridge:{self._endpoint.name}] describe_image failed "
+                f"(model={vision_model}, mime={mime_type}): {exc!r}"
+            )
             return None
 
         if not text:

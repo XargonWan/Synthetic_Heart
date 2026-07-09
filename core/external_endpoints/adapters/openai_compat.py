@@ -679,6 +679,83 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
     # Vision (Iris) – OpenAI vision message format
     # ------------------------------------------------------------------
 
+    # Max base64-encoded image payload we allow in a vision request body.
+    # Harmony AI (and similar) reject bodies larger than ~1 MB; base64 inflates
+    # raw bytes by ~4/3, so a raw budget of 700 KB keeps the encoded payload
+    # (plus JSON/prompt overhead) comfortably under 1 MB.
+    _VISION_MAX_RAW_IMAGE_BYTES = 700_000
+
+    @classmethod
+    def _shrink_image_for_request(
+        cls, image_bytes: bytes, mime_type: str
+    ) -> tuple[bytes, str]:
+        """Downscale / re-compress an image so its request body stays small.
+
+        Returns the (possibly re-encoded) image bytes and the resulting MIME
+        type. Falls back to the original bytes if the image is already small
+        enough or if Pillow is unavailable / decoding fails.
+        """
+        if len(image_bytes) <= cls._VISION_MAX_RAW_IMAGE_BYTES:
+            return image_bytes, mime_type
+
+        try:
+            import io
+
+            from PIL import Image
+
+            resample = getattr(getattr(Image, "Resampling", Image), "LANCZOS", None)
+        except Exception:
+            # Pillow not available – send as-is and let the endpoint decide.
+            log_warning(
+                "[openai_compat] image is large "
+                f"({len(image_bytes)} bytes) but Pillow is unavailable; "
+                "sending without downscaling"
+            )
+            return image_bytes, mime_type
+
+        try:
+            img = Image.open(io.BytesIO(image_bytes))
+            img.load()
+            if img.mode not in ("RGB", "L"):
+                img = img.convert("RGB")
+
+            # Iteratively shrink the longest side and/or lower JPEG quality
+            # until the encoded payload fits the raw budget.
+            max_side = max(img.size)
+            for target_side in (1568, 1280, 1024, 768, 512):
+                if max_side > target_side:
+                    scale = target_side / max_side
+                    new_size = (
+                        max(1, int(img.width * scale)),
+                        max(1, int(img.height * scale)),
+                    )
+                    candidate = img.resize(new_size, resample)
+                else:
+                    candidate = img
+
+                for quality in (85, 70, 55):
+                    buf = io.BytesIO()
+                    candidate.save(buf, format="JPEG", quality=quality, optimize=True)
+                    data = buf.getvalue()
+                    if len(data) <= cls._VISION_MAX_RAW_IMAGE_BYTES:
+                        log_info(
+                            "[openai_compat] downscaled vision image "
+                            f"{len(image_bytes)} -> {len(data)} bytes "
+                            f"(side={target_side}, q={quality})"
+                        )
+                        return data, "image/jpeg"
+
+            # Could not get under budget; return the smallest attempt.
+            log_warning(
+                "[openai_compat] could not shrink vision image under "
+                f"{cls._VISION_MAX_RAW_IMAGE_BYTES} bytes; "
+                f"sending best effort {len(data)} bytes"
+            )
+            return data, "image/jpeg"
+        except Exception as exc:
+            log_warning(f"[openai_compat] image downscale failed: {exc}")
+            return image_bytes, mime_type
+
     async def describe_image(
         self,
         image_bytes: bytes,
@@ -701,6 +778,15 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
 
         engine_tag = f"openai_compat:{self._engine_label or 'default'}"
         effective_mime = mime_type or "image/jpeg"
+
+        # Many vision endpoints (e.g. Harmony AI) reject requests whose body
+        # exceeds ~1 MB with "request body too large". A real photo can easily
+        # be 900 KB+, which becomes ~1.2 MB once base64-encoded, so downscale /
+        # re-compress oversized images before embedding them as a data URL.
+        image_bytes, effective_mime = self._shrink_image_for_request(
+            image_bytes, effective_mime
+        )
+
         b64 = base64.b64encode(image_bytes).decode("ascii")
         data_url = f"data:{effective_mime};base64,{b64}"
         effective_prompt = prompt or "Describe this image in detail."
@@ -759,7 +845,10 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
             },
         )
         _req_start = _time.monotonic()
-        last_error = "No vision endpoint responded successfully"
+        # Collect a per-url error for each failed candidate so a trailing
+        # 404 from a non-existent fallback URL does not mask a meaningful
+        # error (e.g. HTTP 400 "request body too large") from the real one.
+        url_errors: list[str] = []
 
         try:
             async with aiohttp.ClientSession() as session:
@@ -773,7 +862,9 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
                         ) as resp:
                             if resp.status != 200:
                                 body = await resp.text()
-                                last_error = f"HTTP {resp.status}: {body[:200]}"
+                                url_errors.append(
+                                    f"{chat_url} -> HTTP {resp.status}: {body[:200]}"
+                                )
                                 continue
 
                             result = await resp.json()
@@ -789,11 +880,16 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
                             )
                             return description
                     except Exception as exc:
-                        last_error = str(exc)
+                        url_errors.append(f"{chat_url} -> {exc}")
                         continue
         except Exception as exc:
-            last_error = str(exc)
+            url_errors.append(str(exc))
 
+        last_error = (
+            "; ".join(url_errors)
+            if url_errors
+            else "No vision endpoint responded successfully"
+        )
         _elapsed = (_time.monotonic() - _req_start) * 1000
         log_cortex_response(
             engine_tag,
@@ -801,8 +897,7 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
             error=last_error,
             elapsed_ms=_elapsed,
         )
-        if last_error and last_error != "No vision endpoint responded successfully":
-            _elapsed = (_time.monotonic() - _req_start) * 1000
+        if url_errors:
             log_warning(f"[openai_compat] describe_image failed: {last_error}")
         return None
 
