@@ -297,3 +297,22 @@ Validation: `ruff format`/`check` clean; `ty check core/webui.py` back to the 42
 **Deployment note**: `pnpm build` regenerated `frontend/dist/`, which the live instance serves directly from disk — so the (behaviorally no-op-without-token) frontend half is already live. The backend gate needs the next restart, same as the §8 skin-switch fix.
 
 **Not done / still open:** unchanged from §12 (pairing-token issuance UX, phase-2 realtime, AR, mobile packaging).
+
+---
+
+## 14. 2026-07-09 — Voice (Vox/Auris) section in the stage Settings drawer
+
+User asked for "a slick section for auris ie the thing where you configure the tts" — note the naming mix-up: **Auris is STT, Vox is TTS**. Built one "Voice" section covering both (frontend-only, no backend changes):
+
+- New `frontend/src/services/voice-config.ts` — typed client for the legacy-webui config surface the stage didn't use before: `GET/POST /api/config`, `GET /api/components` (vox/auris slices), `GET /api/vox/speakers`, `GET /api/vox/sample`, `POST /api/components/vox/model`. Request shapes mirror `res/synth_webui/js/main.js` (the only prior consumer). All URLs go through `withApiToken()` — these endpoints are ungated today, but it's free future-proofing.
+- New `frontend/src/components/settings/VoiceSettings.vue`, mounted as a "Voice" section in `SettingsDrawer.vue` (between Skin and Camera):
+  - **TTS engine pills** from `/api/components` `vox` (active = server truth); switching POSTs `ACTIVE_VOX_ENGINE` then re-fetches, so the highlight always reflects what the server actually accepted.
+  - **Voice grid** when the selected engine exposes speakers: click = live preview via `/api/vox/sample` + persist. Persistence uses the `<ENGINE>_VOICE` config-key convention (`KITTEN_VOICE` today — the only engine with speakers); if the key doesn't exist in the registry the grid degrades to preview-only with a "(preview only)" hint. Any future engine following the convention gets the full UI for free.
+  - **Model dropdown** only when the engine reports `available_models` (external vox bridges) → `POST /api/components/vox/model {engine, model}`, same as legacy.
+  - **STT engine pills** (`ACTIVE_AURIS_ENGINE`), same pattern.
+- **Verified live** with `frontend/scripts/voice-settings-check.mjs` (kept): engine lists/voices/preview hit the **real production backend** (:8008) read-only, while all config **writes are route-intercepted in Playwright** (a scratch backend shares the production DB — letting a test click flip `ACTIVE_VOX_ENGINE` would reconfigure production; assert the captured payloads instead). All 6 checks pass: lists render live data, engine click POSTs `{key: ACTIVE_VOX_ENGINE}`, highlight reverts to server truth when a write doesn't stick, kitten's 8 voices render, voice click fires a real sample request + `{key: KITTEN_VOICE}` persist. Screenshot: `frontend/scripts/voice-settings.png`.
+- **Scratch-backend caveat discovered**: `scripts/run_webui.py` scratch instances register no real vox/auris engines (plugins don't initialize), so `/api/components` returns only pseudo-entries (`disabled`, and auris additionally reports an `inline` entry even on production — server-side truth, rendered as-is). Test engine-list rendering against production, not scratch.
+- `pnpm typecheck` + `pnpm build` clean; `frontend/dist/` rebuilt, so the section is **already live** on the running instance's `/stage/`. No backend files touched → no ruff/ty/pytest this round. `gitnexus_detect_changes` LOW.
+- Also confirmed while testing: the production restart happened and the §9 port fix is in effect — HTTPS on :8088, HTTP on :8008, both healthy.
+
+**Not done / still open:** unchanged (pairing-token issuance UX, phase-2 realtime, AR, mobile packaging). Possible follow-up: per-engine settings beyond voice/model (e.g. kitten's `KITTEN_MODEL`, vosk language download) stay legacy-webui-only for now.
