@@ -6032,7 +6032,12 @@ function resizeRenderer() {
         renderer.setSize(width, height, false);
         camera.aspect = width / height;
         camera.updateProjectionMatrix();
-        fitFramingForAspect();
+        // NB: NON adattiamo qui il framing all'aspect. Il riframing a figura
+        // intera serve solo alla finestra PiP (portrait), che lo richiede
+        // esplicitamente via window.fitVRMFramingForAspect(). Sulla WebUI
+        // principale la camera deve restare quella di default / impostata
+        // dall'utente (OrbitControls), anche se il canvas è transitoriamente
+        // stretto durante lo spostamento DOM del PiP.
     }
 }
 window.addEventListener('resize', resizeRenderer);
@@ -7799,13 +7804,10 @@ try {
         const _synthDbgElem = document.getElementById('synth-debug');
         const _dbgEnabled = _synthDbgElem && (_synthDbgElem.dataset.debugEnabled === '1' || _synthDbgElem.dataset.debugEnabled === 'true');
         if (_dbgEnabled) {
-            // Load consolidated debug window module and create window (async).
-            // Cache-bust the dynamic import so a normal reload always fetches
-            // the current module instead of a stale browser-cached ES module.
+            // Load consolidated debug window module and create window (async)
             (async () => {
                 try {
-                    const _dbgCacheBust = (window.SYNTH_ASSET_VERSION || Date.now());
-                    const mod = await import(`/js/debug-window.mjs?v=${_dbgCacheBust}`);
+                    const mod = await import('/js/debug-window.mjs');
                     try { if (mod && typeof mod.createDebugWindow === 'function') mod.createDebugWindow(); } catch (e) { /* ignore */ }
                 } catch (e) { console.warn('[synth_webui] Failed to import debug-window module', e); }
             })();
