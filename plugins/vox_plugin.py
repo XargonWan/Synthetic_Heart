@@ -167,6 +167,22 @@ config_registry.get_value(
     component="vox_plugin",
     hidden=True,
 )
+# Visible toggle (Engines tab → vox_plugin box): when on, replies to typed
+# text messages also get a TTS clip attached on every interface. Off keeps
+# the default behavior (Telegram/Discord only speak in reply to voice input).
+config_registry.get_value(
+    "VOX_SPEAK_TEXT_REPLIES",
+    False,
+    label="Attach voice to text replies",
+    description=(
+        "When enabled, replies to typed text messages also get a voice clip "
+        "attached (all interfaces). When disabled, Telegram/Discord replies "
+        "are only spoken when the incoming message was voice."
+    ),
+    value_type=bool,
+    group="plugins",
+    component="vox_plugin",
+)
 
 # Legacy aliases (read by the HTTP engine via its original config keys)
 # tts_lipsync variables are intentionally kept so existing .env files keep working.

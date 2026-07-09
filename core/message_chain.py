@@ -2115,6 +2115,8 @@ async def handle_incoming_message(
 
                         # For Telegram/Discord, only auto-inject TTS for voice-originated
                         # messages. WebUI, Matrix and Ollama always get TTS when VOX is active.
+                        # VOX_SPEAK_TEXT_REPLIES (opt-in toggle, Engines tab) lifts the
+                        # voice-input requirement so typed text replies also get a clip.
                         _is_voice_input = bool(ctx.get("is_voice_input", False))
                         _iface_tts_prefix = (ctx.get("interface_path") or "").split(
                             "/"
@@ -2123,6 +2125,21 @@ async def handle_incoming_message(
                         tts_allowed = (
                             _iface_tts_prefix not in _voice_only_tts_ifaces
                         ) or _is_voice_input
+                        _speak_text_replies = False
+                        try:
+                            from core.config_manager import config_registry
+
+                            _speak_text_replies = bool(
+                                config_registry.get_value(
+                                    "VOX_SPEAK_TEXT_REPLIES",
+                                    False,
+                                    value_type=bool,
+                                    group="plugins",
+                                    component="vox_plugin",
+                                )
+                            )
+                        except Exception:
+                            pass
 
                         if should_skip_tts:
                             skip_reason = []
@@ -2149,10 +2166,15 @@ async def handle_incoming_message(
                         # WebUI/Matrix/other non-voice interfaces which caused the
                         # synth to speak even though the incoming message was not
                         # audio.  the requirement is that non-audio inputs should not
-                        # trigger spoken replies.
-                        elif (is_user_facing and tts_allowed and _is_voice_input) or (
-                            context and context.get("request_tts")
-                        ):
+                        # trigger spoken replies — unless the operator opted in via
+                        # the VOX_SPEAK_TEXT_REPLIES toggle, which attaches a clip
+                        # to text replies on every user-facing interface.
+                        elif (
+                            is_user_facing
+                            and (
+                                (tts_allowed and _is_voice_input) or _speak_text_replies
+                            )
+                        ) or (context and context.get("request_tts")):
                             # With the new strategy we honor explicit TTS requests even when
                             # they come from non-WebUI interfaces (voice note, etc.).
                             if (
