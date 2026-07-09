@@ -131,6 +131,24 @@ CREATE TABLE IF NOT EXISTS agent_tasks (
     INDEX idx_agent_created (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+-- Web Search Tasks: decoupled background web-search jobs triggered by the
+-- recon web-search plugin. Recon fires a search and returns immediately; the
+-- orchestrator runs the searches off the message pipeline, synthesises an
+-- aseptic result via the cortex, and delivers it back as a second turn.
+CREATE TABLE IF NOT EXISTS web_search_tasks (
+    id VARCHAR(64) PRIMARY KEY,
+    interface_path TEXT,
+    queries TEXT,
+    search_context TEXT,
+    status VARCHAR(16) NOT NULL DEFAULT 'pending',
+    result_text LONGTEXT,
+    error TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    INDEX idx_web_search_status (status),
+    INDEX idx_web_search_created (created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 -- External Endpoints: user-defined external AI service endpoints
 -- (OpenAI-compatible, Gemini, Anthropic, custom)
 CREATE TABLE IF NOT EXISTS external_endpoints (

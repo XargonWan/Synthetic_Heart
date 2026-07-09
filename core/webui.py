@@ -782,7 +782,20 @@ class SynthWebUIInterface:
         # History API endpoints (unified diary, grillo, chat history)
         self.app.get("/api/history/diary")(self.history_diary)
         self.app.get("/api/history/grillo")(self.history_grillo)
+        self.app.get("/api/history/calendar")(self.history_calendar)
+        self.app.post("/api/history/calendar")(self.create_calendar_event)
+        self.app.put("/api/history/calendar/{event_id}")(self.update_calendar_event)
+        self.app.delete("/api/history/calendar/{event_id}")(self.delete_calendar_event)
+        self.app.get("/api/history/calendar/upcoming")(self.history_calendar_upcoming)
+        self.app.get("/calendar.ics")(self.export_calendar_ics)
+        # External calendar subscriptions (CalDAV / ICS)
+        self.app.get("/api/history/calendar/external")(self.list_external_calendars)
+        self.app.post("/api/history/calendar/external")(self.add_external_calendar)
+        self.app.delete("/api/history/calendar/external/{calendar_id}")(
+            self.delete_external_calendar
+        )
         self.app.get("/api/history/dreams")(self.history_dreams)
+        self.app.get("/api/history/interface-paths")(self.list_known_interface_paths)
         self.app.get("/api/history/chat")(self.history_chat)
         self.app.get("/api/log-failures")(self.list_log_failures)
         self.app.delete("/api/log-failures/{failure_id}")(self.delete_log_failure)
@@ -1344,7 +1357,13 @@ class SynthWebUIInterface:
         try:
             from core.karada_touch_events import record_touch_event, EVENT_SYNTH_TOUCH
 
-            raw_part = payload.get("part") or payload.get("mapped_part")
+            # Prefer the precise catalog zone id resolved by the frontend 3D
+            # zoning; fall back to the raw node name / heuristic label.
+            raw_part = (
+                payload.get("precise_id")
+                or payload.get("part")
+                or payload.get("mapped_part")
+            )
             await record_touch_event(
                 session_id=session_id,
                 interface_path=f"{INTERFACE_NAME}/{session_id}",
@@ -2170,17 +2189,33 @@ class SynthWebUIInterface:
 
         from core.persona_manager import get_persona_manager
 
-        persona_json: Optional[Dict[str, Any]] = None
         pm = get_persona_manager()
-        if pm and getattr(pm, "_current_persona", None):
-            try:
-                persona_json = pm._load_persona_json(pm._current_persona.name)
-            except Exception:
-                persona_json = None
 
-        expr_section: Dict[str, Any] = (
-            persona_json.get("facial_expressions", {}) if persona_json else {}
-        )
+        def _load_expressions(skin_name: str) -> Dict[str, Any]:
+            if not pm:
+                return {}
+            try:
+                pj = pm._load_persona_json(skin_name)
+            except Exception:
+                return {}
+            if not pj:
+                return {}
+            return pj.get("facial_expressions", {}) or {}
+
+        # Prefer the active persona's expressions.  Dynamically loaded skins
+        # (e.g. ``temp``) or the ``default`` persona may not declare any, so
+        # fall back to the canonical reference skin ``Rei`` — the same skin the
+        # animation system uses as its resolution fallback (see AGENTS.md §7) —
+        # rather than a partial hardcoded list.
+        active_name: Optional[str] = None
+        if pm and getattr(pm, "_current_persona", None):
+            active_name = getattr(pm._current_persona, "name", None)
+
+        expr_section: Dict[str, Any] = {}
+        if active_name:
+            expr_section = _load_expressions(active_name)
+        if not expr_section:
+            expr_section = _load_expressions("Rei")
         if not expr_section:
             expr_section = {
                 n: {"description": n}
@@ -6902,6 +6937,631 @@ class SynthWebUIInterface:
         except Exception as exc:
             log_error(f"{LOG_PREFIX} Failed to fetch grillo history: {exc}")
             return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+
+    async def _fetch_calendar_event_rows(self) -> list[dict[str, Any]]:
+        """Fetch all ``scheduled_events`` rows as plain dicts for calendar use."""
+        from core.db import get_conn_ctx
+
+        rows: list[dict[str, Any]] = []
+        columns = [
+            "id",
+            "date",
+            "time",
+            "recurrence_type",
+            "next_run",
+            "description",
+            "created_at",
+            "created_by",
+            "uid",
+            "rrule",
+            "tzid",
+            "source",
+            "delivered",
+        ]
+        col_list = ", ".join(columns)
+        async with get_conn_ctx() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    f"SELECT {col_list} FROM scheduled_events ORDER BY next_run ASC"
+                )
+                fetched = await cur.fetchall()
+                for row in fetched:
+                    rows.append(dict(zip(columns, row)))
+        return rows
+
+    async def history_calendar(self, request: Request):
+        """Return event occurrences within a requested month for the calendar view.
+
+        Expands recurring events (via their RRULE) into per-occurrence entries
+        that fall inside the requested month window. Each entry carries a local
+        ``date`` (YYYY-MM-DD) and ``time`` (HH:MM) so the frontend grid can place
+        it without any further timezone maths.
+        """
+        params = request.query_params
+
+        def _bounded_int(value: Any, default: int, minimum: int, maximum: int) -> int:
+            try:
+                parsed = int(value)
+            except (TypeError, ValueError):
+                return default
+            return max(minimum, min(maximum, parsed))
+
+        from datetime import datetime as _dt
+
+        now_local = _dt.now()
+        year = _bounded_int(
+            params.get("year"), default=now_local.year, minimum=1970, maximum=3000
+        )
+        month = _bounded_int(
+            params.get("month"), default=now_local.month, minimum=1, maximum=12
+        )
+
+        try:
+            from datetime import timedelta
+            import recurring_ical_events
+
+            from core.calendar_utils import build_calendar
+            from core.time_zone_utils import get_local_timezone
+
+            system_tz = get_local_timezone()
+
+            # Month window in the local timezone (inclusive start, exclusive end).
+            window_start = _dt(year, month, 1, tzinfo=system_tz)
+            if month == 12:
+                window_end = _dt(year + 1, 1, 1, tzinfo=system_tz)
+            else:
+                window_end = _dt(year, month + 1, 1, tzinfo=system_tz)
+
+            from core.calendar_utils import build_event_uid
+
+            rows = await self._fetch_calendar_event_rows()
+            # Map effective UID -> row so we can annotate occurrences with
+            # source/id. build_calendar synthesises ``synth-<id>@host`` when a
+            # row has no stored ``uid``, so the map must key on the same value.
+            row_by_uid: dict[str, dict[str, Any]] = {}
+            for r in rows:
+                uid = r.get("uid")
+                if not uid and r.get("id") is not None:
+                    uid = build_event_uid(r["id"])
+                if uid:
+                    row_by_uid[str(uid)] = r
+
+            calendar = build_calendar(rows, system_tz=system_tz)
+
+            events: list[dict[str, Any]] = []
+            try:
+                occurrences = recurring_ical_events.of(calendar).between(
+                    window_start, window_end - timedelta(seconds=1)
+                )
+            except Exception as exc:
+                log_warning(f"{LOG_PREFIX} calendar expansion failed: {exc}")
+                occurrences = []
+
+            for occ in occurrences:
+                try:
+                    dtstart = occ.get("dtstart")
+                    if dtstart is None:
+                        continue
+                    start_dt = dtstart.dt
+                    if isinstance(start_dt, datetime):
+                        if start_dt.tzinfo is None:
+                            start_dt = start_dt.replace(tzinfo=system_tz)
+                        local_dt = start_dt.astimezone(system_tz)
+                        date_str = local_dt.strftime("%Y-%m-%d")
+                        time_str = local_dt.strftime("%H:%M")
+                    else:
+                        # All-day (date only)
+                        date_str = start_dt.strftime("%Y-%m-%d")
+                        time_str = ""
+
+                    uid = str(occ.get("uid", "")) if occ.get("uid") else ""
+                    src_row = row_by_uid.get(uid, {})
+                    rrule = src_row.get("rrule") or (occ.get("rrule") is not None)
+                    events.append(
+                        {
+                            "id": src_row.get("id"),
+                            "uid": uid,
+                            "date": date_str,
+                            "time": time_str,
+                            "description": str(occ.get("summary", "")),
+                            "recurring": bool(rrule),
+                            "recurrence_type": src_row.get("recurrence_type") or "none",
+                            "source": src_row.get("source") or "synth",
+                            "delivered": bool(src_row.get("delivered")),
+                        }
+                    )
+                except Exception as exc:
+                    log_debug(f"{LOG_PREFIX} skipping calendar occurrence: {exc}")
+                    continue
+
+            # Merge in occurrences from subscribed external calendars (ICS/CalDAV)
+            # so they show up in the grid alongside internal events. External
+            # occurrences are read-only: they carry an ``external:<id>`` source
+            # and no internal ``id``, so the frontend hides edit/delete controls.
+            try:
+                from core.external_calendars import gather_all_external_occurrences
+
+                external = await gather_all_external_occurrences(
+                    window_start=window_start, window_end=window_end
+                )
+                for occ in external:
+                    try:
+                        start_dt = occ.get("start")
+                        if start_dt is None:
+                            continue
+                        if occ.get("all_day"):
+                            date_str = start_dt.strftime("%Y-%m-%d")
+                            time_str = ""
+                        else:
+                            if start_dt.tzinfo is None:
+                                start_dt = start_dt.replace(tzinfo=system_tz)
+                            local_dt = start_dt.astimezone(system_tz)
+                            date_str = local_dt.strftime("%Y-%m-%d")
+                            time_str = local_dt.strftime("%H:%M")
+                        events.append(
+                            {
+                                "id": None,
+                                "uid": str(occ.get("uid") or ""),
+                                "date": date_str,
+                                "time": time_str,
+                                "description": str(occ.get("summary") or ""),
+                                "recurring": False,
+                                "recurrence_type": "none",
+                                "source": str(occ.get("source") or "external"),
+                                "calendar_name": str(occ.get("calendar_name") or ""),
+                                "delivered": False,
+                            }
+                        )
+                    except Exception as exc:
+                        log_debug(
+                            f"{LOG_PREFIX} skipping external calendar occurrence: {exc}"
+                        )
+                        continue
+            except Exception as exc:
+                log_warning(
+                    f"{LOG_PREFIX} failed to gather external calendar occurrences: {exc}"
+                )
+
+            return JSONResponse({"success": True, "events": events})
+
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to fetch calendar: {exc}")
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+
+    async def history_calendar_upcoming(self, request: Request):
+        """Return the next few upcoming events over a short look-ahead window.
+
+        Purely informational: it expands recurring events (via RRULE) starting
+        from *now* over the next ``days`` days and returns at most ``limit``
+        occurrences, each with a preformatted ``label`` such as
+        ``Jul 9, 9:00 (JST)`` for direct display.
+        """
+        params = request.query_params
+
+        def _bounded_int(value: Any, default: int, minimum: int, maximum: int) -> int:
+            try:
+                parsed = int(value)
+            except (TypeError, ValueError):
+                return default
+            return max(minimum, min(maximum, parsed))
+
+        days = _bounded_int(params.get("days"), default=3, minimum=1, maximum=31)
+        limit = _bounded_int(params.get("limit"), default=5, minimum=1, maximum=20)
+
+        try:
+            from datetime import datetime as _dt
+            from datetime import timedelta
+            import recurring_ical_events
+
+            from core.calendar_utils import build_calendar
+            from core.time_zone_utils import get_local_timezone
+
+            system_tz = get_local_timezone()
+            window_start = _dt.now(tz=system_tz)
+            window_end = window_start + timedelta(days=days)
+
+            from core.calendar_utils import build_event_uid
+
+            rows = await self._fetch_calendar_event_rows()
+            row_by_uid: dict[str, dict[str, Any]] = {}
+            for r in rows:
+                uid = r.get("uid")
+                if not uid and r.get("id") is not None:
+                    uid = build_event_uid(r["id"])
+                if uid:
+                    row_by_uid[str(uid)] = r
+
+            calendar = build_calendar(rows, system_tz=system_tz)
+
+            try:
+                occurrences = recurring_ical_events.of(calendar).between(
+                    window_start, window_end
+                )
+            except Exception as exc:
+                log_warning(f"{LOG_PREFIX} upcoming expansion failed: {exc}")
+                occurrences = []
+
+            collected: list[dict[str, Any]] = []
+            for occ in occurrences:
+                try:
+                    dtstart = occ.get("dtstart")
+                    if dtstart is None:
+                        continue
+                    start_dt = dtstart.dt
+                    if isinstance(start_dt, datetime):
+                        if start_dt.tzinfo is None:
+                            start_dt = start_dt.replace(tzinfo=system_tz)
+                        local_dt = start_dt.astimezone(system_tz)
+                        all_day = False
+                    else:
+                        # All-day (date only) -> anchor at local midnight.
+                        local_dt = _dt(
+                            start_dt.year,
+                            start_dt.month,
+                            start_dt.day,
+                            tzinfo=system_tz,
+                        )
+                        all_day = True
+
+                    if local_dt < window_start:
+                        continue
+
+                    if all_day:
+                        label = f"{local_dt.strftime('%b %-d')} (all day)"
+                    else:
+                        tz_abbr = local_dt.strftime("%Z") or "local"
+                        label = (
+                            f"{local_dt.strftime('%b %-d')}, "
+                            f"{local_dt.hour}:{local_dt.strftime('%M')} ({tz_abbr})"
+                        )
+
+                    uid = str(occ.get("uid", "")) if occ.get("uid") else ""
+                    src_row = row_by_uid.get(uid, {})
+                    collected.append(
+                        {
+                            "sort_key": local_dt.timestamp(),
+                            "label": label,
+                            "description": str(occ.get("summary", "")),
+                            "source": src_row.get("source") or "synth",
+                            "all_day": all_day,
+                        }
+                    )
+                except Exception as exc:
+                    log_debug(f"{LOG_PREFIX} skipping upcoming occurrence: {exc}")
+                    continue
+
+            collected.sort(key=lambda e: e["sort_key"])
+            trimmed = [
+                {k: v for k, v in e.items() if k != "sort_key"}
+                for e in collected[:limit]
+            ]
+            return JSONResponse({"success": True, "events": trimmed, "days": days})
+
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to fetch upcoming events: {exc}")
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+
+    async def create_calendar_event(self, request: Request):
+        """Create a new internal scheduled event from the WebUI calendar.
+
+        The event is stored exactly like a Synth-created reminder. When it fires
+        it is delivered to the Synth as an internal ``scheduled_reminder`` beat,
+        which then decides whether/how/who to contact.
+        """
+        try:
+            payload = await request.json()
+        except Exception:
+            return JSONResponse(
+                {"success": False, "error": "Invalid JSON body"}, status_code=400
+            )
+
+        if not isinstance(payload, dict):
+            return JSONResponse(
+                {"success": False, "error": "Invalid payload"}, status_code=400
+            )
+
+        date = str(payload.get("date", "")).strip()
+        time_val = str(payload.get("time", "")).strip() or "00:00"
+        recurrence = str(payload.get("recurrence", "none")).strip() or "none"
+        description = str(payload.get("description", "")).strip()
+
+        if not date or not description:
+            return JSONResponse(
+                {"success": False, "error": "date and description are required"},
+                status_code=400,
+            )
+        if recurrence not in ("none", "daily", "weekly", "monthly", "always"):
+            recurrence = "none"
+
+        try:
+            from core.db import insert_scheduled_event
+
+            await insert_scheduled_event(
+                date=date,
+                time=time_val,
+                recurrence_type=recurrence,
+                description=description,
+                created_by="user",
+                source="user",
+            )
+            return JSONResponse({"success": True})
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to create calendar event: {exc}")
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+
+    async def update_calendar_event(self, request: Request):
+        """Update an existing internal scheduled event from the WebUI calendar.
+
+        Only internal events (``source`` not starting with ``external``) can be
+        edited; external calendar occurrences are read-only mirrors.
+        """
+        event_id_raw = request.path_params.get("event_id")
+        try:
+            event_id = int(event_id_raw)
+        except (TypeError, ValueError):
+            return JSONResponse(
+                {"success": False, "error": "Invalid event id"}, status_code=400
+            )
+
+        try:
+            payload = await request.json()
+        except Exception:
+            return JSONResponse(
+                {"success": False, "error": "Invalid JSON body"}, status_code=400
+            )
+
+        if not isinstance(payload, dict):
+            return JSONResponse(
+                {"success": False, "error": "Invalid payload"}, status_code=400
+            )
+
+        date = str(payload.get("date", "")).strip()
+        time_val = str(payload.get("time", "")).strip() or "00:00"
+        recurrence = str(payload.get("recurrence", "none")).strip() or "none"
+        description = str(payload.get("description", "")).strip()
+
+        if not date or not description:
+            return JSONResponse(
+                {"success": False, "error": "date and description are required"},
+                status_code=400,
+            )
+        if recurrence not in ("none", "daily", "weekly", "monthly", "always"):
+            recurrence = "none"
+
+        # Optional processed/delivered flag from the editor. When the key is
+        # absent, keep the legacy reset-to-not-delivered behaviour (None).
+        delivered_raw = payload.get("delivered", None)
+        delivered: bool | None = None if delivered_raw is None else bool(delivered_raw)
+
+        try:
+            from core.db import get_conn_ctx, update_scheduled_event
+
+            # Guard: refuse to edit external (read-only) occurrences.
+            async with get_conn_ctx() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "SELECT source FROM scheduled_events WHERE id = %s",
+                        (event_id,),
+                    )
+                    row = await cur.fetchone()
+            if row is None:
+                return JSONResponse(
+                    {"success": False, "error": "Event not found"}, status_code=404
+                )
+            source = str(row[0] or "")
+            if source.startswith("external"):
+                return JSONResponse(
+                    {
+                        "success": False,
+                        "error": "External calendar events are read-only",
+                    },
+                    status_code=403,
+                )
+
+            updated = await update_scheduled_event(
+                event_id=event_id,
+                date=date,
+                time=time_val,
+                recurrence_type=recurrence,
+                description=description,
+                delivered=delivered,
+            )
+            if not updated:
+                return JSONResponse(
+                    {"success": False, "error": "Event not found or unchanged"},
+                    status_code=404,
+                )
+            return JSONResponse({"success": True})
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to update calendar event: {exc}")
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+
+    async def delete_calendar_event(self, request: Request):
+        """Delete a scheduled event by id (WebUI calendar)."""
+        event_id_raw = request.path_params.get("event_id")
+        try:
+            event_id = int(event_id_raw)
+        except (TypeError, ValueError):
+            return JSONResponse(
+                {"success": False, "error": "Invalid event id"}, status_code=400
+            )
+
+        try:
+            from core.db import get_conn_ctx
+
+            async with get_conn_ctx() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "DELETE FROM scheduled_events WHERE id = %s", (event_id,)
+                    )
+            return JSONResponse({"success": True})
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to delete calendar event: {exc}")
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+
+    async def export_calendar_ics(self, request: Request):
+        """Serve all scheduled events as a single iCalendar (.ics) file.
+
+        This endpoint powers both the "Download .ics" button and the
+        ``webcal://`` subscription (Google Calendar, Apple Calendar, ...).
+        """
+        try:
+            from core.calendar_utils import build_calendar
+            from core.time_zone_utils import get_local_timezone
+
+            system_tz = get_local_timezone()
+            rows = await self._fetch_calendar_event_rows()
+            calendar = build_calendar(rows, system_tz=system_tz)
+            ics_bytes = calendar.to_ical()
+
+            return Response(
+                content=ics_bytes,
+                media_type="text/calendar; charset=utf-8",
+                headers={
+                    "Content-Disposition": 'attachment; filename="synth-calendar.ics"'
+                },
+            )
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to export calendar ICS: {exc}")
+            return Response(
+                content=f"Calendar export failed: {exc}",
+                media_type="text/plain",
+                status_code=500,
+            )
+
+    async def list_external_calendars(self, request: Request):
+        """Return the configured external calendar subscriptions.
+
+        Credentials are never exposed: the encrypted password column is
+        stripped and replaced with a boolean ``has_password`` flag.
+        """
+        try:
+            from core.external_calendars import (
+                ensure_external_calendars_table,
+                list_external_calendars,
+            )
+
+            await ensure_external_calendars_table()
+            rows = await list_external_calendars()
+            safe_rows: list[dict[str, Any]] = []
+            for row in rows:
+                safe: dict[str, Any] = {}
+                for k, v in row.items():
+                    if k == "password_enc":
+                        continue
+                    safe[k] = v.isoformat() if isinstance(v, datetime) else v
+                safe["has_password"] = bool(row.get("password_enc"))
+                safe_rows.append(safe)
+            return JSONResponse({"calendars": safe_rows})
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to list external calendars: {exc}")
+            return JSONResponse({"error": str(exc)}, status_code=500)
+
+    async def list_known_interface_paths(self, request: Request) -> JSONResponse:
+        """Return known interface paths with a human-friendly label.
+
+        Used by the calendar event editor to let the user attach a delivery
+        target to a scheduled reminder. Each entry is derived from the most
+        recent chat message seen for that ``interface_path`` so the label
+        reflects the last known sender name (pretty name).
+        """
+        try:
+            from core.db import get_conn_ctx
+
+            entries: list[dict[str, str]] = []
+            async with get_conn_ctx() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        """
+                        SELECT DISTINCT ON (interface_path)
+                            interface_path, sender_name
+                        FROM chat_history_cache
+                        ORDER BY interface_path, timestamp DESC
+                        """
+                    )
+                    rows = await cur.fetchall()
+                    for row in rows:
+                        if isinstance(row, dict):
+                            path = row.get("interface_path")
+                            sender = row.get("sender_name")
+                        else:
+                            path = row[0]
+                            sender = row[1] if len(row) > 1 else None
+                        if not path:
+                            continue
+                        label = f"{sender} ({path})" if sender else str(path)
+                        entries.append({"interface_path": str(path), "label": label})
+
+            entries.sort(key=lambda item: item["label"].lower())
+            return JSONResponse({"success": True, "interface_paths": entries})
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to list interface paths: {exc}")
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+
+    async def add_external_calendar(self, request: Request):
+        """Add a new external calendar subscription (CalDAV or ICS)."""
+        try:
+            from core.external_calendars import (
+                CALENDAR_TYPES,
+                add_external_calendar,
+                ensure_external_calendars_table,
+            )
+
+            body = await request.json()
+            name = (body.get("name") or "").strip()
+            url = (body.get("url") or "").strip()
+            cal_type = (body.get("cal_type") or "ics").strip().lower()
+            username = body.get("username") or None
+            password = body.get("password") or None
+            enabled = bool(body.get("enabled", True))
+
+            if not name or not url:
+                return JSONResponse(
+                    {"error": "name and url are required"}, status_code=400
+                )
+            if cal_type not in CALENDAR_TYPES:
+                return JSONResponse(
+                    {"error": f"cal_type must be one of {sorted(CALENDAR_TYPES)}"},
+                    status_code=400,
+                )
+
+            await ensure_external_calendars_table()
+            new_id = await add_external_calendar(
+                name=name,
+                url=url,
+                cal_type=cal_type,
+                username=username,
+                password=password,
+                enabled=enabled,
+            )
+            if new_id is None:
+                return JSONResponse(
+                    {"error": "Failed to add calendar"}, status_code=500
+                )
+            return JSONResponse({"id": new_id})
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to add external calendar: {exc}")
+            return JSONResponse({"error": str(exc)}, status_code=500)
+
+    async def delete_external_calendar(self, request: Request):
+        """Delete an external calendar and its materialised events."""
+        try:
+            from core.external_calendars import (
+                delete_external_calendar,
+                ensure_external_calendars_table,
+            )
+
+            calendar_id = int(request.path_params["calendar_id"])
+            await ensure_external_calendars_table()
+            ok = await delete_external_calendar(calendar_id)
+            if not ok:
+                return JSONResponse({"error": "Calendar not found"}, status_code=404)
+            return JSONResponse({"deleted": calendar_id})
+        except (ValueError, KeyError):
+            return JSONResponse({"error": "Invalid calendar id"}, status_code=400)
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to delete external calendar: {exc}")
+            return JSONResponse({"error": str(exc)}, status_code=500)
 
     @staticmethod
     def _extract_dream_text(response_text: Any) -> str | None:

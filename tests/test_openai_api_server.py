@@ -3,16 +3,14 @@ import json
 
 import pytest
 
-from interface.ollama_compat_server import OllamaCompatServer
+from interface.openai_api_server import OpenAIApiServer
 from fastapi.responses import StreamingResponse
 
 
 @pytest.mark.asyncio
 async def test_streaming_deltas_and_processing_chunk(monkeypatch):
-    monkeypatch.setattr(
-        OllamaCompatServer, "_schedule_server_startup", lambda self: None
-    )
-    server = OllamaCompatServer()
+    monkeypatch.setattr(OpenAIApiServer, "_schedule_server_startup", lambda self: None)
+    server = OpenAIApiServer()
 
     # Capture session_meta calls
     recorded_meta_calls = []
@@ -83,10 +81,8 @@ async def test_streaming_deltas_and_processing_chunk(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_nonstream_completion_includes_text(monkeypatch):
-    monkeypatch.setattr(
-        OllamaCompatServer, "_schedule_server_startup", lambda self: None
-    )
-    server = OllamaCompatServer()
+    monkeypatch.setattr(OpenAIApiServer, "_schedule_server_startup", lambda self: None)
+    server = OpenAIApiServer()
 
     async def fake_add_message_to_context(**kwargs):
         return None
@@ -130,10 +126,8 @@ async def test_nonstream_completion_includes_text(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_nonstream_completion_with_actions_executed(monkeypatch):
-    monkeypatch.setattr(
-        OllamaCompatServer, "_schedule_server_startup", lambda self: None
-    )
-    server = OllamaCompatServer()
+    monkeypatch.setattr(OpenAIApiServer, "_schedule_server_startup", lambda self: None)
+    server = OpenAIApiServer()
 
     async def fake_add_message_to_context(**kwargs):
         return None

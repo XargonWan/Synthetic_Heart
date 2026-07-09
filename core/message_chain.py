@@ -339,6 +339,124 @@ def _auto_inject_interface_path(actions: list, interface_path: Optional[str]) ->
     return actions
 
 
+def _collect_beat_allowed_paths(ctx: Optional[dict]) -> Optional[set[str]]:
+    """Collect the set of interface_paths a Grillo beat is allowed to route to.
+
+    Grillo observer beats present the model with snippets from multiple
+    conversations plus a list of eligible outreach targets. The model must reply
+    to the conversation a snippet came from (or reach out to an eligible target).
+    Because the beat runs with a placeholder context path (``grillo/-1``), a
+    mis-chosen interface_path would otherwise be delivered verbatim to whatever
+    chat the model named, silently landing the reply in the wrong conversation.
+
+    This builds the union of every routable interface_path the beat actually
+    offered the model: the ``chat:`` path embedded in each snippet plus every
+    ``interface_path`` from the eligible-targets list. Returns ``None`` when the
+    context is not a Grillo beat or carries no routable material (in which case
+    no target validation should be applied).
+
+    Args:
+        ctx: The runtime context dict for the current turn.
+
+    Returns:
+        A set of allowed interface_path strings, or ``None`` when validation
+        does not apply.
+    """
+    if not isinstance(ctx, dict) or not ctx.get("grillo_beat"):
+        return None
+
+    allowed: set[str] = set()
+
+    snippets = ctx.get("grillo_snippets")
+    if isinstance(snippets, (list, tuple)):
+        for snippet in snippets:
+            if not isinstance(snippet, str):
+                continue
+            # Snippets are rendered as "(chat:<path> | sender:... | ts) <text>".
+            marker = "chat:"
+            start = snippet.find(marker)
+            if start == -1:
+                continue
+            start += len(marker)
+            end = start
+            # The path ends at the first field separator or closing paren.
+            while end < len(snippet) and snippet[end] not in (" ", "|", ")"):
+                end += 1
+            path = snippet[start:end].strip()
+            if path:
+                allowed.add(path)
+
+    targets = ctx.get("grillo_targets")
+    if isinstance(targets, (list, tuple)):
+        for target in targets:
+            if isinstance(target, dict):
+                path = target.get("interface_path")
+                if isinstance(path, str) and path.strip():
+                    allowed.add(path.strip())
+
+    return allowed or None
+
+
+def _drop_misrouted_beat_actions(actions: list, ctx: Optional[dict]) -> list:
+    """Drop beat actions routed to a conversation the beat never offered.
+
+    For Grillo beats (observer/outreach), any action that carries a concrete
+    ``interface_path`` in its payload must target one of the interface_paths the
+    beat actually presented to the model — the origin of a replied snippet or an
+    eligible outreach target. An action routed to a path outside that set is a
+    routing hallucination and is dropped: not sending is strictly safer than
+    delivering the reply to the wrong conversation. Actions with no concrete
+    ``interface_path`` are left untouched for downstream handling.
+
+    Args:
+        actions: List of action dicts to filter.
+        ctx: The runtime context dict for the current turn.
+
+    Returns:
+        The filtered list of actions.
+    """
+    if not isinstance(actions, list):
+        return actions
+
+    allowed_paths = _collect_beat_allowed_paths(ctx)
+    if not allowed_paths:
+        return actions
+
+    kept: list = []
+    for action in actions:
+        if not isinstance(action, dict):
+            kept.append(action)
+            continue
+
+        payload = action.get("payload")
+        target_path = (
+            payload.get("interface_path") if isinstance(payload, dict) else None
+        )
+        # Only actions that carry a concrete routing target can be misrouted.
+        # Anything without an interface_path (diary entries, non-message actions,
+        # or messages left for downstream injection) is left untouched.
+        if not isinstance(target_path, str) or not target_path.strip():
+            kept.append(action)
+            continue
+
+        if target_path.strip() in allowed_paths:
+            kept.append(action)
+        else:
+            action_type = (
+                action.get("type")
+                or action.get("action")
+                or action.get("command")
+                or action.get("method")
+            )
+            log_warning(
+                f"[message_chain] 🚫 Dropping beat action '{action_type}' routed to "
+                f"'{target_path}' — not among the beat's offered targets "
+                f"{sorted(allowed_paths)}"
+            )
+
+    return kept
+
+
 def _normalize_message_unknown(actions: list, interface_path: Optional[str]) -> list:
     """Normalize 'message_unknown' action types to the correct interface-specific type.
 
@@ -1478,6 +1596,10 @@ async def handle_incoming_message(
                 # Auto-inject interface_path into message actions that are missing it
                 # This prevents validation failures and avoids costly LLM correction calls
                 actions = _auto_inject_interface_path(actions, ctx_interface_path)
+                # For Grillo beats, drop any message action routed to a conversation
+                # the beat never offered (snippet origin or eligible target). This
+                # prevents an observer reply from landing in the wrong chat.
+                actions = _drop_misrouted_beat_actions(actions, ctx)
 
                 # --- New: Validate action types early and trigger corrector for unsupported types ---
                 try:
@@ -1568,6 +1690,7 @@ async def handle_incoming_message(
                             actions = _auto_inject_interface_path(
                                 actions, ctx_interface_path
                             )
+                            actions = _drop_misrouted_beat_actions(actions, ctx)
 
                     unsupported = []
                     for idx, act in enumerate(actions):

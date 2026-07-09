@@ -7,7 +7,13 @@ from core.config_manager import config_registry
 # Get list of available timezones for dropdown
 _AVAILABLE_TIMEZONES = sorted(available_timezones())
 
-# Register timezone configuration
+# Register timezone configuration.
+#
+# ``allow_env_override=False`` makes the ``TZ`` environment variable act only as
+# a seed default: the DB-backed value can then be changed at runtime via
+# ``set_value`` (the env var no longer locks it). Events with ``tzid IS NULL``
+# inherit this value and are recomputed when it changes (see
+# ``core.db.recompute_all_next_runs``).
 _TZ = config_registry.get_var(
     "TZ",
     "UTC",
@@ -16,6 +22,7 @@ _TZ = config_registry.get_var(
     group="core",
     component="core",
     constraints={"choices": _AVAILABLE_TIMEZONES},
+    allow_env_override=False,
 )
 
 # Register location configuration

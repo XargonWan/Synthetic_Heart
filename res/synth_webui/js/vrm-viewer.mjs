@@ -6032,7 +6032,12 @@ function resizeRenderer() {
         renderer.setSize(width, height, false);
         camera.aspect = width / height;
         camera.updateProjectionMatrix();
-        fitFramingForAspect();
+        // NB: NON adattiamo qui il framing all'aspect. Il riframing a figura
+        // intera serve solo alla finestra PiP (portrait), che lo richiede
+        // esplicitamente via window.fitVRMFramingForAspect(). Sulla WebUI
+        // principale la camera deve restare quella di default / impostata
+        // dall'utente (OrbitControls), anche se il canvas è transitoriamente
+        // stretto durante lo spostamento DOM del PiP.
     }
 }
 window.addEventListener('resize', resizeRenderer);
@@ -8399,6 +8404,68 @@ try {
         // Map raw node/mesh names to human-friendly body part labels.
         // Heuristics: strip common suffixes like (merged), baked, numeric suffixes,
         // then match common tokens via ordered regex rules. Returns { label, confidence }.
+        // --- Precise touch-zone catalog -----------------------------------
+        // Loaded once from the shared JSON catalog (single source of truth,
+        // also consumed by the Python backend). Maps a raycast hit point,
+        // converted to VRM 'hips'-local space, to a precise anatomical zone id
+        // (e.g. 'right_breast'). This is the PRIMARY resolution; the mesh-name
+        // heuristic (mapTouchedNodeToHuman) is only the fallback when no zone
+        // matches. See res/synth_webui/data/karada_touch_zones.json.
+        let __synthTouchZones = null;      // array of zone descriptors
+        let __synthTouchZonesLoaded = false;
+        async function _synthLoadTouchZones() {
+            if (__synthTouchZonesLoaded) return __synthTouchZones;
+            __synthTouchZonesLoaded = true;
+            try {
+                const resp = await fetch('/data/karada_touch_zones.json', { cache: 'force-cache' });
+                if (resp && resp.ok) {
+                    const data = await resp.json();
+                    __synthTouchZones = Array.isArray(data.zones) ? data.zones : [];
+                    console.log('[synth_webui] Loaded', __synthTouchZones.length, 'touch zones');
+                } else {
+                    console.warn('[synth_webui] Touch-zone catalog fetch failed:', resp ? resp.status : 'no-response');
+                    __synthTouchZones = [];
+                }
+            } catch (err) {
+                console.warn('[synth_webui] Failed to load touch-zone catalog:', err);
+                __synthTouchZones = [];
+            }
+            return __synthTouchZones;
+        }
+        // Kick off the load early (non-blocking).
+        try { _synthLoadTouchZones(); } catch (_e) { /* ignore */ }
+
+        // Resolve a world-space hit point to a precise zone id, or null.
+        function resolveTouchZone(worldPoint) {
+            if (!worldPoint || !__synthTouchZones || !__synthTouchZones.length) return null;
+            if (!currentVRM || !currentVRM.humanoid) return null;
+            const humanoid = currentVRM.humanoid;
+            const hipsNode = (typeof humanoid.getNormalizedBoneNode === 'function')
+                ? (humanoid.getNormalizedBoneNode('hips') || humanoid.getNormalizedBoneNode('Hips'))
+                : null;
+            if (!hipsNode) return null;
+            // Convert the world hit point into hips-local space.
+            let local;
+            try {
+                hipsNode.updateWorldMatrix(true, false);
+                local = hipsNode.worldToLocal(worldPoint.clone());
+            } catch (_e) {
+                return null;
+            }
+            // hips-local: X = model left/right, Y = height, Z = front(+)/back(-).
+            const x = local.x;
+            const y = local.y;
+            const front = local.z >= 0;
+            for (const zone of __synthTouchZones) {
+                if (x < zone.x_min || x > zone.x_max) continue;
+                if (y < zone.y_min || y > zone.y_max) continue;
+                if (zone.front === true && !front) continue;
+                if (zone.front === false && front) continue;
+                return zone.id;
+            }
+            return null;
+        }
+
         function mapTouchedNodeToHuman(rawName) {
             if (!rawName) return { label: 'unknown', confidence: 0 };
             let name = String(rawName).toLowerCase();
@@ -8523,17 +8590,29 @@ try {
                 }
                 if (!touchedPart) touchedPart = intersect.object.name || 'unknown';
 
+                // PRIMARY: resolve the exact hit point to a precise anatomical
+                // zone id via the shared catalog. Falls back to the mesh-name
+                // heuristic below when no zone matches (or the catalog is not
+                // yet loaded / the model has no usable humanoid).
+                let preciseZoneId = null;
+                try {
+                    preciseZoneId = resolveTouchZone(intersect.point);
+                } catch (_e) { preciseZoneId = null; }
+
                 // Map raw node name to a human-friendly label and expose both
                 const mapped = (typeof mapTouchedNodeToHuman === 'function') ? mapTouchedNodeToHuman(touchedPart) : { label: touchedPart || 'unknown', confidence: 0 };
-                console.log('[synth_webui] Model tapped - touched part:', touchedPart, 'mapped:', mapped);
+                console.log('[synth_webui] Model tapped - touched part:', touchedPart, 'mapped:', mapped, 'zone:', preciseZoneId);
                 window.lastTouchedPart = { part: touchedPart, at: Date.now() };
-                window.lastTouchedPartHuman = { part: mapped.label, raw: touchedPart, confidence: mapped.confidence, at: Date.now(), method: 'heuristic' };
+                window.lastTouchedPartHuman = { part: mapped.label, raw: touchedPart, confidence: mapped.confidence, at: Date.now(), method: preciseZoneId ? 'zone' : 'heuristic', zone: preciseZoneId };
 
                 // Follow the cursor with gaze for a few seconds after a body tap.
                 _triggerFollowMouseGaze(ev.clientX, ev.clientY);
 
                 const touchPayload = {
                     type: 'touch',
+                    // Precise catalog zone id takes precedence downstream; the raw
+                    // node name is kept for debugging / heuristic fallback.
+                    precise_id: preciseZoneId,
                     part: touchedPart,
                     mapped_part: window.lastTouchedPartHuman ? window.lastTouchedPartHuman.part : null,
                     mapped_confidence: window.lastTouchedPartHuman ? window.lastTouchedPartHuman.confidence : null,
@@ -8580,6 +8659,7 @@ try {
                                     context_id: __synthTouchOverlayContextId,
                                     priority: __synthTouchOverlayPriority,
                                     source: 'webui.touch',
+                                    precise_id: preciseZoneId,
                                     part: touchedPart,
                                     mapped_part: window.lastTouchedPartHuman ? window.lastTouchedPartHuman.part : null,
                                     mapped_confidence: window.lastTouchedPartHuman ? window.lastTouchedPartHuman.confidence : null,

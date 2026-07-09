@@ -21,7 +21,7 @@ Available Interfaces
 
 * ``discord_interface`` – Discord bot integration. Requires ``DISCORD_BOT_TOKEN``.
 * ``matrix_interface`` – Matrix chat bridge powered by ``matrix-nio``. Requires homeserver credentials and tokenizer (password or access token).
-* ``ollama_compat_server`` – Ollama-compatible REST bridge that lets external clients talk to SyntH as if it were an Ollama instance.
+* ``openai_api_server`` – OpenAI-compatible REST bridge (also speaks the Ollama HTTP API) that lets external clients talk to SyntH as if it were an OpenAI/Ollama endpoint.
 * ``telegram_bot`` – Telegram bot interface with media support. Requires ``BOTFATHER_TOKEN`` and trainer ID.
 
 **Development Interfaces** (in ``interface_dev/`` directory):
@@ -171,7 +171,7 @@ The **Ollama compatibility server** exposes Synthetic Heart through the same HTT
 .. code-block:: bash
 
    OLLAMA_HOST=0.0.0.0          # Bind address for the compatibility server
-   OLLAMA_PORT=11435            # Default Ollama port; update if you already run a native instance
+   OPENAI_API_SERVER_PORT=11435 # Default Ollama port; update if you already run a native instance
    OLLAMA_DEFAULT_MODEL=SyntH   # Name reported to clients when no model is specified
    OLLAMA_DEFAULT_MODEL_DISPLAY="Synthetic Heart"  # Friendly label in /api/tags
    OLLAMA_MAX_HISTORY=20        # Conversation turns preserved between requests
@@ -180,7 +180,7 @@ The **Ollama compatibility server** exposes Synthetic Heart through the same HTT
 
 **Usage**
 
-1. Start SyntH with the interface enabled (it registers automatically when ``interface/ollama_compat_server.py`` is present).
+1. Start SyntH with the interface enabled (it registers automatically when ``interface/openai_api_server.py`` is present).
 2. Point an Ollama client at your synth instance:
 
    .. code-block:: bash

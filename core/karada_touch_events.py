@@ -31,7 +31,9 @@ off.
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Optional
 
 from core.config_manager import config_registry
@@ -97,6 +99,23 @@ register_exposed_var(
     description=(
         "How long synth_touch events are retained on the sliding window for "
         "later reflection (default 24 hours)."
+    ),
+    scope="core",
+    component="karada",
+    advanced=True,
+)
+
+register_exposed_var(
+    "KARADA_EXPLICIT_TOUCH",
+    label="Explicit Touch Terms",
+    default=0,
+    value_type=int,
+    ui_type="bool",
+    description=(
+        "When enabled, precise anatomical touch points (from the touch-zone "
+        "catalog) are injected into the prompt using their technical term "
+        "instead of being neutralized. When disabled (default), touch points "
+        "are neutralized to safe, generic terms."
     ),
     scope="core",
     component="karada",
@@ -223,6 +242,56 @@ def _synth_ttl_s() -> int:
         return 86400
 
 
+def _explicit_touch_enabled() -> bool:
+    """Whether precise anatomical technical terms should reach the prompt."""
+    try:
+        return bool(int(config_registry.get_value("KARADA_EXPLICIT_TOUCH", 0)))
+    except Exception:
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Touch-zone catalog (shared with the WebUI frontend)
+# ---------------------------------------------------------------------------
+
+# Single source of truth for precise touch-zone ids and their term mappings.
+# The same file drives the WebUI 3D zoning (vrm-viewer.mjs). Here we only need
+# the id -> {technical, neutral} mapping to render the prompt term.
+_CATALOG_PATH = (
+    Path(__file__).resolve().parent.parent
+    / "res"
+    / "synth_webui"
+    / "data"
+    / "karada_touch_zones.json"
+)
+
+# id -> {"technical": str, "neutral": str}
+_zone_terms: Optional[dict[str, dict[str, str]]] = None
+
+
+def _load_zone_terms() -> dict[str, dict[str, str]]:
+    """Load and cache the id -> term mapping from the touch-zone catalog."""
+    global _zone_terms
+    if _zone_terms is not None:
+        return _zone_terms
+    terms: dict[str, dict[str, str]] = {}
+    try:
+        with open(_CATALOG_PATH, encoding="utf-8") as fh:
+            data = json.load(fh)
+        for zone in data.get("zones", []):
+            zone_id = zone.get("id")
+            if not zone_id:
+                continue
+            terms[str(zone_id)] = {
+                "technical": str(zone.get("technical") or zone_id),
+                "neutral": str(zone.get("neutral") or zone_id),
+            }
+    except Exception as e:
+        log_warning(f"[karada_touch] Failed to load touch-zone catalog: {e}")
+    _zone_terms = terms
+    return terms
+
+
 def _track_background(task: asyncio.Task[Any]) -> None:
     """RUF006-safe: retain a strong reference to a fire-and-forget task."""
     _background_tasks.add(task)
@@ -235,17 +304,37 @@ def _track_background(task: asyncio.Task[Any]) -> None:
 
 
 def desexualize_part(raw_part: Optional[str]) -> Optional[str]:
-    """Map a raw (possibly sensitive) body-part name to a neutral, safe term.
+    """Map a raw body-part name to the term written into chat history.
 
-    Returns ``None`` when ``raw_part`` is falsy. Unknown parts are returned
-    lowercased and stripped as-is (they are assumed already neutral).
+    Resolution order:
+
+    1. If ``raw_part`` matches a precise touch-zone id from the catalog, use its
+       ``technical`` term when :data:`KARADA_EXPLICIT_TOUCH` is enabled, or its
+       ``neutral`` term otherwise.
+    2. Otherwise fall back to the legacy :data:`_BODY_PART_DESEXUALIZE` map.
+    3. Unknown parts are returned lowercased and stripped as-is (assumed already
+       neutral).
+
+    Returns ``None`` when ``raw_part`` is falsy.
     """
     if not raw_part:
         return None
-    key = str(raw_part).strip().lower().replace(" ", "").replace("_", "")
+
+    raw = str(raw_part).strip()
+
+    # 1. Precise catalog zone ids (e.g. "right_breast").
+    zone_terms = _load_zone_terms()
+    zone = zone_terms.get(raw) or zone_terms.get(raw.lower())
+    if zone:
+        return zone["technical"] if _explicit_touch_enabled() else zone["neutral"]
+
+    # 2. Legacy de-sexualization map.
+    key = raw.lower().replace(" ", "").replace("_", "")
     if key in _BODY_PART_DESEXUALIZE:
         return _BODY_PART_DESEXUALIZE[key]
-    return str(raw_part).strip().lower() or None
+
+    # 3. Passthrough.
+    return raw.lower() or None
 
 
 # ---------------------------------------------------------------------------

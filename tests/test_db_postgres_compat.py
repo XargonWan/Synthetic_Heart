@@ -282,7 +282,6 @@ async def test_insert_scheduled_event_uses_datetime_param_on_postgres(
     monkeypatch,
 ) -> None:
     captured: dict[str, Any] = {}
-    next_run = datetime(2026, 4, 18, 12, 34, 56, tzinfo=timezone.utc)
 
     class FakeCursor:
         async def __aenter__(self):
@@ -313,8 +312,11 @@ async def test_insert_scheduled_event_uses_datetime_param_on_postgres(
     monkeypatch.setattr(db_module, "get_conn_ctx", lambda: FakeConnCtx())
     monkeypatch.setattr(db_module, "safe_db_execute", fake_safe_db_execute)
     monkeypatch.setattr(db_module, "ensure_core_tables", fake_ensure_core_tables)
+    # insert_scheduled_event now converts the local wall-clock time to UTC
+    # internally using the system timezone. Pin it to UTC so the expected
+    # next_run is deterministic (14:34 local == 14:34 UTC).
     monkeypatch.setattr(
-        "core.time_zone_utils.parse_local_to_utc", lambda d, t: next_run
+        "core.time_zone_utils.get_local_timezone", lambda: timezone.utc
     )
 
     await db_module.insert_scheduled_event(
@@ -325,7 +327,11 @@ async def test_insert_scheduled_event_uses_datetime_param_on_postgres(
     )
 
     assert "INSERT INTO scheduled_events" in captured["query"]
-    assert captured["params"][2] is next_run
+    # On Postgres, next_run (param index 2) must be a native datetime object,
+    # not a preformatted string.
+    next_run_param = captured["params"][2]
+    assert isinstance(next_run_param, datetime)
+    assert next_run_param == datetime(2026, 4, 18, 14, 34, tzinfo=timezone.utc)
 
 
 @pytest.mark.asyncio

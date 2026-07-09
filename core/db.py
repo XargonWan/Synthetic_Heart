@@ -1,7 +1,6 @@
 # core/db.py
 
 from datetime import datetime, timezone, timedelta
-import calendar
 import asyncio
 import time
 from pathlib import Path
@@ -1999,6 +1998,8 @@ async def insert_scheduled_event(
     original_context: str | None = None,
     conversation_user_message: str | None = None,
     conversation_llm_response: str | None = None,
+    tzid: str | None = None,
+    source: str | None = None,
 ) -> None:
     """Insert a new scheduled event using local time and store next_run in UTC.
 
@@ -2011,6 +2012,11 @@ async def insert_scheduled_event(
         original_context: Original context from conversation (optional, for user-initiated events)
         conversation_user_message: Original user message that triggered event creation (optional)
         conversation_llm_response: Original LLM response that created the event (optional)
+        tzid: Explicit IANA timezone id for the event. ``None`` means the event
+            inherits the system ``TZ`` (and its wall-clock shifts when ``TZ``
+            changes); a concrete value anchors the event to that timezone.
+        source: Provenance tag stored in the ``source`` column ("synth"/"user"/
+            "external:<id>"). Defaults are derived from ``created_by`` when omitted.
     """
 
     if not time:
@@ -2018,28 +2024,43 @@ async def insert_scheduled_event(
 
     await ensure_core_tables()
     try:
+        from core.time_zone_utils import get_local_timezone
+        from core.calendar_utils import recurrence_to_rrule
+        from zoneinfo import ZoneInfo
+
+        # Resolve the effective timezone used to convert the wall-clock time to
+        # UTC. ``tzid`` NULL -> inherit the current system TZ.
+        if tzid:
+            try:
+                event_tz = ZoneInfo(tzid)
+            except Exception:
+                log_warning(
+                    f"[insert_scheduled_event] Invalid tzid '{tzid}', inheriting system TZ"
+                )
+                event_tz = get_local_timezone()
+        else:
+            event_tz = get_local_timezone()
+
+        try:
+            dt_local = datetime.strptime(f"{date} {time}", "%Y-%m-%d %H:%M")
+            next_run_utc = dt_local.replace(tzinfo=event_tz).astimezone(ZoneInfo("UTC"))
+        except Exception as e:
+            log_warning(
+                f"[insert_scheduled_event] Invalid date/time: {date} {time} - {e}"
+            )
+            return
+
+        rrule = recurrence_to_rrule(recurrence_type)
+        if source is None:
+            source = (
+                "synth"
+                if (created_by or "synth").lower() in ("synth", "weather_plugin")
+                else "user"
+            )
+
         async with get_conn_ctx() as conn:
             async with conn.cursor() as cur:
-                try:
-                    from core.time_zone_utils import parse_local_to_utc
-
-                    next_run_utc = parse_local_to_utc(date, time)
-                except Exception as e:
-                    log_warning(
-                        f"[insert_scheduled_event] Invalid date/time: {date} {time} - {e}"
-                    )
-                    return
-
                 is_postgres = _get_db_type() == "postgres"
-                # NOTE: The canonical ``scheduled_events`` schema (see
-                # ``event_plugin.ensure_table_exists`` and
-                # ``scripts/sql/app_main_postgres.sql``) only defines the columns
-                # below. The ``original_context`` /
-                # ``conversation_user_message`` / ``conversation_llm_response``
-                # parameters are accepted for backward compatibility but are not
-                # persisted because those columns do not exist in the live table
-                # on any backend. Do not add them back without also shipping a
-                # migration.
                 date_col = "date" if is_postgres else "`date`"
                 time_col = "time" if is_postgres else "`time`"
 
@@ -2069,9 +2090,9 @@ async def insert_scheduled_event(
                     f"""
                     INSERT INTO scheduled_events (
                         {date_col}, {time_col}, next_run, recurrence_type,
-                        description, created_by
+                        description, created_by, rrule, tzid, source
                     )
-                    VALUES (%s, %s, %s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
                         date_value,
@@ -2080,11 +2101,134 @@ async def insert_scheduled_event(
                         recurrence_type or "none",
                         description,
                         created_by,
+                        rrule,
+                        tzid,
+                        source,
                     ),
                     ensure_fn=ensure_core_tables,
                 )
     except Exception as e:
         log_error(f"[insert_scheduled_event] Error: {e}")
+
+
+async def update_scheduled_event(
+    event_id: int,
+    date: str,
+    time: str | None,
+    recurrence_type: str,
+    description: str,
+    tzid: str | None = None,
+    delivered: bool | None = None,
+) -> bool:
+    """Update an existing scheduled event and recompute its next_run/rrule.
+
+    Mirrors :func:`insert_scheduled_event` for the mutable user-editable fields
+    (date, time, recurrence, description). Returns ``True`` when a row was updated.
+
+    Args:
+        event_id: Primary key of the event to update.
+        date: New event date (YYYY-MM-DD).
+        time: New event time (HH:MM); ``None``/empty falls back to "00:00".
+        recurrence_type: Recurrence pattern (none, daily, weekly, monthly, always).
+        description: New event description.
+        tzid: Explicit IANA timezone id; ``None`` inherits the system TZ.
+        delivered: Explicit processed flag. When ``None`` (default) the event is
+            reset to not-delivered so a rescheduled event fires again; pass
+            ``True``/``False`` to set the flag explicitly from the editor.
+    """
+
+    if not time:
+        time = "00:00"
+
+    await ensure_core_tables()
+    try:
+        from core.time_zone_utils import get_local_timezone
+        from core.calendar_utils import recurrence_to_rrule
+        from zoneinfo import ZoneInfo
+
+        if tzid:
+            try:
+                event_tz = ZoneInfo(tzid)
+            except Exception:
+                log_warning(
+                    f"[update_scheduled_event] Invalid tzid '{tzid}', inheriting system TZ"
+                )
+                event_tz = get_local_timezone()
+        else:
+            event_tz = get_local_timezone()
+
+        try:
+            dt_local = datetime.strptime(f"{date} {time}", "%Y-%m-%d %H:%M")
+            next_run_utc = dt_local.replace(tzinfo=event_tz).astimezone(ZoneInfo("UTC"))
+        except Exception as e:
+            log_warning(
+                f"[update_scheduled_event] Invalid date/time: {date} {time} - {e}"
+            )
+            return False
+
+        rrule = recurrence_to_rrule(recurrence_type)
+
+        async with get_conn_ctx() as conn:
+            async with conn.cursor() as cur:
+                is_postgres = _get_db_type() == "postgres"
+                date_col = "date" if is_postgres else "`date`"
+                time_col = "time" if is_postgres else "`time`"
+
+                if is_postgres:
+                    try:
+                        date_value: object = datetime.strptime(date, "%Y-%m-%d").date()
+                    except ValueError:
+                        log_warning(
+                            f"[update_scheduled_event] Invalid date format: {date}"
+                        )
+                        return False
+                    try:
+                        time_value: object = datetime.strptime(time, "%H:%M").time()
+                    except ValueError:
+                        time_value = datetime.strptime(time, "%H:%M:%S").time()
+                    next_run_value: object = next_run_utc
+                    if delivered is None:
+                        delivered_reset = "delivered = FALSE"
+                    else:
+                        delivered_reset = (
+                            "delivered = TRUE" if delivered else "delivered = FALSE"
+                        )
+                else:
+                    date_value = date
+                    time_value = time
+                    next_run_value = next_run_utc.strftime("%Y-%m-%d %H:%M:%S")
+                    if delivered is None:
+                        delivered_reset = "delivered = 0"
+                    else:
+                        delivered_reset = (
+                            "delivered = 1" if delivered else "delivered = 0"
+                        )
+
+                await safe_db_execute(
+                    cur,
+                    f"""
+                    UPDATE scheduled_events
+                    SET {date_col} = %s, {time_col} = %s, next_run = %s,
+                        recurrence_type = %s, description = %s, rrule = %s,
+                        {delivered_reset}
+                    WHERE id = %s
+                    """,
+                    (
+                        date_value,
+                        time_value,
+                        next_run_value,
+                        recurrence_type or "none",
+                        description,
+                        rrule,
+                        event_id,
+                    ),
+                    ensure_fn=ensure_core_tables,
+                )
+                rowcount = getattr(cur, "rowcount", 0) or 0
+                return rowcount > 0
+    except Exception as e:
+        log_error(f"[update_scheduled_event] Error: {e}")
+        return False
 
 
 async def get_due_events(
@@ -2200,7 +2344,8 @@ async def mark_event_delivered(event_id: int) -> bool:
             async with conn.cursor(aiomysql.DictCursor) as cur:
                 await safe_db_execute(
                     cur,
-                    "SELECT recurrence_type, next_run FROM scheduled_events WHERE id = %s",
+                    "SELECT recurrence_type, next_run, rrule, tzid "
+                    "FROM scheduled_events WHERE id = %s",
                     (event_id,),
                     ensure_fn=ensure_core_tables,
                 )
@@ -2214,6 +2359,8 @@ async def mark_event_delivered(event_id: int) -> bool:
 
             repeat_type = (row.get("recurrence_type") or "none").lower()
             next_run_val = row.get("next_run")
+            event_rrule = row.get("rrule")
+            event_tzid = row.get("tzid")
 
             # Process event update based on recurrence type
             async with conn.cursor(aiomysql.DictCursor) as cur:
@@ -2270,22 +2417,29 @@ async def mark_event_delivered(event_id: int) -> bool:
                         )
                         return False
 
-                    if repeat_type == "daily":
-                        new_dt = next_run_dt + timedelta(days=1)
-                    elif repeat_type == "weekly":
-                        new_dt = next_run_dt + timedelta(days=7)
-                    elif repeat_type == "monthly":
-                        year = next_run_dt.year + (next_run_dt.month // 12)
-                        month = next_run_dt.month % 12 + 1
-                        day = min(next_run_dt.day, calendar.monthrange(year, month)[1])
-                        new_dt = next_run_dt.replace(year=year, month=month, day=day)
-                    else:
+                    # Compute the next occurrence via the iCalendar RRULE helper
+                    # so recurrence is evaluated in the event's own timezone
+                    # (correct DST / month-length handling). Fall back to the
+                    # legacy ``recurrence_type`` as an RRULE when the ``rrule``
+                    # column is empty (pre-migration rows).
+                    from core.calendar_utils import (
+                        advance_next_run_by_rrule,
+                        recurrence_to_rrule,
+                    )
+                    from core.time_zone_utils import get_local_timezone
+
+                    effective_rrule = event_rrule or recurrence_to_rrule(repeat_type)
+                    new_dt_utc = advance_next_run_by_rrule(
+                        next_run_dt,
+                        effective_rrule,
+                        tzid=event_tzid,
+                        system_tz=get_local_timezone(),
+                    )
+                    if new_dt_utc is None:
                         log_warning(
                             f"[db] Unknown recurrence type '{repeat_type}' for event {event_id}"
                         )
                         return False
-
-                    new_dt_utc = new_dt.astimezone(timezone.utc)
                     # Postgres' ``next_run`` is a timestamp column and its driver
                     # rejects string literals; pass a real datetime. MySQL accepts
                     # either, so a datetime is safe for both backends.
@@ -2308,6 +2462,107 @@ async def mark_event_delivered(event_id: int) -> bool:
     except Exception as e:
         log_error(f"[mark_event_delivered] Error: {e}")
         return False
+
+
+async def recompute_all_next_runs() -> int:
+    """Recompute ``next_run`` for events that inherit the system timezone.
+
+    Only rows with ``tzid IS NULL`` (inherited) are affected: their wall-clock
+    ``date``/``time`` is reinterpreted in the *current* system TZ and the UTC
+    ``next_run`` is rewritten. Events with an explicit ``tzid`` are anchored and
+    left untouched.
+
+    Intended to be triggered whenever the ``TZ`` config value changes.
+
+    Returns:
+        Number of rows updated (0 on error or when nothing matched).
+    """
+    await ensure_core_tables()
+
+    from core.time_zone_utils import get_local_timezone
+    from zoneinfo import ZoneInfo
+
+    system_tz = get_local_timezone()
+    is_postgres = _get_db_type() == "postgres"
+    date_col = "date" if is_postgres else "`date`"
+    time_col = "time" if is_postgres else "`time`"
+
+    updated = 0
+    try:
+        async with get_conn_ctx() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await safe_db_execute(
+                    cur,
+                    f"SELECT id, {date_col} AS date, {time_col} AS time "
+                    "FROM scheduled_events "
+                    "WHERE tzid IS NULL AND delivered = "
+                    f"{'FALSE' if is_postgres else '0'}",
+                    (),
+                    ensure_fn=ensure_core_tables,
+                )
+                rows = await cur.fetchall()
+
+            if not rows:
+                return 0
+
+            async with conn.cursor() as cur:
+                for r in rows:
+                    event_id = r.get("id")
+                    date_val = r.get("date")
+                    time_val = r.get("time")
+                    if event_id is None or date_val is None:
+                        continue
+
+                    # Normalise date/time values to strings.
+                    if isinstance(date_val, datetime):
+                        date_str = date_val.date().isoformat()
+                    elif hasattr(date_val, "isoformat"):
+                        date_str = date_val.isoformat()
+                    else:
+                        date_str = str(date_val)
+
+                    if time_val is None:
+                        time_str = "00:00"
+                    elif hasattr(time_val, "strftime"):
+                        time_str = time_val.strftime("%H:%M")
+                    else:
+                        time_str = str(time_val)[:5]
+
+                    try:
+                        dt_local = datetime.strptime(
+                            f"{date_str} {time_str}", "%Y-%m-%d %H:%M"
+                        )
+                        next_run_utc = dt_local.replace(tzinfo=system_tz).astimezone(
+                            ZoneInfo("UTC")
+                        )
+                    except Exception as e:
+                        log_warning(
+                            f"[recompute_all_next_runs] Skipping event {event_id}: {e}"
+                        )
+                        continue
+
+                    new_run_val: datetime | str = (
+                        next_run_utc
+                        if is_postgres
+                        else next_run_utc.strftime("%Y-%m-%d %H:%M:%S")
+                    )
+                    await safe_db_execute(
+                        cur,
+                        "UPDATE scheduled_events SET next_run = %s WHERE id = %s",
+                        (new_run_val, event_id),
+                        ensure_fn=ensure_core_tables,
+                    )
+                    updated += 1
+
+        if updated:
+            log_info(
+                f"[recompute_all_next_runs] Recomputed next_run for {updated} "
+                "inherited-timezone event(s) after TZ change"
+            )
+        return updated
+    except Exception as e:
+        log_error(f"[recompute_all_next_runs] Error: {e}")
+        return 0
 
 
 async def delete_scheduled_events_by_created_by(created_by: str) -> int:

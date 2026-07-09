@@ -1,4 +1,4 @@
-"""FastAPI interface exposing the Synthetic Heart with an Ollama-compatible API."""
+"""FastAPI interface exposing the Synthetic Heart with an OpenAI-compatible API."""
 
 from __future__ import annotations
 
@@ -16,7 +16,6 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from core.core_initializer import register_interface
 from core.logging_utils import log_debug, log_error, log_info, log_warning
-import core.plugin_instance as plugin_instance
 
 
 def _now_iso() -> str:
@@ -25,10 +24,10 @@ def _now_iso() -> str:
     return datetime.now(tz=timezone.utc).isoformat()
 
 
-class OllamaCompatServer:
-    """Expose the synth message chain through a REST API compatible with Ollama."""
+class OpenAIApiServer:
+    """Expose the synth message chain through an OpenAI-compatible REST API."""
 
-    display_name = "Ollama Compat Server"
+    display_name = "OpenAI API Server"
 
     interface_id = "ollama_serve"
 
@@ -42,15 +41,16 @@ class OllamaCompatServer:
             "OLLAMA_DEFAULT_MODEL_DISPLAY", "Syntethic Heart"
         )
 
-        # Prefer the configured Base Cortex as the default model exposed to
-        # Ollama/OpenAI clients so `/api/tags` and `/v1/models` reflect
-        # available Cortex engines and the configured active engine.
+        # The Synth exposes itself as a single logical model to Ollama/OpenAI
+        # clients (`/api/tags`, `/v1/models`). Prefer the configured SYNTH_NAME
+        # so the model name reflects the persona rather than the underlying
+        # cortex engine.
         try:
             from core.config_manager import config_registry
 
-            base_cortex = config_registry.get_value("BASE_CORTEX", "")
-            if base_cortex:
-                self.default_model_name = base_cortex
+            synth_name = config_registry.get_value("SYNTH_NAME", "")
+            if synth_name and str(synth_name).strip():
+                self.default_model_name = str(synth_name).strip()
         except Exception:
             # Keep env/default fallback if config_registry isn't available
             pass
@@ -123,13 +123,13 @@ class OllamaCompatServer:
     # ------------------------------------------------------------------
     @staticmethod
     def get_interface_id() -> str:
-        return OllamaCompatServer.interface_id
+        return OpenAIApiServer.interface_id
 
     @staticmethod
     def get_supported_actions() -> dict[str, dict[str, Any]]:
         return {
             "message_ollama_serve": {
-                "description": "Send a text message through the Ollama-compatible HTTP interface.",
+                "description": "Send a text message through the OpenAI-compatible HTTP interface.",
                 "required_fields": ["text", "target"],
                 "optional_fields": ["conversation_id"],
             }
@@ -139,7 +139,7 @@ class OllamaCompatServer:
     def get_prompt_instructions(action_name: str) -> dict[str, Any]:
         if action_name == "message_ollama_serve":
             return {
-                "description": "Send a message back to an Ollama-compatible HTTP client.",
+                "description": "Send a message back to an OpenAI-compatible HTTP client.",
                 "payload": {
                     "text": {
                         "type": "string",
@@ -172,22 +172,8 @@ class OllamaCompatServer:
         return JSONResponse({"status": "ok", "interface": self.interface_id})
 
     async def _list_models(self) -> JSONResponse:
+        # Single logical model = the Synth itself (aggregated capabilities).
         models = self._build_model_catalog()
-        # Try to surface the _runtime_ active cortex as the first/default model
-        try:
-            from core.config import get_active_cortex_engine
-
-            active = await get_active_cortex_engine()
-            if active and not any(m.get("name") == active for m in models):
-                models.insert(
-                    0,
-                    self._format_model_descriptor(
-                        active, display=self.default_model_display
-                    ),
-                )
-        except Exception:
-            # Non-fatal if we cannot determine runtime active engine
-            pass
         payload = {"models": models}
         return JSONResponse(payload)
 
@@ -204,21 +190,12 @@ class OllamaCompatServer:
         raise HTTPException(status_code=404, detail="Model not found")
 
     async def _list_models_v1(self, request: Request) -> JSONResponse:
-        """OpenAI-style `/v1/models` response (returns `data: [...]`)."""
-        data = self._build_model_catalog()
-        try:
-            from core.config import get_active_cortex_engine
+        """OpenAI-style `/v1/models` response (returns `data: [...]`).
 
-            active = await get_active_cortex_engine()
-            if active and not any(m.get("name") == active for m in data):
-                data.insert(
-                    0,
-                    self._format_model_descriptor(
-                        active, display=self.default_model_display
-                    ),
-                )
-        except Exception:
-            pass
+        Exposes a single logical model = the Synth itself, whose capabilities
+        are the aggregate of every active media subsystem.
+        """
+        data = self._build_model_catalog()
         payload = {"object": "list", "data": data}
         return JSONResponse(payload)
 
@@ -849,96 +826,124 @@ class OllamaCompatServer:
             return None
         return int(elapsed * 1_000_000_000)
 
-    def _build_model_catalog(self) -> list[dict[str, Any]]:
-        """Return a model catalog derived from available Cortex engines.
+    def _resolve_synth_name(self) -> str:
+        """Return the Synth's display name as the single exposed model id.
 
-        - Expose all registered cortex engines as `models` so external clients
-          (AIRI, Ollama front-ends) can choose engines directly.
-        - Ensure the configured `BASE_CORTEX` is used as the default model.
+        Falls back to the configured default model name when ``SYNTH_NAME`` is
+        unavailable (e.g. very early startup or a stripped-down deployment).
         """
-        descriptors: list[dict[str, Any]] = []
-
-        # Prefer listing available Cortex engines (synchronous helper)
-        try:
-            from core.config import list_available_cortex_engines
-
-            engines = list(list_available_cortex_engines(None) or [])
-        except Exception:
-            # Fallback to plugin-provided models for backward compatibility
-            try:
-                engines = plugin_instance.get_supported_models() or []
-            except Exception as exc:  # pragma: no cover - defensive guard
-                log_warning(f"[ollama_serve] Failed to list cortex engines: {exc}")
-                engines = []
-
-        # Try to enrich display name from CortexRegistry when available
-        display_map: dict[str, str] = {}
-        try:
-            from core.cortex_registry import get_cortex_registry
-
-            reg = get_cortex_registry()
-            for name in engines:
-                label = reg._engine_meta.get(name, {}).get("label")
-                if label:
-                    display_map[name] = label
-        except Exception:
-            # Not critical — keep going
-            pass
-
-        seen = set()
-        for name in engines:
-            if not isinstance(name, str) or not name:
-                continue
-            descriptor = self._format_model_descriptor(
-                name, display=display_map.get(name)
-            )
-            descriptors.append(descriptor)
-            seen.add(descriptor.get("name") or name)
-
-        # Ensure configured BASE_CORTEX is present and used as default if missing
         try:
             from core.config_manager import config_registry
 
-            base_cortex = (
-                config_registry.get_value("BASE_CORTEX", "") or self.default_model_name
-            )
+            name = config_registry.get_value("SYNTH_NAME", "") or ""
+            name = name.strip()
+            if name:
+                return name
         except Exception:
-            base_cortex = self.default_model_name
+            pass
+        return self.default_model_name
 
-        if base_cortex and base_cortex not in seen:
-            descriptors.insert(
-                0,
-                self._format_model_descriptor(
-                    base_cortex, display=self.default_model_display
-                ),
-            )
+    def _aggregate_capabilities(self) -> dict[str, bool]:
+        """Aggregate capabilities across all active media subsystems.
 
-        return descriptors
+        The Ollama/OpenAI-compat API exposes a single logical model (the Synth)
+        whose feature set is the *union* of what the currently registered
+        engines provide across the four media subsystems:
+
+        - Cortex (LLM / text): ``vision``, ``audio``, ``actions`` ...
+        - Vox (TTS): ``voice_cloning``, ``emotions``, ``streaming`` ...
+        - Auris (STT): ``file_based`` ...
+        - Iris (vision): ``vision``, ``video`` ...
+
+        Only boolean-true capabilities are surfaced. The result is the OR of
+        every engine's capability dict so clients can discover what the Synth
+        can do as a whole, regardless of which backend serves each modality.
+        """
+        aggregated: dict[str, bool] = {}
+
+        def _merge(caps: Any) -> None:
+            if not isinstance(caps, dict):
+                return
+            for key, value in caps.items():
+                if isinstance(key, str) and bool(value):
+                    aggregated[key] = True
+
+        # Cortex registry has no public per-engine getter; read the meta dict
+        # the same way core.config does.
+        try:
+            from core.cortex_registry import get_cortex_registry
+
+            creg = get_cortex_registry()
+            for name in creg.get_available_engines() or []:
+                _merge(creg._engine_meta.get(name, {}).get("capabilities", {}))
+        except Exception:
+            pass
+
+        # Vox / Auris / Iris expose a public get_engine_meta().
+        registry_imports = (
+            ("core.vox_registry", "VOX_REGISTRY"),
+            ("core.auris_registry", "AURIS_REGISTRY"),
+            ("core.iris_registry", "IRIS_REGISTRY"),
+        )
+        for module_path, attr in registry_imports:
+            try:
+                module = __import__(module_path, fromlist=[attr])
+                registry = getattr(module, attr)
+                for name in registry.get_available_engines() or []:
+                    _merge(registry.get_engine_meta(name).get("capabilities", {}))
+            except Exception:
+                continue
+
+        return aggregated
+
+    def _build_model_catalog(self) -> list[dict[str, Any]]:
+        """Return a single-model catalog representing the Synth itself.
+
+        Instead of exposing every registered Cortex engine as a separate model
+        (which confuses OpenAI-compatible clients such as Blinko that expect a
+        coherent model name), we expose one logical model named after the Synth
+        (``SYNTH_NAME``). Its ``capabilities`` are the aggregate of every active
+        media subsystem (Cortex, Vox, Auris, Iris).
+        """
+        synth_name = self._resolve_synth_name()
+        capabilities = self._aggregate_capabilities()
+        descriptor = self._format_model_descriptor(
+            synth_name,
+            display=self.default_model_display,
+            capabilities=capabilities,
+        )
+        return [descriptor]
 
     def _format_model_descriptor(
-        self, name: str, *, display: Optional[str] = None
+        self,
+        name: str,
+        *,
+        display: Optional[str] = None,
+        capabilities: Optional[dict[str, bool]] = None,
     ) -> dict[str, Any]:
         created = _now_iso()
         display_name = display or name
+        caps = capabilities or {}
         # Provide OpenAI/Ollama-style descriptor fields plus a lightweight
         # provider metadata blob so external clients (AIRI, Ollama front-ends)
-        # can discover provider information reliably.
+        # can discover provider information reliably. ``capabilities`` is the
+        # aggregate feature set of every active media subsystem.
         return {
             "id": name,
             "object": "model",
             "name": name,
             "model": name,
             "owned_by": "synthetic-heart",
+            "capabilities": caps,
             "provider": {
                 "name": "synthetic-heart",
                 "type": "local",
                 "display_name": display_name,
+                "capabilities": caps,
             },
             "provider_metadata": {
                 "format": "SyntH",
-                "family": "synthetic-heart"
-                if name == self.default_model_name
-                else "generic",
+                "family": "synthetic-heart",
                 "parameter_size": "dynamic",
                 "quantization_level": "adaptive",
             },
@@ -947,12 +952,11 @@ class OllamaCompatServer:
             "digest": "",
             "details": {
                 "format": "SyntH",
-                "family": "synthetic-heart"
-                if name == self.default_model_name
-                else "generic",
+                "family": "synthetic-heart",
                 "parameter_size": "dynamic",
                 "quantization_level": "adaptive",
                 "display_name": display_name,
+                "capabilities": caps,
             },
         }
 
@@ -981,7 +985,7 @@ class OllamaCompatServer:
         import uvicorn
 
         host = os.getenv("OLLAMA_HOST", "0.0.0.0")
-        port = int(os.getenv("OLLAMA_PORT", "11435"))
+        port = int(os.getenv("OPENAI_API_SERVER_PORT", "11435"))
         config = uvicorn.Config(self.app, host=host, port=port, log_level="info")
         server = uvicorn.Server(config)
 
@@ -996,7 +1000,7 @@ class OllamaCompatServer:
                 log_error(
                     f"[ollama_serve] ❌ Port {port} already in use! "
                     f"Either disable this server with OLLAMA_SERVER_ENABLED=false "
-                    f"or change the port with OLLAMA_PORT=<other_port>. "
+                    f"or change the port with OPENAI_API_SERVER_PORT=<other_port>. "
                     f"If you want to CONNECT to llama.cpp/ollama, use the 'openapi' cortex engine instead."
                 )
             else:
@@ -1100,13 +1104,13 @@ class OllamaCompatServer:
 
 
 # Expose class and instance for auto discovery
-INTERFACE_CLASS = OllamaCompatServer
-ollama_serve_interface = OllamaCompatServer()
+INTERFACE_CLASS = OpenAIApiServer
+openai_api_interface = OpenAIApiServer()
 
 
 async def start_server() -> None:
     """Compatibility wrapper for external starters."""
-    await ollama_serve_interface.serve()
+    await openai_api_interface.serve()
 
 
 def initialize_interface():
@@ -1117,40 +1121,40 @@ def initialize_interface():
     main event loop existed we may have a pending startup; this function
     makes sure the uvicorn task is scheduled when the loop is available.
     """
-    global ollama_serve_interface
+    global openai_api_interface
 
-    if ollama_serve_interface is None:
+    if openai_api_interface is None:
         log_info(
             "[ollama_serve] Creating interface instance via initialize_interface()"
         )
-        ollama_serve_interface = OllamaCompatServer()
+        openai_api_interface = OpenAIApiServer()
 
     # Re-register (idempotent) so core_initializer sees the interface
     try:
-        register_interface("ollama_serve", ollama_serve_interface)
+        register_interface("ollama_serve", openai_api_interface)
     except Exception:
         # register_interface may already have been called at import time
         pass
 
     try:
-        ollama_serve_interface._schedule_server_startup()
+        openai_api_interface._schedule_server_startup()
     except Exception as e:
         log_warning(f"[ollama_serve] Failed to schedule HTTP server startup: {e}")
 
-    return ollama_serve_interface
+    return openai_api_interface
 
 
 def shutdown_interface():
-    """Shutdown and cleanup the Ollama-compatible HTTP server."""
-    global ollama_serve_interface
+    """Shutdown and cleanup the OpenAI-compatible HTTP server."""
+    global openai_api_interface
 
-    if ollama_serve_interface is None:
+    if openai_api_interface is None:
         log_debug("[ollama_serve] No interface instance to shutdown")
         return
 
-    log_info("[ollama_serve] Shutting down Ollama-compatible HTTP server...")
+    log_info("[ollama_serve] Shutting down OpenAI-compatible HTTP server...")
     try:
-        task = getattr(ollama_serve_interface, "_server_task", None)
+        task = getattr(openai_api_interface, "_server_task", None)
         if task is not None and not task.done():
             try:
                 task.cancel()
@@ -1167,7 +1171,7 @@ def shutdown_interface():
     except Exception:
         pass
 
-    ollama_serve_interface = None
+    openai_api_interface = None
     log_info("[ollama_serve] Shutdown complete")
 
 
@@ -1184,7 +1188,7 @@ __all__ = [
     "shutdown_interface",
     "reload_interface",
     "start_server",
-    "OllamaCompatServer",
+    "OpenAIApiServer",
 ]
 
 if __name__ == "__main__":

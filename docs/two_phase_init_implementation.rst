@@ -267,7 +267,7 @@ The following interfaces should be migrated to the two-phase pattern:
 
 - [ ] ``discord_interface.py``
 - [ ] ``matrix_interface.py``
-- [ ] ``ollama_compat_server.py``
+- [ ] ``openai_api_server.py``
 
 Migration checklist for each:
 

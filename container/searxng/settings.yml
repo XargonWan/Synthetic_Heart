@@ -1,0 +1,51 @@
+# SearXNG settings for the in-container, localhost-only instance used by SyntH.
+#
+# This is a minimal, standalone configuration: it binds to 127.0.0.1:8888
+# (the WebUI already owns 8080), enables the JSON API so the web_search plugin
+# can consume results programmatically, and disables the rate limiter so the
+# engine runs without a mandatory valkey/redis dependency.
+#
+# See https://docs.searxng.org/admin/settings/ for the full reference.
+
+use_default_settings: true
+
+general:
+  debug: false
+  instance_name: "SyntH SearXNG"
+  # No public stats / contact page for a private embedded instance.
+  privacypolicy_url: false
+  contact_url: false
+
+server:
+  # Bind to localhost only — this instance is never exposed outside the container.
+  bind_address: "127.0.0.1"
+  port: 8888
+  # NOTE: replace at deploy time or via SEARXNG_SECRET env if you want a unique
+  # per-deployment value. It is only used to sign local session cookies for an
+  # instance that is not reachable from outside the container.
+  secret_key: "synth-searxng-local-instance-change-me"
+  limiter: false
+  public_instance: false
+  image_proxy: false
+  method: "GET"
+
+search:
+  # Enable the JSON output format so the plugin can request format=json.
+  formats:
+    - html
+    - json
+  safe_search: 0
+  autocomplete: ""
+  default_lang: "auto"
+
+ui:
+  static_use_hash: true
+
+# Redis/valkey is optional and disabled implicitly by turning the limiter off.
+# Leaving no `redis:` / `valkey:` section means SearXNG uses in-memory state.
+
+outgoing:
+  request_timeout: 5.0
+  max_request_timeout: 10.0
+  pool_connections: 100
+  pool_maxsize: 20

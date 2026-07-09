@@ -17,7 +17,17 @@ from __future__ import annotations
 # permitted to emit ``message_*`` actions (and receive TTS, survive
 # concurrent-user-message cancellation, and be excluded from language
 # detection on their English system prompt).
-OUTBOUND_BEAT_TYPES: frozenset[str] = frozenset({"observer"})
+#
+# - ``observer``: the proactive chat-observer beat (folded-in ``outreach``).
+# - ``scheduled_reminder``: a due calendar/scheduled event delivered to Synth as
+#   an internal thought; Synth decides if/how/whom to contact, so it must be
+#   allowed to emit ``message_*`` actions.
+# - ``web_search_result``: a completed background web search delivered as a
+#   second turn on the originating interface; Synth reports the findings to the
+#   user, so it must be allowed to emit ``message_*`` actions.
+OUTBOUND_BEAT_TYPES: frozenset[str] = frozenset(
+    {"observer", "scheduled_reminder", "web_search_result"}
+)
 
 
 def is_outbound_beat(beat_type: object) -> bool:
@@ -27,3 +37,100 @@ def is_outbound_beat(beat_type: object) -> bool:
     (any other Grillo ``beat_type``, or ``None``) are introspection-only.
     """
     return isinstance(beat_type, str) and beat_type in OUTBOUND_BEAT_TYPES
+
+
+async def collect_routable_targets(limit: int = 8) -> list[dict[str, object]]:
+    """Return recently active, text-routable ``interface_path`` targets.
+
+    Network-agnostic: for each recent conversation returns a dict with
+    ``interface_path``, ``last_sender`` and ``age_seconds``. Live voice paths
+    (audio-only) are excluded. Used by outbound beats (observer, scheduled
+    reminders) so the model can pick a real path instead of hallucinating one.
+
+    This is a lightweight, cooldown-free variant of the observer's own target
+    collector: a scheduled reminder is an explicit user-created event, so it is
+    not subject to anti-spam self-cooldown gates.
+    """
+    from datetime import datetime, timezone
+
+    targets: list[dict[str, object]] = []
+    try:
+        import core.recent_chats as recent_chats
+        from core.chat_history_cache import load_chat_history
+
+        now = datetime.now(timezone.utc)
+        last = await recent_chats.get_last_active_chats_verbose(limit * 2)
+        for chat_id, _name in last:
+            if len(targets) >= limit:
+                break
+            chat_path = recent_chats.get_chat_path(chat_id) or f"telegram_bot/{chat_id}"
+            # Skip live voice paths — audio-only, cannot receive text.
+            if "_live_" in chat_path:
+                continue
+            try:
+                messages = await load_chat_history(chat_path)
+            except Exception:
+                continue
+            if not messages:
+                continue
+
+            last_msg = messages[-1] if isinstance(messages[-1], dict) else {}
+            last_sender = str(
+                last_msg.get("sender_name") or last_msg.get("sender_id") or "unknown"
+            )
+
+            age_seconds: float | None = None
+            raw_ts = last_msg.get("timestamp")
+            last_ts: datetime | None = None
+            if isinstance(raw_ts, datetime):
+                last_ts = (
+                    raw_ts.replace(tzinfo=timezone.utc)
+                    if raw_ts.tzinfo is None
+                    else raw_ts.astimezone(timezone.utc)
+                )
+            elif raw_ts is not None:
+                try:
+                    parsed = datetime.fromisoformat(str(raw_ts).replace("Z", "+00:00"))
+                    last_ts = (
+                        parsed.replace(tzinfo=timezone.utc)
+                        if parsed.tzinfo is None
+                        else parsed
+                    )
+                except Exception:
+                    last_ts = None
+            if last_ts is not None:
+                age_seconds = (now - last_ts).total_seconds()
+
+            targets.append(
+                {
+                    "interface_path": chat_path,
+                    "last_sender": last_sender,
+                    "age_seconds": age_seconds,
+                }
+            )
+    except Exception:  # pragma: no cover - defensive, logged by caller if needed
+        pass
+    return targets
+
+
+def render_routable_targets_block(targets: list[dict[str, object]]) -> str:
+    """Render routable targets as a prompt block (interface_path + idle age)."""
+    if not targets:
+        return (
+            "\n\nROUTABLE TARGETS: (none recently active — if you decide to reach "
+            "out, you must know a valid interface_path yourself)\n"
+        )
+    block = (
+        "\n\nROUTABLE TARGETS (recently active interface_path values you may reach "
+        "out to):\n"
+    )
+    for t in targets:
+        path = t.get("interface_path", "")
+        age = t.get("age_seconds")
+        try:
+            age_h = f"{float(age) / 3600.0:.1f}h" if age is not None else "?"
+        except Exception:
+            age_h = "?"
+        last = t.get("last_sender") or "?"
+        block += f"- interface_path={path} | idle={age_h} | last_sender={last}\n"
+    return block

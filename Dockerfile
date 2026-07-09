@@ -20,13 +20,15 @@ ENV REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt \
 
 # --- [System Dependencies] ---
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      bash curl wget unzip nano vim \
+      bash curl wget unzip nano vim git \
       ca-certificates \
       openssl \
       htop net-tools iputils-ping \
   ffmpeg mariadb-client libmariadb-dev postgresql-client \
       espeak \
       xz-utils \
+      python3-venv python3-dev build-essential libxml2-dev libxslt1-dev \
+      zlib1g-dev libffi-dev libssl-dev \
     && rm -rf /var/lib/apt/lists/* \
     && useradd -m -s /bin/bash abc
 
@@ -70,6 +72,26 @@ ENV UV_PROJECT_ENVIRONMENT=/app/venv
 RUN uv sync --frozen --no-cache
 
 
+# --- [SearXNG (self-hosted, in-container) ] ---
+# SearXNG is NOT published as an official pip/uv package (the PyPI "searxng"
+# project is an unrelated pre-alpha MCP client). The canonical install is from
+# source into its own isolated venv so its pinned deps never collide with the
+# SyntH app venv. It runs locally on 127.0.0.1:8888 and is queried by the
+# web_search plugin as the preferred backend (see plugins/web_search).
+ENV SEARXNG_SRC=/app/searxng \
+    SEARXNG_VENV=/app/searxng-venv \
+    SEARXNG_SETTINGS_PATH=/etc/searxng/settings.yml
+RUN mkdir -p /etc/searxng
+COPY container/searxng/settings.yml /etc/searxng/settings.yml
+RUN git clone --depth 1 https://github.com/searxng/searxng.git "$SEARXNG_SRC" && \
+    uv venv "$SEARXNG_VENV" && \
+    VIRTUAL_ENV="$SEARXNG_VENV" uv pip install --python "$SEARXNG_VENV/bin/python" \
+      setuptools wheel -r "$SEARXNG_SRC/requirements.txt" granian && \
+    VIRTUAL_ENV="$SEARXNG_VENV" uv pip install --python "$SEARXNG_VENV/bin/python" \
+      --no-build-isolation -e "$SEARXNG_SRC"
+RUN chown -R abc:abc "$SEARXNG_SRC" "$SEARXNG_VENV" /etc/searxng
+
+
 # --- [App Setup] ---
 # Copy scripts
 COPY automation_tools/container_synth.sh /app/synth.sh
@@ -95,6 +117,12 @@ RUN chmod +x /etc/s6-overlay/s6-rc.d/synth/run && \
     mkdir -p /etc/s6-overlay/s6-rc.d/user/contents.d && \
     echo synth > /etc/s6-overlay/s6-rc.d/user/contents.d/synth && \
     chown -R abc:abc /etc/s6-overlay/s6-rc.d/synth
+
+# S6 Service: SearXNG (in-container search backend, longrun)
+COPY container/s6-services/searxng /etc/s6-overlay/s6-rc.d/searxng
+RUN chmod +x /etc/s6-overlay/s6-rc.d/searxng/run && \
+    echo searxng > /etc/s6-overlay/s6-rc.d/user/contents.d/searxng && \
+    chown -R abc:abc /etc/s6-overlay/s6-rc.d/searxng
 
 # Final cleanup
 RUN rm -rf /tmp/*

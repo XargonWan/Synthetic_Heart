@@ -8,7 +8,8 @@ const historyState = {
     diary: { page: 1, per_page: 30, search: '', sort: 'desc' },
     grillo: { page: 1, per_page: 20, search: '', beat_type: '', sort: 'desc' },
     dreams: { page: 1, per_page: 15, search: '', sort: 'desc' },
-    chat: { page: 1, per_page: 50, search: '', interface_path: '', sort: 'desc' }
+    chat: { page: 1, per_page: 50, search: '', interface_path: '', sort: 'desc' },
+    calendar: { year: null, month: null, events: [], loaded: false }
 };
 
 function initializeHistoryTab() {
@@ -103,13 +104,537 @@ function initializeHistoryTab() {
     document.getElementById('history-chat-search')?.addEventListener('input', SynthUtils.debounce(() => { historyState.chat.search = document.getElementById('history-chat-search').value; historyState.chat.page = 1; loadHistoryChat(); }, 500));
     document.getElementById('history-chat-sort')?.addEventListener('change', () => { historyState.chat.sort = document.getElementById('history-chat-sort').value; historyState.chat.page = 1; loadHistoryChat(); });
 
+    // Calendar controls
+    document.getElementById('calendar-prev')?.addEventListener('click', () => shiftCalendarMonth(-1));
+    document.getElementById('calendar-next')?.addEventListener('click', () => shiftCalendarMonth(1));
+    document.getElementById('calendar-today')?.addEventListener('click', () => { const now = new Date(); historyState.calendar.year = now.getFullYear(); historyState.calendar.month = now.getMonth(); loadHistoryCalendar(); });
+    document.getElementById('calendar-new-event')?.addEventListener('click', () => openCalendarEventModal(null));
+    document.getElementById('calendar-subscribe')?.addEventListener('click', () => openCalendarSubscribeModal());
+
     // Load initial diary data
     loadHistoryDiary();
+}
+
+function shiftCalendarMonth(delta) {
+    const cal = historyState.calendar;
+    if (cal.year === null || cal.month === null) { const now = new Date(); cal.year = now.getFullYear(); cal.month = now.getMonth(); }
+    let m = cal.month + delta;
+    let y = cal.year;
+    while (m < 0) { m += 12; y -= 1; }
+    while (m > 11) { m -= 12; y += 1; }
+    cal.year = y; cal.month = m;
+    loadHistoryCalendar();
+}
+
+async function loadHistoryCalendar() {
+    const content = document.getElementById('history-calendar-content');
+    if (!content) return;
+    const cal = historyState.calendar;
+    if (cal.year === null || cal.month === null) { const now = new Date(); cal.year = now.getFullYear(); cal.month = now.getMonth(); }
+
+    content.innerHTML = '<div class="loading-state"><div class="loading-spinner"></div><p>Loading calendar...</p></div>';
+    const params = new URLSearchParams({ year: cal.year, month: cal.month + 1 });
+    try {
+        const response = await fetch(`/api/history/calendar?${params}`);
+        const data = await response.json();
+        if (data && data.success && Array.isArray(data.events)) {
+            cal.events = data.events;
+            cal.loaded = true;
+            renderCalendarGrid();
+        } else {
+            content.innerHTML = '<div class="empty-state"><div class="icon">⚠️</div><p>Failed to load calendar</p></div>';
+        }
+    } catch (error) {
+        console.error('Failed to load calendar:', error);
+        content.innerHTML = '<div class="empty-state"><div class="icon">⚠️</div><p>Failed to load calendar</p></div>';
+    }
+}
+
+function renderCalendarGrid() {
+    const content = document.getElementById('history-calendar-content');
+    if (!content) return;
+    const cal = historyState.calendar;
+    const year = cal.year;
+    const month = cal.month; // 0-based
+
+    // Update the month title
+    const titleEl = document.getElementById('calendar-title');
+    if (titleEl) {
+        try { titleEl.textContent = new Date(year, month, 1).toLocaleDateString(undefined, { month: 'long', year: 'numeric' }); }
+        catch (e) { titleEl.textContent = `${year}-${String(month + 1).padStart(2, '0')}`; }
+    }
+
+    // Group events by local YYYY-MM-DD (occurrence date). Backend returns
+    // one object per occurrence within the requested month window.
+    const byDay = {};
+    (cal.events || []).forEach(ev => {
+        const day = ev.date; // 'YYYY-MM-DD' local
+        if (!day) return;
+        if (!byDay[day]) byDay[day] = [];
+        byDay[day].push(ev);
+    });
+
+    // Weekday headers (Mon-first display but Date-based, locale-neutral labels)
+    const weekdays = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+    let html = '<div class="calendar-grid">';
+    weekdays.forEach(w => { html += `<div class="calendar-weekday">${w}</div>`; });
+
+    const first = new Date(year, month, 1);
+    // JS getDay(): 0=Sun..6=Sat. Convert to Mon-first index (0=Mon..6=Sun).
+    let startOffset = (first.getDay() + 6) % 7;
+    const daysInMonth = new Date(year, month + 1, 0).getDate();
+    const today = new Date();
+    const todayStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+
+    // Leading days from previous month
+    const prevMonthDays = new Date(year, month, 0).getDate();
+    for (let i = startOffset - 1; i >= 0; i--) {
+        const d = prevMonthDays - i;
+        html += `<div class="calendar-day other-month"><span class="calendar-day-number">${d}</span></div>`;
+    }
+
+    // Days of the current month
+    for (let d = 1; d <= daysInMonth; d++) {
+        const dayStr = `${year}-${String(month + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+        const isToday = dayStr === todayStr;
+        const events = byDay[dayStr] || [];
+        let eventsHtml = '';
+        const maxShown = 3;
+        events.slice(0, maxShown).forEach(ev => {
+            const classes = ['calendar-event'];
+            if (ev.recurring) classes.push('recurring');
+            if (ev.source && String(ev.source).startsWith('external')) classes.push('external');
+            const label = escapeHtml((ev.time ? ev.time + ' ' : '') + (ev.description || '(untitled)'));
+            eventsHtml += `<div class="${classes.join(' ')}" title="${label}">${label}</div>`;
+        });
+        if (events.length > maxShown) {
+            eventsHtml += `<div class="calendar-day-more">+${events.length - maxShown} more</div>`;
+        }
+        html += `<div class="calendar-day${isToday ? ' today' : ''}" data-day="${dayStr}"><span class="calendar-day-number">${d}</span>${eventsHtml}</div>`;
+    }
+
+    html += '</div>';
+    content.innerHTML = html;
+
+    // Click a day cell -> open the details/creation modal pre-filled with that date
+    content.querySelectorAll('.calendar-day[data-day]').forEach(cell => {
+        cell.addEventListener('click', () => {
+            const dayStr = cell.dataset.day;
+            const dayEvents = byDay[dayStr] || [];
+            openCalendarDayModal(dayStr, dayEvents);
+        });
+    });
+}
+
+function openCalendarDayModal(dayStr, dayEvents) {
+    let listHtml = '';
+    if (dayEvents.length > 0) {
+        listHtml = '<div class="calendar-day-events">' + dayEvents.map(ev => {
+            const isExternal = ev.source && String(ev.source).startsWith('external');
+            const badge = isExternal ? ' <small>(external)</small>' : '';
+            const recur = ev.recurring ? ' 🔁' : '';
+            const statusBadge = isExternal
+                ? ''
+                : (ev.delivered
+                    ? '<br><small style="color:#7ec87e;" title="Already delivered / processed">✓ processed</small>'
+                    : '<br><small style="opacity:0.6;" title="Not yet delivered">◷ pending</small>');
+            const editBtn = isExternal ? '' : `<button type="button" class="calendar-edit-event" data-event-id="${ev.id}" title="Edit event">✏</button>`;
+            const delBtn = isExternal ? '' : `<button type="button" class="calendar-del-event" data-event-id="${ev.id}" title="Delete event">🗑</button>`;
+            const evJson = encodeURIComponent(JSON.stringify(ev));
+            return `<div class="calendar-event-row" data-event="${evJson}" style="display:flex;justify-content:space-between;align-items:center;gap:0.5rem;padding:0.4rem 0;border-bottom:1px solid rgba(255,255,255,0.08);">
+                <span>${escapeHtml((ev.time ? ev.time + ' — ' : '') + (ev.description || '(untitled)'))}${recur}${badge}${statusBadge}</span>
+                <span style="display:flex;gap:0.25rem;flex-shrink:0;">${editBtn}${delBtn}</span>
+            </div>`;
+        }).join('') + '</div>';
+    } else {
+        listHtml = '<p style="opacity:0.6;">No events on this day.</p>';
+    }
+
+    const body = `
+        <h3>📅 ${escapeHtml(dayStr)}</h3>
+        ${listHtml}
+        <div class="calendar-modal-actions">
+            <button type="button" class="calendar-modal-close">Close</button>
+            <button type="button" class="primary calendar-modal-add">＋ Add event</button>
+        </div>
+    `;
+    const backdrop = showCalendarModal(body);
+    backdrop.querySelector('.calendar-modal-close')?.addEventListener('click', () => backdrop.remove());
+    backdrop.querySelector('.calendar-modal-add')?.addEventListener('click', () => { backdrop.remove(); openCalendarEventModal(dayStr); });
+    backdrop.querySelectorAll('.calendar-edit-event').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const row = btn.closest('.calendar-event-row');
+            let ev = null;
+            try { ev = JSON.parse(decodeURIComponent(row?.dataset.event || '') || 'null'); } catch (e) { ev = null; }
+            if (!ev) return;
+            backdrop.remove();
+            openCalendarEventModal(dayStr, ev);
+        });
+    });
+    backdrop.querySelectorAll('.calendar-del-event').forEach(btn => {
+        btn.addEventListener('click', async () => {
+            const eventId = btn.dataset.eventId;
+            if (!eventId) return;
+            if (!window.confirm('Delete this event?')) return;
+            await deleteCalendarEvent(eventId);
+            backdrop.remove();
+            // Refresh the calendar grid in the background so it stays in sync.
+            loadHistoryCalendar();
+            // Keep the user on the day detail if there are still events left,
+            // otherwise fall back to the calendar view.
+            const remaining = dayEvents.filter(ev => String(ev.id) !== String(eventId));
+            if (remaining.length > 0) {
+                openCalendarDayModal(dayStr, remaining);
+            }
+        });
+    });
+}
+
+function openCalendarEventModal(prefillDate, existingEvent) {
+    const isEdit = !!(existingEvent && existingEvent.id);
+    const dateVal = (existingEvent && existingEvent.date) || prefillDate || '';
+    const timeVal = (existingEvent && existingEvent.time) || '09:00';
+    const recurVal = (existingEvent && existingEvent.recurrence_type) || 'none';
+    const descVal = (existingEvent && existingEvent.description) || '';
+    const deliveredVal = !!(existingEvent && existingEvent.delivered);
+    const recurOptions = ['none', 'daily', 'weekly', 'monthly'].map(function (r) {
+        const label = r === 'none' ? 'Once' : (r.charAt(0).toUpperCase() + r.slice(1));
+        const sel = r === recurVal ? ' selected' : '';
+        return `<option value="${r}"${sel}>${label}</option>`;
+    }).join('');
+    const title = isEdit ? '✏ Edit event' : '＋ New event';
+    const saveLabel = isEdit ? 'Save' : 'Create';
+    const body = `
+        <h3>${title}</h3>
+        <p style="font-size:0.8rem;opacity:0.7;margin:0 0 0.5rem;">
+            This is an internal reminder. When it fires, the Synth receives it as a private thought and decides on its own whether and how to reach you.
+        </p>
+        <label for="cal-ev-date">Date</label>
+        <input type="date" id="cal-ev-date" value="${escapeHtml(dateVal)}">
+        <label for="cal-ev-time">Time</label>
+        <input type="time" id="cal-ev-time" value="${escapeHtml(timeVal)}">
+        <label for="cal-ev-recurrence">Recurrence</label>
+        <select id="cal-ev-recurrence">
+            ${recurOptions}
+        </select>
+        <label for="cal-ev-description">Description</label>
+        <textarea id="cal-ev-description" rows="3" placeholder="What should the Synth remember?">${escapeHtml(descVal)}</textarea>
+        ${isEdit ? `
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:0.5rem;">
+            <label for="cal-ev-delivered" style="display:flex;align-items:center;gap:0.5rem;cursor:pointer;margin:0;">
+                <input type="checkbox" id="cal-ev-delivered" style="width:auto;margin:0;"${deliveredVal ? ' checked' : ''}>
+                <span>Processed (already delivered)</span>
+            </label>
+            <button type="button" class="cal-ev-add-path" style="background:var(--accent);color:var(--accent-contrast, #fff);border:none;border-radius:6px;padding:0.35rem 0.7rem;font-size:0.8rem;cursor:pointer;white-space:nowrap;">Add Interface Path</button>
+        </div>` : ''}
+        <div class="calendar-modal-error" style="color:#ff8080;font-size:0.8rem;margin-top:0.5rem;display:none;"></div>
+        <div class="calendar-modal-actions">
+            <button type="button" class="calendar-modal-close">Cancel</button>
+            <button type="button" class="primary calendar-modal-save">${saveLabel}</button>
+        </div>
+    `;
+    const backdrop = showCalendarModal(body);
+    backdrop.querySelector('.calendar-modal-close')?.addEventListener('click', () => backdrop.remove());
+    backdrop.querySelector('.cal-ev-add-path')?.addEventListener('click', () => {
+        openInterfacePathPicker((interfacePath, label) => {
+            const textarea = backdrop.querySelector('#cal-ev-description');
+            if (!textarea) return;
+            const line = `Send your message on interface path: ${interfacePath} (${label})`;
+            const current = textarea.value.replace(/\s+$/, '');
+            textarea.value = current ? `${current}\n\n${line}` : line;
+        });
+    });
+    backdrop.querySelector('.calendar-modal-save')?.addEventListener('click', async () => {
+        const errEl = backdrop.querySelector('.calendar-modal-error');
+        const date = backdrop.querySelector('#cal-ev-date').value;
+        const time = backdrop.querySelector('#cal-ev-time').value || '09:00';
+        const recurrence = backdrop.querySelector('#cal-ev-recurrence').value;
+        const description = backdrop.querySelector('#cal-ev-description').value.trim();
+        if (!date || !description) {
+            if (errEl) { errEl.style.display = 'block'; errEl.textContent = 'Date and description are required.'; }
+            return;
+        }
+        const url = isEdit ? `/api/history/calendar/${existingEvent.id}` : '/api/history/calendar';
+        const method = isEdit ? 'PUT' : 'POST';
+        const payload = { date, time, recurrence, description };
+        if (isEdit) {
+            payload.delivered = !!backdrop.querySelector('#cal-ev-delivered')?.checked;
+        }
+        try {
+            const resp = await fetch(url, {
+                method: method,
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+            const data = await resp.json();
+            if (data && data.success) {
+                backdrop.remove();
+                loadHistoryCalendar();
+            } else if (errEl) {
+                errEl.style.display = 'block';
+                errEl.textContent = (data && data.error) || (isEdit ? 'Failed to update event.' : 'Failed to create event.');
+            }
+        } catch (e) {
+            if (errEl) { errEl.style.display = 'block'; errEl.textContent = isEdit ? 'Failed to update event.' : 'Failed to create event.'; }
+        }
+    });
+}
+
+function openCalendarSubscribeModal() {
+    const origin = window.location.origin;
+    const httpsUrl = `${origin}/calendar.ics`;
+    const webcalUrl = httpsUrl.replace(/^https?:/, 'webcal:');
+    const body = `
+        <h3>🔗 Subscribe & external calendars</h3>
+        <p style="font-size:0.85rem;opacity:0.8;">
+            Add this URL to Google Calendar, Apple Calendar, Thunderbird or any calendar app
+            that supports iCalendar (ICS) subscriptions. It stays in sync automatically.
+        </p>
+        <label>Subscription URL (webcal)</label>
+        <div class="calendar-subscribe-url">${escapeHtml(webcalUrl)}</div>
+        <label>Plain HTTPS URL</label>
+        <div class="calendar-subscribe-url">${escapeHtml(httpsUrl)}</div>
+        <div class="calendar-modal-actions">
+            <a href="${escapeHtml(webcalUrl)}" class="primary" style="text-decoration:none;padding:0.5rem 1rem;border-radius:6px;">Open in calendar app</a>
+        </div>
+
+        <hr style="margin:1.2rem 0;opacity:0.2;">
+
+        <h3>📥 Subscribe SyntH to an external calendar</h3>
+        <div class="calendar-privacy-warning" style="border:1px solid var(--accent);border-radius:6px;padding:0.6rem 0.8rem;margin:0.5rem 0;font-size:0.8rem;line-height:1.4;">
+            <strong>⚠️ Privacy warning.</strong> Any event you subscribe SyntH to becomes part
+            of what SyntH knows and may reason about. If "alert SyntH" is enabled, SyntH can
+            proactively bring these events up and could <em>disclose their details to third
+            parties</em> (people in chats, other interfaces). Only subscribe calendars whose
+            contents you are comfortable SyntH seeing and potentially sharing.
+        </div>
+        <div id="external-cal-list" style="margin:0.5rem 0;">
+            <div class="loading-state"><div class="loading-spinner"></div><p>Loading...</p></div>
+        </div>
+        <label>Calendar name</label>
+        <input type="text" id="ext-cal-name" placeholder="e.g. Work calendar" style="width:100%;box-sizing:border-box;">
+        <label>Type</label>
+        <select id="ext-cal-type" style="width:100%;box-sizing:border-box;">
+            <option value="ics">ICS (read-only URL)</option>
+            <option value="caldav">CalDAV</option>
+        </select>
+        <label>URL</label>
+        <input type="text" id="ext-cal-url" placeholder="https://... or webcal://..." style="width:100%;box-sizing:border-box;">
+        <label>Username (optional)</label>
+        <input type="text" id="ext-cal-user" placeholder="only for password-protected calendars" style="width:100%;box-sizing:border-box;">
+        <label>Password (optional)</label>
+        <input type="password" id="ext-cal-pass" placeholder="stored encrypted" style="width:100%;box-sizing:border-box;">
+        <div class="calendar-modal-actions">
+            <button type="button" class="calendar-modal-close">Close</button>
+            <button type="button" id="ext-cal-add" class="primary">Add calendar</button>
+        </div>
+    `;
+    const backdrop = showCalendarModal(body);
+    backdrop.querySelector('.calendar-modal-close')?.addEventListener('click', () => backdrop.remove());
+
+    const refresh = () => loadExternalCalendars(backdrop);
+    refresh();
+
+    backdrop.querySelector('#ext-cal-add')?.addEventListener('click', async () => {
+        const name = backdrop.querySelector('#ext-cal-name')?.value?.trim();
+        const url = backdrop.querySelector('#ext-cal-url')?.value?.trim();
+        const cal_type = backdrop.querySelector('#ext-cal-type')?.value || 'ics';
+        const username = backdrop.querySelector('#ext-cal-user')?.value?.trim() || null;
+        const password = backdrop.querySelector('#ext-cal-pass')?.value || null;
+        if (!name || !url) {
+            alert('Name and URL are required.');
+            return;
+        }
+        try {
+            const resp = await fetch('/api/history/calendar/external', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name, url, cal_type, username, password }),
+            });
+            const data = await resp.json();
+            if (!resp.ok || data.error) {
+                alert('Failed to add calendar: ' + (data.error || resp.status));
+                return;
+            }
+            backdrop.querySelector('#ext-cal-name').value = '';
+            backdrop.querySelector('#ext-cal-url').value = '';
+            backdrop.querySelector('#ext-cal-user').value = '';
+            backdrop.querySelector('#ext-cal-pass').value = '';
+            refresh();
+        } catch (e) {
+            console.error('Failed to add external calendar:', e);
+            alert('Failed to add calendar.');
+        }
+    });
+}
+
+async function loadExternalCalendars(backdrop) {
+    const listEl = backdrop.querySelector('#external-cal-list');
+    if (!listEl) return;
+    try {
+        const resp = await fetch('/api/history/calendar/external');
+        const data = await resp.json();
+        const cals = (data && data.calendars) || [];
+        if (!cals.length) {
+            listEl.innerHTML = '<p style="font-size:0.8rem;opacity:0.6;">No external calendars subscribed yet.</p>';
+            return;
+        }
+        listEl.innerHTML = cals.map(c => `
+            <div class="external-cal-item" style="display:flex;align-items:center;justify-content:space-between;padding:0.4rem 0;border-bottom:1px solid rgba(255,255,255,0.08);">
+                <div>
+                    <strong>${escapeHtml(c.name)}</strong>
+                    <span style="font-size:0.75rem;opacity:0.6;"> (${escapeHtml(c.cal_type)})</span>
+                    ${c.last_error ? `<div style="font-size:0.72rem;color:#e57373;">${escapeHtml(String(c.last_error))}</div>` : ''}
+                </div>
+                <button type="button" class="ext-cal-del" data-id="${c.id}" style="padding:0.25rem 0.5rem;">Remove</button>
+            </div>
+        `).join('');
+        listEl.querySelectorAll('.ext-cal-del').forEach(btn => {
+            btn.addEventListener('click', async () => {
+                const id = btn.getAttribute('data-id');
+                if (!confirm('Remove this external calendar and its imported events?')) return;
+                try {
+                    const r = await fetch(`/api/history/calendar/external/${encodeURIComponent(id)}`, { method: 'DELETE' });
+                    if (!r.ok) {
+                        const d = await r.json();
+                        alert('Failed to remove: ' + (d.error || r.status));
+                        return;
+                    }
+                    loadExternalCalendars(backdrop);
+                } catch (e) {
+                    console.error('Failed to delete external calendar:', e);
+                }
+            });
+        });
+    } catch (e) {
+        console.error('Failed to load external calendars:', e);
+        listEl.innerHTML = '<p style="font-size:0.8rem;color:#e57373;">Failed to load external calendars.</p>';
+    }
+}
+
+async function deleteCalendarEvent(eventId) {
+    try {
+        const resp = await fetch(`/api/history/calendar/${encodeURIComponent(eventId)}`, { method: 'DELETE' });
+        const data = await resp.json();
+        if (!data || !data.success) {
+            console.warn('[History] failed to delete calendar event', data);
+        }
+    } catch (e) {
+        console.error('Failed to delete calendar event:', e);
+    }
+}
+
+function showCalendarModal(innerHtml) {
+    // Remove any existing modal first
+    document.querySelectorAll('.calendar-modal-backdrop').forEach(el => el.remove());
+    const backdrop = document.createElement('div');
+    backdrop.className = 'calendar-modal-backdrop';
+    backdrop.innerHTML = `<div class="calendar-modal">${innerHtml}</div>`;
+    backdrop.addEventListener('click', (e) => { if (e.target === backdrop) backdrop.remove(); });
+    document.body.appendChild(backdrop);
+    return backdrop;
+}
+
+function openInterfacePathPicker(onSelect) {
+    const backdrop = document.createElement('div');
+    backdrop.className = 'calendar-modal-backdrop';
+    backdrop.style.zIndex = '48000';
+    backdrop.innerHTML = `<div class="calendar-modal">
+        <h3>Add interface path</h3>
+        <p style="font-size:0.8rem;opacity:0.7;margin:0 0 0.5rem;">
+            Pick a known interface path or type one manually, then confirm.
+        </p>
+        <label for="cal-ev-path-input">Interface path</label>
+        <input type="text" id="cal-ev-path-input" placeholder="Loading known paths..." autocomplete="off">
+        <div class="cal-ev-path-list" style="max-height:220px;overflow-y:auto;margin-top:0.4rem;border:1px solid var(--border,#333);border-radius:6px;background:var(--panel-bg,#1a1a1a);"></div>
+        <div class="calendar-modal-error" style="color:#ff8080;font-size:0.8rem;margin-top:0.5rem;display:none;"></div>
+        <div class="calendar-modal-actions">
+            <button type="button" class="cal-ev-path-cancel">Cancel</button>
+            <button type="button" class="primary cal-ev-path-ok">OK</button>
+        </div>
+    </div>`;
+    backdrop.addEventListener('click', (e) => { if (e.target === backdrop) backdrop.remove(); });
+    document.body.appendChild(backdrop);
+
+    const input = backdrop.querySelector('#cal-ev-path-input');
+    const listEl = backdrop.querySelector('.cal-ev-path-list');
+    const errEl = backdrop.querySelector('.calendar-modal-error');
+    // path -> pretty label map (label without the "(path)" suffix)
+    const labelByPath = {};
+    let entries = [];
+
+    const renderList = (filter) => {
+        const q = (filter || '').toLowerCase();
+        const matches = q
+            ? entries.filter(e => e.label.toLowerCase().includes(q) || e.interface_path.toLowerCase().includes(q))
+            : entries;
+        const shown = matches.slice(0, 300);
+        if (!shown.length) {
+            listEl.innerHTML = '<div style="padding:0.5rem 0.7rem;font-size:0.8rem;opacity:0.6;">No matching paths</div>';
+            return;
+        }
+        listEl.innerHTML = shown.map(e => {
+            const pretty = escapeHtml(labelByPath[e.interface_path] || e.label);
+            return `<div class="cal-ev-path-item" data-path="${escapeHtml(e.interface_path)}" title="${escapeHtml(e.interface_path)}" style="padding:0.4rem 0.7rem;font-size:0.85rem;cursor:pointer;border-bottom:1px solid var(--border,#2a2a2a);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${pretty}</div>`;
+        }).join('');
+        if (matches.length > shown.length) {
+            listEl.innerHTML += `<div style="padding:0.4rem 0.7rem;font-size:0.75rem;opacity:0.6;">…and ${matches.length - shown.length} more, keep typing to filter</div>`;
+        }
+    };
+
+    listEl.addEventListener('mouseover', (e) => {
+        const item = e.target.closest('.cal-ev-path-item');
+        if (item) { item.style.background = 'var(--accent)'; item.style.color = 'var(--accent-contrast, #fff)'; }
+    });
+    listEl.addEventListener('mouseout', (e) => {
+        const item = e.target.closest('.cal-ev-path-item');
+        if (item) { item.style.background = ''; item.style.color = ''; }
+    });
+    listEl.addEventListener('click', (e) => {
+        const item = e.target.closest('.cal-ev-path-item');
+        if (!item) return;
+        input.value = item.getAttribute('data-path');
+    });
+
+    fetch('/api/history/interface-paths')
+        .then(r => r.json())
+        .then(data => {
+            if (!data || !data.success || !Array.isArray(data.interface_paths)) {
+                if (input) input.placeholder = 'telegram_bot/dm/12345';
+                return;
+            }
+            entries = data.interface_paths;
+            entries.forEach(entry => { labelByPath[entry.interface_path] = entry.label; });
+            if (input) input.placeholder = 'telegram_bot/dm/12345';
+            renderList('');
+        })
+        .catch(() => { if (input) input.placeholder = 'telegram_bot/dm/12345'; });
+
+    input?.addEventListener('input', () => renderList(input.value));
+
+    backdrop.querySelector('.cal-ev-path-cancel')?.addEventListener('click', () => backdrop.remove());
+    backdrop.querySelector('.cal-ev-path-ok')?.addEventListener('click', () => {
+        const path = (input?.value || '').trim();
+        if (!path) {
+            if (errEl) { errEl.style.display = 'block'; errEl.textContent = 'Please select or type an interface path.'; }
+            return;
+        }
+        // Derive the pretty name from the known label "Pretty Name (path)".
+        let pretty = path;
+        const fullLabel = labelByPath[path];
+        if (fullLabel) {
+            const m = fullLabel.match(/^(.*)\s+\([^)]*\)\s*$/);
+            pretty = m ? m[1] : fullLabel;
+        }
+        backdrop.remove();
+        if (typeof onSelect === 'function') onSelect(path, pretty);
+    });
 }
 
 function loadHistoryData(subtab) {
     if (subtab === 'diary') return loadHistoryDiary();
     if (subtab === 'grillo') return loadHistoryGrillo();
+    if (subtab === 'calendar') return loadHistoryCalendar();
     if (subtab === 'dreams') return loadHistoryDreams();
     if (subtab === 'chat') return loadHistoryChat();
     if (subtab === 'agent') {
