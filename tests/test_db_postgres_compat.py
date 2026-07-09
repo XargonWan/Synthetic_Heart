@@ -315,9 +315,7 @@ async def test_insert_scheduled_event_uses_datetime_param_on_postgres(
     # insert_scheduled_event now converts the local wall-clock time to UTC
     # internally using the system timezone. Pin it to UTC so the expected
     # next_run is deterministic (14:34 local == 14:34 UTC).
-    monkeypatch.setattr(
-        "core.time_zone_utils.get_local_timezone", lambda: timezone.utc
-    )
+    monkeypatch.setattr("core.time_zone_utils.get_local_timezone", lambda: timezone.utc)
 
     await db_module.insert_scheduled_event(
         date="2026-04-18",
