@@ -22,7 +22,12 @@ from __future__ import annotations
 # - ``scheduled_reminder``: a due calendar/scheduled event delivered to Synth as
 #   an internal thought; Synth decides if/how/whom to contact, so it must be
 #   allowed to emit ``message_*`` actions.
-OUTBOUND_BEAT_TYPES: frozenset[str] = frozenset({"observer", "scheduled_reminder"})
+# - ``web_search_result``: a completed background web search delivered as a
+#   second turn on the originating interface; Synth reports the findings to the
+#   user, so it must be allowed to emit ``message_*`` actions.
+OUTBOUND_BEAT_TYPES: frozenset[str] = frozenset(
+    {"observer", "scheduled_reminder", "web_search_result"}
+)
 
 
 def is_outbound_beat(beat_type: object) -> bool:
