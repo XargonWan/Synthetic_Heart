@@ -123,8 +123,8 @@ async def test_plain_at_symbol_does_not_mark_explicit_trigger(monkeypatch):
         "core.chat_context_manager.add_message_to_context", _fake_add_message_to_context
     )
     monkeypatch.setattr(
-        "interface.discord_interface.chat_link_store.update_names_from_resolver",
-        (lambda *a, **k: _fake_add_message_to_context()),
+        "interface.discord_interface.resolve_and_touch",
+        AsyncMock(return_value=None),
     )
     monkeypatch.setattr("core.message_queue.enqueue", fake_enqueue)
 
@@ -171,8 +171,8 @@ async def test_real_discord_mention_marks_explicit_trigger(monkeypatch):
         "core.chat_context_manager.add_message_to_context", _fake_add_message_to_context
     )
     monkeypatch.setattr(
-        "interface.discord_interface.chat_link_store.update_names_from_resolver",
-        (lambda *a, **k: _fake_add_message_to_context()),
+        "interface.discord_interface.resolve_and_touch",
+        AsyncMock(return_value=None),
     )
     monkeypatch.setattr("core.message_queue.enqueue", fake_enqueue)
 

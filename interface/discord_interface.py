@@ -174,14 +174,13 @@ from core.transport_layer import universal_send
 from core.core_initializer import register_interface
 from core.command_registry import execute_command, handle_command_message, list_commands
 from core import message_queue
-from plugins.chat_link import ChatLinkStore
+from core.interface_paths import resolve_and_touch, set_name_resolver
 from core.config_manager import config_registry
 from core.variables_engine import register_exposed_var
 from core.interfaces_registry import get_interface_registry
 
 
 context_memory: dict[int, deque] = {}
-chat_link_store = ChatLinkStore()
 
 # How often (turns) to flush a diary entry during a live voice session.
 # Historically used by `_write_live_diary_entry`, now deprecated in favor of a
@@ -603,30 +602,63 @@ class DiscordInterface:
                 b = bot_instance or self.client
                 guild_name = None
                 channel_name = None
+                if not b:
+                    return {
+                        "chat_name": None,
+                        "message_thread_name": None,
+                    }
+
+                def _to_int(value):
+                    try:
+                        return int(value) if value is not None else None
+                    except (TypeError, ValueError):
+                        return None
+
+                guild_int = _to_int(guild_id)
+                channel_int = _to_int(channel_id)
                 try:
-                    if b:
-                        channel = b.get_channel(int(channel_id))
+                    if channel_int is not None:
+                        # Guild path: discord_bot/guild_id/channel_id
+                        channel = b.get_channel(channel_int)
                         if channel is None:
-                            channel = await b.fetch_channel(int(channel_id))
+                            channel = await b.fetch_channel(channel_int)
                         if channel:
                             channel_name = getattr(channel, "name", None)
                             guild = getattr(channel, "guild", None)
-                            if guild is None and guild_id is not None:
+                            if guild is None and guild_int is not None:
                                 try:
                                     guild = b.get_guild(
-                                        int(guild_id)
-                                    ) or await b.fetch_guild(int(guild_id))
+                                        guild_int
+                                    ) or await b.fetch_guild(guild_int)
                                 except Exception as e:  # pragma: no cover
                                     log_warning(
                                         f"[discord_interface] guild name lookup failed: {e}"
                                     )
                             if guild:
                                 guild_name = getattr(guild, "name", None)
+                    elif guild_int is not None:
+                        # DM path: discord_bot/user_id (single segment -> guild_id
+                        # carries the user id, channel_id is None). Resolve the
+                        # user's display name as the chat name.
+                        user = b.get_user(guild_int)
+                        if user is None:
+                            try:
+                                user = await b.fetch_user(guild_int)
+                            except Exception as e:  # pragma: no cover
+                                log_warning(
+                                    f"[discord_interface] user name lookup failed: {e}"
+                                )
+                        if user:
+                            guild_name = (
+                                getattr(user, "display_name", None)
+                                or getattr(user, "global_name", None)
+                                or getattr(user, "name", None)
+                            )
                 except Exception as e:  # pragma: no cover
                     log_warning(f"[discord_interface] name lookup failed: {e}")
                 return {"chat_name": guild_name, "message_thread_name": channel_name}
 
-            ChatLinkStore.set_name_resolver("discord", _resolver)
+            set_name_resolver("discord_bot", _resolver)
         else:  # pragma: no cover - library not available
             self._disable("discord.py library not installed")
 
@@ -1924,10 +1956,13 @@ class DiscordInterface:
 
             if getattr(message, "guild", None):
                 try:
-                    await chat_link_store.update_names_from_resolver(
+                    incoming_path = (
+                        f"discord_bot/{message.guild.id}/{message.channel.id}"
+                    )
+                    await resolve_and_touch(
+                        incoming_path,
                         message.guild.id,
                         message.channel.id,
-                        interface="discord",
                         bot=self.client,
                     )
                 except Exception as e:  # pragma: no cover
@@ -2217,6 +2252,28 @@ class DiscordInterface:
             except Exception as e:
                 log_warning(
                     f"[discord_interface] Failed to add message to context: {e}"
+                )
+
+            # Persist human-readable names (guild/channel or DM username) for
+            # this path so /last_chats shows them. Covers guild, thread and DM.
+            try:
+                if guild_id:
+                    await resolve_and_touch(
+                        interface_path,
+                        guild_id,
+                        str(channel_id),
+                        bot=self.client,
+                    )
+                else:
+                    await resolve_and_touch(
+                        interface_path,
+                        str(message.author.id),
+                        None,
+                        bot=self.client,
+                    )
+            except Exception as e:  # pragma: no cover
+                log_debug(
+                    f"[discord_interface] resolve_and_touch failed (non-fatal): {e}"
                 )
 
             # Prepare simplified message for core queue

@@ -263,7 +263,7 @@ class CoreInitializer:
                     f"[core_initializer] start_pending_async_plugins failed: {e}"
                 )
 
-            # 3. Load core actions (like chat_link) if not already loaded
+            # 3. Load core actions if not already loaded
             log_debug("[core_initializer] 🔍 About to call _ensure_core_actions()")
             self._ensure_core_actions()
             log_debug("[core_initializer] ✅ _ensure_core_actions() completed")
@@ -952,7 +952,7 @@ class CoreInitializer:
 
     def _ensure_core_actions(self):
         """Ensure core actions are loaded."""
-        # Core actions like chat_link are loaded automatically when imported
+        # Core actions are loaded automatically when imported
         log_debug("[core_initializer] Core actions check completed")
 
     def _discover_interfaces(self):
@@ -1808,20 +1808,6 @@ class CoreInitializer:
             )
             self.startup_errors.append(f"Component validation registration failed: {e}")
 
-    def _ensure_core_actions(self):
-        """Ensure core actions like chat_link are loaded exactly once."""
-        if "chat_link" not in PLUGIN_REGISTRY:
-            try:
-                # Import chat_link_actions to trigger registration
-                import core.chat_link_actions  # type: ignore[unresolved-import]  # noqa: F401
-
-                log_debug("[core_initializer] Core chat_link actions loaded")
-            except Exception as e:
-                log_error(
-                    f"[core_initializer] Failed to load core chat_link actions: {e}"
-                )
-                self.startup_errors.append(f"Core actions error: {e}")
-
 
 # Global instance
 core_initializer = CoreInitializer()
@@ -2060,7 +2046,7 @@ def register_interface(name: str, interface_obj: Any) -> None:
         pass
 
 
-# NOTE: core actions like chat_link are registered automatically when imported
+# NOTE: core actions are registered automatically when imported
 # by other modules that need them, avoiding circular import issues
 
 # Global variables for debounced rebuild

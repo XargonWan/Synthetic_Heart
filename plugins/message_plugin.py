@@ -477,6 +477,16 @@ class MessagePlugin:
                         context=context,
                         original_message=original_message,
                     )
+                    if voice_ip:
+                        try:
+                            from core.interface_paths import touch_interface_path
+
+                            await touch_interface_path(voice_ip)
+                        except Exception as touch_err:
+                            log_debug(
+                                f"[message_plugin] touch_interface_path (voice) "
+                                f"failed: {touch_err}"
+                            )
                     return
                 log_warning(
                     "[message_plugin] send_as_voice=true but no Vox plugin loaded "
@@ -505,6 +515,17 @@ class MessagePlugin:
             log_info(
                 f"[message_plugin] Message successfully sent to {target} (thread: {thread_id}, reply_to: {reply_to})"
             )
+            # Record this interface_path as a recently-used target (canonical
+            # registry: refreshes last_used + pretty segment labels).
+            if rebuilt_interface_path:
+                try:
+                    from core.interface_paths import touch_interface_path
+
+                    await touch_interface_path(rebuilt_interface_path)
+                except Exception as touch_err:
+                    log_debug(
+                        f"[message_plugin] touch_interface_path failed: {touch_err}"
+                    )
 
         except Exception as e:
             log_error(

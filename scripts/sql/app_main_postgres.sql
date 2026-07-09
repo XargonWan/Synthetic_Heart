@@ -149,13 +149,13 @@ CREATE TABLE IF NOT EXISTS bio (
     user_name TEXT
 );
 
-CREATE TABLE IF NOT EXISTS recent_chats (
-    chat_id TEXT PRIMARY KEY,
-    last_active DOUBLE PRECISION NOT NULL,
-    metadata TEXT,
+CREATE TABLE IF NOT EXISTS interface_paths (
+    interface_path TEXT PRIMARY KEY,
+    last_used DOUBLE PRECISION NOT NULL,
+    segment_labels TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
-CREATE INDEX IF NOT EXISTS idx_recent_chats_last_active ON recent_chats (last_active DESC);
+CREATE INDEX IF NOT EXISTS idx_interface_paths_last_used ON interface_paths (last_used DESC);
 
 CREATE TABLE IF NOT EXISTS scheduled_events (
     id BIGSERIAL PRIMARY KEY,
@@ -178,18 +178,6 @@ CREATE TABLE IF NOT EXISTS blocklist (
     user_id BIGINT PRIMARY KEY,
     reason TEXT,
     blocked_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE IF NOT EXISTS chatlink (
-    int_id BIGSERIAL PRIMARY KEY,
-    interface TEXT NOT NULL,
-    chat_id TEXT NOT NULL,
-    thread_id TEXT,
-    chat_name TEXT,
-    message_thread_name TEXT,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    last_updated TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE (interface, chat_id)
 );
 
 CREATE TABLE IF NOT EXISTS message_map (

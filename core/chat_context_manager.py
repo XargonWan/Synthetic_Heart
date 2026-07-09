@@ -189,22 +189,13 @@ async def add_message_to_context(
         f"[context_manager] Added message to context for interface_path {interface_path}"
     )
 
-    # Automatically update chat activity (mechanical action, centralized here)
-    # This tracks the last activity time for each chat without requiring LLM reasoning
+    # Automatically update chat activity (mechanical action, centralized here).
+    # Tracks last-used time and refreshes the pretty-name labels for this
+    # interface_path without requiring LLM reasoning.
     try:
-        from plugins.recent_chats import update_chat_activity
+        from core.interface_paths import touch_interface_path
 
-        # Extract chat_id from interface_path (format: interface/chat_id/thread_id)
-        parts = interface_path.split("/")
-        chat_id = parts[1] if len(parts) > 1 else interface_path
-        await update_chat_activity(
-            chat_id=chat_id,
-            metadata={
-                "username": sender_name,
-                "user_id": sender_id,
-                "interface_path": interface_path,
-            },
-        )
+        await touch_interface_path(interface_path)
     except Exception as e:
         log_debug(f"[context_manager] Failed to update chat activity: {e}")
 

@@ -24,7 +24,7 @@ from core.interfaces_registry import get_interface_registry
 from core.logging_utils import log_debug, log_error, log_info, log_warning
 from core.config_manager import config_registry
 from core.config import get_trainer_id as core_get_trainer_id
-from plugins.chat_link import ChatLinkStore
+from core.interface_paths import resolve_and_touch, set_name_resolver
 
 load_dotenv()
 
@@ -52,7 +52,6 @@ except Exception:  # pragma: no cover - dependency missing
 INTERFACE_NAME = "matrix_chat"
 ACTION_TYPE = "message_matrix_chat"
 
-chat_link_store = ChatLinkStore()
 _interface_registry = get_interface_registry()
 context_memory: Dict[str, deque[str]] = {}
 
@@ -156,7 +155,7 @@ class MatrixInterface:
                         )
                 return {"chat_name": chat_name, "message_thread_name": None}
 
-            ChatLinkStore.set_name_resolver(INTERFACE_NAME, _resolver)
+            set_name_resolver(INTERFACE_NAME, _resolver)
 
             if (
                 self.client
@@ -466,10 +465,10 @@ class MatrixInterface:
         )
 
         try:
-            await chat_link_store.update_names_from_resolver(
+            await resolve_and_touch(
+                f"{INTERFACE_NAME}/{room_identifier}",
                 room_identifier,
                 None,
-                interface=INTERFACE_NAME,
                 bot=self,
             )
         except Exception as exc:

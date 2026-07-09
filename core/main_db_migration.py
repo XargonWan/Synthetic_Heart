@@ -710,12 +710,6 @@ TABLE_SPECS: dict[str, TableMigrationSpec] = {
         conflict_keys=("id",),
         transform=_normalize_bio_row,
     ),
-    "recent_chats": TableMigrationSpec(
-        name="recent_chats",
-        columns=("chat_id", "last_active", "metadata", "created_at"),
-        conflict_keys=("chat_id",),
-        transform=_normalize_common_row,
-    ),
     "scheduled_events": TableMigrationSpec(
         name="scheduled_events",
         columns=(
@@ -739,23 +733,6 @@ TABLE_SPECS: dict[str, TableMigrationSpec] = {
         name="blocklist",
         columns=("user_id", "reason", "blocked_at"),
         conflict_keys=("user_id",),
-        transform=_normalize_common_row,
-    ),
-    "chatlink": TableMigrationSpec(
-        name="chatlink",
-        columns=(
-            "int_id",
-            "interface",
-            "chat_id",
-            "thread_id",
-            "chat_name",
-            "message_thread_name",
-            "created_at",
-            "last_updated",
-        ),
-        conflict_keys=("int_id",),
-        serial_column="int_id",
-        fetch_order="int_id",
         transform=_normalize_common_row,
     ),
     "message_map": TableMigrationSpec(
@@ -927,10 +904,8 @@ MIGRATION_ORDER: tuple[str, ...] = (
     "memories",
     "emotion_state",
     "bio",
-    "recent_chats",
     "scheduled_events",
     "blocklist",
-    "chatlink",
     "message_map",
     "grillo_beats",
     "grillo_activity_log",
@@ -1297,49 +1272,12 @@ class MainDbMigrator:
                             # ``user_message`` is NOT NULL in the target schema.
                             if normalized_row.get("user_message") is None:
                                 normalized_row["user_message"] = ""
-                        # ``chatlink`` stores identifiers as TEXT columns. Legacy
-                        # MariaDB rows sometimes contain numeric values (e.g.,
-                        # ``-1002634148259.0``) for ``interface``, ``chat_id``,
-                        # ``thread_id`` or ``chat_name``. Cast them to ``str`` to
-                        # satisfy PostgreSQL's TEXT type expectations and avoid
-                        # ``expected str, got float`` errors.
-                        if spec.name == "chatlink":
-                            for col in (
-                                "interface",
-                                "chat_id",
-                                "thread_id",
-                                "chat_name",
-                            ):
-                                if normalized_row.get(
-                                    col
-                                ) is not None and not isinstance(
-                                    normalized_row[col], str
-                                ):
-                                    normalized_row[col] = str(normalized_row[col])
-                            # ``created_at`` and ``last_updated`` are TIMESTAMPTZ NOT
-                            # NULL columns. The MariaDB connector may return them as
-                            # numeric values for some rows. If the generic normaliser
-                            # could not convert them to ``datetime`` (e.g. because the
-                            # epoch integer is out of the supported range), use a safe
-                            # sentinel datetime so asyncpg can bind the value correctly.
-                            for col in ("created_at", "last_updated"):
-                                val = normalized_row.get(col)
-                                if val is not None and not isinstance(val, datetime):
-                                    normalized_row[col] = datetime.now(UTC)
-                                elif val is None:
-                                    normalized_row[col] = datetime.now(UTC)
                         # Universal safeguard: cast columns that must be TEXT in
                         # PostgreSQL back to strings.  ``_coerce_value`` may have
                         # converted numeric-looking strings (e.g. chat IDs, user
                         # IDs) to int/float, which asyncpg rejects for TEXT
                         # columns.
                         _TEXT_COLUMNS: dict[str, tuple[str, ...]] = {
-                            "chatlink": (
-                                "interface",
-                                "chat_id",
-                                "thread_id",
-                                "chat_name",
-                            ),
                             "ai_diary": (
                                 "interface",
                                 "chat_id",
@@ -1352,7 +1290,6 @@ class MainDbMigrator:
                                 "thread_id",
                                 "user_message",
                             ),
-                            "recent_chats": ("chat_id",),
                             "blocklist": ("user_id",),
                             "message_logs": (
                                 "content",

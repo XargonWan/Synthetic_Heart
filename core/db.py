@@ -1468,9 +1468,9 @@ async def ensure_plugin_tables() -> None:
             init_fns: list[tuple[str, str]] = [
                 ("plugins.ai_diary", "init_diary_table"),
                 ("plugins.blocklist", "init_blocklist_table"),
-                ("plugins.recent_chats", "init_recent_chats_table"),
                 ("plugins.message_map", "init_message_map_table"),
                 ("plugins.bio_manager", "init_bio_table"),
+                ("core.interface_paths", "init_interface_paths_table"),
             ]
             for module_name, attr_name in init_fns:
                 try:
@@ -1482,6 +1482,14 @@ async def ensure_plugin_tables() -> None:
                     log_warning(
                         f"[db] Postgres preflight init skipped for {module_name}.{attr_name}: {init_err}"
                     )
+            # Idempotent one-shot schema migrations (backup+verify+drop of
+            # legacy tables, etc.) — applied automatically on every deploy.
+            try:
+                from core.migrations import run_startup_migrations
+
+                await run_startup_migrations()
+            except Exception as _mig_err:
+                log_warning(f"[db] startup migrations skipped: {_mig_err}")
             log_debug("[db] ensure_plugin_tables completed (postgres path)")
             return
 
@@ -1611,16 +1619,16 @@ async def ensure_plugin_tables() -> None:
                     """
                 )
 
-                # recent_chats (plugin)
+                # interface_paths (canonical target registry: last-used + pretty labels)
                 await cur.execute(
                     """
-                    CREATE TABLE IF NOT EXISTS recent_chats (
-                        chat_id VARCHAR(255) PRIMARY KEY,
-                        last_active DOUBLE NOT NULL,
-                        metadata TEXT,
+                    CREATE TABLE IF NOT EXISTS interface_paths (
+                        interface_path VARCHAR(512) PRIMARY KEY,
+                        last_used DOUBLE NOT NULL,
+                        segment_labels TEXT,
                         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                        INDEX idx_last_active (last_active)
-                    )
+                        INDEX idx_interface_paths_last_used (last_used)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
                     """
                 )
 
@@ -1767,6 +1775,14 @@ async def ensure_plugin_tables() -> None:
                     await conn.commit()
                 except Exception:
                     pass
+        # Idempotent one-shot schema migrations (backup+verify+drop of legacy
+        # tables, etc.) — applied automatically on every deploy.
+        try:
+            from core.migrations import run_startup_migrations
+
+            await run_startup_migrations()
+        except Exception as _mig_err:
+            log_warning(f"[db] startup migrations skipped: {_mig_err}")
         log_debug("[db] ensure_plugin_tables completed")
     except Exception as e:
         log_warning(f"[db] ensure_plugin_tables failed: {e}")

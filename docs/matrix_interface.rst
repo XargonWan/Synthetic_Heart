@@ -14,9 +14,9 @@ Overview
   are installed and the environment variables are present.
 - Fully decoupled from the core: removing ``interface/matrix_interface.py`` or
   skipping the configuration does not affect other interfaces.
-- Uses the shared ``message_queue`` and ``ChatLinkStore`` so prompt context,
-  diary entries, and thread metadata flow through the same path as Telegram or
-  Discord.
+- Uses the shared ``message_queue`` and the ``interface_paths`` name-resolver
+  registry so prompt context, diary entries, and thread metadata flow through
+  the same path as Telegram or Discord.
 
 Prerequisites
 -------------
