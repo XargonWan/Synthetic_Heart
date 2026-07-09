@@ -54,6 +54,14 @@ export const useChatStore = defineStore('chat', () => {
         break
       }
       case 'tts-play': {
+        // Chunked replies (turn_id present, see protocol.ts) carry a
+        // per-sentence file here — attaching it as the replay link would
+        // leave the bubble replaying only the last sentence. The correct
+        // combined-clip link arrives via the caption `message` event
+        // (msg.tts_url below) once the whole reply has streamed, so skip
+        // the attachment here and let that event set it instead.
+        if (msg.turn_id)
+          break
         // Attach replay audio to the most recent synth message.
         for (let i = messages.value.length - 1; i >= 0; i--) {
           const m = messages.value[i]!

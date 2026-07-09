@@ -87,6 +87,14 @@ export interface TtsPlayMessage {
   lipsync?: LipsyncData | null
   /** Present only in late-join replays (GET /api/karada/state/audio). */
   offset_s?: number
+  /**
+   * Shared by every chunk of one sentence-streamed reply (see
+   * `plugins/vox_plugin.py::_speak_chunked`); absent on single-shot replies,
+   * where each `tts-play` is its own turn. Used to queue same-turn chunks
+   * for gapless playback instead of each one interrupting the last — see
+   * `stores/audio.ts::scheduleTts`.
+   */
+  turn_id?: string
 }
 
 export type ServerMessage =

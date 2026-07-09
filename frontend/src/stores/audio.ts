@@ -30,6 +30,16 @@ export const useAudioStore = defineStore('audio', () => {
 
   let context: AudioContext | null = null
   let lipsync: LipSyncDriver | null = null
+  // Which item currently owns the shared `speaking`/`lipsync` state. Needed
+  // because an aborted item's cleanup resolves via a Promise (see onAbort
+  // below), which only runs as a *microtask* — a newer item can already be
+  // synchronously mid-playback by the time a superseded item's `finally`
+  // block executes (this happens on every turn interrupt: scheduleTts's
+  // stopAll() + schedule() runs the new item's synchronous start before the
+  // old item's abort-triggered continuation gets a turn). Without this
+  // guard, the stale item's cleanup would clobber the new item's state,
+  // e.g. `speaking` flips back to false right after the new clip started.
+  let activeItemId: string | null = null
 
   function ensureContext(): AudioContext {
     if (!context)
@@ -49,9 +59,11 @@ export const useAudioStore = defineStore('audio', () => {
     const source = ctx.createMediaElementSource(audio)
     source.connect(ctx.destination)
 
-    lipsync = new AnalyserLipSyncDriver()
-    lipsync.attach(source, ctx, item.audio.meta.lipsync)
+    const itemLipsync: LipSyncDriver = new AnalyserLipSyncDriver()
+    itemLipsync.attach(source, ctx, item.audio.meta.lipsync)
 
+    activeItemId = item.id
+    lipsync = itemLipsync
     speaking.value = true
     try {
       await audio.play()
@@ -80,23 +92,42 @@ export const useAudioStore = defineStore('audio', () => {
       })
     }
     finally {
-      lipsync?.detach()
-      lipsync = null
+      itemLipsync.detach()
       source.disconnect()
-      speaking.value = false
+      if (activeItemId === item.id) {
+        lipsync = null
+        speaking.value = false
+      }
     }
   }
 
   const manager = createPlaybackManager<TtsAudio>({
     play: playItem,
     maxVoices: 1,
-    overflowPolicy: 'steal-oldest',
+    // 'queue' lets same-turn chunks (see turnKey below) play back-to-back
+    // without cutting each other off; a genuinely new turn calls stopAll()
+    // explicitly instead of relying on overflow to steal the slot.
+    overflowPolicy: 'queue',
   })
+
+  // Chunks of one sentence-streamed reply share `turn_id` (see
+  // plugins/vox_plugin.py::_speak_chunked) and should queue after one
+  // another. A single-shot reply has no turn_id, so its unique `url` stands
+  // in as its turn key — every such message is its own turn, matching the
+  // old steal-on-arrival behaviour exactly.
+  let currentTurnKey: string | null = null
 
   function scheduleTts(msg: TtsPlayMessage, offsetS = 0): void {
     if (!enabled.value || !msg.url)
       return
     lastError.value = null
+
+    const turnKey = msg.turn_id ?? msg.url
+    if (turnKey !== currentTurnKey) {
+      manager.stopAll('new-turn')
+      currentTurnKey = turnKey
+    }
+
     manager.schedule({
       id: `tts-${nextItemId++}`,
       streamId: 'synth-tts',
