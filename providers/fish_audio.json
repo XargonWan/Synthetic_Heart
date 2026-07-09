@@ -1,0 +1,52 @@
+{
+  "provider_id": "fish_audio",
+  "display_name": "Fish Audio",
+  "description": "Fish Audio cloud TTS (Speech 2.1) — voice cloning via reference IDs",
+  "icon": "fish",
+  "protocol": "fish",
+  "base_url": "https://api.fish.audio/v1/tts",
+  "base_url_locked": true,
+  "requires_api_key": true,
+  "api_key_placeholder": "fa_…",
+  "api_key_hint": "Paste the raw key — it is wrapped into 'Authorization: Bearer <key>' automatically. Get one at https://fish.audio (API keys page).",
+  "default_capabilities": { "cortex": false, "vox": true, "auris": false, "live": false, "vision": false },
+  "suggested_name": "fish-audio",
+  "suggested_label": "Fish Audio",
+  "category": "tts",
+  "extra_config": { "tts_sample_rate": 44100 },
+  "extra_fields": [
+    {
+      "key": "tts_model",
+      "label": "Model",
+      "type": "select",
+      "options": [
+        { "value": "s2.1-pro-free", "label": "s2.1-pro-free — Speech 2.1 Pro (free tier)" },
+        { "value": "s2.1-pro", "label": "s2.1-pro — Speech 2.1 Pro" },
+        { "value": "s1", "label": "s1 — Speech 1" }
+      ],
+      "default": "s2.1-pro-free",
+      "hint": "Sent as the 'model' HTTP header. s2.1-pro-free routes requests to the free tier so you aren't billed."
+    },
+    {
+      "key": "tts_output_format",
+      "label": "Audio format",
+      "type": "select",
+      "options": [
+        { "value": "wav", "label": "wav (recommended)" },
+        { "value": "mp3", "label": "mp3" },
+        { "value": "pcm", "label": "pcm (raw, 44100 Hz)" }
+      ],
+      "default": "wav",
+      "hint": "Sent as the payload 'format' field. Fish Audio's pcm output is 44100 Hz."
+    },
+    {
+      "key": "tts_reference_id",
+      "label": "Reference voice ID",
+      "type": "text",
+      "default": "",
+      "placeholder": "e.g. 6f45f4694be746f39466e5eb42bea6d4",
+      "hint": "ID of the cloned/library voice this persona speaks with. Sent as 'reference_id' in the {text, reference_id, format} payload."
+    }
+  ],
+  "sort_order": 900
+}
