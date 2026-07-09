@@ -373,7 +373,7 @@ def test_http_engine_language_hint(monkeypatch):
 
     captured: dict | None = None
 
-    def fake_post(endpoint, payload, timeout_s):
+    def fake_post(endpoint, payload, headers, timeout_s):
         nonlocal captured
         captured = payload.copy()
         return b"OK"
@@ -384,6 +384,58 @@ def test_http_engine_language_hint(monkeypatch):
     assert audio == b"OK"
     assert captured is not None
     assert captured.get("language") == "it"
+
+
+def test_http_engine_fish_audio_payload_and_headers(monkeypatch):
+    """With a reference_id configured, HttpVoxEngine must send the Fish-style
+    payload (text/reference_id/format, no voice_wav) plus Bearer + model headers."""
+    import plugins.vox_engines.http as http_mod
+
+    cfg = {
+        "HTTP_TTS_ENDPOINTS": "https://api.fish.audio/v1/tts",
+        "HTTP_TTS_API_KEY": "sk-test",
+        "HTTP_TTS_MODEL": "s2.1-pro-free",
+        "HTTP_TTS_REFERENCE_ID": "voice123",
+        "HTTP_TTS_FORMAT": "wav",
+        "HTTP_TTS_EXTRA_HEADERS": '{"X-Extra": "1"}',
+        "HTTP_TTS_EXTRA_PARAMS": '{"temperature": 0.7}',
+        "HTTP_TTS_TIMEOUT_SECONDS": 42,
+    }
+    monkeypatch.setattr(
+        http_mod, "_cfg", lambda key, default, value_type=str: cfg.get(key, default)
+    )
+
+    engine = http_mod.HttpVoxEngine()
+
+    captured: dict = {}
+
+    def fake_post(endpoint, payload, headers, timeout_s):
+        captured.update(
+            endpoint=endpoint, payload=payload, headers=headers, timeout=timeout_s
+        )
+        return b"RIFFxxxx"
+
+    monkeypatch.setattr(engine, "_post_tts", fake_post)
+
+    audio = engine.generate_tts("hello", language="it")
+    assert audio == b"RIFFxxxx"
+    assert captured["endpoint"] == "https://api.fish.audio/v1/tts"
+    assert captured["payload"] == {
+        "text": "hello",
+        "reference_id": "voice123",
+        "format": "wav",
+        "temperature": 0.7,
+    }
+    assert "voice_wav" not in captured["payload"]
+    assert captured["headers"] == {
+        "Authorization": "Bearer sk-test",
+        "model": "s2.1-pro-free",
+        "X-Extra": "1",
+    }
+    assert captured["timeout"] == 42
+    # RIFF passthrough: format=wav must declare wav output so the Vox plugin
+    # doesn't re-wrap the bytes as PCM.
+    assert engine.output_format == "wav"
 
 
 test_vox_plugin_speak_calls_engine_and_writes_file_override_disabled = (

@@ -1168,28 +1168,13 @@ class VoxPlugin(AIPluginBase):
     @staticmethod
     def _import_builtin_engines() -> None:
         """Import built-in Vox engine modules so they self-register."""
+        # The http engine is always imported (not gated on TTS_ENDPOINTS
+        # anymore) so its config box shows in Engines → Vox even before an
+        # endpoint has been configured.
         builtins = [
+            "plugins.vox_engines.http",
             "plugins.vox_engines.kitten",
         ]
-
-        try:
-            tts_endpoints = config_registry.get_value(
-                "TTS_ENDPOINTS",
-                "",
-                value_type=str,
-                group="plugins",
-                component="tts_lipsync",
-            )
-            definition = getattr(config_registry, "_definitions", {}).get(
-                "TTS_ENDPOINTS"
-            )
-            if definition is not None:
-                config_registry._load_definition_sync(definition)
-                tts_endpoints = definition.value
-            if tts_endpoints and str(tts_endpoints).strip():
-                builtins.insert(0, "plugins.vox_engines.http")
-        except Exception:
-            pass
 
         for mod in builtins:
             try:
