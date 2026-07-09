@@ -57,6 +57,9 @@ dependencies = [
     "pypdf>=6.10.2",
     "json-repair>=0.61.0",
     "yt-dlp>=2026.7.4",
+    "icalendar>=7.2.0",
+    "caldav>=3.2.1",
+    "recurring-ical-events>=3.8.2",
 ]
 
 [project.optional-dependencies]
