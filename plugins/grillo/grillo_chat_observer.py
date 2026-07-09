@@ -212,11 +212,6 @@ class GrilloChatObserverPlugin:
         register_plugin("grillo_chat_observer", self)
         log_info("[grillo_chat_observer] Registered GrilloChatObserverPlugin")
 
-        # Track last run timestamp for observer to avoid missing messages even
-        # if the global checker has already consumed them. This is initialized
-        # on start() to the current time to avoid acting on historic messages.
-        self._last_run_ts: float = 0.0
-
         # Config listeners
         config_registry.add_listener(
             "GRILLO_OBSERVER_ENABLED", lambda v: setattr(self, "enabled", bool(v))
@@ -306,11 +301,25 @@ class GrilloChatObserverPlugin:
 
     async def _observer_loop(self):
         log_info("[grillo_chat_observer] Observer loop running")
+        # Resume from the persisted last-run timestamp instead of always
+        # waiting a fresh full interval. Without this, a process restart
+        # (e.g. during dev iteration) resets the wait to `self.interval`
+        # every time, and if restarts happen more often than the interval,
+        # _run_observer() never gets a chance to fire.
+        now = datetime.now(timezone.utc).timestamp()
+        elapsed = max(0.0, now - (self._last_run_ts or now))
+        next_sleep = max(0.0, self.interval - elapsed)
+        if elapsed > 0:
+            log_debug(
+                f"[grillo_chat_observer] Resuming schedule: {elapsed:.0f}s elapsed "
+                f"since last_run_ts, sleeping {next_sleep:.0f}s before next check"
+            )
         try:
             while GrilloChatObserverPlugin._scheduler_running:
                 try:
                     # Sleep for interval but keep cancellable
-                    await asyncio.sleep(self.interval)
+                    await asyncio.sleep(next_sleep)
+                    next_sleep = self.interval
                     if not GrilloChatObserverPlugin._scheduler_running:
                         break
 
