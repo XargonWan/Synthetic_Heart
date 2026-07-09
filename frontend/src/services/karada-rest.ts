@@ -104,9 +104,11 @@ export async function fetchSkins(): Promise<SkinInfo[]> {
  * touch, write, talk, skin_change) and merely plays the skin_change
  * *animation*, it does not swap the model. The server broadcasts the
  * resulting `vrm_model` event to every connected client, this one included.
+ * Token-gated on the backend (same `_require_api_token` as this file's other
+ * routes) even though it doesn't live on the Karada router.
  */
 export async function activateSkin(name: string): Promise<void> {
-  const resp = await fetch(`/api/skins/${encodeURIComponent(name)}/activate`, { method: 'POST' })
+  const resp = await fetch(withApiToken(`/api/skins/${encodeURIComponent(name)}/activate`), { method: 'POST' })
   if (!resp.ok)
     throw new Error(`POST /api/skins/${name}/activate -> ${resp.status}`)
 }

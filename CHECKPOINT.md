@@ -207,7 +207,7 @@ Validation: `pnpm typecheck` + `pnpm build` clean (no new errors; the `[INVALID_
 
 **Not done / still open:**
 - The full pairing-token flow (server-generated token, QR/URL handoff) from the 2026-07-09 discussion — this pass only wired the *storage → transport* half; token issuance/rotation UX is still manual (paste a token that matches `SYNTH_WEBUI_API_TOKEN` server-side).
-- `/api/audio/upload` and `/api/skins/{name}/activate` remain unauthenticated regardless of `SYNTH_WEBUI_API_TOKEN` — noted above, not fixed (out of scope: frontend can't gate what the backend doesn't check; would need a `core/webui.py` change plus the usual backend validation pass).
+- `/api/audio/upload` and `/api/skins/{name}/activate` remain unauthenticated regardless of `SYNTH_WEBUI_API_TOKEN` — noted above, not fixed (out of scope: frontend can't gate what the backend doesn't check; would need a `core/webui.py` change plus the usual backend validation pass). **Done in a later session, see §13.**
 - Capacitor wrapper — untouched, longer-term item per §6.6.
 
 ---
@@ -270,3 +270,30 @@ Validation: `pnpm typecheck` + `pnpm build` clean. No backend files touched, so 
 **Not done / still open:**
 - Real-hardware/human verification of AEC effectiveness — flagged above, can't be done by an agent.
 - §6.3 phase-2 realtime audio-to-audio, §6.5 AR, §6.6 mobile packaging remain the substantially-bigger unstarted items.
+
+---
+
+## 13. 2026-07-09 — `/api/audio/upload` + `/api/skins/{name}/activate` token gap closed
+
+The two endpoints §10 documented as "remain unauthenticated regardless of `SYNTH_WEBUI_API_TOKEN`" are now gated — the last scoped auth gap on the WAN-exposed surface (§9).
+
+**Backend** (`core/webui.py` only — `core/karada_api.py` untouched):
+- Both routes now carry `dependencies=[Depends(_require_api_token)]` at registration (reusing `karada_api.py`'s existing dependency; still a no-op when the token is unset). **Per-route** `Depends`, not router-level — these are plain HTTP routes, so the §4 bug-2 WebSocket trap doesn't apply.
+- Deliberately *not* passed via a shared `**kwargs` dict: `self.app.post(path, **{"dependencies": [...]})` makes `ty` check the dict's value type against every kwarg of `post()` → 36 spurious `invalid-argument-type` diagnostics. Explicit `dependencies=` keeps the count at the pre-existing 42 baseline.
+- Legacy-webui note: it calls both endpoints tokenless, but it also connects to `/ws` tokenless — so with a token set the legacy UI was already broken before this change; nothing newly breaks in the default (unset) config.
+
+**Frontend**: `services/audio-upload.ts::transcribeClip` and `services/karada-rest.ts::activateSkin` now wrap their URLs in `withApiToken()` (the §10 helper); `lib/api-token.ts`'s doc comment lists the two new surfaces. The stale "never actually gated" comments were replaced.
+
+**New test**: `tests/test_webui_api_token_gate.py` (3 tests: open when unset, 401 on missing/wrong token, query + bearer accepted) — first pytest coverage for the token gate at all (M6 was Playwright-only).
+
+**Verified live** against scratch backends on :8092 (not just TestClient):
+- Token set: both endpoints 401 without/with wrong token, past auth (422/404) with `?token=` and with `Authorization: Bearer`; 401 body is the clean `{"detail":"Invalid or missing API token"}`.
+- Neighbors unaffected: `GET /api/skins` and `POST /api/chat/attachments` still open, `/stage/` static still served, `/api/karada/state` gate unchanged.
+- Token unset: both endpoints behave exactly as before (422/404, stray `?token=` ignored).
+- Frontend end-to-end via `frontend/scripts/token-gate-check.mjs` (new, kept): real built stage + fake mic device + injected VAD `speech_start`/`speech_end` frames (the `barge-in-check.mjs` pattern) → the app POSTed the recorded clip to `/api/audio/upload?token=gatetest` and got 503 (Auris not loaded in scratch = past auth), not 401. Skin-tile click was *not* driven live — the scratch backend shares the production DB and clicking a tile would swap the production avatar; `activateSkin` uses the identical one-line `withApiToken()` wrapper verified by the upload path.
+
+Validation: `ruff format`/`check` clean; `ty check core/webui.py` back to the 42-diagnostic pre-existing baseline (see the `**kwargs` note above); `pytest tests/test_webui_api_token_gate.py` — 3 passed; `pnpm typecheck` + `pnpm build` clean; `gitnexus_detect_changes` — LOW risk, exactly the four expected symbols.
+
+**Deployment note**: `pnpm build` regenerated `frontend/dist/`, which the live instance serves directly from disk — so the (behaviorally no-op-without-token) frontend half is already live. The backend gate needs the next restart, same as the §8 skin-switch fix.
+
+**Not done / still open:** unchanged from §12 (pairing-token issuance UX, phase-2 realtime, AR, mobile packaging).

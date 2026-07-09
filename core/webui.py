@@ -27,6 +27,7 @@ from typing import Deque, Dict, Optional, List, Any
 from urllib.parse import quote, unquote, urlparse
 
 from fastapi import (
+    Depends,
     FastAPI,
     WebSocket,
     WebSocketDisconnect,
@@ -680,8 +681,17 @@ class SynthWebUIInterface:
         self.app.post("/api/log-console")(self.log_console_endpoint)
         self.app.websocket("/ws")(self.websocket_endpoint)
         self.app.websocket("/logs")(self.logs_ws_endpoint)
+        # Endpoints the stage/legacy clients hit outside /api/karada/* but that
+        # act on the avatar or feed text into the chain — gated by the same
+        # optional SYNTH_WEBUI_API_TOKEN as /ws and the Karada REST router
+        # (no-op when the token is unset). Per-route Depends is safe here; the
+        # router-level-dependency-on-websocket bug only affects WS routes.
+        from core.karada_api import _require_api_token
+
         # Auris audio endpoints
-        self.app.post("/api/audio/upload")(self.audio_upload_endpoint)
+        self.app.post("/api/audio/upload", dependencies=[Depends(_require_api_token)])(
+            self.audio_upload_endpoint
+        )
         self.app.post("/api/chat/attachments")(self.chat_attachment_upload_endpoint)
         # helper endpoint for Vosk language selection (legacy compat, delegates to MODEL_MANAGER)
         self.app.post("/api/auris/vosk/download")(self.vosk_model_download)
@@ -714,7 +724,10 @@ class SynthWebUIInterface:
         self.app.get("/api/skins")(self.list_skins)
         # new helper: allow clients to query which skin is active
         self.app.get("/api/skins/current_skin")(self.get_current_skin)
-        self.app.post("/api/skins/{skin_name}/activate")(self.activate_skin)
+        self.app.post(
+            "/api/skins/{skin_name}/activate",
+            dependencies=[Depends(_require_api_token)],
+        )(self.activate_skin)
         self.app.post("/api/skins/uploaded/clear")(self.clear_uploaded_vrm)
         # Skin editor endpoints
         self.app.post("/api/skins")(self.create_skin)

@@ -1,7 +1,8 @@
 /**
  * Wires `settings.apiToken` (Pinia store, `stores/settings.ts`) into the
  * gated backend surfaces: `/ws`, `/api/karada/*` (`core/karada_api.py`
- * `rest_router`/`ws_router`), and `/api/audio/stream`. Server accepts the
+ * `rest_router`/`ws_router`), `/api/audio/stream`, `/api/audio/upload`, and
+ * `/api/skins/{name}/activate`. Server accepts the
  * token as `?token=` on both REST and WebSocket requests (see
  * `_token_from_request`/`_token_from_websocket` in `core/karada_api.py`) —
  * using the query param everywhere (not the `Authorization` header) keeps
