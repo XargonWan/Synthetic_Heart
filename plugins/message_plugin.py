@@ -174,11 +174,32 @@ class MessagePlugin:
         }
 
         interface_name = interface_map.get(action_type)
+
+        # interface_path is validated upstream against real routable targets
+        # (e.g. Grillo's ELIGIBLE TARGETS list); the action `type` is free-form
+        # LLM output and can name the wrong platform — models sometimes copy an
+        # example action type verbatim regardless of which interface_path they
+        # were actually given. When the two disagree, trust interface_path: it's
+        # the one guaranteed to point at a real chat, not the target id from a
+        # mismatched interface (e.g. sending a webui session id to Telegram).
+        interface_name_from_path = (
+            interface_path.split("/")[0] if interface_path else None
+        )
+        if (
+            interface_name_from_path
+            and interface_name_from_path in INTERFACE_REGISTRY
+            and interface_name_from_path != interface_name
+        ):
+            if interface_name is not None:
+                log_warning(
+                    f"[message_plugin] action type '{action_type}' implies interface "
+                    f"'{interface_name}' but interface_path='{interface_path}' points at "
+                    f"'{interface_name_from_path}'; trusting interface_path"
+                )
+            interface_name = interface_name_from_path
+
         if not interface_name:
             interface_name = action.get("interface")
-
-        if not interface_name and interface_path:
-            interface_name = interface_path.split("/")[0]
 
         if not interface_name:
             interface_name = (
