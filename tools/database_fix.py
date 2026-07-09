@@ -246,7 +246,11 @@ TABLE_DEFINITIONS: list[tuple[str, str]] = [
             description TEXT NOT NULL,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             delivered BOOLEAN DEFAULT 0,
-            created_by VARCHAR(100) DEFAULT 'synth'
+            created_by VARCHAR(100) DEFAULT 'synth',
+            uid VARCHAR(255),
+            rrule VARCHAR(255),
+            tzid VARCHAR(100),
+            source VARCHAR(100) DEFAULT 'synth'
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
         """,
     ),

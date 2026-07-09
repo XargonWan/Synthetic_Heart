@@ -166,7 +166,11 @@ CREATE TABLE IF NOT EXISTS scheduled_events (
     description TEXT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     delivered BOOLEAN DEFAULT FALSE,
-    created_by TEXT DEFAULT 'synth'
+    created_by TEXT DEFAULT 'synth',
+    uid TEXT,
+    rrule TEXT,
+    tzid TEXT,
+    source TEXT DEFAULT 'synth'
 );
 CREATE INDEX IF NOT EXISTS idx_scheduled_events_next_run ON scheduled_events (next_run);
 

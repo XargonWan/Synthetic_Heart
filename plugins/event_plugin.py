@@ -14,12 +14,64 @@ import traceback
 import asyncio
 import json
 from core.core_initializer import register_plugin
-from core.action_parser import CORRECTOR_RETRIES
+
+# Re-exported so consumers/tests can observe dynamic config propagation of the
+# corrector retry limit through this module (see tests/test_exposed_variables.py).
+from core.action_parser import CORRECTOR_RETRIES  # noqa: F401
 
 # Owners of scheduled events that are self-dispatched by their own plugin.
 # The generic scheduler MUST skip these to avoid double delivery: the owning
 # plugin fetches and delivers them itself (honouring its configured interface).
 _SELF_MANAGED_EVENT_OWNERS: frozenset[str] = frozenset({"weather_plugin"})
+
+
+def _standard_action_scope() -> list[str] | None:
+    """Return the full standard action set from the action registry.
+
+    A ``scheduled_reminder`` beat is delivered on the internal ``grillo``
+    interface, but unlike introspective Grillo beats it may legitimately need
+    to contact a user. Without an explicit scope the prompt builder falls back
+    to ``_derive_default_prompt_action_types`` which filters out every
+    interface-bound ``message_*`` action for the ``grillo`` interface, leaving
+    the model no way to actually reach out.
+
+    To keep a single source of truth we hand the beat the exact set of actions
+    the action registry currently exposes (``available_actions``), so the beat
+    receives the standard catalog instead of a distinct, restricted scope.
+    Returning ``None`` (registry unavailable) lets the caller fall back to the
+    default behaviour rather than crash.
+    """
+    try:
+        from core.core_initializer import core_initializer
+
+        available = core_initializer.actions_block.get("available_actions", {})
+        action_names = [str(name) for name in available if name]
+        return action_names or None
+    except Exception as e:
+        log_error(f"[event_plugin] Failed to derive standard action scope: {repr(e)}")
+        return None
+
+
+# Actions a firing reminder must never be allowed to emit: it has to ACT now,
+# not re-schedule itself (which loops). Filtered deterministically from the
+# catalog — this is not text/keyword matching on the reminder content.
+_REMINDER_BLOCKED_ACTIONS: frozenset[str] = frozenset({"schedule_message"})
+
+
+def _reminder_action_scope() -> list[str] | None:
+    """Standard action scope minus the scheduling actions.
+
+    A ``scheduled_reminder`` beat is delivered when an event fires. The model
+    must carry out the reminder in that turn (e.g. send the message), never
+    create or reschedule another event. Removing the scheduling actions from
+    the beat's scope makes that structurally impossible. Returns ``None`` when
+    the registry is unavailable so the caller can fall back to default
+    behaviour.
+    """
+    scope = _standard_action_scope()
+    if scope is None:
+        return None
+    return [name for name in scope if name not in _REMINDER_BLOCKED_ACTIONS]
 
 
 class EventPlugin(AIPluginBase):
@@ -28,6 +80,11 @@ class EventPlugin(AIPluginBase):
     # Class-level variables to prevent multiple schedulers
     _scheduler_running = False
     _scheduler_task = None
+    # TZ-change listener state (recomputes inherited-timezone events at runtime)
+    _tz_listener_registered = False
+    _tz_recompute_tasks: set[asyncio.Task] = set()
+    # External-calendar polling state: monotonic timestamp of the last poll.
+    _external_last_poll: float = 0.0
     # Human-readable name required by core initializer
     display_name = "Event Plugin"
 
@@ -63,28 +120,181 @@ class EventPlugin(AIPluginBase):
         )
 
         try:
-            from core.db import get_conn_ctx
+            from core.db import get_conn_ctx, _get_db_type
+
+            is_postgres = _get_db_type() == "postgres"
 
             async with get_conn_ctx() as conn:
                 async with conn.cursor() as cur:
-                    await cur.execute(
-                        """
-                        CREATE TABLE IF NOT EXISTS scheduled_events (
-                            id INT AUTO_INCREMENT PRIMARY KEY,
-                            `date` DATE NOT NULL,
-                            `time` TIME DEFAULT '00:00',
-                            recurrence_type VARCHAR(20) DEFAULT 'none',
-                            next_run DATETIME NOT NULL,
-                            description TEXT NOT NULL,
-                            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                            delivered BOOLEAN DEFAULT 0,
-                            created_by VARCHAR(100) DEFAULT 'synth'
+                    if is_postgres:
+                        await cur.execute(
+                            """
+                            CREATE TABLE IF NOT EXISTS scheduled_events (
+                                id BIGSERIAL PRIMARY KEY,
+                                date DATE NOT NULL,
+                                time TIME DEFAULT '00:00',
+                                recurrence_type TEXT DEFAULT 'none',
+                                next_run TIMESTAMPTZ NOT NULL,
+                                description TEXT NOT NULL,
+                                created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+                                delivered BOOLEAN DEFAULT FALSE,
+                                created_by TEXT DEFAULT 'synth',
+                                uid TEXT,
+                                rrule TEXT,
+                                tzid TEXT,
+                                source TEXT DEFAULT 'synth'
+                            )
+                            """
                         )
-                        """
-                    )
+                    else:
+                        await cur.execute(
+                            """
+                            CREATE TABLE IF NOT EXISTS scheduled_events (
+                                id INT AUTO_INCREMENT PRIMARY KEY,
+                                `date` DATE NOT NULL,
+                                `time` TIME DEFAULT '00:00',
+                                recurrence_type VARCHAR(20) DEFAULT 'none',
+                                next_run DATETIME NOT NULL,
+                                description TEXT NOT NULL,
+                                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                                delivered BOOLEAN DEFAULT 0,
+                                created_by VARCHAR(100) DEFAULT 'synth',
+                                uid VARCHAR(255),
+                                rrule VARCHAR(255),
+                                tzid VARCHAR(100),
+                                source VARCHAR(100) DEFAULT 'synth'
+                            )
+                            """
+                        )
             log_info("[event_plugin] ensured scheduled_events table exists")
+            await self._migrate_calendar_columns()
         except Exception as e:
             log_error(f"[event_plugin] Failed to ensure table exists: {repr(e)}")
+
+        try:
+            from core.external_calendars import ensure_external_calendars_table
+
+            await ensure_external_calendars_table()
+        except Exception as e:
+            log_error(
+                f"[event_plugin] Failed to ensure external_calendars table: {repr(e)}"
+            )
+
+    async def _migrate_calendar_columns(self) -> None:
+        """Add iCalendar columns to legacy ``scheduled_events`` tables and backfill.
+
+        Idempotent: safe to run on every startup. Adds ``uid``/``rrule``/
+        ``tzid``/``source`` when missing, then backfills rows where ``uid`` is
+        NULL with a stable UID, an RRULE derived from ``recurrence_type``,
+        ``tzid=NULL`` (inherited system TZ) and a ``source`` derived from
+        ``created_by``.
+        """
+        from core.db import get_conn_ctx, _get_db_type
+        from core.calendar_utils import build_event_uid, recurrence_to_rrule
+
+        is_postgres = _get_db_type() == "postgres"
+
+        # Column definitions (name -> backend-specific type)
+        columns = {
+            "uid": "TEXT" if is_postgres else "VARCHAR(255)",
+            "rrule": "TEXT" if is_postgres else "VARCHAR(255)",
+            "tzid": "TEXT" if is_postgres else "VARCHAR(100)",
+            "source": "TEXT DEFAULT 'synth'"
+            if is_postgres
+            else "VARCHAR(100) DEFAULT 'synth'",
+        }
+
+        try:
+            async with get_conn_ctx() as conn:
+                async with conn.cursor() as cur:
+                    for col_name, col_type in columns.items():
+                        if is_postgres:
+                            await cur.execute(
+                                f"ALTER TABLE scheduled_events "
+                                f"ADD COLUMN IF NOT EXISTS {col_name} {col_type}"
+                            )
+                        else:
+                            # MySQL/MariaDB: check information_schema before adding.
+                            await cur.execute(
+                                "SELECT COUNT(*) FROM information_schema.columns "
+                                "WHERE table_name = 'scheduled_events' "
+                                "AND column_name = %s",
+                                (col_name,),
+                            )
+                            row = await cur.fetchone()
+                            exists = bool(
+                                row
+                                and (
+                                    row[0]
+                                    if not isinstance(row, dict)
+                                    else list(row.values())[0]
+                                )
+                            )
+                            if not exists:
+                                await cur.execute(
+                                    f"ALTER TABLE scheduled_events "
+                                    f"ADD COLUMN `{col_name}` {col_type}"
+                                )
+            log_debug("[event_plugin] calendar columns ensured")
+        except Exception as e:
+            log_error(f"[event_plugin] Failed to add calendar columns: {repr(e)}")
+            return
+
+        # Legacy-event backfill is gated behind a flag so it can stay disabled
+        # during the calendar test phase. Only the schema (columns above) is
+        # applied unconditionally; the data migration below is opt-in.
+        if os.getenv("EVENT_MIGRATION_BACKFILL_ENABLED", "0").lower() not in (
+            "1",
+            "true",
+            "yes",
+        ):
+            log_info(
+                "[event_plugin] legacy event backfill disabled "
+                "(set EVENT_MIGRATION_BACKFILL_ENABLED=1 to enable)"
+            )
+            return
+
+        # Backfill rows missing a UID.
+        try:
+            from core.db import aiomysql
+
+            async with get_conn_ctx() as conn:
+                async with conn.cursor(aiomysql.DictCursor) as cur:
+                    await cur.execute(
+                        "SELECT id, recurrence_type, created_by "
+                        "FROM scheduled_events WHERE uid IS NULL"
+                    )
+                    legacy_rows = await cur.fetchall()
+
+                if not legacy_rows:
+                    log_debug("[event_plugin] no legacy events to backfill")
+                    return
+
+                async with conn.cursor() as cur:
+                    for r in legacy_rows:
+                        event_id = r.get("id")
+                        if event_id is None:
+                            continue
+                        uid = build_event_uid(event_id)
+                        rrule = recurrence_to_rrule(r.get("recurrence_type"))
+                        created_by = (r.get("created_by") or "synth").lower()
+                        source = (
+                            "synth"
+                            if created_by in ("synth", "weather_plugin")
+                            else "user"
+                        )
+                        await cur.execute(
+                            "UPDATE scheduled_events "
+                            "SET uid = %s, rrule = %s, tzid = NULL, source = %s "
+                            "WHERE id = %s",
+                            (uid, rrule, source, event_id),
+                        )
+                    log_info(
+                        f"[event_plugin] backfilled {len(legacy_rows)} legacy event(s) "
+                        "with iCalendar metadata"
+                    )
+        except Exception as e:
+            log_error(f"[event_plugin] Failed to backfill calendar metadata: {repr(e)}")
 
     async def start(self):
         """Start the event scheduler."""
@@ -110,6 +320,41 @@ class EventPlugin(AIPluginBase):
         EventPlugin._scheduler_task = asyncio.create_task(self._event_scheduler())
         log_info("[event_plugin] Event scheduler started (singleton)")
 
+        self._register_tz_listener()
+
+    def _register_tz_listener(self) -> None:
+        """Recompute inherited-timezone events when the TZ config changes.
+
+        Events with ``tzid IS NULL`` follow the system timezone, so their UTC
+        ``next_run`` must be rebuilt whenever ``TZ`` is updated at runtime.
+        """
+        if EventPlugin._tz_listener_registered:
+            return
+
+        from core.config_manager import config_registry
+
+        def _on_tz_change(_new_value: object) -> None:
+            from core.db import recompute_all_next_runs
+
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                # No running loop (e.g. called from a worker thread); run inline.
+                asyncio.run(recompute_all_next_runs())
+                return
+            task = loop.create_task(recompute_all_next_runs())
+            EventPlugin._tz_recompute_tasks.add(task)
+            task.add_done_callback(EventPlugin._tz_recompute_tasks.discard)
+
+        try:
+            config_registry.add_listener("TZ", _on_tz_change)
+            EventPlugin._tz_listener_registered = True
+            log_info("[event_plugin] Registered TZ-change listener for event recompute")
+        except KeyError:
+            log_warning(
+                "[event_plugin] TZ config key not registered; skipping listener"
+            )
+
     async def stop(self):
         """Stop the event scheduler."""
         EventPlugin._scheduler_running = False
@@ -131,7 +376,7 @@ class EventPlugin(AIPluginBase):
 
     def get_supported_action_types(self):
         """Return the action types this plugin supports."""
-        return ["event"]
+        return ["event", "static_inject"]
 
     @staticmethod
     def get_interface_id() -> str:
@@ -151,7 +396,174 @@ class EventPlugin(AIPluginBase):
                 "optional_fields": ["send_in", "send_at"],
                 "description": "Schedule a message to be sent after a delay (send_in) or at a specific time (send_at)",
             },
+            "static_inject": {
+                "required_fields": [],
+                "optional_fields": [],
+                "description": "Inject upcoming scheduled events into the prompt context (informational only)",
+            },
         }
+
+    async def _fetch_upcoming_event_rows(self) -> list[dict]:
+        """Fetch all ``scheduled_events`` rows needed to expand upcoming occurrences."""
+        from core.db import get_conn_ctx
+
+        columns = [
+            "id",
+            "date",
+            "time",
+            "recurrence_type",
+            "next_run",
+            "description",
+            "created_at",
+            "created_by",
+            "uid",
+            "rrule",
+            "tzid",
+            "source",
+        ]
+        col_list = ", ".join(columns)
+        rows: list[dict] = []
+        async with get_conn_ctx() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    f"SELECT {col_list} FROM scheduled_events ORDER BY next_run ASC"
+                )
+                fetched = await cur.fetchall()
+                for row in fetched:
+                    rows.append(dict(zip(columns, row)))
+        return rows
+
+    async def get_static_injection(self, message=None, context_memory=None) -> dict:
+        """Inject the next few upcoming events into the prompt context.
+
+        Purely informational: SyntH sees its own upcoming commitments so it can
+        reason about them naturally. It expands recurring events (via RRULE)
+        starting from *now* over a short look-ahead window and returns a small,
+        preformatted text block (never more than ``max_events`` lines).
+        """
+        try:
+            from core.config_manager import config_registry
+
+            lookahead_days = int(
+                config_registry.get_value(
+                    "UPCOMING_EVENTS_LOOKAHEAD_DAYS",
+                    3,
+                    value_type=int,
+                    label="Upcoming events look-ahead (days)",
+                    description=(
+                        "How many days ahead SyntH's upcoming-events context "
+                        "block looks. Informational only."
+                    ),
+                    group="calendar",
+                    component="event_plugin",
+                )
+            )
+            max_events = int(
+                config_registry.get_value(
+                    "UPCOMING_EVENTS_MAX",
+                    5,
+                    value_type=int,
+                    label="Upcoming events shown in context",
+                    description=(
+                        "Maximum number of upcoming events injected into the "
+                        "prompt context. Informational only."
+                    ),
+                    group="calendar",
+                    component="event_plugin",
+                )
+            )
+        except Exception as e:
+            log_warning(f"[event_plugin] upcoming events config read failed: {e}")
+            lookahead_days = 3
+            max_events = 5
+
+        lookahead_days = max(1, min(31, lookahead_days))
+        max_events = max(1, min(20, max_events))
+
+        try:
+            from datetime import datetime as _dt
+            from datetime import timedelta
+            import recurring_ical_events
+
+            from core.calendar_utils import build_calendar
+            from core.time_zone_utils import get_local_timezone
+
+            system_tz = get_local_timezone()
+            window_start = _dt.now(tz=system_tz)
+            window_end = window_start + timedelta(days=lookahead_days)
+
+            rows = await self._fetch_upcoming_event_rows()
+            if not rows:
+                return {}
+
+            calendar = build_calendar(rows, system_tz=system_tz)
+
+            try:
+                occurrences = recurring_ical_events.of(calendar).between(
+                    window_start, window_end
+                )
+            except Exception as exc:
+                log_warning(f"[event_plugin] upcoming expansion failed: {exc}")
+                return {}
+
+            collected: list[tuple[float, str]] = []
+            for occ in occurrences:
+                try:
+                    dtstart = occ.get("dtstart")
+                    if dtstart is None:
+                        continue
+                    start_dt = dtstart.dt
+                    if isinstance(start_dt, datetime):
+                        if start_dt.tzinfo is None:
+                            start_dt = start_dt.replace(tzinfo=system_tz)
+                        local_dt = start_dt.astimezone(system_tz)
+                        all_day = False
+                    else:
+                        # All-day (date only) -> anchor at local midnight.
+                        local_dt = _dt(
+                            start_dt.year,
+                            start_dt.month,
+                            start_dt.day,
+                            tzinfo=system_tz,
+                        )
+                        all_day = True
+
+                    if local_dt < window_start:
+                        continue
+
+                    if all_day:
+                        when = f"{local_dt.strftime('%b %-d')} (all day)"
+                    else:
+                        tz_abbr = local_dt.strftime("%Z") or "local"
+                        when = (
+                            f"{local_dt.strftime('%b %-d')}, "
+                            f"{local_dt.hour}:{local_dt.strftime('%M')} ({tz_abbr})"
+                        )
+
+                    description = str(occ.get("summary", "")).strip()
+                    if not description:
+                        continue
+                    collected.append((local_dt.timestamp(), f"{when} - {description}"))
+                except Exception as exc:
+                    log_debug(f"[event_plugin] skipping upcoming occurrence: {exc}")
+                    continue
+
+            if not collected:
+                return {}
+
+            collected.sort(key=lambda item: item[0])
+            lines = [line for _, line in collected[:max_events]]
+
+            block = (
+                f"upcoming events (next {lookahead_days} days) "
+                "(informational only, do not act unless relevant):\n"
+                + "\n".join(f"- {line}" for line in lines)
+            )
+            return {"upcoming_events": block}
+
+        except Exception as exc:
+            log_error(f"[event_plugin] get_static_injection failed: {exc}")
+            return {}
 
     def validate_payload(self, action_type: str, payload: dict) -> list:
         """Validate payload for event actions."""
@@ -803,6 +1215,7 @@ class EventPlugin(AIPluginBase):
             try:
                 log_debug("[event_plugin] Event scheduler checking for due events...")
                 await self._check_and_execute_events()
+                await self._poll_external_calendars()
                 await asyncio.sleep(30)  # Check every 30 seconds
             except asyncio.CancelledError:
                 log_info("[event_plugin] Event scheduler cancelled")
@@ -874,6 +1287,172 @@ class EventPlugin(AIPluginBase):
         except Exception as e:
             log_error(f"[event_plugin] Error checking due events: {repr(e)}")
 
+    async def _poll_external_calendars(self) -> None:
+        """Poll enabled external calendars and act on upcoming occurrences.
+
+        Behaviour is gated by two config vars:
+
+        * ``EXTERNAL_CAL_POLL_INTERVAL`` (seconds, default 900) — how often to
+          fetch external calendars. The scheduler ticks every 30s, so this
+          method self-rate-limits with a monotonic timestamp.
+        * ``EXTERNAL_CAL_TRIGGER_BEATS`` (bool, default False) — when True,
+          imminent occurrences fire ``scheduled_reminder`` Grillo beats exactly
+          like internal events; when False the occurrences only enrich prompt
+          context (handled elsewhere) and no beat is emitted here.
+        """
+        try:
+            from core.config_manager import config_registry
+
+            poll_interval = int(
+                config_registry.get_value(
+                    "EXTERNAL_CAL_POLL_INTERVAL",
+                    900,
+                    value_type=int,
+                    label="External calendar poll interval (s)",
+                    description=(
+                        "How often SyntH fetches subscribed external calendars, "
+                        "in seconds."
+                    ),
+                    group="calendar",
+                    component="event_plugin",
+                    advanced=True,
+                )
+            )
+            trigger_beats = bool(
+                config_registry.get_value(
+                    "EXTERNAL_CAL_TRIGGER_BEATS",
+                    False,
+                    value_type=bool,
+                    label="External calendars alert SyntH",
+                    description=(
+                        "When enabled, upcoming events from subscribed external "
+                        "calendars proactively alert SyntH (like internal "
+                        "reminders). When disabled, they only enrich context."
+                    ),
+                    group="calendar",
+                    component="event_plugin",
+                )
+            )
+        except Exception as e:
+            log_warning(f"[event_plugin] external calendar config read failed: {e}")
+            return
+
+        loop = asyncio.get_running_loop()
+        now_monotonic = loop.time()
+        if (now_monotonic - EventPlugin._external_last_poll) < poll_interval:
+            return
+        EventPlugin._external_last_poll = now_monotonic
+
+        if not trigger_beats:
+            # Context-only mode: nothing to alert on. Occurrences are surfaced to
+            # the prompt via the context enrichment path, not here.
+            log_debug(
+                "[event_plugin] external calendars in context-only mode; "
+                "skipping beat trigger"
+            )
+            return
+
+        try:
+            from datetime import timedelta
+
+            from core.external_calendars import gather_all_external_occurrences
+
+            window_start = datetime.now(timezone.utc)
+            window_end = window_start + timedelta(seconds=max(poll_interval, 900))
+            occurrences = await gather_all_external_occurrences(
+                window_start=window_start, window_end=window_end
+            )
+        except Exception as e:
+            log_error(f"[event_plugin] external calendar poll failed: {repr(e)}")
+            return
+
+        if not occurrences:
+            log_debug("[event_plugin] no upcoming external calendar occurrences")
+            return
+
+        log_info(
+            f"[event_plugin] external calendars: {len(occurrences)} upcoming "
+            "occurrence(s), triggering reminder beats"
+        )
+        for occ in occurrences:
+            try:
+                await self._enqueue_external_reminder_beat(occ)
+            except Exception as e:
+                log_warning(
+                    f"[event_plugin] failed to enqueue external reminder beat: {repr(e)}"
+                )
+
+    async def _enqueue_external_reminder_beat(self, occurrence: dict) -> None:
+        """Enqueue a ``scheduled_reminder`` beat for an external occurrence.
+
+        Mirrors ``_enqueue_reminder_beat`` for internal events but sources the
+        prompt from an expanded external occurrence dict.
+        """
+        summary = occurrence.get("summary") or "(untitled event)"
+        start_dt = occurrence.get("start")
+        calendar_name = occurrence.get("calendar_name") or "external calendar"
+        when_text = ""
+        if isinstance(start_dt, datetime):
+            try:
+                from core.time_zone_utils import format_dual_time
+
+                when_text = format_dual_time(start_dt)
+            except Exception:
+                when_text = start_dt.isoformat()
+
+        prompt = (
+            "An event from a subscribed external calendar is coming up.\n"
+            f"Calendar: {calendar_name}\n"
+            f"Event: {summary}\n"
+            f"When: {when_text}\n\n"
+            "Decide whether, how, and who to notify about this. You are not "
+            "obligated to contact anyone; use your judgement."
+        )
+
+        from types import SimpleNamespace
+
+        try:
+            from core import message_queue
+
+            source = occurrence.get("source") or "external"
+            beat_id = f"{source}_{summary}"
+
+            message = SimpleNamespace()
+            message.chat_id = -1
+            message.message_id = f"scheduled_reminder_{beat_id}"
+            message.text = prompt
+            message.from_user = SimpleNamespace(
+                id=-1,
+                username="scheduler",
+                full_name="Scheduler",
+                first_name="Scheduler",
+            )
+            message.chat = SimpleNamespace(id=-1, type="internal")
+            message.date = datetime.now(timezone.utc)
+
+            context_memory = {
+                "grillo_beat": True,
+                "beat_type": "scheduled_reminder",
+                "external_calendar": calendar_name,
+                "external_source": source,
+                "skip_history": True,
+            }
+            reminder_scope = _reminder_action_scope()
+            if reminder_scope is not None:
+                context_memory["allowed_action_types"] = reminder_scope
+            await message_queue.enqueue_low_priority(
+                None,
+                message,
+                context_memory=context_memory,
+                interface_id="grillo",
+                original_message=None,
+            )
+            log_debug(f"[event_plugin] enqueued external reminder beat for '{summary}'")
+        except Exception as e:
+            log_error(
+                f"[event_plugin] enqueue external reminder beat failed: {repr(e)}"
+            )
+
     async def _execute_scheduled_event(self, event: dict):
         """Execute a scheduled event and deliver it to the LLM for processing."""
         try:
@@ -907,7 +1486,19 @@ class EventPlugin(AIPluginBase):
             )
 
     async def _deliver_event_to_llm(self, event: dict):
-        """Deliver the event to the LLM as a structured input and wait for the response."""
+        """Deliver a due event to Synth as an internal ``scheduled_reminder`` beat.
+
+        Events are NOT tied to any single interface. Instead of hardcoding a
+        delivery target (the old behaviour, which forced ``telegram_bot`` and
+        regex-scraped an ``interface_path`` from the description — silently
+        dropping the reminder when none was found), the reminder is enqueued as
+        an internal Grillo beat. Synth receives it as a thought and decides
+        whether, how and whom to contact, choosing from the routable targets
+        presented in the prompt.
+
+        The event is marked delivered ONLY after a successful enqueue, so a
+        transient failure leaves it pending for the next scheduler cycle.
+        """
         raw_id = event.get("id")
         try:
             event_id = int(raw_id) if raw_id is not None else None
@@ -915,153 +1506,64 @@ class EventPlugin(AIPluginBase):
             event_id = None
 
         try:
-            event_prompt = await self._create_event_prompt(event)
+            reminder_prompt = await self._build_reminder_beat_prompt(event)
 
-            from core.core_initializer import INTERFACE_REGISTRY
+            enqueued = await self._enqueue_reminder_beat(event_id, reminder_prompt)
 
-            delivered = False
-            for attempt in range(1, int(CORRECTOR_RETRIES) + 1):
-                interface = INTERFACE_REGISTRY.get("telegram_bot")
-                if not interface:
-                    log_warning(
-                        f"[event_plugin] No interface registered for event {event_id} "
-                        f"(attempt {attempt}/{int(CORRECTOR_RETRIES)})"
-                    )
-                else:
-                    from types import SimpleNamespace
-                    import re
-
-                    # Extract interface_path from description (format: "MESSAGE: ... [interface_path: {interface_path}]")
-                    description = event.get("description", "")
-                    interface_path = None
-                    match = re.search(r"\[interface_path:\s*([^\]]+)\]", description)
-                    if match:
-                        interface_path = match.group(1).strip()
-                        log_debug(
-                            f"[event_plugin] ✅ Extracted interface_path from description: {interface_path}"
-                        )
-
-                    # Fallback: extract from original_context if not in description
-                    if not interface_path:
-                        original_context = event.get("original_context", "")
-                        if original_context:
-                            # Extract from format: [Interface: telegram_bot/chat_id/thread_id]
-                            interface_match = re.search(
-                                r"\[Interface:\s*([^\]]+)\]", original_context
-                            )
-                            if interface_match:
-                                interface_path = interface_match.group(1).strip()
-                                log_info(
-                                    f"[event_plugin] ✅ Extracted interface_path from original_context: {interface_path}"
-                                )
-
-                    # If no interface_path, do NOT use a dummy one
-                    # Leave it as None - the telegram_bot.send_message will check and silently skip
-                    if not interface_path:
-                        log_warning(
-                            f"[event_plugin] ⚠️ Could not extract interface_path from event {event_id}, synthetic message will NOT be routed to any interface"
-                        )
-
-                    # Extract chat_id from interface_path for compatibility
-                    # Format: telegram_bot/chat_id or telegram_bot/chat_id/thread_id
-                    chat_id = None
-                    if interface_path:
-                        parts = interface_path.split("/")
-                        if len(parts) >= 2:
-                            chat_id = parts[1]  # Extract chat_id
-
-                    synthetic_message = SimpleNamespace(
-                        message_id=f"scheduled_event_{event_id}",
-                        interface_path=interface_path,  # Will be None if not extracted
-                        chat_id=int(chat_id)
-                        if chat_id and chat_id.lstrip("-").isdigit()
-                        else None,
-                        text=f"[SCHEDULED_EVENT_{event_id}] {description[:50]}",
-                        from_user=SimpleNamespace(
-                            id=0, username="scheduler", full_name="Scheduler"
-                        ),
-                        chat=SimpleNamespace(
-                            id=int(chat_id)
-                            if chat_id and chat_id.lstrip("-").isdigit()
-                            else None,
-                            type="supergroup",
-                        ),
-                    )
-
-                    delivered = await request_llm_delivery(
-                        message=synthetic_message,
-                        interface=interface,
-                        context=event_prompt,
-                        reason=f"scheduled_event_{event_id}",
-                    )
-
-                    if delivered:
-                        log_info(f"[event_plugin] Event {event_id} delivered to LLM")
-                        break
-
-                if attempt < int(CORRECTOR_RETRIES) and not delivered:
-                    await asyncio.sleep(attempt)
-
-            if not delivered:
+            if not enqueued:
                 log_warning(
-                    f"[event_plugin] Failed to deliver event {event_id} after {int(CORRECTOR_RETRIES)} attempts"
+                    f"[event_plugin] Failed to enqueue reminder beat for event "
+                    f"{event_id}; will retry next cycle"
                 )
-            else:
-                # Mark as delivered ONLY if it was successfully sent to LLM
-                try:
-                    if event_id is not None:
-                        if await mark_event_delivered(event_id):
-                            log_info(
-                                f"[event_plugin] ✅ Event {event_id} successfully marked as delivered in DB"
-                            )
-                        else:
-                            log_warning(
-                                f"[event_plugin] ⚠️ Failed to mark event {event_id} as delivered in DB (will retry next cycle)"
-                            )
+                return
+
+            log_info(
+                f"[event_plugin] Event {event_id} enqueued as scheduled_reminder beat"
+            )
+
+            # Mark delivered ONLY after a successful enqueue.
+            try:
+                if event_id is not None:
+                    if await mark_event_delivered(event_id):
+                        log_info(
+                            f"[event_plugin] Event {event_id} marked as delivered in DB"
+                        )
                     else:
                         log_warning(
-                            "[event_plugin] Cannot mark event with invalid id as delivered"
+                            f"[event_plugin] Failed to mark event {event_id} as "
+                            f"delivered in DB (will retry next cycle)"
                         )
-                except Exception as e:
+                else:
                     log_warning(
-                        f"[event_plugin] Error marking event {event_id} delivered: {e}"
+                        "[event_plugin] Cannot mark event with invalid id as delivered"
                     )
+            except Exception as e:
+                log_warning(
+                    f"[event_plugin] Error marking event {event_id} delivered: {e}"
+                )
         except Exception as outer_e:
             log_error(
                 f"[event_plugin] Error in _deliver_event_to_llm for event {event_id}: {repr(outer_e)}"
             )
 
-    async def _create_event_prompt(self, event: dict):
-        """Create a structured prompt for the event delivery."""
+    async def _build_reminder_beat_prompt(self, event: dict) -> str:
+        """Frame a due event as an internal-thought prompt for Synth.
 
-        def make_json_serializable(obj):
-            """Recursively convert datetime objects and dataclasses to JSON-serializable types."""
-            from datetime import datetime, date, timedelta
-            from dataclasses import is_dataclass, asdict
-
-            if isinstance(obj, (datetime, date)):
-                return obj.isoformat() if hasattr(obj, "isoformat") else str(obj)
-            elif isinstance(obj, timedelta):
-                return str(obj)
-            elif isinstance(obj, dict):
-                return {k: make_json_serializable(v) for k, v in obj.items()}
-            elif isinstance(obj, (list, tuple)):
-                return [make_json_serializable(item) for item in obj]
-            elif is_dataclass(obj):
-                return make_json_serializable(asdict(obj))
-            return obj
-
-        # Extract event details
-        event_id = event.get("id", "unknown")
+        Includes the event details and the currently routable interface_path
+        targets so Synth can pick a real path if it decides to reach out.
+        """
+        from core.beat_utils import (
+            collect_routable_targets,
+            render_routable_targets_block,
+        )
         from core.time_zone_utils import format_dual_time
 
-        date = event.get("date", "")
-        time = event.get("time", "")
-        description = event.get("description", "")
-        is_late = event.get("is_late", False)
-        minutes_late = event.get("minutes_late", 0)
+        event_id = event.get("id", "unknown")
+        description = str(event.get("description", "")).strip()
+        repeat = event.get("recurrence_type", "none")
 
         next_run_val = event.get("next_run")
+        scheduled_time = "unknown"
         try:
             if isinstance(next_run_val, datetime):
                 dt_utc = next_run_val
@@ -1075,178 +1577,78 @@ class EventPlugin(AIPluginBase):
         except Exception:
             scheduled_time = "unknown"
 
-        # Create lateness context
-        lateness_context = ""
-        if is_late:
-            if minutes_late < 60:
-                lateness_context = f"⚠️ THIS EVENT IS {minutes_late} MINUTES LATE! It was scheduled for {scheduled_time}."
-            else:
-                hours_late = minutes_late // 60
-                remaining_minutes = minutes_late % 60
-                if remaining_minutes > 0:
-                    lateness_context = f"⚠️ THIS EVENT IS LATE BY {hours_late}h {remaining_minutes}m! It was scheduled for {scheduled_time}."
-                else:
-                    lateness_context = f"⚠️ THIS EVENT IS LATE BY {hours_late} {'hour' if hours_late == 1 else 'hours'}! It was scheduled for {scheduled_time}."
-        else:
-            lateness_context = f"✅ Event on time (scheduled for {scheduled_time})"
+        is_late = bool(event.get("is_late", False))
+        minutes_late = event.get("minutes_late", 0)
+        lateness_note = ""
+        if is_late and minutes_late:
+            lateness_note = f" (this reminder is {minutes_late} minutes late)"
 
-        context = {
-            "messages": [],
-            "memories": [],
-            "location": "",
-            "date": datetime.utcnow().strftime("%Y-%m-%d"),
-            "time": format_dual_time(datetime.utcnow().replace(tzinfo=timezone.utc)),
-            "event_status": {
-                "is_late": is_late,
-                "minutes_late": minutes_late,
-                "scheduled_time": scheduled_time,
-                "lateness_context": lateness_context,
-            },
-        }
-        try:
-            from core.action_parser import gather_static_injections
+        targets = await collect_routable_targets()
+        targets_block = render_routable_targets_block(targets)
 
-            # FOR EVENT REMINDERS: Only get minimal injections to avoid bloating context with full persona/diary
-            # Event reminders don't need complete memory context - just essential system state
-            log_info(
-                "[event_plugin] 📦 EVENT_REMINDER context reduction: gathering minimal injections only"
-            )
-            injections = await gather_static_injections()
-            if isinstance(injections, dict):
-                # Keep only essential keys for event reminders, skip heavy diary/persona data
-                allowed_keys = {
-                    "persona",
-                    "persona_preferences",
-                    "weather",
-                    "current_time",
-                    "instructions",
-                }
-                reduced_injections = {
-                    k: v for k, v in injections.items() if k in allowed_keys
-                }
-
-                # For persona, if it exists, limit diary entries to last 5 only
-                if "persona" in reduced_injections and isinstance(
-                    reduced_injections["persona"], dict
-                ):
-                    persona = reduced_injections["persona"]
-                    if "latest_diary_entries" in persona and isinstance(
-                        persona["latest_diary_entries"], list
-                    ):
-                        # Keep only 5 most recent diary entries
-                        persona["latest_diary_entries"] = persona[
-                            "latest_diary_entries"
-                        ][:5]
-                        log_debug(
-                            "[event_plugin] Persona diary reduced to 5 entries for event reminder"
-                        )
-                    if "memories" in persona and isinstance(persona["memories"], list):
-                        # Keep only 3 most recent memories
-                        persona["memories"] = persona["memories"][:3]
-                        log_debug(
-                            "[event_plugin] Persona memories reduced to 3 entries for event reminder"
-                        )
-
-                context.update(reduced_injections)
-                log_info(
-                    f"[event_plugin] 📦 Context size after reduction: {len(str(context))} chars (was potentially 200KB+)"
-                )
-        except Exception as e:
-            log_warning(f"[event_plugin] Failed to gather static injections: {e}")
-
-        log_debug(
-            f"[event_plugin] Formatting event {event_id} as event_reminder for LLM"
+        header = (
+            "[SCHEDULED REMINDER] One of your own scheduled events is now due. "
+            "This is an internal thought firing right now, not a message from "
+            "anyone. This reminder already exists, so there is no need to schedule "
+            "or reschedule it again — the moment to act on it is this turn. If the "
+            "reminder tells you what to do (for example it asks you to send a "
+            "message on a specific interface path), the natural thing is to follow "
+            "through now and send that message on the path it names. Otherwise "
+            "it's up to you: reach out to someone, do something, or simply take "
+            "note of it. When you do choose to contact someone, pick one of the "
+            "routable interface_path values below rather than making one up."
         )
-
-        # Convert date/time to serializable strings
-        date_str = str(date) if date else ""
-        time_str = str(time) if time else ""
-
-        # Extract metadata from description for LLM
-        import re
-
-        interface_match = re.search(r"\[interface_path:\s*([^\]]+)\]", description)
-        interface_path = interface_match.group(1).strip() if interface_match else None
-        interface_name = (
-            interface_path.split("/", 1)[0]
-            if isinstance(interface_path, str) and "/" in interface_path
-            else interface_path
+        body = (
+            f"\n\nEvent #{event_id} scheduled for {scheduled_time}{lateness_note}.\n"
+            f"Recurrence: {repeat}.\n"
+            f"Reminder: {description or '(no description)'}\n"
         )
+        return header + body + targets_block
 
-        result = {
-            "context": context,
-            "input": {
-                "type": "event_reminder",
-                "payload": {
-                    "date": date_str,
-                    "time": time_str,
-                    "repeat": event.get("recurrence_type", "none"),
-                    "description": description,
-                    "created_by": event.get("created_by", "synth"),
-                    "interface_path": interface_path,
-                },
-                "source": {
-                    "event_id": event_id,
-                    "origin": "scheduler",
-                },
-                "timestamp": (
-                    event.get("next_run").isoformat()
-                    if isinstance(event.get("next_run"), datetime)
-                    else str(event.get("next_run"))
-                    if event.get("next_run")
-                    else datetime.utcnow().isoformat() + "+00:00"
-                ),
-            },
-        }
+    async def _enqueue_reminder_beat(self, event_id: object, prompt: str) -> bool:
+        """Enqueue the reminder as a low-priority ``scheduled_reminder`` beat."""
+        from types import SimpleNamespace
 
-        # Build PromptRequest delivery path for migrated engines while keeping
-        # the legacy context/input/instructions keys for compatibility.
         try:
-            from core.prompt_engine import build_delivery_request
+            from core import message_queue
 
-            action_outputs = [
-                {
-                    "event_id": event_id,
-                    "description": description,
-                    "date": date_str,
-                    "time": time_str,
-                    "scheduled_time": scheduled_time,
-                    "is_late": is_late,
-                    "minutes_late": minutes_late,
-                    "lateness_context": lateness_context,
-                    "interface_path": interface_path,
-                }
-            ]
-            result["__prompt_request"] = await build_delivery_request(
-                action_type="event_reminder",
-                action_outputs=action_outputs,
-                interface_name=interface_name,
-                interface_path=interface_path,
+            message = SimpleNamespace()
+            message.chat_id = -1
+            message.message_id = f"scheduled_reminder_{event_id}"
+            message.text = prompt
+            message.from_user = SimpleNamespace(
+                id=-1,
+                username="scheduler",
+                full_name="Scheduler",
+                first_name="Scheduler",
             )
-        except Exception as e:
-            log_debug(f"[event_plugin] build_delivery_request skipped: {e}")
+            message.chat = SimpleNamespace(id=-1, type="internal")
+            message.date = datetime.now(timezone.utc)
 
-        # Make all datetime objects JSON-serializable before returning
-        log_debug(
-            f"[event_plugin] Applying make_json_serializable to event {event_id} payload"
-        )
-        serializable_result = make_json_serializable(result)
-        log_debug(f"[event_plugin] Serialization complete for event {event_id}")
+            context_memory = {
+                "grillo_beat": True,
+                "beat_type": "scheduled_reminder",
+                "event_id": event_id,
+                "skip_history": True,
+            }
+            reminder_scope = _reminder_action_scope()
+            if reminder_scope is not None:
+                context_memory["allowed_action_types"] = reminder_scope
 
-        # Test JSON serialization immediately
-        try:
-            import json
-
-            _ = json.dumps(serializable_result, ensure_ascii=False)
-            log_debug(
-                f"[event_plugin] ✅ Event {event_id} payload is JSON-serializable"
+            await message_queue.enqueue_low_priority(
+                None,
+                message,
+                context_memory=context_memory,
+                interface_id="grillo",
+                original_message=None,
             )
+            return True
         except Exception as e:
             log_error(
-                f"[event_plugin] ❌ Event {event_id} payload still NOT JSON-serializable: {e}"
+                f"[event_plugin] Failed to enqueue scheduled_reminder beat for "
+                f"event {event_id}: {repr(e)}"
             )
-
-        return serializable_result
+            return False
 
     def _create_scheduler_message(self, event: dict):
         """Create a scheduler message object for the event."""

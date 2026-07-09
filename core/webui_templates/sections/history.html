@@ -11,6 +11,10 @@
               <span class="icon">🦗</span>
               <span>Grillo</span>
             </button>
+            <button class="sub-nav-btn" data-subtab="calendar" role="tab" aria-selected="false">
+              <span class="icon">📅</span>
+              <span>Calendar</span>
+            </button>
             <button class="sub-nav-btn" data-subtab="dreams" role="tab" aria-selected="false">
               <span class="icon">🌙</span>
               <span>Dreams</span>
@@ -70,6 +74,29 @@
           </div>
         </div>
         <div id="history-grillo-pagination" class="pagination-controls"></div>
+      </div>
+
+      <!-- Calendar Sub-Tab -->
+      <div class="sub-tab-panel" id="subtab-calendar" data-subtab="calendar">
+        <div class="section-controls calendar-controls">
+          <div class="calendar-nav">
+            <button type="button" id="calendar-prev" class="calendar-nav-btn" title="Previous month">←</button>
+            <span id="calendar-title" class="calendar-title">—</span>
+            <button type="button" id="calendar-next" class="calendar-nav-btn" title="Next month">→</button>
+            <button type="button" id="calendar-today" class="calendar-nav-btn calendar-today-btn">Today</button>
+          </div>
+          <div class="calendar-actions">
+            <button type="button" id="calendar-new-event" class="calendar-action-btn">＋ New event</button>
+            <a href="/calendar.ics" id="calendar-download-ics" class="calendar-action-btn" download="synth-calendar.ics" title="Download all events as an .ics file">⬇ Download .ics</a>
+            <button type="button" id="calendar-subscribe" class="calendar-action-btn" title="Subscribe from Google Calendar, Apple Calendar, Thunderbird, ...">🔗 Subscribe</button>
+          </div>
+        </div>
+        <div id="history-calendar-content" class="history-container calendar-container">
+          <div class="loading-state">
+            <div class="loading-spinner"></div>
+            <p>Loading calendar...</p>
+          </div>
+        </div>
       </div>
 
       <!-- Dreams Sub-Tab -->
@@ -805,6 +832,235 @@
           min-width: 0;
           width: auto;
         }
+      }
+
+      /* Calendar sub-tab */
+      .calendar-controls {
+        flex-wrap: wrap;
+        justify-content: space-between;
+        align-items: center;
+      }
+      .calendar-nav {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+      }
+      .calendar-title {
+        font-weight: 600;
+        font-size: 1rem;
+        min-width: 10rem;
+        text-align: center;
+        color: var(--text);
+      }
+      .calendar-nav-btn,
+      .calendar-action-btn {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.35rem;
+        padding: 0.4rem 0.75rem;
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        background: rgba(12, 12, 20, 0.35);
+        color: var(--text-soft);
+        border-radius: 6px;
+        cursor: pointer;
+        font-size: 0.85rem;
+        text-decoration: none;
+        transition: all 0.15s ease;
+        white-space: nowrap;
+      }
+      .calendar-nav-btn:hover,
+      .calendar-action-btn:hover {
+        color: var(--text);
+        border-color: var(--accent);
+        background: rgba(255, 255, 255, 0.06);
+      }
+      .calendar-actions {
+        display: flex;
+        gap: 0.5rem;
+        flex-wrap: wrap;
+      }
+      .calendar-container {
+        padding: 0.75rem;
+      }
+      .calendar-grid {
+        display: grid;
+        grid-template-columns: repeat(7, 1fr);
+        gap: 2px;
+        background: rgba(255, 255, 255, 0.06);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 8px;
+        overflow: hidden;
+      }
+      .calendar-weekday {
+        background: rgba(12, 12, 20, 0.5);
+        color: var(--text-soft);
+        text-align: center;
+        padding: 0.4rem 0;
+        font-size: 0.75rem;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+      }
+      .calendar-day {
+        background: rgba(12, 12, 20, 0.35);
+        height: 6.5rem;
+        padding: 0.35rem;
+        display: flex;
+        flex-direction: column;
+        gap: 0.25rem;
+        cursor: pointer;
+        overflow: hidden;
+        transition: background 0.15s ease;
+      }
+      .calendar-day:hover {
+        background: rgba(255, 255, 255, 0.05);
+      }
+      .calendar-day.other-month {
+        opacity: 0.4;
+      }
+      .calendar-day.today .calendar-day-number {
+        background: var(--accent);
+        color: var(--accent-contrast, #fff);
+        border-radius: 50%;
+        width: 1.6rem;
+        height: 1.6rem;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+      }
+      .calendar-day-number {
+        font-size: 0.8rem;
+        color: var(--text-soft);
+        align-self: flex-start;
+      }
+      .calendar-event {
+        background: var(--accent);
+        color: var(--accent-contrast, #fff);
+        font-size: 0.72rem;
+        line-height: 1.2;
+        padding: 0.15rem 0.35rem;
+        border-radius: 4px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        flex-shrink: 0;
+      }
+      .calendar-event.recurring::before {
+        content: "🔁 ";
+      }
+      .calendar-event.external {
+        background: rgba(120, 120, 140, 0.7);
+        color: #fff;
+      }
+      .calendar-day-more {
+        font-size: 0.7rem;
+        color: var(--text-soft);
+      }
+      /* Simple modal for event creation / details */
+      .calendar-modal-backdrop {
+        position: fixed;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.6);
+        display: flex;
+        align-items: flex-start;
+        justify-content: center;
+        /* Push the modal down so it is not hidden behind the top menu bar */
+        padding: 5.5rem 1rem 1.5rem;
+        box-sizing: border-box;
+        overflow-y: auto;
+        z-index: 47000;
+      }
+      .calendar-modal {
+        background: var(--panel, #12121a);
+        border: 1px solid var(--accent);
+        border-radius: 10px;
+        padding: 1.25rem;
+        /* Wider modal so its content is less tall */
+        width: min(46rem, 96vw);
+        max-height: calc(100vh - 7rem);
+        overflow-y: auto;
+        box-sizing: border-box;
+        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+        margin: 0 auto;
+      }
+      .calendar-modal h3 {
+        margin: 0 0 1rem;
+        color: var(--text);
+      }
+      .calendar-modal label {
+        display: block;
+        font-size: 0.8rem;
+        color: var(--text-soft);
+        margin: 0.75rem 0 0.25rem;
+      }
+      .calendar-modal input,
+      .calendar-modal select,
+      .calendar-modal textarea {
+        width: 100%;
+        box-sizing: border-box;
+        padding: 0.5rem;
+        background: rgba(12, 12, 20, 0.5);
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        border-radius: 6px;
+        color: var(--text);
+        font-size: 0.9rem;
+      }
+      .calendar-modal textarea {
+        resize: vertical;
+        min-height: 8rem;
+        line-height: 1.5;
+      }
+      .calendar-modal-actions {
+        display: flex;
+        justify-content: flex-end;
+        gap: 0.5rem;
+        margin-top: 1.25rem;
+      }
+      .calendar-modal-actions button {
+        padding: 0.5rem 1rem;
+        border-radius: 6px;
+        cursor: pointer;
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        background: rgba(12, 12, 20, 0.5);
+        color: var(--text-soft);
+      }
+      .calendar-modal-actions button.primary {
+        background: var(--accent);
+        color: var(--accent-contrast, #fff);
+        border-color: var(--accent);
+      }
+      .calendar-edit-event,
+      .calendar-del-event {
+        padding: 0.15rem 0.4rem;
+        border-radius: 5px;
+        cursor: pointer;
+        line-height: 1;
+        border: 1px solid transparent;
+        background: transparent;
+      }
+      .calendar-edit-event {
+        color: var(--accent);
+        border-color: var(--accent);
+      }
+      .calendar-edit-event:hover {
+        background: var(--accent);
+        color: var(--accent-contrast, #fff);
+      }
+      .calendar-del-event {
+        color: #ff5c5c;
+        border-color: #ff5c5c;
+      }
+      .calendar-del-event:hover {
+        background: #ff5c5c;
+        color: #fff;
+      }
+      .calendar-subscribe-url {
+        font-family: monospace;
+        font-size: 0.8rem;
+        word-break: break-all;
+        background: rgba(12, 12, 20, 0.5);
+        padding: 0.5rem;
+        border-radius: 6px;
+        margin-top: 0.5rem;
       }
       </style>
 
