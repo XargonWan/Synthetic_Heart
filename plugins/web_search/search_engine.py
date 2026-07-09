@@ -1,9 +1,12 @@
 """Web search engines and page fetching with a per-task shared fetch cache.
 
-This module owns the single implementation of the search backends (Tavily with a
-keyless DuckDuckGo fallback via the ``ddgs`` package) and the page-content fetcher.
-``web_search_plugin`` imports these helpers so there is exactly one implementation
-of each.
+This module owns the single implementation of the search backends (SearXNG as the
+primary self-hosted engine, with an optional Tavily API backend) and the
+page-content fetcher. ``web_search_plugin`` imports these helpers so there is
+exactly one implementation of each.
+
+Note: the keyless DuckDuckGo backend was removed because DuckDuckGo serves bots a
+CAPTCHA and blocks automated queries, so it returned no results in practice.
 
 The :class:`FetchCache` is the mechanism that lets multiple concurrent queries of
 the *same* search task avoid re-scraping the same URL: the first query to touch a
@@ -20,7 +23,7 @@ import requests
 from bs4 import BeautifulSoup
 
 from core.config_manager import config_registry
-from core.logging_utils import log_debug, log_error, log_info, log_warning
+from core.logging_utils import log_debug, log_info, log_warning
 
 _USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -29,7 +32,7 @@ _USER_AGENT = (
 
 
 def _tavily_api_key() -> str:
-    """Read the Tavily API key from the config registry (empty -> DuckDuckGo)."""
+    """Read the Tavily API key from the config registry (empty -> disabled)."""
     try:
         return str(config_registry.get_value("TAVILY_API_KEY", "") or "").strip()
     except Exception:
@@ -49,7 +52,7 @@ def _searxng_url() -> str:
 async def search_tavily(
     api_key: str, query: str, max_results: int = 5
 ) -> list[dict[str, str]]:
-    """Search via the Tavily API. Falls back to DuckDuckGo on any failure."""
+    """Search via the Tavily API. Returns an empty list on any failure."""
 
     def _do_post() -> dict:
         headers = {"Content-Type": "application/json"}
@@ -82,10 +85,8 @@ async def search_tavily(
             for r in results
         ]
     except Exception as e:
-        log_warning(
-            f"[web_search] Tavily API request failed: {e}. Falling back to DuckDuckGo..."
-        )
-        return await search_duckduckgo(query, max_results=max_results)
+        log_warning(f"[web_search] Tavily API request failed: {e}")
+        return []
 
 
 async def search_searxng(
@@ -128,42 +129,13 @@ async def search_searxng(
         return []
 
 
-async def search_duckduckgo(query: str, max_results: int = 5) -> list[dict[str, str]]:
-    """Search via DuckDuckGo (no API key required).
-
-    Uses the ``ddgs`` package, which queries DuckDuckGo's JSON backend instead of
-    scraping the HTML SERP. The old HTML scrape (``https://html.duckduckgo.com``)
-    is now served a bot CAPTCHA and returns zero results, so it was replaced.
-    """
-
-    def _do_search() -> list[dict[str, str]]:
-        from ddgs import DDGS
-
-        results: list[dict[str, str]] = []
-        with DDGS() as ddgs:
-            for r in ddgs.text(query, max_results=max_results):
-                title = str(r.get("title") or "").strip()
-                snippet = str(r.get("body") or "").strip()
-                url = str(r.get("href") or "").strip()
-                if title and url:
-                    results.append({"title": title, "snippet": snippet, "url": url})
-        return results
-
-    try:
-        results = await asyncio.to_thread(_do_search)
-        log_info(f"[web_search] DuckDuckGo returned {len(results)} results")
-        return results
-    except Exception as e:
-        log_error(f"[web_search] DuckDuckGo search failed: {e}")
-        return []
-
-
 async def run_search(query: str, max_results: int = 5) -> list[dict[str, str]]:
     """Run a single query on the active engine.
 
-    Backend priority: SearXNG (self-hosted, if configured) -> Tavily (if keyed)
-    -> DuckDuckGo (keyless fallback). Each backend that yields no results falls
-    through to the next.
+    Backend priority: SearXNG (self-hosted, if configured) -> Tavily (if keyed).
+    SearXNG that yields no results falls through to Tavily. If neither backend is
+    configured or both yield nothing, an empty list is returned. The DuckDuckGo
+    backend was removed because it blocks bots with a CAPTCHA.
     """
     searxng_url = _searxng_url()
     if searxng_url:
@@ -174,7 +146,7 @@ async def run_search(query: str, max_results: int = 5) -> list[dict[str, str]]:
     api_key = _tavily_api_key()
     if api_key:
         return await search_tavily(api_key, query, max_results=max_results)
-    return await search_duckduckgo(query, max_results=max_results)
+    return []
 
 
 class FetchCache:

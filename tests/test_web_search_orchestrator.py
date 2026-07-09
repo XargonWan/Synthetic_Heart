@@ -243,102 +243,75 @@ def test_web_search_result_is_outbound_beat() -> None:
     assert is_outbound_beat("web_search_result") is True
 
 
-class _FakeDDGS:
-    """Stub for ddgs.DDGS as a context manager yielding fixed text results."""
-
-    _RESULTS: list[dict[str, str]] = []
-
-    def __enter__(self) -> _FakeDDGS:
-        return self
-
-    def __exit__(self, *_exc: object) -> bool:
-        return False
-
-    def text(self, query: str, max_results: int = 5) -> list[dict[str, str]]:
-        return list(self._RESULTS[:max_results])
-
-
 @pytest.mark.asyncio
-async def test_search_duckduckgo_uses_ddgs(monkeypatch: pytest.MonkeyPatch) -> None:
-    """search_duckduckgo maps ddgs text() rows to title/snippet/url dicts."""
-    import ddgs as ddgs_module
-
-    _FakeDDGS._RESULTS = [
-        {"title": "T1", "body": "B1", "href": "https://example.com/1"},
-        {"title": "T2", "body": "B2", "href": "https://example.com/2"},
-    ]
-    monkeypatch.setattr(ddgs_module, "DDGS", _FakeDDGS)
-
-    results = await search_engine.search_duckduckgo("some query", max_results=5)
-
-    assert results == [
-        {"title": "T1", "snippet": "B1", "url": "https://example.com/1"},
-        {"title": "T2", "snippet": "B2", "url": "https://example.com/2"},
-    ]
-
-
-@pytest.mark.asyncio
-async def test_search_duckduckgo_skips_rows_without_url(
+async def test_run_search_uses_searxng_when_configured(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Rows missing a title or url are dropped."""
-    import ddgs as ddgs_module
-
-    _FakeDDGS._RESULTS = [
-        {"title": "Good", "body": "b", "href": "https://example.com/ok"},
-        {"title": "", "body": "b", "href": "https://example.com/no-title"},
-        {"title": "No URL", "body": "b", "href": ""},
-    ]
-    monkeypatch.setattr(ddgs_module, "DDGS", _FakeDDGS)
-
-    results = await search_engine.search_duckduckgo("q", max_results=5)
-
-    assert results == [
-        {"title": "Good", "snippet": "b", "url": "https://example.com/ok"},
-    ]
-
-
-@pytest.mark.asyncio
-async def test_search_duckduckgo_returns_empty_on_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A failure inside ddgs yields an empty list, never an exception."""
-    import ddgs as ddgs_module
-
-    class _BoomDDGS:
-        def __enter__(self) -> _BoomDDGS:
-            return self
-
-        def __exit__(self, *_exc: object) -> bool:
-            return False
-
-        def text(self, *_a: object, **_k: object) -> list[dict[str, str]]:
-            raise RuntimeError("network down")
-
-    monkeypatch.setattr(ddgs_module, "DDGS", _BoomDDGS)
-
-    results = await search_engine.search_duckduckgo("q")
-
-    assert results == []
-
-
-@pytest.mark.asyncio
-async def test_run_search_uses_ddgs_when_no_tavily_key(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Without a Tavily key, run_search routes to the DuckDuckGo (ddgs) backend."""
+    """When SearXNG is configured, run_search routes to the SearXNG backend."""
+    monkeypatch.setattr(search_engine, "_searxng_url", lambda: "http://searxng:8888")
     monkeypatch.setattr(search_engine, "_tavily_api_key", lambda: "")
 
     called: dict[str, Any] = {}
 
-    async def _fake_ddg(query: str, max_results: int = 5) -> list[dict[str, str]]:
+    async def _fake_searxng(
+        base_url: str, query: str, max_results: int = 5
+    ) -> list[dict[str, str]]:
+        called["base_url"] = base_url
         called["query"] = query
         called["max_results"] = max_results
         return [{"title": "T", "snippet": "S", "url": "https://example.com"}]
 
-    monkeypatch.setattr(search_engine, "search_duckduckgo", _fake_ddg)
+    monkeypatch.setattr(search_engine, "search_searxng", _fake_searxng)
 
     results = await search_engine.run_search("hello", max_results=3)
 
-    assert called == {"query": "hello", "max_results": 3}
+    assert called == {
+        "base_url": "http://searxng:8888",
+        "query": "hello",
+        "max_results": 3,
+    }
     assert results == [{"title": "T", "snippet": "S", "url": "https://example.com"}]
+
+
+@pytest.mark.asyncio
+async def test_run_search_falls_back_to_tavily_when_searxng_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SearXNG returning nothing falls through to Tavily when a key is set."""
+    monkeypatch.setattr(search_engine, "_searxng_url", lambda: "http://searxng:8888")
+    monkeypatch.setattr(search_engine, "_tavily_api_key", lambda: "tvly-key")
+
+    async def _empty_searxng(
+        base_url: str, query: str, max_results: int = 5
+    ) -> list[dict[str, str]]:
+        return []
+
+    called: dict[str, Any] = {}
+
+    async def _fake_tavily(
+        api_key: str, query: str, max_results: int = 5
+    ) -> list[dict[str, str]]:
+        called["api_key"] = api_key
+        called["query"] = query
+        return [{"title": "T", "snippet": "S", "url": "https://example.com"}]
+
+    monkeypatch.setattr(search_engine, "search_searxng", _empty_searxng)
+    monkeypatch.setattr(search_engine, "search_tavily", _fake_tavily)
+
+    results = await search_engine.run_search("hello", max_results=3)
+
+    assert called == {"api_key": "tvly-key", "query": "hello"}
+    assert results == [{"title": "T", "snippet": "S", "url": "https://example.com"}]
+
+
+@pytest.mark.asyncio
+async def test_run_search_returns_empty_when_no_backend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With neither SearXNG nor a Tavily key configured, run_search returns []."""
+    monkeypatch.setattr(search_engine, "_searxng_url", lambda: "")
+    monkeypatch.setattr(search_engine, "_tavily_api_key", lambda: "")
+
+    results = await search_engine.run_search("hello", max_results=3)
+
+    assert results == []

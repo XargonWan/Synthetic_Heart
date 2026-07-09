@@ -2,7 +2,7 @@
 
 Two decoupled pieces:
 
-- ``search_engine``: pure search + page-fetch helpers (Tavily / DuckDuckGo) with
+- ``search_engine``: pure search + page-fetch helpers (SearXNG / Tavily) with
   a per-task shared fetch cache so concurrent queries never scrape the same URL
   twice.
 - ``search_orchestrator``: a background orchestrator that runs searches OUTSIDE
