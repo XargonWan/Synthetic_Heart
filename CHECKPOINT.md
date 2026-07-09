@@ -242,6 +242,31 @@ Also added: `tests/test_vox_plugin.py::test_vox_plugin_speak_chunks_multi_senten
 Validation: `ruff format`/`check` clean on all touched files; `ty check plugins/vox_plugin.py core/animation_handler.py` clean; `pytest tests/test_vox_plugin.py` — 30 passed (the one pre-existing unrelated failure, `test_active_vox_engine_default_is_kitten`, is the documented `AGENTS.md` §12 DB-connectivity/config-registry-pollution flake, confirmed failing identically with my changes stashed out). Frontend `pnpm typecheck` + `pnpm build` clean.
 
 **Not done / still open:**
-- §6.2 barge-in/interrupt — still open, was the other option offered and not picked this round.
+- §6.2 barge-in/interrupt — still open, was the other option offered and not picked this round. **Done in the following session, see §12.**
 - Sentence splitting is regex-based and will mis-split on abbreviations ("Mr. Smith") — acceptable for streaming pause-points, not linguistically precise; documented in the function docstring.
 - No cleanup of the extra per-chunk `.wav` files chunking leaves in `res/synth_webui/static/audio/tts/` — but there was **already no cleanup** of any Vox output file before this change (confirmed by reading the whole plugin — `VOX_AUDIO_CACHE_SIZE` is registered but only ever read for a Settings-page display string, never enforced), so this is proportionally more of a pre-existing gap, not a new one. Worth fixing generally if it ever becomes a real disk-usage problem.
+
+---
+
+## 12. 2026-07-09 — §6.2 barge-in/interrupt done
+
+The other half of the choice offered in §11 — picked up next since it's the last remaining *scoped* item (phase-2 realtime, AR, and mobile packaging are all substantially bigger). Direction was agreed in advance when the choice was offered: always-on, trusting the browser's `echoCancellation` rather than gating barge-in behind a settings toggle (the `MicMode` groundwork in `stores/settings.ts` remains unused — still a real option later if real-hardware testing shows AEC isn't reliable enough).
+
+**Change** (`frontend/src/stores/mic.ts`, `frontend/src/stores/audio.ts` — frontend only, no backend changes):
+- `getUserMedia` now explicitly requests `{ echoCancellation: true, noiseSuppression: true, autoGainControl: true }` instead of bare `audio: true`. This is the actual mechanism that's supposed to keep the avatar's own voice (played through system speakers) from being picked back up by the mic and misread as user speech — previously the half-duplex guard (see below) was the *only* thing preventing that, achieved by simply never listening while the avatar spoke.
+- The half-duplex guard — mic PCM was dropped entirely while `audio.speaking` was true — is removed. PCM now streams to `/api/audio/stream` continuously, VAD included, so the server can actually detect the user starting to talk *during* avatar speech.
+- When a `speech_start` VAD signal arrives while `audio.speaking` is true, that's treated as a genuine barge-in: `audio.stopAll('barge-in')` cuts the avatar off immediately, then recording starts exactly as it would for any other utterance.
+- `useAudioStore().stopAll()` gained an optional `reason` param (default `'user-stop'`, unchanged for its only prior caller) so the barge-in interrupt shows up distinctly from other stop reasons if anyone inspects `playback-manager`'s interrupt events later.
+
+**What this does *not* attempt**: real acoustic AEC reliability (does the avatar's voice actually stay under Silero's VAD threshold on real speaker/mic hardware) is fundamentally not verifiable by an agent in a sandboxed headless browser — it needs a human on real hardware. This was an explicit, informed trade-off the user made when offered the choice, not an oversight. If it turns out to misfire in practice (avatar barging in on itself), the fallback documented in the discussion is the settings-gated opt-in variant that was *not* chosen this round.
+
+**Verified live** against a scratch backend with `frontend/scripts/barge-in-check.mjs` (kept), launched with Chromium's `--use-fake-device-for-media-stream` flag (same pattern as `m4-voice-check.mjs`):
+- `getUserMedia` constraints captured via a monkey-patched `navigator.mediaDevices.getUserMedia` confirm all three AEC flags are actually sent.
+- The mic reaches `listening` state and its real `/api/audio/stream` WebSocket opens (`readyState === 1`) against a live backend.
+- Since nothing in this environment can produce genuine speech for a fake mic device to pick up, the actual interrupt-decision code path (not just the constraints) was verified by intercepting the *real* WebSocket instance (via a `Proxy` around `window.WebSocket` installed before app code runs) and injecting a synthetic `{"type":"vad","signal":"speech_start"}` server frame while the avatar was mid-clip: `audio.speaking` flipped from `true` to `false` immediately and `mic.userSpeaking` became `true` — confirming the actual `onVad` handler wiring, not a re-implementation of it.
+
+Validation: `pnpm typecheck` + `pnpm build` clean. No backend files touched, so no `ruff`/`ty`/`pytest` re-run needed this round. `gitnexus_detect_changes` — LOW risk, exactly `stores/audio.ts::stopAll` and `stores/mic.ts::start`, nothing unexpected.
+
+**Not done / still open:**
+- Real-hardware/human verification of AEC effectiveness — flagged above, can't be done by an agent.
+- §6.3 phase-2 realtime audio-to-audio, §6.5 AR, §6.6 mobile packaging remain the substantially-bigger unstarted items.

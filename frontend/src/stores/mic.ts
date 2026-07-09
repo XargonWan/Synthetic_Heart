@@ -25,9 +25,12 @@ export type MicState = 'off' | 'starting' | 'listening' | 'error'
  * the clip is POSTed to `/api/audio/upload` for the actual transcript, which
  * is then sent over `/ws` exactly like a typed message.
  *
- * Half-duplex guard: mic frames are suppressed while the avatar is speaking
- * (`audio.speaking`) so its own voice is never fed back into VAD/STT. This
- * suppression point is also the phase-2 barge-in seam.
+ * Barge-in: mic PCM streams to VAD continuously, including while the avatar
+ * is speaking — `getUserMedia`'s `echoCancellation` (requested below) is
+ * what keeps the avatar's own voice from re-triggering VAD, not silence on
+ * our end. If `speech_start` fires while `audio.speaking` is true, that's
+ * genuine user speech cutting the avatar off, so it's stopped immediately
+ * (`audio.stopAll()`) before the utterance starts recording.
  */
 export const useMicStore = defineStore('mic', () => {
   const state = ref<MicState>('off')
@@ -90,13 +93,17 @@ export const useMicStore = defineStore('mic', () => {
     error.value = null
 
     try {
-      stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      })
       recorder = new VoiceRecorder(stream)
 
       const client = new AudioStreamClient({
         onVad: (signal) => {
           userSpeaking.value = signal === 'speech_start'
           if (signal === 'speech_start') {
+            if (audio.speaking)
+              audio.stopAll('barge-in')
             recorder?.start()
           }
           else {
@@ -115,9 +122,7 @@ export const useMicStore = defineStore('mic', () => {
       vadClient = client
 
       pcmCapture = await startMicCapture(stream, (pcm) => {
-        // Half-duplex: don't feed the avatar's own voice back into VAD.
-        if (!audio.speaking)
-          vadClient?.sendPcm(pcm)
+        vadClient?.sendPcm(pcm)
       })
 
       state.value = 'listening'

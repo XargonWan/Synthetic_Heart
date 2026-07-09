@@ -152,8 +152,8 @@ export const useAudioStore = defineStore('audio', () => {
     return lipsync?.sample() ?? {}
   }
 
-  function stopAll(): void {
-    manager.stopAll('user-stop')
+  function stopAll(reason = 'user-stop'): void {
+    manager.stopAll(reason)
   }
 
   return { speaking, enabled, lastError, scheduleTts, handleMessage, sampleVisemes, stopAll, ensureContext }
