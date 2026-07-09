@@ -6935,6 +6935,54 @@ class SynthWebUIInterface:
                     log_debug(f"{LOG_PREFIX} skipping calendar occurrence: {exc}")
                     continue
 
+            # Merge in occurrences from subscribed external calendars (ICS/CalDAV)
+            # so they show up in the grid alongside internal events. External
+            # occurrences are read-only: they carry an ``external:<id>`` source
+            # and no internal ``id``, so the frontend hides edit/delete controls.
+            try:
+                from core.external_calendars import gather_all_external_occurrences
+
+                external = await gather_all_external_occurrences(
+                    window_start=window_start, window_end=window_end
+                )
+                for occ in external:
+                    try:
+                        start_dt = occ.get("start")
+                        if start_dt is None:
+                            continue
+                        if occ.get("all_day"):
+                            date_str = start_dt.strftime("%Y-%m-%d")
+                            time_str = ""
+                        else:
+                            if start_dt.tzinfo is None:
+                                start_dt = start_dt.replace(tzinfo=system_tz)
+                            local_dt = start_dt.astimezone(system_tz)
+                            date_str = local_dt.strftime("%Y-%m-%d")
+                            time_str = local_dt.strftime("%H:%M")
+                        events.append(
+                            {
+                                "id": None,
+                                "uid": str(occ.get("uid") or ""),
+                                "date": date_str,
+                                "time": time_str,
+                                "description": str(occ.get("summary") or ""),
+                                "recurring": False,
+                                "recurrence_type": "none",
+                                "source": str(occ.get("source") or "external"),
+                                "calendar_name": str(occ.get("calendar_name") or ""),
+                                "delivered": False,
+                            }
+                        )
+                    except Exception as exc:
+                        log_debug(
+                            f"{LOG_PREFIX} skipping external calendar occurrence: {exc}"
+                        )
+                        continue
+            except Exception as exc:
+                log_warning(
+                    f"{LOG_PREFIX} failed to gather external calendar occurrences: {exc}"
+                )
+
             return JSONResponse({"success": True, "events": events})
 
         except Exception as exc:
