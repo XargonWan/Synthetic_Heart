@@ -159,6 +159,7 @@ class FetchCache:
 
     def __init__(self) -> None:
         self._contents: dict[str, str] = {}
+        self._detailed: dict[str, dict[str, str]] = {}
         self._locks: dict[str, asyncio.Lock] = {}
         self._guard = asyncio.Lock()
 
@@ -188,6 +189,24 @@ class FetchCache:
             self._contents[url] = content
             return content
 
+    async def get_or_fetch_detailed(self, url: str, max_chars: int) -> dict[str, str]:
+        """Return a cached structured fetch outcome, fetching once if necessary.
+
+        Mirrors :meth:`get_or_fetch` but stores the full ``fetch_url_detailed``
+        result (status/text/reason) so a URL passed both as a search result and
+        as an explicit ``check_website`` link is scraped at most once per task.
+        """
+        if url in self._detailed:
+            return self._detailed[url]
+
+        lock = await self._lock_for(url)
+        async with lock:
+            if url in self._detailed:
+                return self._detailed[url]
+            outcome = await fetch_url_detailed(url, max_chars)
+            self._detailed[url] = outcome
+            return outcome
+
 
 async def _fetch_page_text(url: str, max_chars: int) -> str:
     """Fetch a page and return cleaned, length-capped visible text."""
@@ -214,3 +233,115 @@ async def _fetch_page_text(url: str, max_chars: int) -> str:
     except Exception as e:
         log_debug(f"[web_search] Page fetch failed for {url}: {e}")
         return ""
+
+
+# HTTP status codes that indicate the request was actively refused, most often
+# because the site detected automation (Cloudflare & friends commonly answer
+# 403/429/503 to bot-like requests). These are treated as "blocked" so the
+# caller can report the specific link as protected instead of silently empty.
+# Language-agnostic on purpose: we key off HTTP status, never page text.
+_ANTIBOT_STATUS_CODES = frozenset({401, 403, 405, 406, 429, 503})
+
+# A successful (2xx) page that yields almost no extractable text is very likely
+# a JS-rendered challenge/shell page (e.g. a Cloudflare "checking your browser"
+# interstitial or an SPA that needs JavaScript). Without a headless browser we
+# cannot render it, so we also surface these as "blocked".
+_MIN_MEANINGFUL_TEXT_CHARS = 64
+
+
+async def fetch_url_detailed(url: str, max_chars: int) -> dict[str, str]:
+    """Fetch a single URL and return a structured outcome.
+
+    Unlike :func:`_fetch_page_text` (which collapses every failure into an empty
+    string), this returns *why* a fetch did not produce content so the caller can
+    tell the user that a specific link is bot-protected rather than merely empty.
+
+    Returns a dict ``{"url", "status", "text", "reason"}`` where ``status`` is one
+    of:
+
+    - ``"ok"``      — page fetched and meaningful text extracted (in ``text``);
+    - ``"blocked"`` — the site refused the request or served an unrenderable
+      challenge/JS shell (anti-bot); ``text`` is empty, ``reason`` explains it;
+    - ``"invalid"`` — the URL is malformed / not http(s);
+    - ``"error"``   — any other network/parse failure (``reason`` has details).
+
+    NOTE: This uses a plain ``requests`` GET with no JavaScript rendering, so it
+    cannot get past JS-based anti-bot challenges. In the future we could add an
+    optional Playwright / headless-browser path here to render such pages before
+    giving up and reporting the link as blocked.
+    """
+    if not url or not str(url).lower().startswith(("http://", "https://")):
+        return {
+            "url": str(url or ""),
+            "status": "invalid",
+            "text": "",
+            "reason": "not a valid http(s) URL",
+        }
+
+    def _do_get() -> tuple[int, str]:
+        headers = {"User-Agent": _USER_AGENT}
+        response = requests.get(url, headers=headers, timeout=10)
+        return response.status_code, response.text
+
+    try:
+        status_code, html = await asyncio.to_thread(_do_get)
+    except Exception as e:
+        log_debug(f"[web_search] check_website network error for {url}: {e}")
+        return {
+            "url": url,
+            "status": "error",
+            "text": "",
+            "reason": f"network error: {e}",
+        }
+
+    if status_code in _ANTIBOT_STATUS_CODES:
+        log_debug(f"[web_search] check_website blocked (HTTP {status_code}) for {url}")
+        return {
+            "url": url,
+            "status": "blocked",
+            "text": "",
+            "reason": f"anti-bot protection (HTTP {status_code})",
+        }
+
+    if status_code >= 400:
+        return {
+            "url": url,
+            "status": "error",
+            "text": "",
+            "reason": f"HTTP {status_code}",
+        }
+
+    try:
+        soup = BeautifulSoup(html, "html.parser")
+        for tag in soup(["script", "style", "noscript", "header", "footer", "nav"]):
+            tag.decompose()
+        text = soup.get_text(separator=" ", strip=True)
+        text = " ".join(text.split())
+    except Exception as e:
+        log_debug(f"[web_search] check_website parse error for {url}: {e}")
+        return {
+            "url": url,
+            "status": "error",
+            "text": "",
+            "reason": f"parse error: {e}",
+        }
+
+    if len(text) < _MIN_MEANINGFUL_TEXT_CHARS:
+        # 2xx but no real content: almost certainly a JS challenge or an
+        # SPA shell that our non-rendering fetcher cannot read.
+        log_debug(
+            f"[web_search] check_website returned near-empty text ({len(text)} "
+            f"chars) for {url}; treating as blocked"
+        )
+        return {
+            "url": url,
+            "status": "blocked",
+            "text": "",
+            "reason": "page requires JavaScript or is bot-protected "
+            "(no readable content)",
+        }
+
+    if max_chars > 0 and len(text) > max_chars:
+        text = text[:max_chars] + "…"
+    log_debug(f"[web_search] check_website fetched {len(text)} chars from {url}")
+    return {"url": url, "status": "ok", "text": text, "reason": ""}

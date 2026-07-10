@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from typing import List
+from typing import List, cast
 
 from core.config_manager import config_registry
 from core.logging_utils import log_debug, log_error, log_info
@@ -49,43 +49,87 @@ class ReconWebSearchPlugin:
 
     def get_recon_instruction(self) -> str:
         return (
-            "Determine whether the user request needs a web search for current or "
-            "verifiable information. Bias toward searching whenever the answer "
-            "depends on facts that can change over time or that you cannot state "
-            "with confidence from static knowledge (for example anything the user "
-            "frames as up-to-date, latest, current, today's, or recent). When in "
-            "doubt, prefer generating a query rather than returning an empty list. "
-            "If a search is warranted, generate 1-3 specific, self-contained search "
-            "queries. Return STRICTLY this JSON object and nothing else: "
-            '{"web_search": ["query1", "query2"]}. '
-            "Only when the request clearly needs no external information "
-            "(pure general knowledge, opinions, hypotheticals, or internal system "
-            'questions) return {"web_search": []}.'
+            "Decide whether the user request needs external web information. There "
+            "are TWO independent tools you can trigger:\n"
+            "1. queries: internet searches (SearXNG/Tavily) for current or "
+            "verifiable facts. Bias toward searching whenever the answer depends "
+            "on facts that can change over time or that you cannot state with "
+            "confidence from static knowledge. Generate 1-3 specific, "
+            "self-contained search queries.\n"
+            "2. check_website: explicit links the user asked you to open/visit/"
+            "read directly. Put here ONLY full http(s) URLs the user provided or "
+            "clearly wants you to fetch directly. These are visited and scraped "
+            "AS-IS; they do NOT replace or count against the search queries.\n"
+            "Either list may be empty. Use check_website WITHOUT any queries when "
+            "the user only wants specific links opened and no broader search is "
+            "needed. Return STRICTLY this JSON object and nothing else: "
+            '{"web_search": {"queries": ["query1"], "check_website": '
+            '["https://example.com"]}}. '
+            "When the request clearly needs no external information and no links "
+            'to open, return {"web_search": {"queries": [], "check_website": []}}.'
         )
 
-    def _extract_queries_from_text(self, raw_text: str) -> list[str]:
-        """Attempt to extract web_search queries from raw LLM text.
+    @staticmethod
+    def _split_payload(raw: object) -> tuple[list[str], list[str]]:
+        """Normalize a ``web_search`` value into ``(queries, urls)``.
 
-        The Recon LLM may produce valid JSON that the central parser failed to
-        extract (e.g. due to truncation or formatting quirks).  This helper
-        tries loose extraction as a fallback.
+        Accepts every historical and current shape:
+        - new object form: ``{"queries": [...], "check_website": [...]}``
+        - legacy bare list: ``["query1", "query2"]`` (all treated as queries)
+        - nested legacy: ``{"web_search": [...]}``
+        URLs are validated to be http(s); anything that is not a valid link is
+        dropped from the url list. Query/URL classification is decided by the
+        recon LLM's structure, never by keyword/regex matching of content.
+        """
+        queries: list[str] = []
+        urls: list[str] = []
+
+        if isinstance(raw, dict):
+            raw_dict = cast("dict[object, object]", raw)
+            q: object = raw_dict.get("queries")
+            if not isinstance(q, list):
+                # nested legacy {"web_search": [...]}
+                q = raw_dict.get("web_search")
+            if isinstance(q, list):
+                queries = [str(x).strip() for x in q if str(x).strip()][:3]
+
+            cw: object = raw_dict.get("check_website")
+            if isinstance(cw, list):
+                urls = [
+                    str(x).strip()
+                    for x in cw
+                    if str(x).strip().lower().startswith(("http://", "https://"))
+                ][:3]
+        elif isinstance(raw, list):
+            queries = [str(x).strip() for x in raw if str(x).strip()][:3]
+
+        return queries, urls
+
+    def _extract_payload_from_text(self, raw_text: str) -> tuple[list[str], list[str]]:
+        """Loosely extract ``(queries, urls)`` from raw LLM text.
+
+        Fallback when the central JSON parser could not extract structured data
+        (truncation, formatting quirks). Handles both the new object form and
+        the legacy bare-list form.
         """
         if not raw_text or not raw_text.strip():
-            return []
+            return [], []
 
         text = raw_text.strip()
 
+        def _from_parsed(parsed: object) -> tuple[list[str], list[str]]:
+            if isinstance(parsed, dict):
+                parsed_dict = cast("dict[object, object]", parsed)
+                return self._split_payload(parsed_dict.get("web_search"))
+            if isinstance(parsed, list):
+                return self._split_payload(parsed)
+            return [], []
+
         # Try full JSON parse
         try:
-            parsed = json.loads(text)
-            if isinstance(parsed, dict):
-                raw = parsed.get("web_search")
-                if isinstance(raw, list):
-                    return [str(q).strip() for q in raw if str(q).strip()][:3]
-                if isinstance(raw, dict):
-                    nested = raw.get("web_search")
-                    if isinstance(nested, list):
-                        return [str(q).strip() for q in nested if str(q).strip()][:3]
+            q, u = _from_parsed(json.loads(text))
+            if q or u:
+                return q, u
         except json.JSONDecodeError:
             pass
 
@@ -95,21 +139,13 @@ class ReconWebSearchPlugin:
         json_match = re.search(r"\{.*\}", text, re.DOTALL)
         if json_match:
             try:
-                parsed = json.loads(json_match.group())
-                if isinstance(parsed, dict):
-                    raw = parsed.get("web_search")
-                    if isinstance(raw, list):
-                        return [str(q).strip() for q in raw if str(q).strip()][:3]
-                    if isinstance(raw, dict):
-                        nested = raw.get("web_search")
-                        if isinstance(nested, list):
-                            return [str(q).strip() for q in nested if str(q).strip()][
-                                :3
-                            ]
+                q, u = _from_parsed(json.loads(json_match.group()))
+                if q or u:
+                    return q, u
             except json.JSONDecodeError:
                 pass
 
-        return []
+        return [], []
 
     async def parse_recon_response(
         self,
@@ -155,33 +191,26 @@ class ReconWebSearchPlugin:
             return []
 
         queries: list[str] = []
+        urls: list[str] = []
 
-        # Phase 1: Use pre-parsed data from recon.py
+        # Phase 1: Use pre-parsed data from recon.py. ``data`` is already the
+        # value under the "web_search" key, so pass it straight to _split_payload
+        # (it handles the object form, the legacy bare list, and the nested form).
         if data is not None:
-            if isinstance(data, dict):
-                raw_queries = data.get("web_search")
-                if isinstance(raw_queries, list):
-                    queries = [str(q).strip() for q in raw_queries if str(q).strip()][
-                        :3
-                    ]
-                elif isinstance(raw_queries, dict):
-                    nested = raw_queries.get("web_search")
-                    if isinstance(nested, list):
-                        queries = [str(q).strip() for q in nested if str(q).strip()][:3]
-            elif isinstance(data, list):
-                queries = [str(q).strip() for q in data if str(q).strip()][:3]
+            queries, urls = self._split_payload(data)
 
         # Phase 2: Self-parse from raw LLM text when central parser failed
-        if not queries and _raw_llm_text:
-            queries = self._extract_queries_from_text(_raw_llm_text)
-            if queries:
+        if not queries and not urls and _raw_llm_text:
+            queries, urls = self._extract_payload_from_text(_raw_llm_text)
+            if queries or urls:
                 log_info(
-                    f"[recon_web_search] Extracted {len(queries)} queries from raw "
-                    f"LLM text (central JSON parser missed these)"
+                    f"[recon_web_search] Extracted {len(queries)} queries and "
+                    f"{len(urls)} link(s) from raw LLM text (central JSON parser "
+                    f"missed these)"
                 )
 
-        if not queries:
-            log_debug("[recon_web_search] No search queries generated by LLM")
+        if not queries and not urls:
+            log_debug("[recon_web_search] No search queries or links generated by LLM")
             # No background search was triggered for this turn. Emit a guard
             # instruction so the persona model does not falsely announce that a
             # search is underway (a hallucinated "searching..." message would
@@ -231,23 +260,30 @@ class ReconWebSearchPlugin:
                 context_memory=context_memory
                 if isinstance(context_memory, dict)
                 else None,
+                urls=urls or None,
             )
             log_info(
                 f"[recon_web_search] Triggered background search task {task_id} "
-                f"({len(queries)} queries) for path={interface_path}"
+                f"({len(queries)} queries, {len(urls)} link(s)) for "
+                f"path={interface_path}"
             )
         except Exception as e:
             log_error(f"[recon_web_search] Failed to trigger background search: {e}")
             return []
 
-        queries_str = "; ".join(queries)
+        parts: list[str] = []
+        if queries:
+            parts.append(f"web searches for: {'; '.join(queries)}")
+        if urls:
+            parts.append(f"directly visiting the link(s): {', '.join(urls)}")
+        work_desc = " and ".join(parts)
         instruction = (
-            "You are starting a web search in the background for the following "
-            f"queries: {queries_str}. Tell the user, in their language and your "
-            "own voice, that you are searching and will report the detailed "
-            "results in a follow-up message. Answer the rest of their message "
-            "normally now; do NOT fabricate search results — the real findings "
-            "will arrive later as a separate turn."
+            f"You are starting the following work in the background: {work_desc}. "
+            "Tell the user, in their language and your own voice, that you are "
+            "on it and will report the detailed results in a follow-up message. "
+            "Answer the rest of their message normally now; do NOT fabricate "
+            "search results or link contents — the real findings will arrive "
+            "later as a separate turn."
         )
 
         return [

@@ -46,10 +46,12 @@ async def test_recon_is_non_blocking_and_returns_instruction(
             queries: list[str],
             search_context: str,
             context_memory: dict[str, Any] | None = None,
+            urls: list[str] | None = None,
         ) -> str:
             submitted["interface_path"] = interface_path
             submitted["queries"] = queries
             submitted["search_context"] = search_context
+            submitted["urls"] = urls
             return "task-xyz"
 
     monkeypatch.setattr(
@@ -186,12 +188,17 @@ async def test_orchestrator_delivers_second_turn(
     orch = SearchOrchestrator()
 
     async def _fake_search(
-        self: SearchOrchestrator, queries: list[str]
-    ) -> list[dict[str, Any]]:
-        return [{"query": queries[0], "results": []}]
+        self: SearchOrchestrator,
+        queries: list[str],
+        urls: list[str] | None = None,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+        return [{"query": queries[0], "results": []}], []
 
     async def _fake_synth(
-        self: SearchOrchestrator, blocks: list[dict[str, Any]], search_context: str
+        self: SearchOrchestrator,
+        blocks: list[dict[str, Any]],
+        search_context: str,
+        link_outcomes: list[dict[str, str]] | None = None,
     ) -> str:
         return "SYNTHESIZED RESULT"
 
@@ -315,3 +322,118 @@ async def test_run_search_returns_empty_when_no_backend(
     results = await search_engine.run_search("hello", max_results=3)
 
     assert results == []
+
+
+@pytest.mark.asyncio
+async def test_recon_extracts_check_website_from_object_form(
+    enable_recon: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The object form must split into queries and check_website URLs."""
+    submitted: dict[str, Any] = {}
+
+    class _FakeOrchestrator:
+        async def submit(
+            self,
+            *,
+            interface_path: str | None,
+            queries: list[str],
+            search_context: str,
+            context_memory: dict[str, Any] | None = None,
+            urls: list[str] | None = None,
+        ) -> str:
+            submitted["queries"] = queries
+            submitted["urls"] = urls
+            return "task-xyz"
+
+    monkeypatch.setattr(
+        search_orchestrator,
+        "get_search_orchestrator",
+        lambda: _FakeOrchestrator(),
+    )
+
+    plugin = ReconWebSearchPlugin()
+    # recon.py passes the VALUE under the "web_search" key, not the wrapper.
+    out = await plugin.parse_recon_response(
+        {
+            "queries": ["latest news"],
+            "check_website": ["https://example.com/page"],
+        },
+        message=_Msg(interface_path="tg/7"),
+        context_memory={},
+        text="check https://example.com/page and search latest news",
+    )
+
+    assert submitted["queries"] == ["latest news"]
+    assert submitted["urls"] == ["https://example.com/page"]
+    assert len(out) == 1
+    assert out[0]["type"] == "instruction"
+
+
+@pytest.mark.asyncio
+async def test_recon_check_website_only_triggers_without_queries(
+    enable_recon: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A link with no query must still trigger the background task."""
+    submitted: dict[str, Any] = {}
+
+    class _FakeOrchestrator:
+        async def submit(
+            self,
+            *,
+            interface_path: str | None,
+            queries: list[str],
+            search_context: str,
+            context_memory: dict[str, Any] | None = None,
+            urls: list[str] | None = None,
+        ) -> str:
+            submitted["queries"] = queries
+            submitted["urls"] = urls
+            return "task-xyz"
+
+    monkeypatch.setattr(
+        search_orchestrator,
+        "get_search_orchestrator",
+        lambda: _FakeOrchestrator(),
+    )
+
+    plugin = ReconWebSearchPlugin()
+    # recon.py passes the VALUE under the "web_search" key, not the wrapper.
+    out = await plugin.parse_recon_response(
+        {"queries": [], "check_website": ["https://a.test/x"]},
+        message=_Msg(interface_path="tg/7"),
+        context_memory={},
+        text="look at https://a.test/x",
+    )
+
+    assert submitted["queries"] == []
+    assert submitted["urls"] == ["https://a.test/x"]
+    assert len(out) == 1
+    assert out[0]["type"] == "instruction"
+
+
+@pytest.mark.asyncio
+async def test_search_partial_link_failure_does_not_fail_task(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One unreachable URL among several must not fail the whole search."""
+
+    async def _fake_detailed(
+        self: FetchCache, url: str, max_chars: int
+    ) -> dict[str, str]:
+        if "blocked" in url:
+            return {"url": url, "status": "blocked", "text": "", "reason": "anti-bot"}
+        return {"url": url, "status": "ok", "text": f"content-{url}", "reason": ""}
+
+    monkeypatch.setattr(FetchCache, "get_or_fetch_detailed", _fake_detailed)
+
+    orch = SearchOrchestrator()
+    blocks, link_outcomes = await orch._search(
+        [], urls=["https://ok.test/a", "https://blocked.test/b"]
+    )
+
+    assert blocks == []
+    statuses = {o["url"]: o["status"] for o in link_outcomes}
+    assert statuses == {
+        "https://ok.test/a": "ok",
+        "https://blocked.test/b": "blocked",
+    }

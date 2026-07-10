@@ -151,8 +151,20 @@ async def _insert_task(
     interface_path: str | None,
     queries: list[str],
     search_context: str,
+    urls: list[str] | None = None,
 ) -> None:
     from core.db import get_conn_ctx
+
+    # The schema has a single `queries` TEXT column. To persist the optional
+    # direct-visit URLs without a migration, we store a JSON object
+    # ``{"queries": [...], "urls": [...]}`` whenever URLs are present, and keep
+    # the legacy bare-list JSON when there are none (backward compatible).
+    if urls:
+        queries_blob = json.dumps(
+            {"queries": queries, "urls": urls}, ensure_ascii=False
+        )
+    else:
+        queries_blob = json.dumps(queries, ensure_ascii=False)
 
     async with get_conn_ctx() as conn:
         async with conn.cursor() as cur:
@@ -165,7 +177,7 @@ async def _insert_task(
                 (
                     task_id,
                     interface_path or "",
-                    json.dumps(queries, ensure_ascii=False),
+                    queries_blob,
                     search_context or "",
                 ),
             )
@@ -216,19 +228,34 @@ class SearchOrchestrator:
         queries: list[str],
         search_context: str,
         context_memory: dict[str, Any] | None = None,
+        urls: list[str] | None = None,
     ) -> str:
         """Register a task and launch it in the background. Returns immediately.
 
         This is the entry point called by recon. It NEVER blocks on the actual
         search — it only records the task and schedules the background coroutine.
+
+        ``queries`` are internet searches (SearXNG/Tavily); ``urls`` are explicit
+        links the user asked Synth to visit directly (``check_website``). Both are
+        handled by the SAME task and delivered together in a single second turn.
         """
         max_queries = _cfg_int("WEB_SEARCH_MAX_QUERIES", 3)
         clean = [q.strip() for q in queries if q and q.strip()][:max_queries]
+
+        max_urls = _cfg_int("WEB_SEARCH_MAX_QUERIES", 3)
+        clean_urls = [
+            u.strip()
+            for u in (urls or [])
+            if u and u.strip().lower().startswith(("http://", "https://"))
+        ][:max_urls]
+
         task_id = uuid.uuid4().hex
 
         await self._ensure_table()
         try:
-            await _insert_task(task_id, interface_path, clean, search_context)
+            await _insert_task(
+                task_id, interface_path, clean, search_context, urls=clean_urls
+            )
         except Exception as e:
             log_error(f"[web_search] Failed to persist task {task_id}: {e}")
 
@@ -239,13 +266,15 @@ class SearchOrchestrator:
                 queries=clean,
                 search_context=search_context,
                 context_memory=dict(context_memory or {}),
+                urls=clean_urls,
             )
         )
         _BACKGROUND_TASKS.add(task)
         task.add_done_callback(_BACKGROUND_TASKS.discard)
         log_info(
             f"[web_search] Submitted task {task_id} "
-            f"({len(clean)} queries) for path={interface_path}"
+            f"({len(clean)} queries, {len(clean_urls)} direct link(s)) "
+            f"for path={interface_path}"
         )
         return task_id
 
@@ -257,8 +286,10 @@ class SearchOrchestrator:
         queries: list[str],
         search_context: str,
         context_memory: dict[str, Any],
+        urls: list[str] | None = None,
     ) -> None:
         fetch_timeout = _cfg_int("WEB_SEARCH_FETCH_TIMEOUT", 120)
+        urls = urls or []
         try:
             await _update_status(task_id, "running")
             # The SEARCH phase (network I/O) is bounded by a timeout. The
@@ -267,11 +298,11 @@ class SearchOrchestrator:
             # picks it up, and cancelling on wall-clock time would abort a task
             # that is merely waiting its turn — the engine owns its own
             # per-request timeout once it starts processing.
-            blocks = await asyncio.wait_for(
-                self._search(queries),
+            blocks, link_outcomes = await asyncio.wait_for(
+                self._search(queries, urls),
                 timeout=fetch_timeout,
             )
-            result_text = await self._synthesize(blocks, search_context)
+            result_text = await self._synthesize(blocks, search_context, link_outcomes)
             await _update_status(task_id, "done", result_text=result_text)
             await self._deliver(
                 interface_path=interface_path,
@@ -280,6 +311,8 @@ class SearchOrchestrator:
                 queries=queries,
                 context_memory=context_memory,
                 task_id=task_id,
+                urls=urls,
+                link_outcomes=link_outcomes,
             )
         except asyncio.TimeoutError:
             log_warning(
@@ -291,12 +324,22 @@ class SearchOrchestrator:
             log_error(f"[web_search] Task {task_id} failed: {e}")
             await _update_status(task_id, "error", error=str(e))
 
-    async def _search(self, queries: list[str]) -> list[dict[str, Any]]:
-        """Run all queries concurrently with a shared cache. Returns raw blocks."""
+    async def _search(
+        self, queries: list[str], urls: list[str] | None = None
+    ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+        """Run queries and direct-visit URLs concurrently with a shared cache.
+
+        Returns ``(blocks, link_outcomes)`` where ``blocks`` are the per-query
+        search results and ``link_outcomes`` are the structured per-URL results
+        of the explicit ``check_website`` visits (each a dict from
+        ``fetch_url_detailed``). A failed link never fails the task: it is simply
+        reported with its ``blocked``/``error`` status.
+        """
         results_per_query = _cfg_int("WEB_SEARCH_RESULTS_PER_QUERY", 5)
         fetch_pages = _cfg_bool("WEB_SEARCH_FETCH_PAGES", True)
         fetch_top_n = _cfg_int("WEB_SEARCH_FETCH_TOP_N", 3)
         page_max_chars = _cfg_int("WEB_SEARCH_PAGE_MAX_CHARS", 4000)
+        urls = urls or []
 
         cache = FetchCache()
 
@@ -318,24 +361,53 @@ class SearchOrchestrator:
                 )
             return {"query": query, "results": enriched}
 
+        async def _one_url(url: str) -> dict[str, str]:
+            return await cache.get_or_fetch_detailed(url, page_max_chars)
+
+        query_tasks = [_one_query(q) for q in queries]
+        url_tasks = [_one_url(u) for u in urls]
         gathered = await asyncio.gather(
-            *[_one_query(q) for q in queries], return_exceptions=True
+            *query_tasks, *url_tasks, return_exceptions=True
         )
+
+        n_queries = len(query_tasks)
         blocks: list[dict[str, Any]] = []
-        for item in gathered:
+        for item in gathered[:n_queries]:
             if isinstance(item, dict):
                 blocks.append(item)
             else:
                 log_debug(f"[web_search] query error: {item}")
 
-        return blocks
+        link_outcomes: list[dict[str, str]] = []
+        for url, item in zip(urls, gathered[n_queries:]):
+            if isinstance(item, dict):
+                link_outcomes.append(item)
+            else:
+                # An unexpected exception fetching this specific link: report it
+                # as an error outcome instead of failing the whole task.
+                log_debug(f"[web_search] check_website error for {url}: {item}")
+                link_outcomes.append(
+                    {
+                        "url": url,
+                        "status": "error",
+                        "text": "",
+                        "reason": f"unexpected error: {item}",
+                    }
+                )
+
+        return blocks, link_outcomes
 
     async def _synthesize(
-        self, blocks: list[dict[str, Any]], search_context: str
+        self,
+        blocks: list[dict[str, Any]],
+        search_context: str,
+        link_outcomes: list[dict[str, str]] | None = None,
     ) -> str:
         """Fuse raw results into a single aseptic factual text via the cortex."""
         from core.config import get_active_cortex_engine
         from core.cortex_registry import get_cortex_registry
+
+        link_outcomes = link_outcomes or []
 
         payload_blocks = []
         for b in blocks:
@@ -354,14 +426,35 @@ class SearchOrchestrator:
                 }
             )
 
+        # Direct-visit links: successful ones contribute their page text; failed
+        # ones are passed as structured "not visitable" notes so the synthesis
+        # can tell the user exactly which links could not be read and why.
+        visited_links = [
+            {"url": o.get("url", ""), "page": o.get("text", "")}
+            for o in link_outcomes
+            if o.get("status") == "ok" and o.get("text")
+        ]
+        unreachable_links = [
+            {
+                "url": o.get("url", ""),
+                "status": o.get("status", "error"),
+                "reason": o.get("reason", ""),
+            }
+            for o in link_outcomes
+            if o.get("status") != "ok"
+        ]
+
         instructions = (
             "You are an ASEPTIC text processor, NOT a persona. Merge the raw web "
-            "search results below into a SINGLE factual, well-structured text that "
-            "answers the search intent. Rules: report only facts present in the "
-            "results; do NOT invent anything; cite the source URL after each fact "
-            "or claim; no first person, no opinions, no persona voice; write in the "
-            "same language as the search intent. If the results are insufficient, "
-            "say so plainly."
+            "search results and the directly-visited link contents below into a "
+            "SINGLE factual, well-structured text that answers the search intent. "
+            "Rules: report only facts present in the results; do NOT invent "
+            "anything; cite the source URL after each fact or claim; no first "
+            "person, no opinions, no persona voice; write in the same language as "
+            "the search intent. If any 'unreachable_links' are listed, state "
+            "plainly that those specific links could not be visited (and why), "
+            "without failing the rest. If the results are insufficient, say so "
+            "plainly."
         )
         prompt = {
             "input": {
@@ -369,6 +462,8 @@ class SearchOrchestrator:
                 "payload": {
                     "search_intent": search_context,
                     "blocks": payload_blocks,
+                    "visited_links": visited_links,
+                    "unreachable_links": unreachable_links,
                 },
             },
             "context": {},
@@ -383,7 +478,9 @@ class SearchOrchestrator:
         )
         log_info(
             f"[web_search] Synthesizing {total_results} result(s) across "
-            f"{len(payload_blocks)} query block(s) ({total_chars} chars) "
+            f"{len(payload_blocks)} query block(s) ({total_chars} chars), "
+            f"{len(visited_links)} visited link(s), "
+            f"{len(unreachable_links)} unreachable link(s) "
             f"for intent={search_context!r}"
         )
 
@@ -391,10 +488,11 @@ class SearchOrchestrator:
         # ground truth: even if the synthesis cortex ignores or hallucinates over
         # the payload, Synth must still receive the real facts + sources so she
         # never reports "no results were passed to me" when there clearly were.
-        raw_digest = self._raw_results_digest(blocks)
+        raw_digest = self._raw_results_digest(blocks, link_outcomes)
 
-        # If we genuinely have no results, there is nothing to synthesize.
-        if total_results == 0:
+        # If we genuinely have no search results AND no link outcomes at all,
+        # there is nothing to synthesize or report.
+        if total_results == 0 and not link_outcomes:
             log_info(
                 f"[web_search] No results to synthesize for intent={search_context!r}"
             )
@@ -436,7 +534,10 @@ class SearchOrchestrator:
         return f"{synthesized}\n\n--- RAW SOURCES ---\n{raw_digest}".strip()
 
     @staticmethod
-    def _raw_results_digest(blocks: list[dict[str, Any]]) -> str:
+    def _raw_results_digest(
+        blocks: list[dict[str, Any]],
+        link_outcomes: list[dict[str, str]] | None = None,
+    ) -> str:
         """Build a plain, source-cited digest directly from the search results."""
         lines: list[str] = []
         for b in blocks:
@@ -449,6 +550,19 @@ class SearchOrchestrator:
                 snippet = r.get("snippet", "")
                 url = r.get("url", "")
                 lines.append(f"- {title}: {snippet} ({url})")
+
+        for outcome in link_outcomes or []:
+            url = outcome.get("url", "")
+            status = outcome.get("status", "")
+            if status == "ok":
+                text = outcome.get("text", "")
+                lines.append(f"# Visited link: {url}")
+                if text:
+                    lines.append(text)
+            else:
+                reason = outcome.get("reason", "") or status
+                lines.append(f"# Unreachable link: {url} ({reason})")
+
         return "\n".join(lines).strip()
 
     async def _deliver(
@@ -460,23 +574,33 @@ class SearchOrchestrator:
         queries: list[str],
         context_memory: dict[str, Any],
         task_id: str,
+        urls: list[str] | None = None,
+        link_outcomes: list[dict[str, str]] | None = None,
     ) -> None:
         """Wake Synth with a second turn carrying the synthesized results."""
         if not result_text:
             log_info(f"[web_search] Task {task_id}: empty result, skipping delivery")
             return
 
+        urls = urls or []
+        link_outcomes = link_outcomes or []
+
         try:
             from core import message_queue
 
+            links_line = f"Direct links: {', '.join(urls)}\n" if urls else ""
             prompt = (
                 "=== WEB SEARCH RESULTS ===\n"
                 "A background web search you announced earlier has completed. "
                 "Report the findings to the user naturally, in your own voice, in "
                 "their language. The following is an aseptic factual summary with "
-                "sources — do not read it verbatim, integrate it.\n\n"
+                "sources — do not read it verbatim, integrate it. If any links "
+                "could not be visited, tell the user which specific ones failed "
+                "(and why) while still reporting everything that succeeded.\n\n"
                 f"Search intent: {search_context}\n"
-                f"Queries: {', '.join(queries)}\n\n"
+                f"Queries: {', '.join(queries)}\n"
+                f"{links_line}"
+                "\n"
                 f"{result_text}"
             )
 
@@ -499,6 +623,8 @@ class SearchOrchestrator:
                 "web_search_task_id": task_id,
                 "web_search_context": search_context,
                 "web_search_queries": queries,
+                "web_search_urls": urls,
+                "web_search_link_outcomes": link_outcomes,
                 "prior_context": context_memory,
             }
 
