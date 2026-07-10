@@ -22,9 +22,11 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import io
 import re
 import threading
 import time
+import uuid
 import wave
 from pathlib import Path
 from typing import Any
@@ -157,6 +159,30 @@ config_registry.get_value(
     component="vox_plugin",
     hidden=True,
 )
+config_registry.get_value(
+    "VOX_SENTENCE_CHUNKING",
+    True,
+    value_type=bool,
+    group="plugins",
+    component="vox_plugin",
+    hidden=True,
+)
+# Visible toggle (Engines tab → vox_plugin box): when on, replies to typed
+# text messages also get a TTS clip attached on every interface. Off keeps
+# the default behavior (Telegram/Discord only speak in reply to voice input).
+config_registry.get_value(
+    "VOX_SPEAK_TEXT_REPLIES",
+    False,
+    label="Attach voice to text replies",
+    description=(
+        "When enabled, replies to typed text messages also get a voice clip "
+        "attached (all interfaces). When disabled, Telegram/Discord replies "
+        "are only spoken when the incoming message was voice."
+    ),
+    value_type=bool,
+    group="plugins",
+    component="vox_plugin",
+)
 
 # Legacy aliases (read by the HTTP engine via its original config keys)
 # tts_lipsync variables are intentionally kept so existing .env files keep working.
@@ -167,6 +193,35 @@ config_registry.get_value(
 
 _EMOJI_RE = re.compile(r"[^\w\s,.!?;:\'\-\"\u2018\u2019]+")
 _MULTI_SPACE_RE = re.compile(r"\s+")
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?\u3002\uff01\uff1f])\s+")
+
+
+def _split_sentences(text: str, min_chars: int = 12) -> list[str]:
+    """Best-effort sentence splitter used only for TTS chunking.
+
+    Not linguistically precise (no abbreviation handling, e.g. "Mr. Smith"
+    will split) \u2014 good enough to find natural pause points for streaming
+    playback, which tolerates an occasional wrong split far better than a
+    missed one. Fragments shorter than ``min_chars`` are merged into a
+    neighbour so a lone "Ok." doesn't become its own tiny synthesis call.
+    """
+    raw = [s.strip() for s in _SENTENCE_SPLIT_RE.split(text.strip()) if s.strip()]
+    if len(raw) <= 1:
+        return raw
+
+    merged: list[str] = []
+    buffer = ""
+    for piece in raw:
+        buffer = f"{buffer} {piece}".strip() if buffer else piece
+        if len(buffer) >= min_chars:
+            merged.append(buffer)
+            buffer = ""
+    if buffer:
+        if merged:
+            merged[-1] = f"{merged[-1]} {buffer}"
+        else:
+            merged.append(buffer)
+    return merged
 
 
 def _get_wav_duration(path: Path) -> float | None:
@@ -222,6 +277,7 @@ class VoxPlugin(AIPluginBase):
         self._engine_settings: dict[str, Any] = {}
         self._output_dir: Path = Path("res/synth_webui/static/audio/tts")
         self._fallback_to_text: bool = True
+        self._sentence_chunking_enabled: bool = True
 
         # Pre-warm the lingua detector in a daemon thread so it is ready before
         # the first detect_language() call arrives from recon.  Building all
@@ -357,18 +413,39 @@ class VoxPlugin(AIPluginBase):
                 log_warning(f"[vox_plugin] preprocess_emotional_text failed: {exc}")
 
         # --- Generate audio ---
-        try:
-            # pass detected language hint to engine if available; engines may
-            # ignore unexpected kwargs.
-            kwargs: dict[str, Any] = {}
-            if detected_lang:
-                kwargs["language"] = detected_lang
-            audio_bytes: bytes | None = await asyncio.to_thread(
-                engine.generate_tts, tts_text, emotion, **kwargs
+        # pass detected language hint to engine if available; engines may
+        # ignore unexpected kwargs.
+        kwargs: dict[str, Any] = {}
+        if detected_lang:
+            kwargs["language"] = detected_lang
+
+        # Sentence-by-sentence streaming shrinks time-to-first-audio for the
+        # live webui/stage avatar on multi-sentence replies — the first
+        # sentence plays while later ones are still synthesizing, instead of
+        # the client waiting for the entire reply. See _chunking_karada for
+        # the (narrow) eligibility rules and _speak_chunked for the pipeline.
+        chunk_karada = await self._chunking_karada(
+            generate_only, em_events, interface_path
+        )
+        sentences = _split_sentences(tts_text) if chunk_karada else []
+
+        already_streamed = False
+        audio_bytes: bytes | None = None
+        if len(sentences) > 1:
+            audio_bytes = await self._speak_chunked(
+                sentences, engine, emotion, kwargs, chunk_karada
             )
-        except Exception as exc:
-            log_error(f"[vox_plugin] Engine '{name}' generation error: {exc}")
-            audio_bytes = None
+            already_streamed = audio_bytes is not None
+
+        if audio_bytes is None:
+            try:
+                audio_bytes = await asyncio.to_thread(
+                    engine.generate_tts, tts_text, emotion, **kwargs
+                )
+            except Exception as exc:
+                log_error(f"[vox_plugin] Engine '{name}' generation error: {exc}")
+                audio_bytes = None
+            already_streamed = False
 
         if not audio_bytes:
             log_warning(f"[vox_plugin] Engine '{name}' returned no audio.")
@@ -421,6 +498,7 @@ class VoxPlugin(AIPluginBase):
                 context=context,
                 original_message=original_message,
                 audio_duration_s=audio_duration_s,
+                skip_karada_broadcast=already_streamed,
             )
 
         # --- Schedule facial expression timeline (voice responses) ---
@@ -694,6 +772,16 @@ class VoxPlugin(AIPluginBase):
                     component="vox_plugin",
                 )
             )
+
+            self._sentence_chunking_enabled = bool(
+                config_registry.get_value(
+                    "VOX_SENTENCE_CHUNKING",
+                    True,
+                    value_type=bool,
+                    group="plugins",
+                    component="vox_plugin",
+                )
+            )
         except Exception as exc:
             log_warning(f"[vox_plugin] refresh_config failed: {exc}")
 
@@ -767,19 +855,158 @@ class VoxPlugin(AIPluginBase):
         except Exception as exc:
             log_warning(f"[vox_plugin] Failed to schedule expression timeline: {exc}")
 
-    def _write_audio(self, path: Path, audio_bytes: bytes, engine: Any) -> None:
-        """Write audio bytes to disk, wrapping raw PCM in WAV if needed."""
+    async def _chunking_karada(
+        self,
+        generate_only: bool,
+        em_events: list[FacialExpressionEvent],
+        interface_path: str | None,
+    ) -> Any | None:
+        """Return the live Karada state server when sentence-chunked TTS
+        streaming applies to this call, else ``None``.
+
+        Chunking is scoped narrowly on purpose: only the live webui/stage
+        avatar path (Telegram/Discord/etc. still get exactly one clip per
+        reply — chunking would mean N separate voice messages, which is a
+        regression there, not an improvement), never when facial-expression
+        tags are present (``_schedule_expression_timeline`` anchors its
+        timeline to whole-reply text offsets, which chunked synthesis would
+        have to reproduce per-chunk), and gated by ``VOX_SENTENCE_CHUNKING``
+        so it can be switched off without a code change.
+        """
+        if generate_only or em_events or not self._sentence_chunking_enabled:
+            return None
+        if not interface_path:
+            return None
+        try:
+            from core.interface_path_utils import parse_interface_path
+
+            iface_name, _ = parse_interface_path(interface_path)
+        except Exception:
+            return None
+        if iface_name != "synth_webui":
+            return None
+        try:
+            from core.animation_handler import get_karada_state_server
+
+            karada = get_karada_state_server()
+        except Exception:
+            return None
+        if not karada or not karada.has_connected_clients():
+            return None
+        return karada
+
+    async def _speak_chunked(
+        self,
+        sentences: list[str],
+        engine: Any,
+        emotion: str | None,
+        kwargs: dict[str, Any],
+        karada: Any,
+    ) -> bytes | None:
+        """Synthesize *sentences* one at a time, broadcasting each to the
+        live avatar as soon as it is ready while the next one synthesizes in
+        the background — this is the actual latency win: the first sentence
+        is audible without waiting for the whole reply to finish generating.
+
+        Returns the full reply's concatenated WAV bytes (used for the
+        persisted chat bubble / click-to-replay / non-live interfaces,
+        exactly as the single-shot path would have produced), or ``None`` if
+        every chunk failed to synthesize — the caller falls back to
+        whole-reply synthesis in that case.
+
+        Broadcasts are paced with ``asyncio.sleep(duration)`` between
+        chunks so ``KaradaStateServer.broadcast_audio``'s talk-animation
+        return-to-idle timer (reset on every call) stays roughly in step
+        with actual client playback instead of firing early because
+        synthesis outran real-time audio.
+        """
+        turn_id = f"vox-{uuid.uuid4().hex[:8]}"
+
+        async def _synth(sentence: str) -> bytes | None:
+            try:
+                return await asyncio.to_thread(
+                    engine.generate_tts, sentence, emotion, **kwargs
+                )
+            except Exception as exc:
+                log_error(f"[vox_plugin] chunk synthesis error: {exc}")
+                return None
+
+        wav_chunks: list[bytes] = []
+        pending: "asyncio.Task[bytes | None] | None" = None
+
+        for i, sentence in enumerate(sentences):
+            raw = await pending if pending is not None else await _synth(sentence)
+            pending = None
+            if not raw:
+                continue
+
+            wav_bytes = self._to_wav_bytes(raw, engine)
+            wav_chunks.append(wav_bytes)
+
+            more_coming = i + 1 < len(sentences)
+            if more_coming:
+                pending = asyncio.create_task(_synth(sentences[i + 1]))
+
+            chunk_path = self._output_dir / f"vox_{turn_id}_{i}.wav"
+            duration: float | None = None
+            try:
+                chunk_path.write_bytes(wav_bytes)
+                duration = _get_wav_duration(chunk_path)
+            except Exception as exc:
+                log_error(f"[vox_plugin] failed to write chunk {i}: {exc}")
+
+            try:
+                await karada.broadcast_audio(
+                    audio_path=str(chunk_path),
+                    audio_duration_s=duration,
+                    turn_id=turn_id,
+                )
+            except Exception as exc:
+                log_warning(f"[vox_plugin] chunk broadcast failed: {exc}")
+
+            if more_coming and duration:
+                await asyncio.sleep(duration)
+
+        if not wav_chunks:
+            return None
+        return self._concat_wav_bytes(wav_chunks)
+
+    @staticmethod
+    def _to_wav_bytes(audio_bytes: bytes, engine: Any) -> bytes:
+        """Normalize raw engine output to WAV bytes, wrapping raw PCM if needed."""
         fmt = getattr(engine, "output_format", "wav")
         if fmt == "pcm" or not audio_bytes.startswith(b"RIFF"):
             sr = getattr(engine, "sample_rate", 22050)
             ch = getattr(engine, "channels", 1)
-            with wave.open(str(path), "wb") as wf:
+            buf = io.BytesIO()
+            with wave.open(buf, "wb") as wf:
                 wf.setnchannels(ch)
                 wf.setsampwidth(2)
                 wf.setframerate(sr)
                 wf.writeframes(audio_bytes)
-        else:
-            path.write_bytes(audio_bytes)
+            return buf.getvalue()
+        return audio_bytes
+
+    def _write_audio(self, path: Path, audio_bytes: bytes, engine: Any) -> None:
+        """Write audio bytes to disk, wrapping raw PCM in WAV if needed."""
+        path.write_bytes(self._to_wav_bytes(audio_bytes, engine))
+
+    @staticmethod
+    def _concat_wav_bytes(wav_chunks: list[bytes]) -> bytes:
+        """Concatenate same-format WAV byte blobs (already normalized via
+        ``_to_wav_bytes``) into a single clip, for the persisted/dispatched
+        file when a reply was synthesized sentence-by-sentence."""
+        if len(wav_chunks) == 1:
+            return wav_chunks[0]
+        with wave.open(io.BytesIO(wav_chunks[0]), "rb") as first:
+            params = first.getparams()
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as out:
+            out.setparams(params)
+            for chunk in wav_chunks:
+                with wave.open(io.BytesIO(chunk), "rb") as wf:
+                    out.writeframes(wf.readframes(wf.getnframes()))
+        return buf.getvalue()
 
     async def _dispatch(
         self,
@@ -790,8 +1017,15 @@ class VoxPlugin(AIPluginBase):
         context: dict | None,
         original_message: Any,
         audio_duration_s: float | None = None,
+        skip_karada_broadcast: bool = False,
     ) -> None:
-        """Dispatch generated audio to the correct interface."""
+        """Dispatch generated audio to the correct interface.
+
+        ``skip_karada_broadcast`` is set by ``speak()`` when the reply was
+        already streamed to the live avatar sentence-by-sentence
+        (``_speak_chunked``) — the karada fan-out for the combined clip
+        would otherwise double-play the same audio the client just heard.
+        """
         if not interface_path:
             log_warning("[vox_plugin] No interface_path; cannot dispatch audio.")
             return
@@ -816,11 +1050,14 @@ class VoxPlugin(AIPluginBase):
             # audio received via Telegram while the WebUI is open) and whether
             # it was automatic or explicitly triggered. We never iterate client
             # connections here — the server distributes to all transports.
-            await self._broadcast_audio_to_clients(
-                audio_path=audio_path,
-                lipsync_data=lipsync_data,
-                audio_duration_s=audio_duration_s,
-            )
+            # Skipped when the reply was already streamed chunk-by-chunk
+            # (see the skip_karada_broadcast docstring above).
+            if not skip_karada_broadcast:
+                await self._broadcast_audio_to_clients(
+                    audio_path=audio_path,
+                    lipsync_data=lipsync_data,
+                    audio_duration_s=audio_duration_s,
+                )
 
             if iface_name == "synth_webui" and hasattr(target_iface, "send_tts_audio"):
                 session_id = levels[0] if levels else None
@@ -947,28 +1184,13 @@ class VoxPlugin(AIPluginBase):
     @staticmethod
     def _import_builtin_engines() -> None:
         """Import built-in Vox engine modules so they self-register."""
+        # The http engine is always imported (not gated on TTS_ENDPOINTS
+        # anymore) so its config box shows in Engines → Vox even before an
+        # endpoint has been configured.
         builtins = [
+            "plugins.vox_engines.http",
             "plugins.vox_engines.kitten",
         ]
-
-        try:
-            tts_endpoints = config_registry.get_value(
-                "TTS_ENDPOINTS",
-                "",
-                value_type=str,
-                group="plugins",
-                component="tts_lipsync",
-            )
-            definition = getattr(config_registry, "_definitions", {}).get(
-                "TTS_ENDPOINTS"
-            )
-            if definition is not None:
-                config_registry._load_definition_sync(definition)
-                tts_endpoints = definition.value
-            if tts_endpoints and str(tts_endpoints).strip():
-                builtins.insert(0, "plugins.vox_engines.http")
-        except Exception:
-            pass
 
         for mod in builtins:
             try:

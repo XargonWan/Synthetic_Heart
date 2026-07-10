@@ -75,6 +75,16 @@ usually does the following:
 The Custom Endpoint preset is also available for any service that is not
 already covered by the built-in presets.
 
+TTS-only providers (e.g. **Fish Audio**) are listed in a dedicated *TTS
+Endpoints* section below the main provider grid. Their presets can define
+provider-specific form fields (``extra_fields`` in the preset JSON) that are
+rendered in the wizard and persisted into the endpoint's ``extra_config`` —
+for Fish Audio: the model tier (``s2.1-pro-free`` by default), the audio
+format (``wav`` recommended), and the ``reference_id`` of the cloned/library
+voice. The API key is sent as an ``Authorization: Bearer`` header
+automatically; requests use the Fish ``{text, reference_id, format}`` payload
+schema with the model tier passed as a ``model`` HTTP header.
+
 Probe status
 ------------
 

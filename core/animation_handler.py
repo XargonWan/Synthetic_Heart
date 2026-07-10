@@ -2173,6 +2173,7 @@ class KaradaStateServer:
         lipsync_data: Optional[Dict] = None,
         audio_duration_s: Optional[float] = None,
         text: Optional[str] = None,
+        turn_id: Optional[str] = None,
     ) -> None:
         """Broadcast a TTS audio-play command to *every* connected client.
 
@@ -2194,6 +2195,14 @@ class KaradaStateServer:
             text:             Optional caption (forwarded in the payload; the
                               chat-bubble persistence is an interface concern,
                               handled separately by the originating interface).
+            turn_id:          Optional identifier shared by every chunk of one
+                              sentence-streamed reply (see
+                              ``VoxPlugin._speak_chunked``). Forwarded as-is in
+                              the payload so clients can group same-turn chunks
+                              for gapless queued playback instead of each one
+                              interrupting the last; omitted for single-shot
+                              replies (each is its own turn from the client's
+                              point of view).
         """
         url = self._derive_audio_url(audio_path)
 
@@ -2204,6 +2213,8 @@ class KaradaStateServer:
             payload["lipsync"] = lipsync_data
         if audio_duration_s is not None:
             payload["audio_duration_s"] = audio_duration_s
+        if turn_id is not None:
+            payload["turn_id"] = turn_id
 
         if self._has_any_transport():
             for transport in self._transports:

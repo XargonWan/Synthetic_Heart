@@ -365,7 +365,13 @@ Available Vox engines
      - Notes
    * - ``http``
      - ``vox_engines/http.py``
-     - Legacy built-in HTTP TTS engine. Supports ``TTS_ENDPOINTS`` compatibility and is intended for backward-compatible deployments only. For new external HTTP TTS integrations, prefer adding a custom external endpoint and mapping it to ``vox``.
+     - Generic HTTP TTS engine. Posts to one or more external TTS servers
+       with failover, in either the legacy ``{text, voice_wav}`` payload
+       style or the reference-id style used by
+       Fish Audio's ``/v1/tts``. Fully configurable from the WebUI Engines
+       tab (Vox → http box) — see the key table below. The legacy
+       ``TTS_ENDPOINTS`` / ``TTS_TIMEOUT_SECONDS`` keys are still honoured
+       as fallbacks.
    * - ``kitten``
      - ``vox_engines/kitten.py``
      - Neural KittenTTS engine; requires the ``kittentts`` package or uses
@@ -375,6 +381,68 @@ Available Vox engines
        pydub``) for audio output to work.  Without them the engine will fall
        back to text and log an informative error.  Produces higher-quality
        audio than the legacy system-voice implementation.
+
+HTTP engine configuration
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+All keys are editable in the WebUI: Engines tab → Vox → select ``http`` →
+expand the *http* box → **Configuration**.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 15 55
+
+   * - Key
+     - Default
+     - Purpose
+   * - ``HTTP_TTS_ENDPOINTS``
+     - *(empty)*
+     - Comma-separated endpoint URLs, tried in order (failover). Fish
+       Audio: ``https://api.fish.audio/v1/tts``. Falls back to the legacy
+       ``TTS_ENDPOINTS`` key when empty.
+   * - ``HTTP_TTS_API_KEY``
+     - *(empty)*
+     - Sent as ``Authorization: Bearer <key>``. Required by Fish Audio.
+   * - ``HTTP_TTS_MODEL``
+     - *(empty)*
+     - Sent as a ``model`` HTTP header when set (Fish Audio tiers:
+       ``s2.1-pro-free``, ``s2.1-pro``, ``s1``).
+   * - ``HTTP_TTS_REFERENCE_ID``
+     - *(empty)*
+     - Voice ``reference_id`` (Fish Audio cloned/library voice). Setting it
+       switches the payload to the Fish-style
+       ``{text, reference_id, format}`` schema; empty keeps the legacy
+       ``{text, voice_wav, use_emo_text}`` schema.
+   * - ``HTTP_TTS_FORMAT``
+     - ``pcm``
+     - Audio format returned by the server (``pcm`` or ``wav``). Use
+       ``wav`` for Fish Audio. Also sent as the payload ``format`` field in
+       reference-id mode.
+   * - ``HTTP_TTS_SAMPLE_RATE``
+     - ``22050``
+     - Sample rate used to wrap raw PCM responses into WAV (Fish Audio pcm
+       is 44100 Hz). Ignored for ``wav``.
+   * - ``HTTP_TTS_VOICE_WAV``
+     - *(empty)*
+     - Server-side reference-voice WAV path for legacy payload mode;
+       omitted from the payload when empty.
+   * - ``HTTP_TTS_EXTRA_HEADERS``
+     - ``{}``
+     - JSON object merged into the request headers.
+   * - ``HTTP_TTS_EXTRA_PARAMS``
+     - ``{}``
+     - JSON object merged into the request payload (e.g. Fish Audio
+       prosody controls such as ``temperature`` / ``top_p``).
+   * - ``HTTP_TTS_TIMEOUT_SECONDS``
+     - ``0``
+     - Per-request timeout; ``0`` falls back to the legacy
+       ``TTS_TIMEOUT_SECONDS`` key (default 300).
+
+Example — Fish Audio ``s2.1-pro-free``: set the endpoint to
+``https://api.fish.audio/v1/tts``, paste your API key, set the model to
+``s2.1-pro-free``, set the reference ID to your cloned/library voice id and
+the format to ``wav``, then select ``http`` as the active Vox engine.
+
 Lip-sync Integration
 ---------------------
 

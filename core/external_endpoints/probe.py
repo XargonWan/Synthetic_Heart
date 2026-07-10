@@ -101,6 +101,22 @@ def get_adapter_for_endpoint(
             timeout=timeout,
         )
 
+    if proto == EndpointProtocol.FISH:
+        from core.external_endpoints.adapters.fish_audio_adapter import (
+            DEFAULT_BASE_URL,
+            FishAudioAdapter,
+        )
+
+        if not api_key:
+            raise ValueError(
+                f"[probe] Endpoint '{endpoint.name}' (fish) requires an API key."
+            )
+        return FishAudioAdapter(
+            base_url=endpoint.base_url or DEFAULT_BASE_URL,
+            api_key=api_key,
+            extra_config=endpoint.extra_config,
+        )
+
     if proto == EndpointProtocol.CUSTOM:
         if endpoint.extra_config.get("legacy_http_tts"):
             from core.external_endpoints.adapters.custom_tts_adapter import (

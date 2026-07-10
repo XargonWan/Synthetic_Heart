@@ -42,7 +42,7 @@ async def init_recent_chats_table():
             raise
 
 
-async def update_chat_activity(chat_id: int, metadata: Optional[Dict] = None):
+async def update_chat_activity(chat_id: int | str, metadata: Optional[Dict] = None):
     """Update the last activity time for a chat."""
     await init_recent_chats_table()
     async with get_conn_ctx() as conn:
@@ -217,7 +217,9 @@ class RecentChatsPlugin:
         return self._build_message_action(text, context, original_message)
 
     @staticmethod
-    def _build_message_action(text: str, context: dict, original_message) -> dict:
+    def _build_message_action(
+        text: str, context: dict, original_message
+    ) -> dict | None:
         """Build a message action dict for interface-agnostic delivery."""
         interface_path = None
         if context and isinstance(context, dict):

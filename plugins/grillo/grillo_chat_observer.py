@@ -57,7 +57,31 @@ register_exposed_var(
     default=3,
     value_type=int,
     ui_type="number",
-    description="Anti-spam guard: a conversation whose last message came from the synth is FORBIDDEN for proactive messaging for this many days",
+    description="Strict anti-spam guard: a conversation whose last message came from the synth is FORBIDDEN for proactive messaging for this many days. Set to 0 to fall back to the finer-grained minutes cooldown (GRILLO_OBSERVER_SELF_COOLDOWN_MINUTES)",
+    scope="plugins",
+    component="grillo_chat_observer",
+    tags=["plugin"],
+)
+
+register_exposed_var(
+    "GRILLO_OBSERVER_SELF_COOLDOWN_MINUTES",
+    label="Grillo Observer Self-Cooldown (minutes)",
+    default=45,
+    value_type=int,
+    ui_type="number",
+    description="Fine-grained anti-spam guard used when the days cooldown is 0: after the synth speaks last in a conversation, proactive messaging to it is blocked for this many minutes. Keep it below GRILLO_OBSERVER_INTERVAL or every other run will be skipped",
+    scope="plugins",
+    component="grillo_chat_observer",
+    tags=["plugin"],
+)
+
+register_exposed_var(
+    "GRILLO_OUTREACH_QUIET_MINUTES",
+    label="Grillo Outreach Quiet Window (minutes)",
+    default=15,
+    value_type=int,
+    ui_type="number",
+    description="Active-conversation guard: a chat whose last HUMAN message is younger than this is considered mid-conversation and is skipped by proactive outreach for that run",
     scope="plugins",
     component="grillo_chat_observer",
     tags=["plugin"],
@@ -170,12 +194,41 @@ class GrilloChatObserverPlugin:
         )
         # Anti-spam self-cooldown: number of days a path is off-limits for
         # proactive messaging if its most recent message came from the synth.
+        # When 0, the finer-grained minutes cooldown below applies instead.
         self.self_cooldown_days = int(
             config_registry.get_value(
                 "GRILLO_OBSERVER_SELF_COOLDOWN_DAYS",
                 3,
                 label="Grillo Observer Self-Cooldown (days)",
-                description="Anti-spam guard: a conversation whose last message came from the synth is forbidden for proactive messaging for this many days",
+                description="Strict anti-spam guard: a conversation whose last message came from the synth is forbidden for proactive messaging for this many days. Set to 0 to use the minutes cooldown instead",
+                value_type=int,
+                group="grillo",
+                component="grillo_chat_observer",
+            )
+        )
+        # Fine-grained self-cooldown used when the days guard is disabled (0).
+        # Must stay below the observer interval, otherwise consecutive runs
+        # will always land inside the cooldown and outreach halves in cadence.
+        self.self_cooldown_minutes = int(
+            config_registry.get_value(
+                "GRILLO_OBSERVER_SELF_COOLDOWN_MINUTES",
+                45,
+                label="Grillo Observer Self-Cooldown (minutes)",
+                description="Fine-grained anti-spam guard used when the days cooldown is 0: after the synth speaks last in a conversation, proactive messaging to it is blocked for this many minutes",
+                value_type=int,
+                group="grillo",
+                component="grillo_chat_observer",
+            )
+        )
+        # Active-conversation guard: if the last HUMAN message in a chat is
+        # younger than this, the conversation is considered live and proactive
+        # outreach must not butt into it; the next run re-evaluates.
+        self.quiet_minutes = int(
+            config_registry.get_value(
+                "GRILLO_OUTREACH_QUIET_MINUTES",
+                15,
+                label="Grillo Outreach Quiet Window (minutes)",
+                description="Active-conversation guard: a chat whose last human message is younger than this is skipped by proactive outreach for that run",
                 value_type=int,
                 group="grillo",
                 component="grillo_chat_observer",
@@ -212,11 +265,6 @@ class GrilloChatObserverPlugin:
         register_plugin("grillo_chat_observer", self)
         log_info("[grillo_chat_observer] Registered GrilloChatObserverPlugin")
 
-        # Track last run timestamp for observer to avoid missing messages even
-        # if the global checker has already consumed them. This is initialized
-        # on start() to the current time to avoid acting on historic messages.
-        self._last_run_ts: float = 0.0
-
         # Config listeners
         config_registry.add_listener(
             "GRILLO_OBSERVER_ENABLED", lambda v: setattr(self, "enabled", bool(v))
@@ -242,6 +290,14 @@ class GrilloChatObserverPlugin:
         config_registry.add_listener(
             "GRILLO_OBSERVER_SELF_COOLDOWN_DAYS",
             lambda v: setattr(self, "self_cooldown_days", int(v)),
+        )
+        config_registry.add_listener(
+            "GRILLO_OBSERVER_SELF_COOLDOWN_MINUTES",
+            lambda v: setattr(self, "self_cooldown_minutes", int(v)),
+        )
+        config_registry.add_listener(
+            "GRILLO_OUTREACH_QUIET_MINUTES",
+            lambda v: setattr(self, "quiet_minutes", int(v)),
         )
         config_registry.add_listener(
             "GRILLO_OBSERVER_ACTIVITY_WINDOW_DAYS",
@@ -306,11 +362,25 @@ class GrilloChatObserverPlugin:
 
     async def _observer_loop(self):
         log_info("[grillo_chat_observer] Observer loop running")
+        # Resume from the persisted last-run timestamp instead of always
+        # waiting a fresh full interval. Without this, a process restart
+        # (e.g. during dev iteration) resets the wait to `self.interval`
+        # every time, and if restarts happen more often than the interval,
+        # _run_observer() never gets a chance to fire.
+        now = datetime.now(timezone.utc).timestamp()
+        elapsed = max(0.0, now - (self._last_run_ts or now))
+        next_sleep = max(0.0, self.interval - elapsed)
+        if elapsed > 0:
+            log_debug(
+                f"[grillo_chat_observer] Resuming schedule: {elapsed:.0f}s elapsed "
+                f"since last_run_ts, sleeping {next_sleep:.0f}s before next check"
+            )
         try:
             while GrilloChatObserverPlugin._scheduler_running:
                 try:
                     # Sleep for interval but keep cancellable
-                    await asyncio.sleep(self.interval)
+                    await asyncio.sleep(next_sleep)
+                    next_sleep = self.interval
                     if not GrilloChatObserverPlugin._scheduler_running:
                         break
 
@@ -430,13 +500,13 @@ class GrilloChatObserverPlugin:
             # need at least one eligible target to speak into; otherwise the
             # whole network is either dead or on cooldown and we stay silent.
             if not fragments and not eligible_targets:
-                log_debug(
+                log_info(
                     "[grillo_chat_observer] No fragments and no eligible targets; skipping"
                 )
                 return
             if decay_driven and not eligible_targets:
-                log_debug(
-                    "[grillo_chat_observer] Decay-driven run but no eligible targets (dead/cooldown); skipping"
+                log_info(
+                    "[grillo_chat_observer] Decay-driven run but no eligible targets (dead/cooldown/live); skipping"
                 )
                 return
 
@@ -631,9 +701,15 @@ class GrilloChatObserverPlugin:
         - ``last_from_self``: whether the synth spoke last
         - ``age_seconds``: absolute time delta since the last message
         - ``eligible``: True only if there was genuine human (non-self)
-          activity within ``activity_window_days`` (anti-dead-chat gate) AND the
-          self-cooldown (``self_cooldown_days``) is not currently active.
-        - ``cooldown_active``: True when the synth spoke last within cooldown.
+          activity within ``activity_window_days`` (anti-dead-chat gate), the
+          self-cooldown is not currently active, AND the conversation is not
+          live right now (see ``in_active_conversation``).
+        - ``cooldown_active``: True when the synth spoke last within the
+          cooldown window. The window is ``self_cooldown_days`` when > 0
+          (strict legacy behaviour); otherwise ``self_cooldown_minutes``.
+        - ``in_active_conversation``: True when a human spoke last within
+          ``quiet_minutes`` — the chat is mid-conversation and outreach must
+          not interrupt it; the next run re-evaluates.
 
         The activation-frame prompt uses this to pick a precise
         ``interface_path`` where a void was detected, instead of routing to a
@@ -646,7 +722,11 @@ class GrilloChatObserverPlugin:
 
             now = datetime.now(timezone.utc)
             activity_cutoff = now - timedelta(days=self.activity_window_days)
-            cooldown_cutoff = now - timedelta(days=self.self_cooldown_days)
+            if self.self_cooldown_days > 0:
+                cooldown_cutoff = now - timedelta(days=self.self_cooldown_days)
+            else:
+                cooldown_cutoff = now - timedelta(minutes=self.self_cooldown_minutes)
+            quiet_cutoff = now - timedelta(minutes=self.quiet_minutes)
 
             recent = await get_recent_interface_paths(limit * 2)
             for item in recent:
@@ -687,6 +767,14 @@ class GrilloChatObserverPlugin:
                     and last_ts >= cooldown_cutoff
                 )
 
+                # Active-conversation guard: a human spoke last and recently —
+                # the chat is live, outreach must not interrupt it this run.
+                in_active_conversation = bool(
+                    not last_from_self
+                    and last_ts is not None
+                    and last_ts >= quiet_cutoff
+                )
+
                 # Anti-dead-chat gate: genuine human activity within window.
                 has_recent_human = False
                 for msg in reversed(list(messages)):
@@ -700,7 +788,11 @@ class GrilloChatObserverPlugin:
                         has_recent_human = True
                         break
 
-                eligible = has_recent_human and not cooldown_active
+                eligible = (
+                    has_recent_human
+                    and not cooldown_active
+                    and not in_active_conversation
+                )
 
                 targets.append(
                     {
@@ -709,6 +801,7 @@ class GrilloChatObserverPlugin:
                         "last_from_self": last_from_self,
                         "age_seconds": age_seconds,
                         "cooldown_active": cooldown_active,
+                        "in_active_conversation": in_active_conversation,
                         "has_recent_human": has_recent_human,
                         "eligible": eligible,
                     }
@@ -784,7 +877,12 @@ class GrilloChatObserverPlugin:
                     age_h = f"{float(age) / 3600.0:.1f}h" if age is not None else "?"
                 except Exception:
                     age_h = "?"
-                cd = "ON-COOLDOWN(OFF-LIMITS)" if t.get("cooldown_active") else "ok"
+                if t.get("cooldown_active"):
+                    cd = "ON-COOLDOWN(OFF-LIMITS)"
+                elif t.get("in_active_conversation"):
+                    cd = "LIVE-CONVERSATION(OFF-LIMITS)"
+                else:
+                    cd = "ok"
                 last = t.get("last_sender") or "?"
                 targets_block += f"- interface_path={path} | idle={age_h} | last_sender={last} | cooldown={cd}\n"
         else:

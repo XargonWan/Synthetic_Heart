@@ -502,13 +502,27 @@ class TTSLipSyncPlugin(AIPluginBase):
 
         return endpoints
 
-    def _get_voice_ref(self, endpoint: str) -> str:
-        """Get the appropriate voice reference path for a specific endpoint."""
-        if "192.168.1.69" in endpoint:
-            # Server VM (n2)
-            return r"F:\0synth\0synth\reference\2b_ref.wav"
-        # Dev Machine (n1)
-        return r"C:\Users\EVO\Documents\ai2\index-tts\index-tts-training_v2\audio\reference\2b_ref.wav"
+    def _get_voice_ref(self) -> str:
+        """Get the reference voice WAV path sent to the TTS server.
+
+        Configured via ``TTS_VOICE_WAV``; empty means the field is omitted
+        from the request payload.
+        """
+        return str(
+            config_registry.get_value(
+                "TTS_VOICE_WAV",
+                "",
+                label="Reference voice WAV path",
+                description=(
+                    "Server-side path to the reference voice WAV sent as "
+                    "'voice_wav'. Omitted from the payload when empty."
+                ),
+                value_type=str,
+                group="plugins",
+                component="tts_lipsync",
+            )
+            or ""
+        ).strip()
 
     async def _generate_audio(
         self, text: str, emotion: str | None = None
@@ -528,19 +542,16 @@ class TTSLipSyncPlugin(AIPluginBase):
 
         audio_bytes = None
 
-        for endpoint in endpoints:
-            # Construct payload dynamically for each endpoint
-            voice_wav = self._get_voice_ref(endpoint)
-            payload = {
-                "text": clean_text,
-                "voice_wav": voice_wav,
-                "use_emo_text": False,
-            }
+        payload = {
+            "text": clean_text,
+            "use_emo_text": False,
+        }
+        voice_wav = self._get_voice_ref()
+        if voice_wav:
+            payload["voice_wav"] = voice_wav
 
-            # Dynamic timeout: tight timeout for primary .6 server to failover fast
+        for endpoint in endpoints:
             current_timeout = self.timeout_s
-            if "192.168.1.6:" in endpoint:
-                current_timeout = 2  # 2 seconds max for primary
 
             try:
                 log_debug(
