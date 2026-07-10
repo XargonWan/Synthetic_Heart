@@ -1239,7 +1239,20 @@ async def _handle_plugin_action(
                     clean_text, events = parse_facial_expressions(original_text)
                     if clean_text != original_text:
                         payload["text"] = clean_text
-                    if events and get_karada_state_server().has_connected_clients():
+                    # When the reply is delivered as voice (send_as_voice=true),
+                    # do NOT schedule the expression timeline here: Vox.speak()
+                    # will schedule it using the *real* synthesised audio
+                    # duration, which is engine-independent (Vox repairs the WAV
+                    # header for every engine before measuring). Scheduling a
+                    # second, char-estimate-based timeline here would race the
+                    # audio-driven one and make the avatar's face differ between
+                    # Vox engines for the same emotion tag.
+                    is_voice_reply = bool(payload.get("send_as_voice"))
+                    if (
+                        events
+                        and not is_voice_reply
+                        and get_karada_state_server().has_connected_clients()
+                    ):
                         # find our plugin instance (if loaded)
                         expr_plugin = None
                         from core.core_initializer import PLUGIN_REGISTRY

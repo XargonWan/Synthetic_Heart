@@ -370,6 +370,59 @@ async def test_recon_extracts_check_website_from_object_form(
 
 
 @pytest.mark.asyncio
+async def test_recon_extracts_check_website_from_double_wrapped_form(
+    enable_recon: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A weak recon model may echo the wrapper key; unwrap it defensively."""
+    submitted: dict[str, Any] = {}
+
+    class _FakeOrchestrator:
+        async def submit(
+            self,
+            *,
+            interface_path: str | None,
+            queries: list[str],
+            search_context: str,
+            context_memory: dict[str, Any] | None = None,
+            urls: list[str] | None = None,
+        ) -> str:
+            submitted["queries"] = queries
+            submitted["urls"] = urls
+            return "task-xyz"
+
+    monkeypatch.setattr(
+        search_orchestrator,
+        "get_search_orchestrator",
+        lambda: _FakeOrchestrator(),
+    )
+
+    plugin = ReconWebSearchPlugin()
+    # Some recon models emit {"web_search": {...}} as the value under the
+    # already-namespaced "web_search" key, producing a redundant nesting.
+    out = await plugin.parse_recon_response(
+        {
+            "web_search": {
+                "queries": [],
+                "check_website": [
+                    "https://synthetic-heart.readthedocs.io/en/latest/"
+                    "chat_instructions.html"
+                ],
+            }
+        },
+        message=_Msg(interface_path="tg/7"),
+        context_memory={},
+        text="Rekku, can you see this site? https://synthetic-heart.readthedocs.io",
+    )
+
+    assert submitted["queries"] == []
+    assert submitted["urls"] == [
+        "https://synthetic-heart.readthedocs.io/en/latest/chat_instructions.html"
+    ]
+    assert len(out) == 1
+    assert out[0]["type"] == "instruction"
+
+
+@pytest.mark.asyncio
 async def test_recon_check_website_only_triggers_without_queries(
     enable_recon: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:

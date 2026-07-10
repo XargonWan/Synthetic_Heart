@@ -62,11 +62,11 @@ class ReconWebSearchPlugin:
             "AS-IS; they do NOT replace or count against the search queries.\n"
             "Either list may be empty. Use check_website WITHOUT any queries when "
             "the user only wants specific links opened and no broader search is "
-            "needed. Return STRICTLY this JSON object and nothing else: "
-            '{"web_search": {"queries": ["query1"], "check_website": '
-            '["https://example.com"]}}. '
+            "needed. The value for this key MUST be an object with exactly these "
+            "two lists and nothing else: "
+            '{"queries": ["query1"], "check_website": ["https://example.com"]}. '
             "When the request clearly needs no external information and no links "
-            'to open, return {"web_search": {"queries": [], "check_website": []}}.'
+            'to open, use {"queries": [], "check_website": []}.'
         )
 
     @staticmethod
@@ -86,6 +86,17 @@ class ReconWebSearchPlugin:
 
         if isinstance(raw, dict):
             raw_dict = cast("dict[object, object]", raw)
+            # Defensive unwrap: some recon models echo the wrapper key and emit
+            # {"web_search": {"queries": [...], "check_website": [...]}} as the
+            # value. Peel one redundant layer so both shapes are accepted.
+            nested = raw_dict.get("web_search")
+            if (
+                isinstance(nested, dict)
+                and ("queries" in nested or "check_website" in nested)
+                and "queries" not in raw_dict
+                and "check_website" not in raw_dict
+            ):
+                raw_dict = cast("dict[object, object]", nested)
             q: object = raw_dict.get("queries")
             if not isinstance(q, list):
                 # nested legacy {"web_search": [...]}
