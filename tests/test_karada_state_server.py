@@ -493,9 +493,10 @@ class TestKaradaApiRouter:
         from core.karada_api import create_karada_router
 
         handler, _ = _make_handler()
-        router = create_karada_router(handler)
-        # Router should have multiple routes
+        router, ws_router = create_karada_router(handler)
+        # REST router should have multiple routes; WS router carries /ws alone.
         assert len(router.routes) > 5
+        assert len(ws_router.routes) == 1
 
     def test_karada_api_transport_class(self) -> None:
         from core.karada_api import KaradaApiTransport

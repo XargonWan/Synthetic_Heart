@@ -42,6 +42,13 @@ _DEFAULTS: dict[str, Any] = {
     "suggested_name": "",
     "suggested_label": "",
     "extra_config": {},
+    # Wizard grouping: "llm" providers render in the main grid, "tts" ones in
+    # the dedicated "TTS Endpoints" section below the divider.
+    "category": "llm",
+    # Provider-specific form fields rendered in step 2 of the add wizard.
+    # Each entry: {key, label, type: "text"|"select", options, default,
+    # placeholder, hint}. Values are persisted into the endpoint extra_config.
+    "extra_fields": [],
     "sort_order": 500,
 }
 

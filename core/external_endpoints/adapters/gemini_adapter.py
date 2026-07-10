@@ -326,14 +326,18 @@ class GeminiAdapter(BaseProtocolAdapter):
     def __init__(self, api_key: str) -> None:
         self._api_key = api_key
         self._last_completion_metadata: dict[str, Any] = {}
+        self._client: Any = None
 
     def _get_client(self) -> Any:
+        if self._client is not None:
+            return self._client
         try:
             from google import genai
 
-            return harden_genai_client_for_async_close(
+            self._client = harden_genai_client_for_async_close(
                 genai.Client(api_key=self._api_key)
             )
+            return self._client
         except ImportError as exc:
             raise RuntimeError(
                 "[gemini_adapter] The 'google-genai' package is required."

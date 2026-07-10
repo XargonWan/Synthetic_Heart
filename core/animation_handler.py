@@ -156,6 +156,7 @@ class KaradaStateServer:
         self._current_audio_duration_s: Optional[float] = None
         self._current_audio_lipsync: Optional[Dict] = None
         self._current_audio_started_at: Optional[datetime] = None
+        self._current_audio_turn_id: Optional[str] = None
         self._audio_clear_task: Optional[asyncio.Task] = None
         # Talk animation: driven strictly by the audio lifecycle so the "talk"
         # animation plays *during* the actual speech (i.e. while the TTS audio
@@ -2173,6 +2174,7 @@ class KaradaStateServer:
         lipsync_data: Optional[Dict] = None,
         audio_duration_s: Optional[float] = None,
         text: Optional[str] = None,
+        turn_id: Optional[str] = None,
     ) -> None:
         """Broadcast a TTS audio-play command to *every* connected client.
 
@@ -2194,6 +2196,14 @@ class KaradaStateServer:
             text:             Optional caption (forwarded in the payload; the
                               chat-bubble persistence is an interface concern,
                               handled separately by the originating interface).
+            turn_id:          Optional identifier shared by every chunk of one
+                              sentence-streamed reply (see
+                              ``VoxPlugin._speak_chunked``). Forwarded as-is in
+                              the payload so clients can group same-turn chunks
+                              for gapless queued playback instead of each one
+                              interrupting the last; omitted for single-shot
+                              replies (each is its own turn from the client's
+                              point of view).
         """
         url = self._derive_audio_url(audio_path)
 
@@ -2204,6 +2214,8 @@ class KaradaStateServer:
             payload["lipsync"] = lipsync_data
         if audio_duration_s is not None:
             payload["audio_duration_s"] = audio_duration_s
+        if turn_id is not None:
+            payload["turn_id"] = turn_id
 
         if self._has_any_transport():
             for transport in self._transports:
@@ -2217,7 +2229,7 @@ class KaradaStateServer:
 
         # Record for late-joining clients (auto-clears after the clip ends).
         try:
-            self.set_current_audio(url, audio_duration_s, lipsync_data)
+            self.set_current_audio(url, audio_duration_s, lipsync_data, turn_id)
         except Exception:
             pass
 
@@ -2381,17 +2393,27 @@ class KaradaStateServer:
         url: Optional[str],
         duration_s: Optional[float] = None,
         lipsync_data: Optional[Dict] = None,
+        turn_id: Optional[str] = None,
     ) -> None:
         """Record the currently-playing TTS audio for catch-up.
 
         Called by ``SynthWebUIInterface.send_tts_audio()`` after broadcast.
         A background task automatically clears the state after *duration_s*
         seconds so that late joiners don't replay stale audio.
+
+        *turn_id* identifies the reply this clip belongs to (shared by every
+        chunk of a sentence-streamed reply). It is echoed back to late-joining
+        clients so their playback scheduler recognises the replayed clip as
+        part of a turn it may already be playing, instead of treating it as a
+        brand-new turn and re-playing it — which is what caused the
+        chunk-streamed (e.g. Fish Audio) duplicate-voice on a mid-utterance
+        reconnect/remount.
         """
         self._current_audio_url = url
         self._current_audio_duration_s = duration_s
         self._current_audio_lipsync = lipsync_data
         self._current_audio_started_at = datetime.now(tz=timezone.utc)
+        self._current_audio_turn_id = turn_id
 
         # Cancel previous auto-clear task
         if self._audio_clear_task and not self._audio_clear_task.done():
@@ -2414,6 +2436,7 @@ class KaradaStateServer:
             self._current_audio_duration_s = None
             self._current_audio_lipsync = None
             self._current_audio_started_at = None
+            self._current_audio_turn_id = None
         except asyncio.CancelledError:
             pass
 
@@ -2427,13 +2450,16 @@ class KaradaStateServer:
         dur = self._current_audio_duration_s or 0
         if dur > 0 and elapsed >= dur:
             return None
-        return {
+        result: Dict[str, Any] = {
             "type": "tts-play",
             "url": self._current_audio_url,
             "audio_duration_s": dur,
             "lipsync": self._current_audio_lipsync,
             "offset_s": elapsed,
         }
+        if self._current_audio_turn_id:
+            result["turn_id"] = self._current_audio_turn_id
+        return result
 
     # ------------------------------------------------------------------
     # Priority registration

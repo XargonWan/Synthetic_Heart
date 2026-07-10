@@ -49,6 +49,7 @@ dist/
 build/
 site/
 logs/
+core/chat_paths.json
 skins/2B/
 skins/2B/persona.json
 skins/Rekku
@@ -86,3 +87,8 @@ installer/vendor/*.msi
 # grok-api-mcp ships a prebuilt dist so workspaces only need `npm ci`, no build
 !mcp_servers/grok-api-mcp/dist/
 !mcp_servers/grok-api-mcp/dist/**
+
+# SyntH Stage frontend (Node toolchain corner, see frontend/README.md)
+frontend/node_modules/
+frontend/dist/
+frontend/.pnpm-store

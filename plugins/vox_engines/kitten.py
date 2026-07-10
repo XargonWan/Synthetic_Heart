@@ -38,8 +38,9 @@ import os
 import sys
 
 # Default HuggingFace model used when no model_id is configured.
-# kitten-tts-nano-0.8 is the standard ONNX model (~25 MB).
-_DEFAULT_KITTENTTS_MODEL = "KittenML/kitten-tts-nano-0.8"
+# kitten-tts-mini-0.8 is the higher-quality ONNX model (~80 MB); it is the
+# default and is downloaded automatically on first use.
+_DEFAULT_KITTENTTS_MODEL = "KittenML/kitten-tts-mini-0.8"
 
 # Flag set at import time so generate() knows which API to call.
 _USING_VENDOR_STUB: bool
@@ -252,7 +253,10 @@ _KITTEN_VOICE_META: list[VoiceSpec] = [
 _KITTEN_VOICES: list[str] = [v.name for v in _KITTEN_VOICE_META]
 
 _DEFAULT_VOICE = "Bella"
-_DEFAULT_MODEL = "builtin"
+# Default MODEL_MANAGER model id. Mini 0.8 (~80 MB) is the higher-quality
+# variant and is treated as present even before download — it is fetched
+# automatically on first synthesis (see _DEFAULT_KITTENTTS_MODEL / _get_model).
+_DEFAULT_MODEL = "kitten-tts-mini-0.8"
 _SAMPLE_RATE = 24000
 
 # ---------------------------------------------------------------------------
@@ -261,28 +265,28 @@ _SAMPLE_RATE = 24000
 # is downloaded from HuggingFace on demand (see MODEL_MANAGER.download).
 # ---------------------------------------------------------------------------
 _KITTEN_MODELS: list[ModelSpec] = [
-    # Nano is the default model: it is auto-downloaded on first use when no
+    # Mini is the default model: it is auto-downloaded on first use when no
     # other KittenTTS model is present (see _DEFAULT_KITTENTTS_MODEL).
-    ModelSpec(
-        model_id="kitten-tts-nano-0.8",
-        plugin_id="vox_kitten",
-        display_name="KittenTTS Nano 0.8 (default)",
-        description="Compact multi-voice neural TTS model (~25 MB, ONNX, CPU). "
-        "Default model — downloaded automatically on first use.",
-        tags=["tts", "local", "cpu"],
-        size_mb=25,
-        voices_meta=_KITTEN_VOICE_META,
-        hf_repo_id="KittenML/kitten-tts-nano-0.8",
-    ),
     ModelSpec(
         model_id="kitten-tts-mini-0.8",
         plugin_id="vox_kitten",
-        display_name="KittenTTS Mini 0.8",
-        description="Higher-quality multi-voice neural TTS model (ONNX, CPU).",
+        display_name="KittenTTS Mini 0.8 (default)",
+        description="Higher-quality multi-voice neural TTS model (~80 MB, ONNX, CPU). "
+        "Default model — downloaded automatically on first use.",
         tags=["tts", "local", "cpu"],
         size_mb=80,
         voices_meta=_KITTEN_VOICE_META,
         hf_repo_id="KittenML/kitten-tts-mini-0.8",
+    ),
+    ModelSpec(
+        model_id="kitten-tts-nano-0.8",
+        plugin_id="vox_kitten",
+        display_name="KittenTTS Nano 0.8",
+        description="Compact multi-voice neural TTS model (~25 MB, ONNX, CPU).",
+        tags=["tts", "local", "cpu"],
+        size_mb=25,
+        voices_meta=_KITTEN_VOICE_META,
+        hf_repo_id="KittenML/kitten-tts-nano-0.8",
     ),
     ModelSpec(
         model_id="kitten-tts-micro-0.8",
@@ -329,15 +333,16 @@ _SAMPLE_TEXTS: dict[str, str] = {
 # ---------------------------------------------------------------------------
 # Expose engine settings in the WebUI → Components section
 # ---------------------------------------------------------------------------
-# Model selector — the value is a MODEL_MANAGER model id (or the "builtin"
-# sentinel) resolved to a HuggingFace repo id by _get_model().
+# Model selector — the value is a MODEL_MANAGER model id resolved to a
+# HuggingFace repo id by _get_model(). The default (Mini 0.8) is treated as
+# present even before download and fetched automatically on first use.
 register_exposed_var(
     "KITTEN_MODEL",
     label="Kitten TTS — Model",
     default=_DEFAULT_MODEL,
     value_type=str,
     ui_type="select",
-    options=[_DEFAULT_MODEL] + [spec.model_id for spec in _KITTEN_MODELS],
+    options=[spec.model_id for spec in _KITTEN_MODELS],
     description=(
         "Which KittenTTS model variant to use. The WebUI Vox controls populate "
         "this from the downloaded models."

@@ -27,6 +27,7 @@ from typing import Deque, Dict, Optional, List, Any
 from urllib.parse import quote, unquote, urlparse
 
 from fastapi import (
+    Depends,
     FastAPI,
     WebSocket,
     WebSocketDisconnect,
@@ -38,6 +39,7 @@ from fastapi import (
 )
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, Response
 from fastapi.staticfiles import StaticFiles
+from starlette.websockets import WebSocketState
 
 from core.core_initializer import register_interface
 from core.logging_utils import _LOG_FILE, log_debug, log_error, log_info, log_warning
@@ -98,6 +100,28 @@ mimetypes.init()
 mimetypes.add_type("text/javascript", ".js")
 mimetypes.add_type("text/javascript", ".mjs")
 mimetypes.add_type("application/json", ".json")
+
+
+def _clean_env(name: str, default: Optional[str] = None) -> Optional[str]:
+    """Read an env var, stripping inline ``# comment`` suffixes and whitespace.
+
+    Some launchers (notably the VS Code/Antigravity Python integration, which
+    injects the workspace ``.env`` with its own parser) leave inline comments
+    inside the value, e.g. ``'8088   # HTTPS port'``. Because the app loads
+    ``.env`` with ``override=False``, such a poisoned value wins over the
+    correctly parsed file — so sanitize here and warn instead of failing
+    silently downstream (see AGENTS.md §12, 2026-07-09).
+    """
+    raw = os.getenv(name, default)
+    if raw is None:
+        return None
+    cleaned = raw.split("#", 1)[0].strip()
+    if cleaned != raw.strip():
+        log_warning(
+            f"{LOG_PREFIX} Env var {name} contained an inline comment; "
+            f"using {cleaned!r} (raw value was {raw!r})"
+        )
+    return cleaned
 
 
 class SynthWebUIInterface:
@@ -166,14 +190,15 @@ class SynthWebUIInterface:
         # Runtime/configurable attributes with sensible defaults
         # Autostart can be disabled for tests/dev harnesses.
         self.autostart = bool(autostart)
-        self.host = os.getenv("SYNTH_WEBUI_HOST", "0.0.0.0")
+        self.host = _clean_env("SYNTH_WEBUI_HOST", "0.0.0.0") or "0.0.0.0"
         self.log_level = os.getenv("SYNTH_WEBUI_LOG_LEVEL", "info")
         # TLS / HTTPS configuration
         # By default expose the WebUI over HTTPS unless explicitly disabled.
         # This makes the default developer experience minimal and secure.
-        self.tls_enabled = (
-            os.getenv("SYNTH_WEBUI_TLS", os.getenv("SECURE_CONNECTION", "1")) == "1"
-        )
+        tls_flag = _clean_env("SYNTH_WEBUI_TLS")
+        if tls_flag is None:
+            tls_flag = _clean_env("SECURE_CONNECTION", "1")
+        self.tls_enabled = tls_flag == "1"
         self.tls_certfile = os.getenv("SYNTH_WEBUI_CERTFILE", None)
         self.tls_keyfile = os.getenv("SYNTH_WEBUI_KEYFILE", None)
         # Port configuration
@@ -181,22 +206,32 @@ class SynthWebUIInterface:
         # - SYNTH_WEBUI_HTTPS_PORT: HTTPS/TLS port (only used when TLS is enabled)
         # Backward compatible fallbacks:
         # - SYNTH_WEBUI_PORT / PORT
-        raw_http_port = os.getenv(
-            "SYNTH_WEBUI_HTTP_PORT",
-            os.getenv("SYNTH_WEBUI_PORT", os.getenv("PORT", "8080")),
-        )
+        raw_http_port = _clean_env("SYNTH_WEBUI_HTTP_PORT")
+        if raw_http_port is None:
+            raw_http_port = _clean_env("SYNTH_WEBUI_PORT")
+        if raw_http_port is None:
+            raw_http_port = _clean_env("PORT", "8080")
         try:
-            http_port = int(raw_http_port)
+            http_port = int(raw_http_port or "8080")
         except Exception:
+            log_warning(
+                f"{LOG_PREFIX} Could not parse HTTP port {raw_http_port!r}; "
+                f"falling back to 8080"
+            )
             http_port = 8080
 
         https_port = None
         if self.tls_enabled:
-            raw_https_port = os.getenv("SYNTH_WEBUI_HTTPS_PORT", None)
+            raw_https_port = _clean_env("SYNTH_WEBUI_HTTPS_PORT")
             if raw_https_port:
                 try:
                     https_port = int(raw_https_port)
                 except Exception:
+                    log_warning(
+                        f"{LOG_PREFIX} Could not parse HTTPS port "
+                        f"{raw_https_port!r}; serving HTTPS on the HTTP port "
+                        f"{http_port} instead"
+                    )
                     https_port = http_port
             else:
                 # If no explicit HTTPS port is provided, keep historical behavior
@@ -455,6 +490,52 @@ class SynthWebUIInterface:
             log_warning(
                 f"{LOG_PREFIX} VRM directory does not exist, /avatars endpoint NOT mounted"
             )
+
+        # Mount the SyntH Stage frontend (frontend/dist) at /stage when built.
+        # The Stage app is an optional standalone Vue client (see frontend/README.md);
+        # the backend runs fine without it, so this mount is best-effort.
+        stage_dist = Path(__file__).resolve().parent.parent / "frontend" / "dist"
+        self._stage_mounted = False
+        if stage_dist.exists():
+            try:
+                self.app.mount(
+                    "/stage",
+                    StaticFiles(directory=str(stage_dist), html=True),
+                    name="synth-stage",
+                )
+                self._stage_mounted = True
+                log_info(f"{LOG_PREFIX} Mounted /stage to {stage_dist}")
+            except Exception as exc:
+                log_warning(f"{LOG_PREFIX} Failed to mount /stage: {exc}")
+        else:
+            log_info(
+                f"{LOG_PREFIX} Stage frontend not built, /stage NOT mounted ({stage_dist})"
+            )
+
+        # Optional CORS for cross-origin Stage clients (e.g. Capacitor apps).
+        # Gated on SYNTH_WEBUI_CORS_ORIGINS (comma-separated origins); default
+        # empty -> middleware not added, existing behaviour unchanged. Same-origin
+        # deployments (/stage) and the Vite dev proxy do not need this.
+        cors_origins = [
+            origin.strip()
+            for origin in os.getenv("SYNTH_WEBUI_CORS_ORIGINS", "").split(",")
+            if origin.strip()
+        ]
+        if cors_origins:
+            try:
+                from starlette.middleware.cors import CORSMiddleware
+
+                self.app.add_middleware(
+                    CORSMiddleware,  # type: ignore[arg-type]
+                    allow_origins=cors_origins,
+                    allow_credentials=True,
+                    allow_methods=["*"],
+                    allow_headers=["*"],
+                )
+                log_info(f"{LOG_PREFIX} CORS enabled for origins: {cors_origins}")
+            except Exception as exc:
+                log_warning(f"{LOG_PREFIX} Failed to add CORS middleware: {exc}")
+
         if self.vrm_dir.exists():
             log_debug(f"{LOG_PREFIX} VRM directory is_dir: {self.vrm_dir.is_dir()}")
             log_debug(
@@ -496,8 +577,11 @@ class SynthWebUIInterface:
             try:
                 from core.karada_api import create_karada_router
 
-                karada_router = create_karada_router(self.animation_handler)
+                karada_router, karada_ws_router = create_karada_router(
+                    self.animation_handler
+                )
                 self.app.include_router(karada_router)
+                self.app.include_router(karada_ws_router)
                 log_info(f"{LOG_PREFIX} Karada API router mounted at /api/karada/")
             except Exception as karada_exc:
                 log_warning(
@@ -599,8 +683,17 @@ class SynthWebUIInterface:
         self.app.post("/api/log-console")(self.log_console_endpoint)
         self.app.websocket("/ws")(self.websocket_endpoint)
         self.app.websocket("/logs")(self.logs_ws_endpoint)
+        # Endpoints the stage/legacy clients hit outside /api/karada/* but that
+        # act on the avatar or feed text into the chain — gated by the same
+        # optional SYNTH_WEBUI_API_TOKEN as /ws and the Karada REST router
+        # (no-op when the token is unset). Per-route Depends is safe here; the
+        # router-level-dependency-on-websocket bug only affects WS routes.
+        from core.karada_api import _require_api_token
+
         # Auris audio endpoints
-        self.app.post("/api/audio/upload")(self.audio_upload_endpoint)
+        self.app.post("/api/audio/upload", dependencies=[Depends(_require_api_token)])(
+            self.audio_upload_endpoint
+        )
         self.app.post("/api/chat/attachments")(self.chat_attachment_upload_endpoint)
         # helper endpoint for Vosk language selection (legacy compat, delegates to MODEL_MANAGER)
         self.app.post("/api/auris/vosk/download")(self.vosk_model_download)
@@ -622,6 +715,8 @@ class SynthWebUIInterface:
         # Vox metadata/sample endpoints
         self.app.get("/api/vox/speakers")(self.vox_speakers)
         self.app.get("/api/vox/sample")(self.vox_sample)
+        self.app.post("/api/vox/voices")(self.vox_add_voice)
+        self.app.delete("/api/vox/voices")(self.vox_remove_voice)
         self.app.get("/api/vrm")(self.list_vrm_models)
         self.app.get("/api/vrm/active")(self.get_active_vrm_endpoint)
         self.app.post("/api/vrm")(self.upload_vrm_model)
@@ -633,7 +728,10 @@ class SynthWebUIInterface:
         self.app.get("/api/skins")(self.list_skins)
         # new helper: allow clients to query which skin is active
         self.app.get("/api/skins/current_skin")(self.get_current_skin)
-        self.app.post("/api/skins/{skin_name}/activate")(self.activate_skin)
+        self.app.post(
+            "/api/skins/{skin_name}/activate",
+            dependencies=[Depends(_require_api_token)],
+        )(self.activate_skin)
         self.app.post("/api/skins/uploaded/clear")(self.clear_uploaded_vrm)
         # Skin editor endpoints
         self.app.post("/api/skins")(self.create_skin)
@@ -1467,6 +1565,11 @@ class SynthWebUIInterface:
                 else "false",
                 "%%MULTI_SESSION%%": "true"
                 if self._multi_session_enabled()
+                else "false",
+                # Whether the SyntH Stage frontend (/stage) is mounted. Used by
+                # the settings section to show/hide the "Open SyntH Stage" link.
+                "%%STAGE_AVAILABLE%%": "true"
+                if getattr(self, "_stage_mounted", False)
                 else "false",
             }
 
@@ -2337,6 +2440,16 @@ class SynthWebUIInterface:
     # WebSocket logic
     # ------------------------------------------------------------------
     async def websocket_endpoint(self, websocket: WebSocket):
+        from core.karada_api import _configured_api_token, _token_from_websocket
+
+        expected_token = _configured_api_token()
+        if (
+            expected_token is not None
+            and _token_from_websocket(websocket) != expected_token
+        ):
+            await websocket.close(code=4401, reason="Invalid or missing API token")
+            return
+
         try:
             client_info = getattr(websocket, "client", None)
             log_debug(f"{LOG_PREFIX} Incoming websocket connection from: {client_info}")
@@ -2385,6 +2498,7 @@ class SynthWebUIInterface:
         client_type: str = "unknown"
         client_capabilities: List[str] = ["url_fetch"]
         missing_assets: List[str] = []
+        hello_disconnect = False
 
         try:
             raw_hello = await asyncio.wait_for(websocket.receive_text(), timeout=0.3)
@@ -2415,12 +2529,29 @@ class SynthWebUIInterface:
             log_debug(
                 f"{LOG_PREFIX} No hello from {session_id} within timeout, proceeding"
             )
+        except WebSocketDisconnect:
+            # Client dropped during the handshake (page reload / reconnect
+            # churn). Skip the state push and the receive loop — attempting
+            # either on a closed socket logs a spurious warning ("Failed to
+            # push VRM state ... after 'websocket.close'") followed by an
+            # error ("Cannot call 'receive' once a disconnect message has
+            # been received").
+            hello_disconnect = True
         except Exception as hello_exc:
             log_debug(f"{LOG_PREFIX} Hello handling error (non-fatal): {hello_exc}")
 
+        # The disconnect can also be consumed without raising (e.g. the
+        # ``wait_for`` cancellation races the close frame), so double-check
+        # the socket state rather than trusting the exception alone.
+        if (
+            websocket.client_state is not WebSocketState.CONNECTED
+            or websocket.application_state is not WebSocketState.CONNECTED
+        ):
+            hello_disconnect = True
+
         # Push full VRM state to the newly connected client
         try:
-            if self.animation_handler:
+            if self.animation_handler and not hello_disconnect:
                 full_state = await self.animation_handler.get_full_state()
 
                 # 1) VRM model
@@ -2465,9 +2596,16 @@ class SynthWebUIInterface:
                 f"{LOG_PREFIX} Failed to push VRM state to session {session_id}: {push_exc}"
             )
 
-        log_info(f"{LOG_PREFIX} Client connected: {session_id} (type={client_type})")
+        if not hello_disconnect:
+            log_info(
+                f"{LOG_PREFIX} Client connected: {session_id} (type={client_type})"
+            )
 
         try:
+            if hello_disconnect:
+                # Route through the normal disconnect path so the shared
+                # cleanup in ``finally`` runs exactly once.
+                raise WebSocketDisconnect(code=1000)
             while True:
                 data = await websocket.receive_text()
                 try:
@@ -2801,7 +2939,14 @@ class SynthWebUIInterface:
         except ValueError:
             raise HTTPException(status_code=404, detail="Engine not found")
         try:
-            speakers = engine.get_speakers()
+            # ``get_speakers`` is a synchronous method that, for external
+            # endpoints, drives an async adapter call. Running it on the event
+            # loop thread would deadlock (the bridge schedules the coroutine on
+            # the running loop and blocks on the result, but the loop thread is
+            # this handler). Run it in a worker thread so the loop stays free.
+            import asyncio
+
+            speakers = await asyncio.to_thread(engine.get_speakers)
         except Exception:
             speakers = []
         return JSONResponse(speakers)
@@ -2823,10 +2968,124 @@ class SynthWebUIInterface:
         except ValueError:
             raise HTTPException(status_code=404, detail="Engine not found")
         try:
-            data = engine.sample(speaker)
+            # Off-load to a worker thread: for external endpoints ``sample``
+            # synthesises via an async adapter, and running it on the event
+            # loop thread would deadlock (see ``vox_speakers``).
+            import asyncio
+
+            data = await asyncio.to_thread(engine.sample, speaker)
         except NotImplementedError:
             raise HTTPException(status_code=404, detail="No sample available")
         return Response(data, media_type="audio/wav")
+
+    async def vox_add_voice(self, request: Request) -> JSONResponse:
+        """POST /api/vox/voices  — add a voice by URL to an external Vox engine.
+
+        Body JSON: ``{"engine": <name>, "url": <fish share URL or id>}``.
+        Scrapes the voice's metadata (title/language) from the adapter and
+        persists it in the endpoint's ``extra_config["manual_voices"]`` list so
+        it appears in the "Manually added" tier of the voice picker.
+        """
+        from core.config_manager import config_registry
+        from core.external_endpoints.registry import get_external_endpoint_registry
+
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        engine_name = (body or {}).get("engine") or config_registry.get_value(
+            "ACTIVE_VOX_ENGINE", "kitten", value_type=str
+        )
+        url = str((body or {}).get("url") or "").strip()
+        if not url:
+            raise HTTPException(status_code=400, detail="url is required")
+
+        registry = get_external_endpoint_registry()
+        endpoint = await registry.get_endpoint_by_name(str(engine_name))
+        if endpoint is None:
+            raise HTTPException(status_code=404, detail="Engine not found")
+
+        from core.external_endpoints.crypto import decrypt_api_key
+        from core.external_endpoints.probe import get_adapter_for_endpoint
+
+        api_key = decrypt_api_key(endpoint.api_key_enc or "")
+        adapter = get_adapter_for_endpoint(endpoint, api_key)
+        parse = getattr(type(adapter), "parse_model_id_from_url", None)
+        fetch_detail = getattr(adapter, "fetch_model_detail", None)
+        if parse is None or not callable(fetch_detail):
+            raise HTTPException(
+                status_code=400,
+                detail="This engine does not support adding voices by URL",
+            )
+
+        model_id = parse(url)
+        if not model_id:
+            raise HTTPException(status_code=400, detail="Could not parse a voice id")
+
+        detail = await fetch_detail(model_id)
+        if not detail:
+            # Fall back to a minimal record so the id is still usable even if
+            # metadata scraping failed (e.g. private voice, transient error).
+            detail = {"reference_id": model_id, "title": model_id, "language": None}
+
+        extra = dict(endpoint.extra_config or {})
+        manual = extra.get("manual_voices")
+        if not isinstance(manual, list):
+            manual = []
+        ref_id = str(detail.get("reference_id") or model_id)
+        # De-duplicate on reference_id, refreshing metadata if already present.
+        manual = [
+            v
+            for v in manual
+            if isinstance(v, dict) and str(v.get("reference_id")) != ref_id
+        ]
+        manual.append(
+            {
+                "reference_id": ref_id,
+                "title": detail.get("title") or ref_id,
+                "language": detail.get("language"),
+            }
+        )
+        extra["manual_voices"] = manual
+        await registry.update_endpoint(endpoint.id, extra_config=extra)
+        return JSONResponse({"success": True, "voice": manual[-1]})
+
+    async def vox_remove_voice(self, request: Request) -> JSONResponse:
+        """DELETE /api/vox/voices  — remove a manually-added voice.
+
+        Body JSON: ``{"engine": <name>, "reference_id": <id>}``.
+        """
+        from core.config_manager import config_registry
+        from core.external_endpoints.registry import get_external_endpoint_registry
+
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        engine_name = (body or {}).get("engine") or config_registry.get_value(
+            "ACTIVE_VOX_ENGINE", "kitten", value_type=str
+        )
+        ref_id = str((body or {}).get("reference_id") or "").strip()
+        if not ref_id:
+            raise HTTPException(status_code=400, detail="reference_id is required")
+
+        registry = get_external_endpoint_registry()
+        endpoint = await registry.get_endpoint_by_name(str(engine_name))
+        if endpoint is None:
+            raise HTTPException(status_code=404, detail="Engine not found")
+
+        extra = dict(endpoint.extra_config or {})
+        manual = extra.get("manual_voices")
+        if not isinstance(manual, list):
+            manual = []
+        new_manual = [
+            v
+            for v in manual
+            if isinstance(v, dict) and str(v.get("reference_id")) != ref_id
+        ]
+        extra["manual_voices"] = new_manual
+        await registry.update_endpoint(endpoint.id, extra_config=extra)
+        return JSONResponse({"success": True, "removed": ref_id})
 
     # ------------------------------------------------------------------
     # Model management endpoints  (SSOT: core.model_manager.MODEL_MANAGER)
@@ -3121,6 +3380,16 @@ class SynthWebUIInterface:
         - ``{"type": "vad",     "signal": "speech_start"|"speech_end"}`` — VAD events.
         - ``{"type": "error",   "detail": "..."}`` — error notification.
         """
+        from core.karada_api import _configured_api_token, _token_from_websocket
+
+        expected_token = _configured_api_token()
+        if (
+            expected_token is not None
+            and _token_from_websocket(websocket) != expected_token
+        ):
+            await websocket.close(code=4401, reason="Invalid or missing API token")
+            return
+
         await websocket.accept()
         session_id = f"ws_{uuid.uuid4().hex}"
         live_engine = None  # only set when using LIVE_REGISTRY
@@ -10210,6 +10479,15 @@ class SynthWebUIInterface:
                 port=self.port,
                 log_level=self.log_level or "info",
                 lifespan="off",
+                # Uvicorn's default (None) waits indefinitely for open
+                # connections to close on SIGINT before server.serve()
+                # returns. The stage keeps long-lived WebSockets open
+                # (karada state broadcast, mic streaming for barge-in) that
+                # don't close promptly, which blocks serve() forever — and
+                # until it returns, uvicorn never hands SIGINT back to
+                # main.py's own shutdown handler, so the whole app hangs.
+                # Bound it so one Ctrl+C is enough.
+                timeout_graceful_shutdown=5,
             )
             if self.tls_enabled and self.tls_certfile and self.tls_keyfile:
                 log_info(
@@ -11028,6 +11306,18 @@ class SynthWebUIInterface:
                 f"{LOG_PREFIX} Failed to set active VRM after activating skin {skin_name}: {exc}"
             )
             raise HTTPException(status_code=500, detail="Failed to activate skin")
+
+        # Broadcast the new model so connected clients reload it live. Without
+        # this only clients that poll (legacy webui's refreshModels) notice the
+        # swap; the stage frontend relies entirely on the vrm_model broadcast.
+        try:
+            if self.animation_handler:
+                await self.animation_handler.set_vrm_model(
+                    f"/avatars/{target.name}", target.name
+                )
+                log_debug(f"{LOG_PREFIX} Broadcast vrm_model: {target.name}")
+        except Exception as vrm_exc:
+            log_warning(f"{LOG_PREFIX} Failed to broadcast vrm_model: {vrm_exc}")
 
         # Trigger skin_change animation so the avatar plays a transition animation
         # after the frontend reloads the VRM model.

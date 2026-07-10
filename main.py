@@ -227,6 +227,32 @@ async def initialize_database():
         return False
 
 
+def _quiet_proactor_connection_reset(
+    loop: asyncio.AbstractEventLoop, context: dict
+) -> None:
+    """Silence a known-benign Windows asyncio artifact instead of dumping a traceback.
+
+    ProactorEventLoop's _call_connection_lost unconditionally calls
+    socket.shutdown() while tearing down a transport. If the remote peer
+    already forcibly reset the connection (a stage browser tab closed or
+    reloaded, or a lingering WebSocket force-cancelled by uvicorn's bounded
+    graceful shutdown), that raises ConnectionResetError ([WinError 10054])
+    from inside a bare loop callback that no application-level try/except
+    can reach, so asyncio's default handler prints a full traceback to
+    stderr for something already handled correctly at the application
+    layer. See https://github.com/python/cpython/issues/83413.
+    """
+    exc = context.get("exception")
+    if (
+        isinstance(exc, ConnectionResetError)
+        and getattr(exc, "winerror", None) == 10054
+        and "_call_connection_lost" in repr(context.get("handle"))
+    ):
+        log_debug(f"[main] Ignored benign Proactor connection reset: {exc}")
+        return
+    loop.default_exception_handler(context)
+
+
 if __name__ == "__main__":
     # Set up signal handlers for graceful shutdown
     signal.signal(signal.SIGINT, signal_handler)  # Ctrl+C
@@ -253,6 +279,8 @@ if __name__ == "__main__":
         from core.notifier import _set_main_loop
 
         loop = asyncio.get_running_loop()
+        if sys.platform == "win32":
+            loop.set_exception_handler(_quiet_proactor_connection_reset)
         _set_main_loop(loop)
         _main_event_loop = loop
         _shutdown_event = asyncio.Event()

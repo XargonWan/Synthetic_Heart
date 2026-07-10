@@ -2,7 +2,7 @@
 """Adapter for legacy/custom HTTP TTS endpoints.
 
 This adapter supports external endpoints that expose a simple HTTP TTS API
-similar to the legacy ``tts_lipsync``/``index-tts`` backend.
+similar to the legacy ``tts_lipsync`` backend.
 """
 
 from __future__ import annotations

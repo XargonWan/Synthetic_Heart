@@ -13,6 +13,10 @@
     let _endpoints = [];
     let _presets = [];          // loaded once, cached for the session
     let _presetsLoaded = false;
+    // Provider-specific form fields (from the selected preset's extra_fields)
+    let _activeExtraFields = [];        // field specs rendered in step 2
+    let _activeExtraConfigBase = {};    // preset extra_config defaults + provider_id
+    let _editingExtraConfig = null;     // existing extra_config when editing
 
     // -----------------------------------------------------------------------
     // API helpers
@@ -79,14 +83,14 @@
     }
 
     function protocolBadgeColor(proto) {
-        return { openai: '#19a97b', gemini: '#4285f4', anthropic: '#d97706', custom: '#7b61ff' }[proto] || '#888';
+        return { openai: '#19a97b', gemini: '#4285f4', anthropic: '#d97706', fish: '#e8506e', custom: '#7b61ff' }[proto] || '#888';
     }
 
     // Icon text/emoji fallback for provider cards
     function providerIcon(icon) {
         const icons = {
             google: '🔵', anthropic: '🟠', openrouter: '⚡', github: '🐙',
-            ollama: '🦙', openai: '🟢', selenium: '🤖', custom: '⚙️',
+            ollama: '🦙', openai: '🟢', selenium: '🤖', fish: '🐟', custom: '⚙️',
         };
         return icons[icon] || '🔌';
     }
@@ -470,7 +474,7 @@
             'min-height:90px',
         ].join(';');
 
-        for (const preset of _presets) {
+        function buildPresetCard(preset) {
             const card = document.createElement('div');
             card.style.cssText = cardStyle;
             card.innerHTML = `
@@ -487,7 +491,20 @@
                 card.style.background = 'var(--background)';
             });
             card.addEventListener('click', () => selectPreset(preset));
-            grid.appendChild(card);
+            return card;
+        }
+
+        const mainPresets = _presets.filter(p => (p.category || 'llm') !== 'tts');
+        const ttsPresets = _presets.filter(p => (p.category || 'llm') === 'tts');
+
+        for (const preset of mainPresets) grid.appendChild(buildPresetCard(preset));
+
+        if (ttsPresets.length > 0) {
+            const divider = document.createElement('div');
+            divider.style.cssText = 'grid-column:1/-1; margin-top:8px; padding-top:12px; border-top:1px solid var(--border,#444);';
+            divider.innerHTML = '<div style="font-size:0.8rem; font-weight:600; color:var(--muted); text-transform:uppercase; letter-spacing:0.06em;">TTS Endpoints</div>';
+            grid.appendChild(divider);
+            for (const preset of ttsPresets) grid.appendChild(buildPresetCard(preset));
         }
 
         if (_presets.length === 0) {
@@ -507,6 +524,67 @@
         const s2 = document.getElementById('ext-ep-step-form');
         if (s1) s1.style.display = step === 1 ? 'block' : 'none';
         if (s2) s2.style.display = step === 2 ? 'block' : 'none';
+    }
+
+    // Render provider-specific fields (preset.extra_fields) into step 2.
+    // `values` overrides each field's default (used when editing an endpoint).
+    function renderExtraFields(fields, values) {
+        const container = document.getElementById('ext-ep-extra-fields');
+        if (!container) return;
+        container.innerHTML = '';
+        _activeExtraFields = Array.isArray(fields) ? fields : [];
+        for (const spec of _activeExtraFields) {
+            const row = document.createElement('div');
+            row.style.cssText = 'margin-bottom:14px;';
+
+            const label = document.createElement('label');
+            label.style.cssText = 'display:block; margin-bottom:4px; font-weight:600;';
+            label.textContent = spec.label || spec.key;
+            row.appendChild(label);
+
+            const value = (values && values[spec.key] !== undefined && values[spec.key] !== null)
+                ? String(values[spec.key])
+                : String(spec.default ?? '');
+
+            let input;
+            if (spec.type === 'select') {
+                input = document.createElement('select');
+                for (const opt of (spec.options || [])) {
+                    const o = document.createElement('option');
+                    o.value = typeof opt === 'object' ? opt.value : String(opt);
+                    o.textContent = typeof opt === 'object' ? (opt.label || opt.value) : String(opt);
+                    input.appendChild(o);
+                }
+                input.value = value;
+            } else {
+                input = document.createElement('input');
+                input.type = 'text';
+                input.autocomplete = 'off';
+                input.placeholder = spec.placeholder || '';
+                input.value = value;
+            }
+            input.id = `ext-ep-extra-${spec.key}`;
+            input.style.cssText = 'width:100%; padding:9px 12px; background:var(--background); color:var(--text); border:1px solid var(--primary); border-radius:8px; box-sizing:border-box;';
+            row.appendChild(input);
+
+            if (spec.hint) {
+                const hint = document.createElement('div');
+                hint.style.cssText = 'margin-top:5px; font-size:0.8rem; color:var(--muted);';
+                hint.textContent = spec.hint;
+                row.appendChild(hint);
+            }
+            container.appendChild(row);
+        }
+    }
+
+    // Collect the current values of the rendered extra fields.
+    function collectExtraFields() {
+        const out = {};
+        for (const spec of _activeExtraFields) {
+            const el = document.getElementById(`ext-ep-extra-${spec.key}`);
+            if (el) out[spec.key] = el.value;
+        }
+        return out;
     }
 
     function selectPreset(preset) {
@@ -560,6 +638,11 @@
         const identityDetails = document.getElementById('ext-ep-identity-details');
         if (identityDetails) identityDetails.open = !preset.suggested_name;
 
+        // Provider-specific fields (e.g. Fish Audio model / format / voice id)
+        _editingExtraConfig = null;
+        _activeExtraConfigBase = { ...(preset.extra_config || {}), provider_id: preset.provider_id };
+        renderExtraFields(preset.extra_fields, null);
+
         document.getElementById('ext-ep-modal-title').textContent = 'Add External Endpoint';
         showStep(2);
     }
@@ -568,10 +651,19 @@
     // Wizard — Step 2: edit existing endpoint
     // -----------------------------------------------------------------------
 
-    function openModalEdit(ep) {
+    async function openModalEdit(ep) {
         setModalError('');
         setModalStatus('');
         document.getElementById('ext-ep-modal-title').textContent = 'Edit Endpoint';
+
+        // Re-render the provider-specific fields (if this endpoint was created
+        // from a preset that defines them), pre-filled from its extra_config.
+        await ensurePresets();
+        const epExtra = ep.extra_config || {};
+        const srcPreset = _presets.find(p => p.provider_id && p.provider_id === epExtra.provider_id);
+        _editingExtraConfig = epExtra;
+        _activeExtraConfigBase = {};
+        renderExtraFields(srcPreset ? srcPreset.extra_fields : [], epExtra);
 
         setField('ext-ep-form-id', ep.id);
         const nameInput = document.getElementById('ext-ep-form-name');
@@ -684,6 +776,15 @@
             payload.subsystem_map = subsystem_map;
         }
         if (key) payload.api_key = key;
+
+        // Provider-specific fields → extra_config. On edit, merge over the
+        // endpoint's existing extra_config so unrelated keys are preserved.
+        if (_activeExtraFields.length > 0) {
+            payload.extra_config = {
+                ...(_editingExtraConfig || _activeExtraConfigBase),
+                ...collectExtraFields(),
+            };
+        }
 
         try {
             // Show progress inside the modal so it is visible even when the
