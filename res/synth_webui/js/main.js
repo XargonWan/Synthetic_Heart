@@ -4176,17 +4176,17 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                     } catch (e) { /* ignore */ return null; }
                 }
 
-                // Helper to toggle page-level scrolling for long document-style tabs
-                function _adjustPageScroll(tab) {
+                // Keep document-level scrolling disabled for every tab. Content-heavy
+                // panels (settings, plugins, engines, about, skins) scroll *inside*
+                // themselves via the shell's `.tab-panel[...].active { overflow-y:auto }`
+                // rules, so the top bar stays fixed. Previously Settings (and
+                // components/about) were special-cased to enable page-level scroll and
+                // call scrollIntoView, which shifted the top bar up on tab switch — the
+                // divergent behaviour every other content tab did not have.
+                function _adjustPageScroll(_tab) {
                     try {
-                        if (['settings', 'components', 'about'].includes(tab)) {
-                            document.documentElement.style.overflow = 'auto';
-                            document.body.style.overflow = 'auto';
-                            try { const targetPanel = document.querySelector(`[data-tab="${tab}"]`); if (targetPanel) targetPanel.scrollIntoView({ behavior: 'auto', block: 'start' }); } catch (e) { /* ignore */ }
-                        } else {
-                            document.documentElement.style.overflow = 'hidden';
-                            document.body.style.overflow = 'hidden';
-                        }
+                        document.documentElement.style.overflow = 'hidden';
+                        document.body.style.overflow = 'hidden';
                     } catch (e) { /* ignore */ }
                 }
 
