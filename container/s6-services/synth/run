@@ -3,6 +3,18 @@ set -e
 
 # Ensure synth config directory exists and is writable
 mkdir -p /config/.config/
+
+# Ensure persistent storage sub-directories exist under the /config volume so
+# that models, HuggingFace cache, generated TTS audio and received media are
+# written to persistent storage (survive rebuilds) rather than the ephemeral
+# container layer. These paths are pointed here via SYNTH_MODELS_DIR / HF_HOME /
+# VOX_OUTPUT_DIR / TMPDIR in the compose file.
+mkdir -p \
+  "${SYNTH_MODELS_DIR:-/config/models}" \
+  "${HF_HOME:-/config/hf-cache}" \
+  "${VOX_OUTPUT_DIR:-/config/media/tts}" \
+  "${TMPDIR:-/config/media/tmp}"
+
 chmod a+rwx -R /config
 
 echo "[S6 synth] Avvio Synthetic Heart..."
