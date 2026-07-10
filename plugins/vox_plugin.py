@@ -119,6 +119,8 @@ def _detect_language(text: str) -> str | None:
 config_registry.get_value(
     "ACTIVE_VOX_ENGINE",
     "disabled",
+    label="Active Vox Engine",
+    description="Active voice text-to-speech engine selection.",
     value_type=str,
     group="plugins",
     component="vox_plugin",
@@ -140,6 +142,8 @@ config_registry.get_value(
 config_registry.get_value(
     "VOX_ENGINE_SETTINGS",
     "{}",
+    label="Vox Engine Settings",
+    description="JSON string containing settings for all Vox engines.",
     value_type=str,
     group="plugins",
     component="vox_plugin",
@@ -148,6 +152,8 @@ config_registry.get_value(
 config_registry.get_value(
     "VOX_OUTPUT_DIR",
     "res/synth_webui/static/audio/tts",
+    label="Vox Output Directory",
+    description="Directory where synthesised Vox audio clips are stored.",
     value_type=str,
     group="plugins",
     component="vox_plugin",
@@ -156,6 +162,8 @@ config_registry.get_value(
 config_registry.get_value(
     "VOX_TIMEOUT_SECONDS",
     300,
+    label="Vox Timeout Seconds",
+    description="Timeout in seconds for Vox speech synthesis calls.",
     value_type=int,
     group="plugins",
     component="vox_plugin",
@@ -164,6 +172,8 @@ config_registry.get_value(
 config_registry.get_value(
     "VOX_FALLBACK_TO_TEXT",
     True,
+    label="Vox Fallback to Text",
+    description="Enable text fallback when Vox speech synthesis fails.",
     value_type=bool,
     group="plugins",
     component="vox_plugin",
@@ -172,6 +182,8 @@ config_registry.get_value(
 config_registry.get_value(
     "VOX_AUDIO_CACHE_SIZE",
     40,
+    label="Vox Audio Cache Size",
+    description="Maximum number of audio files to keep in the cache.",
     value_type=int,
     group="plugins",
     component="vox_plugin",
@@ -180,6 +192,8 @@ config_registry.get_value(
 config_registry.get_value(
     "VOX_SENTENCE_CHUNKING",
     True,
+    label="Vox Sentence Chunking",
+    description="Enable sentence-by-sentence streaming for faster response playback.",
     value_type=bool,
     group="plugins",
     component="vox_plugin",
