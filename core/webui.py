@@ -374,6 +374,45 @@ class SynthWebUIInterface:
                 log_file=WEBUI_LOG,
             )
 
+        # When the configured Vox output directory lives *outside* the /static
+        # tree (e.g. a persistent volume like /config/media/tts), serve its
+        # parent under the alternate /media mount so generated TTS audio is
+        # actually reachable by clients. The URL prefix (/media/<leaf>/...) is
+        # produced by core.media_url_utils.derive_audio_url and must match the
+        # directory mounted here.
+        try:
+            from core.media_url_utils import (
+                get_vox_output_dir,
+                vox_output_is_outside_static,
+                MEDIA_MOUNT_PATH,
+            )
+
+            if vox_output_is_outside_static():
+                vox_dir = get_vox_output_dir()
+                media_parent = vox_dir.parent
+                if media_parent.exists():
+                    self.app.mount(
+                        MEDIA_MOUNT_PATH,
+                        StaticFiles(directory=str(media_parent)),
+                        name="media",
+                    )
+                    log_info(
+                        f"{LOG_PREFIX} mounted {MEDIA_MOUNT_PATH} → {media_parent} "
+                        f"for out-of-static Vox output {vox_dir}",
+                        log_file=WEBUI_LOG,
+                    )
+                else:
+                    log_warning(
+                        f"{LOG_PREFIX} Vox media parent dir not found, "
+                        f"skipping {MEDIA_MOUNT_PATH} mount: {media_parent}",
+                        log_file=WEBUI_LOG,
+                    )
+        except Exception as exc:
+            log_warning(
+                f"{LOG_PREFIX} could not set up /media mount for Vox output: {exc}",
+                log_file=WEBUI_LOG,
+            )
+
         # Ensure the root path always returns the rendered HTML directly.
         # In some deployment or hot-reload scenarios a previous handler may
         # end up returning None (serialized as JSON null). Add a lightweight
@@ -4618,21 +4657,14 @@ class SynthWebUIInterface:
             log_warning(f"{LOG_PREFIX} send_tts_audio: no websocket for session {sid}")
             return False
 
-        # Derive a client-accessible URL from the filesystem path.
-        # Audio is stored under the /static mount, e.g.
-        #   res/synth_webui/static/audio/tts/vox_123.wav → /static/audio/tts/vox_123.wav
-        try:
-            from pathlib import Path as _Path
+        # Derive a client-accessible URL from the filesystem path. In-image
+        # audio is served under /static; audio living outside the static tree
+        # (e.g. a persistent VOX_OUTPUT_DIR volume like /config/media/tts) is
+        # served under the alternate /media mount. Both cases are handled by the
+        # shared helper so this path and the Karada broadcast agree on the URL.
+        from core.media_url_utils import derive_audio_url
 
-            p = _Path(audio_path)
-            parts_list = list(p.parts)
-            try:
-                idx = parts_list.index("static")
-                url = "/" + "/".join(parts_list[idx:])
-            except ValueError:
-                url = "/static/audio/tts/" + p.name
-        except Exception:
-            url = "/static/audio/tts/" + str(audio_path).rsplit("/", 1)[-1]
+        url = derive_audio_url(audio_path)
 
         # Deliver the caption as a regular chat message so that it is persisted
         # in the DB, appears in the in-memory history (replay on reconnect) and

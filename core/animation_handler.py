@@ -2150,23 +2150,18 @@ class KaradaStateServer:
 
     @staticmethod
     def _derive_audio_url(audio_path: str) -> str:
-        """Derive a client-accessible ``/static/...`` URL from a filesystem path.
+        """Derive a client-accessible URL from a generated-audio filesystem path.
 
-        Audio is stored under the WebUI ``/static`` mount, e.g.
-        ``res/synth_webui/static/audio/tts/vox_123.wav`` →
-        ``/static/audio/tts/vox_123.wav``.  Falls back to
-        ``/static/audio/tts/<filename>`` when no ``static`` segment is present.
+        Delegates to :func:`core.media_url_utils.derive_audio_url`, which serves
+        in-image audio under ``/static`` and audio living outside the ``static``
+        tree (e.g. a persistent ``VOX_OUTPUT_DIR`` volume like
+        ``/config/media/tts``) under the alternate ``/media`` mount. This avoids
+        the previous HTTP 404 when ``VOX_OUTPUT_DIR`` pointed off the ``/static``
+        tree.
         """
-        try:
-            p = Path(audio_path)
-            parts_list = list(p.parts)
-            try:
-                idx = parts_list.index("static")
-                return "/" + "/".join(parts_list[idx:])
-            except ValueError:
-                return "/static/audio/tts/" + p.name
-        except Exception:
-            return "/static/audio/tts/" + str(audio_path).rsplit("/", 1)[-1]
+        from core.media_url_utils import derive_audio_url
+
+        return derive_audio_url(audio_path)
 
     async def broadcast_audio(
         self,
