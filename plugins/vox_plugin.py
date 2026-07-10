@@ -23,7 +23,11 @@ from __future__ import annotations
 import asyncio
 import importlib
 import io
+import os
 import re
+import shutil
+import subprocess
+import tempfile
 import threading
 import time
 import uuid
@@ -235,6 +239,114 @@ def _get_wav_duration(path: Path) -> float | None:
     except Exception:
         pass
     return None
+
+
+def _wav_header_needs_repair(audio_bytes: bytes) -> bool:
+    """Return True when a RIFF/WAVE payload has a placeholder/invalid size field.
+
+    Some engines (notably Fish Audio) stream WAV over ``Transfer-Encoding:
+    chunked`` and cannot know the total length up front, so they write a
+    placeholder ``RIFF`` chunk size (``0`` or ``0xFFFFFFFF``) and/or a bogus
+    ``data`` sub-chunk size. Such a file plays back as garbage / undecodable in
+    the browser and yields a wrong duration from :mod:`wave`. We treat the
+    header as authoritative only when the declared ``RIFF`` size is consistent
+    with the actual byte length.
+    """
+    if (
+        len(audio_bytes) < 12
+        or audio_bytes[0:4] != b"RIFF"
+        or audio_bytes[8:12] != b"WAVE"
+    ):
+        return False
+    riff_size = int.from_bytes(audio_bytes[4:8], "little")
+    expected = len(audio_bytes) - 8
+    # Placeholder markers or a size that disagrees with the real length.
+    if riff_size in (0, 0xFFFFFFFF):
+        return True
+    # Allow small slack for trailing metadata chunks, but flag gross mismatches.
+    if abs(riff_size - expected) > 8:
+        return True
+    return False
+
+
+def _repair_wav_header(audio_bytes: bytes) -> bytes | None:
+    """Re-mux a WAV blob so its header sizes are authoritative.
+
+    Prefers a lossless decode+re-emit via :mod:`wave` (handles standard 8/16/
+    24/32-bit PCM). Falls back to ``ffmpeg`` for anything :mod:`wave` cannot
+    parse (float WAV, WAVE_FORMAT_EXTENSIBLE, compressed payloads). Returns the
+    repaired WAV bytes, or ``None`` if repair is impossible (caller keeps the
+    original bytes).
+    """
+    # Attempt 1: decode + re-emit via the stdlib wave module.
+    try:
+        with wave.open(io.BytesIO(audio_bytes), "rb") as src:
+            nchannels = src.getnchannels()
+            sampwidth = src.getsampwidth()
+            framerate = src.getframerate()
+            frames = src.readframes(src.getnframes() or -1)
+        if frames and framerate > 0 and nchannels > 0 and sampwidth > 0:
+            out = io.BytesIO()
+            with wave.open(out, "wb") as dst:
+                dst.setnchannels(nchannels)
+                dst.setsampwidth(sampwidth)
+                dst.setframerate(framerate)
+                dst.writeframes(frames)
+            repaired = out.getvalue()
+            if repaired.startswith(b"RIFF") and len(repaired) > 44:
+                return repaired
+    except Exception as exc:
+        log_debug(f"[vox_plugin] wave-based WAV repair failed: {exc!r}")
+
+    # Attempt 2: ffmpeg transcode (robust for non-standard/compressed WAV).
+    repaired = _ffmpeg_to_wav(audio_bytes)
+    if repaired:
+        return repaired
+    log_warning(
+        "[vox_plugin] could not repair malformed WAV header; "
+        "lip-sync/duration may be wrong for this clip"
+    )
+    return None
+
+
+def _ffmpeg_to_wav(audio_bytes: bytes) -> bytes | None:
+    """Transcode arbitrary audio to a well-formed WAV via ffmpeg, or ``None``."""
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        return None
+    in_path: str | None = None
+    out_path: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".in", delete=False) as in_fh:
+            in_fh.write(audio_bytes)
+            in_path = in_fh.name
+        out_fd, out_path = tempfile.mkstemp(suffix=".wav")
+        os.close(out_fd)
+        result = subprocess.run(  # noqa: S603 - fixed argv, no shell
+            [ffmpeg, "-y", "-i", in_path, "-f", "wav", out_path],
+            capture_output=True,
+            timeout=60,
+        )
+        if result.returncode != 0:
+            log_warning(
+                "[vox_plugin] ffmpeg WAV repair failed "
+                f"(rc={result.returncode}): "
+                f"{result.stderr.decode('utf-8', 'replace')[:300]}"
+            )
+            return None
+        with open(out_path, "rb") as out_fh:
+            wav_bytes = out_fh.read()
+        return wav_bytes or None
+    except Exception as exc:
+        log_warning(f"[vox_plugin] ffmpeg WAV repair raised: {exc!r}")
+        return None
+    finally:
+        for path in (in_path, out_path):
+            if path and os.path.exists(path):
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
 
 
 def is_vox_enabled() -> bool:
@@ -973,7 +1085,20 @@ class VoxPlugin(AIPluginBase):
 
     @staticmethod
     def _to_wav_bytes(audio_bytes: bytes, engine: Any) -> bytes:
-        """Normalize raw engine output to WAV bytes, wrapping raw PCM if needed."""
+        """Normalize raw engine output to WAV bytes, wrapping raw PCM if needed.
+
+        Handles three cases:
+          1. ``fmt == "pcm"`` or non-RIFF bytes → wrap raw PCM in a WAV header
+             with correct sizes (engines that emit headerless PCM).
+          2. RIFF bytes with a valid, authoritative header → pass through.
+          3. RIFF bytes with a placeholder/invalid size field (e.g. Fish Audio
+             streams WAV via chunked transfer and writes ``data``/``RIFF`` sizes
+             of 0 or ``0xFFFFFFFF``) → re-mux so the header is authoritative.
+             A broken size field makes ``wave``-based duration parsing and the
+             browser ``<audio>`` element fail, which is why lip-sync latches the
+             mouth open and the expression timeline collapses to ~0s. This must
+             work for any engine, not just Fish, per the pipeline contract.
+        """
         fmt = getattr(engine, "output_format", "wav")
         if fmt == "pcm" or not audio_bytes.startswith(b"RIFF"):
             sr = getattr(engine, "sample_rate", 22050)
@@ -985,6 +1110,10 @@ class VoxPlugin(AIPluginBase):
                 wf.setframerate(sr)
                 wf.writeframes(audio_bytes)
             return buf.getvalue()
+        if _wav_header_needs_repair(audio_bytes):
+            repaired = _repair_wav_header(audio_bytes)
+            if repaired is not None:
+                return repaired
         return audio_bytes
 
     def _write_audio(self, path: Path, audio_bytes: bytes, engine: Any) -> None:

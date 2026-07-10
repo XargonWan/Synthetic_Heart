@@ -3873,6 +3873,284 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                         voxEngineSel.addEventListener('change', updateKittenControlsVisibility);
                     }
 
+                    // ── Generic Vox voice selector (any engine exposing speakers) ──
+                    // Engines other than Kitten (which has its own dedicated picker
+                    // above) get a generic voice dropdown + preview here whenever
+                    // /api/vox/speakers returns entries for the active engine. The
+                    // choice is persisted into the <ENGINE>_VOICE config key when the
+                    // key exists (registered dynamically for external endpoints that
+                    // expose list_speakers — see registry._register_voice_config_key).
+                    const voxVoiceSelect = document.getElementById('vox-voice-select');
+                    const voxVoicePlayBtn = document.getElementById('vox-voice-play-btn');
+                    let voxVoiceList = [];
+
+                    const voxVoiceConfigKey = (engine) => engine ? `${engine.toUpperCase()}_VOICE` : null;
+
+                    async function loadVoxVoices(engine) {
+                        try {
+                            const r = await fetch(`/api/vox/speakers?engine=${encodeURIComponent(engine)}`);
+                            voxVoiceList = r.ok ? await r.json() : [];
+                        } catch (e) {
+                            console.error('[synth_webui] failed to load vox voices', e);
+                            voxVoiceList = [];
+                        }
+                    }
+
+                    function populateVoxVoices(currentValue) {
+                        if (!voxVoiceSelect) return;
+                        voxVoiceSelect.innerHTML = '';
+                        // Group voices into <optgroup> blocks by tier label so the
+                        // hierarchy (Manually added → My Voices → Bookmarks →
+                        // Default Voices) is visible. The adapter already returns
+                        // entries pre-sorted by tier and alphabetically within it,
+                        // so we only need to split on the tier boundary.
+                        const hasTiers = voxVoiceList.some(s => s.tier_label);
+                        if (!hasTiers) {
+                            voxVoiceList.forEach(s => {
+                                const opt = document.createElement('option');
+                                opt.value = s.code;
+                                opt.textContent = s.name || s.code;
+                                if (String(currentValue) === s.code) opt.selected = true;
+                                voxVoiceSelect.appendChild(opt);
+                            });
+                            return;
+                        }
+                        let currentGroup = null;
+                        let currentLabel = null;
+                        voxVoiceList.forEach(s => {
+                            const label = s.tier_label || 'Voices';
+                            if (label !== currentLabel) {
+                                currentLabel = label;
+                                currentGroup = document.createElement('optgroup');
+                                currentGroup.label = label;
+                                voxVoiceSelect.appendChild(currentGroup);
+                            }
+                            const opt = document.createElement('option');
+                            opt.value = s.code;
+                            opt.textContent = s.name || s.code;
+                            if (String(currentValue) === s.code) opt.selected = true;
+                            currentGroup.appendChild(opt);
+                        });
+                    }
+
+                    async function updateVoxVoiceVisibility() {
+                        if (!voxVoiceSelect) return;
+                        const engine = voxEngineSel ? voxEngineSel.value : '';
+                        // Kitten has its own dedicated speaker picker; hide the generic
+                        // one for it and when no engine / a disabled engine is active.
+                        if (!engine || engine === 'kitten' || engine === 'disabled') {
+                            voxVoiceSelect.style.display = 'none';
+                            if (voxVoicePlayBtn) voxVoicePlayBtn.style.display = 'none';
+                            return;
+                        }
+                        await loadVoxVoices(engine);
+                        if (!voxVoiceList.length) {
+                            voxVoiceSelect.style.display = 'none';
+                            if (voxVoicePlayBtn) voxVoicePlayBtn.style.display = 'none';
+                            return;
+                        }
+                        // Resolve the currently saved voice (if the config key exists).
+                        let saved = '';
+                        const key = voxVoiceConfigKey(engine);
+                        try {
+                            const r = await fetch('/api/config');
+                            if (r.ok) {
+                                const cfg = await r.json();
+                                const items = Array.isArray(cfg.items) ? cfg.items : [];
+                                const item = items.find(i => i.key === key);
+                                if (item && item.value) saved = String(item.value);
+                            }
+                        } catch (e) { /* ignore — preview still works */ }
+                        populateVoxVoices(saved || (voxVoiceList[0] && voxVoiceList[0].code));
+                        voxVoiceSelect.style.display = '';
+                        if (voxVoicePlayBtn) voxVoicePlayBtn.style.display = '';
+                    }
+
+                    if (voxVoiceSelect && !voxVoiceSelect.dataset.bound) {
+                        voxVoiceSelect.addEventListener('change', async () => {
+                            const engine = voxEngineSel ? voxEngineSel.value : '';
+                            const key = voxVoiceConfigKey(engine);
+                            if (!key) return;
+                            try {
+                                const r = await fetch('/api/config', {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({ key, value: voxVoiceSelect.value })
+                                });
+                                if (!r.ok) throw new Error('HTTP ' + r.status);
+                                window.showToast && window.showToast('Voice set to ' + voxVoiceSelect.value);
+                            } catch (e) {
+                                console.error('[synth_webui] Failed to set ' + key, e);
+                                window.showToast && window.showToast('Failed to save voice', true);
+                            }
+                        });
+                        voxVoiceSelect.dataset.bound = '1';
+                    }
+                    if (voxVoicePlayBtn && !voxVoicePlayBtn.dataset.bound) {
+                        voxVoicePlayBtn.addEventListener('click', () => {
+                            const engine = voxEngineSel ? voxEngineSel.value : '';
+                            const code = voxVoiceSelect ? voxVoiceSelect.value : '';
+                            if (!engine || !code) return;
+                            const audio = new Audio(
+                                `/api/vox/sample?engine=${encodeURIComponent(engine)}&speaker=${encodeURIComponent(code)}`
+                            );
+                            audio.play().catch(() => { /* no sample available — ignore */ });
+                        });
+                        voxVoicePlayBtn.dataset.bound = '1';
+                    }
+                    // ── Voice manager (add voices by URL — e.g. Fish Audio) ──
+                    // The picker's tier metadata (tier_label) is the signal that
+                    // the active engine supports a manually-managed voice list, so
+                    // the "Manage Voices" button is only shown for those engines.
+                    const voxManageVoicesBtn = document.getElementById('vox-manage-voices-btn');
+                    const voiceManagerModal = document.getElementById('voice-manager-modal');
+                    const voiceManagerClose = document.getElementById('voice-manager-close');
+                    const voiceManagerUrl = document.getElementById('voice-manager-url');
+                    const voiceManagerAddBtn = document.getElementById('voice-manager-add-btn');
+                    const voiceManagerError = document.getElementById('voice-manager-error');
+                    const voiceManagerList = document.getElementById('voice-manager-list');
+                    const voiceManagerRowTpl = document.getElementById('voice-manager-row-tpl');
+
+                    function voiceManagerShowError(msg) {
+                        if (!voiceManagerError) return;
+                        if (!msg) { voiceManagerError.style.display = 'none'; voiceManagerError.textContent = ''; return; }
+                        voiceManagerError.textContent = msg;
+                        voiceManagerError.style.display = '';
+                    }
+
+                    function renderVoiceManagerList() {
+                        if (!voiceManagerList || !voiceManagerRowTpl) return;
+                        voiceManagerList.innerHTML = '';
+                        // Only manually-added voices (tier 1) can be removed here.
+                        const manual = voxVoiceList.filter(s => Number(s.tier) === 1);
+                        if (!manual.length) {
+                            const empty = document.createElement('div');
+                            empty.className = 'meta';
+                            empty.textContent = 'No voices added yet. Paste a voice URL above to add one.';
+                            voiceManagerList.appendChild(empty);
+                            return;
+                        }
+                        manual.forEach(s => {
+                            const row = voiceManagerRowTpl.content.firstElementChild.cloneNode(true);
+                            row.querySelector('.vm-name').textContent = s.name || s.code;
+                            const langEl = row.querySelector('.vm-lang');
+                            if (s.language) { langEl.textContent = s.language; }
+                            else { langEl.style.display = 'none'; }
+                            row.querySelector('.vm-id').textContent = s.code;
+                            const delBtn = row.querySelector('.vm-delete-btn');
+                            delBtn.addEventListener('click', async () => {
+                                const engine = voxEngineSel ? voxEngineSel.value : '';
+                                if (!engine) return;
+                                delBtn.disabled = true;
+                                voiceManagerShowError('');
+                                try {
+                                    const r = await fetch('/api/vox/voices', {
+                                        method: 'DELETE',
+                                        headers: { 'Content-Type': 'application/json' },
+                                        body: JSON.stringify({ engine, reference_id: s.code })
+                                    });
+                                    if (!r.ok) {
+                                        const err = await r.json().catch(() => ({}));
+                                        throw new Error(err.error || err.detail || ('HTTP ' + r.status));
+                                    }
+                                    await refreshVoiceManager();
+                                } catch (e) {
+                                    voiceManagerShowError('Failed to remove voice: ' + e.message);
+                                    delBtn.disabled = false;
+                                }
+                            });
+                            voiceManagerList.appendChild(row);
+                        });
+                    }
+
+                    async function refreshVoiceManager() {
+                        const engine = voxEngineSel ? voxEngineSel.value : '';
+                        if (!engine) return;
+                        await loadVoxVoices(engine);
+                        renderVoiceManagerList();
+                        // Refresh the inline picker too so a newly-added voice shows.
+                        await updateVoxVoiceVisibility();
+                    }
+
+                    // Exposed so other UI code can re-pull the voice list after edits.
+                    window.refreshVoxVoices = refreshVoiceManager;
+
+                    async function updateVoxManageVoicesVisibility() {
+                        if (!voxManageVoicesBtn) return;
+                        const engine = voxEngineSel ? voxEngineSel.value : '';
+                        if (!engine || engine === 'kitten' || engine === 'disabled') {
+                            voxManageVoicesBtn.style.display = 'none';
+                            return;
+                        }
+                        // Tiered voices (tier_label present) mark an engine that
+                        // supports a manually-managed voice list.
+                        const supported = voxVoiceList.some(s => s.tier_label);
+                        voxManageVoicesBtn.style.display = supported ? '' : 'none';
+                    }
+
+                    if (voxManageVoicesBtn && !voxManageVoicesBtn.dataset.bound) {
+                        voxManageVoicesBtn.addEventListener('click', async () => {
+                            if (!voiceManagerModal) return;
+                            voiceManagerShowError('');
+                            if (voiceManagerUrl) voiceManagerUrl.value = '';
+                            voiceManagerModal.style.display = 'flex';
+                            await refreshVoiceManager();
+                        });
+                        voxManageVoicesBtn.dataset.bound = '1';
+                    }
+                    if (voiceManagerClose && !voiceManagerClose.dataset.bound) {
+                        voiceManagerClose.addEventListener('click', () => {
+                            if (voiceManagerModal) voiceManagerModal.style.display = 'none';
+                        });
+                        voiceManagerClose.dataset.bound = '1';
+                    }
+                    if (voiceManagerModal && !voiceManagerModal.dataset.bound) {
+                        voiceManagerModal.addEventListener('click', (e) => {
+                            if (e.target === voiceManagerModal) voiceManagerModal.style.display = 'none';
+                        });
+                        voiceManagerModal.dataset.bound = '1';
+                    }
+                    if (voiceManagerAddBtn && !voiceManagerAddBtn.dataset.bound) {
+                        voiceManagerAddBtn.addEventListener('click', async () => {
+                            const engine = voxEngineSel ? voxEngineSel.value : '';
+                            const url = voiceManagerUrl ? voiceManagerUrl.value.trim() : '';
+                            if (!engine || !url) { voiceManagerShowError('Paste a voice URL first.'); return; }
+                            voiceManagerAddBtn.disabled = true;
+                            voiceManagerShowError('');
+                            try {
+                                const r = await fetch('/api/vox/voices', {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({ engine, url })
+                                });
+                                if (!r.ok) {
+                                    const err = await r.json().catch(() => ({}));
+                                    throw new Error(err.error || err.detail || ('HTTP ' + r.status));
+                                }
+                                if (voiceManagerUrl) voiceManagerUrl.value = '';
+                                await refreshVoiceManager();
+                                window.showToast && window.showToast('Voice added');
+                            } catch (e) {
+                                voiceManagerShowError('Failed to add voice: ' + e.message);
+                            } finally {
+                                voiceManagerAddBtn.disabled = false;
+                            }
+                        });
+                        voiceManagerAddBtn.dataset.bound = '1';
+                    }
+
+                    // Keep the Manage Voices button visibility in sync with the
+                    // picker: both react to the active engine's voice list.
+                    async function updateVoxVoiceControls() {
+                        await updateVoxVoiceVisibility();
+                        await updateVoxManageVoicesVisibility();
+                    }
+
+                    updateVoxVoiceControls();
+                    if (voxEngineSel) {
+                        voxEngineSel.addEventListener('change', updateVoxVoiceControls);
+                    }
+
                     // ── Vosk language selector ─────────────────────────────────
                     const voskLangSelect = document.getElementById('auris-vosk-language');
                     const VOSK_LANGUAGES = [

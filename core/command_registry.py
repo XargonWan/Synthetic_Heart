@@ -903,15 +903,26 @@ async def _media_command(
 
     models, current_model = await _media_endpoint_models(engine_name)
 
-    # `/<cmd> <engine>` -> list that engine's models.
+    # `/<cmd> <engine>` with no model argument.
     if model_arg is None:
-        lines = [f"*Models for `{engine_name}` ({label}):*"]
+        # Engines without selectable models (e.g. bundled local engines like
+        # kitten) have nothing to pick, so switch directly instead of showing
+        # an empty model list that would otherwise be a dead end.
         if not models:
-            lines.append("_No models available for this engine._")
-        else:
-            for m in models:
-                marker = " ✅" if m == current_model else ""
-                lines.append(f"• `{m}`{marker}")
+            try:
+                await config_registry.set_value(config_key, engine_name)
+            except Exception as exc:
+                return f"❌ Failed to switch {label} engine: {exc}"
+            return (
+                f"✅ {label} engine switched to `{engine_name}`.\n"
+                f"_Note: media engines are applied on next use; a restart guarantees a full re-sync._"
+            )
+
+        # Engine has selectable models -> list them for the user to choose.
+        lines = [f"*Models for `{engine_name}` ({label}):*"]
+        for m in models:
+            marker = " ✅" if m == current_model else ""
+            lines.append(f"• `{m}`{marker}")
         lines.append("")
         lines.append(f"To switch: `/{label.lower()} {engine_name} <model>`")
         return "\n".join(lines)

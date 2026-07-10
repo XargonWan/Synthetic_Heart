@@ -47,6 +47,99 @@ class ExternalVoxEngine(VoxEngineBase):
         except Exception:
             return 1
 
+    def get_speakers(self) -> list[dict]:
+        """Return the endpoint's available voices, if the adapter exposes them.
+
+        Adapters that support voice discovery (e.g. Fish Audio via ``GET
+        /model``) implement an async ``list_speakers`` returning
+        ``{"reference_id", "title", "language"}`` dicts. We map those onto the
+        base ``get_speakers`` contract (``{"code", "name", "language"}``) where
+        ``code`` is the ``reference_id`` — that is what the WebUI persists into
+        ``extra_config["tts_reference_id"]`` and the adapter reads back at
+        synthesis time. Adapters without ``list_speakers`` inherit the empty
+        default.
+        """
+        import asyncio
+
+        adapter = self._adapter
+        if adapter is None:
+            return []
+        list_speakers = getattr(adapter, "list_speakers", None)
+        if not callable(list_speakers):
+            return []
+
+        coro = list_speakers()
+        try:
+            try:
+                running_loop = asyncio.get_running_loop()
+            except RuntimeError:
+                running_loop = None
+
+            if running_loop is not None:
+                import concurrent.futures
+
+                future: concurrent.futures.Future[list[dict[str, Any]]] = (
+                    concurrent.futures.Future()
+                )
+
+                async def _run() -> None:
+                    try:
+                        future.set_result(await coro)
+                    except Exception as exc:
+                        future.set_exception(exc)
+
+                asyncio.ensure_future(_run())
+                raw = future.result(timeout=30)
+            else:
+                raw = asyncio.run(coro)
+        except Exception as exc:
+            from core.logging_utils import log_warning
+
+            log_warning(
+                f"[vox_bridge:{self._endpoint.name}] get_speakers failed: "
+                f"{type(exc).__name__}: {exc}"
+            )
+            return []
+
+        speakers: list[dict] = []
+        for entry in raw or []:
+            if not isinstance(entry, dict):
+                continue
+            code = entry.get("reference_id") or entry.get("code")
+            name = entry.get("title") or entry.get("name") or code
+            if not code:
+                continue
+            speaker: dict[str, Any] = {"code": str(code), "name": str(name)}
+            if entry.get("language"):
+                speaker["language"] = entry["language"]
+            # Preserve the hierarchy tier (Manually added / My Voices /
+            # Bookmarks / Default Voices) so the WebUI can group + order the
+            # picker. Adapters that don't tier their voices simply omit these.
+            if entry.get("tier") is not None:
+                speaker["tier"] = entry["tier"]
+            if entry.get("tier_label"):
+                speaker["tier_label"] = entry["tier_label"]
+            speakers.append(speaker)
+        return speakers
+
+    def sample(self, speaker: str) -> bytes:
+        """Synthesize a short preview clip for ``speaker``.
+
+        The WebUI voice picker calls ``/api/vox/sample`` to preview a voice
+        before saving it. External TTS endpoints (e.g. Fish Audio) have no
+        pre-rendered samples, so we synthesize a short fixed phrase on demand
+        with the requested voice — this is what makes the preview work "like
+        Kitten" for any endpoint that exposes ``get_speakers``. Raises
+        ``NotImplementedError`` when synthesis is unavailable so the endpoint
+        returns 404 and the UI silently skips the preview.
+        """
+        if self._adapter is None:
+            raise NotImplementedError("engine does not provide samples")
+        audio = self.generate_tts("Hello, this is a voice preview.", voice=speaker)
+        if not audio:
+            raise NotImplementedError("engine did not return a sample")
+        return audio
+
     def _runtime_selected_model(self) -> str | None:
         """Return the TTS model chosen at runtime via the WebUI, if any.
 
@@ -70,6 +163,31 @@ class ExternalVoxEngine(VoxEngineBase):
         if available and selected not in available:
             return None
         return selected
+
+    def _runtime_selected_voice(self) -> str | None:
+        """Return the voice chosen at runtime via the WebUI voice picker.
+
+        The WebUI persists the selected speaker code to the ``<ENGINE>_VOICE``
+        config key (``ENGINE`` being this endpoint's name, uppercased) — the
+        same convention the ``VoiceSettings`` component uses to save and
+        restore the choice. For Fish Audio that code is the voice's
+        ``reference_id`` exposed by ``get_speakers``. Returns ``None`` when no
+        selection has been made.
+        """
+        name = getattr(self._endpoint, "name", None)
+        if not name:
+            return None
+        key = f"{str(name).upper()}_VOICE"
+        try:
+            from core.config_manager import config_registry
+
+            selected = config_registry.get_value(key, None)
+        except Exception:
+            return None
+        if not selected:
+            return None
+        selected = str(selected).strip()
+        return selected or None
 
     def _model_settings(self, model: str | None) -> dict[str, Any]:
         """Return the per-model TTS settings for ``model``, if configured.
@@ -167,8 +285,18 @@ class ExternalVoxEngine(VoxEngineBase):
         if voice is None:
             if "voice" in model_settings:
                 voice = model_settings["voice"]
-            elif pin_applies:
-                voice = extra.get("tts_voice")
+            else:
+                # Voice chosen at runtime via the WebUI voice picker. The
+                # picker persists the selected speaker code (for Fish, the
+                # ``reference_id`` returned by ``get_speakers``) into the
+                # ``<ENGINE>_VOICE`` config key. Honour it before the legacy
+                # ``tts_voice`` / ``tts_reference_id`` endpoint pins so the
+                # WebUI selection actually reaches synthesis.
+                runtime_voice = self._runtime_selected_voice()
+                if runtime_voice:
+                    voice = runtime_voice
+                elif pin_applies:
+                    voice = extra.get("tts_voice") or extra.get("tts_reference_id")
 
         # --- Extra synthesis parameters --------------------------------
         # Any other per-model settings (e.g. ``mode``, ``generation_options``

@@ -715,6 +715,8 @@ class SynthWebUIInterface:
         # Vox metadata/sample endpoints
         self.app.get("/api/vox/speakers")(self.vox_speakers)
         self.app.get("/api/vox/sample")(self.vox_sample)
+        self.app.post("/api/vox/voices")(self.vox_add_voice)
+        self.app.delete("/api/vox/voices")(self.vox_remove_voice)
         self.app.get("/api/vrm")(self.list_vrm_models)
         self.app.get("/api/vrm/active")(self.get_active_vrm_endpoint)
         self.app.post("/api/vrm")(self.upload_vrm_model)
@@ -2937,7 +2939,14 @@ class SynthWebUIInterface:
         except ValueError:
             raise HTTPException(status_code=404, detail="Engine not found")
         try:
-            speakers = engine.get_speakers()
+            # ``get_speakers`` is a synchronous method that, for external
+            # endpoints, drives an async adapter call. Running it on the event
+            # loop thread would deadlock (the bridge schedules the coroutine on
+            # the running loop and blocks on the result, but the loop thread is
+            # this handler). Run it in a worker thread so the loop stays free.
+            import asyncio
+
+            speakers = await asyncio.to_thread(engine.get_speakers)
         except Exception:
             speakers = []
         return JSONResponse(speakers)
@@ -2959,10 +2968,124 @@ class SynthWebUIInterface:
         except ValueError:
             raise HTTPException(status_code=404, detail="Engine not found")
         try:
-            data = engine.sample(speaker)
+            # Off-load to a worker thread: for external endpoints ``sample``
+            # synthesises via an async adapter, and running it on the event
+            # loop thread would deadlock (see ``vox_speakers``).
+            import asyncio
+
+            data = await asyncio.to_thread(engine.sample, speaker)
         except NotImplementedError:
             raise HTTPException(status_code=404, detail="No sample available")
         return Response(data, media_type="audio/wav")
+
+    async def vox_add_voice(self, request: Request) -> JSONResponse:
+        """POST /api/vox/voices  — add a voice by URL to an external Vox engine.
+
+        Body JSON: ``{"engine": <name>, "url": <fish share URL or id>}``.
+        Scrapes the voice's metadata (title/language) from the adapter and
+        persists it in the endpoint's ``extra_config["manual_voices"]`` list so
+        it appears in the "Manually added" tier of the voice picker.
+        """
+        from core.config_manager import config_registry
+        from core.external_endpoints.registry import get_external_endpoint_registry
+
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        engine_name = (body or {}).get("engine") or config_registry.get_value(
+            "ACTIVE_VOX_ENGINE", "kitten", value_type=str
+        )
+        url = str((body or {}).get("url") or "").strip()
+        if not url:
+            raise HTTPException(status_code=400, detail="url is required")
+
+        registry = get_external_endpoint_registry()
+        endpoint = await registry.get_endpoint_by_name(str(engine_name))
+        if endpoint is None:
+            raise HTTPException(status_code=404, detail="Engine not found")
+
+        from core.external_endpoints.crypto import decrypt_api_key
+        from core.external_endpoints.probe import get_adapter_for_endpoint
+
+        api_key = decrypt_api_key(endpoint.api_key_enc or "")
+        adapter = get_adapter_for_endpoint(endpoint, api_key)
+        parse = getattr(type(adapter), "parse_model_id_from_url", None)
+        fetch_detail = getattr(adapter, "fetch_model_detail", None)
+        if parse is None or not callable(fetch_detail):
+            raise HTTPException(
+                status_code=400,
+                detail="This engine does not support adding voices by URL",
+            )
+
+        model_id = parse(url)
+        if not model_id:
+            raise HTTPException(status_code=400, detail="Could not parse a voice id")
+
+        detail = await fetch_detail(model_id)
+        if not detail:
+            # Fall back to a minimal record so the id is still usable even if
+            # metadata scraping failed (e.g. private voice, transient error).
+            detail = {"reference_id": model_id, "title": model_id, "language": None}
+
+        extra = dict(endpoint.extra_config or {})
+        manual = extra.get("manual_voices")
+        if not isinstance(manual, list):
+            manual = []
+        ref_id = str(detail.get("reference_id") or model_id)
+        # De-duplicate on reference_id, refreshing metadata if already present.
+        manual = [
+            v
+            for v in manual
+            if isinstance(v, dict) and str(v.get("reference_id")) != ref_id
+        ]
+        manual.append(
+            {
+                "reference_id": ref_id,
+                "title": detail.get("title") or ref_id,
+                "language": detail.get("language"),
+            }
+        )
+        extra["manual_voices"] = manual
+        await registry.update_endpoint(endpoint.id, extra_config=extra)
+        return JSONResponse({"success": True, "voice": manual[-1]})
+
+    async def vox_remove_voice(self, request: Request) -> JSONResponse:
+        """DELETE /api/vox/voices  — remove a manually-added voice.
+
+        Body JSON: ``{"engine": <name>, "reference_id": <id>}``.
+        """
+        from core.config_manager import config_registry
+        from core.external_endpoints.registry import get_external_endpoint_registry
+
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        engine_name = (body or {}).get("engine") or config_registry.get_value(
+            "ACTIVE_VOX_ENGINE", "kitten", value_type=str
+        )
+        ref_id = str((body or {}).get("reference_id") or "").strip()
+        if not ref_id:
+            raise HTTPException(status_code=400, detail="reference_id is required")
+
+        registry = get_external_endpoint_registry()
+        endpoint = await registry.get_endpoint_by_name(str(engine_name))
+        if endpoint is None:
+            raise HTTPException(status_code=404, detail="Engine not found")
+
+        extra = dict(endpoint.extra_config or {})
+        manual = extra.get("manual_voices")
+        if not isinstance(manual, list):
+            manual = []
+        new_manual = [
+            v
+            for v in manual
+            if isinstance(v, dict) and str(v.get("reference_id")) != ref_id
+        ]
+        extra["manual_voices"] = new_manual
+        await registry.update_endpoint(endpoint.id, extra_config=extra)
+        return JSONResponse({"success": True, "removed": ref_id})
 
     # ------------------------------------------------------------------
     # Model management endpoints  (SSOT: core.model_manager.MODEL_MANAGER)

@@ -556,6 +556,13 @@ class ExternalEndpointRegistry:
                 vox_bridge = ExternalVoxEngine(ep, adapter)
                 VOX_REGISTRY.register_instance(engine_name, vox_bridge, label=label)
                 log_info(f"[ext_endpoints] '{ep.name}' registered as Vox engine")
+                # Expose a `<ENGINE>_VOICE` config key when the adapter can
+                # list voices, so the WebUI voice picker treats the selection
+                # as persistable (matching the KittenTTS convention). The
+                # value is the speaker code (for Fish, the voice reference_id)
+                # and is honoured at synthesis time by ExternalVoxEngine.
+                if callable(getattr(adapter, "list_speakers", None)):
+                    self._register_voice_config_key(engine_name, label)
             except Exception as exc:
                 log_warning(
                     f"[ext_endpoints] Vox registration failed for '{ep.name}': {exc}"
@@ -613,6 +620,44 @@ class ExternalEndpointRegistry:
                 log_warning(
                     f"[ext_endpoints] Iris registration failed for '{ep.name}': {exc}"
                 )
+
+    def _register_voice_config_key(self, engine_name: str, label: str) -> None:
+        """Expose a ``<ENGINE>_VOICE`` config key for a voice-listing engine.
+
+        The WebUI voice picker (``VoiceSettings.vue``) treats a voice as
+        persistable only when ``<ACTIVE_VOX>_VOICE`` is a known config key, and
+        saves the chosen speaker code there. ``ExternalVoxEngine`` reads the
+        same key at synthesis time. Registering it here (idempotently) closes
+        the gap for external Vox endpoints, mirroring the static ``KITTEN_VOICE``
+        registration for the built-in KittenTTS engine.
+        """
+        key = f"{str(engine_name).upper()}_VOICE"
+        try:
+            from core.variables_engine import exposed_vars, register_exposed_var
+
+            # `register` is idempotent (re-registration is ignored), but skip
+            # early when already present to avoid the noisy debug log.
+            if exposed_vars.get_definition(key) is not None:
+                return
+            register_exposed_var(
+                key,
+                label=f"{label} — Voice",
+                default="",
+                value_type=str,
+                ui_type="select",
+                options=[],
+                description=(
+                    f"Active voice for the '{label}' TTS engine. "
+                    "Populated by the WebUI voice picker from the provider account."
+                ),
+                scope="plugins",
+                component="vox_plugin",
+                advanced=False,
+            )
+        except Exception as exc:
+            log_warning(
+                f"[ext_endpoints] Could not expose voice config key '{key}': {exc}"
+            )
 
     def _unregister_from_all(self, engine_name: str) -> None:
         """Remove an engine from all subsystem registries."""

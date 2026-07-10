@@ -116,6 +116,14 @@ export const useAudioStore = defineStore('audio', () => {
   // in as its turn key — every such message is its own turn, matching the
   // old steal-on-arrival behaviour exactly.
   let currentTurnKey: string | null = null
+  // URLs already scheduled for the current turn. A late-joining client fetches
+  // the server's current-audio state on mount/reconnect and replays it via
+  // scheduleTts (see Stage.vue onMounted); if that clip is one this client is
+  // already playing/has queued for the same turn, re-scheduling it would make
+  // the same audio play twice — the chunk-streamed (Fish Audio) duplicate
+  // voice. Dedup per-turn by url so a mid-utterance catch-up never double-plays
+  // a chunk the client already received live.
+  let currentTurnUrls = new Set<string>()
 
   function scheduleTts(msg: TtsPlayMessage, offsetS = 0): void {
     if (!enabled.value || !msg.url)
@@ -126,7 +134,13 @@ export const useAudioStore = defineStore('audio', () => {
     if (turnKey !== currentTurnKey) {
       manager.stopAll('new-turn')
       currentTurnKey = turnKey
+      currentTurnUrls = new Set<string>()
     }
+    // Skip a clip already scheduled for this turn (late-join catch-up of a
+    // chunk the client already received live).
+    if (currentTurnUrls.has(msg.url))
+      return
+    currentTurnUrls.add(msg.url)
 
     manager.schedule({
       id: `tts-${nextItemId++}`,
