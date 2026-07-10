@@ -239,6 +239,76 @@ async def save_chat_message(
         return False
 
 
+async def update_message_text(
+    interface_path: str,
+    timestamp: datetime | str | None,
+    message_text: str,
+    metadata: dict[str, Any] | None = None,
+) -> bool:
+    """Update the stored text (and optionally metadata) of an existing row.
+
+    Used to persist an enriched version of a message that was already saved
+    (e.g. augmenting an image caption with the Iris vision description) without
+    creating a duplicate row.  The row is matched on the composite key
+    ``(interface_path, timestamp)``, so the *timestamp* must be the one the
+    message was originally saved with.  When ``metadata`` is ``None`` the
+    metadata column is left untouched.
+
+    Returns ``True`` when exactly one row was updated, ``False`` otherwise.
+    """
+    if not interface_path or not message_text or timestamp is None:
+        return False
+
+    try:
+        from datetime import timezone
+
+        if isinstance(timestamp, str):
+            try:
+                timestamp = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+            except Exception:
+                return False
+
+        if not isinstance(timestamp, datetime):
+            return False
+
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=timezone.utc)
+        timestamp = timestamp.astimezone(timezone.utc)
+
+        async with get_conn_ctx() as conn:
+            async with conn.cursor() as cur:
+                if metadata is not None:
+                    import json as _json
+
+                    metadata_json = _json.dumps(metadata)
+                    await cur.execute(
+                        """
+                        UPDATE chat_history_cache
+                        SET message_text = %s, metadata = %s
+                        WHERE interface_path = %s AND timestamp = %s
+                        """,
+                        (message_text, metadata_json, interface_path, timestamp),
+                    )
+                else:
+                    await cur.execute(
+                        """
+                        UPDATE chat_history_cache
+                        SET message_text = %s
+                        WHERE interface_path = %s AND timestamp = %s
+                        """,
+                        (message_text, interface_path, timestamp),
+                    )
+                updated = getattr(cur, "rowcount", 0)
+                log_debug(
+                    f"[chat_history_cache] update_message_text: {updated} row(s) "
+                    f"for {interface_path} @ {timestamp}"
+                )
+                return bool(updated)
+    except Exception as e:
+        log_debug(f"[chat_history_cache] Failed to update message text: {e}")
+        return False
+
+
 async def load_chat_history(
     interface_path: str,
     limit: int | None = None,

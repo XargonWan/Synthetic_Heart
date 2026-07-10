@@ -14,8 +14,11 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import os
 import tempfile
+import time
+from pathlib import Path
 from typing import Any
 
 from core.ai_plugin_base import AIPluginBase
@@ -24,6 +27,16 @@ from core.core_initializer import register_plugin
 from core.iris_registry import IRIS_REGISTRY
 from core.logging_utils import log_error, log_info, log_warning
 from plugins.iris_base import IrisResult
+
+# ---------------------------------------------------------------------------
+# Durable media cache — Iris keeps a copy of analysed media so the synth can
+# re-inspect it on later turns (the vision_describe action resolves a cached
+# path recorded in chat-history metadata).  Managed centrally here, at the
+# Iris subsystem level, so every interface shares the same behaviour.
+# ---------------------------------------------------------------------------
+
+_IRIS_CACHE_DIR = Path("tmp/iris_cache")
+_IRIS_CACHE_TTL_SECONDS = 7 * 24 * 60 * 60  # 7 days
 
 # ---------------------------------------------------------------------------
 # Config variables (hidden from Settings — Iris is configured via the Engines
@@ -197,6 +210,57 @@ class IrisPlugin(AIPluginBase):
             return None
 
     # ------------------------------------------------------------------
+    # Durable media cache
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def cache_media_bytes(
+        cls,
+        media_bytes: bytes,
+        mime_type: str | None = None,
+    ) -> str | None:
+        """Persist media bytes into the Iris cache and return the file path.
+
+        The path is content-addressed (SHA-256 of the bytes), so re-caching the
+        same media reuses the existing file.  Stale entries are pruned lazily on
+        every call.  Returns ``None`` when *media_bytes* is empty or the write
+        fails.
+        """
+        if not media_bytes:
+            return None
+        try:
+            cls._prune_cache()
+            _IRIS_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+            digest = hashlib.sha256(media_bytes).hexdigest()
+            suffix = cls._mime_suffix(mime_type)
+            target = _IRIS_CACHE_DIR / f"{digest}{suffix}"
+            if not target.exists():
+                target.write_bytes(media_bytes)
+            else:
+                # Refresh mtime so the TTL sweep keeps recently-used media.
+                os.utime(target, None)
+            return str(target.resolve())
+        except Exception as exc:
+            log_warning(f"[iris_plugin] Failed to cache media: {exc}")
+            return None
+
+    @staticmethod
+    def _prune_cache() -> None:
+        """Remove cached media files older than the configured TTL."""
+        try:
+            if not _IRIS_CACHE_DIR.exists():
+                return
+            cutoff = time.time() - _IRIS_CACHE_TTL_SECONDS
+            for entry in _IRIS_CACHE_DIR.iterdir():
+                try:
+                    if entry.is_file() and entry.stat().st_mtime < cutoff:
+                        entry.unlink()
+                except OSError:
+                    continue
+        except Exception as exc:
+            log_warning(f"[iris_plugin] Cache prune skipped: {exc}")
+
+    # ------------------------------------------------------------------
     # Action support
     # ------------------------------------------------------------------
 
@@ -344,193 +408,6 @@ class IrisPlugin(AIPluginBase):
         except Exception as exc:
             log_warning(f"[iris_plugin] refresh_config failed: {exc}")
 
-    async def _run_vision_describe(
-        self,
-        payload: dict[str, Any],
-        *,
-        bot: Any | None = None,
-        original_message: Any | None = None,
-    ) -> dict[str, Any]:
-        image_path = str(payload.get("image_path", "") or "").strip()
-        mime_type: str | None = payload.get("mime_type")
-        prompt: str | None = payload.get("prompt")
-        engine_name: str | None = payload.get("engine")
-        model: str | None = payload.get("model")
-
-        (
-            resolved_path,
-            should_cleanup,
-            effective_mime,
-        ) = await self._resolve_media_target(
-            image_path,
-            mime_type,
-            bot=bot,
-            original_message=original_message,
-        )
-        if not resolved_path:
-            return {
-                "status": "error",
-                "message": "No image available for vision analysis.",
-            }
-
-        try:
-            result = await self.describe_media(
-                resolved_path,
-                effective_mime,
-                prompt,
-                engine_name,
-                model,
-            )
-            if result:
-                response: dict[str, Any] = {
-                    "status": "success",
-                    "description": result.description,
-                }
-                if result.language is not None:
-                    response["language"] = result.language
-                if result.confidence is not None:
-                    response["confidence"] = result.confidence
-                return response
-            return {
-                "status": "error",
-                "message": "Vision analysis returned no result.",
-            }
-        finally:
-            if should_cleanup and resolved_path:
-                try:
-                    os.remove(resolved_path)
-                except OSError:
-                    pass
-
-    async def _resolve_media_target(
-        self,
-        image_path: str,
-        mime_type: str | None,
-        *,
-        bot: Any | None = None,
-        original_message: Any | None = None,
-    ) -> tuple[str | None, bool, str | None]:
-        if image_path and os.path.exists(image_path):
-            return image_path, False, mime_type
-
-        inline_path, inline_mime = self._materialize_inline_media(image_path, mime_type)
-        if inline_path:
-            return inline_path, True, inline_mime
-
-        if original_message is not None:
-            (
-                message_path,
-                should_cleanup,
-                message_mime,
-            ) = await self._materialize_message_media(
-                bot,
-                original_message,
-            )
-            if message_path:
-                return message_path, should_cleanup, message_mime or mime_type
-
-        return None, False, mime_type
-
-    @staticmethod
-    def _infer_interface_name(original_message: Any) -> str:
-        interface_name = getattr(original_message, "interface_name", None) or getattr(
-            original_message, "interface", None
-        )
-        if interface_name:
-            return str(interface_name)
-        interface_path = str(getattr(original_message, "interface_path", "") or "")
-        if "/" in interface_path:
-            return interface_path.split("/", 1)[0]
-        return interface_path
-
-    @staticmethod
-    def _mime_suffix(mime_type: str | None) -> str:
-        if not mime_type or "/" not in mime_type:
-            return ""
-        return f".{mime_type.split('/', 1)[1].split(';', 1)[0]}"
-
-    @classmethod
-    def _write_temp_media(
-        cls,
-        media_bytes: bytes,
-        mime_type: str | None,
-    ) -> str | None:
-        if not media_bytes:
-            return None
-        suffix = cls._mime_suffix(mime_type)
-        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-            tmp.write(media_bytes)
-            return tmp.name
-
-    @classmethod
-    def _materialize_inline_media(
-        cls,
-        image_path: str,
-        mime_type: str | None,
-    ) -> tuple[str | None, str | None]:
-        if not image_path:
-            return None, mime_type
-
-        raw_value = image_path.strip()
-        effective_mime = mime_type
-        if raw_value.startswith("data:"):
-            header, _, raw_value = raw_value.partition(",")
-            if ";base64" not in header or not raw_value:
-                return None, mime_type
-            if effective_mime is None:
-                effective_mime = header[5:].split(";", 1)[0] or mime_type
-
-        compact_value = "".join(raw_value.split())
-        media_hint = bool(mime_type and mime_type.startswith(("image/", "video/")))
-        if not media_hint and len(compact_value) < 64:
-            return None, effective_mime
-
-        try:
-            media_bytes = base64.b64decode(compact_value, validate=True)
-        except Exception:
-            return None, effective_mime
-
-        return cls._write_temp_media(media_bytes, effective_mime), effective_mime
-
-    async def _materialize_message_media(
-        self,
-        bot: Any | None,
-        original_message: Any,
-    ) -> tuple[str | None, bool, str | None]:
-        try:
-            from core.plugin_instance import _extract_multimodal_attachments
-
-            interface_name = self._infer_interface_name(original_message)
-            attachments = await _extract_multimodal_attachments(
-                bot,
-                original_message,
-                interface_name,
-            )
-        except Exception as exc:
-            log_warning(f"[iris_plugin] Failed to extract message attachments: {exc}")
-            return None, False, None
-
-        for attachment in attachments:
-            if not isinstance(attachment, dict):
-                continue
-            attachment_mime = str(attachment.get("mime_type") or "")
-            if not attachment_mime.startswith(("image/", "video/")):
-                continue
-
-            file_path = str(attachment.get("path") or attachment.get("file_path") or "")
-            if file_path and os.path.exists(file_path):
-                return file_path, False, attachment_mime
-
-            inline_data = str(attachment.get("data") or attachment.get("base64") or "")
-            inline_path, effective_mime = self._materialize_inline_media(
-                inline_data,
-                attachment_mime,
-            )
-            if inline_path:
-                return inline_path, True, effective_mime or attachment_mime
-
-        return None, False, None
-
     # ------------------------------------------------------------------
     # Vision helpers
     # ------------------------------------------------------------------
@@ -620,7 +497,67 @@ class IrisPlugin(AIPluginBase):
             if message_path:
                 return message_path, should_cleanup, message_mime or mime_type
 
+        # Final fallback: re-inspect a previously cached image referenced by the
+        # conversation history. This lets the synth look again at an image it was
+        # already shown in an earlier turn (e.g. "look at the menu again") even
+        # when no fresh attachment is present on the current message.
+        if original_message is not None:
+            cached_path, cached_mime = await self._resolve_cached_media(
+                original_message
+            )
+            if cached_path:
+                return cached_path, False, cached_mime or mime_type
+
         return None, False, mime_type
+
+    @classmethod
+    async def _resolve_cached_media(
+        cls,
+        original_message: Any,
+    ) -> tuple[str | None, str | None]:
+        """Find the most recent cached Iris image for this conversation.
+
+        Scans the chat history for the message's ``interface_path`` and returns
+        the newest ``iris_cached_path`` (recorded when the image was first
+        described) whose cached file still exists on disk, so the vision engine
+        can re-inspect it. Returns ``(None, None)`` when nothing is available.
+        """
+        interface_path = str(getattr(original_message, "interface_path", "") or "")
+        if not interface_path:
+            return None, None
+
+        try:
+            from core.chat_history_cache import load_chat_history
+
+            history = await load_chat_history(
+                interface_path,
+                limit=50,
+                match_chat_level=True,
+            )
+        except Exception as exc:
+            log_warning(f"[iris_plugin] Failed to load history for cache lookup: {exc}")
+            return None, None
+
+        for msg in reversed(list(history)):
+            if not isinstance(msg, dict):
+                continue
+            meta = msg.get("metadata")
+            if isinstance(meta, str):
+                try:
+                    import json as _json
+
+                    meta = _json.loads(meta)
+                except Exception:
+                    continue
+            if not isinstance(meta, dict):
+                continue
+            cached_path = meta.get("iris_cached_path")
+            if not cached_path:
+                continue
+            if os.path.exists(str(cached_path)):
+                return str(cached_path), meta.get("iris_cached_mime")
+
+        return None, None
 
     @staticmethod
     def _infer_interface_name(original_message: Any) -> str:

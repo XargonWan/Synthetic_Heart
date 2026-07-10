@@ -215,6 +215,53 @@ async def add_message_to_context(
         log_warning(f"[context_manager] Failed to persist message to cache: {e}")
 
 
+async def update_message_in_context(
+    interface_path: str,
+    timestamp: Optional[str],
+    message_text: str,
+    metadata: dict[str, Any] | None = None,
+) -> bool:
+    """Update an already-added message's text in memory and in the DB cache.
+
+    Matches the most recent in-memory message for *interface_path* whose
+    ``timestamp`` equals the given one and rewrites its ``text`` (and metadata),
+    then persists the same change to ``chat_history_cache`` keyed on
+    ``(interface_path, timestamp)``.  Keeps the in-memory deque and the DB in
+    sync so a re-hydrated context and a same-process context agree.
+
+    Returns ``True`` when the DB row was updated.
+    """
+    interface_path = _resolve_context_path(interface_path)
+
+    # Update the in-memory deque entry (most recent match wins).
+    try:
+        context = get_or_create_chat_context(interface_path)
+        for msg in reversed(context):
+            if not isinstance(msg, dict):
+                continue
+            if timestamp is not None and msg.get("timestamp") == timestamp:
+                msg["text"] = message_text
+                if metadata is not None:
+                    msg["metadata"] = metadata
+                break
+    except Exception as e:
+        log_debug(f"[context_manager] In-memory update skipped: {e}")
+
+    # Persist to the DB cache.
+    try:
+        from core.chat_history_cache import update_message_text
+
+        return await update_message_text(
+            interface_path=interface_path,
+            timestamp=timestamp,
+            message_text=message_text,
+            metadata=metadata,
+        )
+    except Exception as e:
+        log_warning(f"[context_manager] Failed to persist message update: {e}")
+        return False
+
+
 async def load_chat_history(interface_path: str) -> None:
     """Load persisted chat history into context memory.
 

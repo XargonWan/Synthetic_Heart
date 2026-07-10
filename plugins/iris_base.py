@@ -42,11 +42,16 @@ class IrisResult:
         language:    BCP-47 / ISO-639-1 language code of the description
                      (e.g. ``"en"``, ``"it"``).  ``None`` when unknown.
         confidence:  Optional confidence score in [0.0, 1.0] from the engine.
+        cached_path: Optional absolute path to a durable cached copy of the
+                     analysed media, populated by the Iris subsystem so the
+                     media can be re-inspected on later turns.  ``None`` when
+                     no durable copy was kept.
     """
 
     description: str
     language: str | None = field(default=None)
     confidence: float | None = field(default=None)
+    cached_path: str | None = field(default=None)
 
 
 class IrisEngineBase(ABC):
