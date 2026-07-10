@@ -86,6 +86,18 @@ const presets = Object.keys(CAMERA_PRESETS) as Array<keyof typeof CAMERA_PRESETS
         >
       </section>
 
+      <section class="flex flex-col gap-2">
+        <h3 class="text-xs uppercase tracking-wide text-white/50">
+          Interface
+        </h3>
+        <a
+          href="/"
+          class="rounded-lg bg-white/10 px-2 py-1.5 text-center text-xs text-white/70 transition hover:bg-white/20"
+        >
+          Open classic WebUI
+        </a>
+      </section>
+
       <p class="mt-auto text-[11px] leading-relaxed text-white/40">
         SyntH Stage — connects to this server's <code>/ws</code> and
         <code>/api/karada</code> endpoints. Portions ported from

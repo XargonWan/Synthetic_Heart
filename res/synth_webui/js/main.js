@@ -4365,6 +4365,15 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                     const resetBtn = document.getElementById('reset-window-positions');
                     const backupBtn = document.getElementById('create-database-backup');
                     const backupStatus = document.getElementById('database-backup-status');
+
+                    // Reveal the "SyntH Stage" switch card only when the Stage
+                    // frontend is actually mounted at /stage (see core/webui.py).
+                    try {
+                        const stageCard = document.getElementById('stage-switch-card');
+                        if (stageCard && window.__SYNTH_CONFIG && window.__SYNTH_CONFIG.STAGE_AVAILABLE) {
+                            stageCard.style.display = '';
+                        }
+                    } catch (e) { /* ignore */ }
                     if (resetBtn) {
                         resetBtn.addEventListener('click', () => {
                             try {

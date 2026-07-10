@@ -1,22 +1,40 @@
 SyntH Stage frontend
 ====================
 
-**SyntH Stage** is the official WebUI: a standalone Vue 3 single-page
-application that provides the avatar stage, chat overlay, and live-voice
-client for SyntH. It lives in the ``frontend/`` directory and is the one
-Node.js corner of an otherwise uv-only Python repository.
+**SyntH Stage** is an alternative WebUI: a standalone Vue 3 single-page
+application focused on the avatar stage, chat overlay, and live-voice client
+for SyntH — well suited to OBS browser sources and desktop-companion overlays.
+It lives in the ``frontend/`` directory and is the one Node.js corner of an
+otherwise uv-only Python repository. It is where most new frontend work is
+targeted.
 
-The older WebUI (``core/webui_templates/`` + ``res/synth_webui/js/``) is the
-legacy interface. It is untouched and keeps working alongside Stage — both are
+The classic WebUI (``core/webui_templates/`` + ``res/synth_webui/js/``) is the
+official interface. It keeps working alongside Stage — both are
 :doc:`Karada <animation_system>` clients that receive avatar state from the
-single source of truth (:pyfile:`core/animation_handler.py`) — but Stage is
-the interface new work targets.
+single source of truth (:pyfile:`core/animation_handler.py`).
 
 .. note::
 
    Stage must be built before it can be served: if ``frontend/dist/`` has not
-   been built, the ``/stage`` route is not mounted and only the legacy WebUI
-   remains available. The backend still starts either way.
+   been built, the ``/stage`` route is not mounted and only the official
+   (classic) WebUI remains available. The backend still starts either way.
+
+   - **In Docker** (the default deployment): the image builds Stage
+     automatically (see `Production deployment`_), so ``/stage`` is available
+     out of the box — no manual step required.
+   - **Outside Docker** (running SyntH directly on the host): you must build
+     Stage yourself before it appears at ``/stage``. Once (and again whenever
+     the frontend changes) run:
+
+     .. code-block:: bash
+
+        cd frontend
+        pnpm install        # first time only
+        pnpm build          # emits frontend/dist/
+
+     Restart the backend afterwards; on startup look for ``Mounted /stage to
+     .../frontend/dist`` in the logs to confirm it was picked up. See
+     `Toolchain`_ for the Node ≥ 22 / pnpm requirements.
 
 Architecture
 ------------
@@ -69,18 +87,46 @@ Production deployment
 involved — whenever the directory exists. Visit ``https://<host>:<port>/stage``
 to load it.
 
+Docker build
+~~~~~~~~~~~~~
+
+The Dockerfile builds Stage automatically as part of the image build, so no
+manual ``pnpm build`` step is needed for containerized deployments. A dedicated
+``node:22-slim`` build stage (``stage_builder``) runs ``pnpm install
+--frozen-lockfile`` and ``pnpm build``, then the resulting ``dist/`` is copied
+into the runtime image at ``/app/frontend/dist``. The Node/pnpm toolchain stays
+in the build stage and never bloats the final Python image. After
+``docker compose up -d --build``, look for ``Mounted /stage to
+/app/frontend/dist`` in the startup logs.
+
 URL flags
 ~~~~~~~~~
 
 - ``?transparent=1`` — transparent background with minimal chrome, intended
   for OBS browser sources and desktop-companion overlays.
 
+Switching between interfaces
+----------------------------
+
+The two WebUIs cross-link so users can move between them without editing the
+URL:
+
+- **Classic WebUI → Stage**: the *Settings* tab shows a "SyntH Stage" card with
+  an *Open SyntH Stage* button linking to ``/stage/``. The card is only
+  rendered when Stage is actually mounted — the backend exposes a
+  ``STAGE_AVAILABLE`` flag on ``window.__SYNTH_CONFIG`` (set from
+  ``self._stage_mounted`` in :pyfile:`core/webui.py`), and the settings JS hides
+  the card when the flag is false, so the link never 404s.
+- **Stage → Classic WebUI**: the settings drawer has an *Interface* section with
+  an *Open classic WebUI* button linking to ``/``. No flag is needed — the
+  classic WebUI is always served at the root path.
+
 API token gate
 --------------
 
 The Karada REST router (``/api/karada/*``), the audio endpoints
 (``/api/audio/upload``, ``/api/audio/stream``) and the ``/ws`` WebSocket can be
-protected with an optional bearer token. This is off by default (the legacy
+protected with an optional bearer token. This is off by default (the classic
 WebUI has no auth layer today).
 
 Set the environment variable ``SYNTH_WEBUI_API_TOKEN`` to require a token on

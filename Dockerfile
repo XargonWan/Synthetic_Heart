@@ -1,6 +1,21 @@
 # 1. Grab uv binary from its official image
 FROM ghcr.io/astral-sh/uv:latest AS uv_source
 
+# 1b. Build the SyntH Stage frontend (Vue 3 SPA) in a dedicated Node stage.
+# The compiled bundle is copied into the final image so the backend can mount
+# it at /stage (see core/webui.py). Kept as a separate stage so the Node/pnpm
+# toolchain never bloats the runtime image.
+FROM node:22-slim AS stage_builder
+ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
+RUN corepack enable
+WORKDIR /build
+# Copy dependency manifests first for layer caching.
+COPY frontend/package.json frontend/pnpm-lock.yaml ./
+RUN pnpm install --frozen-lockfile
+# Copy the rest of the frontend source and build to /build/dist.
+COPY frontend/ ./
+RUN pnpm build
+
 # 2. Start your actual Base Image (Debian slim)
 # PyTorch official wheels require a glibc-based Python environment.
 FROM python:3.12-slim
@@ -99,6 +114,11 @@ RUN chmod +x /app/synth.sh
 
 # Copy application code (includes vendor packages)
 COPY . /app
+
+# Copy the pre-built SyntH Stage bundle from the Node build stage. Placed AFTER
+# `COPY . /app` so it is never clobbered; the host has no frontend/dist, this is
+# the sole source of it. With this present, core/webui.py mounts /stage.
+COPY --from=stage_builder /build/dist /app/frontend/dist
 
 # vendored packages are installed by `uv sync` earlier via path sources.
 # Historically we pip-installed them here, but that invoked the system pip

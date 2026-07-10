@@ -495,6 +495,7 @@ class SynthWebUIInterface:
         # The Stage app is an optional standalone Vue client (see frontend/README.md);
         # the backend runs fine without it, so this mount is best-effort.
         stage_dist = Path(__file__).resolve().parent.parent / "frontend" / "dist"
+        self._stage_mounted = False
         if stage_dist.exists():
             try:
                 self.app.mount(
@@ -502,6 +503,7 @@ class SynthWebUIInterface:
                     StaticFiles(directory=str(stage_dist), html=True),
                     name="synth-stage",
                 )
+                self._stage_mounted = True
                 log_info(f"{LOG_PREFIX} Mounted /stage to {stage_dist}")
             except Exception as exc:
                 log_warning(f"{LOG_PREFIX} Failed to mount /stage: {exc}")
@@ -1561,6 +1563,11 @@ class SynthWebUIInterface:
                 else "false",
                 "%%MULTI_SESSION%%": "true"
                 if self._multi_session_enabled()
+                else "false",
+                # Whether the SyntH Stage frontend (/stage) is mounted. Used by
+                # the settings section to show/hide the "Open SyntH Stage" link.
+                "%%STAGE_AVAILABLE%%": "true"
+                if getattr(self, "_stage_mounted", False)
                 else "false",
             }
 
