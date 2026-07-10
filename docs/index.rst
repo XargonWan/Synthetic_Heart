@@ -37,6 +37,7 @@ getting started.
    vrm_animations
    animation_system
    webui_controls
+   synth_stage_frontend
    gemini/synth-live-voice-integration
    faq
 
