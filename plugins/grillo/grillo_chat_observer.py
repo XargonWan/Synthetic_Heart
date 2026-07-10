@@ -536,16 +536,17 @@ class GrilloChatObserverPlugin:
     async def _collect_recent_snippets(self, limit: int) -> List[str]:
         snippets = []
         try:
-            import core.recent_chats as recent_chats
             from core.chat_history_cache import load_chat_history
+            from core.interface_paths import get_recent_interface_paths
 
-            last = await recent_chats.get_last_active_chats_verbose(limit * 2)
-            for chat_id, name in last:
+            recent = await get_recent_interface_paths(limit * 2)
+            for item in recent:
                 if len(snippets) >= limit:
                     break
-                chat_path = (
-                    recent_chats.get_chat_path(chat_id) or f"telegram_bot/{chat_id}"
-                )
+                chat_path = item.get("interface_path")
+                if not chat_path:
+                    continue
+                chat_path = str(chat_path)
                 try:
                     messages = await load_chat_history(chat_path)
                     # if the most recent message belongs to the synth and it was
@@ -640,20 +641,21 @@ class GrilloChatObserverPlugin:
         """
         targets: List[Dict[str, Any]] = []
         try:
-            import core.recent_chats as recent_chats
             from core.chat_history_cache import load_chat_history
+            from core.interface_paths import get_recent_interface_paths
 
             now = datetime.now(timezone.utc)
             activity_cutoff = now - timedelta(days=self.activity_window_days)
             cooldown_cutoff = now - timedelta(days=self.self_cooldown_days)
 
-            last = await recent_chats.get_last_active_chats_verbose(limit * 2)
-            for chat_id, _name in last:
+            recent = await get_recent_interface_paths(limit * 2)
+            for item in recent:
                 if len(targets) >= limit:
                     break
-                chat_path = (
-                    recent_chats.get_chat_path(chat_id) or f"telegram_bot/{chat_id}"
-                )
+                chat_path = item.get("interface_path")
+                if not chat_path:
+                    continue
+                chat_path = str(chat_path)
                 # Skip live voice paths — audio-only, cannot receive text.
                 if "_live_" in chat_path:
                     continue

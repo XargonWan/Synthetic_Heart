@@ -49,9 +49,7 @@ async def test_get_static_injection_includes_upcoming_events(
         return rows
 
     monkeypatch.setattr(plugin, "_fetch_upcoming_event_rows", fake_fetch)
-    monkeypatch.setattr(
-        "core.time_zone_utils.get_local_timezone", lambda: timezone.utc
-    )
+    monkeypatch.setattr("core.time_zone_utils.get_local_timezone", lambda: timezone.utc)
 
     result = await plugin.get_static_injection()
 
@@ -73,9 +71,7 @@ async def test_get_static_injection_empty_when_no_events(
         return []
 
     monkeypatch.setattr(plugin, "_fetch_upcoming_event_rows", fake_fetch)
-    monkeypatch.setattr(
-        "core.time_zone_utils.get_local_timezone", lambda: timezone.utc
-    )
+    monkeypatch.setattr("core.time_zone_utils.get_local_timezone", lambda: timezone.utc)
 
     result = await plugin.get_static_injection()
 
@@ -98,9 +94,7 @@ async def test_get_static_injection_respects_max_events(
         return rows
 
     monkeypatch.setattr(plugin, "_fetch_upcoming_event_rows", fake_fetch)
-    monkeypatch.setattr(
-        "core.time_zone_utils.get_local_timezone", lambda: timezone.utc
-    )
+    monkeypatch.setattr("core.time_zone_utils.get_local_timezone", lambda: timezone.utc)
 
     result = await plugin.get_static_injection()
 

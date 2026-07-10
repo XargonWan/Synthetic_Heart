@@ -45,7 +45,6 @@ from plugins.blocklist import (
 from plugins.message_map import init_message_map_table, cleanup_old_mappings
 from core import response_proxy
 from core import message_queue
-from core import recent_chats  # For command functions only, not for tracking
 from core.mention_utils import is_message_for_bot
 from core.logging_utils import log_debug, log_info, log_warning, log_error
 from core.chat_attention import set_attention, get_attention, evaluate_triggers
@@ -64,14 +63,12 @@ from core.config import (
 )
 from core.command_registry import execute_command, handle_command_message
 
-from plugins.chat_link import ChatLinkMultipleMatches, ChatLinkStore
+from core.interface_paths import resolve_and_touch, set_name_resolver
 import core.plugin_instance as plugin_instance
 from core.core_initializer import register_interface
 from core.interfaces_registry import get_interface_registry
 from core.config_manager import config_registry
 from core.variables_engine import register_exposed_var
-
-chat_link_store = ChatLinkStore()
 
 
 async def _await_if_needed(result):
@@ -1066,6 +1063,32 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         log_warning(f"[telegram_bot] Failed to add message to context: {e}")
         # Continue processing even if context tracking fails
 
+    # Persist human-readable chat/thread names for this path. The chat title is
+    # resolved live by the registered resolver; the forum-topic name is NOT
+    # fetchable via the Bot API, so extract it from the update here (it rides on
+    # the topic-opener message referenced by reply_to_message) and pass it as an
+    # override to resolve_and_touch.
+    try:
+        _topic_name: Optional[str] = None
+        if thread_id:
+            # The topic name can arrive either on the message itself (when this
+            # update IS the topic-creation service message) or on the referenced
+            # topic-opener message (reply_to_message).
+            _topic_created = getattr(message, "forum_topic_created", None)
+            if _topic_created is None and _reply_msg is not None:
+                _topic_created = getattr(_reply_msg, "forum_topic_created", None)
+            if _topic_created is not None:
+                _topic_name = getattr(_topic_created, "name", None)
+        await resolve_and_touch(
+            interface_path,
+            str(message.chat_id),
+            str(thread_id) if thread_id else None,
+            bot=context.bot,
+            thread_name=_topic_name,
+        )
+    except Exception as e:
+        log_debug(f"[telegram_bot] resolve_and_touch failed (non-fatal): {e}")
+
     try:
         from core.peer_policy import notify_message_arrived
 
@@ -1546,62 +1569,21 @@ async def last_chats_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if not is_trainer(update.effective_user.id):
         return
 
-    entries = await recent_chats.get_last_active_chats_verbose(10, context.bot)
+    from core.interface_paths import get_recent_interface_paths
+
+    entries = await get_recent_interface_paths(10)
     if not entries:
         await update.message.reply_text("⚠️ No recent chat found.")
         return
 
-    lines = [
-        f"[{escape_markdown(name)}](tg://user?id={cid}) — `{cid}`"
-        for cid, name in entries
-    ]
+    lines = []
+    for item in entries:
+        path = item.get("interface_path") or ""
+        display = item.get("display") or path
+        lines.append(f"{escape_markdown(display)} — `{escape_markdown(path)}`")
     await update.message.reply_text(
         "\U0001f553 Last active chats:\n" + "\n".join(lines), parse_mode="Markdown"
     )
-
-
-async def manage_chat_id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_trainer(update.effective_user.id):
-        return
-
-    args = context.args
-    if not args:
-        entries = await recent_chats.get_last_active_chats_verbose(20, context.bot)
-        if not entries:
-            await update.message.reply_text("⚠️ No chat found.")
-            return
-        lines = []
-        for cid, name in entries:
-            path = recent_chats.get_chat_path(cid)
-            if path:
-                lines.append(
-                    f"{escape_markdown(name)} — `{cid}` -> {escape_markdown(path)}"
-                )
-            else:
-                lines.append(f"{escape_markdown(name)} — `{cid}`")
-        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
-        return
-
-    if args[0] == "reset":
-        if len(args) < 2:
-            await update.message.reply_text("Usage: /manage_chat_id reset <id|this>")
-            return
-        if args[1] == "this":
-            cid = update.effective_chat.id
-        else:
-            try:
-                cid = int(args[1])
-            except ValueError:
-                await update.message.reply_text("Invalid ID")
-                return
-        await recent_chats.reset_chat(cid, "telegram_bot")
-        await update.message.reply_text(
-            f"✅ Reset mapping for `{cid}`.", parse_mode="Markdown"
-        )
-    else:
-        await update.message.reply_text(
-            "Usage: /manage_chat_id [reset <id>|reset this>"
-        )
 
 
 # /say command removed — use direct message sending via interface-specific tooling.
@@ -2172,25 +2154,14 @@ class TelegramInterface:
                 )
             except Exception as e:  # pragma: no cover - network failures
                 log_warning(f"[telegram_interface] chat name lookup failed: {e}")
-            if thread_id:
-                try:
-                    # Check if getForumTopic method exists (available in newer versions of python-telegram-bot)
-                    if hasattr(b, "getForumTopic"):
-                        topic = await b.getForumTopic(chat_id, thread_id)
-                        thread_name = getattr(topic, "name", None) or getattr(
-                            topic, "title", None
-                        )
-                    else:
-                        log_debug(
-                            "[telegram_interface] getForumTopic method not available, skipping thread name lookup"
-                        )
-                        thread_name = None
-                except Exception as e:  # pragma: no cover
-                    log_warning(f"[telegram_interface] thread name lookup failed: {e}")
-                    thread_name = None
+            # Forum-topic names are NOT retrievable via the Bot API — there is
+            # no getForumTopic method. The topic name rides on the incoming
+            # update (forum_topic_created on the topic-opener message) and is
+            # supplied by the caller as a thread_name override to
+            # resolve_and_touch. Here we only resolve the chat title.
             return {"chat_name": chat_name, "message_thread_name": thread_name}
 
-        ChatLinkStore.set_name_resolver("telegram", _resolver)
+        set_name_resolver("telegram_bot", _resolver)
 
         # Register validation rules with the validation registry
         self._register_custom_validation()
@@ -2705,67 +2676,25 @@ class TelegramInterface:
         chat_id = target
 
         if chat_id is None:
-            try:
-                row = await chat_link_store.resolve(
-                    chat_id=chat_id,
-                    thread_id=thread_id,
-                    chat_name=chat_name,
-                    message_thread_name=None,
-                )
-            except ChatLinkMultipleMatches:
-                # Use orchestrator instead of legacy corrector
-                try:
-                    from core import action_parser
-                    from types import SimpleNamespace
-                    from datetime import datetime
-                except Exception:
-                    action_parser = None
-                correction_payload = {
-                    "system_message": {
-                        "type": "error",
-                        "message": f"Multiple channels found with name {chat_name}, please repeat your previous message putting the chat_id instead of chat_name",
-                        "your_reply": payload,
-                    }
+            # We can no longer resolve a chat by name; ask the LLM to supply the
+            # numeric chat_id instead.
+            correction_payload = {
+                "system_message": {
+                    "type": "error",
+                    "message": f"Cannot resolve a destination from chat_name {chat_name!r}; please repeat your previous message using the numeric chat_id instead.",
+                    "your_reply": payload,
                 }
-                msg = SimpleNamespace()
-                msg.chat_id = None
-                msg.text = ""
-                msg.original_text = json.dumps(correction_payload, ensure_ascii=False)
-                msg.thread_id = None
-                msg.date = datetime.utcnow()
-                msg.from_cortex = False
-                if action_parser is not None:
-                    try:
-                        await action_parser.corrector_orchestrator(
-                            text=msg.original_text,
-                            context={"interface": "telegram"},
-                            bot=self.bot,
-                            message=msg,
-                        )
-                    except Exception:
-                        pass
-                return False
-            if not row:
-                correction_payload = {
-                    "system_message": {
-                        "type": "error",
-                        "message": f"No channels found with name {chat_name}, please repeat your previous message putting the chat_id instead of chat_name",
-                        "your_reply": payload,
-                    }
-                }
-                # Use orchestrator instead of legacy corrector for not-found
-                from core.transport_layer import notify_corrector_of_system_message
+            }
+            from core.transport_layer import notify_corrector_of_system_message
 
-                await notify_corrector_of_system_message(
-                    json.dumps(correction_payload, ensure_ascii=False),
-                    self.bot,
-                    chat_id=None,
-                    thread_id=None,
-                    interface="telegram",
-                )
-                return False
-            chat_id = row.get("chat_id", chat_id)
-            thread_id = row.get("thread_id", thread_id)
+            await notify_corrector_of_system_message(
+                json.dumps(correction_payload, ensure_ascii=False),
+                self.bot,
+                chat_id=None,
+                thread_id=None,
+                interface="telegram",
+            )
+            return False
 
         log_debug(
             f"[telegram_interface] Resolved: chat_id={chat_id}, final_thread_id={thread_id}"
@@ -2779,9 +2708,8 @@ class TelegramInterface:
         if chat_id is not None:
             chat_id = str(chat_id)
 
-        await chat_link_store.update_names_from_resolver(
-            chat_id, thread_id, interface="telegram_bot", bot=self.bot
-        )
+        if interface_path:
+            await resolve_and_touch(interface_path, chat_id, thread_id, bot=self.bot)
 
         reply_message_id = None
         if (

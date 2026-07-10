@@ -140,7 +140,6 @@ async def help_command() -> str:
         "`/get_interface_path` – Show the interface_path of the current chat\n"
         "`/diary [days]` – View synth's diary entries (default: 7 days)\n"
         "`/purge_map [days]` – Purge old mappings\n"
-        "`/clean_chat_link <chat_id>` – Remove the link between a chat and conversation.\n"
         "`/logchat` – Set the current chat as the log chat\n"
         "`/splitprompt [on|off]` – Enable/disable double-prompt mode (PART1/PART2)\n"
     )
@@ -1052,16 +1051,26 @@ async def model_command(*args) -> str:
 
 async def last_chats_command(*args) -> str:
     """Get last active chats."""
-    from core import recent_chats
+    from core.interface_paths import build_pretty_name, get_recent_interface_paths
 
-    # Note: This is interface-agnostic but needs context from interface
-    # The interface should handle the formatting
-    entries = await recent_chats.get_last_active_chats_verbose(10, None)
+    entries = await get_recent_interface_paths(10)
     if not entries:
         return "⚠️ No recent chat found."
 
-    lines = [f"{name} — `{cid}`" for cid, name in entries]
-    return "🕔 Last active chats:\n" + "\n".join(lines)
+    lines = []
+    for item in entries:
+        path = item.get("interface_path")
+        # Re-derive the pretty name fresh: stored segment labels may have been
+        # updated after the row was last touched, and cached labels can be stale.
+        display = path
+        if path:
+            try:
+                pretty = await build_pretty_name(path, use_cache=False)
+                display = pretty.get("display") or path
+            except Exception:
+                display = item.get("display") or path
+        lines.append(f"{display} — `{path}`")
+    return "🕔 Last active chats:\n\n" + "\n".join(lines)
 
 
 async def context_command(*args) -> str:
@@ -1327,41 +1336,3 @@ async def cancel_command(*args, interface_context=None) -> str:
 
 register_command("cancel", cancel_command)
 register_command("logchat", logchat_command)
-
-
-async def clean_chat_link_command(*args: str, interface_context: Any = None) -> str:
-    """Remove the path link between a chat_id and its conversation folder.
-
-    Usage:
-      /clean_chat_link <chat_id>  – Remove the mapping for the given chat_id.
-      /clean_chat_link            – Remove the mapping for the *current* chat
-                                    (requires interface_context).
-    """
-    from core.recent_chats import clear_chat_path, get_chat_path
-
-    # Resolve target chat_id
-    if args:
-        try:
-            target_id: int | str = int(args[0])
-        except ValueError:
-            return "❌ Use: `/clean_chat_link <chat_id>` where chat_id is an integer."
-    else:
-        # Try to infer from interface context
-        target_id_raw: int | str | None = None
-        if interface_context and isinstance(interface_context, dict):
-            update = interface_context.get("update")
-            if update and getattr(update, "effective_chat", None):
-                target_id_raw = update.effective_chat.id
-        if target_id_raw is None:
-            return "❌ Use: `/clean_chat_link <chat_id>` or run inside a chat."
-        target_id = target_id_raw
-
-    existing = get_chat_path(target_id)
-    if existing is None:
-        return f"⚠️ No chat link found for `{target_id}`."
-
-    clear_chat_path(target_id)
-    return f"✅ Chat link removed for `{target_id}` (was: `{existing}`)."
-
-
-register_command("clean_chat_link", clean_chat_link_command)

@@ -193,7 +193,6 @@ The emotional state is exposed to the WebUI for real-time visualization and can 
 
 * ``emotion_manager`` – Centralized emotional state management with decay and balancing.
 * ``blocklist`` – User blocking/unblocking functionality (no configuration).
-* ``chat_link`` – Cross-platform chat linking and message forwarding.
 * ``message_map`` – Message threading and conversation tracking.
 * ``message_plugin`` – Send text across registered interfaces (no configuration).
 * ``recent_chats`` – Access to recent conversation history.

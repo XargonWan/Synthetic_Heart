@@ -255,22 +255,6 @@ TABLE_DEFINITIONS: list[tuple[str, str]] = [
         """,
     ),
     (
-        "chatlink",
-        """
-        CREATE TABLE IF NOT EXISTS chatlink (
-            int_id INT AUTO_INCREMENT PRIMARY KEY,
-            interface VARCHAR(32) NOT NULL,
-            chat_id TEXT NOT NULL,
-            thread_id TEXT DEFAULT NULL,
-            chat_name TEXT DEFAULT NULL,
-            message_thread_name TEXT DEFAULT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-            UNIQUE KEY unique_chat (interface, chat_id(255))
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-        """,
-    ),
-    (
         "message_map",
         """
         CREATE TABLE IF NOT EXISTS message_map (
@@ -288,18 +272,6 @@ TABLE_DEFINITIONS: list[tuple[str, str]] = [
             user_id BIGINT PRIMARY KEY,
             reason TEXT,
             blocked_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-        """,
-    ),
-    (
-        "recent_chats",
-        """
-        CREATE TABLE IF NOT EXISTS recent_chats (
-            chat_id VARCHAR(255) PRIMARY KEY,
-            last_active DOUBLE NOT NULL,
-            metadata TEXT,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            INDEX idx_last_active (last_active)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
         """,
     ),
@@ -650,19 +622,6 @@ EXPECTED_COLUMNS: dict[str, list[tuple[str, str]]] = {
         ("delivered", "delivered BOOLEAN DEFAULT 0"),
         ("created_by", "created_by VARCHAR(100) DEFAULT 'synth'"),
     ],
-    "chatlink": [
-        ("int_id", "int_id INT AUTO_INCREMENT PRIMARY KEY"),
-        ("interface", "interface VARCHAR(32) NOT NULL"),
-        ("chat_id", "chat_id TEXT NOT NULL"),
-        ("thread_id", "thread_id TEXT DEFAULT NULL"),
-        ("chat_name", "chat_name TEXT DEFAULT NULL"),
-        ("message_thread_name", "message_thread_name TEXT DEFAULT NULL"),
-        ("created_at", "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP"),
-        (
-            "last_updated",
-            "last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP",
-        ),
-    ],
     "message_map": [
         ("trainer_message_id", "trainer_message_id INTEGER NOT NULL"),
         ("chat_id", "chat_id BIGINT NOT NULL"),
@@ -673,12 +632,6 @@ EXPECTED_COLUMNS: dict[str, list[tuple[str, str]]] = {
         ("user_id", "user_id BIGINT NOT NULL"),
         ("reason", "reason TEXT"),
         ("blocked_at", "blocked_at DATETIME DEFAULT CURRENT_TIMESTAMP"),
-    ],
-    "recent_chats": [
-        ("chat_id", "chat_id VARCHAR(255) NOT NULL"),
-        ("last_active", "last_active DOUBLE NOT NULL"),
-        ("metadata", "metadata TEXT"),
-        ("created_at", "created_at DATETIME DEFAULT CURRENT_TIMESTAMP"),
     ],
     # ── grillo ───────────────────────────────────────────────────
     "grillo_activity_log": [

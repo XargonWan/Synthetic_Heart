@@ -1331,6 +1331,34 @@ async def build_prompt_request(
     except Exception as e:
         log_warning(f"[json_prompt] Failed to attach recon context: {e}")
 
+    # === 3aa. Channel legend for interface_paths present in the history ===
+    # For every distinct interface_path that contributed a "[from ...]" history
+    # line, expose its human-readable pretty name so the model can map the
+    # source label back to a routable interface_path when it decides to reply.
+    try:
+        history_paths = context_section.pop("history_interface_paths", None)
+        if history_paths:
+            from core.interface_paths import build_pretty_name
+
+            legend_lines: list[str] = []
+            for hp in history_paths:
+                try:
+                    pretty = await build_pretty_name(hp)
+                    display = pretty.get("display") if pretty else None
+                except Exception as legend_err:
+                    log_debug(
+                        f"[json_prompt] pretty name for {hp} failed: {legend_err}"
+                    )
+                    display = None
+                if display:
+                    legend_lines.append(f"{hp} = {display}")
+                else:
+                    legend_lines.append(str(hp))
+            if legend_lines:
+                context_section["channel_legend"] = legend_lines
+    except Exception as e:
+        log_debug(f"[json_prompt] Failed to build channel legend: {e}")
+
     # === 3a. Static injections from plugins ===
     static_persona = None  # Extract persona separately for instructions
     try:

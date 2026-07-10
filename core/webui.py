@@ -7322,36 +7322,22 @@ class SynthWebUIInterface:
         """Return known interface paths with a human-friendly label.
 
         Used by the calendar event editor to let the user attach a delivery
-        target to a scheduled reminder. Each entry is derived from the most
-        recent chat message seen for that ``interface_path`` so the label
-        reflects the last known sender name (pretty name).
+        target to a scheduled reminder. Labels come from the stored
+        ``segment_labels`` (multi-level pretty name) of each known path.
         """
         try:
-            from core.db import get_conn_ctx
+            from core.interface_paths import list_interface_paths
 
             entries: list[dict[str, str]] = []
-            async with get_conn_ctx() as conn:
-                async with conn.cursor() as cur:
-                    await cur.execute(
-                        """
-                        SELECT DISTINCT ON (interface_path)
-                            interface_path, sender_name
-                        FROM chat_history_cache
-                        ORDER BY interface_path, timestamp DESC
-                        """
-                    )
-                    rows = await cur.fetchall()
-                    for row in rows:
-                        if isinstance(row, dict):
-                            path = row.get("interface_path")
-                            sender = row.get("sender_name")
-                        else:
-                            path = row[0]
-                            sender = row[1] if len(row) > 1 else None
-                        if not path:
-                            continue
-                        label = f"{sender} ({path})" if sender else str(path)
-                        entries.append({"interface_path": str(path), "label": label})
+            for item in await list_interface_paths():
+                path = item.get("interface_path")
+                if not path:
+                    continue
+                display = item.get("display") or path
+                label = (
+                    f"{display} ({path})" if display and display != path else str(path)
+                )
+                entries.append({"interface_path": str(path), "label": label})
 
             entries.sort(key=lambda item: item["label"].lower())
             return JSONResponse({"success": True, "interface_paths": entries})

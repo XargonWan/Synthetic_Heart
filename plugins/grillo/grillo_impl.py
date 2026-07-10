@@ -260,18 +260,16 @@ class GrilloPlugin(AIPluginBase):
         history_snippet = None
         if self.history_evaluator:
             try:
-                import core.recent_chats as recent_chats
+                from core.interface_paths import get_recent_interface_paths
 
                 # Try a few recent chats and pick the first public/active one
-                last = await recent_chats.get_last_active_chats_verbose(5)
-                if last:
-                    for chat_id, _ in last:
-                        chat_path = (
-                            recent_chats.get_chat_path(chat_id)
-                            or f"telegram_bot/{chat_id}"
-                        )
+                recent = await get_recent_interface_paths(5)
+                if recent:
+                    for item in recent:
+                        chat_path = item.get("interface_path")
                         if not chat_path:
                             continue
+                        chat_path = str(chat_path)
                         # Skip chats where last message is synth unless exempt
                         try:
                             ok = await self._is_public_active_chat(chat_path)
@@ -340,18 +338,16 @@ class GrilloPlugin(AIPluginBase):
         history_snippet = None
         if self.history_evaluator:
             try:
-                import core.recent_chats as recent_chats
+                from core.interface_paths import get_recent_interface_paths
 
                 # Try multiple recent chats and pick the first public/active one
-                last = await recent_chats.get_last_active_chats_verbose(5)
-                if last:
-                    for chat_id, _ in last:
-                        chat_path = (
-                            recent_chats.get_chat_path(chat_id)
-                            or f"telegram_bot/{chat_id}"
-                        )
+                recent = await get_recent_interface_paths(5)
+                if recent:
+                    for item in recent:
+                        chat_path = item.get("interface_path")
                         if not chat_path:
                             continue
+                        chat_path = str(chat_path)
                         try:
                             ok = await self._is_public_active_chat(chat_path)
                             if not ok:

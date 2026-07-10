@@ -560,17 +560,18 @@ class GrilloDreamPlugin:
         try:
             # 1) Recent chats
             try:
-                import core.recent_chats as recent_chats
                 from core.chat_history_cache import load_chat_history
+                from core.interface_paths import get_recent_interface_paths
 
-                last = await recent_chats.get_last_active_chats_verbose(limit * 2)
-                for chat_id, name in last:
+                recent = await get_recent_interface_paths(limit * 2)
+                for item in recent:
                     if len(fragments) >= limit:
                         break
                     # Determine interface path
-                    chat_path = (
-                        recent_chats.get_chat_path(chat_id) or f"telegram_bot/{chat_id}"
-                    )
+                    chat_path = item.get("interface_path")
+                    if not chat_path:
+                        continue
+                    chat_path = str(chat_path)
                     try:
                         messages = await load_chat_history(chat_path)
                         # take up to 2 messages per chat (most recent)

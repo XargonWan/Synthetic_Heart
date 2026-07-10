@@ -10,7 +10,7 @@ from typing import Any, cast
 import traceback
 from types import SimpleNamespace
 
-from core import plugin_instance, rate_limit, recent_chats
+from core import plugin_instance, rate_limit
 from core.beat_utils import is_outbound_beat
 from core.logging_utils import log_debug, log_error, log_warning, log_info
 from core.mention_utils import is_message_for_bot
@@ -23,7 +23,7 @@ from core.session_meta import (
     get_session_meta as get_session_meta_fn,
 )
 from plugins.blocklist import is_user_blocked
-from plugins.chat_link import ChatLinkStore
+from core.interface_paths import get_name_resolver
 from core.user_utils import ensure_message_user_fields
 
 # Use a priority queue so events can be processed before regular messages
@@ -497,12 +497,9 @@ async def enqueue(
         _resolve_message_animation_state("received")
     )
 
-    meta = message.chat.title or message.chat.username or message.chat.first_name
-    # Persist last-active chat, but don't let DB failures abort enqueueing
-    try:
-        await recent_chats.track_chat(chat_id, meta)
-    except Exception as e:
-        log_warning(f"[QUEUE] recent_chats.track_chat failed but continuing: {e}")
+    # Last-active tracking is handled centrally by
+    # ``core.interface_paths.touch_interface_path`` from the chat-context and
+    # outbound message paths, so no explicit per-enqueue tracking is needed.
 
     # Extract thread_id - unified field name, check both Telegram and generic names
     # DEBUG: let's see what telegram message actually contains
@@ -534,8 +531,7 @@ async def enqueue(
     chat_name = None
     message_thread_name = None
     try:
-        store = ChatLinkStore()
-        resolver = store.get_name_resolver(interface)
+        resolver = get_name_resolver(interface)
         if resolver:
             log_debug(f"[QUEUE] Resolving names for chat {chat_id}, thread {thread_id}")
             names = await resolver(chat_id, thread_id, bot)
@@ -667,8 +663,7 @@ async def enqueue_low_priority(
     chat_name = None
     message_thread_name = None
     try:
-        store = ChatLinkStore()
-        resolver = store.get_name_resolver(interface_id)
+        resolver = get_name_resolver(interface_id)
         if resolver:
             names = await resolver(chat_id, thread_id, bot)
             if names:
@@ -843,25 +838,6 @@ async def _consumer_loop() -> None:
                 log_debug(
                     f"[QUEUE] Processing message from chat {final.get('chat_id')}"
                 )
-
-            # Ensure chat exists with resolved names
-            chat_name = final.get("chat_name")
-            message_thread_name = final.get("message_thread_name")
-            if chat_name or message_thread_name:
-                try:
-                    store = ChatLinkStore()
-                    await store.ensure_chat_exists(
-                        chat_id=final.get("chat_id"),
-                        thread_id=final.get("thread_id"),
-                        interface=final.get("interface"),
-                        chat_name=chat_name,
-                        message_thread_name=message_thread_name,
-                    )
-                    log_debug(
-                        f"[QUEUE] Updated chat record with names: chat='{chat_name}', thread='{message_thread_name}'"
-                    )
-                except Exception as e:
-                    log_warning(f"[QUEUE] Failed to update chat names: {e}")
 
             plugin = plugin_instance.get_plugin()
             if not plugin:

@@ -93,7 +93,6 @@ Plugin Ecosystem
     - ``ai_diary``: Personal memory and interaction tracking
     - ``bio_manager``: Persistent user profile management
     - ``blocklist``: User access control
-    - ``chat_link``: Conversation linking and management
     - ``message_map``: Message threading and tracking
     - ``message_plugin``: Cross-platform message routing
     - ``recent_chats``: Access to conversation history

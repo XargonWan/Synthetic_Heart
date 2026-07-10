@@ -46,7 +46,7 @@ Administration
 * ``/last_chats`` – List recently active chats.
 * ``/purge_map [days]`` – Remove chat mappings older than ``days`` (default 7).
 * ``/logchat`` – Set the current chat as the log chat.
-* ``/manage_chat_id [reset <id>|reset this]`` – Reset stored mapping for a chat.
+
 
 Voice Control (Discord only)
 ----------------------------

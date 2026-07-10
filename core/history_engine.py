@@ -457,6 +457,17 @@ class HistoryEngine:
         thoughts: List[str] = []
 
         seen_history: set[str] = set()
+        # Distinct interface_paths that actually contributed history lines. Used
+        # by the prompt engine to render a compact pretty-name legend so the
+        # model can map each "[from ...]" source back to a routable path.
+        used_interface_paths: set[str] = set()
+
+        def _note_path(entry: Any) -> None:
+            if not isinstance(entry, dict):
+                return
+            p = entry.get("interface_path") or entry.get("source_path")
+            if p:
+                used_interface_paths.add(str(p))
 
         # --- Core contributions ---
         if enable_current and interface_path:
@@ -523,6 +534,7 @@ class HistoryEngine:
                     if k in seen_history:
                         continue
                     history_current_chat.append(line)
+                    _note_path(m)
                     seen_history.add(k)
             except Exception as e:
                 log_debug(f"[history_engine] Failed building history_current_chat: {e}")
@@ -697,6 +709,7 @@ class HistoryEngine:
                     else:
                         other_lines.append(line)
 
+                    _note_path(m)
                     seen_history.add(k)
 
                 if verbosity > 0:
@@ -769,6 +782,7 @@ class HistoryEngine:
                     if k in seen_history:
                         continue
                     history_recent.append(line)
+                    _note_path(m)
                     seen_history.add(k)
             except Exception as e:
                 log_debug(f"[history_engine] Failed building history_recent: {e}")
@@ -838,6 +852,7 @@ class HistoryEngine:
                         if c.name == "ai_diary" and not diary_full:
                             continue
                         history_recent.append(line)
+                    _note_path(raw)
                     seen_history.add(k)
 
             elif target == "thoughts":
@@ -912,5 +927,13 @@ class HistoryEngine:
 
         if enable_tags_placeholder and not lite_mode:
             context["tags_placeholder"] = []
+
+        # Distinct interface_paths present in the assembled history (excluding the
+        # current chat, which the model already knows). The prompt engine turns
+        # these into a compact pretty-name legend.
+        if interface_path:
+            used_interface_paths.discard(str(interface_path))
+        if used_interface_paths:
+            context["history_interface_paths"] = sorted(used_interface_paths)
 
         return context

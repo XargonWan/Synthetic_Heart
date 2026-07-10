@@ -861,7 +861,6 @@ docker exec synth-dev tail -f /app/logs/synth.log | grep -E "\[grillo\]|grillo"
 | `external_endpoints` | `init-db.sql` | LLM/API endpoint registry (name, protocol, URL, key, capabilities, model list) |
 | `scheduled_events` | `plugins/event_plugin.py` | Date/time triggered events Synth should act on |
 | `blocklist` | `plugins/blocklist.py` | Blocked users/entities |
-| `chatlink` | `plugins/chat_link.py` | Cross-interface chat bridging config |
 | `message_map` | `plugins/message_map.py` | Message ID mapping across interfaces |
 
 **Key facts:**
