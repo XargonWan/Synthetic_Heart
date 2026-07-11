@@ -93,3 +93,10 @@ frontend/node_modules/
 frontend/dist/
 frontend/.pnpm-store
 memories/session
+
+# Kilo agent config (per-workspace, not shared)
+.kilo/
+# Local dev artifacts
+frontend/scripts/voice-settings.png
+# Runtime-generated TTS audio
+res/synth_webui/static/audio/tts/
