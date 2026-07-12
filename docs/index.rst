@@ -31,6 +31,7 @@ getting started.
    interfaces
    peer_synths
    plugins
+   self_growth
    external_endpoints
    auris_vox
    radio_azuracast

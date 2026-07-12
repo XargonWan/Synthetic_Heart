@@ -64,6 +64,20 @@ CREATE TABLE IF NOT EXISTS grillo_action_execs (
     FOREIGN KEY (activity_log_id) REFERENCES grillo_activity_log(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+-- G.R.I.L.L.O. Self-Growth States Table
+-- Rolling history (max 10 rows) of SyntH's evolving self-growth reflection.
+-- Exactly one row has is_current = 1. Older rows beyond the newest 10 are pruned.
+CREATE TABLE IF NOT EXISTS growth_states (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    content LONGTEXT NOT NULL,
+    created_by VARCHAR(64) NOT NULL DEFAULT 'grillo_growth',
+    source VARCHAR(64) NOT NULL DEFAULT 'weekly',
+    is_current BOOLEAN NOT NULL DEFAULT 0,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_growth_current (is_current),
+    INDEX idx_growth_created_at (created_at DESC)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 -- Karada Touch Events Table
 -- Records WebUI 3D-interaction events (environment/window taps and touches on
 -- the Synth avatar) so Synth is aware of physical interaction with her Karada.

@@ -19,6 +19,10 @@
               <span class="icon">🌙</span>
               <span>Dreams</span>
             </button>
+            <button class="sub-nav-btn" data-subtab="growth" role="tab" aria-selected="false">
+              <span class="icon">🌱</span>
+              <span>Self-Growth</span>
+            </button>
             <button class="sub-nav-btn" data-subtab="chat" role="tab" aria-selected="false">
               <span class="icon">💬</span>
               <span>Chat</span>
@@ -115,6 +119,21 @@
           </div>
         </div>
         <div id="history-dreams-pagination" class="pagination-controls"></div>
+      </div>
+
+      <!-- Self-Growth Sub-Tab -->
+      <div class="sub-tab-panel" id="subtab-growth" data-subtab="growth">
+        <div class="section-controls">
+          <div style="color: var(--text-soft); font-size: 0.9rem;">
+            Synth's evolving self-growth reflection. Edit it directly, or revert to a previous state (last 10 kept).
+          </div>
+        </div>
+        <div id="history-growth-content" class="history-container">
+          <div class="loading-state">
+            <div class="loading-spinner"></div>
+            <p>Loading self-growth...</p>
+          </div>
+        </div>
       </div>
 
       <!-- Chat Sub-Tab -->
@@ -873,6 +892,60 @@
         color: var(--text);
         border-color: var(--accent);
         background: rgba(255, 255, 255, 0.06);
+      }
+
+      .history-delete-btn {
+        flex: 0 0 auto;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        padding: 0.3rem 0.5rem;
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        background: rgba(12, 12, 20, 0.35);
+        color: var(--text-soft);
+        border-radius: 6px;
+        cursor: pointer;
+        font-size: 0.9rem;
+        line-height: 1;
+        transition: all 0.15s ease;
+      }
+      .history-delete-btn:hover {
+        color: #fff;
+        border-color: #e05a5a;
+        background: rgba(224, 90, 90, 0.18);
+      }
+      .growth-proposal-lists {
+        display: flex;
+        gap: 1.25rem;
+        flex-wrap: wrap;
+      }
+      .growth-proposal-col {
+        flex: 1 1 220px;
+        min-width: 200px;
+      }
+      .growth-diff-list {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+      }
+      .growth-item {
+        padding: 0.15rem 0;
+        font-size: 0.85rem;
+      }
+      .growth-item-added {
+        color: #5fd08a;
+      }
+      .growth-item-added::before {
+        content: '+ ';
+        opacity: 0.8;
+      }
+      .growth-item-removed {
+        color: #e05a5a;
+        text-decoration: line-through;
+      }
+      .growth-item-removed::before {
+        content: '- ';
+        opacity: 0.8;
       }
       .calendar-actions {
         display: flex;

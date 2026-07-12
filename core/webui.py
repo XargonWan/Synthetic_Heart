@@ -838,6 +838,14 @@ class SynthWebUIInterface:
             self.delete_external_calendar
         )
         self.app.get("/api/history/dreams")(self.history_dreams)
+        self.app.get("/api/history/growth")(self.history_growth)
+        self.app.post("/api/growth/current")(self.update_growth_current)
+        self.app.post("/api/growth/revert")(self.revert_growth_state)
+        # Per-item delete for History sub-tabs
+        self.app.delete("/api/history/diary/{entry_id}")(self.delete_diary_day)
+        self.app.delete("/api/history/grillo/{entry_id}")(self.delete_grillo_entry)
+        self.app.delete("/api/history/dreams/{entry_id}")(self.delete_grillo_entry)
+        self.app.delete("/api/history/growth/{entry_id}")(self.delete_growth_state)
         self.app.get("/api/history/interface-paths")(self.list_known_interface_paths)
         self.app.get("/api/history/chat")(self.history_chat)
         self.app.get("/api/log-failures")(self.list_log_failures)
@@ -6939,6 +6947,140 @@ class SynthWebUIInterface:
             log_error(f"{LOG_PREFIX} Failed to fetch daily diary: {exc}")
             return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
 
+    async def history_growth(self, request: Request):
+        """Return the current self-growth state plus its rolling history.
+
+        Powers the History > Self-Growth sub-tab. The response mirrors the other
+        history endpoints' envelope but the payload is growth-specific.
+        """
+        try:
+            from core.growth_state import get_current_growth, get_growth_history
+
+            current = await get_current_growth()
+            history = await get_growth_history()
+
+            entries = []
+            for row in history:
+                entries.append(
+                    {
+                        "id": row.get("id"),
+                        "content": row.get("content"),
+                        "created_by": row.get("created_by"),
+                        "source": row.get("source"),
+                        "is_current": bool(row.get("is_current")),
+                        # get_growth_history already serializes created_at to an
+                        # ISO string, so pass it through as-is.
+                        "created_at": row.get("created_at"),
+                        # likes/dislikes proposed/applied at this iteration
+                        # (empty for rows created before the columns existed).
+                        "likes": row.get("likes") or [],
+                        "dislikes": row.get("dislikes") or [],
+                    }
+                )
+
+            # Surface the requested (pending) likes/dislikes awaiting trainer
+            # approval, plus the current lists for comparison. When no proposal
+            # is pending, ``pending_proposal`` is None and the UI hides the block.
+            from core.config_manager import config_registry
+
+            def _as_str_list(value: Any) -> list[str]:
+                if isinstance(value, list):
+                    return [str(x) for x in value]
+                return []
+
+            current_likes = _as_str_list(
+                config_registry.get_value("SYNTH_LIKES", []) or []
+            )
+            current_dislikes = _as_str_list(
+                config_registry.get_value("SYNTH_DISLIKES", []) or []
+            )
+
+            pending_proposal = None
+            raw_pending = config_registry.get_value("GROWTH_PENDING_PROPOSAL", "") or ""
+            if str(raw_pending).strip():
+                try:
+                    proposal = json.loads(raw_pending)
+                    if isinstance(proposal, dict):
+                        pending_proposal = {
+                            "self_growth": str(proposal.get("self_growth") or ""),
+                            "likes": _as_str_list(proposal.get("likes")),
+                            "dislikes": _as_str_list(proposal.get("dislikes")),
+                        }
+                except Exception as parse_exc:
+                    log_error(
+                        f"{LOG_PREFIX} Failed to parse pending growth proposal: "
+                        f"{parse_exc}"
+                    )
+
+            return JSONResponse(
+                {
+                    "success": True,
+                    "current": current,
+                    "entries": entries,
+                    "total_count": len(entries),
+                    "current_likes": current_likes,
+                    "current_dislikes": current_dislikes,
+                    "pending_proposal": pending_proposal,
+                }
+            )
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to fetch self-growth history: {exc}")
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+
+    async def update_growth_current(self, request: Request):
+        """Persist a user-edited self-growth state as the new current entry."""
+        try:
+            from core.config_manager import config_registry
+            from core.growth_state import save_growth_state
+
+            body = await request.json()
+            content = str(body.get("content") or "").strip()
+
+            def _as_str_list(value: Any) -> list[str]:
+                if isinstance(value, list):
+                    return [str(x) for x in value]
+                return []
+
+            # Preserve the currently-applied likes/dislikes on the new history
+            # row so a manual text edit does not lose that context.
+            cur_likes = _as_str_list(config_registry.get_value("SYNTH_LIKES", []) or [])
+            cur_dislikes = _as_str_list(
+                config_registry.get_value("SYNTH_DISLIKES", []) or []
+            )
+
+            new_id = await save_growth_state(
+                content,
+                created_by="user",
+                source="manual",
+                allow_empty=True,
+                likes=cur_likes,
+                dislikes=cur_dislikes,
+            )
+            return JSONResponse({"success": new_id is not None, "id": new_id})
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to update self-growth state: {exc}")
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+
+    async def revert_growth_state(self, request: Request):
+        """Revert the current self-growth state to a previous history entry."""
+        try:
+            from core.growth_state import revert_to_state
+
+            body = await request.json()
+            try:
+                state_id = int(body.get("id"))
+            except (TypeError, ValueError):
+                return JSONResponse(
+                    {"success": False, "error": "valid id is required"},
+                    status_code=400,
+                )
+
+            new_id = await revert_to_state(state_id)
+            return JSONResponse({"success": new_id is not None, "id": new_id})
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to revert self-growth state: {exc}")
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+
     async def history_grillo(self, request: Request):
         """Return grillo activity log for the History > Grillo sub-tab - optimized."""
         params = request.query_params
@@ -7559,6 +7701,105 @@ class SynthWebUIInterface:
             return JSONResponse({"success": True})
         except Exception as exc:
             log_error(f"{LOG_PREFIX} Failed to delete calendar event: {exc}")
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+
+    async def delete_diary_day(self, request: Request):
+        """Delete every diary row for the day of the given entry id.
+
+        The History > Diary view is aggregated per day (one card = all rows for
+        that date), so deletion targets the whole day rather than a single row.
+        """
+        entry_id_raw = request.path_params.get("entry_id")
+        try:
+            entry_id = int(entry_id_raw)
+        except (TypeError, ValueError):
+            return JSONResponse(
+                {"success": False, "error": "Invalid entry id"}, status_code=400
+            )
+
+        try:
+            from core.db import get_conn_ctx
+
+            async with get_conn_ctx() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "DELETE FROM ai_diary WHERE DATE(timestamp) = "
+                        "(SELECT DATE(timestamp) FROM ai_diary WHERE id = %s)",
+                        (entry_id,),
+                    )
+                    deleted = getattr(cur, "rowcount", 0) or 0
+            return JSONResponse({"success": True, "deleted_count": deleted})
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to delete diary day: {exc}")
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+
+    async def delete_grillo_entry(self, request: Request):
+        """Delete a single grillo_activity_log row by id (Grillo & Dreams sub-tabs)."""
+        entry_id_raw = request.path_params.get("entry_id")
+        try:
+            entry_id = int(entry_id_raw)
+        except (TypeError, ValueError):
+            return JSONResponse(
+                {"success": False, "error": "Invalid entry id"}, status_code=400
+            )
+
+        try:
+            from core.db import get_conn_ctx
+
+            async with get_conn_ctx() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "DELETE FROM grillo_activity_log WHERE id = %s", (entry_id,)
+                    )
+                    deleted = getattr(cur, "rowcount", 0) or 0
+            return JSONResponse({"success": True, "deleted_count": deleted})
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to delete grillo entry: {exc}")
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+
+    async def delete_growth_state(self, request: Request):
+        """Delete a single self-growth history row by id.
+
+        The current state (``is_current``) is protected and cannot be deleted.
+        """
+        entry_id_raw = request.path_params.get("entry_id")
+        try:
+            entry_id = int(entry_id_raw)
+        except (TypeError, ValueError):
+            return JSONResponse(
+                {"success": False, "error": "Invalid entry id"}, status_code=400
+            )
+
+        try:
+            from core.db import get_conn_ctx
+
+            async with get_conn_ctx() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "SELECT is_current FROM growth_states WHERE id = %s",
+                        (entry_id,),
+                    )
+                    row = await cur.fetchone()
+                    if row is None:
+                        return JSONResponse(
+                            {"success": False, "error": "Entry not found"},
+                            status_code=404,
+                        )
+                    if row[0]:
+                        return JSONResponse(
+                            {
+                                "success": False,
+                                "error": "Cannot delete the current self-growth state",
+                            },
+                            status_code=400,
+                        )
+                    await cur.execute(
+                        "DELETE FROM growth_states WHERE id = %s", (entry_id,)
+                    )
+                    deleted = getattr(cur, "rowcount", 0) or 0
+            return JSONResponse({"success": True, "deleted_count": deleted})
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to delete self-growth state: {exc}")
             return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
 
     async def export_calendar_ics(self, request: Request):

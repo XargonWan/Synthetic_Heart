@@ -2220,6 +2220,18 @@ Please resend your message with ONLY valid emotions from the list above."""
         injection = {"persona": identity_content}
         if preference_content:
             injection["persona_preferences"] = preference_content
+
+        # Inject the current self-growth reflection (if any) so it becomes part
+        # of SyntH's ongoing sense of self in every prompt.
+        try:
+            from core.growth_state import get_current_growth
+
+            growth_content = await get_current_growth()
+            if growth_content:
+                injection["self_growth"] = growth_content
+        except Exception as e:
+            log_debug(f"[persona_manager] self_growth injection skipped: {e}")
+
         return injection
 
     async def handle_static_inject(self, payload: Dict[str, Any]) -> Dict[str, Any]:
