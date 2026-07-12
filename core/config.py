@@ -387,34 +387,22 @@ LIVE_AUDIO_MIN_RMS = config_registry.get_var(
 )
 
 # --- LogChat configuration (use config_registry so exposed-variable APIs are consistent)
-LOG_CHAT_INTERFACE = config_registry.get_var(
-    "LOG_CHAT_INTERFACE",
-    "",
-    label="Log Chat Interface",
-    description="Interface used for system/trainer log messages.",
-    group="core",
-    component="logchat",
-    hidden=True,
-)
-LOG_CHAT_ID = config_registry.get_var(
+# The LogChat target is stored as a single canonical interface_path
+# (e.g. "telegram_bot/-28475648/6"), following the same "interface-path"
+# standard used by other routing config vars. The interface name, chat id
+# and (optional) thread id are derived from this single value.
+_register_exposed_var(
     "LOG_CHAT_ID",
-    "",
-    label="Log Chat ID",
-    description="Chat ID used for system/trainer notifications.",
-    group="core",
+    label="Log Chat",
+    default="",
+    value_type=str,
+    ui_type="interface-path",
+    description=(
+        "Interface path of the chat used for system/trainer notifications "
+        "(e.g. telegram_bot/-28475648/6)."
+    ),
+    scope="core",
     component="logchat",
-    value_type=int,
-    hidden=True,
-)
-LOG_CHAT_THREAD_ID = config_registry.get_var(
-    "LOG_CHAT_THREAD_ID",
-    "",
-    label="Log Chat Thread ID",
-    description="Thread ID for the log chat (if supported by interface).",
-    group="core",
-    component="logchat",
-    value_type=int,
-    hidden=True,
 )
 
 
@@ -769,143 +757,130 @@ async def switch_active_cortex_engine(name: str, use_hot_swap: bool = True):
             log_debug(f"[config] 🔓 Released Cortex switch lock for '{name}'")
 
 
-_log_chat_id: int | None = None  # cached log chat ID
-_log_chat_thread_id: int | None = None  # cached log chat thread ID
-_log_chat_interface: str | None = None  # cached log chat interface
+# The LogChat target is stored as a single canonical interface_path in the
+# `LOG_CHAT_ID` config key (e.g. "telegram_bot/-28475648/6"). The cache holds
+# that raw path; the interface name, chat id and thread id are derived from it.
+_log_chat_path: str | None = None  # cached log chat interface_path
+
+
+def _parse_log_chat_path(path: str | None) -> tuple[str | None, int | None, int | None]:
+    """Split a LogChat interface_path into (interface, chat_id, thread_id).
+
+    Returns (None, None, None) when the path is empty. chat_id/thread_id are
+    returned as int when numeric, otherwise None.
+    """
+    if not path:
+        return (None, None, None)
+
+    from core.interface_path_utils import extract_legacy_ids
+
+    parts = extract_legacy_ids(path)
+    interface = parts.get("interface") or None
+
+    def _to_int(value: str | None) -> int | None:
+        if value is None or value == "":
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    return (interface, _to_int(parts.get("chat_id")), _to_int(parts.get("thread_id")))
+
+
+def _load_log_chat_path() -> str | None:
+    """Load and cache the raw LogChat interface_path from config_registry."""
+    global _log_chat_path
+    if _log_chat_path is None:
+        try:
+            raw = config_registry.get_value("LOG_CHAT_ID", "")
+            _log_chat_path = raw if raw else None
+            log_debug(
+                f"[config] 📥 Loaded LOG_CHAT_ID (path) via config_registry: {_log_chat_path}"
+            )
+        except Exception as e:
+            log_error(f"[config] ❌ Error in _load_log_chat_path(): {repr(e)}")
+    return _log_chat_path
+
+
+def _on_log_chat_id_changed(new_value: object) -> None:
+    """Invalidate the cached path when LOG_CHAT_ID changes from any source.
+
+    The WebUI writes LOG_CHAT_ID directly via config_registry.set_value (the
+    generic exposed-var endpoint), bypassing set_log_chat_id_and_thread, so the
+    module-level cache must be refreshed on every change.
+    """
+    global _log_chat_path
+    _log_chat_path = str(new_value) if new_value else None
+
+
+try:
+    config_registry.add_listener("LOG_CHAT_ID", _on_log_chat_id_changed)
+except Exception as e:  # pragma: no cover - registry not ready
+    log_debug(f"[config] Could not register LOG_CHAT_ID listener: {repr(e)}")
 
 
 async def get_log_chat_id() -> int | None:
-    """Return the configured log chat ID, if any (via config_registry `LOG_CHAT_ID`)."""
-    global _log_chat_id
-    if _log_chat_id is None:
-        try:
-            raw = config_registry.get_value("LOG_CHAT_ID", "")
-            if raw is None or raw == "":
-                _log_chat_id = None
-            else:
-                try:
-                    _log_chat_id = int(raw)
-                except Exception:
-                    _log_chat_id = None
-            log_debug(
-                f"[config] 📥 Loaded LOG_CHAT_ID via config_registry: {_log_chat_id}"
-            )
-        except Exception as e:
-            log_error(f"[config] ❌ Error in get_log_chat_id(): {repr(e)}")
-    return _log_chat_id
+    """Return the configured log chat ID, derived from the `LOG_CHAT_ID` path."""
+    _, chat_id, _ = _parse_log_chat_path(_load_log_chat_path())
+    return chat_id
 
 
 async def get_log_chat_interface() -> str | None:
-    """Return the configured log chat interface, if any (via config_registry `LOG_CHAT_INTERFACE`)."""
-    global _log_chat_interface
-    if _log_chat_interface is None:
-        try:
-            raw = config_registry.get_value("LOG_CHAT_INTERFACE", "")
-            _log_chat_interface = raw if raw else None
-            log_debug(
-                f"[config] 📥 Loaded LOG_CHAT_INTERFACE via config_registry: {_log_chat_interface}"
-            )
-        except Exception as e:
-            log_error(f"[config] ❌ Error in get_log_chat_interface(): {repr(e)}")
-    return _log_chat_interface
-
-
-async def set_log_chat_id(chat_id: int) -> None:
-    """Persist and cache the log chat ID via `config_registry`."""
-    global _log_chat_id
-    _log_chat_id = chat_id
-    try:
-        await config_registry.set_value("LOG_CHAT_ID", str(chat_id))
-        log_debug(f"[config] 💾 Saved LOG_CHAT_ID via config_registry: {chat_id}")
-    except Exception as e:
-        log_error(f"[config] ❌ Error in set_log_chat_id(): {repr(e)}")
+    """Return the configured log chat interface, derived from the `LOG_CHAT_ID` path."""
+    interface, _, _ = _parse_log_chat_path(_load_log_chat_path())
+    return interface
 
 
 async def get_log_chat_thread_id() -> int | None:
-    """Return the configured log chat thread ID, if any (via config_registry `LOG_CHAT_THREAD_ID`)."""
-    global _log_chat_thread_id
-    if _log_chat_thread_id is None:
-        try:
-            raw = config_registry.get_value("LOG_CHAT_THREAD_ID", "")
-            if raw is None or raw == "":
-                _log_chat_thread_id = None
-            else:
-                try:
-                    _log_chat_thread_id = int(raw)
-                except Exception:
-                    _log_chat_thread_id = None
-            log_debug(
-                f"[config] 📥 Loaded LOG_CHAT_THREAD_ID via config_registry: {_log_chat_thread_id}"
-            )
-        except Exception as e:
-            log_error(f"[config] ❌ Error in get_log_chat_thread_id(): {repr(e)}")
-    return _log_chat_thread_id
+    """Return the configured log chat thread ID, derived from the `LOG_CHAT_ID` path."""
+    _, _, thread_id = _parse_log_chat_path(_load_log_chat_path())
+    return thread_id
+
+
+async def set_log_chat_id(chat_id: int) -> None:
+    """Persist and cache the log chat as a bare chat id (no interface/thread)."""
+    await set_log_chat_id_and_thread(chat_id)
 
 
 async def set_log_chat_id_and_thread(
     chat_id: int, thread_id: int | None = None, interface: str = "webui"
 ) -> None:
-    """Persist and cache the log chat ID, thread ID, and interface via config_registry."""
-    global _log_chat_id, _log_chat_thread_id, _log_chat_interface
-    _log_chat_id = chat_id
-    _log_chat_thread_id = thread_id
-    _log_chat_interface = interface
+    """Compose and persist the LogChat target as a single interface_path.
+
+    The interface, chat id and optional thread id are joined into one canonical
+    interface_path (e.g. "telegram_bot/-28475648/6") stored in `LOG_CHAT_ID`.
+    """
+    global _log_chat_path
+
+    from core.interface_path_utils import build_interface_path_from_legacy
+
+    path = build_interface_path_from_legacy(interface, chat_id, thread_id)
+    _log_chat_path = path
 
     try:
-        await config_registry.set_value("LOG_CHAT_INTERFACE", interface)
-        await config_registry.set_value("LOG_CHAT_ID", str(chat_id))
-        await config_registry.set_value(
-            "LOG_CHAT_THREAD_ID", str(thread_id) if thread_id is not None else ""
-        )
-        log_debug(
-            f"[config] 💾 Saved LOG_CHAT (id/thread/interface) via config_registry: {chat_id}, {thread_id}, {interface}"
-        )
+        await config_registry.set_value("LOG_CHAT_ID", path)
+        log_debug(f"[config] 💾 Saved LOG_CHAT_ID (path) via config_registry: {path}")
     except Exception as e:
         log_error(f"[config] ❌ Error in set_log_chat_id_and_thread(): {repr(e)}")
 
 
 def get_log_chat_id_sync() -> int | None:
-    """Synchronous helper to fetch cached log chat ID, loading from DB if needed."""
-    global _log_chat_id
-    if _log_chat_id is not None:
-        return _log_chat_id
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        loop = None
-    if loop and loop.is_running():
-        # Cannot perform blocking DB fetch; return None until explicitly loaded
-        return _log_chat_id
-    return asyncio.run(get_log_chat_id())
+    """Synchronous helper to fetch the cached log chat ID."""
+    _, chat_id, _ = _parse_log_chat_path(_load_log_chat_path())
+    return chat_id
 
 
 def get_log_chat_interface_sync() -> str | None:
-    """Synchronous helper to fetch cached log chat interface."""
-    global _log_chat_interface
-    if _log_chat_interface is not None:
-        return _log_chat_interface
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        loop = None
-    if loop and loop.is_running():
-        # Cannot perform blocking DB fetch; return None until explicitly loaded
-        return _log_chat_interface
-    return asyncio.run(get_log_chat_interface())
+    """Synchronous helper to fetch the cached log chat interface."""
+    interface, _, _ = _parse_log_chat_path(_load_log_chat_path())
+    return interface
 
 
 def get_log_chat_thread_id_sync() -> int | None:
-    """Synchronous helper to fetch cached log chat thread ID."""
-    global _log_chat_thread_id
-    if _log_chat_thread_id is not None:
-        return _log_chat_thread_id
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        loop = None
-    if loop and loop.is_running():
-        return _log_chat_thread_id
-    return asyncio.run(get_log_chat_thread_id())
+    """Synchronous helper to fetch the cached log chat thread ID."""
+    _, _, thread_id = _parse_log_chat_path(_load_log_chat_path())
+    return thread_id
 
 
 def list_available_llms():

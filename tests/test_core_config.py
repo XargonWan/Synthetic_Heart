@@ -66,10 +66,11 @@ def test_webui_accent_default():
 
 @pytest.mark.asyncio
 async def test_log_chat_persistence_uses_config_registry(monkeypatch):
-    """Ensure set_log_chat_id_and_thread writes via config_registry.set_value."""
+    """set_log_chat_id_and_thread writes a single interface_path to LOG_CHAT_ID."""
     from core import config as conf
     import core.config_manager as cm
 
+    conf._log_chat_path = None
     mock = AsyncMock()
     monkeypatch.setattr(cm.config_registry, "set_value", mock)
 
@@ -77,30 +78,35 @@ async def test_log_chat_persistence_uses_config_registry(monkeypatch):
         12345, thread_id=678, interface="telegram_bot"
     )
 
-    # Expect set_value called for each key
-    assert mock.await_count >= 3
-    mock.assert_any_await("LOG_CHAT_INTERFACE", "telegram_bot")
-    mock.assert_any_await("LOG_CHAT_ID", "12345")
-    mock.assert_any_await("LOG_CHAT_THREAD_ID", "678")
+    # Expect a single write with the composed interface_path.
+    mock.assert_awaited_once_with("LOG_CHAT_ID", "telegram_bot/12345/678")
 
 
-def test_get_log_chat_reads_from_config_registry(monkeypatch):
-    """Ensure getters read via config_registry.get_value."""
+@pytest.mark.asyncio
+async def test_log_chat_persistence_omits_empty_thread(monkeypatch):
+    """A None thread_id produces a two-segment interface_path."""
     from core import config as conf
     import core.config_manager as cm
 
+    conf._log_chat_path = None
+    mock = AsyncMock()
+    monkeypatch.setattr(cm.config_registry, "set_value", mock)
+
+    await conf.set_log_chat_id_and_thread(12345, interface="telegram_bot")
+
+    mock.assert_awaited_once_with("LOG_CHAT_ID", "telegram_bot/12345")
+
+
+def test_get_log_chat_reads_from_config_registry(monkeypatch):
+    """Getters derive interface/chat/thread from the single LOG_CHAT_ID path."""
+    from core import config as conf
+    import core.config_manager as cm
+
+    conf._log_chat_path = None
     monkeypatch.setattr(
         cm.config_registry,
         "get_value",
-        lambda k, d=None: (
-            "telegram_bot"
-            if k == "LOG_CHAT_INTERFACE"
-            else (
-                "12345"
-                if k == "LOG_CHAT_ID"
-                else ("678" if k == "LOG_CHAT_THREAD_ID" else d)
-            )
-        ),
+        lambda k, d=None: "telegram_bot/12345/678" if k == "LOG_CHAT_ID" else d,
     )
 
     # Async getters
@@ -110,6 +116,34 @@ def test_get_log_chat_reads_from_config_registry(monkeypatch):
     assert val == 12345
     val = asyncio.run(conf.get_log_chat_thread_id())
     assert val == 678
+
+    # Sync getters share the same derivation.
+    assert conf.get_log_chat_interface_sync() == "telegram_bot"
+    assert conf.get_log_chat_id_sync() == 12345
+    assert conf.get_log_chat_thread_id_sync() == 678
+
+
+def test_log_chat_listener_invalidates_cache(monkeypatch):
+    """A direct LOG_CHAT_ID change (e.g. WebUI) refreshes the cached path."""
+    from core import config as conf
+    import core.config_manager as cm
+
+    # An empty registry so a cleared cache never reloads a real value.
+    monkeypatch.setattr(cm.config_registry, "get_value", lambda k, d=None: d)
+
+    # Seed the cache with an initial value.
+    conf._log_chat_path = "telegram_bot/111"
+    assert conf.get_log_chat_id_sync() == 111
+
+    # Simulate the config_registry listener firing on a new value.
+    conf._on_log_chat_id_changed("discord_bot/222/9")
+    assert conf.get_log_chat_interface_sync() == "discord_bot"
+    assert conf.get_log_chat_id_sync() == 222
+    assert conf.get_log_chat_thread_id_sync() == 9
+
+    # An empty value clears the cache.
+    conf._on_log_chat_id_changed("")
+    assert conf.get_log_chat_id_sync() is None
 
 
 @pytest.mark.asyncio
