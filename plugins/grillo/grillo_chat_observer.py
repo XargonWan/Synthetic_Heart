@@ -653,6 +653,7 @@ class GrilloChatObserverPlugin:
                         # defensively ignore any parsing errors and continue
                         pass
                     # take up to 2 recent messages per chat
+                    now = datetime.now(timezone.utc)
                     taken = 0
                     for msg in reversed(list(messages)):
                         if not isinstance(msg, dict):
@@ -662,12 +663,24 @@ class GrilloChatObserverPlugin:
                             msg.get("sender_name") or msg.get("sender_id") or "unknown"
                         )
                         timestamp = msg.get("timestamp") or ""
+                        # Relative-age annotation. A bare ISO timestamp is
+                        # invisible-as-old to a small model, so it treats a
+                        # days-old line as the current moment and continues it
+                        # (see AGENTS.md §12 staleness note). Tagging each
+                        # snippet with how long ago it was said lets the model
+                        # judge staleness itself — no hard age gate, so outreach
+                        # always has context behind it.
+                        msg_ts = self._parse_ts(timestamp)
+                        age_seconds: Optional[float] = None
+                        if msg_ts is not None:
+                            age_seconds = (now - msg_ts).total_seconds()
                         if text:
                             snippet = text.strip()
                             if len(snippet) > 300:
                                 snippet = snippet[:300] + "..."
+                            age_label = self._humanize_age(age_seconds)
                             snippets.append(
-                                f"(chat:{chat_path} | sender:{sender} | {timestamp}) {snippet}"
+                                f"(chat:{chat_path} | sender:{sender} | {timestamp} | {age_label}) {snippet}"
                             )
                             taken += 1
                         if taken >= 2 or len(snippets) >= limit:
@@ -811,6 +824,23 @@ class GrilloChatObserverPlugin:
         return targets
 
     @staticmethod
+    def _humanize_age(age_seconds: Optional[float]) -> str:
+        """Render a relative-age label so snippet staleness is visible to the
+        LLM (e.g. ``age:just now``, ``age:3h ago``, ``age:2d ago``)."""
+        if age_seconds is None:
+            return "age:unknown"
+        if age_seconds < 90:
+            return "age:just now"
+        minutes = age_seconds / 60.0
+        if minutes < 90:
+            return f"age:{int(round(minutes))}m ago"
+        hours = age_seconds / 3600.0
+        if hours < 48:
+            return f"age:{int(round(hours))}h ago"
+        days = age_seconds / 86400.0
+        return f"age:{int(round(days))}d ago"
+
+    @staticmethod
     def _parse_ts(value: Any) -> Optional[datetime]:
         """Parse a chat_history timestamp into an aware UTC datetime."""
         if value is None:
@@ -856,7 +886,13 @@ class GrilloChatObserverPlugin:
         targets: Optional[List[Dict[str, Any]]] = None,
         decay_driven: bool = False,
     ) -> str:
-        header = "[G.R.I.L.L.O. CHAT OBSERVER] Below are recent chat snippets from across conversations. Analyze and propose any actions that would be helpful."
+        header = (
+            "[G.R.I.L.L.O. CHAT OBSERVER] Below are chat snippets from across conversations. "
+            "Each snippet is tagged with an 'age:' marker showing how long ago it was said. "
+            "Treat older snippets as historical context, NOT as the current moment — do not "
+            "continue or reply to a stale line as if it just happened. Analyze and propose any "
+            "actions that would be genuinely helpful right now."
+        )
 
         body = "\n\nSnippets:\n"
         if snippets:
