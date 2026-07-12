@@ -423,6 +423,7 @@ class VoxPlugin(AIPluginBase):
         merged_text: str | None = None,
         allow_fallback: bool = True,
         generate_only: bool = False,
+        voice: str | None = None,
     ) -> dict[str, Any]:
         """Full TTS pipeline: generate → write → dispatch → lip-sync.
 
@@ -434,6 +435,10 @@ class VoxPlugin(AIPluginBase):
             emotion:          Optional emotion/style hint forwarded to the engine.
             engine_name:      Override the active engine for this call.
             merged_text:      Pre-resolved display text (used as fallback caption).
+            voice:            Optional explicit voice override. When omitted, the
+                              engine resolves the configured voice via the normal
+                              Vox flow (``<ENGINE>_VOICE`` config key). Only set
+                              this for deliberate per-call overrides.
 
         Returns:
             ``{"status": "success"|"skipped"|"error", ...}``
@@ -530,6 +535,12 @@ class VoxPlugin(AIPluginBase):
         kwargs: dict[str, Any] = {}
         if detected_lang:
             kwargs["language"] = detected_lang
+        # Only forward an explicit voice override; when absent the engine/bridge
+        # resolves the configured voice through the normal Vox flow. This keeps
+        # callers (e.g. radio) following the same voice as regular chat unless
+        # they deliberately override it.
+        if voice:
+            kwargs["voice"] = voice
 
         # Sentence-by-sentence streaming shrinks time-to-first-audio for the
         # live webui/stage avatar on multi-sentence replies — the first

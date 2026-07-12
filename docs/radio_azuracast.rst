@@ -120,7 +120,12 @@ All variables are WebUI-configurable under **Settings → Plugins → Radio Host
      - How many recent listener messages to include in the prompt context.
    * - ``RADIO_HOST_VOX_ENGINE``
      - ``""``
-     - Override the default TTS engine for radio host (blank = system default).
+     - Optional TTS **engine** override for the radio host (blank = system
+       default ``ACTIVE_VOX_ENGINE``). The radio follows the normal Vox flow,
+       so it uses the configured voice of whichever engine is active (the
+       ``<ENGINE>_VOICE`` key). When overriding the engine, also select that
+       engine's voice in the WebUI — otherwise engines like Fish Audio pick a
+       random voice.
    * - ``RADIO_HOST_GAIN_DB``
      - ``4.0``
      - Volume boost for banter audio in dB (applied via ffmpeg ``volume`` filter).

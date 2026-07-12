@@ -268,9 +268,18 @@ Limitations
 -----------
 
 - Only one AzuraCast station is supported per plugin instance.
-- The ``RADIO_HOST_VOX_ENGINE`` is not exposed in the WebUI; inherits
-  the system-wide ``ACTIVE_VOX_ENGINE``. To use a different voice for
-  the radio host, set ``ACTIVE_VOX_ENGINE`` before enabling the plugin.
+- The radio host follows the **same voice as normal chat**. It routes
+  through the standard Vox flow (``vox.speak()``), so the configured
+  voice of the active engine (the ``<ENGINE>_VOICE`` config key, e.g.
+  ``FISH-AUDIO_VOICE``) is used automatically — no radio-specific voice
+  setting exists.
+- ``RADIO_HOST_VOX_ENGINE`` is an optional **engine** override only. It
+  is not exposed in the WebUI and defaults to empty, in which case the
+  system-wide ``ACTIVE_VOX_ENGINE`` is used. If you set it to a
+  different engine, you must also select that engine's voice in the
+  WebUI (which persists ``<ENGINE>_VOICE``); otherwise the engine falls
+  back to its own default and, for engines like Fish Audio, will pick a
+  random voice.
 - Audio is injected as a file upload + queue operation, not as a live
   Icecast source connection. Because banter is **pre-generated** during
   the previous song, it is ready the moment a track change fires and
