@@ -58,8 +58,13 @@ class ReconWebSearchPlugin:
             "self-contained search queries.\n"
             "2. check_website: explicit links the user asked you to open/visit/"
             "read directly. Put here ONLY full http(s) URLs the user provided or "
-            "clearly wants you to fetch directly. These are visited and scraped "
-            "AS-IS; they do NOT replace or count against the search queries.\n"
+            "clearly wants you to fetch directly. ALWAYS copy into this list "
+            "every full http(s) URL that appears in the user's message when the "
+            "user is asking about it, sharing it for you to look at, or wondering "
+            "what it contains — do not leave check_website empty if the message "
+            "contains a link the user is pointing you to. These are visited and "
+            "scraped AS-IS; they do NOT replace or count against the search "
+            "queries.\n"
             "Either list may be empty. Use check_website WITHOUT any queries when "
             "the user only wants specific links opened and no broader search is "
             "needed. The value for this key MUST be an object with exactly these "
@@ -115,6 +120,32 @@ class ReconWebSearchPlugin:
             queries = [str(x).strip() for x in raw if str(x).strip()][:3]
 
         return queries, urls
+
+    @staticmethod
+    def _extract_urls_from_text(raw_text: str | None) -> list[str]:
+        """Extract explicit http(s) URLs literally present in a text.
+
+        This is a purely *structural* extraction (it matches the ``http(s)``
+        token shape), NOT a keyword/intent detection: it only picks up links
+        the user actually pasted into their message. It is used as a
+        deterministic backstop for weak recon models that fail to copy an
+        explicit link into ``check_website`` even when the user pasted one and
+        asked for it to be opened. Language-agnostic and content-agnostic.
+        """
+        if not raw_text or not raw_text.strip():
+            return []
+        import re
+
+        found = re.findall(r"https?://[^\s<>\"'\]\)]+", raw_text)
+        # Trim common trailing punctuation that is not part of the URL.
+        cleaned: list[str] = []
+        seen: set[str] = set()
+        for url in found:
+            url = url.rstrip(".,;:!?")
+            if url and url not in seen:
+                seen.add(url)
+                cleaned.append(url)
+        return cleaned[:3]
 
     def _extract_payload_from_text(self, raw_text: str) -> tuple[list[str], list[str]]:
         """Loosely extract ``(queries, urls)`` from raw LLM text.
@@ -218,6 +249,27 @@ class ReconWebSearchPlugin:
                     f"[recon_web_search] Extracted {len(queries)} queries and "
                     f"{len(urls)} link(s) from raw LLM text (central JSON parser "
                     f"missed these)"
+                )
+
+        # Phase 3: Deterministic link backstop. Weak recon models sometimes
+        # return an empty check_website even when the user pasted an explicit
+        # http(s) link and asked for it to be opened (observed with
+        # selenium-llm-engine). In that case the persona would promise a
+        # follow-up that never arrives, because no task is triggered. If the
+        # recon LLM produced NO links, recover any explicit URLs literally
+        # present in the user's message and treat them as check_website targets.
+        # This is a purely structural URL extraction from the message text, not
+        # keyword/intent detection — language-agnostic.
+        if not urls:
+            msg_text = getattr(message, "text", None) if message is not None else None
+            candidate_text = str(msg_text) if msg_text else (text or "")
+            recovered = self._extract_urls_from_text(candidate_text)
+            if recovered:
+                urls = recovered
+                log_info(
+                    f"[recon_web_search] Recovered {len(urls)} explicit link(s) "
+                    f"from the user's message that the recon LLM omitted from "
+                    f"check_website"
                 )
 
         if not queries and not urls:

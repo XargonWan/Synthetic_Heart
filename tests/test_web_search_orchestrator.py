@@ -108,6 +108,91 @@ async def test_recon_no_queries_emits_guard_and_does_not_submit(
 
 
 @pytest.mark.asyncio
+async def test_recon_recovers_explicit_url_when_llm_omits_it(
+    enable_recon: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A link pasted by the user must trigger a fetch even if the recon LLM
+    returns an empty check_website (weak-model backstop).
+
+    Reproduces the incident where the recon model emitted
+    {"queries": [], "check_website": []} for a message that contained an
+    explicit URL, so no search fired and the promised follow-up never arrived.
+    """
+    submitted: dict[str, Any] = {}
+
+    class _FakeOrchestrator:
+        async def submit(
+            self,
+            *,
+            interface_path: str | None,
+            queries: list[str],
+            search_context: str,
+            context_memory: dict[str, Any] | None = None,
+            urls: list[str] | None = None,
+        ) -> str:
+            submitted["queries"] = queries
+            submitted["urls"] = urls
+            return "task-recovered"
+
+    monkeypatch.setattr(
+        search_orchestrator,
+        "get_search_orchestrator",
+        lambda: _FakeOrchestrator(),
+    )
+
+    plugin = ReconWebSearchPlugin()
+    msg = _Msg(
+        text="Guarda qua: https://example.com/article Chissà cosa dice.",
+        interface_path="tg/7",
+    )
+    out = await plugin.parse_recon_response(
+        {"web_search": {"queries": [], "check_website": []}},
+        message=msg,
+        context_memory={},
+        text="Guarda qua: https://example.com/article Chissà cosa dice.",
+    )
+
+    # The explicit URL from the message was recovered and submitted.
+    assert submitted["urls"] == ["https://example.com/article"]
+    assert submitted["queries"] == []
+    # A follow-up instruction is emitted (a search IS now running).
+    assert len(out) == 1
+    assert out[0]["type"] == "instruction"
+    assert out[0]["source"] == "recon_web_search"
+
+
+@pytest.mark.asyncio
+async def test_recon_no_url_in_message_still_emits_guard(
+    enable_recon: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When neither the LLM nor the message provides a link/query, the guard
+    instruction must still be returned and no task submitted."""
+    called = {"submit": False}
+
+    class _FakeOrchestrator:
+        async def submit(self, **_k: Any) -> str:
+            called["submit"] = True
+            return "x"
+
+    monkeypatch.setattr(
+        search_orchestrator,
+        "get_search_orchestrator",
+        lambda: _FakeOrchestrator(),
+    )
+
+    plugin = ReconWebSearchPlugin()
+    out = await plugin.parse_recon_response(
+        {"web_search": {"queries": [], "check_website": []}},
+        message=_Msg(text="just a plain question with no link"),
+        context_memory={},
+        text="just a plain question with no link",
+    )
+    assert called["submit"] is False
+    assert len(out) == 1
+    assert out[0]["source"] == "recon_web_search"
+
+
+@pytest.mark.asyncio
 async def test_recon_skips_result_delivery_beat_and_does_not_resubmit(
     enable_recon: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
