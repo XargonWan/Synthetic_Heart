@@ -9,7 +9,8 @@ const historyState = {
     grillo: { page: 1, per_page: 20, search: '', beat_type: '', sort: 'desc' },
     dreams: { page: 1, per_page: 15, search: '', sort: 'desc' },
     chat: { page: 1, per_page: 50, search: '', interface_path: '', sort: 'desc' },
-    calendar: { year: null, month: null, events: [], loaded: false }
+    calendar: { year: null, month: null, events: [], loaded: false },
+    growth: { current: null, entries: [], currentLikes: [], currentDislikes: [], pendingProposal: null }
 };
 
 function initializeHistoryTab() {
@@ -636,6 +637,7 @@ function loadHistoryData(subtab) {
     if (subtab === 'grillo') return loadHistoryGrillo();
     if (subtab === 'calendar') return loadHistoryCalendar();
     if (subtab === 'dreams') return loadHistoryDreams();
+    if (subtab === 'growth') return loadHistoryGrowth();
     if (subtab === 'chat') return loadHistoryChat();
     if (subtab === 'agent') {
         try { if (window.SynthWebUI && typeof window.SynthWebUI.initAgentTab === 'function') window.SynthWebUI.initAgentTab(); } catch (e) { /* ignore */ }
@@ -758,11 +760,283 @@ function renderDreamEntry(entry) {
                 <div class="history-entry-meta">
                     <div class="history-entry-date">🌙 ${timestamp}</div>
                 </div>
+                ${entry.id ? `<button type="button" class="history-delete-btn" title="Delete this dream" onclick="window.SynthWebUI.deleteDreamEntry(${entry.id})">🗑</button>` : ''}
             </div>
             <div class="history-entry-content${contentClass}">${safeContent || '<em style="opacity:0.5">No dream content</em>'}</div>
             ${entry.has_diary && entry.diary_entry_id ? `<div class="history-entry-detail" style="margin-top: 0.75rem; opacity: 0.7;"><small>📝 Diary entry ID: ${entry.diary_entry_id}</small></div>` : ''}
         </div>
     `;
+}
+
+async function loadHistoryGrowth() {
+    const content = document.getElementById('history-growth-content'); if (!content) return;
+    content.innerHTML = '<div class="loading-state"><div class="loading-spinner"></div><p>Loading self-growth...</p></div>';
+    try {
+        const response = await fetch('/api/history/growth');
+        const data = await response.json();
+        if (data && data.success) {
+            historyState.growth.current = data.current || '';
+            historyState.growth.entries = Array.isArray(data.entries) ? data.entries : [];
+            historyState.growth.currentLikes = Array.isArray(data.current_likes) ? data.current_likes : [];
+            historyState.growth.currentDislikes = Array.isArray(data.current_dislikes) ? data.current_dislikes : [];
+            historyState.growth.pendingProposal = data.pending_proposal || null;
+            renderGrowthPanel();
+        } else {
+            content.classList.remove('history-populated');
+            content.innerHTML = '<div class="empty-state"><div class="icon">⚠️</div><p>Failed to load self-growth</p></div>';
+        }
+    } catch (error) {
+        console.error('Failed to load self-growth:', error);
+        content.innerHTML = '<div class="empty-state"><div class="icon">⚠️</div><p>Failed to load self-growth</p></div>';
+    }
+}
+
+function renderGrowthPanel() {
+    const content = document.getElementById('history-growth-content'); if (!content) return;
+    const current = historyState.growth.current || '';
+    const entries = historyState.growth.entries || [];
+
+    // Likes/dislikes block, rendered inline inside the editor card just above
+    // the Save / Run now buttons.
+    const proposalHtml = renderPendingProposalBlock(
+        historyState.growth.pendingProposal,
+        historyState.growth.currentLikes || [],
+        historyState.growth.currentDislikes || []
+    );
+
+    const editor = `
+        <div class="history-entry">
+            <div class="history-entry-header">
+                <div class="history-entry-meta">
+                    <div class="history-entry-date">🌱 Current self-growth state</div>
+                </div>
+            </div>
+            <textarea id="growth-current-editor" class="search-input" style="width:100%;min-height:200px;resize:vertical;font-family:inherit;line-height:1.5;">${escapeHtml(current)}</textarea>
+            ${proposalHtml}
+            <div style="margin-top:0.75rem;display:flex;gap:0.5rem;">
+                <button type="button" class="calendar-action-btn" onclick="window.SynthWebUI.saveGrowthCurrent()">💾 Save as current</button>
+                <button type="button" id="growth-run-now-btn" class="calendar-action-btn" onclick="window.SynthWebUI.runGrowthNow()">🌱 Run now</button>
+            </div>
+        </div>
+    `;
+
+    let historyHtml = '';
+    if (entries.length === 0) {
+        historyHtml = '<div class="empty-state"><div class="icon">🌱</div><p>No self-growth history yet</p></div>';
+    } else {
+        historyHtml = entries.map(e => renderGrowthHistoryEntry(e)).join('');
+    }
+
+    content.innerHTML = editor +
+        '<h3 style="margin:1.25rem 0 0.5rem;font-size:0.95rem;opacity:0.85;">History (last 10)</h3>' +
+        historyHtml;
+    content.classList.add('history-populated');
+}
+
+// Render a list of requested (proposed) items, highlighting how they differ
+// from the current list: additions in green, removals struck through in red,
+// unchanged items neutral. Pure list-diff — no keyword/phrase matching.
+function renderGrowthDiffList(proposed, current) {
+    const currentSet = new Set(current);
+    const proposedSet = new Set(proposed);
+    const parts = [];
+    proposed.forEach(item => {
+        const cls = currentSet.has(item) ? '' : ' growth-item-added';
+        parts.push(`<li class="growth-item${cls}">${escapeHtml(item)}</li>`);
+    });
+    current.forEach(item => {
+        if (!proposedSet.has(item)) {
+            parts.push(`<li class="growth-item growth-item-removed">${escapeHtml(item)}</li>`);
+        }
+    });
+    if (parts.length === 0) {
+        return '<li class="growth-item" style="opacity:0.6;">(empty)</li>';
+    }
+    return parts.join('');
+}
+
+function renderPendingProposalBlock(proposal, currentLikes, currentDislikes) {
+    // Always show the likes/dislikes fields. When a proposal is pending, show
+    // the requested values as a diff against the current ones (additions in
+    // green, removals struck through). When nothing is pending, the requested
+    // values simply are the current ones, so we diff each list against itself
+    // (all neutral).
+    const hasProposal = !!proposal;
+    const likes = hasProposal && Array.isArray(proposal.likes) ? proposal.likes : currentLikes;
+    const dislikes = hasProposal && Array.isArray(proposal.dislikes) ? proposal.dislikes : currentDislikes;
+    const title = hasProposal
+        ? '🌱 Requested likes / dislikes (pending approval)'
+        : '🌱 Likes / dislikes (current)';
+    const legend = hasProposal
+        ? 'Green = added · struck through = removed vs current'
+        : 'No pending proposal — showing current likes / dislikes';
+    return `
+        <div class="growth-proposal-inline" style="margin-top:0.75rem;">
+            <div class="history-entry-date" style="margin-bottom:0.5rem;">${title}</div>
+            <div class="growth-proposal-lists">
+                <div class="growth-proposal-col">
+                    <h4 style="margin:0 0 0.4rem;font-size:0.85rem;opacity:0.85;">👍 Likes</h4>
+                    <ul class="growth-diff-list">${renderGrowthDiffList(likes, currentLikes)}</ul>
+                </div>
+                <div class="growth-proposal-col">
+                    <h4 style="margin:0 0 0.4rem;font-size:0.85rem;opacity:0.85;">👎 Dislikes</h4>
+                    <ul class="growth-diff-list">${renderGrowthDiffList(dislikes, currentDislikes)}</ul>
+                </div>
+            </div>
+            <p style="margin:0.6rem 0 0;font-size:0.75rem;opacity:0.6;">${legend}</p>
+        </div>
+    `;
+}
+
+function renderGrowthEntryList(items) {
+    const arr = Array.isArray(items) ? items : [];
+    if (!arr.length) return '<li class="growth-item" style="opacity:0.5;">(empty)</li>';
+    return arr.map(it => `<li class="growth-item">${escapeHtml(String(it))}</li>`).join('');
+}
+
+function renderGrowthEntryLists(entry) {
+    const likes = Array.isArray(entry.likes) ? entry.likes : [];
+    const dislikes = Array.isArray(entry.dislikes) ? entry.dislikes : [];
+    // Nothing was recorded for this iteration (e.g. rows created before the
+    // likes/dislikes columns existed) — omit the block entirely.
+    if (!likes.length && !dislikes.length) return '';
+    return `
+        <div class="growth-proposal-inline" style="margin-top:0.6rem;">
+            <div class="history-entry-date" style="font-size:0.85rem;">🌱 Likes / dislikes proposed at this iteration</div>
+            <div class="growth-proposal-lists">
+                <div class="growth-proposal-col">
+                    <h4 style="margin:0 0 0.4rem;font-size:0.85rem;opacity:0.85;">👍 Likes</h4>
+                    <ul class="growth-diff-list">${renderGrowthEntryList(likes)}</ul>
+                </div>
+                <div class="growth-proposal-col">
+                    <h4 style="margin:0 0 0.4rem;font-size:0.85rem;opacity:0.85;">👎 Dislikes</h4>
+                    <ul class="growth-diff-list">${renderGrowthEntryList(dislikes)}</ul>
+                </div>
+            </div>
+        </div>
+    `;
+}
+
+function renderGrowthHistoryEntry(entry) {
+    const timestamp = formatTimestamp(entry.created_at);
+    let safeContent = escapeHtml(entry.content || '');
+    const contentIsLong = safeContent.split('\n').length > 8 || safeContent.length > 800;
+    const contentClass = contentIsLong ? ' history-entry-content--limited' : '';
+    const currentBadge = entry.is_current ? ' <span style="color:var(--accent, #6ec1e4);">● current</span>' : '';
+    const meta = `${entry.source || 'weekly'} · ${entry.created_by || 'grillo_growth'}`;
+    const listsHtml = renderGrowthEntryLists(entry);
+
+    return `
+        <div class="history-entry">
+            <div class="history-entry-header">
+                <div class="history-entry-meta">
+                    <div class="history-entry-date">🌱 ${timestamp}${currentBadge}</div>
+                    <div class="history-entry-detail" style="opacity:0.7;"><small>${escapeHtml(meta)}</small></div>
+                </div>
+                ${entry.is_current ? '' : `<div style="display:flex;gap:0.5rem;"><button type="button" class="calendar-action-btn" onclick="window.SynthWebUI.revertGrowthState(${entry.id})">↩ Revert to this</button><button type="button" class="history-delete-btn" title="Delete this entry" onclick="window.SynthWebUI.deleteGrowthState(${entry.id})">🗑</button></div>`}
+            </div>
+            <div class="history-entry-content${contentClass}">${safeContent || '<em style="opacity:0.5">No content</em>'}</div>
+            ${listsHtml}
+        </div>
+    `;
+}
+
+async function saveGrowthCurrent() {
+    const editor = document.getElementById('growth-current-editor'); if (!editor) return;
+    const content = editor.value.trim();
+    try {
+        const response = await fetch('/api/growth/current', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ content })
+        });
+        const data = await response.json();
+        if (data && data.success) {
+            loadHistoryGrowth();
+        } else {
+            alert('Failed to save: ' + ((data && data.error) || 'unknown error'));
+        }
+    } catch (error) {
+        console.error('Failed to save self-growth:', error);
+        alert('Failed to save self-growth.');
+    }
+}
+
+async function runGrowthNow() {
+    const btn = document.getElementById('growth-run-now-btn');
+    if (btn) { btn.disabled = true; btn.textContent = '⏳ Running...'; }
+    try {
+        const response = await fetch('/api/components/run', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: 'grillo_growth', action: 'run_now', payload: {} })
+        });
+        const data = await response.json();
+        const result = data && data.result;
+        if (result && result.status === 'done') {
+            loadHistoryGrowth();
+        } else {
+            const msg = (result && result.message) || (data && data.error) || 'unknown error';
+            alert('Self-growth run failed: ' + msg);
+        }
+    } catch (error) {
+        console.error('Failed to run self-growth:', error);
+        alert('Failed to run self-growth.');
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = '🌱 Run now'; }
+    }
+}
+
+async function revertGrowthState(id) {
+    if (!confirm('Revert the current self-growth state to this history entry?')) return;
+    try {
+        const response = await fetch('/api/growth/revert', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id })
+        });
+        const data = await response.json();
+        if (data && data.success) {
+            loadHistoryGrowth();
+        } else {
+            alert('Failed to revert: ' + ((data && data.error) || 'unknown error'));
+        }
+    } catch (error) {
+        console.error('Failed to revert self-growth:', error);
+        alert('Failed to revert self-growth.');
+    }
+}
+
+async function deleteHistoryItem(url, reload, confirmMsg) {
+    if (!confirm(confirmMsg)) return;
+    try {
+        const response = await fetch(url, { method: 'DELETE' });
+        const data = await response.json();
+        if (data && data.success) {
+            reload();
+        } else {
+            alert('Failed to delete: ' + ((data && data.error) || 'unknown error'));
+        }
+    } catch (error) {
+        console.error('Failed to delete history item:', error);
+        alert('Failed to delete.');
+    }
+}
+
+function deleteDiaryDay(id) {
+    deleteHistoryItem('/api/history/diary/' + id, loadHistoryDiary, 'Delete the entire diary entry for this day? This cannot be undone.');
+}
+
+function deleteGrilloEntry(id) {
+    deleteHistoryItem('/api/history/grillo/' + id, loadHistoryGrillo, 'Delete this grillo activity entry? This cannot be undone.');
+}
+
+function deleteDreamEntry(id) {
+    deleteHistoryItem('/api/history/dreams/' + id, loadHistoryDreams, 'Delete this dream entry? This cannot be undone.');
+}
+
+function deleteGrowthState(id) {
+    deleteHistoryItem('/api/history/growth/' + id, loadHistoryGrowth, 'Delete this self-growth history entry? This cannot be undone.');
 }
 
 async function loadHistoryChat() {
@@ -826,6 +1100,7 @@ function renderDiaryDayEntry(entry) {
             <div class="diary-day-header">
                 <span class="diary-day-icon">📔</span>
                 <span class="diary-day-label">${dayLabel}</span>
+                ${entry.id ? `<button type="button" class="history-delete-btn" title="Delete this day" onclick="window.SynthWebUI.deleteDiaryDay(${entry.id})">🗑</button>` : ''}
             </div>
             <div class="diary-day-content">${contentHtml || '<em>No entry for this day</em>'}</div>
             ${safeThought ? `<div class="diary-day-thought"><strong>💭</strong> ${safeThought}</div>` : ''}
@@ -850,6 +1125,7 @@ function renderGrilloEntry(entry) {
                     <div class="history-entry-date">🦗 ${timestamp}</div>
                     <span class="history-entry-type">${beatTypeLabel}</span>
                 </div>
+                ${entry.id ? `<button type="button" class="history-delete-btn" title="Delete this entry" onclick="window.SynthWebUI.deleteGrilloEntry(${entry.id})">🗑</button>` : ''}
             </div>
             <div class="grillo-prompt${promptClass}">${safePrompt}</div>
             ${safeResponse ? `
@@ -970,6 +1246,13 @@ function formatTimestamp(isoString) { return SynthUtils.formatTimestamp(isoStrin
 // Expose initializer for dynamic loader
 window.SynthWebUI = window.SynthWebUI || {};
 window.SynthWebUI.initHistoryTab = function() { initializeHistoryTab(); };
+window.SynthWebUI.saveGrowthCurrent = saveGrowthCurrent;
+window.SynthWebUI.runGrowthNow = runGrowthNow;
+window.SynthWebUI.revertGrowthState = revertGrowthState;
+window.SynthWebUI.deleteDiaryDay = deleteDiaryDay;
+window.SynthWebUI.deleteGrilloEntry = deleteGrilloEntry;
+window.SynthWebUI.deleteDreamEntry = deleteDreamEntry;
+window.SynthWebUI.deleteGrowthState = deleteGrowthState;
 
 // Fallback: if the tab is active on DOMContentLoaded, initialize
 document.addEventListener('DOMContentLoaded', () => {

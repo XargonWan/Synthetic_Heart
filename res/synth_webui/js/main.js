@@ -2111,6 +2111,59 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                             wrap.appendChild(input);
                             inputEl = wrap;
 
+                        } else if (item.ui_type === 'interface-path') {
+                            skipAutoSave = true;
+                            const wrap = document.createElement('div');
+                            wrap.style.display = 'flex';
+                            wrap.style.gap = '0.4rem';
+                            const input = document.createElement('input');
+                            input.type = 'text';
+                            input.autocomplete = 'off';
+                            input.placeholder = 'telegram_bot/dm/12345';
+                            input.value = typeof value === 'string' ? value : (value ? JSON.stringify(value) : '');
+                            input.disabled = !isEditable;
+                            input.style.flex = '1';
+                            const browseBtn = document.createElement('button');
+                            browseBtn.type = 'button';
+                            browseBtn.textContent = 'Browse…';
+                            browseBtn.disabled = !isEditable;
+                            browseBtn.addEventListener('click', () => {
+                                fetch('/api/history/interface-paths')
+                                    .then(r => r.json())
+                                    .then(data => {
+                                        const paths = (data && data.success && Array.isArray(data.interface_paths))
+                                            ? data.interface_paths : [];
+                                        const listing = paths.map(e => e.interface_path || e.label).filter(Boolean);
+                                        const choice = window.prompt(
+                                            'Enter an interface path:\n\n' +
+                                            (listing.length ? listing.slice(0, 50).join('\n') : '(no known paths)'),
+                                            input.value || ''
+                                        );
+                                        if (choice !== null) {
+                                            input.value = choice.trim();
+                                            if (isEditable) persistValue(input.value, [input]);
+                                        }
+                                    })
+                                    .catch(() => {
+                                        const choice = window.prompt('Enter an interface path:', input.value || '');
+                                        if (choice !== null) {
+                                            input.value = choice.trim();
+                                            if (isEditable) persistValue(input.value, [input]);
+                                        }
+                                    });
+                            });
+                            if (isEditable) {
+                                input.addEventListener('keydown', (ev) => {
+                                    if (ev.key === 'Enter' && !ev.shiftKey && !ev.ctrlKey && !ev.metaKey) {
+                                        ev.preventDefault();
+                                        persistValue(input.value.trim(), [input]);
+                                    }
+                                });
+                                input.addEventListener('blur', () => { persistValue(input.value.trim(), [input]); });
+                            }
+                            wrap.appendChild(input);
+                            wrap.appendChild(browseBtn);
+                            inputEl = wrap;
                         } else {
                             const input = document.createElement('input');
                             input.type = item.ui_type === 'password' ? 'password' : (item.value_type === 'int' || item.value_type === 'float' || item.ui_type === 'number' ? 'number' : 'text');
@@ -3058,6 +3111,54 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                                             console.error('[synth_webui] Diary consolidation Run Now request failed', err);
                                             runBtn.textContent = 'Error';
                                             alert('Diary consolidation Run Now request failed.');
+                                        } finally {
+                                            setTimeout(() => {
+                                                runBtn.textContent = originalText;
+                                                runBtn.disabled = false;
+                                            }, 4000);
+                                        }
+                                    });
+                                    summaryActions.appendChild(runBtn);
+                                }
+                            } catch (e) { /* ignore UI helper errors */ }
+
+                            // Special: "Run Now" button for the Grillo self-growth agent.
+                            // Runs the weekly self-growth reflection immediately,
+                            // bypassing the schedule and the "off" mode gate.
+                            try {
+                                if (item && item.name === 'grillo_growth') {
+                                    const runBtn = document.createElement('button');
+                                    runBtn.className = 'pill';
+                                    runBtn.textContent = 'Run Now';
+                                    runBtn.title = 'Run the self-growth reflection now';
+                                    runBtn.style.marginLeft = '8px';
+                                    runBtn.addEventListener('click', async (ev) => {
+                                        ev.stopPropagation();
+                                        ev.preventDefault();
+                                        runBtn.disabled = true;
+                                        const originalText = runBtn.textContent;
+                                        runBtn.textContent = 'Running…';
+                                        try {
+                                            const resp = await fetch('/api/components/run', {
+                                                method: 'POST',
+                                                headers: { 'Content-Type': 'application/json' },
+                                                body: JSON.stringify({ name: 'grillo_growth', action: 'run_now' })
+                                            });
+                                            let body = null;
+                                            try { body = await resp.json(); } catch (e) { /* ignore */ }
+                                            const result = (body && body.result) || {};
+                                            if (resp.ok && result.status === 'done') {
+                                                runBtn.textContent = 'Done';
+                                            } else {
+                                                const msg = (result && result.message) || (body && body.detail) || 'Failed';
+                                                runBtn.textContent = 'Error';
+                                                console.error('[synth_webui] Self-growth Run Now failed:', msg);
+                                                alert(`Self-growth Run Now failed: ${msg}`);
+                                            }
+                                        } catch (err) {
+                                            console.error('[synth_webui] Self-growth Run Now request failed', err);
+                                            runBtn.textContent = 'Error';
+                                            alert('Self-growth Run Now request failed.');
                                         } finally {
                                             setTimeout(() => {
                                                 runBtn.textContent = originalText;

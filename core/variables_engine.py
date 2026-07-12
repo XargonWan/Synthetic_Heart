@@ -25,6 +25,8 @@ API compatibility:
 # - `tag-combobox` → tag-list with suggestion support (uses `options`)
 # - `file`    → file upload control
 # - `color`   → color picker with optional preset swatches
+# - `interface-path` → interface-path picker (opens the WebUI picker modal;
+#                     value persisted as a string interface_path)
 #
 # When registering exposed variables prefer setting `value_type` to a native
 # Python type (e.g. `int`, `bool`, or the special string `'json'`) so the API
@@ -114,6 +116,10 @@ class ExposedVarDefinition:
             return
         # For file-backed variables we accept a string path or dict metadata; skip casting
         if self.ui_type == "file":
+            return
+        # Interface-path variables are opaque string paths (e.g. "telegram_bot/123");
+        # skip casting so they are stored verbatim.
+        if self.ui_type == "interface-path":
             return
         if isinstance(self.value_type, type):
             try:

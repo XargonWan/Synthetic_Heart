@@ -500,6 +500,15 @@ def _build_context_summary(
     if persona_preferences:
         parts.append("[Persona background]\n" + persona_preferences)
 
+    self_growth = str(context_section.get("self_growth") or "").strip()
+    if self_growth:
+        parts.append(
+            "[Self-growth]\n"
+            "The following is your evolving self-growth reflection: how you have "
+            "grown and who you are becoming over time. Treat it as part of your "
+            "current sense of self.\n" + self_growth
+        )
+
     # Grillo internal beats skip cross-chat history and participants
     if not is_grillo_internal:
         history_recent = _sanitize_context_entries(
@@ -2319,6 +2328,7 @@ async def build_delivery_request(
     # ── Gather persona for system instruction ────────────────────────────────
     persona: str = ""
     persona_preferences: str = ""
+    self_growth: str = ""
     try:
         from core.action_parser import gather_static_injections
         from types import SimpleNamespace
@@ -2336,6 +2346,7 @@ async def build_delivery_request(
         if isinstance(_injections, dict):
             persona = str(_injections.get("persona") or "")
             persona_preferences = str(_injections.get("persona_preferences") or "")
+            self_growth = str(_injections.get("self_growth") or "")
     except Exception as _pe:
         log_debug(f"[build_delivery_request] persona gather skipped: {_pe}")
 
@@ -2383,9 +2394,19 @@ async def build_delivery_request(
         system_instruction=system_instruction,
         tool_declarations=tool_declarations,
         context_summary=(
-            f"[Persona background]\n{persona_preferences}"
-            if persona_preferences
-            else ""
+            (f"[Persona background]\n{persona_preferences}" if persona_preferences else "")
+            + (
+                (
+                    ("\n\n" if persona_preferences else "")
+                    + "[Self-growth]\n"
+                    + "The following is your evolving self-growth reflection: how you "
+                    + "have grown and who you are becoming over time. Treat it as part "
+                    + "of your current sense of self.\n"
+                    + self_growth
+                )
+                if self_growth
+                else ""
+            )
         ),
         conversation_history=[],
         current_text=current_text,
@@ -2774,6 +2795,13 @@ async def build_live_prompt_request(
     persona_preferences = injections.pop("persona_preferences", "")
     if persona_preferences and isinstance(persona_preferences, str):
         parts.append("Background preferences and interests:\n" + persona_preferences)
+
+    self_growth = injections.pop("self_growth", "")
+    if self_growth and isinstance(self_growth, str):
+        parts.append(
+            "Self-growth (how you have grown and who you are becoming over time; "
+            "treat it as part of your current sense of self):\n" + self_growth
+        )
 
     # --- Safety / gasmask ---
     gasmask = injections.pop("gasmask_protection", "")

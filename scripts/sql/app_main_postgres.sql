@@ -227,6 +227,19 @@ CREATE TABLE IF NOT EXISTS grillo_action_execs (
 );
 CREATE INDEX IF NOT EXISTS idx_grillo_action_execs_activity_log_id ON grillo_action_execs (activity_log_id);
 
+-- Rolling history (max 10 rows) of SyntH's evolving self-growth reflection.
+-- Exactly one row has is_current = TRUE. Older rows beyond the newest 10 are pruned.
+CREATE TABLE IF NOT EXISTS growth_states (
+    id BIGSERIAL PRIMARY KEY,
+    content TEXT NOT NULL,
+    created_by TEXT NOT NULL DEFAULT 'grillo_growth',
+    source TEXT NOT NULL DEFAULT 'weekly',
+    is_current BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_growth_states_current ON growth_states (is_current);
+CREATE INDEX IF NOT EXISTS idx_growth_states_created_at ON growth_states (created_at DESC);
+
 CREATE TABLE IF NOT EXISTS agent_activity_log (
     id BIGSERIAL PRIMARY KEY,
     command TEXT NOT NULL,
