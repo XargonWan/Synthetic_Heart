@@ -97,7 +97,7 @@ register_exposed_var(
     label="Daily Weather Report Interface",
     default="synth_webui",
     value_type=str,
-    ui_type="text",
+    ui_type="interface-path",
     description="Interface id used for the daily weather announcement",
     scope="plugins",
     component="weather_plugin",
@@ -189,7 +189,7 @@ class WeatherPlugin:
             value_type=str,
             group="plugins",
             component="weather_plugin",
-            advanced=True,
+            advanced=False,
         )
 
         # Use a dedicated executor so we don't depend on the event loop's default executor

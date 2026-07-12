@@ -2113,56 +2113,86 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
 
                         } else if (item.ui_type === 'interface-path') {
                             skipAutoSave = true;
+                            const currentValue = typeof value === 'string' ? value : (value ? String(value) : '');
+
+                            // Editable combo box: free-text <input> backed by a <datalist>
+                            // of known interface paths. The user can either pick a suggestion
+                            // (shown as "Pretty Name (interface/path)") or type an arbitrary path.
                             const wrap = document.createElement('div');
-                            wrap.style.display = 'flex';
-                            wrap.style.gap = '0.4rem';
+                            wrap.style.width = '100%';
+
+                            const listId = `ifpath-list-${item.key || Math.random().toString(36).slice(2)}`;
                             const input = document.createElement('input');
                             input.type = 'text';
                             input.autocomplete = 'off';
-                            input.placeholder = 'telegram_bot/dm/12345';
-                            input.value = typeof value === 'string' ? value : (value ? JSON.stringify(value) : '');
+                            input.setAttribute('list', listId);
+                            input.placeholder = 'telegram_bot/-28475648/6';
+                            input.value = currentValue;
                             input.disabled = !isEditable;
-                            input.style.flex = '1';
-                            const browseBtn = document.createElement('button');
-                            browseBtn.type = 'button';
-                            browseBtn.textContent = 'Browse…';
-                            browseBtn.disabled = !isEditable;
-                            browseBtn.addEventListener('click', () => {
-                                fetch('/api/history/interface-paths')
-                                    .then(r => r.json())
-                                    .then(data => {
-                                        const paths = (data && data.success && Array.isArray(data.interface_paths))
-                                            ? data.interface_paths : [];
-                                        const listing = paths.map(e => e.interface_path || e.label).filter(Boolean);
-                                        const choice = window.prompt(
-                                            'Enter an interface path:\n\n' +
-                                            (listing.length ? listing.slice(0, 50).join('\n') : '(no known paths)'),
-                                            input.value || ''
-                                        );
-                                        if (choice !== null) {
-                                            input.value = choice.trim();
-                                            if (isEditable) persistValue(input.value, [input]);
-                                        }
-                                    })
-                                    .catch(() => {
-                                        const choice = window.prompt('Enter an interface path:', input.value || '');
-                                        if (choice !== null) {
-                                            input.value = choice.trim();
-                                            if (isEditable) persistValue(input.value, [input]);
-                                        }
-                                    });
-                            });
+                            input.style.width = '100%';
+
+                            const datalist = document.createElement('datalist');
+                            datalist.id = listId;
+
+                            // Map raw path -> pretty label so we can display/parse either form.
+                            const labelByPath = new Map();
+
+                            const populate = (paths) => {
+                                datalist.innerHTML = '';
+                                labelByPath.clear();
+                                const seen = new Set();
+                                paths.forEach(e => {
+                                    const p = e.interface_path || '';
+                                    if (!p || seen.has(p)) return;
+                                    seen.add(p);
+                                    const label = e.label || p;
+                                    labelByPath.set(p, label);
+                                    const opt = document.createElement('option');
+                                    // The option VALUE is what gets inserted into the input when
+                                    // picked; show the pretty label so the dropdown is readable.
+                                    opt.value = label;
+                                    datalist.appendChild(opt);
+                                });
+                                // Display the pretty label for the currently-saved raw path,
+                                // if we have a match. Free-text values are left as typed.
+                                if (currentValue && labelByPath.has(currentValue)) {
+                                    input.value = labelByPath.get(currentValue);
+                                }
+                            };
+
+                            // Extract the raw "interface/path" from a possibly pretty value.
+                            // Accepts either "Pretty Name (interface/path)" or a bare path.
+                            const toRawPath = (raw) => {
+                                const v = (raw || '').trim();
+                                if (!v) return '';
+                                const m = v.match(/\(([^()]+)\)\s*$/);
+                                if (m) return m[1].trim();
+                                return v;
+                            };
+
+                            fetch('/api/history/interface-paths')
+                                .then(r => r.json())
+                                .then(data => {
+                                    const paths = (data && data.success && Array.isArray(data.interface_paths))
+                                        ? data.interface_paths : [];
+                                    populate(paths);
+                                })
+                                .catch(() => { populate([]); });
+
                             if (isEditable) {
+                                const save = () => { persistValue(toRawPath(input.value), [input]); };
+                                input.addEventListener('change', save);
                                 input.addEventListener('keydown', (ev) => {
                                     if (ev.key === 'Enter' && !ev.shiftKey && !ev.ctrlKey && !ev.metaKey) {
                                         ev.preventDefault();
-                                        persistValue(input.value.trim(), [input]);
+                                        save();
                                     }
                                 });
-                                input.addEventListener('blur', () => { persistValue(input.value.trim(), [input]); });
+                                input.addEventListener('blur', save);
                             }
+
                             wrap.appendChild(input);
-                            wrap.appendChild(browseBtn);
+                            wrap.appendChild(datalist);
                             inputEl = wrap;
                         } else {
                             const input = document.createElement('input');
