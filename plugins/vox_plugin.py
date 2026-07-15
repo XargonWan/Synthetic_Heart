@@ -38,6 +38,7 @@ from typing import Any
 from core.ai_plugin_base import AIPluginBase
 from core.beat_utils import is_outbound_beat
 from core.config_manager import config_registry
+from core.config import get_vox_language_override_async
 from core.core_initializer import register_plugin, INTERFACE_REGISTRY
 from core.facial_expression_parser import (
     FacialExpressionEvent,
@@ -122,6 +123,19 @@ config_registry.get_value(
     group="plugins",
     component="vox_plugin",
     hidden=True,
+)
+config_registry.get_value(
+    "VOX_LANGUAGE_OVERRIDES",
+    "{}",
+    value_type=str,
+    group="plugins",
+    component="vox_plugin",
+    hidden=True,
+    label="Vox per-language engine overrides",
+    description=(
+        "JSON map of ISO-639-1 language code -> {engine, model, voice} used "
+        "to route TTS to a different engine/model/voice per detected language."
+    ),
 )
 config_registry.get_value(
     "VOX_ENGINE_SETTINGS",
@@ -510,8 +524,30 @@ class VoxPlugin(AIPluginBase):
                 f"[vox_plugin] detected text language: '{detected_lang}'"
             )  # pragma: no branch
 
+        # --- Per-language engine override ---
+        # A global VOX_LANGUAGE_OVERRIDES map can route TTS to a different
+        # engine/model/voice depending on the detected language (e.g. Italian
+        # -> Fish Audio + "maria", English -> Kitten + "luna"). An explicit
+        # per-call engine_name always wins over the language override.
+        lang_override: dict | None = None
+        if engine_name is None and detected_lang:
+            lang_override = await get_vox_language_override_async(detected_lang)
+            if lang_override:
+                ov_engine = lang_override.get("engine")
+                if ov_engine and ov_engine != "disabled":
+                    log_info(
+                        f"[vox_plugin] language override '{detected_lang}' -> "
+                        f"engine '{ov_engine}'"
+                    )
+                    name = ov_engine
+                else:
+                    name = self._active_engine_name
+            else:
+                name = self._active_engine_name
+        else:
+            name = engine_name or self._active_engine_name
+
         # --- Load engine ---
-        name = engine_name or self._active_engine_name
         try:
             engine = VOX_REGISTRY.load_engine(name)
         except ValueError as exc:
@@ -541,6 +577,17 @@ class VoxPlugin(AIPluginBase):
         # they deliberately override it.
         if voice:
             kwargs["voice"] = voice
+        # A per-language override may also pin a specific model and/or voice for
+        # the chosen engine. These are explicit per-call values, so the bridge
+        # (vox_bridge.generate_tts) prioritises them over the global
+        # VOX_DEFAULT_MODEL / <ENGINE>_VOICE defaults.
+        if lang_override:
+            ov_model = lang_override.get("model")
+            if ov_model:
+                kwargs["model"] = ov_model
+            ov_voice = lang_override.get("voice")
+            if ov_voice:
+                kwargs["voice"] = ov_voice
 
         # Sentence-by-sentence streaming shrinks time-to-first-audio for the
         # live webui/stage avatar on multi-sentence replies — the first

@@ -3,6 +3,7 @@
 import os
 import json
 import asyncio
+import time
 
 from core.variables_engine import register_exposed_var as _register_exposed_var
 
@@ -26,6 +27,7 @@ except Exception:
 
 from core.logging_utils import log_debug, log_info, log_warning, log_error
 from core.config_manager import config_registry
+from core.languages import normalize_lang
 
 """
 notify_trainer(chat_id: int, message: str) -> None
@@ -645,6 +647,105 @@ async def get_active_cortex_for_path(
         log_debug(f"[config] 🧠 Per-path cortex ({interface_path}): {engine}")
         return engine
     return await get_active_cortex_engine(scope=scope)
+
+
+# ---------------------------------------------------------------------------
+# Vox per-language engine overrides
+# ---------------------------------------------------------------------------
+# A single global JSON map (VOX_LANGUAGE_OVERRIDES) routes TTS to a different
+# engine/model/voice depending on the detected language of the text, e.g.
+# {"it": {"engine": "fish-audio", "model": "s2.1-pro", "voice": "maria"},
+#  "en": {"engine": "kitten", "model": "", "voice": "luna"}}.
+# When a language is not present (or its engine is "disabled") the caller falls
+# back to the normal ACTIVE_VOX_ENGINE / VOX_DEFAULT_MODEL / <ENGINE>_VOICE flow.
+
+
+def get_vox_language_override(language: str | None) -> dict | None:
+    """Return the Vox override entry for ``language``, or ``None``.
+
+    The lookup key is normalised (region stripped, lowercased) so ``it-it``
+    matches an ``"it"`` entry. Returns ``None`` when there is no override for
+    the language, when the map is empty/invalid, or when the matched entry's
+    engine is ``"disabled"`` (explicit opt-out → use the default engine).
+
+    NOTE: this is the synchronous, cache-only variant. It reads the value that
+    was loaded into the registry at startup (``load_all_from_db``). Because the
+    registry deliberately skips DB loads inside a running event loop, callers
+    running inside ``async`` code (e.g. ``VoxPlugin.speak``) must use
+    :func:`get_vox_language_override_async` instead, which reads the persisted
+    DB value directly.
+    """
+    norm = normalize_lang(language)
+    if not norm:
+        return None
+    try:
+        raw = config_registry.get_value("VOX_LANGUAGE_OVERRIDES", "{}", value_type=str)
+        mapping = json.loads(raw) if raw else {}
+    except Exception as exc:
+        log_warning(f"[config] VOX_LANGUAGE_OVERRIDES parse failed: {exc}")
+        return None
+    if not isinstance(mapping, dict):
+        return None
+    entry = mapping.get(norm)
+    if not isinstance(entry, dict):
+        return None
+    engine = entry.get("engine")
+    if engine == "disabled":
+        return None
+    return entry
+
+
+# In-memory cache so we don't hit the DB on every single TTS call. The cache is
+# invalidated whenever the override map is written (see ``_invalidate_vox_lang_override_cache``).
+_vox_lang_override_cache: dict | None = None
+_vox_lang_override_cache_at: float = 0.0
+_VOX_LANG_OVERRIDE_CACHE_TTL_S = 5.0
+
+
+def _invalidate_vox_lang_override_cache() -> None:
+    """Drop the cached override map (called after a successful write)."""
+    global _vox_lang_override_cache, _vox_lang_override_cache_at
+    _vox_lang_override_cache = None
+    _vox_lang_override_cache_at = 0.0
+
+
+async def get_vox_language_override_async(language: str | None) -> dict | None:
+    """Async variant of :func:`get_vox_language_override`.
+
+    Reads the persisted ``VOX_LANGUAGE_OVERRIDES`` value directly from the DB
+    (via ``get_persisted_value``, which is safe inside a running event loop),
+    bypassing the registry's "skip DB load in async context" behaviour. Results
+    are cached in-memory for a short TTL to avoid a query per TTS call.
+    """
+    norm = normalize_lang(language)
+    if not norm:
+        return None
+    global _vox_lang_override_cache, _vox_lang_override_cache_at
+    now = time.time()
+    mapping = _vox_lang_override_cache
+    if (
+        mapping is None
+        or (now - _vox_lang_override_cache_at) > _VOX_LANG_OVERRIDE_CACHE_TTL_S
+    ):
+        try:
+            raw = await config_registry.get_persisted_value(
+                "VOX_LANGUAGE_OVERRIDES", "{}"
+            )
+            mapping = json.loads(raw) if raw else {}
+        except Exception as exc:
+            log_warning(f"[config] VOX_LANGUAGE_OVERRIDES parse failed: {exc}")
+            mapping = {}
+        if not isinstance(mapping, dict):
+            mapping = {}
+        _vox_lang_override_cache = mapping
+        _vox_lang_override_cache_at = now
+    entry = mapping.get(norm)
+    if not isinstance(entry, dict):
+        return None
+    engine = entry.get("engine")
+    if engine == "disabled":
+        return None
+    return entry
 
 
 async def switch_active_cortex_engine(name: str, use_hot_swap: bool = True):

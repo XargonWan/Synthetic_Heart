@@ -114,6 +114,43 @@
                     </div>
                 </div>
                 <div class="components-list" id="components-vox-list"><div class="meta">Loading…</div></div>
+
+                <!-- Per-language engine overrides -->
+                <div style="margin-top:20px; padding-top:16px; border-top:1px dashed var(--border,#444);">
+                    <div style="display:flex; align-items:center; gap:10px; margin-bottom:8px;">
+                        <h4 style="margin:0; font-size:0.95rem; color:var(--text);">Language overrides</h4>
+                        <button id="vox-add-lang-override-btn" class="pill secondary" style="padding:6px 12px; font-weight:600;">＋ Add language override</button>
+                    </div>
+                    <div class="meta" style="margin-bottom:10px;">Route TTS to a different engine / model / voice per detected language. Languages not listed use the default engine above.</div>
+                    <div id="vox-lang-overrides-list" class="components-list"><div class="meta">No overrides configured.</div></div>
+
+                    <!-- Editor (hidden until "Add" / edit) -->
+                    <div id="vox-lang-override-editor" style="display:none; margin-top:12px; padding:14px; border:1px solid var(--border,#444); border-radius:8px; background:var(--background,#1a1a22);">
+                        <div style="display:flex; flex-wrap:wrap; gap:12px; align-items:flex-end;">
+                            <div style="display:flex; flex-direction:column; gap:3px;">
+                                <label style="font-size:0.82rem; font-weight:600;">Language</label>
+                                <select id="vox-lang-override-lang" style="min-width:220px;"></select>
+                            </div>
+                            <div style="display:flex; flex-direction:column; gap:3px;">
+                                <label style="font-size:0.82rem; font-weight:600;">Engine</label>
+                                <select id="vox-lang-override-engine" style="min-width:200px;"></select>
+                            </div>
+                            <div style="display:flex; flex-direction:column; gap:3px;">
+                                <label style="font-size:0.82rem; font-weight:600;">Model</label>
+                                <select id="vox-lang-override-model" style="min-width:200px;"></select>
+                            </div>
+                            <div style="display:flex; flex-direction:column; gap:3px;">
+                                <label style="font-size:0.82rem; font-weight:600;">Voice</label>
+                                <select id="vox-lang-override-voice" style="min-width:200px;"></select>
+                            </div>
+                        </div>
+                        <div style="margin-top:12px; display:flex; gap:10px;">
+                            <button id="vox-lang-override-save" class="pill primary" style="padding:7px 16px; font-weight:600;">Save</button>
+                            <button id="vox-lang-override-cancel" class="pill secondary" style="padding:7px 16px; font-weight:600;">Cancel</button>
+                            <button id="vox-lang-override-delete" class="pill danger" style="display:none; padding:7px 16px; font-weight:600;">Delete</button>
+                        </div>
+                    </div>
+                </div>
             </div>
 
             <!-- ── Auris ───────────────────────────────────────────────────── -->

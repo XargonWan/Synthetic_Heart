@@ -5,10 +5,16 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 
 import {
   fetchConfigValues,
+  fetchLanguages,
   fetchSpeakers,
   fetchVoiceComponents,
+  getVoxLanguageOverrides,
   setConfigValue,
   setSubsystemModel,
+  setVoxLanguageOverrides,
+  type LanguageInfo,
+  type VoxLanguageOverride,
+  type VoxLanguageOverrides,
   voiceSampleUrl,
 } from '@/services/voice-config'
 
@@ -153,10 +159,120 @@ watch(activeVox, () => {
   syncSelectedModel()
 })
 
+// ── Vox per-language engine overrides ──────────────────────────────────────
+const languages = ref<LanguageInfo[]>([])
+const langOverrides = ref<VoxLanguageOverrides>({})
+const langOverrideEditing = ref<string | null>(null)
+const langOverrideEngine = ref('')
+const langOverrideModel = ref('')
+const langOverrideVoice = ref('')
+const langOverrideVoices = ref<SpeakerInfo[]>([])
+const langOverrideBusy = ref(false)
+
+const langOverrideEngineModels = computed<string[]>(() => {
+  const engine = voxEngines.value.find(e => e.name === langOverrideEngine.value)
+  return engine?.available_models ?? []
+})
+
+function langLabel(code: string): string {
+  const info = languages.value.find(l => l.code === code)
+  return info ? `${info.it || info.en || code} (${code})` : code
+}
+
+async function loadLanguageOverrides(): Promise<void> {
+  try {
+    const [langs, map] = await Promise.all([fetchLanguages(), getVoxLanguageOverrides()])
+    languages.value = langs
+    langOverrides.value = map
+  }
+  catch {
+    languages.value = []
+    langOverrides.value = {}
+  }
+}
+
+async function loadLangOverrideVoices(engine: string): Promise<void> {
+  langOverrideVoices.value = []
+  if (!engine || engine === 'disabled' || engine === 'kitten')
+    return
+  try {
+    langOverrideVoices.value = await fetchSpeakers(engine)
+  }
+  catch {
+    langOverrideVoices.value = []
+  }
+}
+
+function openLangOverrideEditor(code: string | null): void {
+  langOverrideEditing.value = code
+  if (code && langOverrides.value[code]) {
+    const entry = langOverrides.value[code]
+    langOverrideEngine.value = entry.engine || ''
+    langOverrideModel.value = entry.model || ''
+    langOverrideVoice.value = entry.voice || ''
+  }
+  else {
+    langOverrideEngine.value = ''
+    langOverrideModel.value = ''
+    langOverrideVoice.value = ''
+  }
+  void loadLangOverrideVoices(langOverrideEngine.value)
+}
+
+function closeLangOverrideEditor(): void {
+  langOverrideEditing.value = null
+}
+
+async function saveLangOverride(): Promise<void> {
+  const code = langOverrideEditing.value
+  if (!code || !langOverrideEngine.value || langOverrideEngine.value === 'disabled') {
+    error.value = 'Select a language and a non-disabled engine'
+    return
+  }
+  langOverrideBusy.value = true
+  try {
+    const entry: VoxLanguageOverride = {
+      engine: langOverrideEngine.value,
+      model: langOverrideModel.value,
+      voice: langOverrideVoice.value,
+    }
+    const next: VoxLanguageOverrides = { ...langOverrides.value, [code]: entry }
+    await setVoxLanguageOverrides(next)
+    langOverrides.value = next
+    closeLangOverrideEditor()
+  }
+  catch {
+    error.value = 'Failed to save language override'
+  }
+  finally {
+    langOverrideBusy.value = false
+  }
+}
+
+async function deleteLangOverride(code: string): Promise<void> {
+  const next: VoxLanguageOverrides = { ...langOverrides.value }
+  delete next[code]
+  try {
+    await setVoxLanguageOverrides(next)
+    langOverrides.value = next
+    if (langOverrideEditing.value === code)
+      closeLangOverrideEditor()
+  }
+  catch {
+    error.value = 'Failed to remove language override'
+  }
+}
+
+watch(langOverrideEngine, (engine) => {
+  langOverrideModel.value = ''
+  void loadLangOverrideVoices(engine)
+})
+
 onMounted(async () => {
   await refresh()
   await loadVoices()
   syncSelectedModel()
+  await loadLanguageOverrides()
 })
 onUnmounted(stopPreview)
 
@@ -235,6 +351,115 @@ function engineLabel(engine: VoiceEngineInfo): string {
             </option>
           </select>
         </template>
+
+        <!-- Per-language engine overrides -->
+        <div class="mt-3 flex flex-col gap-1.5 border-t border-white/10 pt-3">
+          <div class="flex items-center justify-between">
+            <span class="text-[11px] text-white/40">Language overrides</span>
+            <button
+              class="rounded-lg bg-white/10 px-2 py-1 text-[11px] text-white/70 transition hover:bg-white/20"
+              :disabled="busy || langOverrideBusy"
+              @click="openLangOverrideEditor(null)"
+            >
+              ＋ Add language override
+            </button>
+          </div>
+          <p class="text-[10px] text-white/30">
+            Route TTS to a different engine / model / voice per detected language.
+          </p>
+
+          <div v-if="Object.keys(langOverrides).length" class="flex flex-col gap-1">
+            <div
+              v-for="(entry, code) in langOverrides"
+              :key="code"
+              class="flex items-center justify-between rounded-lg bg-white/5 px-2 py-1 text-xs"
+            >
+              <span class="truncate">
+                <span class="font-semibold text-white/80">{{ langLabel(code) }}</span>
+                <span class="ml-1 text-white/40">
+                  → {{ entry.engine }}{{ entry.model ? ` · ${entry.model}` : '' }}{{ entry.voice ? ` · ${entry.voice}` : '' }}
+                </span>
+              </span>
+              <span class="flex shrink-0 gap-1">
+                <button
+                  class="rounded bg-white/10 px-1.5 py-0.5 text-[10px] text-white/70 hover:bg-white/20"
+                  @click="openLangOverrideEditor(code)"
+                >
+                  Edit
+                </button>
+                <button
+                  class="rounded bg-red-500/20 px-1.5 py-0.5 text-[10px] text-red-200 hover:bg-red-500/30"
+                  @click="deleteLangOverride(code)"
+                >
+                  Remove
+                </button>
+              </span>
+            </div>
+          </div>
+          <p v-else class="text-[10px] text-white/30">
+            No overrides configured — default engine is used for every language.
+          </p>
+
+          <!-- Editor -->
+          <div
+            v-if="langOverrideEditing !== null"
+            class="mt-1 flex flex-col gap-1.5 rounded-lg border border-white/10 bg-white/5 p-2"
+          >
+            <div class="flex flex-wrap gap-1.5">
+              <select
+                :value="langOverrideEditing"
+                :disabled="true"
+                class="rounded-lg bg-white/10 px-2 py-1 text-xs text-white [&>option]:bg-neutral-900"
+              >
+                <option v-for="l in languages" :key="l.code" :value="l.code">
+                  {{ l.it || l.en || l.code }} ({{ l.code }})
+                </option>
+              </select>
+              <select
+                v-model="langOverrideEngine"
+                class="rounded-lg bg-white/10 px-2 py-1 text-xs text-white [&>option]:bg-neutral-900"
+              >
+                <option value="">— engine —</option>
+                <option v-for="engine in voxEngines" :key="engine.name" :value="engine.name">
+                  {{ engineLabel(engine) }}
+                </option>
+              </select>
+              <select
+                v-model="langOverrideModel"
+                class="rounded-lg bg-white/10 px-2 py-1 text-xs text-white [&>option]:bg-neutral-900"
+              >
+                <option value="">(default model)</option>
+                <option v-for="model in langOverrideEngineModels" :key="model" :value="model">
+                  {{ model }}
+                </option>
+              </select>
+              <select
+                v-model="langOverrideVoice"
+                class="rounded-lg bg-white/10 px-2 py-1 text-xs text-white [&>option]:bg-neutral-900"
+              >
+                <option value="">(default voice)</option>
+                <option v-for="speaker in langOverrideVoices" :key="speaker.code" :value="speaker.code">
+                  {{ speaker.name || speaker.code }}
+                </option>
+              </select>
+            </div>
+            <div class="flex gap-1.5">
+              <button
+                class="rounded-lg bg-primary-500/80 px-2 py-1 text-[11px] text-white hover:bg-primary-500"
+                :disabled="langOverrideBusy"
+                @click="saveLangOverride"
+              >
+                Save
+              </button>
+              <button
+                class="rounded-lg bg-white/10 px-2 py-1 text-[11px] text-white/70 hover:bg-white/20"
+                @click="closeLangOverrideEditor"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
       </div>
 
       <!-- STT -->
