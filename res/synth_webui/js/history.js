@@ -396,7 +396,7 @@ function openCalendarSubscribeModal() {
         <label>Plain HTTPS URL</label>
         <div class="calendar-subscribe-url">${escapeHtml(httpsUrl)}</div>
         <div class="calendar-modal-actions">
-            <a href="${escapeHtml(webcalUrl)}" class="primary" style="text-decoration:none;padding:0.5rem 1rem;border-radius:6px;">Open in calendar app</a>
+            <button type="button" class="primary" id="calendar-open-app">Open in calendar app</button>
         </div>
 
         <hr style="margin:1.2rem 0;opacity:0.2;">
@@ -432,6 +432,42 @@ function openCalendarSubscribeModal() {
     `;
     const backdrop = showCalendarModal(body);
     backdrop.querySelector('.calendar-modal-close')?.addEventListener('click', () => backdrop.remove());
+
+    // "Open in calendar app": try the webcal:// scheme (desktop), but on mobile
+    // browsers webcal:// is silently ignored, so fall back to copying the URL
+    // and telling the user how to subscribe.
+    backdrop.querySelector('#calendar-open-app')?.addEventListener('click', async () => {
+        const tryWebcal = () => {
+            const a = document.createElement('a');
+            a.href = webcalUrl;
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+        };
+        const copyAndNotify = async () => {
+            try {
+                await navigator.clipboard.writeText(httpsUrl);
+                if (window.showToast) {
+                    window.showToast('Subscription URL copied — paste it into your calendar app', false);
+                } else {
+                    alert('Subscription URL copied to clipboard:\n' + httpsUrl);
+                }
+            } catch (e) {
+                if (window.showToast) {
+                    window.showToast('Could not open automatically. URL: ' + httpsUrl, true);
+                } else {
+                    alert('Copy this URL into your calendar app:\n' + httpsUrl);
+                }
+            }
+        };
+        // Detect mobile: webcal:// is unreliable there.
+        const isMobile = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
+        if (isMobile) {
+            await copyAndNotify();
+        } else {
+            tryWebcal();
+        }
+    });
 
     const refresh = () => loadExternalCalendars(backdrop);
     refresh();

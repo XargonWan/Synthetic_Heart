@@ -1092,14 +1092,32 @@
         padding: 0.5rem 1rem;
         border-radius: 6px;
         cursor: pointer;
-        border: 1px solid rgba(255, 255, 255, 0.12);
-        background: rgba(12, 12, 20, 0.5);
-        color: var(--text-soft);
+        border: 1px solid var(--accent);
+        background: var(--accent);
+        color: var(--accent-contrast, #fff);
+        transition: all 0.15s ease;
+      }
+      .calendar-modal-actions button:hover {
+        filter: brightness(1.12);
       }
       .calendar-modal-actions button.primary {
         background: var(--accent);
         color: var(--accent-contrast, #fff);
         border-color: var(--accent);
+      }
+      .ext-cal-del {
+        padding: 0.25rem 0.5rem;
+        border-radius: 5px;
+        cursor: pointer;
+        border: 1px solid #e05a5a;
+        background: rgba(224, 90, 90, 0.18);
+        color: #ff8a8a;
+        font-size: 0.8rem;
+        transition: all 0.15s ease;
+      }
+      .ext-cal-del:hover {
+        background: #e05a5a;
+        color: #fff;
       }
       .calendar-edit-event,
       .calendar-del-event {
