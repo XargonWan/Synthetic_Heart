@@ -4282,6 +4282,258 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                         voxEngineSel.addEventListener('change', updateVoxVoiceControls);
                     }
 
+                    // ── Vox per-language engine overrides ──────────────────────
+                    // Global map VOX_LANGUAGE_OVERRIDES: { "<iso639-1>": {engine, model, voice} }.
+                    // The editor lets the user add an override per language, choosing
+                    // engine → model → voice exactly like the default Vox controls, but
+                    // scoped to a language. Models/voices are read in read-only mode
+                    // (no global POST) so the default engine is never disturbed.
+                    const voxLangOverrideBtn = document.getElementById('vox-add-lang-override-btn');
+                    const voxLangOverrideEditor = document.getElementById('vox-lang-override-editor');
+                    const voxLangOverrideLang = document.getElementById('vox-lang-override-lang');
+                    const voxLangOverrideEngine = document.getElementById('vox-lang-override-engine');
+                    const voxLangOverrideModel = document.getElementById('vox-lang-override-model');
+                    const voxLangOverrideVoice = document.getElementById('vox-lang-override-voice');
+                    const voxLangOverrideSave = document.getElementById('vox-lang-override-save');
+                    const voxLangOverrideCancel = document.getElementById('vox-lang-override-cancel');
+                    const voxLangOverrideDelete = document.getElementById('vox-lang-override-delete');
+                    const voxLangOverridesList = document.getElementById('vox-lang-overrides-list');
+
+                    let voxLangOverrideMap = {};
+                    let voxLangOverrideEditing = null; // language code being edited, or null for new
+                    let voxLangList = [];
+
+                    async function loadVoxLanguageOverrides() {
+                        try {
+                            const r = await fetch('/api/config');
+                            if (r.ok) {
+                                const cfg = await r.json();
+                                const items = Array.isArray(cfg.items) ? cfg.items : [];
+                                const item = items.find(i => i.key === 'VOX_LANGUAGE_OVERRIDES');
+                                voxLangOverrideMap = (item && item.value) ? JSON.parse(item.value) : {};
+                            } else {
+                                voxLangOverrideMap = {};
+                            }
+                        } catch (e) {
+                            console.error('[synth_webui] failed to load VOX_LANGUAGE_OVERRIDES', e);
+                            voxLangOverrideMap = {};
+                        }
+                        renderVoxLanguageOverrides();
+                    }
+
+                    function renderVoxLanguageOverrides() {
+                        if (!voxLangOverridesList) return;
+                        const codes = Object.keys(voxLangOverrideMap);
+                        if (!codes.length) {
+                            voxLangOverridesList.innerHTML = '<div class="meta">No overrides configured.</div>';
+                            return;
+                        }
+                        voxLangOverridesList.innerHTML = '';
+                        codes.forEach(code => {
+                            const entry = voxLangOverrideMap[code] || {};
+                            const engine = entry.engine || '—';
+                            const model = entry.model ? ` · model ${entry.model}` : '';
+                            const voice = entry.voice ? ` · voice ${entry.voice}` : '';
+                            const row = document.createElement('div');
+                            row.className = 'component-item';
+                            row.style.marginBottom = '6px';
+                            row.style.padding = '8px 10px';
+                            row.style.border = '1px solid var(--border,#444)';
+                            row.style.borderRadius = '6px';
+                            row.innerHTML =
+                                `<div style="display:flex; align-items:center; justify-content:space-between; gap:10px;">` +
+                                `<div><span style="font-weight:600;">${code}</span>` +
+                                `<span class="meta" style="margin-left:8px;">${engine}${model}${voice}</span></div>` +
+                                `<div style="display:flex; gap:8px;">` +
+                                `<button class="pill secondary vox-lo-edit" style="padding:4px 10px; font-weight:600;">Edit</button>` +
+                                `<button class="pill danger vox-lo-remove" style="padding:4px 10px; font-weight:600;">Remove</button>` +
+                                `</div></div>`;
+                            row.querySelector('.vox-lo-edit').addEventListener('click', () => openVoxLangOverrideEditor(code));
+                            row.querySelector('.vox-lo-remove').addEventListener('click', () => deleteVoxLangOverride(code));
+                            voxLangOverridesList.appendChild(row);
+                        });
+                    }
+
+                    async function populateVoxLangOverrideLanguages() {
+                        if (!voxLangOverrideLang) return;
+                        try {
+                            const r = await fetch('/api/languages');
+                            voxLangList = r.ok ? await r.json() : { languages: [] };
+                            voxLangList = voxLangList.languages || [];
+                        } catch (e) {
+                            console.error('[synth_webui] failed to load languages', e);
+                            voxLangList = [];
+                        }
+                        voxLangOverrideLang.innerHTML = '';
+                        voxLangList.forEach(l => {
+                            const opt = document.createElement('option');
+                            opt.value = l.code;
+                            opt.textContent = `${l.it || l.en || l.code} (${l.code})`;
+                            voxLangOverrideLang.appendChild(opt);
+                        });
+                    }
+
+                    function populateVoxLangOverrideEngines() {
+                        if (!voxLangOverrideEngine) return;
+                        // Mirror the engine dropdown options from the default Vox controls.
+                        voxLangOverrideEngine.innerHTML = '';
+                        const src = document.getElementById('vox-engine-select');
+                        if (src) {
+                            Array.from(src.options).forEach(o => {
+                                const opt = document.createElement('option');
+                                opt.value = o.value;
+                                opt.textContent = o.textContent;
+                                voxLangOverrideEngine.appendChild(opt);
+                            });
+                        }
+                    }
+
+                    async function populateVoxLangOverrideModels(engine) {
+                        if (!voxLangOverrideModel) return;
+                        voxLangOverrideModel.innerHTML = '<option value="">(default)</option>';
+                        if (!engine || engine === 'disabled') return;
+                        // Read available models for this engine from /api/components (read-only).
+                        try {
+                            const r = await fetch('/api/components');
+                            if (r.ok) {
+                                const data = await r.json();
+                                const vox = (data.vox || []).find(e => e.name === engine);
+                                const models = (vox && vox.available_models) || [];
+                                models.forEach(m => {
+                                    const opt = document.createElement('option');
+                                    opt.value = m;
+                                    opt.textContent = m;
+                                    voxLangOverrideModel.appendChild(opt);
+                                });
+                            }
+                        } catch (e) { /* ignore */ }
+                    }
+
+                    async function populateVoxLangOverrideVoices(engine) {
+                        if (!voxLangOverrideVoice) return;
+                        voxLangOverrideVoice.innerHTML = '<option value="">(default)</option>';
+                        if (!engine || engine === 'disabled' || engine === 'kitten') return;
+                        try {
+                            const r = await fetch(`/api/vox/speakers?engine=${encodeURIComponent(engine)}`);
+                            const list = r.ok ? await r.json() : [];
+                            list.forEach(s => {
+                                const opt = document.createElement('option');
+                                opt.value = s.code;
+                                opt.textContent = s.name || s.code;
+                                voxLangOverrideVoice.appendChild(opt);
+                            });
+                        } catch (e) { /* ignore */ }
+                    }
+
+                    async function openVoxLangOverrideEditor(lang) {
+                        voxLangOverrideEditing = lang || null;
+                        if (!voxLangOverrideEditor) return;
+                        voxLangOverrideEditor.style.display = '';
+                        await populateVoxLangOverrideLanguages();
+                        populateVoxLangOverrideEngines();
+                        if (lang && voxLangOverrideMap[lang]) {
+                            const entry = voxLangOverrideMap[lang];
+                            if (voxLangOverrideLang) voxLangOverrideLang.value = lang;
+                            voxLangOverrideLang.disabled = true;
+                            if (voxLangOverrideEngine) voxLangOverrideEngine.value = entry.engine || '';
+                            await populateVoxLangOverrideModels(entry.engine || '');
+                            if (voxLangOverrideModel) voxLangOverrideModel.value = entry.model || '';
+                            await populateVoxLangOverrideVoices(entry.engine || '');
+                            if (voxLangOverrideVoice) voxLangOverrideVoice.value = entry.voice || '';
+                            if (voxLangOverrideDelete) voxLangOverrideDelete.style.display = '';
+                        } else {
+                            if (voxLangOverrideLang) voxLangOverrideLang.disabled = false;
+                            if (voxLangOverrideEngine) voxLangOverrideEngine.value = '';
+                            await populateVoxLangOverrideModels('');
+                            if (voxLangOverrideModel) voxLangOverrideModel.value = '';
+                            await populateVoxLangOverrideVoices('');
+                            if (voxLangOverrideVoice) voxLangOverrideVoice.value = '';
+                            if (voxLangOverrideDelete) voxLangOverrideDelete.style.display = 'none';
+                        }
+                    }
+
+                    function closeVoxLangOverrideEditor() {
+                        if (voxLangOverrideEditor) voxLangOverrideEditor.style.display = 'none';
+                        voxLangOverrideEditing = null;
+                    }
+
+                    async function saveVoxLangOverride() {
+                        const lang = voxLangOverrideLang ? voxLangOverrideLang.value : '';
+                        const engine = voxLangOverrideEngine ? voxLangOverrideEngine.value : '';
+                        if (!lang || !engine || engine === 'disabled') {
+                            window.showToast && window.showToast('Select a language and a non-disabled engine', true);
+                            return;
+                        }
+                        const model = voxLangOverrideModel ? voxLangOverrideModel.value : '';
+                        const voice = voxLangOverrideVoice ? voxLangOverrideVoice.value : '';
+                        voxLangOverrideMap[lang] = {
+                            engine,
+                            model: model || '',
+                            voice: voice || '',
+                        };
+                        try {
+                            const r = await fetch('/api/config', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ key: 'VOX_LANGUAGE_OVERRIDES', value: JSON.stringify(voxLangOverrideMap) })
+                            });
+                            if (!r.ok) throw new Error('HTTP ' + r.status);
+                            window.showToast && window.showToast('Language override saved');
+                            closeVoxLangOverrideEditor();
+                            renderVoxLanguageOverrides();
+                        } catch (e) {
+                            console.error('[synth_webui] failed to save VOX_LANGUAGE_OVERRIDES', e);
+                            window.showToast && window.showToast('Failed to save override', true);
+                        }
+                    }
+
+                    async function deleteVoxLangOverride(lang) {
+                        if (!(lang in voxLangOverrideMap)) return;
+                        delete voxLangOverrideMap[lang];
+                        try {
+                            const r = await fetch('/api/config', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ key: 'VOX_LANGUAGE_OVERRIDES', value: JSON.stringify(voxLangOverrideMap) })
+                            });
+                            if (!r.ok) throw new Error('HTTP ' + r.status);
+                            window.showToast && window.showToast('Language override removed');
+                            if (voxLangOverrideEditing === lang) closeVoxLangOverrideEditor();
+                            renderVoxLanguageOverrides();
+                        } catch (e) {
+                            console.error('[synth_webui] failed to delete VOX_LANGUAGE_OVERRIDES', e);
+                            window.showToast && window.showToast('Failed to remove override', true);
+                        }
+                    }
+
+                    if (voxLangOverrideBtn && !voxLangOverrideBtn.dataset.bound) {
+                        voxLangOverrideBtn.addEventListener('click', () => openVoxLangOverrideEditor(null));
+                        voxLangOverrideBtn.dataset.bound = '1';
+                    }
+                    if (voxLangOverrideSave && !voxLangOverrideSave.dataset.bound) {
+                        voxLangOverrideSave.addEventListener('click', saveVoxLangOverride);
+                        voxLangOverrideSave.dataset.bound = '1';
+                    }
+                    if (voxLangOverrideCancel && !voxLangOverrideCancel.dataset.bound) {
+                        voxLangOverrideCancel.addEventListener('click', closeVoxLangOverrideEditor);
+                        voxLangOverrideCancel.dataset.bound = '1';
+                    }
+                    if (voxLangOverrideDelete && !voxLangOverrideDelete.dataset.bound) {
+                        voxLangOverrideDelete.addEventListener('click', () => {
+                            if (voxLangOverrideEditing) deleteVoxLangOverride(voxLangOverrideEditing);
+                        });
+                        voxLangOverrideDelete.dataset.bound = '1';
+                    }
+                    if (voxLangOverrideEngine && !voxLangOverrideEngine.dataset.bound) {
+                        voxLangOverrideEngine.addEventListener('change', async () => {
+                            const engine = voxLangOverrideEngine.value;
+                            await populateVoxLangOverrideModels(engine);
+                            await populateVoxLangOverrideVoices(engine);
+                        });
+                        voxLangOverrideEngine.dataset.bound = '1';
+                    }
+                    loadVoxLanguageOverrides();
+
                     // ── Vosk language selector ─────────────────────────────────
                     const voskLangSelect = document.getElementById('auris-vosk-language');
                     const VOSK_LANGUAGES = [

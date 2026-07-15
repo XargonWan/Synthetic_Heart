@@ -106,3 +106,45 @@ export function voiceSampleUrl(engine: string, speaker: string): string {
 export async function setSubsystemModel(subsystem: 'vox' | 'auris', engine: string, model: string): Promise<void> {
   await postJson(`/api/components/${subsystem}/model`, { engine, model })
 }
+
+// ── Vox per-language engine overrides ──────────────────────────────────────
+// Global map VOX_LANGUAGE_OVERRIDES: { "<iso639-1>": { engine, model, voice } }.
+// Lets the user route TTS to a different engine/model/voice per detected
+// language (e.g. Italian -> Fish Audio + "maria", English -> Kitten + "luna").
+
+export interface LanguageInfo {
+  code: string
+  en: string
+  it: string
+}
+
+export interface VoxLanguageOverride {
+  engine: string
+  model: string
+  voice: string
+}
+
+export type VoxLanguageOverrides = Record<string, VoxLanguageOverride>
+
+export async function fetchLanguages(): Promise<LanguageInfo[]> {
+  const data = await getJson<{ languages?: LanguageInfo[] }>('/api/languages')
+  return data.languages ?? []
+}
+
+export async function getVoxLanguageOverrides(): Promise<VoxLanguageOverrides> {
+  const values = await fetchConfigValues(['VOX_LANGUAGE_OVERRIDES'])
+  const raw = values['VOX_LANGUAGE_OVERRIDES']
+  if (!raw)
+    return {}
+  try {
+    const parsed = JSON.parse(raw)
+    return (parsed && typeof parsed === 'object') ? parsed as VoxLanguageOverrides : {}
+  }
+  catch {
+    return {}
+  }
+}
+
+export async function setVoxLanguageOverrides(map: VoxLanguageOverrides): Promise<void> {
+  await postJson('/api/config', { key: 'VOX_LANGUAGE_OVERRIDES', value: JSON.stringify(map) })
+}

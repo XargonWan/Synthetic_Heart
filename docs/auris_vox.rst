@@ -246,6 +246,13 @@ Configuration (all WebUI-configurable):
    * - ``ACTIVE_VOX_ENGINE``
      - ``kitten``
      - Name of the active TTS engine.  Set to ``disabled`` to disable the Vox subsystem.
+   * - ``VOX_LANGUAGE_OVERRIDES``
+     - ``{}``
+     - JSON map of ISO-639-1 language code → ``{"engine", "model", "voice"}``
+       used to route TTS to a different engine / model / voice per detected
+       language.  Languages not present in the map use ``ACTIVE_VOX_ENGINE``
+       (and its default model / ``<ENGINE>_VOICE``).  An entry whose ``engine``
+       is ``"disabled"`` is treated as "use the default engine".
    * - ``VOX_ENGINE_SETTINGS``
      - ``{}``
      - JSON string forwarded to the engine at load time.
@@ -284,6 +291,40 @@ wish to supply short example clips.
 
 These helpers are used internally by ``res/synth_webui/js/main.js`` to
 populate the Kitten voice selector and play sample audio.
+
+Per-language engine overrides
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+By default every message is spoken with the single ``ACTIVE_VOX_ENGINE`` (and
+its configured model / ``<ENGINE>_VOICE``).  To use a *different* engine,
+model, or voice depending on the language of the text, set the
+``VOX_LANGUAGE_OVERRIDES`` config key to a JSON map:
+
+.. code-block:: json
+
+   {
+     "it": {"engine": "fish-audio", "model": "s2.1-pro", "voice": "maria"},
+     "en": {"engine": "kitten",     "model": "",         "voice": "luna"}
+   }
+
+* The map key is an ISO-639-1 language code (``it``, ``en``, ``fr`` …).  Region
+  variants are normalised, so ``it-it`` matches the ``"it"`` entry.
+* ``engine`` is required and selects the TTS engine for that language.  Use
+  ``"disabled"`` to opt a language back out to the default engine.
+* ``model`` and ``voice`` are optional.  When set they are forwarded as
+  explicit per-call values, so they take priority over the engine's default
+  model (``VOX_DEFAULT_MODEL``) and the ``<ENGINE>_VOICE`` config key.  Leave
+  them as empty strings to keep the engine's defaults.
+* Language is detected from the cleaned reply text via ``lingua`` inside
+  ``VoxPlugin.speak()``; the override is applied only when no explicit
+  per-call ``engine_name`` was supplied.
+
+The **Engines** tab exposes this through an *Add language override* editor
+(both the classic WebUI and the Vue frontend): pick a language from the full
+ISO-639-1 list, then choose engine → model → voice exactly as for the default
+engine.  The selection is persisted to ``VOX_LANGUAGE_OVERRIDES`` via
+``POST /api/config``.  A read-only ``GET /api/languages`` endpoint serves the
+language catalogue used to populate the combo box.
 
 Public API:
 

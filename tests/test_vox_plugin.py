@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import json
 import types
 import wave
 from pathlib import Path
@@ -277,6 +278,200 @@ async def test_vox_plugin_passes_language_to_engine(monkeypatch) -> None:
 
     assert result["status"] == "success"
     assert "filename" in result
+
+
+# ---------------------------------------------------------------------------
+# Vox per-language engine overrides
+# ---------------------------------------------------------------------------
+
+
+def test_get_vox_language_override_hit_and_miss(monkeypatch) -> None:
+    """get_vox_language_override resolves a language entry, normalises the
+    code, and returns None for unknown languages / disabled engines."""
+    from core.config import get_vox_language_override
+
+    mapping = {
+        "it": {"engine": "fish-audio", "model": "s2.1-pro", "voice": "maria"},
+        "en": {"engine": "kitten", "model": "", "voice": "luna"},
+        "fr": {"engine": "disabled"},
+    }
+    monkeypatch.setattr(
+        "core.config.config_registry.get_value",
+        lambda key, default="{}", value_type=str: (
+            json.dumps(mapping) if key == "VOX_LANGUAGE_OVERRIDES" else default
+        ),
+    )
+
+    # exact match
+    assert get_vox_language_override("it") == {
+        "engine": "fish-audio",
+        "model": "s2.1-pro",
+        "voice": "maria",
+    }
+    # region-stripped normalisation ("it-it" -> "it")
+    assert get_vox_language_override("it-it") == {
+        "engine": "fish-audio",
+        "model": "s2.1-pro",
+        "voice": "maria",
+    }
+    # uppercase normalisation
+    assert get_vox_language_override("EN") == {
+        "engine": "kitten",
+        "model": "",
+        "voice": "luna",
+    }
+    # unknown language -> None
+    assert get_vox_language_override("de") is None
+    # engine "disabled" -> None (use default engine)
+    assert get_vox_language_override("fr") is None
+    # empty / None input -> None
+    assert get_vox_language_override("") is None
+    assert get_vox_language_override(None) is None
+
+
+def test_get_vox_language_override_invalid_json(monkeypatch) -> None:
+    """Malformed VOX_LANGUAGE_OVERRIDES JSON must not raise — return None."""
+    from core.config import get_vox_language_override
+
+    monkeypatch.setattr(
+        "core.config.config_registry.get_value",
+        lambda key, default="{}", value_type=str: (
+            "{not json" if key == "VOX_LANGUAGE_OVERRIDES" else default
+        ),
+    )
+    assert get_vox_language_override("it") is None
+
+
+@pytest.mark.asyncio
+async def test_get_vox_language_override_async_reads_db(monkeypatch) -> None:
+    """The async variant must read the persisted DB value (not the registry
+    default), because the registry skips DB loads inside a running event loop."""
+    from core.config import get_vox_language_override_async
+
+    mapping = {"it": {"engine": "fish-audio", "model": "s2.1-pro", "voice": "maria"}}
+    monkeypatch.setattr(
+        "core.config.config_registry.get_persisted_value",
+        AsyncMock(return_value=json.dumps(mapping)),
+    )
+    from core.config import _invalidate_vox_lang_override_cache
+
+    _invalidate_vox_lang_override_cache()
+
+    assert await get_vox_language_override_async("it") == {
+        "engine": "fish-audio",
+        "model": "s2.1-pro",
+        "voice": "maria",
+    }
+    # unknown language -> None
+    assert await get_vox_language_override_async("de") is None
+    # empty / None input -> None
+    assert await get_vox_language_override_async("") is None
+    assert await get_vox_language_override_async(None) is None
+
+
+@pytest.mark.asyncio
+async def test_vox_plugin_speak_language_override_routes_engine_and_voice() -> None:
+    """When a detected language has an override, speak() must load that engine
+    and forward its model + voice as explicit per-call kwargs."""
+    from core.vox_registry import VoxRegistry
+    from plugins.vox_base import VoxEngineBase
+
+    captured: dict = {}
+
+    class OverrideEngine(VoxEngineBase):
+        def generate_tts(self, text, emotion=None, **kw):
+            captured.update(kw)
+            return b"RIFF" + b"\x00" * 36
+
+    mock_reg = VoxRegistry()
+    mock_reg._engine_modules["fish-audio"] = "fish_vox_mod"
+    mock_reg._instances["fish-audio"] = OverrideEngine()
+
+    from plugins.vox_plugin import VoxPlugin
+
+    plugin = VoxPlugin.__new__(VoxPlugin)
+    plugin._active_engine_name = "kitten"  # default engine differs from override
+    plugin._engine_settings = {}
+    plugin._fallback_to_text = True
+    plugin._sentence_chunking_enabled = False
+    plugin._output_dir = Path("/tmp/vox_test")
+    plugin._output_dir.mkdir(parents=True, exist_ok=True)
+
+    mapping = {"it": {"engine": "fish-audio", "model": "s2.1-pro", "voice": "maria"}}
+    from core.config import _invalidate_vox_lang_override_cache
+
+    _invalidate_vox_lang_override_cache()
+    with (
+        patch("plugins.vox_plugin.VOX_REGISTRY", mock_reg),
+        patch.object(plugin, "_dispatch", new=AsyncMock(return_value=None)),
+        patch.object(plugin, "refresh_config"),
+        patch(
+            "core.config.config_registry.get_persisted_value",
+            AsyncMock(return_value=json.dumps(mapping)),
+        ),
+    ):
+        result = await plugin.speak(
+            "Questo è un testo completamente in italiano.",
+            interface_path="synth_webui/sess123",
+        )
+
+    assert result["status"] == "success"
+    # override engine was used and its model + voice forwarded explicitly
+    assert captured.get("model") == "s2.1-pro"
+    assert captured.get("voice") == "maria"
+    assert captured.get("language") == "it"
+
+
+@pytest.mark.asyncio
+async def test_vox_plugin_speak_no_override_uses_default_engine() -> None:
+    """Without an override for the detected language, speak() uses the default
+    active engine and does NOT inject a model/voice override."""
+    from core.vox_registry import VoxRegistry
+    from plugins.vox_base import VoxEngineBase
+
+    captured: dict = {}
+
+    class DefaultEngine(VoxEngineBase):
+        def generate_tts(self, text, emotion=None, **kw):
+            captured.update(kw)
+            return b"RIFF" + b"\x00" * 36
+
+    mock_reg = VoxRegistry()
+    mock_reg._engine_modules["kitten"] = "kitten_vox_mod"
+    mock_reg._instances["kitten"] = DefaultEngine()
+
+    from plugins.vox_plugin import VoxPlugin
+
+    plugin = VoxPlugin.__new__(VoxPlugin)
+    plugin._active_engine_name = "kitten"
+    plugin._engine_settings = {}
+    plugin._fallback_to_text = True
+    plugin._sentence_chunking_enabled = False
+    plugin._output_dir = Path("/tmp/vox_test")
+    plugin._output_dir.mkdir(parents=True, exist_ok=True)
+
+    from core.config import _invalidate_vox_lang_override_cache
+
+    _invalidate_vox_lang_override_cache()
+    with (
+        patch("plugins.vox_plugin.VOX_REGISTRY", mock_reg),
+        patch.object(plugin, "_dispatch", new=AsyncMock(return_value=None)),
+        patch.object(plugin, "refresh_config"),
+        patch(
+            "core.config.config_registry.get_persisted_value",
+            AsyncMock(return_value="{}"),
+        ),
+    ):
+        result = await plugin.speak(
+            "Questo è un testo completamente in italiano.",
+            interface_path="synth_webui/sess123",
+        )
+
+    assert result["status"] == "success"
+    # no override -> no explicit model/voice injected (only the language hint)
+    assert "model" not in captured
+    assert "voice" not in captured
+    assert captured.get("language") == "it"
 
 
 def _make_wav_bytes(num_frames: int = 100, rate: int = 8000) -> bytes:

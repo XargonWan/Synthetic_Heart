@@ -756,6 +756,7 @@ class SynthWebUIInterface:
         self.app.get("/api/vox/sample")(self.vox_sample)
         self.app.post("/api/vox/voices")(self.vox_add_voice)
         self.app.delete("/api/vox/voices")(self.vox_remove_voice)
+        self.app.get("/api/languages")(self.languages_list)
         self.app.get("/api/vrm")(self.list_vrm_models)
         self.app.get("/api/vrm/active")(self.get_active_vrm_endpoint)
         self.app.post("/api/vrm")(self.upload_vrm_model)
@@ -2997,6 +2998,13 @@ class SynthWebUIInterface:
         except Exception:
             speakers = []
         return JSONResponse(speakers)
+
+    async def languages_list(self, request: Request):
+        """GET /api/languages — full ISO-639-1 catalogue for the Vox
+        per-language override UI."""
+        from core.languages import SUPPORTED_LANGUAGES
+
+        return JSONResponse({"languages": SUPPORTED_LANGUAGES})
 
     async def vox_sample(self, request: Request):
         """GET /api/vox/sample?engine=<name>&speaker=<code>"""
@@ -8727,6 +8735,17 @@ class SynthWebUIInterface:
             raise HTTPException(
                 status_code=500, detail="Failed to update configuration"
             ) from exc
+
+        # Invalidate the in-memory Vox language-override cache so the next TTS
+        # call picks up the new mapping immediately (the cache has a short TTL
+        # anyway, but this makes the change instant).
+        if key == "VOX_LANGUAGE_OVERRIDES":
+            try:
+                from core.config import _invalidate_vox_lang_override_cache
+
+                _invalidate_vox_lang_override_cache()
+            except Exception:
+                pass
 
         response_data = {"status": "ok"}
 
