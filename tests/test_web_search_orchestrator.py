@@ -410,6 +410,67 @@ async def test_run_search_returns_empty_when_no_backend(
 
 
 @pytest.mark.asyncio
+async def test_collect_valid_results_skips_blocked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Blocked/empty results must NOT count toward the requested number.
+
+    Reproduces the user's note: the first page may return 5 hits but some are
+    anti-bot-blocked (no usable text), so the collector must page past them and
+    keep going until it has gathered ``min_valid`` *valid* results.
+    """
+    monkeypatch.setattr(search_engine, "_searxng_url", lambda: "http://sx")
+    monkeypatch.setattr(search_engine, "_tavily_api_key", lambda: "")
+
+    # Page 1: 4 blocked (no snippet/page) + 1 valid. Page 2: 5 valid.
+    valid = lambda i: {"title": f"v{i}", "snippet": "ok", "url": f"https://v{i}.x"}
+    blocked = lambda i: {"title": f"b{i}", "snippet": "", "url": f"https://b{i}.x"}
+
+    pages = [
+        [blocked(0), blocked(1), blocked(2), blocked(3), valid(0)],
+        [valid(1), valid(2), valid(3), valid(4), valid(5)],
+    ]
+
+    async def _fake_searxng(base_url, query, max_results=5, page=1):
+        return pages[page - 1][:max_results]
+
+    monkeypatch.setattr(search_engine, "search_searxng", _fake_searxng)
+
+    out = await search_engine.collect_valid_results("q", min_valid=5)
+    assert len(out) == 5
+    # The blocked hits must not appear in the final set.
+    assert all("b" not in r["title"] for r in out)
+    assert out[0]["title"] == "v0"
+
+
+@pytest.mark.asyncio
+async def test_collect_valid_results_caps_candidates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the backend only returns blocked results, the collector must stop.
+
+    Guards against an infinite loop: even if every candidate is invalid, the search
+    terminates once ``max_candidates`` have been examined and returns whatever
+    (possibly fewer than ``min_valid``) valid results it found.
+    """
+    monkeypatch.setattr(search_engine, "_searxng_url", lambda: "http://sx")
+    monkeypatch.setattr(search_engine, "_tavily_api_key", lambda: "")
+
+    blocked = {"title": "b", "snippet": "", "url": "https://b.x"}
+
+    async def _fake_searxng(base_url, query, max_results=5, page=1):
+        # Always returns blocked hits, never exhausts — would loop forever without a cap.
+        return [blocked for _ in range(max_results)]
+
+    monkeypatch.setattr(search_engine, "search_searxng", _fake_searxng)
+
+    out = await search_engine.collect_valid_results(
+        "q", min_valid=5, max_candidates=9
+    )
+    assert out == []  # nothing valid, but it returned instead of hanging
+
+
+@pytest.mark.asyncio
 async def test_recon_extracts_check_website_from_object_form(
     enable_recon: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
