@@ -1263,9 +1263,38 @@ export function initChatUI() {
             audio.play().catch((err) => {
                 if (window.__synthLipSyncAudio === thisAudio) window.__synthIsLipSyncing = false;
                 if (err && err.name === 'NotAllowedError') {
-                    console.debug('[chat-window] Autoplay blocked; user can tap bubble to play');
-                    window.__synthPendingAudio = window.__synthPendingAudio || [];
-                    window.__synthPendingAudio.push({ url, text, audioDuration });
+                    console.debug('[chat-window] Autoplay blocked; resuming AudioContext and retrying');
+                    // The browser blocked autoplay because no user gesture has
+                    // occurred yet (e.g. a tts-play arriving from a server push
+                    // rather than a click). Resume the AudioContext — on a
+                    // spectator client that has interacted before this may
+                    // unlock it; otherwise the pending-audio queue still lets a
+                    // later gesture play the clip. Retry once after resume so
+                    // the mouth-sync actually starts for the normal chat path
+                    // (the debug Vox test works because its button click is a
+                    // gesture that already unlocked the context).
+                    try {
+                        const ctx = window.__synthLipSyncCtx;
+                        if (ctx && ctx.state === 'suspended') {
+                            ctx.resume().then(() => {
+                                if (window.__synthLipSyncAudio === thisAudio) {
+                                    audio.play().catch(() => {
+                                        window.__synthPendingAudio = window.__synthPendingAudio || [];
+                                        window.__synthPendingAudio.push({ url, text, audioDuration });
+                                    });
+                                }
+                            }).catch(() => {
+                                window.__synthPendingAudio = window.__synthPendingAudio || [];
+                                window.__synthPendingAudio.push({ url, text, audioDuration });
+                            });
+                        } else {
+                            window.__synthPendingAudio = window.__synthPendingAudio || [];
+                            window.__synthPendingAudio.push({ url, text, audioDuration });
+                        }
+                    } catch (_) {
+                        window.__synthPendingAudio = window.__synthPendingAudio || [];
+                        window.__synthPendingAudio.push({ url, text, audioDuration });
+                    }
                 }
             });
         }

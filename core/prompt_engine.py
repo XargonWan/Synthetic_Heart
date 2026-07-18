@@ -2394,7 +2394,11 @@ async def build_delivery_request(
         system_instruction=system_instruction,
         tool_declarations=tool_declarations,
         context_summary=(
-            (f"[Persona background]\n{persona_preferences}" if persona_preferences else "")
+            (
+                f"[Persona background]\n{persona_preferences}"
+                if persona_preferences
+                else ""
+            )
             + (
                 (
                     ("\n\n" if persona_preferences else "")

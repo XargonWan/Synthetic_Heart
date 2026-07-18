@@ -603,7 +603,12 @@ class VoxPlugin(AIPluginBase):
         audio_bytes: bytes | None = None
         if len(sentences) > 1:
             audio_bytes = await self._speak_chunked(
-                sentences, engine, emotion, kwargs, chunk_karada
+                sentences,
+                engine,
+                emotion,
+                kwargs,
+                chunk_karada,
+                lipsync_data=None,
             )
             already_streamed = audio_bytes is not None
 
@@ -1072,6 +1077,7 @@ class VoxPlugin(AIPluginBase):
         emotion: str | None,
         kwargs: dict[str, Any],
         karada: Any,
+        lipsync_data: dict | None = None,
     ) -> bytes | None:
         """Synthesize *sentences* one at a time, broadcasting each to the
         live avatar as soon as it is ready while the next one synthesizes in
@@ -1130,6 +1136,8 @@ class VoxPlugin(AIPluginBase):
                     audio_path=str(chunk_path),
                     audio_duration_s=duration,
                     turn_id=turn_id,
+                    text=sentence,
+                    lipsync_data=lipsync_data,
                 )
             except Exception as exc:
                 log_warning(f"[vox_plugin] chunk broadcast failed: {exc}")
@@ -1244,6 +1252,7 @@ class VoxPlugin(AIPluginBase):
                     audio_path=audio_path,
                     lipsync_data=lipsync_data,
                     audio_duration_s=audio_duration_s,
+                    text=caption,
                 )
 
             if iface_name == "synth_webui" and hasattr(target_iface, "send_tts_audio"):
@@ -1323,6 +1332,7 @@ class VoxPlugin(AIPluginBase):
         audio_path: Path,
         lipsync_data: dict | None,
         audio_duration_s: float | None,
+        text: str | None = None,
     ) -> None:
         """Hand generated audio to the Karada state server for distribution.
 
@@ -1342,6 +1352,7 @@ class VoxPlugin(AIPluginBase):
                 audio_path=str(audio_path),
                 lipsync_data=lipsync_data,
                 audio_duration_s=audio_duration_s,
+                text=text,
             )
         except Exception as exc:
             log_debug(f"[vox_plugin] _broadcast_audio_to_clients error: {exc}")
