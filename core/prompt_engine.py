@@ -1510,6 +1510,19 @@ async def build_prompt_request(
         "source": _source_dict,
         "timestamp": message.date.isoformat(),
         "privacy": "default",
+        # Explicit anchor for reply routing. THIS is the chat the incoming
+        # message arrived in — the model MUST target its reply here by default.
+        # Any other conversation in the context block is background context only
+        # and must NOT be replied to unless the user explicitly asks to message
+        # someone/somewhere else. Weak engines lose this anchor when unified
+        # history blends multiple chats, so we state it structurally, not just
+        # in prose instructions.
+        "current_chat": {
+            "interface_path": interface_path,
+            "interface": interface_name,
+            "thread_id": getattr(message, "thread_id", None)
+            or getattr(message, "message_thread_id", None),
+        },
         # Set `scope` to the effective history_scope when provided, otherwise keep legacy default
         "scope": (
             effective_history_scope
@@ -2238,6 +2251,7 @@ def load_json_instructions() -> str:
         "If an action you need is not available, reply with JSON explaining why.\n"
         f"AUTONOMY GUIDELINES: You MAY proactively propose or execute allowed actions when beneficial. When acting autonomously include a brief `meta` object with `autonomous: true` and a short first-person `rationale` (your own voice) for why you are acting.{naming_hint} If an action is disallowed, return a JSON proposal describing the need.\n"
         "RESPOND ONLY WITH VALID JSON. No text before or after.\n"
+        "REPLY ROUTING: input.payload.current_chat.interface_path is the chat the incoming message arrived in — this is WHERE you must reply by default. Any other conversation shown in the context block is background context only; do NOT reply there unless the user explicitly asks to message someone or somewhere else. Always copy input.payload.current_chat.interface_path into the 'interface_path' of your message_* action.\n"
         "Use input.interface and input.payload.source.interface_path to route replies.\n"
         "NEVER use 'target' — always use 'interface_path' in message actions.\n"
         "Include reply_message_id when replying to specific messages. Use thread_id from input.payload.source.thread_id when present (omit if missing).\n"
@@ -2394,7 +2408,11 @@ async def build_delivery_request(
         system_instruction=system_instruction,
         tool_declarations=tool_declarations,
         context_summary=(
-            (f"[Persona background]\n{persona_preferences}" if persona_preferences else "")
+            (
+                f"[Persona background]\n{persona_preferences}"
+                if persona_preferences
+                else ""
+            )
             + (
                 (
                     ("\n\n" if persona_preferences else "")

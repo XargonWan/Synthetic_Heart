@@ -793,6 +793,7 @@ class SynthWebUIInterface:
         self.app.post("/api/debug/inject_message")(self.debug_inject_message)
         self.app.post("/api/debug/tts_test")(self.debug_tts_test)
         self.app.get("/api/debug/expressions")(self.debug_expressions)
+        self.app.post("/api/debug/build_prompt")(self.debug_build_prompt)
         self.app.post("/api/config")(self.update_config_entry)
         # Cortex-aware endpoints
         self.app.post("/api/components/cortex")(self.set_cortex_engine)
@@ -2295,6 +2296,171 @@ class SynthWebUIInterface:
                     for name, info in expr_section.items()
                 },
                 "canonical_emotions": canonical_emotions,
+            }
+        )
+
+    async def debug_build_prompt(self, request: Request) -> JSONResponse:
+        """Build a REAL prompt from the live system state for a faked incoming message.
+
+        This is a debugging aid: it runs the full ``build_prompt_request``
+        pipeline (persona, history, recon context, action catalog, etc.) against
+        the *actual* running system state, but the resulting prompt is returned
+        as JSON and is NEVER sent to the LLM. It lets you inspect whether the
+        prompt is assembled correctly (e.g. the ``current_chat`` anchor, the
+        ``interface_path`` routing metadata, the unified-history labelling)
+        without spending a single token.
+
+        The incoming message is simulated. By default it mimics an OpenAI-compatible
+        API endpoint delivering the text "This is a test message"; the text and a
+        few other fields can be overridden in the request body:
+
+        - ``text`` (str): the faked message body. Default "This is a test message".
+        - ``interface_name`` (str): which interface delivered it. Default
+          "openai_compat" (the Ollama-compatible API surface).
+        - ``interface_path`` (str): the chat the message "arrived in". Default
+          "openai_compat/test".
+        - ``chat_id`` (str/int): the chat id. Default "test".
+        - ``user_id`` (str/int): the sender id. Default 0.
+        - ``username`` (str): sender display name. Default "DebugUser".
+        - ``usertag`` (str): sender @tag. Default "@debuguser".
+        - ``history_scope`` (str): "local" | "recent" | "unified". Default None
+          (falls back to the global UNIFIED_HISTORY setting).
+        - ``thread_id`` (str): optional thread id.
+
+        Gated by ``WEB_DEBUG=1``.
+        """
+        web_debug = os.getenv("WEB_DEBUG", "0").lower()
+        if web_debug not in ("1", "true", "yes"):
+            raise HTTPException(status_code=403, detail="Debug endpoints disabled")
+
+        try:
+            body: Dict[str, Any] = await request.json()
+        except Exception:
+            body = {}
+
+        if not isinstance(body, dict):
+            body = {}
+
+        text: str = str(body.get("text", "This is a test message"))
+        interface_path: str = str(body.get("interface_path", "openai_compat/test"))
+        # Derive interface_name from interface_path when not given explicitly,
+        # so the simulated message is internally consistent.
+        interface_name: str = str(
+            body.get("interface_name") or interface_path.split("/")[0]
+        )
+        chat_id: Any = body.get("chat_id", "test")
+        user_id: Any = body.get("user_id", 0)
+        username: Optional[str] = body.get("username") or "DebugUser"
+        usertag: Optional[str] = body.get("usertag") or "@debuguser"
+        history_scope: Optional[str] = body.get("history_scope")
+        thread_id: Optional[str] = body.get("thread_id")
+
+        # Build a faked incoming message. build_prompt_request reads fields via
+        # getattr, so a SimpleNamespace is sufficient and avoids constructing a
+        # full interface-specific message object.
+        import datetime as _dt
+        from types import SimpleNamespace
+
+        fake_user = SimpleNamespace(
+            id=user_id,
+            username=username,
+            full_name=username or "DebugUser",
+        )
+        fake_message = SimpleNamespace(
+            id=body.get("message_id", 0),
+            text=text,
+            message_id=body.get("message_id", 0),
+            chat_id=chat_id,
+            interface_path=interface_path,
+            interface_name=interface_name,
+            from_user=fake_user,
+            date=_dt.datetime.now(_dt.timezone.utc),
+            reply_to_message=None,
+            thread_id=thread_id,
+            message_thread_id=thread_id,
+        )
+        # chat attribute is read by some paths (e.g. telegram_chat_kind)
+        fake_message.chat = SimpleNamespace(id=chat_id, type="group")
+
+        try:
+            from core.prompt_engine import build_prompt_request
+
+            prompt = await build_prompt_request(
+                message=fake_message,
+                context_memory={},
+                interface_name=interface_name,
+                history_scope=history_scope,
+            )
+        except Exception as exc:
+            import traceback as _tb
+
+            _stack = _tb.format_exc()
+            log_error(f"{LOG_PREFIX} debug_build_prompt failed: {exc}\n{_stack}")
+            raise HTTPException(
+                status_code=500, detail=f"Failed to build prompt: {exc}"
+            )
+
+        # build_prompt_request returns a dict that embeds non-JSON-serializable
+        # objects (Turn, RuntimeContext, ToolManifest, Attachment) under keys
+        # like "actions"/"__prompt_request". For a debug view we only need the
+        # human-readable, JSON-safe parts: the input payload (with the
+        # current_chat anchor), the context_summary, the system instruction and
+        # the rendered instructions. Anything else is dropped to keep the
+        # response serializable.
+        def _safe(value: Any) -> Any:
+            if isinstance(value, dict):
+                return {k: _safe(v) for k, v in value.items()}
+            if isinstance(value, (list, tuple)):
+                return [_safe(v) for v in value]
+            if isinstance(value, (str, int, float, bool)) or value is None:
+                return value
+            return str(value)
+
+        debug_prompt: Dict[str, Any] = {}
+        if isinstance(prompt, dict):
+            for key in ("input", "context_summary", "instructions", "context"):
+                if key in prompt:
+                    debug_prompt[key] = _safe(prompt[key])
+            # The raw system instruction lives on the attached PromptRequest
+            pr = prompt.get("__prompt_request")
+            if pr is not None and hasattr(pr, "system_instruction"):
+                debug_prompt["system_instruction"] = _safe(pr.system_instruction)
+            # Expose the action catalog names so the caller can verify which
+            # actions were offered for this turn. build_prompt_request keeps the
+            # live catalog on the attached PromptRequest (actions_block), so read
+            # it from there when present; fall back to a top-level "actions" key.
+            action_names: list[str] = []
+            pr = prompt.get("__prompt_request")
+            if pr is not None:
+                try:
+                    from core.core_initializer import core_initializer
+
+                    _ab = getattr(core_initializer, "actions_block", None) or {}
+                    _av = _ab.get("available_actions", {}) or {}
+                    action_names = list(_av.keys())
+                except Exception:
+                    action_names = []
+            if not action_names and isinstance(prompt.get("actions"), dict):
+                action_names = list(
+                    prompt["actions"].get("available_actions", {}).keys()
+                )
+            debug_prompt["available_actions"] = _safe(action_names)
+
+        return JSONResponse(
+            {
+                "success": True,
+                "simulated_message": {
+                    "text": text,
+                    "interface_name": interface_name,
+                    "interface_path": interface_path,
+                    "chat_id": chat_id,
+                    "user_id": user_id,
+                    "username": username,
+                    "usertag": usertag,
+                    "history_scope": history_scope,
+                    "thread_id": thread_id,
+                },
+                "prompt": debug_prompt,
             }
         )
 
