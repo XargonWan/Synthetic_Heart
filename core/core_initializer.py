@@ -1330,6 +1330,32 @@ class CoreInitializer:
                     )
             log_info("[core_initializer] All pending async plugins processed")
 
+        # Ensure the Grillo autonomous-beat plugin (and its sub-plugins, e.g. the
+        # LLM-failure recovery plugin) is started. GrilloPlugin is registered in
+        # PLUGIN_REGISTRY but is not discovered by the generic plugin loop above,
+        # so its start() (which launches the beat scheduler + recovery loop) must
+        # be invoked explicitly here.
+        try:
+            grillo = PLUGIN_REGISTRY.get("grillo_plugin")
+            if grillo is not None and hasattr(grillo, "start"):
+                # Guard against double-start (idempotent): GrilloPlugin exposes
+                # _running once its beat loop is active.
+                if not getattr(grillo, "_running", False):
+                    if asyncio.iscoroutinefunction(grillo.start):
+                        await grillo.start()
+                    else:
+                        grillo.start()
+                    log_info(
+                        "[core_initializer] ✅ Started GrilloPlugin (beats + recovery)"
+                    )
+                else:
+                    log_debug(
+                        "[core_initializer] GrilloPlugin already running; skip start"
+                    )
+        except Exception as e:
+            log_error(f"[core_initializer] Error starting GrilloPlugin: {repr(e)}")
+            self.startup_errors.append(f"GrilloPlugin: {e}")
+
     async def _build_actions_block(self):
         """Collect and validate action schemas from all plugins and interfaces."""
         # TEMPORARILY DISABLE FLAG FOR TESTING

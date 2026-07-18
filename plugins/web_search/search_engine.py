@@ -23,7 +23,7 @@ import requests
 from bs4 import BeautifulSoup
 
 from core.config_manager import config_registry
-from core.logging_utils import log_debug, log_info, log_warning
+from core.logging_utils import log_debug, log_error, log_info, log_warning
 
 _USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -90,19 +90,20 @@ async def search_tavily(
 
 
 async def search_searxng(
-    base_url: str, query: str, max_results: int = 5
+    base_url: str, query: str, max_results: int = 5, page: int = 1
 ) -> list[dict[str, str]]:
     """Search via a self-hosted SearXNG instance (JSON API).
 
     Queries ``{base_url}/search?format=json`` and maps the SearXNG result shape
     (``title`` / ``content`` / ``url``) to the plugin's ``{title, snippet, url}``
     shape. Returns an empty list on any failure so ``run_search`` can fall back to
-    the next backend.
+    the next backend. The ``page`` argument enables paging past the first batch
+    so callers can collect more *valid* results than a single page yields.
     """
 
     def _do_get() -> dict:
         headers = {"User-Agent": _USER_AGENT}
-        params = {"q": query, "format": "json"}
+        params = {"q": query, "format": "json", "p": page}
         response = requests.get(
             f"{base_url}/search",
             headers=headers,
@@ -146,7 +147,118 @@ async def run_search(query: str, max_results: int = 5) -> list[dict[str, str]]:
     api_key = _tavily_api_key()
     if api_key:
         return await search_tavily(api_key, query, max_results=max_results)
+
+    # Neither backend produced results. Distinguish "configured but empty" from
+    # "nothing configured at all" so the caller (and the logs) can tell whether
+    # the search genuinely failed or was never wired up. A silent ``[]`` here
+    # is the most common cause of "the search ran but Synth got nothing".
+    if searxng_url or api_key:
+        log_warning(
+            f"[web_search] No results for '{query}' from the configured "
+            f"backend(s) (SearXNG={'yes' if searxng_url else 'no'}, "
+            f"Tavily={'yes' if api_key else 'no'})."
+        )
+    else:
+        log_error(
+            f"[web_search] No web-search backend available for '{query}': "
+            f"SearXNG is not configured/reachable AND no Tavily API key is set. "
+            f"Set SEARXNG_URL or TAVILY_API_KEY, otherwise every search "
+            f"returns empty."
+        )
     return []
+
+
+def _is_valid_result(hit: dict[str, str]) -> bool:
+    """A result is *valid* only if it can actually be shown to the user.
+
+    It must have a title and a URL, AND carry some usable text (a snippet or a
+    fetched page). A result whose page was blocked by anti-bot protection or that
+    returned no text is NOT valid: it must not count toward the requested number
+    of results, otherwise the user would receive fewer usable results than asked.
+    """
+    if not str(hit.get("title", "") or "").strip():
+        return False
+    if not str(hit.get("url", "") or "").strip():
+        return False
+    snippet = str(hit.get("snippet", "") or "").strip()
+    page = str(hit.get("page", "") or "").strip()
+    if not snippet and not page:
+        return False
+    return True
+
+
+async def collect_valid_results(
+    query: str,
+    min_valid: int = 5,
+    max_candidates: int | None = None,
+) -> list[dict[str, str]]:
+    """Collect ``min_valid`` usable results for ``query``, paging past blocked ones.
+
+    Unlike :func:`run_search` (which returns whatever the first page yields),
+    this keeps pulling candidates — across pages and falling through from SearXNG
+    to Tavily — until it has gathered ``min_valid`` *valid* results. A result is
+    valid only if it has a title, a URL, and some usable text (see
+    :func:`_is_valid_result`); results whose page was blocked by anti-bot
+    protection or that returned no text do NOT count, so the user always gets the
+    requested number of usable results.
+
+    To guarantee termination, the search stops after ``max_candidates`` raw
+    candidates have been examined (default ``3 * min_valid``). This bounds the
+    work even when the backend keeps returning blocked/empty results, so the
+    caller never loops forever. Returns fewer than ``min_valid`` results only
+    when the backend is exhausted or unreachable.
+    """
+    if max_candidates is None:
+        max_candidates = max(min_valid * 3, min_valid + 10)
+
+    searxng_url = _searxng_url()
+    api_key = _tavily_api_key()
+
+    valid: list[dict[str, str]] = []
+    seen_urls: set[str] = set()
+    candidates_examined = 0
+    page = 1
+
+    # Pull from SearXNG (paging) first, then fall through to Tavily.
+    while len(valid) < min_valid and candidates_examined < max_candidates:
+        batch: list[dict[str, str]] = []
+        if searxng_url:
+            batch = await search_searxng(
+                searxng_url, query, max_results=max_candidates, page=page
+            )
+            page += 1
+        elif api_key:
+            # Tavily has no paging; one call with a generous limit suffices.
+            batch = await search_tavily(
+                api_key, query, max_results=max_candidates
+            )
+
+        if not batch:
+            # SearXNG exhausted its pages (or no SearXNG) -> try Tavily once.
+            if searxng_url and api_key:
+                searxng_url = ""  # disable SearXNG, force Tavily on next loop
+                continue
+            break
+
+        for hit in batch:
+            if candidates_examined >= max_candidates:
+                break
+            candidates_examined += 1
+            url = str(hit.get("url", "") or "").strip()
+            if url and url in seen_urls:
+                continue
+            if url:
+                seen_urls.add(url)
+            if _is_valid_result(hit):
+                valid.append(hit)
+                if len(valid) >= min_valid:
+                    break
+
+    log_info(
+        f"[web_search] collect_valid_results('{query}'): {len(valid)} valid "
+        f"of {min_valid} requested ({candidates_examined} candidates examined)"
+    )
+    return valid
 
 
 class FetchCache:
