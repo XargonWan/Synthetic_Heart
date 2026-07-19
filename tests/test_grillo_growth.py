@@ -450,6 +450,156 @@ async def test_parse_recon_noop_when_nothing_pending(
     apply_mock.assert_not_awaited()
 
 
+# ----------------------------------------------------- recon-based revision
+
+
+def test_get_recon_instruction_includes_revise_when_pending(
+    plugin: GrilloGrowthPlugin, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    proposal = {
+        "self_growth": "I have grown a lot this week.",
+        "likes": ["music"],
+        "dislikes": ["noise"],
+    }
+    monkeypatch.setattr(plugin, "_load_pending_proposal", lambda: proposal)
+    monkeypatch.setattr(plugin, "_current_likes_dislikes", lambda: ([], []))
+
+    instruction = plugin.get_recon_instruction()
+
+    assert "revise" in instruction
+    assert "approve" in instruction
+    assert "reject" in instruction
+
+
+@pytest.mark.asyncio
+async def test_parse_recon_revise_regenerates(
+    plugin: GrilloGrowthPlugin, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    proposal = {"self_growth": "g", "likes": [], "dislikes": []}
+    monkeypatch.setattr(plugin, "_load_pending_proposal", lambda: proposal)
+    monkeypatch.setattr(gg.config_registry, "get_value", lambda *a, **k: True)
+    revise_mock = AsyncMock(return_value={"success": True, "message": "ok"})
+    monkeypatch.setattr(plugin, "_revise_pending_proposal", revise_mock)
+
+    result = await plugin.parse_recon_response(
+        {"decision": "revise"}, text="rendila più concreta, meno astratta"
+    )
+
+    assert result == []
+    revise_mock.assert_awaited_once_with("rendila più concreta, meno astratta")
+
+
+@pytest.mark.asyncio
+async def test_parse_recon_revise_noop_when_nothing_pending(
+    plugin: GrilloGrowthPlugin, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(plugin, "_load_pending_proposal", lambda: None)
+    monkeypatch.setattr(gg.config_registry, "get_value", lambda *a, **k: True)
+    revise_mock = AsyncMock()
+    monkeypatch.setattr(plugin, "_revise_pending_proposal", revise_mock)
+
+    result = await plugin.parse_recon_response(
+        {"decision": "revise"}, text="cambia questa parte"
+    )
+
+    assert result == []
+    revise_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_revise_pending_proposal_overwrites_and_redelivers(
+    plugin: GrilloGrowthPlugin, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    old_proposal = {"self_growth": "old", "likes": [], "dislikes": []}
+    new_proposal = {"self_growth": "new revised", "likes": ["a"], "dislikes": ["b"]}
+
+    monkeypatch.setattr(plugin, "_load_pending_proposal", lambda: old_proposal)
+    monkeypatch.setattr(
+        plugin, "_fetch_recent_diaries", AsyncMock(return_value="diary")
+    )
+    monkeypatch.setattr(gg, "get_current_growth", AsyncMock(return_value="prev"))
+    monkeypatch.setattr(plugin, "_current_likes_dislikes", lambda: ([], []))
+    monkeypatch.setattr(plugin, "_recall_memories", AsyncMock(return_value=[]))
+    monkeypatch.setattr(
+        plugin, "_ask_llm_for_revise", AsyncMock(return_value=new_proposal)
+    )
+    save_mock = AsyncMock()
+    monkeypatch.setattr(plugin, "_save_pending_proposal", save_mock)
+    deliver_mock = AsyncMock(return_value=True)
+    monkeypatch.setattr(plugin, "_deliver_proposal", deliver_mock)
+
+    result = await plugin._revise_pending_proposal("rendila più concreta")
+
+    assert result["success"] is True
+    # The pending slot is overwritten with the new proposal (old discarded).
+    save_mock.assert_awaited_once_with(new_proposal)
+    deliver_mock.assert_awaited_once_with(new_proposal)
+    assert result["proposal"] == new_proposal
+
+
+@pytest.mark.asyncio
+async def test_revise_pending_proposal_noop_when_nothing_pending(
+    plugin: GrilloGrowthPlugin, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(plugin, "_load_pending_proposal", lambda: None)
+    revise_mock = AsyncMock()
+    monkeypatch.setattr(plugin, "_ask_llm_for_revise", revise_mock)
+    save_mock = AsyncMock()
+    monkeypatch.setattr(plugin, "_save_pending_proposal", save_mock)
+    deliver_mock = AsyncMock()
+    monkeypatch.setattr(plugin, "_deliver_proposal", deliver_mock)
+
+    result = await plugin._revise_pending_proposal("cambia questa parte")
+
+    assert result["success"] is False
+    revise_mock.assert_not_awaited()
+    save_mock.assert_not_awaited()
+    deliver_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_revise_pending_proposal_fails_when_llm_returns_none(
+    plugin: GrilloGrowthPlugin, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    old_proposal = {"self_growth": "old", "likes": [], "dislikes": []}
+    monkeypatch.setattr(plugin, "_load_pending_proposal", lambda: old_proposal)
+    monkeypatch.setattr(
+        plugin, "_fetch_recent_diaries", AsyncMock(return_value="diary")
+    )
+    monkeypatch.setattr(gg, "get_current_growth", AsyncMock(return_value="prev"))
+    monkeypatch.setattr(plugin, "_current_likes_dislikes", lambda: ([], []))
+    monkeypatch.setattr(plugin, "_recall_memories", AsyncMock(return_value=[]))
+    monkeypatch.setattr(plugin, "_ask_llm_for_revise", AsyncMock(return_value=None))
+    save_mock = AsyncMock()
+    monkeypatch.setattr(plugin, "_save_pending_proposal", save_mock)
+    deliver_mock = AsyncMock()
+    monkeypatch.setattr(plugin, "_deliver_proposal", deliver_mock)
+
+    result = await plugin._revise_pending_proposal("rendila più concreta")
+
+    assert result["success"] is False
+    save_mock.assert_not_awaited()
+    deliver_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_execute_action_revise_triggers_revision(
+    plugin: GrilloGrowthPlugin, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    revise_mock = AsyncMock(return_value={"success": True, "message": "ok"})
+    monkeypatch.setattr(plugin, "_revise_pending_proposal", revise_mock)
+
+    await plugin.execute_action(
+        {
+            "type": "apply_growth_proposal",
+            "payload": {"revise": True, "feedback": "rendila più concreta"},
+        },
+        {},
+    )
+
+    revise_mock.assert_awaited_once_with("rendila più concreta")
+
+
 @pytest.mark.asyncio
 async def test_parse_recon_disabled_is_noop(
     plugin: GrilloGrowthPlugin, monkeypatch: pytest.MonkeyPatch
