@@ -29,7 +29,7 @@ from typing import Any
 from core.config_manager import config_registry
 from core.logging_utils import log_debug, log_error, log_info, log_warning
 
-from .search_engine import FetchCache, run_search
+from .search_engine import FetchCache, collect_valid_results
 
 # Expose the orchestrator's tunables in the WebUI / env loader. Registration is
 # best-effort so importing the orchestrator never fails if the variables engine
@@ -344,7 +344,17 @@ class SearchOrchestrator:
         cache = FetchCache()
 
         async def _one_query(query: str) -> dict[str, Any]:
-            hits = await run_search(query, max_results=results_per_query)
+            # Collect ``results_per_query`` *valid* results, paging past any
+            # that are blocked by anti-bot protection or returned no usable text
+            # (those must NOT count toward the requested number — see
+            # ``collect_valid_results`` / ``_is_valid_result``). A hard cap on
+            # examined candidates prevents an infinite loop when the backend keeps
+            # returning blocked/empty results.
+            hits = await collect_valid_results(
+                query,
+                min_valid=results_per_query,
+                max_candidates=results_per_query * 3,
+            )
             enriched: list[dict[str, str]] = []
             for idx, hit in enumerate(hits):
                 page = ""
@@ -589,6 +599,22 @@ class SearchOrchestrator:
             from core import message_queue
 
             links_line = f"Direct links: {', '.join(urls)}\n" if urls else ""
+            # Default delivery target is the originating interface_path. We tell
+            # Synth explicitly where the search came from and that she should
+            # reply there by default. She MAY override the destination, but we
+            # strongly discourage it: the user asked in that chat and expects the
+            # answer there. This is a soft, freedom-preserving instruction — not
+            # a hard constraint — so a deliberate cross-chat reply is still
+            # possible if she has a good reason.
+            origin_note = (
+                f"ORIGIN: this search was requested on interface_path "
+                f"'{interface_path}'. Reply on that same interface_path by default. "
+                f"You MAY redirect the reply elsewhere if you have a clear reason, "
+                f"but doing so is strongly discouraged — the user expects the "
+                f"answer in the chat where they asked.\n"
+                if interface_path
+                else ""
+            )
             prompt = (
                 "=== WEB SEARCH RESULTS ===\n"
                 "A background web search you announced earlier has completed. "
@@ -597,6 +623,7 @@ class SearchOrchestrator:
                 "sources — do not read it verbatim, integrate it. If any links "
                 "could not be visited, tell the user which specific ones failed "
                 "(and why) while still reporting everything that succeeded.\n\n"
+                f"{origin_note}"
                 f"Search intent: {search_context}\n"
                 f"Queries: {', '.join(queries)}\n"
                 f"{links_line}"
@@ -615,6 +642,17 @@ class SearchOrchestrator:
             message.date = datetime.now(timezone.utc)
             if interface_path:
                 message.interface_path = interface_path
+            else:
+                # Without an interface_path the second turn cannot be routed back
+                # to the originating chat, so Synth would never surface the results
+                # (or would post them to the wrong conversation). This is a hard
+                # misconfiguration of the recon trigger — surface it loudly.
+                log_error(
+                    f"[web_search] Task {task_id}: cannot deliver results — "
+                    f"interface_path is empty. The search completed but Synth "
+                    f"will not receive/expose the findings. Check that recon "
+                    f"resolved the originating interface_path."
+                )
 
             context = {
                 "grillo_beat": True,

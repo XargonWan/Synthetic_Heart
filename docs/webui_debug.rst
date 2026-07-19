@@ -67,3 +67,98 @@ Scope
 
 This feature is intended for development only.
 Do not enable it on stable deployments.
+
+Debug Prompt Builder (``/api/debug/build_prompt``)
+--------------------------------------------------
+
+When ``WEB_DEBUG=1`` is set, the WebUI exposes a debug endpoint that builds a
+**real** prompt from the live system state for a *faked* incoming message, and
+returns it as JSON **without ever sending it to the LLM**. It is the fastest way
+to verify that the prompt is assembled correctly (for example the
+``current_chat`` anchor, the ``interface_path`` routing metadata, and the
+unified-history labelling) without spending a single token.
+
+The incoming message is simulated. By default it mimics an OpenAI-compatible API
+endpoint delivering the text ``"This is a test message"``. The text and several
+other fields can be overridden in the request body.
+
+Request
+~~~~~~~
+
+.. code-block:: bash
+
+   curl -k -X POST https://localhost:8000/api/debug/build_prompt \
+     -H "Content-Type: application/json" \
+     -d '{"text": "Ciao, questo è un test", "interface_path": "telegram_bot/-100123456", "history_scope": "unified"}'
+
+All body fields are optional:
+
+.. list-table::
+   :header-rows: 1
+
+   * - Field
+     - Type
+     - Default
+     - Meaning
+   * - ``text``
+     - str
+     - ``"This is a test message"``
+     - The faked message body.
+   * - ``interface_name``
+     - str
+     - ``"openai_compat"``
+     - Which interface "delivered" the message.
+   * - ``interface_path``
+     - str
+     - ``"openai_compat/test"``
+     - The chat the message "arrived in" (the routing anchor).
+   * - ``chat_id``
+     - str/int
+     - ``"test"``
+     - The chat id.
+   * - ``user_id``
+     - str/int
+     - ``0``
+     - The sender id.
+   * - ``username``
+     - str
+     - ``"DebugUser"``
+     - Sender display name.
+   * - ``usertag``
+     - str
+     - ``"@debuguser"``
+     - Sender @tag.
+   * - ``history_scope``
+     - str
+     - (global default)
+     - ``"local"`` | ``"recent"`` | ``"unified"``.
+   * - ``thread_id``
+     - str
+     - (none)
+     - Optional thread id.
+
+Response
+~~~~~~~~
+
+The endpoint returns a JSON object with two keys:
+
+.. code-block:: json
+
+   {
+     "success": true,
+     "simulated_message": { "text": "...", "interface_path": "...", ... },
+     "prompt": { "system_instruction": "...", "input": { ... }, "context_summary": "..." }
+   }
+
+``prompt`` is the full ``PromptRequest`` payload produced by
+``core.prompt_engine.build_prompt_request`` against the running system — persona,
+history, recon context, action catalog and all. Inspect ``prompt.input.payload.current_chat``
+to confirm the reply-routing anchor points at the chat you expect, and
+``prompt.input.payload.source.interface_path`` for the sender's chat.
+
+Notes
+~~~~~
+
+- The endpoint is gated by ``WEB_DEBUG=1`` (returns HTTP 403 otherwise).
+- The faked message is **never** enqueued and **never** reaches the LLM.
+- It is a development-only tool; do not enable it on stable deployments.
