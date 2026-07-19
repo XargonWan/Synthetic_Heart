@@ -464,9 +464,7 @@ async def test_collect_valid_results_caps_candidates(
 
     monkeypatch.setattr(search_engine, "search_searxng", _fake_searxng)
 
-    out = await search_engine.collect_valid_results(
-        "q", min_valid=5, max_candidates=9
-    )
+    out = await search_engine.collect_valid_results("q", min_valid=5, max_candidates=9)
     assert out == []  # nothing valid, but it returned instead of hanging
 
 

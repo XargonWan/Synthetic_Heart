@@ -249,3 +249,14 @@ to improve continuity across interfaces and sessions.
        Unified history entries coming from other chats are now prefixed with
        ``[from <interface_path>]`` to make it explicit they are not part of the
        current conversation.
+
+    .. note::
+       Cross-chat context is treated as ambient background, not shared social
+       knowledge. The synth is instructed (via the ``CROSS-CHAT PRIVACY``
+       directive in the master chat instructions and a per-block note on the
+       ``[Recent context from other conversations]`` section) never to
+       name-drop people from other chats to the current interlocutor, never to
+       assume the current user knows them, and never to reference them unless
+       the current user brings them up first. This applies to any non-current
+       context (other chats, third-party memories, diary notes), not only to
+       unified history.

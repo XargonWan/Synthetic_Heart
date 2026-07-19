@@ -229,9 +229,7 @@ async def collect_valid_results(
             page += 1
         elif api_key:
             # Tavily has no paging; one call with a generous limit suffices.
-            batch = await search_tavily(
-                api_key, query, max_results=max_candidates
-            )
+            batch = await search_tavily(api_key, query, max_results=max_candidates)
 
         if not batch:
             # SearXNG exhausted its pages (or no SearXNG) -> try Tavily once.

@@ -460,6 +460,35 @@ def test_load_chat_history_for_guild_queries(monkeypatch):
     assert cur2.last_params[-1] == 2
 
 
+def test_cross_chat_privacy_note_in_recent_block(monkeypatch):
+    """The [Recent context from other conversations] block must carry a note
+    telling the model not to name-drop people from other chats."""
+    summary = prompt_engine._build_context_summary(
+        {
+            "history_recent": [
+                '[from the group chat] [05/07/26:0132] Lybris: "did you see the track?"'
+            ]
+        },
+        is_grillo_internal=False,
+    )
+    assert "[Recent context from other conversations]" in summary
+    assert "Lybris" in summary
+    # The anti-name-dropping note must be present and reference the current interlocutor
+    assert "name-drop" in summary
+    assert "current interlocutor" in summary
+    assert "current conversation" in summary
+
+
+def test_cross_chat_privacy_directive_in_master_instructions(monkeypatch):
+    """The master chat instruction set must include a general cross-chat privacy
+    directive that applies to any non-current context (not just unified history)."""
+    instructions = prompt_engine.load_json_instructions()
+    assert "CROSS-CHAT PRIVACY" in instructions
+    assert "name-drop" in instructions
+    assert "current conversation" in instructions
+    assert "current user" in instructions
+
+
 def test_cross_chat_source_label_tags_telegram_group_vs_dm():
     """Cross-chat history entries must be tagged with a readable room label,
     not the raw interface_path -- otherwise the model has no way to tell
