@@ -92,3 +92,4 @@ installer/vendor/*.msi
 frontend/node_modules/
 frontend/dist/
 frontend/.pnpm-store
+memories/session

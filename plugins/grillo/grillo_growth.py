@@ -227,10 +227,13 @@ class GrilloGrowthPlugin:
                     "trainer approval. Use this ONLY after the trainer has reviewed "
                     "the proposal you presented and told you their decision: set "
                     "'approve' to true to commit the new self-growth reflection and "
-                    "likes/dislikes, or false to discard the pending proposal."
+                    "likes/dislikes, or false to discard the pending proposal. "
+                    "Set 'revise' to true (with optional 'feedback') to regenerate "
+                    "the pending proposal from the trainer's feedback and re-send "
+                    "it for another review, without applying it yet."
                 ),
                 "required_fields": [],
-                "optional_fields": ["approve"],
+                "optional_fields": ["approve", "revise", "feedback"],
             },
         }
 
@@ -252,6 +255,11 @@ class GrilloGrowthPlugin:
                 "proposal": result.get("proposal"),
             }
         if action_type == "apply_growth_proposal":
+            # A revise request (strong engines) regenerates the pending proposal
+            # from the trainer's feedback and re-delivers it, without applying.
+            if payload.get("revise"):
+                feedback = str(payload.get("feedback") or "").strip()
+                return await self._revise_pending_proposal(feedback)
             # Default to approve=True: the model only emits this action once the
             # trainer has expressed a decision, and an explicit approve=false
             # discards the pending proposal.
@@ -895,14 +903,27 @@ class GrilloGrowthPlugin:
             return {
                 "description": (
                     "Commit or discard the self-growth proposal that is pending "
-                    "trainer approval. Emit this action (not just a text reply) "
-                    "as soon as the trainer states their decision about the "
-                    "pending proposal."
+                    "trainer approval, or revise it from the trainer's feedback. "
+                    "Emit this action (not just a text reply) as soon as the "
+                    "trainer states their decision about the pending proposal."
                 ),
                 "example": {
                     "type": "apply_growth_proposal",
                     "payload": {"approve": True},
                 },
+                "examples": [
+                    {
+                        "type": "apply_growth_proposal",
+                        "payload": {"approve": True},
+                    },
+                    {
+                        "type": "apply_growth_proposal",
+                        "payload": {
+                            "revise": True,
+                            "feedback": "make it more concrete and less abstract",
+                        },
+                    },
+                ],
             }
         if action_type == "run_self_growth":
             return {
@@ -951,9 +972,15 @@ class GrilloGrowthPlugin:
             "decide, purely from its intent (do NOT match specific words), "
             "whether it expresses a decision about THIS pending proposal.\n"
             "Return an object with exactly one key: "
-            '{"decision": "approve"|"reject"|"none"}.\n'
+            '{"decision": "approve"|"reject"|"revise"|"none"}.\n'
             '  - "approve": the trainer accepts/confirms/agrees to apply it.\n'
-            '  - "reject": the trainer declines/refuses/wants it discarded.\n'
+            '  - "reject": the trainer declines/refuses/wants it discarded '
+            "(no revision wanted).\n"
+            '  - "revise": the trainer wants CHANGES to the proposal (e.g. '
+            '"make it more concrete", "change the part about X", "I don\'t '
+            'like this bit") — they are NOT rejecting it outright, they want '
+            "you to rework it. In this case you will regenerate the proposal "
+            "from the old one plus their feedback and re-send it.\n"
             '  - "none": the message is unrelated to this proposal, or too '
             "ambiguous to tell.\n"
             "The proposal awaiting their decision is:\n"
@@ -1009,6 +1036,13 @@ class GrilloGrowthPlugin:
                 f"[grillo_growth] Recon detected trainer REJECTION; discarded "
                 f"pending proposal: {result.get('message')}"
             )
+        elif decision == "revise":
+            feedback = (text or "").strip()
+            result = await self._revise_pending_proposal(feedback)
+            log_info(
+                f"[grillo_growth] Recon detected trainer REVISE; regenerated "
+                f"pending proposal: {result.get('message')}"
+            )
         else:
             log_debug(
                 "[grillo_growth] Recon: trainer message not a decision on the "
@@ -1016,6 +1050,218 @@ class GrilloGrowthPlugin:
             )
 
         return []
+
+    async def _revise_pending_proposal(self, feedback: str) -> dict[str, Any]:
+        """Regenerate the pending proposal incorporating the trainer's feedback.
+
+        Loads the existing pending proposal, asks the cortex to revise it (using
+        the old proposal as the base plus the trainer's feedback), then
+        OVERWRITES the pending slot with the new proposal and re-delivers it to
+        the trainer. The old proposal is effectively discarded (replaced), not
+        applied.
+        """
+        old_proposal = self._load_pending_proposal()
+        if old_proposal is None:
+            return {
+                "success": False,
+                "message": "No self-growth proposal is pending revision.",
+            }
+
+        feedback = (feedback or "").strip()
+        if not feedback:
+            log_info(
+                "[grillo_growth] Revising pending proposal without explicit "
+                "trainer feedback"
+            )
+
+        log_info("[grillo_growth] Building revision context from week diaries")
+        diary_blob = await self._fetch_recent_diaries()
+        current_growth = await get_current_growth() or ""
+        likes, _dislikes = self._current_likes_dislikes()
+        recall_query = " ".join(
+            [current_growth[:200]] + [str(x) for x in likes[:5]]
+        ).strip()
+        memories = await self._recall_memories(recall_query)
+
+        new_proposal = await self._ask_llm_for_revise(
+            old_proposal, feedback, diary_blob, memories
+        )
+        if not new_proposal:
+            return {
+                "success": False,
+                "message": "LLM produced no valid revision",
+            }
+
+        # Overwrite the pending slot with the revised proposal (discards the old).
+        await self._save_pending_proposal(new_proposal)
+
+        delivered = await self._deliver_proposal(new_proposal)
+        return {
+            "success": delivered,
+            "message": (
+                "Proposal revised and re-delivered for approval"
+                if delivered
+                else "Proposal revised but re-delivery failed"
+            ),
+            "proposal": new_proposal,
+        }
+
+    async def _ask_llm_for_revise(
+        self,
+        old_proposal: dict[str, Any],
+        feedback: str,
+        diary_blob: str,
+        memories: list[str],
+    ) -> dict[str, Any] | None:
+        """Rewrite the pending proposal incorporating the trainer's feedback.
+
+        Unlike ``_ask_llm_for_rewrite`` (which starts from the current growth
+        state), this starts from the OLD proposal the trainer already reviewed
+        and revises it according to the trainer's feedback, so the new proposal
+        is a refinement of the one they asked to change — not a fresh rewrite
+        from scratch.
+        """
+        persona = await self._get_persona_injection()
+        old_growth = str(old_proposal.get("self_growth", "")).strip()
+        old_likes = [str(x) for x in (old_proposal.get("likes") or [])]
+        old_dislikes = [str(x) for x in (old_proposal.get("dislikes") or [])]
+
+        memories_text = (
+            "\n".join(f"- {m}" for m in memories) if memories else "(none recalled)"
+        )
+
+        header = (
+            "You previously wrote a self-growth reflection for this person and "
+            "sent it to the trainer for review. The trainer has now given "
+            "feedback and asked you to revise it. REWRITE the reflection so that "
+            "it addresses their feedback, keeping what already worked and "
+            "changing only what they asked to change.\n\n"
+            "The output is NOT a diary entry — it becomes part of the persona "
+            "prompt that describes this person, so it MUST be written in the "
+            "SECOND PERSON, addressing them as 'you'. Never use first person "
+            "('I', 'my') and never third person ('they', 'the synth').\n\n"
+            "Be PRAGMATIC and CONCRETE. Build the note FROM the diary events "
+            "below and the previous reflection: name the actual people, "
+            "conversations, tasks, mistakes and small moments, and say what you "
+            "learned or want to do differently. Every sentence should point to "
+            "something that really happened or a real habit — not a slogan.\n\n"
+            "Do NOT reuse, paraphrase or continue vague phrasing. Absolutely "
+            "forbidden: grandiose or philosophical statements, and the words / "
+            "ideas 'digital growth', 'structural compliance', 'cognitive "
+            "consistency', 'consistency across cycles', 'operational "
+            "discipline', 'anchoring your identity', 'flourish', 'becoming'. "
+            "Those are empty filler — a reply containing any of them is wrong.\n\n"
+            "The result must be a single flowing free-form text that reads as a "
+            "coherent whole, not a diff. You may also revise the likes and "
+            "dislikes to reflect who this person is now. Keep the self-growth "
+            "text concise (a few short paragraphs at most)."
+        )
+
+        instructions = (
+            "Reply ONLY with valid JSON of the exact shape: "
+            '{"self_growth": "<full rewritten reflection, in the second person '
+            'using you/your>", '
+            '"likes": ["..."], "dislikes": ["..."]}. '
+            "The self_growth text MUST be second person (you are..., you "
+            "have...), never first or third person. "
+            "If you do not wish to change likes/dislikes, repeat the current "
+            "lists verbatim. Never include commentary outside the JSON."
+        )
+
+        prompt = {
+            "input": {
+                "type": "self_growth_revision",
+                "payload": {
+                    "description": header,
+                    "persona": persona,
+                    "previous_self_growth": old_growth,
+                    "previous_likes": old_likes,
+                    "previous_dislikes": old_dislikes,
+                    "trainer_feedback": feedback,
+                    "past_week_diary": diary_blob or "(no diary entries this week)",
+                    "recalled_memories": memories_text,
+                },
+            },
+            "context": {},
+            "instructions": instructions,
+        }
+
+        active_cortex = await get_active_cortex_engine(scope="grillo")
+        registry = get_cortex_registry()
+        engine = registry.get_engine(active_cortex)
+        if engine is None:
+            try:
+                engine = registry.load_engine(active_cortex)
+            except Exception as e:
+                log_error(
+                    f"[grillo_growth] Could not load Cortex engine '{active_cortex}': {e}"
+                )
+                try:
+                    engine = registry.load_engine("manual")
+                except Exception as e2:
+                    log_error(f"[grillo_growth] Manual fallback failed: {e2}")
+                    return None
+
+        parsed = await self._generate_and_parse(engine, prompt)
+        if parsed is None:
+            log_warning(
+                "[grillo_growth] First revision attempt did not yield a usable "
+                "JSON object; retrying once with a stricter correction prompt"
+            )
+            retry_prompt = dict(prompt)
+            retry_prompt["instructions"] = (
+                instructions
+                + " Your previous reply could not be parsed as a single JSON "
+                "object. Output the JSON object and NOTHING else: no prose, no "
+                "code fences, no leading or trailing text, not an array."
+            )
+            parsed = await self._generate_and_parse(engine, retry_prompt)
+
+        if parsed is not None and self._reads_as_abstract(
+            str(parsed.get("self_growth") or ""), diary_blob
+        ):
+            log_warning(
+                "[grillo_growth] Revision reads as abstract filler with no "
+                "grounding in the week's events; retrying once with concrete "
+                "diary excerpts pinned into the instructions"
+            )
+            excerpts = self._diary_excerpts(diary_blob)
+            grounding = (
+                "\n\nYour previous reply was too abstract: it did not mention "
+                "any real event from the past week. REWRITE it so that it is "
+                "built directly on these actual moments from the diary — refer "
+                "to them concretely (people, places, tasks, feelings), do NOT "
+                "invent generic themes, and do NOT use abstract slogans:\n" + excerpts
+            )
+            retry_prompt = dict(prompt)
+            retry_prompt["instructions"] = instructions + grounding
+            retried = await self._generate_and_parse(engine, retry_prompt)
+            if retried is not None and str(retried.get("self_growth") or "").strip():
+                parsed = retried
+
+        if parsed is None:
+            log_warning(
+                "[grillo_growth] LLM did not return a usable revision after "
+                "retry; skipping"
+            )
+            return None
+
+        new_growth = str(parsed.get("self_growth") or "").strip()
+        if not new_growth:
+            log_warning("[grillo_growth] LLM returned empty self_growth; skipping")
+            return None
+
+        new_likes = parsed.get("likes")
+        new_dislikes = parsed.get("dislikes")
+        return {
+            "self_growth": new_growth,
+            "likes": [str(x) for x in new_likes]
+            if isinstance(new_likes, list)
+            else old_likes,
+            "dislikes": [str(x) for x in new_dislikes]
+            if isinstance(new_dislikes, list)
+            else old_dislikes,
+        }
 
     async def _commit_proposal(
         self, proposal: dict[str, Any], *, source: str

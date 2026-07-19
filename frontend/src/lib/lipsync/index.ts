@@ -33,6 +33,11 @@ export class AnalyserLipSyncDriver implements LipSyncDriver {
     analyser.fftSize = 256
     analyser.smoothingTimeConstant = 0.2
     source.connect(analyser)
+    // Route the analyser to the destination so the audio graph is actually
+    // pulled: without this the analyser node is a "dead end" and reads a
+    // silent/zero buffer, leaving the mouth static. The legacy WebUI viewer
+    // connects analyser → ctx.destination for the same reason.
+    analyser.connect(context.destination)
     this.analyser = analyser
     this.buffer = new Uint8Array(analyser.frequencyBinCount)
   }
