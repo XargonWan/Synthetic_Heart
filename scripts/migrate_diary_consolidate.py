@@ -62,9 +62,9 @@ def migrate(dry_run: bool = False) -> None:
     # Find all days that have more than one row
     cur.execute(
         """
-        SELECT DATE(timestamp) AS day, COUNT(*) AS cnt
+        SELECT DATE(created_at) AS day, COUNT(*) AS cnt
         FROM ai_diary
-        GROUP BY DATE(timestamp)
+        GROUP BY DATE(created_at)
         HAVING cnt > 1
         ORDER BY day ASC
         """
@@ -89,7 +89,7 @@ def migrate(dry_run: bool = False) -> None:
             """
             SELECT id, content
             FROM ai_diary
-            WHERE DATE(timestamp) = %s
+            WHERE DATE(created_at) = %s
             ORDER BY id ASC
             """,
             (day,),

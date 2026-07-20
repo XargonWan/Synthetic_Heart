@@ -455,7 +455,7 @@ def test_load_chat_history_for_guild_queries(monkeypatch):
     assert len(result2) == 1
     cur2 = cursor_holder.get("cur")
     assert cur2 is not None
-    assert "timestamp > %s" in cur2.last_query
+    assert "created_at > %s" in cur2.last_query
     assert cur2.last_params[1] == "2026-02-01T00:00:00"
     assert cur2.last_params[-1] == 2
 

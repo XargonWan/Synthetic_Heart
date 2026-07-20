@@ -276,7 +276,7 @@ async def test_observer_db_check_updates_and_advances_last_run_ts(monkeypatch):
         query: str, params: tuple[object, ...] = ()
     ) -> list[dict[str, object]]:
         # This corresponds to the COUNT/MAX query used in _run_observer()
-        if "SELECT COUNT(*) as cnt, MAX(timestamp) as max_ts" in query:
+        if "SELECT COUNT(*) as cnt, MAX(created_at) as max_ts" in query:
             assert params
             assert params[0] == datetime.fromtimestamp(1000.0, tz=timezone.utc)
             return [{"cnt": 1, "max_ts": expected_max_ts}]

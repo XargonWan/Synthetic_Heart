@@ -252,7 +252,7 @@ async def peer_already_responded(
                     f"SELECT COUNT(*) FROM chat_history_cache "
                     f"WHERE interface_path LIKE %s "
                     f"AND sender_id IN ({placeholders}) "
-                    f"AND timestamp > %s",
+                    f"AND created_at > %s",
                     (path_prefix, *peer_id_strs, since_utc),
                 )
                 row = await cur.fetchone()
@@ -399,7 +399,7 @@ async def _self_replied_recently(chat_id: int, cooldown_seconds: float) -> bool:
         async with get_conn_ctx() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
-                    "SELECT MAX(timestamp) FROM chat_history_cache "
+                    "SELECT MAX(created_at) FROM chat_history_cache "
                     "WHERE interface_path LIKE %s AND sender_id = 'self'",
                     (path_prefix,),
                 )

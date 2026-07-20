@@ -175,10 +175,134 @@ async def _drop_legacy_recent_chats() -> None:
                 )
 
 
+async def _column_exists(cur: Any, table: str, column: str, db_type: str) -> bool:
+    """Return True if ``column`` exists on ``table`` in the current database."""
+    if db_type == "postgres":
+        await cur.execute(
+            "SELECT COUNT(*) FROM information_schema.columns "
+            "WHERE table_schema = 'public' AND table_name = %s AND column_name = %s",
+            (table, column),
+        )
+    else:
+        await cur.execute(
+            "SELECT COUNT(*) FROM information_schema.columns "
+            "WHERE table_schema = DATABASE() AND table_name = %s AND column_name = %s",
+            (table, column),
+        )
+    row = await cur.fetchone()
+    if row is None:
+        return False
+    value = next(iter(row.values())) if isinstance(row, dict) else row[0]
+    return bool(value)
+
+
+async def _rename_timestamp_columns() -> None:
+    """Rename the reserved-word ``timestamp`` DB column to ``created_at``.
+
+    On a fresh Postgres install the ORM auto-translates a bare ``timestamp``
+    column to ``timestamptz``, producing an invalid schema that breaks SyntH.
+    This migration renames the legacy ``timestamp`` column to ``created_at``
+    on existing MariaDB/Postgres installs so the new DDL matches at runtime.
+
+    ``mem_cells`` is special: its event-time column is renamed to
+    ``event_timestamp`` (it already has a distinct ``created_at`` row-creation
+    column). Idempotent: a no-op once already applied.
+    """
+    from core.db import _get_db_type, get_conn_ctx
+
+    # (table, old_column, new_column, column_type_for_mariadb)
+    renames: list[tuple[str, str, str, str]] = [
+        ("chat_history_cache", "timestamp", "created_at", "DATETIME"),
+        ("ai_diary", "timestamp", "created_at", "DATETIME"),
+        ("ai_diary_archive", "timestamp", "created_at", "DATETIME"),
+        ("memories", "timestamp", "created_at", "DATETIME"),
+        ("emotion_state", "timestamp", "created_at", "DATETIME"),
+        ("emotion_diary", "timestamp", "created_at", "DATETIME"),
+        ("message_map", "timestamp", "created_at", "REAL"),
+        ("radio_activity_log", "timestamp", "created_at", "DATETIME"),
+        ("mem_cells", "timestamp", "event_timestamp", "TIMESTAMPTZ"),
+    ]
+    # Index renames keyed by table (old index name -> new index name).
+    index_renames: dict[str, tuple[str, str]] = {
+        "chat_history_cache": ("idx_timestamp", "idx_created_at"),
+        "ai_diary": ("idx_timestamp", "idx_created_at"),
+        "ai_diary_archive": ("idx_timestamp", "idx_created_at"),
+        "memories": ("idx_timestamp", "idx_created_at"),
+        "emotion_state": ("idx_timestamp", "idx_created_at"),
+        "emotion_diary": ("idx_timestamp", "idx_created_at"),
+        "radio_activity_log": ("idx_radio_timestamp", "idx_radio_created_at"),
+        "mem_cells": ("idx_mem_cells_timestamp", "idx_mem_cells_event_timestamp"),
+    }
+
+    db_type = _get_db_type()
+    async with get_conn_ctx() as conn:
+        async with conn.cursor() as cur:
+            for table, old_col, new_col, col_type in renames:
+                if not await _table_exists(cur, table, db_type):
+                    continue
+                if not await _column_exists(cur, table, old_col, db_type):
+                    continue
+                if await _column_exists(cur, table, new_col, db_type):
+                    # Both columns present (partial migration) — leave as-is to
+                    # avoid data loss; the new code path uses ``new_col``.
+                    log_warning(
+                        f"[migrations] `{table}` has both `{old_col}` and "
+                        f"`{new_col}`; skipping rename to avoid data loss."
+                    )
+                    continue
+                try:
+                    if db_type == "postgres":
+                        await cur.execute(
+                            f'ALTER TABLE "{table}" '
+                            f'RENAME COLUMN "{old_col}" TO "{new_col}"'
+                        )
+                    else:
+                        await cur.execute(
+                            f"ALTER TABLE `{table}` "
+                            f"CHANGE `{old_col}` `{new_col}` {col_type}"
+                        )
+                    log_info(
+                        f"[migrations] Renamed `{table}.{old_col}` -> "
+                        f"`{table}.{new_col}`"
+                    )
+                except Exception as exc:
+                    log_error(
+                        f"[migrations] Failed to rename `{table}.{old_col}`: {exc}",
+                        exc,
+                    )
+
+            # Rename stale indexes that still reference the old column name.
+            for table, (old_idx, new_idx) in index_renames.items():
+                if not await _table_exists(cur, table, db_type):
+                    continue
+                try:
+                    if db_type == "postgres":
+                        await cur.execute(
+                            f'ALTER INDEX IF EXISTS "{old_idx}" RENAME TO "{new_idx}"'
+                        )
+                    else:
+                        await cur.execute(
+                            f"ALTER TABLE `{table}` "
+                            f"RENAME INDEX `{old_idx}` TO `{new_idx}`"
+                        )
+                except Exception as exc:
+                    # Index may not exist (e.g. never created) — non-fatal.
+                    log_warning(
+                        f"[migrations] Index rename `{old_idx}` -> "
+                        f"`{new_idx}` skipped: {exc}"
+                    )
+
+            try:
+                await conn.commit()
+            except Exception:
+                pass
+
+
 # Registry of startup migrations, applied in order. Each entry is
 # (name, coroutine-callable). Add new one-shot migrations here.
 _STARTUP_MIGRATIONS: list[tuple[str, Any]] = [
     ("drop_legacy_recent_chats", _drop_legacy_recent_chats),
+    ("rename_timestamp_columns", _rename_timestamp_columns),
 ]
 
 

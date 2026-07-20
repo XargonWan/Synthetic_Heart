@@ -6827,18 +6827,18 @@ class SynthWebUIInterface:
                         # Note: try to include involved_users if column exists
                         try:
                             query = f"""
-                                (SELECT id, content, personal_thought, timestamp, context_tags, involved_users, 
+                                (SELECT id, content, personal_thought, created_at, context_tags, involved_users, 
                                        emotions, interface, chat_id, thread_id, interaction_summary, user_message,
                                        FALSE as archived
                                 FROM ai_diary
                                 WHERE 1=1 {search_condition})
                                 UNION ALL
-                                (SELECT id, content, personal_thought, timestamp, context_tags, involved_users, 
+                                (SELECT id, content, personal_thought, created_at, context_tags, involved_users, 
                                        emotions, interface, chat_id, thread_id, interaction_summary, user_message,
                                        TRUE as archived
                                 FROM ai_diary_archive
                                 WHERE 1=1 {search_condition})
-                                ORDER BY timestamp DESC
+                                ORDER BY created_at DESC
                                 LIMIT %s OFFSET %s
                             """
                             await cur.execute(query, search_params + [limit, offset])
@@ -6846,18 +6846,18 @@ class SynthWebUIInterface:
                             # If involved_users column doesn't exist, fallback to query without it
                             if "Unknown column" in str(e):
                                 query = f"""
-                                    (SELECT id, content, personal_thought, timestamp, context_tags, '[]' as involved_users, 
+                                    (SELECT id, content, personal_thought, created_at, context_tags, '[]' as involved_users, 
                                            emotions, interface, chat_id, thread_id, interaction_summary, user_message,
                                            FALSE as archived
                                     FROM ai_diary
                                     WHERE 1=1 {search_condition})
                                     UNION ALL
-                                    (SELECT id, content, personal_thought, timestamp, context_tags, '[]' as involved_users, 
+                                    (SELECT id, content, personal_thought, created_at, context_tags, '[]' as involved_users, 
                                            emotions, interface, chat_id, thread_id, interaction_summary, user_message,
                                            TRUE as archived
                                     FROM ai_diary_archive
                                     WHERE 1=1 {search_condition})
-                                    ORDER BY timestamp DESC
+                                    ORDER BY created_at DESC
                                     LIMIT %s OFFSET %s
                                 """
                                 await cur.execute(
@@ -6868,12 +6868,12 @@ class SynthWebUIInterface:
                     else:
                         try:
                             query = f"""
-                                SELECT id, content, personal_thought, timestamp, context_tags, involved_users, 
+                                SELECT id, content, personal_thought, created_at, context_tags, involved_users, 
                                        emotions, interface, chat_id, thread_id, interaction_summary, user_message,
                                        FALSE as archived
                                 FROM ai_diary
                                 WHERE 1=1 {search_condition}
-                                ORDER BY timestamp DESC
+                                ORDER BY created_at DESC
                                 LIMIT %s OFFSET %s
                             """
                             await cur.execute(query, search_params + [limit, offset])
@@ -6881,12 +6881,12 @@ class SynthWebUIInterface:
                             # If involved_users column doesn't exist, fallback
                             if "Unknown column" in str(e):
                                 query = f"""
-                                    SELECT id, content, personal_thought, timestamp, context_tags, '[]' as involved_users, 
+                                    SELECT id, content, personal_thought, created_at, context_tags, '[]' as involved_users, 
                                            emotions, interface, chat_id, thread_id, interaction_summary, user_message,
                                            FALSE as archived
                                     FROM ai_diary
                                     WHERE 1=1 {search_condition}
-                                    ORDER BY timestamp DESC
+                                    ORDER BY created_at DESC
                                     LIMIT %s OFFSET %s
                                 """
                                 await cur.execute(
@@ -7062,7 +7062,7 @@ class SynthWebUIInterface:
 
                     # Count distinct days that match the filter
                     count_query = f"""
-                        SELECT COUNT(DISTINCT DATE(timestamp))
+                        SELECT COUNT(DISTINCT DATE(created_at))
                         FROM ai_diary
                         {where_clause}
                     """
@@ -7079,12 +7079,12 @@ class SynthWebUIInterface:
                             MAX(id)                                                           AS id,
                             GROUP_CONCAT(content ORDER BY id ASC SEPARATOR '\n\n---\n\n')    AS content,
                             MAX(personal_thought)                                             AS personal_thought,
-                            MAX(timestamp)                                                    AS timestamp,
+                            MAX(created_at)                                                    AS timestamp,
                             JSON_EXTRACT(MAX(emotions), '$[0].type')                          AS primary_emotion
                         FROM ai_diary
                         {where_clause}
-                        GROUP BY DATE(timestamp)
-                        ORDER BY MAX(timestamp) {order}
+                        GROUP BY DATE(created_at)
+                        ORDER BY MAX(created_at) {order}
                         LIMIT %s OFFSET %s
                     """
                     await cur.execute(query, search_params + [per_page, offset])
@@ -7897,8 +7897,8 @@ class SynthWebUIInterface:
             async with get_conn_ctx() as conn:
                 async with conn.cursor() as cur:
                     await cur.execute(
-                        "DELETE FROM ai_diary WHERE DATE(timestamp) = "
-                        "(SELECT DATE(timestamp) FROM ai_diary WHERE id = %s)",
+                        "DELETE FROM ai_diary WHERE DATE(created_at) = "
+                        "(SELECT DATE(created_at) FROM ai_diary WHERE id = %s)",
                         (entry_id,),
                     )
                     deleted = getattr(cur, "rowcount", 0) or 0
@@ -8294,10 +8294,10 @@ class SynthWebUIInterface:
             async with get_conn_ctx() as conn:
                 async with conn.cursor() as cur:
                     query = f"""
-                        SELECT interface_path, sender_name, message_text, timestamp, metadata
+                        SELECT interface_path, sender_name, message_text, created_at, metadata
                         FROM chat_history_cache
                         WHERE {where_clause}
-                        ORDER BY timestamp {order}
+                        ORDER BY created_at {order}
                         LIMIT %s OFFSET %s
                     """
 
@@ -8315,7 +8315,7 @@ class SynthWebUIInterface:
                             raw_interface_path = row.get("interface_path")
                             raw_sender_name = row.get("sender_name")
                             raw_message_text = row.get("message_text")
-                            raw_timestamp = row.get("timestamp")
+                            raw_timestamp = row.get("created_at")
                             raw_meta = row.get("metadata")
                         else:
                             raw_interface_path = row[0]

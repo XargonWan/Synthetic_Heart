@@ -110,7 +110,7 @@ class RuleBasedMemCellCurator:
             except ValueError:
                 pass
 
-        ts = summary.timestamp
+        ts = summary.event_timestamp
         if ts.tzinfo is None:
             from datetime import timezone as _tz
 
@@ -209,7 +209,7 @@ class SoulCompiler:
                     atomic_facts=atomic_facts,
                     emotional_tag=self._to_emotional_tag(raw_cell),
                     foresight_signals=self._to_foresight_signals(raw_cell),
-                    timestamp=cell_timestamp,
+                    event_timestamp=cell_timestamp,
                     session_id=session_id,
                     embedding=embedding,
                 )
@@ -268,7 +268,7 @@ class SoulCompiler:
             input={"pending_cells": len(pending_cells), "clusters": len(clusters)},
         ) as trace:
             for cells in clusters.values():
-                anchor = min(c.timestamp for c in cells)
+                anchor = min(c.event_timestamp for c in cells)
                 scene_id = new_scene_id(anchor)
                 summary = await self.summary_builder.summarize_scene(cells=cells)
                 scene = MemScene(
@@ -292,7 +292,7 @@ class SoulCompiler:
                             subject=parts[0],
                             predicate=parts[1],
                             object=parts[2],
-                            valid_from=cell.timestamp,
+                            valid_from=cell.event_timestamp,
                             valid_until=None,
                             scene_id=scene_id,
                         )
@@ -442,7 +442,7 @@ class SoulCompiler:
                 )
 
                 def _salience(s: MemCellSummary) -> float:
-                    ts = s.timestamp
+                    ts = s.event_timestamp
                     if ts.tzinfo is None:
                         ts = ts.replace(tzinfo=_tz.utc)
                     age_s = max(0.0, (now - ts.astimezone(_tz.utc)).total_seconds())

@@ -259,7 +259,7 @@ async def _grillo_recent_same_message(
             WHERE interface_path = %s
               AND COALESCE(sender_id,'') IN (%s,%s)
               AND message_text = %s
-              AND timestamp > %s
+              AND created_at > %s
             """,
             (interface_path, "self", "synth", text, threshold),
         )

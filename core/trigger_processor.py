@@ -21,8 +21,8 @@ async def process_triggers_for_emotion(emotion: dict) -> int:
     scope = emotion.get("scope", "auto")  # fallback if not defined
     query = """
         SELECT content FROM memories
-        WHERE timestamp >= %s AND scope = %s
-        ORDER BY timestamp DESC
+        WHERE created_at >= %s AND scope = %s
+        ORDER BY created_at DESC
     """
     async with get_conn_ctx() as conn:
         try:

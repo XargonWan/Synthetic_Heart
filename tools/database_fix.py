@@ -88,10 +88,10 @@ TABLE_DEFINITIONS: list[tuple[str, str]] = [
             sender_name VARCHAR(255),
             sender_id VARCHAR(255),
             message_text LONGTEXT NOT NULL,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             INDEX idx_interface_path (interface_path),
-            INDEX idx_timestamp (timestamp),
-            UNIQUE KEY uniq_message (interface_path, timestamp)
+            INDEX idx_created_at (created_at),
+            UNIQUE KEY uniq_message (interface_path, created_at)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
         """,
     ),
@@ -131,14 +131,14 @@ TABLE_DEFINITIONS: list[tuple[str, str]] = [
             personal_thought TEXT COMMENT 'synth personal reflection about the interaction',
             emotions TEXT DEFAULT '[]' COMMENT 'synth emotions about this interaction',
             interaction_summary TEXT COMMENT 'Brief summary of what happened',
-            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             interface VARCHAR(50),
             chat_id VARCHAR(255),
             thread_id VARCHAR(255),
             user_message TEXT COMMENT 'What the user said that triggered this response',
             context_tags TEXT DEFAULT '[]' COMMENT 'Tags about the context/topic',
             involved_users TEXT DEFAULT '[]' COMMENT 'JSON list of users involved in the interaction',
-            INDEX idx_timestamp (timestamp),
+            INDEX idx_created_at (created_at),
             INDEX idx_interface_chat (interface, chat_id)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
         """,
@@ -152,14 +152,14 @@ TABLE_DEFINITIONS: list[tuple[str, str]] = [
             personal_thought TEXT COMMENT 'synth personal reflection about the interaction',
             emotions TEXT DEFAULT '[]' COMMENT 'synth emotions about this interaction',
             interaction_summary TEXT COMMENT 'Brief summary of what happened',
-            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             interface VARCHAR(50),
             chat_id VARCHAR(255),
             thread_id VARCHAR(255),
             user_message TEXT COMMENT 'What the user said that triggered this response',
             context_tags TEXT DEFAULT '[]' COMMENT 'Tags about the context/topic',
             involved_users TEXT DEFAULT '[]' COMMENT 'JSON list of users involved in the interaction',
-            INDEX idx_timestamp (timestamp)
+            INDEX idx_created_at (created_at)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
         """,
     ),
@@ -170,10 +170,10 @@ TABLE_DEFINITIONS: list[tuple[str, str]] = [
             id INT AUTO_INCREMENT PRIMARY KEY,
             emotion_name VARCHAR(100) NOT NULL,
             intensity FLOAT NOT NULL DEFAULT 5.0,
-            timestamp DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
             updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
             INDEX idx_emotion_name (emotion_name),
-            INDEX idx_timestamp (timestamp)
+            INDEX idx_created_at (created_at)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
         """,
     ),
@@ -190,8 +190,8 @@ TABLE_DEFINITIONS: list[tuple[str, str]] = [
             trigger_condition VARCHAR(255),
             decision_logic TEXT,
             next_check DATETIME,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-            INDEX idx_timestamp (timestamp)
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            INDEX idx_created_at (created_at)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
         """,
     ),
@@ -200,7 +200,7 @@ TABLE_DEFINITIONS: list[tuple[str, str]] = [
         """
         CREATE TABLE IF NOT EXISTS memories (
             id INT AUTO_INCREMENT PRIMARY KEY,
-            timestamp DATETIME NOT NULL,
+            created_at DATETIME NOT NULL,
             content TEXT NOT NULL,
             author VARCHAR(100),
             source VARCHAR(100),
@@ -261,7 +261,7 @@ TABLE_DEFINITIONS: list[tuple[str, str]] = [
             trainer_message_id INTEGER PRIMARY KEY,
             chat_id BIGINT NOT NULL,
             message_id INTEGER NOT NULL,
-            timestamp DOUBLE
+            created_at DOUBLE
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
         """,
     ),
@@ -470,7 +470,7 @@ EXPECTED_COLUMNS: dict[str, list[tuple[str, str]]] = {
         ("sender_name", "sender_name VARCHAR(255)"),
         ("sender_id", "sender_id VARCHAR(255)"),
         ("message_text", "message_text LONGTEXT NOT NULL"),
-        ("timestamp", "`timestamp` DATETIME DEFAULT CURRENT_TIMESTAMP"),
+        ("created_at", "`created_at` DATETIME DEFAULT CURRENT_TIMESTAMP"),
     ],
     "chat_session_meta": [
         ("interface_path", "interface_path VARCHAR(512) NOT NULL"),
@@ -507,7 +507,7 @@ EXPECTED_COLUMNS: dict[str, list[tuple[str, str]]] = {
             "interaction_summary",
             "interaction_summary TEXT COMMENT 'Brief summary of what happened'",
         ),
-        ("timestamp", "`timestamp` TIMESTAMP DEFAULT CURRENT_TIMESTAMP"),
+        ("created_at", "`created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP"),
         ("interface", "interface VARCHAR(50)"),
         ("chat_id", "chat_id VARCHAR(255)"),
         ("thread_id", "thread_id VARCHAR(255)"),
@@ -542,7 +542,7 @@ EXPECTED_COLUMNS: dict[str, list[tuple[str, str]]] = {
             "interaction_summary",
             "interaction_summary TEXT COMMENT 'Brief summary of what happened'",
         ),
-        ("timestamp", "`timestamp` TIMESTAMP DEFAULT CURRENT_TIMESTAMP"),
+        ("created_at", "`created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP"),
         ("interface", "interface VARCHAR(50)"),
         ("chat_id", "chat_id VARCHAR(255)"),
         ("thread_id", "thread_id VARCHAR(255)"),
@@ -563,7 +563,7 @@ EXPECTED_COLUMNS: dict[str, list[tuple[str, str]]] = {
         ("id", "id INT AUTO_INCREMENT PRIMARY KEY"),
         ("emotion_name", "emotion_name VARCHAR(100) NOT NULL"),
         ("intensity", "intensity FLOAT NOT NULL DEFAULT 5.0"),
-        ("timestamp", "`timestamp` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP"),
+        ("created_at", "`created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP"),
         (
             "updated_at",
             "updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP",
@@ -579,11 +579,11 @@ EXPECTED_COLUMNS: dict[str, list[tuple[str, str]]] = {
         ("trigger_condition", "trigger_condition VARCHAR(255)"),
         ("decision_logic", "decision_logic TEXT"),
         ("next_check", "next_check DATETIME"),
-        ("timestamp", "`timestamp` DATETIME DEFAULT CURRENT_TIMESTAMP"),
+        ("created_at", "`created_at` DATETIME DEFAULT CURRENT_TIMESTAMP"),
     ],
     "memories": [
         ("id", "id INT AUTO_INCREMENT PRIMARY KEY"),
-        ("timestamp", "`timestamp` DATETIME NOT NULL"),
+        ("created_at", "`created_at` DATETIME NOT NULL"),
         ("content", "content TEXT NOT NULL"),
         ("author", "author VARCHAR(100)"),
         ("source", "source VARCHAR(100)"),
@@ -626,7 +626,7 @@ EXPECTED_COLUMNS: dict[str, list[tuple[str, str]]] = {
         ("trainer_message_id", "trainer_message_id INTEGER NOT NULL"),
         ("chat_id", "chat_id BIGINT NOT NULL"),
         ("message_id", "message_id INTEGER NOT NULL"),
-        ("timestamp", "`timestamp` DOUBLE"),
+        ("created_at", "`created_at` DOUBLE"),
     ],
     "blocklist": [
         ("user_id", "user_id BIGINT NOT NULL"),

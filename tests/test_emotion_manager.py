@@ -104,7 +104,7 @@ class TestEmotionState:
 
         assert emotion.emotion_name == "happy"
         assert emotion.intensity == 8.0
-        assert emotion.timestamp == now
+        assert emotion.created_at == now
 
     def test_emotion_state_to_dict(self):
         """Test EmotionState serialization to dict."""

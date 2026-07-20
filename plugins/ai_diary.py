@@ -310,14 +310,14 @@ async def init_diary_table():
                 personal_thought TEXT COMMENT 'synth personal reflection about the interaction',
                 emotions TEXT DEFAULT '[]' COMMENT 'synth emotions about this interaction',
                 interaction_summary TEXT COMMENT 'Brief summary of what happened',
-                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 interface VARCHAR(50),
                 chat_id VARCHAR(255),
                 thread_id VARCHAR(255),
                 user_message TEXT COMMENT 'What the user said that triggered this response',
                 context_tags TEXT DEFAULT '[]' COMMENT 'Tags about the context/topic',
                 involved_users TEXT DEFAULT '[]' COMMENT 'JSON list of users involved in the interaction',
-                INDEX idx_timestamp (timestamp),
+                INDEX idx_created_at (created_at),
                 INDEX idx_interface_chat (interface, chat_id)
             )
         """)
@@ -337,7 +337,7 @@ async def init_diary_table():
         await cursor.execute("""
             CREATE TABLE IF NOT EXISTS memories (
                 id INT AUTO_INCREMENT PRIMARY KEY,
-                timestamp DATETIME NOT NULL,
+                created_at DATETIME NOT NULL,
                 content TEXT NOT NULL,
                 author VARCHAR(100),
                 source VARCHAR(100),
@@ -365,8 +365,8 @@ async def init_diary_table():
                 trigger_condition VARCHAR(255),
                 decision_logic TEXT,
                 next_check DATETIME,
-                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-                INDEX idx_timestamp (timestamp)
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                INDEX idx_created_at (created_at)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
         """)
 
@@ -378,14 +378,14 @@ async def init_diary_table():
                 personal_thought TEXT COMMENT 'synth personal reflection about the interaction',
                 emotions TEXT DEFAULT '[]' COMMENT 'synth emotions about this interaction',
                 interaction_summary TEXT COMMENT 'Brief summary of what happened',
-                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 interface VARCHAR(50),
                 chat_id VARCHAR(255),
                 thread_id VARCHAR(255),
                 user_message TEXT COMMENT 'What the user said that triggered this response',
                 context_tags TEXT DEFAULT '[]' COMMENT 'Tags about the context/topic',
                 involved_users TEXT DEFAULT '[]' COMMENT 'JSON list of users involved in the interaction',
-                INDEX idx_timestamp (timestamp),
+                INDEX idx_created_at (created_at),
                 INDEX idx_interface_chat (interface, chat_id)
             )
         """)
@@ -412,13 +412,13 @@ async def recreate_diary_table():
                 personal_thought TEXT COMMENT 'synth personal reflection about the interaction',
                 emotions TEXT DEFAULT '[]' COMMENT 'synth emotions about this interaction',
                 interaction_summary TEXT COMMENT 'Brief summary of what happened',
-                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 interface VARCHAR(50),
                 chat_id VARCHAR(255),
                 thread_id VARCHAR(255),
                 user_message TEXT COMMENT 'What the user said that triggered this response',
                 context_tags TEXT DEFAULT '[]' COMMENT 'Tags about the context/topic',
-                INDEX idx_timestamp (timestamp),
+                INDEX idx_created_at (created_at),
                 INDEX idx_interface_chat (interface, chat_id)
             )
         """)
@@ -690,8 +690,8 @@ async def _upsert_diary_impl(
                 "SELECT id, content, personal_thought, interaction_summary, "
                 "user_message, emotions, context_tags, involved_users, "
                 "interface, chat_id, thread_id "
-                "FROM ai_diary WHERE DATE(timestamp) = CURDATE() "
-                "ORDER BY timestamp DESC LIMIT 1"
+                "FROM ai_diary WHERE DATE(created_at) = CURDATE() "
+                "ORDER BY created_at DESC LIMIT 1"
             )
             existing = await cursor.fetchone()
             if existing:
@@ -735,7 +735,7 @@ async def _upsert_diary_impl(
                     SET content=%s, personal_thought=%s, interaction_summary=%s,
                         user_message=%s, emotions=%s, context_tags=%s,
                         involved_users=%s, interface=%s, chat_id=%s,
-                        thread_id=%s, timestamp=NOW()
+                        thread_id=%s, created_at=NOW()
                     WHERE id=%s
                     """
                 update_params = (
@@ -849,7 +849,7 @@ def add_diary_entry(
                     _execute("""
                     CREATE TABLE IF NOT EXISTS ai_diary (
                         id INT AUTO_INCREMENT PRIMARY KEY,
-                        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                         content LONGTEXT,
                         personal_thought TEXT,
                         emotions JSON,
@@ -972,7 +972,7 @@ async def add_diary_entry_async(
                 await _execute("""
                     CREATE TABLE IF NOT EXISTS ai_diary (
                         id INT AUTO_INCREMENT PRIMARY KEY,
-                        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                         content LONGTEXT,
                         personal_thought TEXT,
                         emotions JSON,
@@ -1091,11 +1091,11 @@ async def get_recent_entries_async(
 
         entries = await _fetchall(
             """
-            SELECT id, content, personal_thought, timestamp, context_tags, involved_users, 
+            SELECT id, content, personal_thought, created_at, context_tags, involved_users, 
                    emotions, interface, chat_id, thread_id, interaction_summary, user_message
             FROM ai_diary
-            WHERE timestamp >= %s
-            ORDER BY timestamp DESC
+            WHERE created_at >= %s
+            ORDER BY created_at DESC
             """,
             (cutoff_date,),
         )
@@ -1108,7 +1108,7 @@ async def get_recent_entries_async(
             entry["context_tags"] = _parse_json_list(entry.get("context_tags"))
             entry["involved_users"] = _parse_json_list(entry.get("involved_users"))
             entry["emotions"] = _parse_json_list(entry.get("emotions"))
-            entry["timestamp"] = _isoformat_timestamp(entry.get("timestamp"))
+            entry["created_at"] = _isoformat_timestamp(entry.get("created_at"))
 
         log_debug(f"[ai_diary] After JSON parsing: {len(entries)} entries")
 
@@ -1176,11 +1176,11 @@ def get_entries_by_tags(tags: List[str], limit: int = 10) -> List[Dict[str, Any]
             return []
 
         query = f"""
-            SELECT id, content, personal_thought, timestamp, context_tags, involved_users, 
+            SELECT id, content, personal_thought, created_at, context_tags, involved_users, 
                    emotions, interface, chat_id, thread_id, interaction_summary, user_message
             FROM ai_diary
             WHERE {" OR ".join(tag_conditions)}
-            ORDER BY timestamp DESC
+            ORDER BY created_at DESC
             LIMIT %s
         """
         params.append(limit)
@@ -1193,7 +1193,7 @@ def get_entries_by_tags(tags: List[str], limit: int = 10) -> List[Dict[str, Any]
             entry["context_tags"] = _parse_json_list(entry.get("context_tags"))
             entry["involved_users"] = _parse_json_list(entry.get("involved_users"))
             entry["emotions"] = _parse_json_list(entry.get("emotions"))
-            entry["timestamp"] = _isoformat_timestamp(entry.get("timestamp"))
+            entry["created_at"] = _isoformat_timestamp(entry.get("created_at"))
 
         return entries
 
@@ -1211,13 +1211,13 @@ def get_entries_with_person(person: str, limit: int = 10) -> List[Dict[str, Any]
         entries = _run(
             _fetchall(
                 """
-            SELECT id, content, personal_thought, timestamp, context_tags, involved_users, 
+            SELECT id, content, personal_thought, created_at, context_tags, involved_users, 
                    emotions, interface, chat_id, thread_id, interaction_summary, user_message
             FROM ai_diary
             WHERE """
                 + " OR ".join(person_conditions)
                 + """
-            ORDER BY timestamp DESC
+            ORDER BY created_at DESC
             LIMIT %s
             """,
                 tuple(person_params + [limit]),
@@ -1230,7 +1230,7 @@ def get_entries_with_person(person: str, limit: int = 10) -> List[Dict[str, Any]
             entry["context_tags"] = _parse_json_list(entry.get("context_tags"))
             entry["involved_users"] = _parse_json_list(entry.get("involved_users"))
             entry["emotions"] = _parse_json_list(entry.get("emotions"))
-            entry["timestamp"] = _isoformat_timestamp(entry.get("timestamp"))
+            entry["created_at"] = _isoformat_timestamp(entry.get("created_at"))
 
         return entries
 
@@ -1278,14 +1278,14 @@ def cleanup_old_entries(days_to_keep: int = 30) -> int:
         # First count how many will be deleted
         count_result = _run(
             _fetchall(
-                "SELECT COUNT(*) as count FROM ai_diary WHERE timestamp < %s",
+                "SELECT COUNT(*) as count FROM ai_diary WHERE created_at < %s",
                 (cutoff_date,),
             )
         )
         count = count_result[0]["count"] if count_result else 0
 
         # Delete old entries
-        _run(_execute("DELETE FROM ai_diary WHERE timestamp < %s", (cutoff_date,)))
+        _run(_execute("DELETE FROM ai_diary WHERE created_at < %s", (cutoff_date,)))
 
         log_info(f"[ai_diary] Cleaned up {count} old diary entries")
         return count
@@ -1353,7 +1353,7 @@ def _format_single_entry_for_prompt(entry: dict) -> str:
     """Format a single diary entry as it would appear in the prompt."""
     lines = []
 
-    timestamp = entry.get("timestamp", "Unknown time")
+    timestamp = entry.get("created_at", "Unknown time")
     if timestamp and len(timestamp) > 19:  # Truncate ISO timestamp
         timestamp = timestamp[:19].replace("T", " ")
 
@@ -1665,11 +1665,11 @@ class DiaryPlugin:
             cutoff_date = datetime.now() - timedelta(days=diary_days)
             recent_entries = await _fetchall(
                 """
-                SELECT id, content, personal_thought, timestamp, context_tags, involved_users, 
+                SELECT id, content, personal_thought, created_at, context_tags, involved_users, 
                        emotions, interface, chat_id, thread_id, interaction_summary, user_message
                 FROM ai_diary
-                WHERE timestamp >= %s
-                ORDER BY timestamp DESC
+                WHERE created_at >= %s
+                ORDER BY created_at DESC
                 """,
                 (cutoff_date,),
             )
@@ -1679,7 +1679,7 @@ class DiaryPlugin:
                 entry["context_tags"] = _parse_json_list(entry.get("context_tags"))
                 entry["involved_users"] = _parse_json_list(entry.get("involved_users"))
                 entry["emotions"] = _parse_json_list(entry.get("emotions"))
-                entry["timestamp"] = _isoformat_timestamp(entry.get("timestamp"))
+                entry["created_at"] = _isoformat_timestamp(entry.get("created_at"))
 
             duration = time.time() - start
             if duration > 0.1:
@@ -1827,7 +1827,7 @@ class DiaryPlugin:
 
                 if merge_timestamp is not None:
                     await _execute(
-                        "UPDATE ai_diary SET content=%s, timestamp=%s WHERE id=%s",
+                        "UPDATE ai_diary SET content=%s, created_at=%s WHERE id=%s",
                         (new_content, merge_timestamp, int(entry_id)),
                     )
                 else:
@@ -1861,8 +1861,8 @@ class DiaryPlugin:
                     extra_stale = await _fetchall(
                         """
                         SELECT id FROM ai_diary
-                        WHERE DATE(timestamp) = (
-                            SELECT DATE(timestamp) FROM ai_diary WHERE id = %s
+                        WHERE DATE(created_at) = (
+                            SELECT DATE(created_at) FROM ai_diary WHERE id = %s
                         )
                         AND id != %s
                         """,
@@ -1942,7 +1942,7 @@ def archive_diary_entries(entry_ids: List[int]) -> Dict[str, Any]:
                 _execute(
                     """
                 INSERT INTO ai_diary_archive 
-                (id, content, personal_thought, emotions, interaction_summary, timestamp, 
+                (id, content, personal_thought, emotions, interaction_summary, created_at, 
                  interface, chat_id, thread_id, user_message, context_tags)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
@@ -1952,7 +1952,7 @@ def archive_diary_entries(entry_ids: List[int]) -> Dict[str, Any]:
                         entry["personal_thought"],
                         entry["emotions"],
                         entry["interaction_summary"],
-                        entry["timestamp"],
+                        entry["created_at"],
                         entry["interface"],
                         entry["chat_id"],
                         entry["thread_id"],
@@ -2007,7 +2007,7 @@ def unarchive_diary_entries(entry_ids: List[int]) -> Dict[str, Any]:
                 _execute(
                     """
                 INSERT INTO ai_diary 
-                (id, content, personal_thought, emotions, interaction_summary, timestamp, 
+                (id, content, personal_thought, emotions, interaction_summary, created_at, 
                  interface, chat_id, thread_id, user_message, context_tags)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
@@ -2017,7 +2017,7 @@ def unarchive_diary_entries(entry_ids: List[int]) -> Dict[str, Any]:
                         entry["personal_thought"],
                         entry["emotions"],
                         entry["interaction_summary"],
-                        entry["timestamp"],
+                        entry["created_at"],
                         entry["interface"],
                         entry["chat_id"],
                         entry["thread_id"],
@@ -2080,11 +2080,11 @@ def get_all_diary_entries(include_archived: bool = False) -> List[Dict[str, Any]
         entries = _run(
             _fetchall(
                 """
-            SELECT id, content, personal_thought, timestamp, context_tags, 
+            SELECT id, content, personal_thought, created_at, context_tags, 
                    emotions, interface, chat_id, thread_id, interaction_summary, user_message,
                    FALSE as archived
             FROM ai_diary
-            ORDER BY timestamp DESC
+            ORDER BY created_at DESC
             """
             )
         )
@@ -2093,11 +2093,11 @@ def get_all_diary_entries(include_archived: bool = False) -> List[Dict[str, Any]
             archived_entries = _run(
                 _fetchall(
                     """
-                SELECT id, content, personal_thought, timestamp, context_tags, 
+                SELECT id, content, personal_thought, created_at, context_tags, 
                        emotions, interface, chat_id, thread_id, interaction_summary, user_message,
                        TRUE as archived
                 FROM ai_diary_archive
-                ORDER BY timestamp DESC
+                ORDER BY created_at DESC
                 """
                 )
             )
@@ -2107,7 +2107,7 @@ def get_all_diary_entries(include_archived: bool = False) -> List[Dict[str, Any]
         for entry in entries:
             entry["context_tags"] = _parse_json_list(entry.get("context_tags"))
             entry["emotions"] = _parse_json_list(entry.get("emotions"))
-            entry["timestamp"] = _isoformat_timestamp(entry.get("timestamp"))
+            entry["created_at"] = _isoformat_timestamp(entry.get("created_at"))
 
         return entries
 

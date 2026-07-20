@@ -577,7 +577,7 @@ def _select_recent_diary_columns(cur: Any, target: str | None = None) -> list[st
     columns = set(_get_table_columns(cur, "ai_diary", target))
     preferred = [
         "id",
-        "timestamp",
+        "created_at",
         "content",
         "interface",
         "chat_id",
@@ -775,7 +775,7 @@ def get_memories(
                 where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
                 params.append(limit)
                 cur.execute(
-                    f"SELECT id, timestamp, content, author, tags, scope, emotion, intensity "
+                    f"SELECT id, created_at, content, author, tags, scope, emotion, intensity "
                     f"FROM memories {where} ORDER BY id DESC LIMIT %s",
                     params,
                 )
@@ -812,7 +812,7 @@ def get_emotion_state(target: Optional[str] = None) -> str:
 def get_recent_diary(limit: int = 10, target: Optional[str] = None) -> str:
     """Read recent diary rows from the selected target.
 
-    This helper now uses the canonical `timestamp` column and dynamically limits
+    This helper now uses the canonical `created_at` column and dynamically limits
     the selected columns to those actually present in the current schema.
     """
     limit = min(max(1, limit), 50)
@@ -855,7 +855,7 @@ def get_chat_history(
         with conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT id, sender_name, sender_id, message_text, timestamp "
+                    "SELECT id, sender_name, sender_id, message_text, created_at "
                     "FROM chat_history_cache WHERE interface_path = %s ORDER BY id DESC LIMIT %s",
                     (interface_path, limit),
                 )
@@ -1000,7 +1000,7 @@ def add_memory(
         with conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "INSERT INTO memories (timestamp, content, author, tags, scope, emotion) "
+                    "INSERT INTO memories (created_at, content, author, tags, scope, emotion) "
                     "VALUES (NOW(), %s, %s, %s, %s, %s)",
                     (content, author, tags, scope, emotion),
                 )

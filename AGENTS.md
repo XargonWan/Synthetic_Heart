@@ -311,6 +311,8 @@ If any step fails, fix it before proceeding.
   - trigger-word routing
   - regex-based intent detection
   - hardcoded phrase matching for feature activation
+- **Never use SQL reserved words as bare column names.**
+  `timestamp` is a PostgreSQL reserved word. A bare `timestamp` column on a fresh Postgres install is auto-translated by the ORM to `timestamptz`, producing an invalid schema that leaves SyntH broken (T-pose, unable to do anything). Always name time columns explicitly, e.g. `created_at`, `event_timestamp`, `updated_at`. This applies to every DDL in `init-db.sql`, `scripts/sql/*.sql`, inline plugin DDL, and `core/migrations.py`. Public API dict keys returned to the WebUI/JS may still be named `"timestamp"` — only the DB-column SQL references are forbidden from using the reserved word.
 
 ---
 
@@ -382,6 +384,12 @@ docker exec synth-dev tail -f /app/logs/synth.log | grep -E "\[grillo\]|grillo"
 > **Status:** known / in progress / workaround in place
 > **Notes:** anything that helps the next agent understand it fast
 > ```
+
+### Bare `timestamp` column breaks fresh Postgres installs  <!-- 2025-01-01 -->
+**Symptom:** On a fresh PostgreSQL install, SyntH comes up in a broken state — avatar stuck in T-pose, unable to do anything. Root cause: a bare `timestamp` column is a PostgreSQL reserved word; the ORM auto-translates it to `timestamptz`, producing an invalid schema.
+**Location:** Any DDL using a bare `timestamp` column (`init-db.sql`, `scripts/sql/*.sql`, inline plugin DDL, `core/migrations.py`). Historically affected `chat_history_cache`, `ai_diary`, `ai_diary_archive`, `memories`, `emotion_state`, `emotion_diary`, `message_map`, `radio_activity_log`, and `mem_cells`.
+**Status:** fixed (renamed to `created_at` / `event_timestamp`; startup auto-migration added in `core/migrations.py::_rename_timestamp_columns`).
+**Notes:** A startup migration (`_rename_timestamp_columns`, registered in `_STARTUP_MIGRATIONS`) renames any lingering `timestamp` columns to `created_at` (and `mem_cells.timestamp` → `event_timestamp`) and renames stale indexes (`idx_timestamp` → `idx_created_at`, etc.) on both Postgres and MariaDB. See the Hard Rules entry: never use `timestamp` as a bare DB column name. Public API dict keys named `"timestamp"` returned to the WebUI/JS are intentionally kept — only DB-column SQL references are forbidden.
 
 > Resolved issues (Status: fixed) and general changelog have been moved to [`CHANGELOG.md`](FIXED_ISSUES.md).
 

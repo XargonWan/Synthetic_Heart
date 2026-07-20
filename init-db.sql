@@ -8,10 +8,10 @@ CREATE TABLE IF NOT EXISTS emotion_state (
     id INT AUTO_INCREMENT PRIMARY KEY,
     emotion_name VARCHAR(100) NOT NULL,
     intensity FLOAT NOT NULL DEFAULT 5.0,
-    timestamp DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     INDEX idx_emotion_name (emotion_name),
-    INDEX idx_timestamp (timestamp)
+    INDEX idx_created_at (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- G.R.I.L.L.O. Beat Tracking Table

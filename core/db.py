@@ -1646,8 +1646,8 @@ async def ensure_plugin_tables() -> None:
                             CREATE TABLE IF NOT EXISTS ai_diary (
                                 id INT AUTO_INCREMENT PRIMARY KEY,
                                 content LONGTEXT,
-                                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                                INDEX idx_timestamp (timestamp)
+                                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                                INDEX idx_created_at (created_at)
                             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
                         """)
 
@@ -1655,8 +1655,8 @@ async def ensure_plugin_tables() -> None:
                             CREATE TABLE IF NOT EXISTS ai_diary_archive (
                                 id INT AUTO_INCREMENT PRIMARY KEY,
                                 content LONGTEXT,
-                                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                                INDEX idx_timestamp (timestamp)
+                                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                                INDEX idx_created_at (created_at)
                             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
                         """)
                     try:
@@ -1854,7 +1854,7 @@ async def insert_memory(
             async with conn.cursor() as cur:
                 await cur.execute(
                     """
-                    INSERT INTO memories (timestamp, content, author, source, tags, scope, emotion, intensity, emotion_state)
+                    INSERT INTO memories (created_at, content, author, source, tags, scope, emotion, intensity, emotion_state)
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
@@ -1990,8 +1990,8 @@ async def get_recent_responses(since_timestamp: str) -> list[dict]:
                 await cur.execute(
                     """
                     SELECT * FROM memories
-                    WHERE source = 'synth' AND timestamp >= %s
-                    ORDER BY timestamp DESC
+                    WHERE source = 'synth' AND created_at >= %s
+                    ORDER BY created_at DESC
                     """,
                     (since_timestamp,),
                 )
