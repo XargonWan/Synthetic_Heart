@@ -163,8 +163,8 @@
                     <!-- model picker shown when the active engine/endpoint exposes multiple models -->
                     <select id="auris-model-select" style="min-width:200px; display:none;" title="Select the model used by the active Auris engine">
                     </select>
-                    <!-- Vosk model picker populated from MODEL_MANAGER catalog (shows download status) -->
-                    <select id="auris-vosk-language" style="min-width:240px; display:none;">
+                    <!-- Vosk active-model selector: lists ALL catalog models (downloaded or not) -->
+                    <select id="auris-vosk-model-select" style="min-width:240px; display:none;" title="Select the active Vosk model (downloads on select if missing)">
                     </select>
                     <button id="auris-manage-models-btn" class="pill secondary" title="Download, update or remove STT models" style="padding:8px 14px; font-weight:600;">🗂 Manage Models</button>
                     <div id="auris-engine-info" class="meta" style="min-width:260px; display:none;">

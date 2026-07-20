@@ -148,3 +148,25 @@ export async function getVoxLanguageOverrides(): Promise<VoxLanguageOverrides> {
 export async function setVoxLanguageOverrides(map: VoxLanguageOverrides): Promise<void> {
   await postJson('/api/config', { key: 'VOX_LANGUAGE_OVERRIDES', value: JSON.stringify(map) })
 }
+
+// ── Vosk active-model selector (local Auris engine) ────────────────────────
+// Lists ALL catalog models (downloaded or not) so the user picks the MODEL
+// directly.  Non-downloaded models are selectable and trigger a download.
+
+export interface ModelCatalogEntry {
+  model_id: string
+  display_name?: string
+  downloaded?: boolean
+  downloading?: boolean
+  download_progress?: number
+  [key: string]: unknown
+}
+
+export async function fetchAurisModels(): Promise<ModelCatalogEntry[]> {
+  const data = await getJson<{ models?: ModelCatalogEntry[] }>('/api/models?plugin_id=auris_vosk')
+  return data.models ?? []
+}
+
+export async function downloadAurisModel(modelId: string): Promise<void> {
+  await postJson(`/api/models/${encodeURIComponent(modelId)}/download`, {})
+}

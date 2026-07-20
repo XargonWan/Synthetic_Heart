@@ -35,7 +35,7 @@ const presets = Object.keys(CAMERA_PRESETS) as Array<keyof typeof CAMERA_PRESETS
 
       <section class="flex flex-col gap-2">
         <h3 class="text-xs uppercase tracking-wide text-white/50">
-          Voice
+          Vox
         </h3>
         <VoiceSettings />
       </section>

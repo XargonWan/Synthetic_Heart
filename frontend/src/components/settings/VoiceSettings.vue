@@ -4,6 +4,7 @@ import type { SpeakerInfo, VoiceEngineInfo } from '@/services/voice-config'
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 
 import {
+  fetchAurisModels,
   fetchConfigValues,
   fetchLanguages,
   fetchSpeakers,
@@ -12,7 +13,9 @@ import {
   setConfigValue,
   setSubsystemModel,
   setVoxLanguageOverrides,
+  downloadAurisModel,
   type LanguageInfo,
+  type ModelCatalogEntry,
   type VoxLanguageOverride,
   type VoxLanguageOverrides,
   voiceSampleUrl,
@@ -42,6 +45,50 @@ const activeVoxEngine = computed(() => voxEngines.value.find(e => e.name === act
 const voxModels = computed(() => activeVoxEngine.value?.available_models ?? [])
 const selectedModel = ref('')
 
+// ── Vosk active-model selector (local Auris engine) ──
+const aurisModels = ref<ModelCatalogEntry[]>([])
+const selectedAurisModel = ref('')
+
+async function loadAurisModels(): Promise<void> {
+  aurisModels.value = []
+  selectedAurisModel.value = ''
+  if (activeAuris.value !== 'vosk')
+    return
+  try {
+    const [list, config] = await Promise.all([fetchAurisModels(), fetchConfigValues(['VOSK_MODEL'])])
+    if (activeAuris.value !== 'vosk')
+      return
+    aurisModels.value = list
+    selectedAurisModel.value = config['VOSK_MODEL'] ?? ''
+  }
+  catch {
+    aurisModels.value = []
+  }
+}
+
+async function selectAurisModel(model: string): Promise<void> {
+  if (busy.value)
+    return
+  busy.value = true
+  try {
+    await setConfigValue('VOSK_MODEL', model)
+    selectedAurisModel.value = model
+    const entry = aurisModels.value.find(m => m.model_id === model)
+    if (entry && !entry.downloaded) {
+      error.value = null
+      await downloadAurisModel(model)
+      // Refresh the catalog so the option flips to "downloaded" once done.
+      await loadAurisModels()
+    }
+  }
+  catch {
+    error.value = 'Failed to save Vosk model'
+  }
+  finally {
+    busy.value = false
+  }
+}
+
 let previewAudio: HTMLAudioElement | null = null
 
 function stopPreview(): void {
@@ -62,6 +109,7 @@ async function refresh(): Promise<void> {
     activeVox.value = components.vox.find(e => e.active)?.name ?? components.vox[0]?.name ?? null
     activeAuris.value = components.auris.find(e => e.active)?.name ?? null
     voxCurrentModel.value = components.voxCurrentModel
+    await loadAurisModels()
   }
   catch {
     error.value = 'Voice engines unavailable — is the backend reachable?'
@@ -157,6 +205,10 @@ async function selectModel(model: string): Promise<void> {
 watch(activeVox, () => {
   void loadVoices()
   syncSelectedModel()
+})
+
+watch(activeAuris, () => {
+  void loadAurisModels()
 })
 
 // ── Vox per-language engine overrides ──────────────────────────────────────
@@ -296,7 +348,7 @@ function engineLabel(engine: VoiceEngineInfo): string {
     <template v-if="!loading">
       <!-- TTS -->
       <div v-if="voxEngines.length" class="flex flex-col gap-1.5">
-        <span class="text-[11px] text-white/40">Text to speech</span>
+        <span class="text-[11px] text-white/40">Vox — Text to speech</span>
         <div class="flex flex-wrap gap-1.5">
           <button
             v-for="engine in voxEngines"
@@ -464,7 +516,7 @@ function engineLabel(engine: VoiceEngineInfo): string {
 
       <!-- STT -->
       <div v-if="aurisEngines.length" class="flex flex-col gap-1.5">
-        <span class="text-[11px] text-white/40">Speech to text</span>
+        <span class="text-[11px] text-white/40">Auris — Speech to text</span>
         <div class="flex flex-wrap gap-1.5">
           <button
             v-for="engine in aurisEngines"
@@ -479,6 +531,22 @@ function engineLabel(engine: VoiceEngineInfo): string {
           >
             {{ engineLabel(engine) }}
           </button>
+        </div>
+        <!-- Vosk active-model selector: ALL catalog models, pinned via VOSK_MODEL -->
+        <div v-if="activeAuris === 'vosk'" class="mt-1 flex flex-col gap-1">
+          <span class="text-[11px] text-white/40">Active Vosk model</span>
+          <select
+            v-if="aurisModels.length"
+            class="rounded-lg bg-white/10 px-2 py-1 text-xs text-white/80"
+            :value="selectedAurisModel"
+            :disabled="busy"
+            @change="selectAurisModel(($event.target as HTMLSelectElement).value)"
+          >
+            <option v-for="m in aurisModels" :key="m.model_id" :value="m.model_id">
+              {{ m.display_name || m.model_id }}{{ m.downloaded ? '' : (m.downloading ? ' (downloading…)' : ' (not downloaded — select to download)') }}
+            </option>
+          </select>
+          <span v-else class="text-[11px] text-white/30">No models available</span>
         </div>
       </div>
 

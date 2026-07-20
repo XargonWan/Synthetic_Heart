@@ -4004,6 +4004,130 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                         voxEngineSel.addEventListener('change', updateKittenControlsVisibility);
                     }
 
+                    // ── Vosk active-model selector (local Auris engine) ──
+                    // Mirrors the Kitten model picker: lists only downloaded Vosk
+                    // models and persists the choice into the VOSK_MODEL config key.
+                    const aurisVoskModelSelect = document.getElementById('auris-vosk-model-select');
+                    let aurisVoskModelList = [];
+
+                    function populateAurisModels(currentValue) {
+                        if (!aurisVoskModelSelect) return;
+                        aurisVoskModelSelect.innerHTML = '';
+                        if (!aurisVoskModelList.length) {
+                            const opt = document.createElement('option');
+                            opt.value = '';
+                            opt.textContent = 'No models available';
+                            opt.disabled = true;
+                            opt.selected = true;
+                            aurisVoskModelSelect.appendChild(opt);
+                            return;
+                        }
+                        let matched = false;
+                        aurisVoskModelList.forEach(m => {
+                            const opt = document.createElement('option');
+                            opt.value = m.model_id;
+                            let label = m.display_name || m.model_id;
+                            if (m.downloaded === true) {
+                                // nothing extra — ready to use
+                            } else if (m.downloading) {
+                                label += ' (downloading…)';
+                            } else {
+                                label += ' (not downloaded — select to download)';
+                            }
+                            opt.textContent = label;
+                            opt.dataset.downloaded = m.downloaded === true ? '1' : '0';
+                            if (String(currentValue) === m.model_id) {
+                                opt.selected = true;
+                                matched = true;
+                            }
+                            aurisVoskModelSelect.appendChild(opt);
+                        });
+                        if (!matched && aurisVoskModelSelect.options.length) {
+                            aurisVoskModelSelect.selectedIndex = 0;
+                        }
+                    }
+
+                    async function loadAurisModels() {
+                        try {
+                            const r = await fetch('/api/models?plugin_id=auris_vosk');
+                            if (r.ok) {
+                                const data = await r.json();
+                                // List ALL catalog models (downloaded or not) so the user
+                                // picks the MODEL directly — not a language.  Non-downloaded
+                                // models are selectable and trigger a download on change.
+                                const models = Array.isArray(data.models) ? data.models : [];
+                                aurisVoskModelList = models;
+                            } else {
+                                aurisVoskModelList = [];
+                            }
+                        } catch (e) {
+                            console.error('[synth_webui] failed to load auris vosk models', e);
+                            aurisVoskModelList = [];
+                        }
+                    }
+
+                    async function updateAurisModelVisibility() {
+                        if (!aurisVoskModelSelect) return;
+                        const aurisSel = document.getElementById('auris-engine-select');
+                        if (aurisSel && aurisSel.value === 'vosk') {
+                            await loadAurisModels();
+                            aurisVoskModelSelect.style.display = '';
+                            try {
+                                const r = await fetch('/api/config');
+                                if (r.ok) {
+                                    const cfg = await r.json();
+                                    const items = Array.isArray(cfg.items) ? cfg.items : [];
+                                    const modelItem = items.find(i => i.key === 'VOSK_MODEL');
+                                    populateAurisModels(modelItem && modelItem.value ? modelItem.value : '');
+                                } else {
+                                    populateAurisModels('');
+                                }
+                            } catch (e) {
+                                populateAurisModels('');
+                            }
+                        } else {
+                            aurisVoskModelSelect.style.display = 'none';
+                        }
+                    }
+                    if (aurisVoskModelSelect && !aurisVoskModelSelect.dataset.bound) {
+                        aurisVoskModelSelect.addEventListener('change', async () => {
+                            const model = aurisVoskModelSelect.value;
+                            const opt = aurisVoskModelSelect.options[aurisVoskModelSelect.selectedIndex];
+                            const alreadyDownloaded = opt && opt.dataset.downloaded === '1';
+                            try {
+                                await fetch('/api/config', {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({ key: 'VOSK_MODEL', value: model })
+                                });
+                                if (alreadyDownloaded) {
+                                    window.showToast && window.showToast('Vosk model set to ' + (model || '(default)'));
+                                } else {
+                                    window.showToast && window.showToast('Vosk model set to ' + (model || '(default)') + ' — starting download…');
+                                    await fetch('/api/models/' + encodeURIComponent(model) + '/download', { method: 'POST' });
+                                    // Refresh the combo so the option flips to "downloaded"
+                                    // once the download finishes (poll via the Manage-Models hook).
+                                    if (typeof window.refreshAurisModelSelect === 'function') {
+                                        window.refreshAurisModelSelect();
+                                    }
+                                }
+                            } catch (e) {
+                                console.error('[synth_webui] Failed to set VOSK_MODEL', e);
+                                window.showToast && window.showToast('Failed to save model', true);
+                            }
+                        });
+                        aurisVoskModelSelect.dataset.bound = '1';
+                    }
+                    // Expose a refresh hook so the Manage-Models modal can rebuild the
+                    // downloaded-model combo after a download/delete without a page reload.
+                    window.refreshAurisModelSelect = updateAurisModelVisibility;
+                    // show auris controls now + wire engine change event
+                    updateAurisModelVisibility();
+                    const aurisEngineSel = document.getElementById('auris-engine-select');
+                    if (aurisEngineSel) {
+                        aurisEngineSel.addEventListener('change', updateAurisModelVisibility);
+                    }
+
                     // ── Generic Vox voice selector (any engine exposing speakers) ──
                     // Engines other than Kitten (which has its own dedicated picker
                     // above) get a generic voice dropdown + preview here whenever
@@ -4072,6 +4196,10 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                         if (!engine || engine === 'kitten' || engine === 'disabled') {
                             voxVoiceSelect.style.display = 'none';
                             if (voxVoicePlayBtn) voxVoicePlayBtn.style.display = 'none';
+                            // Drop any voices loaded for a previous (external) engine so
+                            // they can never leak into the hidden selector when Kitten or
+                            // a disabled engine is active again.
+                            voxVoiceList = [];
                             return;
                         }
                         await loadVoxVoices(engine);
@@ -4534,73 +4662,10 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                     }
                     loadVoxLanguageOverrides();
 
-                    // ── Vosk language selector ─────────────────────────────────
-                    const voskLangSelect = document.getElementById('auris-vosk-language');
-                    const VOSK_LANGUAGES = [
-                        {code:'en-us', label:'English (US)'},
-                        {code:'it-it', label:'Italiano'},
-                        {code:'fr-fr', label:'Français'},
-                        {code:'es-es', label:'Español'},
-                    ];
-                    function populateVoskLanguages(){
-                        if(!voskLangSelect) return;
-                        voskLangSelect.innerHTML = '';
-                        VOSK_LANGUAGES.forEach(l=>{
-                            const opt = document.createElement('option');
-                            opt.value = l.code;
-                            opt.textContent = l.label;
-                            voskLangSelect.appendChild(opt);
-                        });
-                    }
-                    async function updateVoskLangVisibility(){
-                        if(!voskLangSelect) return;
-                        const aurisSel = document.getElementById('auris-engine-select');
-                        if(aurisSel && aurisSel.value === 'vosk'){
-                            voskLangSelect.style.display = '';
-                            populateVoskLanguages();
-                            // fetch current config value
-                            try{
-                                const r = await fetch('/api/config');
-                                if(r.ok){
-                                    const cfg = await r.json();
-                                    const item = Array.isArray(cfg.items)? cfg.items.find(i=>i.key==='VOSK_LANGUAGE') : null;
-                                    if(item && item.value) voskLangSelect.value = item.value;
-                                }
-                            } catch (e) { /* ignore */ }
-                        } else {
-                            voskLangSelect.style.display = 'none';
-                        }
-                    }
-                    if (voskLangSelect && !voskLangSelect.dataset.bound) {
-                        voskLangSelect.addEventListener('change', async () => {
-                            const lang = voskLangSelect.value;
-                            try {
-                                await fetch('/api/config', {
-                                    method: 'POST',
-                                    headers: { 'Content-Type': 'application/json' },
-                                    body: JSON.stringify({ key: 'VOSK_LANGUAGE', value: lang })
-                                });
-                                const r2 = await fetch('/api/auris/vosk/download', {
-                                    method: 'POST',
-                                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                                    body: `language=${encodeURIComponent(lang)}`
-                                });
-                                if (!r2.ok) throw new Error('download failed');
-                                window.showToast && window.showToast('Vosk language set to ' + lang + ', model download started');
-                            } catch (e) {
-                                console.error('[synth_webui] Vosk language update failed', e);
-                                window.showToast && window.showToast('Failed to set Vosk language', true);
-                            }
-                        });
-                        voskLangSelect.dataset.bound = '1';
-                    }
-                    // ensure visibility reflects current engine choice
-                    updateVoskLangVisibility();
-                    // re-run when auris engine selection changes
-                    const aurisSel = document.getElementById('auris-engine-select');
-                    if(aurisSel){
-                        aurisSel.addEventListener('change', updateVoskLangVisibility);
-                    }
+                    // ── Vosk model selector (replaces the old language selector) ──
+                    // The user now picks the MODEL directly via #auris-vosk-model-select
+                    // (see the block above).  VOSK_MODEL wins over VOSK_LANGUAGE in the
+                    // engine, so the language selector is intentionally removed.
 
                     if (componentsVoxListEl)   renderDetailsList(data.vox   || [], componentsVoxListEl);
                     if (componentsAurisListEl) renderDetailsList(data.auris || [], componentsAurisListEl);
@@ -5218,6 +5283,10 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                                 if (m.downloaded && typeof window.refreshKittenModelSelect === 'function') {
                                     window.refreshKittenModelSelect();
                                 }
+                                // Same for the Vosk active-model combo.
+                                if (m.downloaded && typeof window.refreshAurisModelSelect === 'function') {
+                                    window.refreshAurisModelSelect();
+                                }
                             }
                         } catch (e) {
                             clearInterval(pollTimers[modelId]);
@@ -5268,6 +5337,10 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                             // model disappears without a page reload.
                             if (typeof window.refreshKittenModelSelect === 'function') {
                                 window.refreshKittenModelSelect();
+                            }
+                            // Same for the Vosk active-model combo.
+                            if (typeof window.refreshAurisModelSelect === 'function') {
+                                window.refreshAurisModelSelect();
                             }
                         } catch (e) {
                             showError('Failed to delete model: ' + e.message);

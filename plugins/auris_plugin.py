@@ -64,6 +64,14 @@ config_registry.get_value(
     hidden=True,
 )
 config_registry.get_value(
+    "VOSK_MODEL",
+    "",
+    value_type=str,
+    group="plugins",
+    component="auris_plugin",
+    hidden=True,
+)
+config_registry.get_value(
     "MODEL_AUTO_DOWNLOAD",
     True,
     value_type=bool,

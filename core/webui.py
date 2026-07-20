@@ -10344,7 +10344,10 @@ class SynthWebUIInterface:
                 config_registry.get_value("VOX_DEFAULT_MODEL", "") or ""
             ),
             "auris_current_model": (
-                config_registry.get_value("AURIS_DEFAULT_MODEL", "") or ""
+                config_registry.get_value(
+                    "VOSK_MODEL", "", group="plugins", component="auris_plugin"
+                )
+                or ""
             ),
             "live": live_data,
             "interfaces": interfaces_data,
