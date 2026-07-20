@@ -137,7 +137,7 @@ class RecentChatsPlugin:
         log_info("[recent_chats] RecentChatsPlugin initialized and registered")
 
     def get_supported_action_types(self):
-        return ["get_recent_chats", "cleanup_old_chats"]
+        return ["get_recent_chats"]
 
     def get_supported_actions(self):
         return {
@@ -147,11 +147,6 @@ class RecentChatsPlugin:
                 "description": "Get the most recently active chats",
                 "required_fields": [],
                 "optional_fields": ["limit"],
-            },
-            "cleanup_old_chats": {
-                "description": "Remove old chat records",
-                "required_fields": [],
-                "optional_fields": ["older_than_days"],
             },
         }
 
@@ -168,12 +163,6 @@ class RecentChatsPlugin:
             asyncio.create_task(
                 self._send_recent_chats(context, original_message, limit)
             )
-
-        elif action_type == "cleanup_old_chats":
-            older_than_days = payload.get("older_than_days", 30)
-            import asyncio
-
-            asyncio.create_task(cleanup_old_chats(older_than_days))
 
     async def _send_recent_chats(self, context, original_message, limit):
         """Return recent chats list as a message action."""

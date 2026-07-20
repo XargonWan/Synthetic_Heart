@@ -269,28 +269,16 @@ class MessageMapPlugin:
 
     def get_supported_action_types(self):
         return [
-            "store_message_mapping",
             "get_original_message",
-            "cleanup_old_mappings",
             "get_mapping_stats",
         ]
 
     def get_supported_actions(self):
         return {
-            "store_message_mapping": {
-                "description": "Store a mapping between trainer message and original message",
-                "required_fields": ["trainer_message_id", "chat_id", "message_id"],
-                "optional_fields": [],
-            },
             "get_original_message": {
                 "description": "Get the original chat_id and message_id for a trainer message",
                 "required_fields": ["trainer_message_id"],
                 "optional_fields": [],
-            },
-            "cleanup_old_mappings": {
-                "description": "Remove old message mappings",
-                "required_fields": [],
-                "optional_fields": ["older_than_hours"],
             },
             "get_mapping_stats": {
                 "description": "Get statistics about message mappings",
@@ -301,27 +289,7 @@ class MessageMapPlugin:
 
     def get_prompt_instructions(self, action_name: str) -> dict:
         """Provide detailed prompt instructions for LLM on how to use message mapping actions."""
-        if action_name == "store_message_mapping":
-            return {
-                "description": "Store a mapping between a trainer's forwarded message and the original message it refers to. This enables replying to the correct conversation.",
-                "when_to_use": "When the trainer forwards a message and you need to track which original message it corresponds to.",
-                "examples": [
-                    {
-                        "scenario": "Trainer forwards message #123 from chat -100123456, original message #789",
-                        "payload": {
-                            "trainer_message_id": 123,
-                            "chat_id": -100123456,
-                            "message_id": 789,
-                        },
-                    }
-                ],
-                "notes": [
-                    "trainer_message_id is the ID of the message the trainer sent",
-                    "chat_id is the original chat where the message came from",
-                    "message_id is the original message ID in that chat",
-                ],
-            }
-        elif action_name == "get_original_message":
+        if action_name == "get_original_message":
             return {
                 "description": "Retrieve the original chat and message ID for a trainer's forwarded message. Use this to reply to the correct conversation.",
                 "when_to_use": "When you need to respond to a trainer's forwarded message and want to send the reply to the original chat.",
@@ -342,19 +310,7 @@ class MessageMapPlugin:
         action_type = action.get("type")
         payload = action.get("payload", {}) or {}
 
-        if action_type == "store_message_mapping":
-            trainer_message_id = payload.get("trainer_message_id")
-            chat_id = payload.get("chat_id")
-            message_id = payload.get("message_id")
-            if all([trainer_message_id, chat_id, message_id]):
-                import asyncio
-
-                asyncio.create_task(
-                    store_message_mapping(trainer_message_id, chat_id, message_id)
-                )
-            return None
-
-        elif action_type == "get_original_message":
+        if action_type == "get_original_message":
             trainer_message_id = payload.get("trainer_message_id")
             if trainer_message_id:
                 import asyncio
@@ -364,13 +320,6 @@ class MessageMapPlugin:
                         context, original_message, trainer_message_id
                     )
                 )
-            return None
-
-        elif action_type == "cleanup_old_mappings":
-            older_than_hours = payload.get("older_than_hours", 24)
-            import asyncio
-
-            asyncio.create_task(cleanup_old_mappings(older_than_hours))
             return None
 
         elif action_type == "get_mapping_stats":

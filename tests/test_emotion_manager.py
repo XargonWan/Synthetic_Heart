@@ -190,8 +190,6 @@ class TestEmotionManager:
         assert "static_inject" in actions
         assert "get_emotion_state" in actions
         assert "update_emotion_from_tags" in actions
-        assert "set_emotion" in actions
-        assert "decay_emotions" in actions
 
     def test_extract_emotion_tags_single(self):
         """Test extraction of single emotion tag."""

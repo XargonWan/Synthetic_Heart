@@ -137,15 +137,6 @@ API Reference
 ``update_emotion_from_tags``
    Extract and apply emotions from LLM message tags like ``{emotion intensity}``
 
-``set_emotion``
-   Set a single emotion intensity directly
-
-``decay_emotions``
-   Apply decay to all emotions and remove low-intensity ones
-
-``sync_emotions_from_all_sources``
-   Synchronize emotions from ai_diary, message tags, and emotion_state DB
-
 **Usage Examples:**
 
 .. code-block:: python
@@ -159,9 +150,6 @@ API Reference
 
    # Update from message tags
    await mgr.update_emotion_from_tags("I'm feeling {joy 8.0} and {curiosity 6.5} about this!")
-
-   # Set emotion directly
-   await mgr.set_emotion('excitement', 9.0)
 
 LLM Integration
 ---------------

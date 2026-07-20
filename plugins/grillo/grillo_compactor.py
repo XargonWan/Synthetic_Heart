@@ -200,17 +200,11 @@ class GrilloCompactorPlugin:
         config_registry.add_listener("GRILLO_COMPACT_AGE_DAYS", _update_age)
 
     def get_supported_actions(self) -> dict:
-        """Declare a single high-level action for the compactor so the Web UI can
-        render a single control for 'Run Grillo'. The action accepts an optional
-        payload with 'cycles' (int) and 'dry_run' (bool).
+        """The compactor exposes no LLM actions. Manual runs are triggered via the
+        Web UI 'run_component' endpoint (which calls run_action directly) and the
+        automatic scheduler, not by the LLM emitting an action.
         """
-        return {
-            "compact_now": {
-                "description": 'Run Grillo compaction cycles now. Payload example: {"cycles":1, "dry_run":true}',
-                "required_fields": [],
-                "optional_fields": ["cycles", "dry_run"],
-            }
-        }
+        return {}
 
     async def start(self):
         if not self.enabled:

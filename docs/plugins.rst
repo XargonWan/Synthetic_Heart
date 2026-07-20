@@ -166,9 +166,6 @@ The engine supports a comprehensive whitelist including Ekman's basic emotions (
 - ``static_inject``: Inject current emotional state into LLM context
 - ``get_emotion_state``: Get current emotional state with decay applied
 - ``update_emotion_from_tags``: Extract and apply emotions from LLM message tags like ``{emotion intensity}``
-- ``set_emotion``: Set a single emotion intensity directly
-- ``decay_emotions``: Apply decay to all emotions and remove low-intensity ones
-- ``sync_emotions_from_all_sources``: Synchronize emotions from ai_diary, message tags, and emotion_state DB
 
 **LLM Integration:**
 
@@ -225,7 +222,6 @@ The ``recent_chats`` plugin manages conversation activity tracking and provides 
 **Available Actions:**
 
 - ``get_recent_chats``: Retrieve the most recently active chats
-- ``cleanup_old_chats``: Remove chat records older than specified days
 
 **Database Schema:**
 
