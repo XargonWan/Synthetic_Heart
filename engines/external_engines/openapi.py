@@ -1422,7 +1422,7 @@ class OpenAPIPlugin(AIPluginBase):
             interface_hint = (
                 "CURRENT INTERFACE: grillo (INTERNAL)\n"
                 "This is an internal introspection beat. Do NOT output any message_* actions.\n"
-                "Use ONLY internal actions like 'create_personal_diary_entry', 'set_emotion', etc."
+                "Use ONLY internal actions like 'create_personal_diary_entry', 'update_emotion_state', etc."
             )
         else:
             interface_hint = (

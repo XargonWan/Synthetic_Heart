@@ -21,7 +21,7 @@ def test_numeric_param_string_coerced_to_int():
 
 def test_numeric_param_decimal_coerced_to_float():
     payload = {"intensity": "0.9"}
-    _normalize_payload("set_emotion", payload)
+    _normalize_payload("update_emotion_state", payload)
     assert payload["intensity"] == 0.9
     assert isinstance(payload["intensity"], float)
 
@@ -43,7 +43,7 @@ def test_string_typed_target_left_unchanged():
 
 def test_already_numeric_and_non_numeric_left_unchanged():
     payload = {"limit": 5, "older_than_days": "soon", "animation_state": "think"}
-    _normalize_payload("cleanup_old_chats", payload)
+    _normalize_payload("get_recent_chats", payload)
     assert payload["limit"] == 5
     assert payload["older_than_days"] == "soon"
     assert payload["animation_state"] == "think"

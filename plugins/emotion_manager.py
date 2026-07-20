@@ -273,26 +273,6 @@ class EmotionManager(PluginBase):
                     "apply_balancing": "bool - apply Plutchik opposite balancing (default: true)",
                 },
             },
-            "set_emotion": {
-                "description": "Set a single emotion intensity directly",
-                "required_params": {
-                    "emotion": "Emotion name (must be in whitelist)",
-                    "intensity": "float 0.0-10.0",
-                },
-                "optional_params": {},
-            },
-            "decay_emotions": {
-                "description": "Apply decay to all emotions and remove low-intensity ones",
-                "required_params": {},
-                "optional_params": {
-                    "threshold": "float - remove emotions below this intensity (default 0.1)",
-                },
-            },
-            "sync_emotions_from_all_sources": {
-                "description": "Synchronize emotions from ai_diary, message tags, and emotion_state DB",
-                "required_params": {},
-                "optional_params": {},
-            },
         }
 
     async def execute_action(
@@ -324,25 +304,6 @@ class EmotionManager(PluginBase):
             if isinstance(emotions, dict):
                 return await self.update_emotion_state(emotions, apply_balancing)
             return await self.get_emotion_state()
-
-        elif action_type == "set_emotion":
-            emotion = payload.get("emotion")
-            intensity = payload.get("intensity")
-            if emotion is not None and intensity is not None:
-                return await self.set_emotion(emotion, float(intensity))
-            return False
-
-        elif action_type == "decay_emotions":
-            threshold = payload.get("threshold")
-            if threshold:
-                try:
-                    threshold = float(threshold)
-                except (ValueError, TypeError):
-                    threshold = None
-            return await self.decay_emotions(threshold)
-
-        elif action_type == "sync_emotions_from_all_sources":
-            return await self.sync_emotions_from_all_sources()
 
         elif action_type == "get_emotion_state":
             include_raw = payload.get("include_raw", False)

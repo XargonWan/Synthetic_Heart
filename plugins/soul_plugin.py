@@ -205,28 +205,6 @@ class SoulPlugin(PluginBase):
                 "required_params": {},
                 "optional_params": {},
             },
-            "soul_force_compile": {
-                "description": "Force compile pending SOUL transcript buffer",
-                "required_params": {},
-                "optional_params": {"interface_path": "Optional interface path"},
-            },
-            "soul_force_rollup": {
-                "description": "Force SOUL nightly rollup now",
-                "required_params": {},
-                "optional_params": {},
-            },
-            "soul_get_status": {
-                "description": "Return SOUL plugin runtime status",
-                "required_params": {},
-                "optional_params": {},
-            },
-            "soul_run_curator": {
-                "description": "Run the Memory Curator to prune outdated or low-value MemCells",
-                "required_params": {},
-                "optional_params": {
-                    "max_memories": "Maximum number of MemCells to retain (default 500)"
-                },
-            },
         }
 
     def is_enabled(self) -> bool:
@@ -244,16 +222,6 @@ class SoulPlugin(PluginBase):
 
         if action_type == "static_inject":
             return await self.get_static_injection(original_message, context)
-        if action_type == "soul_force_compile":
-            interface_path = str(payload.get("interface_path") or "")
-            return await self._force_compile(interface_path=interface_path or None)
-        if action_type == "soul_force_rollup":
-            return await self._run_rollup_now()
-        if action_type == "soul_get_status":
-            return await self._get_status()
-        if action_type == "soul_run_curator":
-            max_memories = int(payload.get("max_memories") or 500)
-            return await self._run_curator_now(max_memories=max_memories)
         return None
 
     async def get_static_injection(
