@@ -132,6 +132,52 @@ the WebUI can surface it. Persistence is best-effort — a DB failure is logged
 and swallowed and never breaks the turn itself. The WebUI route no longer
 persists its own row; it reads ``task_id`` from the result to avoid duplicates.
 
+Drones — ephemeral sub-agents
+-----------------------------
+
+A **Drone** is a short-lived, task-scoped sub-agent that the Agent can spawn to
+handle a focused, self-contained piece of work (research, a scoped lookup, a
+multi-step file inspection) without polluting the parent task. A Drone runs its
+own bounded :meth:`core.agent_core.AgentLoopManager.run_agentic_turn` loop with
+the full tool set and returns a concise result.
+
+Entry point: :meth:`core.agent_core.AgentLoopManager.run_drone`. It is additive
+over ``run_agentic_turn`` (no signature change to the existing loop) — it injects
+a ``drone`` marker into the context, applies the tighter Drone budget, and
+delegates to ``run_agentic_turn``.
+
+**Spawning.** Drones are spawned **only** via the ``spawn_drone`` action
+(handled in :mod:`plugins.agent_plugin`):
+
+* ``required_fields``: ``["goal"]``
+* ``optional_fields``: ``["engine", "max_iterations"]``
+* ``security_level``: ``"medium"``
+
+There is no direct user/interface spawn — a Drone is always requested by the
+Agent from inside an agentic turn.
+
+**Single-level delegation — Drones cannot spawn Drones.** This is enforced
+twice:
+
+1. :meth:`core.agent_core.AgentLoopManager._build_agent_prompt` omits the
+   ``spawn_drone`` tool from a Drone's tool list when
+   ``context["drone"]["is_drone"]`` is set, so the model never sees it.
+2. The ``spawn_drone`` handler returns
+   ``{"ok": False, "error": "drones_cannot_spawn_drones"}`` if it is invoked from
+   within a Drone (defensive backstop).
+
+**Engine inheritance.** When ``engine`` is omitted, a Drone resolves the same
+agent-scope cortex as its parent (``get_active_cortex_engine(scope="agent")`` →
+``AGENT_CORTEX`` → ``BASE_CORTEX``). An explicit ``engine`` in the payload wins.
+
+**Budget.** Tighter than the parent Agent: ``DRONE_MAX_ITERATIONS`` (default 3)
+and ``DRONE_TURN_TIMEOUT_SEC`` (default 90).
+
+**Persistence.** Drone turns are recorded in the same ``agent_tasks`` table as
+Agent turns, tagged with ``metadata.source = "drone"`` and
+``metadata.drone.parent_task_id`` linking them to the spawning Agent task. No new
+DB table is introduced.
+
 Routing (Phase E)
 -----------------
 
@@ -291,6 +337,8 @@ Key                               Meaning
 ``AGENT_TURN_TIMEOUT_SEC``        Wall-clock budget per agent turn (default 120).
 ``AGENT_MCP_EXPOSED_ACTIONS``     Comma list of actions to expose as MCP tools.
 ``SYNTH_MCP_CONFIG``              Override path to ``config/synth_mcp.json``.
+``DRONE_MAX_ITERATIONS``          Hard cap on Drone sub-agent iterations (default 3).
+``DRONE_TURN_TIMEOUT_SEC``        Wall-clock budget per Drone turn (default 90).
 ================================  ============================================
 
 Testing
@@ -300,3 +348,8 @@ Testing
 router classification, and MCP server exposure. Run it with::
 
     uv run pytest tests/test_agentic_runtime.py -q
+
+``tests/test_drones.py`` covers Drone spawning, the no-recursion guard (handler
+and prompt filter), engine override, and Drone metadata tagging. Run it with::
+
+    uv run pytest tests/test_drones.py -q

@@ -160,6 +160,32 @@ names are namespaced `mcp_<server>_<tool>`.
 `AGENT_TURN_TIMEOUT_SEC` (120), `AGENT_MCP_EXPOSED_ACTIONS`, `SYNTH_MCP_CONFIG`.
 See `docs/agentic_tools.rst` for the full reference.
 
+**Drones — ephemeral sub-agents.** The Agent can delegate a focused, self-contained
+sub-task to a **Drone**: a short-lived sub-agent that runs its own bounded
+`run_agentic_turn` loop with the full tool set and returns a concise result. Drones
+keep the parent task clean (research, scoped lookups, multi-step file inspection).
+
+- **Spawn:** only via the `spawn_drone` action (`required_fields: ["goal"]`,
+  `optional_fields: ["engine", "max_iterations"]`, `security_level: "medium"`),
+  handled in `plugins/agent_plugin.py`. There is **no** direct user/interface spawn.
+- **Single-level delegation — Drones cannot spawn Drones.** Enforced twice:
+  (1) `AgentLoopManager._build_agent_prompt` hides `spawn_drone` from a Drone's tool
+  list when `context["drone"]["is_drone"]` is set; (2) the `spawn_drone` handler
+  returns `{"ok": False, "error": "drones_cannot_spawn_drones"}` if invoked from
+  within a Drone.
+- **Engine inheritance:** when `engine` is omitted, a Drone resolves the same
+  agent-scope cortex as its parent (`get_active_cortex_engine(scope="agent")` →
+  `AGENT_CORTEX` → `BASE_CORTEX`). An explicit `engine` in the payload wins.
+- **Budget:** tighter than the parent — `DRONE_MAX_ITERATIONS` (3),
+  `DRONE_TURN_TIMEOUT_SEC` (90).
+- **Persistence:** Drone turns are recorded in `agent_tasks` with
+  `metadata.source = "drone"` and `metadata.drone.parent_task_id` linking them to
+  the spawning Agent task. No new DB table.
+- **Entry point:** `AgentLoopManager.run_drone(...)` in `core/agent_core.py` —
+  additive over `run_agentic_turn` (no signature change to the existing loop).
+
+**Drone config keys:** `DRONE_MAX_ITERATIONS` (3), `DRONE_TURN_TIMEOUT_SEC` (90).
+
 ---
 
 ## 6. Interfaces
@@ -508,6 +534,8 @@ All keys stored in the `config` table and accessible via `config_registry.get_va
 | `GRILLO_ALLOWED_SECURITY_LEVEL` | Max security level for Grillo actions |
 | `AUTONOMY_ALLOWED_ACTIONS` | Actions allowed in autonomy mode |
 | `AUTONOMY_ALLOWED_SECURITY_LEVEL` | Max security level for autonomous actions |
+| `DRONE_MAX_ITERATIONS` | Hard cap on Drone sub-agent loop iterations (default 3) |
+| `DRONE_TURN_TIMEOUT_SEC` | Wall-clock budget per Drone turn in seconds (default 90) |
 | `LLM_AUTO_EXECUTE_UNSAFE_ACTIONS` | Whether to auto-execute unsafe LLM actions |
 | `AWAIT_RESPONSE_TIMEOUT` | Seconds to wait for LLM response before timeout |
 | `LIVE_VOICE_NAME` | Voice name for live audio TTS |

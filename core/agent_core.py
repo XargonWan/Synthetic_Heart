@@ -36,6 +36,31 @@ try:
         component="agent",
         needs_component_reload=False,
     )
+    # Drones are ephemeral, task-scoped sub-agents spawned by the Agent via the
+    # `spawn_drone` tool. They run through the same bounded agent loop but with a
+    # tighter budget and cannot spawn further Drones (single-level delegation).
+    register_exposed_var(
+        "DRONE_MAX_ITERATIONS",
+        label="Drone max iterations",
+        default=3,
+        value_type=int,
+        ui_type="number",
+        description="Maximum iterations allowed for a Drone (sub-agent) loop before automatic stop.",
+        scope="agent",
+        component="agent",
+        needs_component_reload=False,
+    )
+    register_exposed_var(
+        "DRONE_TURN_TIMEOUT_SEC",
+        label="Drone turn timeout (seconds)",
+        default=90,
+        value_type=int,
+        ui_type="number",
+        description="Wall-clock budget in seconds for a single Drone (sub-agent) turn.",
+        scope="agent",
+        component="agent",
+        needs_component_reload=False,
+    )
 except Exception:
     pass
 
@@ -266,6 +291,15 @@ class AgentLoopManager:
                 "interface_path": interface_path,
                 "has_preplanned_calls": bool(isinstance(preplanned_calls, list)),
             }
+            # Tag Drone (sub-agent) turns so the WebUI/audit can distinguish them
+            # from top-level Agent turns and link them to their parent task.
+            if isinstance(context, dict) and isinstance(context.get("drone"), dict):
+                drone_meta = context["drone"]
+                if drone_meta.get("is_drone"):
+                    metadata["source"] = "drone"
+                    metadata["drone"] = {
+                        "parent_task_id": drone_meta.get("parent_task_id"),
+                    }
 
             conn_ctx = await self._get_conn_ctx()
             async with conn_ctx as conn:
@@ -651,6 +685,68 @@ class AgentLoopManager:
         )
         return result
 
+    async def run_drone(
+        self,
+        *,
+        goal: str,
+        engine: str | None = None,
+        context: Dict[str, Any] | None = None,
+        parent_task_id: int | None = None,
+        max_iterations: int | None = None,
+        timeout_seconds: float | None = None,
+        original_message: Any = None,
+    ) -> Dict[str, Any]:
+        """Run an ephemeral, task-scoped sub-agent ("Drone").
+
+        A Drone is a single-level delegation: it runs through the same bounded
+        :meth:`run_agentic_turn` loop but with a tighter budget
+        (``DRONE_MAX_ITERATIONS`` / ``DRONE_TURN_TIMEOUT_SEC``) and is flagged so
+        it cannot spawn further Drones. The flag is enforced both by the
+        ``spawn_drone`` handler (recursion guard) and by
+        :meth:`_build_agent_prompt`, which hides the ``spawn_drone`` tool from a
+        Drone's tool list.
+
+        Args:
+            goal: The focused sub-task objective for the Drone.
+            engine: Optional cortex engine name. When ``None`` the Drone inherits
+                the agent-scope engine (same resolution as the parent Agent).
+            context: Optional context dict; a ``drone`` marker is injected.
+            parent_task_id: DB id of the Agent task that spawned this Drone.
+            max_iterations: Hard cap (defaults to ``DRONE_MAX_ITERATIONS``).
+            timeout_seconds: Wall-clock budget (defaults to ``DRONE_TURN_TIMEOUT_SEC``).
+            original_message: Optional originating message (for audit/safety).
+
+        Returns:
+            The standard :meth:`run_agentic_turn` result dict (``iterations``,
+            ``observations``, ``final_text``, ``stop_reason``, ``task_id``).
+        """
+        if max_iterations is None:
+            max_iterations = int(config_registry.get_var("DRONE_MAX_ITERATIONS", 3))
+        if timeout_seconds is None:
+            timeout_seconds = float(
+                config_registry.get_var("DRONE_TURN_TIMEOUT_SEC", 90)
+            )
+
+        drone_context: Dict[str, Any] = dict(context or {})
+        drone_context["drone"] = {
+            "is_drone": True,
+            "parent_task_id": parent_task_id,
+        }
+
+        log_info(
+            f"[agent_core] Spawning Drone (parent_task_id={parent_task_id}, "
+            f"max_iterations={max_iterations}, timeout={timeout_seconds}s)"
+        )
+
+        return await self.run_agentic_turn(
+            goal=goal,
+            engine=engine,
+            context=drone_context,
+            max_iterations=max_iterations,
+            timeout_seconds=timeout_seconds,
+            original_message=original_message,
+        )
+
     async def _call_engine_direct(
         self,
         prompt: Dict[str, Any],
@@ -730,8 +826,19 @@ class AgentLoopManager:
 
         observation_block = "\n".join(history_lines)
 
+        # Drones cannot spawn Drones: hide the spawn_drone tool from a Drone's
+        # available tool list (single-level delegation). The handler enforces the
+        # same rule defensively, this just keeps the model from ever proposing it.
+        is_drone = bool(
+            isinstance(context, dict)
+            and isinstance(context.get("drone"), dict)
+            and context["drone"].get("is_drone")
+        )
+
         tool_lines: list[str] = []
         for tool in tool_registry.all_tools():
+            if is_drone and tool.name == "spawn_drone":
+                continue
             params = []
             for p in tool.parameters:
                 ptype = p.type or "string"

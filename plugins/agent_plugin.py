@@ -296,6 +296,20 @@ class AgentPlugin(AIPluginBase):
                 "optional_fields": ["start_line", "end_line", "max_chars"],
                 "description": "Read a text file within the allowed agent filesystem roots.",
             },
+            "spawn_drone": {
+                "required_fields": ["goal"],
+                "optional_fields": ["engine", "max_iterations"],
+                "security_level": "medium",
+                "external_effects": ["drone"],
+                "description": (
+                    "Delegate a focused sub-task to an ephemeral sub-agent (a 'Drone'). "
+                    "The Drone runs its own bounded agentic loop with the available tools "
+                    "and returns a concise result. Use this to isolate a self-contained "
+                    "piece of work (research, a multi-step lookup, a scoped file inspection) "
+                    "so the main task stays clean. A Drone CANNOT spawn further Drones. "
+                    "Provide a clear, self-contained 'goal'."
+                ),
+            },
         }
 
     def _allowed_roots(self) -> list[Path]:
@@ -930,6 +944,48 @@ class AgentPlugin(AIPluginBase):
                 max_iterations=max_iterations,
             )
             return {"status": "started", "task_id": task_id}
+
+        if action_type == "spawn_drone":
+            goal = str(payload.get("goal") or "").strip()
+            if not goal:
+                return {"status": "error", "reason": "no goal provided"}
+
+            # Recursion guard: Drones cannot spawn Drones (single-level
+            # delegation). The prompt filter already hides spawn_drone from a
+            # Drone's tool list; this is the defensive backstop.
+            ctx = context or {}
+            drone_ctx = ctx.get("drone")
+            if isinstance(drone_ctx, dict) and drone_ctx.get("is_drone"):
+                log_warning("[agent] A Drone attempted to spawn another Drone; blocked")
+                return {"ok": False, "error": "drones_cannot_spawn_drones"}
+
+            engine = payload.get("engine") or None
+            max_iterations = payload.get("max_iterations")
+            parent_task_id = ctx.get("agent_task_id") or ctx.get("task_id")
+
+            from core.agent_core import get_agent_loop_manager
+
+            manager = get_agent_loop_manager()
+            try:
+                result = await manager.run_drone(
+                    goal=goal,
+                    engine=engine,
+                    context=ctx,
+                    parent_task_id=parent_task_id,
+                    max_iterations=max_iterations,
+                    original_message=original_message,
+                )
+            except Exception as exc:
+                log_error(f"[agent] spawn_drone failed: {exc}")
+                return {"ok": False, "error": f"drone_failed: {exc}"}
+
+            return {
+                "ok": True,
+                "final_text": result.get("final_text", ""),
+                "iterations": result.get("iterations"),
+                "stop_reason": result.get("stop_reason"),
+                "task_id": result.get("task_id"),
+            }
 
         log_warning(f"[agent] Unknown action type: {action_type}")
         return None
