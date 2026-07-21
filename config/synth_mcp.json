@@ -1,0 +1,34 @@
+{
+  "_comment": "Synth runtime MCP server registry. SEPARATE from .mcp.json (which is DEV-ONLY tooling for Claude Code / Copilot). Servers listed here are consumed by Synth's own MCP client bridge (core/mcp_bridge) at runtime. Add/remove entries to give Synth external tool access. Set 'enabled': false to disable without removing.",
+  "synthMcpServers": {
+    "synth_logs": {
+      "enabled": true,
+      "transport": "stdio",
+      "command": "uv",
+      "args": [
+        "run",
+        "python",
+        "mcp_servers/synth_logs.py"
+      ],
+      "env": {
+        "LOG_DIR": "/app/logs"
+      },
+      "security_level": "low",
+      "description": "Runtime log analysis MCP server shipped with Synth."
+    },
+    "filesystem": {
+      "enabled": false,
+      "transport": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "/videodrome/videodrome-deployment/Synthetic_Heart",
+        "/videodrome/videodrome-deployment/Synthetic_Heart/logs"
+      ],
+      "env": {},
+      "security_level": "medium",
+      "description": "Local filesystem access for Synth (repo + logs roots). Requires npx/node inside synth container."
+    }
+  }
+}

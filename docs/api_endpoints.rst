@@ -94,10 +94,29 @@ Agent‑related APIs
 - **POST** `/api/agent/tasks/{task_id}/pause` – pause a running task.
 - **POST** `/api/agent/tasks/{task_id}/resume` – resume a paused task.
 - **POST** `/api/agent/tasks/{task_id}/cancel` – cancel a task.
+- **POST** `/api/agent/tasks/{task_id}/message` – append a user message to the
+  task's reasoning timeline (``iterations_meta``). Body: ``{"text": "..."}``.
+  Records the human intervention inline in the conversational WebUI; does not
+  relaunch the agent loop.
+- **PATCH** `/api/agent/tasks/{task_id}` – rename a task by setting a custom
+  display name. Body: ``{"name": "My task"}``. The name is stored inside the
+  task's ``metadata`` JSON blob (key ``name``) — no schema change — and is
+  surfaced by ``GET /api/agent/tasks`` and shown in place of the engine label in
+  the WebUI Agent panel. Send an empty string (``{"name": ""}``) to clear the
+  custom name and revert to the engine label. Returns
+  ``{"status": "renamed", "task_id": <id>, "name": <name|null>}``.
+- **DELETE** `/api/agent/tasks/{task_id}` – permanently delete a task row. Any
+  running agent loop for that task is cancelled on a best-effort basis before the
+  row is removed. Exposed in the WebUI Agent panel as the 🗑 button on each task
+  card.
 - **GET** `/api/agent/proposals` – list agent action proposals waiting
   approval.
 - **POST** `/api/agent/proposals/{proposal_id}/approve` – approve a pending
   proposal.
+- **POST** `/api/agent/proposals/{proposal_id}/reject` – reject a pending
+  proposal, marking its status as ``rejected`` (explicit human refusal).
+- **DELETE** `/api/agent/proposals/{proposal_id}` – soft-cancel a pending
+  proposal (marks status ``cancelled``).
 
 Animations, VRM & Emotion State
 -------------------------------

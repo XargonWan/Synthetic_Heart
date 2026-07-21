@@ -2379,6 +2379,23 @@ async def build_delivery_request(
         "Compose a natural message to the user summarising these results. "
         "Use only message_* actions."
     )
+    # Agent command results must reach the interfaces (Telegram, Discord, …)
+    # with the executed command and its raw output kept verbatim inside
+    # fenced triple-backtick code blocks, so terminal output stays readable and
+    # is never reflowed or truncated by the model.
+    if action_type == "agent_execute":
+        delivery_note += (
+            " Because this is a shell command execution, preserve the executed "
+            "command and its raw output verbatim inside fenced triple-backtick "
+            "code blocks. Format the message exactly like this (translate only "
+            "the two labels into the conversation language, keep the code fences "
+            "and their contents unchanged):\n"
+            "<label for 'command'>:\n"
+            "```\n<the executed command>\n```\n"
+            "<label for 'output'>:\n"
+            "```\n<the raw command output>\n```\n"
+            "Do not summarise, paraphrase, or truncate the command or its output."
+        )
     system_instruction: str
     if persona:
         system_instruction = (

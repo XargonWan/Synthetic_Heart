@@ -160,11 +160,28 @@
       <!-- Agent Sub-Tab -->
       <div class="sub-tab-panel" id="subtab-agent" data-subtab="agent">
         <div class="section-controls">
-          <div style="color: var(--text-soft); font-size: 0.9rem;">Agent tasks and proposals</div>
+          <div style="color: var(--text-soft); font-size: 0.9rem;">Agent workspace</div>
         </div>
-        <div id="agent-tasks-list">Loading tasks...</div>
-        <div id="agent-proposals-list" style="margin-top: 1rem;">Loading proposals...</div>
-        <div id="agent-task-detail" style="margin-top: 1rem;"></div>
+        <div id="agent-legacy-layout" style="display:grid;grid-template-columns:minmax(260px,34%) 1fr;gap:1rem;align-items:start;overflow-y:auto;height:100%;">
+          <div id="agent-left-pane" style="display:grid;gap:1rem;overflow-y:auto;height:100%;">
+            <div>
+              <h3 style="margin:0 0 0.5rem 0;">Tasks</h3>
+              <div id="agent-tasks-list">Loading tasks...</div>
+            </div>
+          </div>
+          <div id="agent-right-pane" style="display:flex;flex-direction:column;overflow:hidden;height:100%;">
+            <div id="agent-task-meta" class="agent-meta-bar">Select a task from the left pane.</div>
+            <div id="agent-conversation" class="agent-conversation">
+              <div class="agent-empty">Select a task from the left pane.</div>
+            </div>
+            <!-- Proposals render inline inside the conversation stream; this list is kept hidden for compatibility -->
+            <div id="agent-proposals-list" style="display:none;"></div>
+            <form id="agent-composer" class="agent-composer" onsubmit="return false;">
+              <textarea id="agent-msg-input" class="agent-msg-input" rows="1" placeholder="Message the agent… (Enter to send, Shift+Enter for newline)"></textarea>
+              <button type="button" id="agent-send-btn" class="agent-send-btn" title="Send">Send</button>
+            </form>
+          </div>
+        </div>
       </div>
         </div><!-- .sub-tabs-container -->
       </div><!-- .history-wrapper -->
@@ -1153,6 +1170,222 @@
         border-radius: 6px;
         margin-top: 0.5rem;
       }
+
+      /* ── VS Code-style agent conversation ──────────────────────────── */
+      .agent-meta-bar {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 0.5rem 1rem;
+        padding: 0.5rem 0.75rem;
+        font-size: 0.82rem;
+        color: var(--text-soft, #b9b9c9);
+        border-bottom: 1px solid var(--border);
+        flex: 0 0 auto;
+      }
+      .agent-meta-bar strong { color: var(--text, #f5f5ff); }
+      .agent-meta-bar .agent-meta-actions {
+        margin-left: auto;
+        display: flex;
+        gap: 0.35rem;
+      }
+      .agent-meta-bar .agent-meta-actions .pill {
+        padding: 2px 8px;
+        font-size: 0.9rem;
+        line-height: 1.2;
+      }
+
+      .agent-conversation {
+        flex: 1 1 auto;
+        overflow-y: auto;
+        display: flex;
+        flex-direction: column;
+        gap: 0.6rem;
+        padding: 0.75rem 0.5rem;
+      }
+      .agent-empty {
+        color: var(--text-soft, #8a8a9a);
+        font-size: 0.9rem;
+        text-align: center;
+        margin: auto;
+      }
+
+      .agent-msg {
+        max-width: 88%;
+        padding: 0.55rem 0.8rem;
+        border-radius: 14px;
+        font-size: 0.9rem;
+        line-height: 1.45;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+      .agent-msg.user {
+        align-self: flex-end;
+        background: var(--accent, #4f8cff);
+        color: var(--accent-contrast, #fff);
+        border-bottom-right-radius: 4px;
+      }
+      .agent-msg.assistant {
+        align-self: flex-start;
+        background: var(--surface, rgba(24, 24, 36, 0.9));
+        border: 1px solid var(--border);
+        border-bottom-left-radius: 4px;
+      }
+      .agent-msg.error {
+        align-self: flex-start;
+        background: rgba(239, 83, 80, 0.12);
+        border: 1px solid rgba(239, 83, 80, 0.4);
+        color: #ef8f8d;
+        font-size: 0.82rem;
+      }
+      .agent-msg pre {
+        white-space: pre-wrap;
+        overflow-x: auto;
+        margin: 0.4rem 0 0 0;
+        background: rgba(12, 12, 20, 0.5);
+        border-radius: 8px;
+        padding: 0.5rem 0.6rem;
+        font-size: 0.82rem;
+      }
+
+      /* Collapsible tool-call rows */
+      .agent-tool {
+        align-self: flex-start;
+        width: 88%;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        background: rgba(12, 12, 20, 0.35);
+        font-size: 0.85rem;
+        overflow: hidden;
+      }
+      .agent-tool > summary {
+        list-style: none;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        padding: 0.45rem 0.65rem;
+        user-select: none;
+      }
+      .agent-tool > summary::-webkit-details-marker { display: none; }
+      .agent-tool > summary::before {
+        content: "▸";
+        transition: transform 0.15s ease;
+        color: var(--text-soft, #8a8a9a);
+      }
+      .agent-tool[open] > summary::before { transform: rotate(90deg); }
+      .agent-tool .agent-tool-name {
+        font-family: monospace;
+        font-weight: 600;
+      }
+      .agent-tool .agent-tool-badge {
+        margin-left: auto;
+        padding: 1px 8px;
+        border-radius: 999px;
+        font-size: 0.72rem;
+      }
+      .agent-tool .agent-tool-badge.ok { background: rgba(83, 194, 112, 0.2); color: #53c270; }
+      .agent-tool .agent-tool-badge.err { background: rgba(239, 83, 80, 0.2); color: #ef5350; }
+      .agent-tool pre {
+        margin: 0;
+        padding: 0.5rem 0.65rem;
+        border-top: 1px solid var(--border);
+        white-space: pre-wrap;
+        overflow-x: auto;
+        font-size: 0.8rem;
+        background: rgba(0, 0, 0, 0.2);
+      }
+      .agent-tool .agent-tool-err {
+        color: #ef8f8d;
+        padding: 0.35rem 0.65rem;
+        font-size: 0.78rem;
+      }
+
+      /* Inline proposal (Allow / Refuse) */
+      .agent-proposal {
+        align-self: flex-start;
+        width: 88%;
+        border: 1px solid var(--accent, #4f8cff);
+        border-radius: 14px;
+        background: rgba(79, 140, 255, 0.08);
+        padding: 0.6rem 0.75rem;
+        font-size: 0.88rem;
+      }
+      .agent-proposal .agent-proposal-head {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        margin-bottom: 0.4rem;
+        color: var(--text-soft, #b9b9c9);
+        font-size: 0.8rem;
+      }
+      .agent-proposal pre {
+        white-space: pre-wrap;
+        overflow-x: auto;
+        margin: 0 0 0.5rem 0;
+        background: rgba(12, 12, 20, 0.6);
+        border-radius: 8px;
+        padding: 0.5rem 0.6rem;
+        font-size: 0.82rem;
+      }
+      .agent-proposal .agent-proposal-actions {
+        display: flex;
+        gap: 0.5rem;
+      }
+      .agent-proposal .agent-btn-allow,
+      .agent-proposal .agent-btn-refuse {
+        border: none;
+        border-radius: 8px;
+        padding: 0.35rem 0.9rem;
+        font-size: 0.82rem;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      .agent-proposal .agent-btn-allow { background: #53c270; color: #06210f; }
+      .agent-proposal .agent-btn-allow:hover { background: #47b063; }
+      .agent-proposal .agent-btn-refuse { background: rgba(239, 83, 80, 0.18); color: #ef5350; }
+      .agent-proposal .agent-btn-refuse:hover { background: rgba(239, 83, 80, 0.3); }
+
+      /* Composer */
+      .agent-composer {
+        flex: 0 0 auto;
+        display: flex;
+        gap: 0.5rem;
+        align-items: flex-end;
+        padding: 0.6rem 0.5rem 0.2rem 0.5rem;
+        border-top: 1px solid var(--border);
+      }
+      .agent-msg-input {
+        flex: 1 1 auto;
+        resize: none;
+        max-height: 140px;
+        min-height: 38px;
+        padding: 0.55rem 0.7rem;
+        border-radius: 10px;
+        border: 1px solid var(--border);
+        background: var(--surface, rgba(24, 24, 36, 0.9));
+        color: var(--text, #f5f5ff);
+        font: inherit;
+        font-size: 0.9rem;
+        line-height: 1.4;
+      }
+      .agent-msg-input:focus {
+        outline: none;
+        border-color: var(--accent, #4f8cff);
+      }
+      .agent-send-btn {
+        flex: 0 0 auto;
+        border: none;
+        border-radius: 10px;
+        padding: 0.55rem 1.1rem;
+        background: var(--accent, #4f8cff);
+        color: var(--accent-contrast, #fff);
+        font-weight: 600;
+        cursor: pointer;
+        height: 38px;
+      }
+      .agent-send-btn:hover { filter: brightness(1.08); }
+      .agent-send-btn:disabled { opacity: 0.5; cursor: not-allowed; }
       </style>
 
       <script src="/js/utils.js"></script>

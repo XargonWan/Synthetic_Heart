@@ -18,7 +18,7 @@ from typing import Any, Dict, List, Optional
 from dotenv import load_dotenv
 
 from core import message_queue
-from core.command_registry import execute_command
+from core.command_registry import handle_command_message
 from core.core_initializer import register_interface
 from core.interfaces_registry import get_interface_registry
 from core.logging_utils import log_debug, log_error, log_info, log_warning
@@ -592,15 +592,19 @@ class MatrixInterface:
             log_warning(f"[matrix_interface] Failed to update chat link names: {exc}")
 
         if text.startswith("/"):
-            parts = text[1:].split()
-            if parts:
-                command, *args = parts
-                try:
-                    response = await execute_command(command, *args)
-                    if response:
-                        await self._send_matrix_message(room_identifier, response)
-                except Exception as exc:  # pragma: no cover - command failure
-                    log_error(f"[matrix_interface] Command {command} failed: {exc}")
+            try:
+                # Route through the shared handler so trainer permission checks
+                # (is_trainer) are enforced consistently with other interfaces.
+                response = await handle_command_message(
+                    text,
+                    user_id=getattr(event, "sender", None),
+                    interface_id=INTERFACE_NAME,
+                    interface_context={"bot": self, "wrapped": wrapped},
+                )
+                if response:
+                    await self._send_matrix_message(room_identifier, response)
+            except Exception as exc:  # pragma: no cover - command failure
+                log_error(f"[matrix_interface] Command failed: {exc}")
             return
 
         await message_queue.enqueue(self, wrapped, interface_id=INTERFACE_NAME)

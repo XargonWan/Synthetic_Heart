@@ -857,13 +857,26 @@ class SynthWebUIInterface:
         self.app.get("/api/agent/tasks")(self.list_agent_tasks)
         self.app.get("/api/agent/tasks/{task_id}")(self.get_agent_task)
         self.app.post("/api/agent/tasks")(self.create_agent_task)
+        self.app.post("/api/agent/run")(self.run_agent_turn)
+        self.app.get("/api/agent/tools")(self.list_agent_tools)
         self.app.post("/api/agent/tasks/{task_id}/pause")(self.pause_agent_task)
         self.app.post("/api/agent/tasks/{task_id}/resume")(self.resume_agent_task)
         self.app.post("/api/agent/tasks/{task_id}/cancel")(self.cancel_agent_task)
+        self.app.delete("/api/agent/tasks/{task_id}")(self.delete_agent_task)
+        self.app.patch("/api/agent/tasks/{task_id}")(self.rename_agent_task)
+        self.app.post("/api/agent/tasks/{task_id}/message")(
+            self.send_agent_task_message
+        )
         # Agent proposal approval endpoint
         self.app.get("/api/agent/proposals")(self.list_agent_proposals)
         self.app.post("/api/agent/proposals/{proposal_id}/approve")(
             self.approve_agent_proposal
+        )
+        self.app.post("/api/agent/proposals/{proposal_id}/reject")(
+            self.reject_agent_proposal
+        )
+        self.app.delete("/api/agent/proposals/{proposal_id}")(
+            self.delete_agent_proposal
         )
         self.app.get("/api/animations/{skin}/{animation_type}")(
             self.get_animations_for_type
@@ -1073,12 +1086,19 @@ class SynthWebUIInterface:
             async with get_conn_ctx() as conn:
                 async with conn.cursor() as cur:
                     await cur.execute(
-                        "SELECT id, engine, status, created_at, updated_at FROM agent_tasks ORDER BY created_at DESC LIMIT %s",
+                        "SELECT id, engine, status, created_at, updated_at, metadata FROM agent_tasks ORDER BY created_at DESC LIMIT %s",
                         (int(limit),),
                     )
                     rows = await cur.fetchall()
                     tasks = []
                     for r in rows:
+                        name = None
+                        try:
+                            meta = json.loads(r[5]) if r[5] else None
+                            if isinstance(meta, dict):
+                                name = meta.get("name") or None
+                        except Exception:
+                            name = None
                         tasks.append(
                             {
                                 "id": r[0],
@@ -1086,6 +1106,7 @@ class SynthWebUIInterface:
                                 "status": r[2],
                                 "created_at": r[3].isoformat() if r[3] else None,
                                 "updated_at": r[4].isoformat() if r[4] else None,
+                                "name": name,
                             }
                         )
                     return JSONResponse({"tasks": tasks})
@@ -1133,6 +1154,58 @@ class SynthWebUIInterface:
             log_error(f"{LOG_PREFIX} get_agent_task failed: {error_msg}")
             raise HTTPException(status_code=500, detail=error_msg)
 
+    async def send_agent_task_message(self, task_id: int, request: Request):
+        """Append a user message to a task's reasoning timeline.
+
+        This records the human intervention as a ``user_message`` entry in
+        ``agent_tasks.iterations_meta`` so it appears inline in the
+        conversational UI. It does NOT relaunch the agent loop — that
+        "continue with new input" behaviour is a separate future feature.
+        """
+        try:
+            body = await request.json()
+            text = (body.get("text") or "").strip()
+            if not text:
+                raise HTTPException(status_code=400, detail="text is required")
+
+            from core.db import get_conn_ctx
+
+            async with get_conn_ctx() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "SELECT iterations_meta FROM agent_tasks WHERE id=%s",
+                        (int(task_id),),
+                    )
+                    row = await cur.fetchone()
+                    if not row:
+                        raise HTTPException(status_code=404, detail="task not found")
+
+                    meta = json.loads(row[0]) if row[0] else []
+                    if not isinstance(meta, list):
+                        meta = []
+
+                    next_iteration = len(meta) + 1
+                    entry = {
+                        "iteration": next_iteration,
+                        "role": "user_message",
+                        "result": text,
+                    }
+                    meta.append(entry)
+
+                    await cur.execute(
+                        "UPDATE agent_tasks SET iterations_meta=%s, updated_at=CURRENT_TIMESTAMP WHERE id=%s",
+                        (json.dumps(meta, ensure_ascii=False), int(task_id)),
+                    )
+                    await conn.commit()
+
+            return JSONResponse({"success": True, "entry": entry})
+        except HTTPException:
+            raise
+        except Exception as e:
+            error_msg = str(e)
+            log_error(f"{LOG_PREFIX} send_agent_task_message failed: {error_msg}")
+            raise HTTPException(status_code=500, detail=error_msg)
+
     async def create_agent_task(self, request: Request):
         try:
             body = await request.json()
@@ -1165,6 +1238,124 @@ class SynthWebUIInterface:
         except Exception as e:
             error_msg = str(e)
             log_error(f"{LOG_PREFIX} create_agent_task failed: {error_msg}")
+            raise HTTPException(status_code=500, detail=error_msg)
+
+    async def list_agent_tools(self):
+        """Return the unified tool catalog (internal actions + MCP tools)."""
+        try:
+            from core.tool_registry import tool_registry
+            from core.core_initializer import core_initializer
+            from core.mcp_bridge.client import mcp_client_bridge
+
+            # Rebuild actions so plugin enable/disable toggles are applied immediately.
+            await core_initializer._build_actions_block()
+
+            available_actions = {}
+            if isinstance(core_initializer.actions_block, dict):
+                available_actions = (
+                    core_initializer.actions_block.get("available_actions", {}) or {}
+                )
+
+            # Refresh internal tools from the latest actions block.
+            tool_registry.load_internal_actions(available_actions)
+            await mcp_client_bridge.connect_all(force=True)
+
+            tools = []
+            for tool in tool_registry.all_tools():
+                parameters = []
+                for p in tool.parameters:
+                    parameters.append(
+                        {
+                            "name": p.name,
+                            "type": p.type,
+                            "description": p.description,
+                            "required": bool(p.required),
+                            "enum": p.enum,
+                        }
+                    )
+                tools.append(
+                    {
+                        "name": tool.name,
+                        "description": tool.description,
+                        "source": tool.source,
+                        "security_level": tool.security_level,
+                        "external_effects": list(tool.external_effects or []),
+                        "server_name": tool.server_name,
+                        "parameters": parameters,
+                    }
+                )
+
+            tools.sort(key=lambda t: t["name"])
+            return JSONResponse({"tools": tools})
+        except Exception as e:
+            error_msg = str(e)
+            log_error(f"{LOG_PREFIX} list_agent_tools failed: {error_msg}")
+            raise HTTPException(status_code=500, detail=error_msg)
+
+    async def run_agent_turn(self, request: Request):
+        """Run one synchronous Agentic Runtime turn from WebUI."""
+        try:
+            body = await request.json()
+            prompt = str(body.get("prompt") or body.get("goal") or "").strip()
+            planned_actions = body.get("actions")
+            if not prompt and not isinstance(planned_actions, list):
+                raise HTTPException(status_code=400, detail="Missing prompt")
+
+            engine = body.get("engine")
+            max_iterations = body.get("max_iterations")
+            timeout_seconds = body.get("timeout_seconds")
+
+            # Ensure unified registry is fresh and MCP servers are connected.
+            from core.core_initializer import core_initializer
+            from core.tool_registry import tool_registry
+            from core.mcp_bridge.client import mcp_client_bridge
+            from core.agent_core import get_agent_loop_manager
+            from core.config_manager import config_registry as cfg
+
+            if not bool(cfg.get_var("AGENT_ENABLED", True)):
+                raise HTTPException(status_code=403, detail="Agent disabled")
+
+            # Rebuild actions so plugin enable/disable toggles are applied immediately.
+            await core_initializer._build_actions_block()
+
+            available_actions = {}
+            if isinstance(core_initializer.actions_block, dict):
+                available_actions = (
+                    core_initializer.actions_block.get("available_actions", {}) or {}
+                )
+            tool_registry.load_internal_actions(available_actions)
+            await mcp_client_bridge.connect_all(force=True)
+
+            manager = get_agent_loop_manager()
+            result = await manager.run_agentic_turn(
+                goal=prompt or "Execute planned agent actions",
+                engine=engine,
+                context={
+                    "goal": prompt,
+                    "interface": "synth_webui",
+                    "interface_name": "synth_webui",
+                    "interface_path": "synth_webui/agent",
+                    "chat_id": "agent",
+                },
+                max_iterations=max_iterations,
+                timeout_seconds=timeout_seconds,
+                original_message={"sender_id": "webui"},
+                preplanned_calls=planned_actions
+                if isinstance(planned_actions, list)
+                else None,
+            )
+
+            # Persistence into agent_tasks is centralised in run_agentic_turn
+            # (source-agnostic), which returns the created task id. This avoids
+            # a duplicate WebUI-only row for the same turn.
+            task_id = result.get("task_id")
+
+            return JSONResponse({"result": result, "task_id": task_id})
+        except HTTPException:
+            raise
+        except Exception as e:
+            error_msg = str(e)
+            log_error(f"{LOG_PREFIX} run_agent_turn failed: {error_msg}")
             raise HTTPException(status_code=500, detail=error_msg)
 
     async def create_database_backup_endpoint(self):
@@ -1260,6 +1451,83 @@ class SynthWebUIInterface:
             log_error(f"{LOG_PREFIX} cancel_agent_task failed: {error_msg}")
             raise HTTPException(status_code=500, detail=error_msg)
 
+    async def delete_agent_task(self, task_id: int):
+        try:
+            from core.agent_core import get_agent_loop_manager
+
+            # Best-effort stop of any in-flight loop before removing the record.
+            try:
+                get_agent_loop_manager().cancel_task(int(task_id))
+            except Exception:
+                pass
+
+            from core.db import get_conn_ctx
+
+            async with get_conn_ctx() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "DELETE FROM agent_tasks WHERE id=%s",
+                        (int(task_id),),
+                    )
+                    await conn.commit()
+            return JSONResponse({"status": "deleted", "task_id": int(task_id)})
+        except Exception as e:
+            error_msg = str(e)
+            log_error(f"{LOG_PREFIX} delete_agent_task failed: {error_msg}")
+            raise HTTPException(status_code=500, detail=error_msg)
+
+    async def rename_agent_task(self, task_id: int, request: Request):
+        """Set (or clear) a human-friendly display name for a task.
+
+        The name is stored inside the ``metadata`` JSON blob under the
+        ``name`` key so no schema change is required. Passing an empty or
+        null name clears it.
+        """
+        try:
+            body = await request.json()
+            raw_name = body.get("name")
+            name = (raw_name or "").strip() if isinstance(raw_name, str) else ""
+
+            from core.db import get_conn_ctx
+
+            async with get_conn_ctx() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "SELECT metadata FROM agent_tasks WHERE id=%s",
+                        (int(task_id),),
+                    )
+                    row = await cur.fetchone()
+                    if not row:
+                        raise HTTPException(status_code=404, detail="task not found")
+
+                    try:
+                        meta = json.loads(row[0]) if row[0] else {}
+                    except Exception:
+                        meta = {}
+                    if not isinstance(meta, dict):
+                        meta = {}
+
+                    if name:
+                        meta["name"] = name
+                    else:
+                        meta.pop("name", None)
+
+                    await cur.execute(
+                        "UPDATE agent_tasks SET metadata=%s, updated_at=CURRENT_TIMESTAMP WHERE id=%s",
+                        (json.dumps(meta, ensure_ascii=False), int(task_id)),
+                    )
+                    await conn.commit()
+
+            return JSONResponse(
+                {"status": "renamed", "task_id": int(task_id), "name": name or None}
+            )
+        except HTTPException:
+            raise
+        except Exception as e:
+            error_msg = str(e)
+            log_error(f"{LOG_PREFIX} rename_agent_task failed: {error_msg}")
+            raise HTTPException(status_code=500, detail=error_msg)
+
     async def approve_agent_proposal(self, proposal_id: int, request: Request):
         try:
             body = await request.json()
@@ -1320,6 +1588,80 @@ class SynthWebUIInterface:
                 return JSONResponse({"proposals": []})
             error_msg = str(e)
             log_error(f"{LOG_PREFIX} list_agent_proposals failed: {error_msg}")
+            raise HTTPException(status_code=500, detail=error_msg)
+
+    async def delete_agent_proposal(self, proposal_id: int):
+        """Soft-delete a pending proposal by marking it as cancelled."""
+        try:
+            from core.db import get_conn_ctx
+
+            async with get_conn_ctx() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        """
+                        UPDATE agent_activity_log
+                        SET status=%s, response_ts=CURRENT_TIMESTAMP
+                        WHERE id=%s AND status=%s
+                        """,
+                        ("cancelled", int(proposal_id), "proposed"),
+                    )
+                    deleted_count = int(getattr(cur, "rowcount", 0) or 0)
+                    await conn.commit()
+
+            if deleted_count == 0:
+                raise HTTPException(
+                    status_code=404,
+                    detail="proposal not found or not in proposed state",
+                )
+
+            return JSONResponse({"success": True, "deleted_count": deleted_count})
+        except HTTPException:
+            raise
+        except Exception as e:
+            if self._is_missing_agent_table_error(e):
+                raise HTTPException(status_code=404, detail="proposal table missing")
+            error_msg = str(e)
+            log_error(f"{LOG_PREFIX} delete_agent_proposal failed: {error_msg}")
+            raise HTTPException(status_code=500, detail=error_msg)
+
+    async def reject_agent_proposal(self, proposal_id: int):
+        """Reject a pending proposal by marking it as rejected.
+
+        Unlike ``delete_agent_proposal`` (which soft-cancels), this records an
+        explicit human refusal so the agent can reason about an alternative
+        approach. The ``rejected`` value already exists in the
+        ``agent_activity_log.status`` enum.
+        """
+        try:
+            from core.db import get_conn_ctx
+
+            async with get_conn_ctx() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        """
+                        UPDATE agent_activity_log
+                        SET status=%s, response_ts=CURRENT_TIMESTAMP
+                        WHERE id=%s AND status=%s
+                        """,
+                        ("rejected", int(proposal_id), "proposed"),
+                    )
+                    updated_count = int(getattr(cur, "rowcount", 0) or 0)
+                    await conn.commit()
+
+            if updated_count == 0:
+                raise HTTPException(
+                    status_code=404,
+                    detail="proposal not found or not in proposed state",
+                )
+
+            return JSONResponse({"success": True, "rejected_count": updated_count})
+        except HTTPException:
+            raise
+        except Exception as e:
+            if self._is_missing_agent_table_error(e):
+                raise HTTPException(status_code=404, detail="proposal table missing")
+            error_msg = str(e)
+            log_error(f"{LOG_PREFIX} reject_agent_proposal failed: {error_msg}")
             raise HTTPException(status_code=500, detail=error_msg)
 
     async def set_animation_state(self, request: Request):
@@ -5606,6 +5948,7 @@ class SynthWebUIInterface:
                 "GRILLO_CORTEX",
                 "TRAINER_CORTEX",
                 "LIVE_CORTEX",
+                "AGENT_CORTEX",
             ):
                 ui_type = "select"
                 if entry.get("key") == "LIVE_CORTEX":
@@ -5619,7 +5962,11 @@ class SynthWebUIInterface:
                     combined = sorted(set(live_engines + extra))
                     # always allow explicit disable
                     options = ["Default", "disabled"] + combined
-                elif entry.get("key") in ("GRILLO_CORTEX", "TRAINER_CORTEX"):
+                elif entry.get("key") in (
+                    "GRILLO_CORTEX",
+                    "TRAINER_CORTEX",
+                    "AGENT_CORTEX",
+                ):
                     options = ["Default"] + available_cortex_engines
                 else:
                     options = available_cortex_engines
@@ -8912,6 +9259,18 @@ class SynthWebUIInterface:
                 _invalidate_vox_lang_override_cache()
             except Exception:
                 pass
+
+        if key in {"AGENT_ENABLED", "AGENT_APPROVAL_MODE", "AGENT_SHELL_WHITELIST"}:
+            try:
+                from core.core_initializer import core_initializer
+
+                # Agent plugin checks is_enabled() while rebuilding this map, so
+                # a config toggle instantly updates the available tool/action set.
+                await core_initializer._build_actions_block()
+            except Exception as exc:
+                log_warning(
+                    f"{LOG_PREFIX} failed to rebuild actions after {key} update: {exc}"
+                )
 
         response_data = {"status": "ok"}
 

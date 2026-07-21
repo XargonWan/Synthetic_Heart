@@ -770,6 +770,8 @@ async def handle_incoming_message(
     ctx["original_text"] = (
         text  # Track original text in context, not on message (for consistency with immutable Telegram Message objects)
     )
+    if not ctx.get("goal") and isinstance(text, str) and text.strip():
+        ctx["goal"] = text.strip()
     if not ctx.get("original_user_message"):
         try:
             ctx["original_user_message"] = getattr(message, "text", "") or ""
@@ -2521,7 +2523,48 @@ async def handle_incoming_message(
                                     else:
                                         filtered.append(act)
                                 actions = filtered
-                        result = await run_actions(actions, ctx, bot, message)
+                        # Agentic Runtime 2.0: optional deterministic router.
+                        # When AGENTIC_ROUTING_ENABLED is False (default) this is
+                        # a no-op and the Fast Lane runs exactly as before.
+                        if config_registry.get_var(
+                            "AGENTIC_ROUTING_ENABLED", False, value_type=bool
+                        ):
+                            from core.agent_router import (
+                                classify as _agent_classify,
+                                route as _agent_route,
+                            )
+
+                            action_list = actions if isinstance(actions, list) else []
+                            lane = _agent_classify(action_list, context=ctx)
+                            if lane == "agent":
+                                log_info(
+                                    "[message_chain] 🤖 Agent Lane engaged for this turn"
+                                )
+                                result = await _agent_route(
+                                    action_list,
+                                    context=ctx,
+                                    bot=bot,
+                                    message=message,
+                                )
+                                # The agent lane returns its own result shape;
+                                # normalize to what the loop expects downstream.
+                                if not isinstance(result, dict):
+                                    result = {"processed": [], "failed_actions": []}
+                                result.setdefault("processed", [])
+                                result.setdefault("failed_actions", [])
+                                result.setdefault("errors", [])
+                                result.setdefault("action_outputs", [])
+                                actions_executed_during_loop = True
+                                # Skip the rest of the Fast-Lane correction logic.
+                                delivered_to_llm = False
+                                fixable_failures: list = []
+                                unfixable_failures: list = []
+                            else:
+                                result = await run_actions(
+                                    action_list, ctx, bot, message
+                                )
+                        else:
+                            result = await run_actions(actions, ctx, bot, message)
                         processed = result.get("processed", [])
                         failed = result.get("failed_actions", [])
                         errors = result.get("errors", [])

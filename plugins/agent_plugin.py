@@ -4,6 +4,7 @@ import asyncio
 import importlib
 import json
 import os
+from pathlib import Path
 import sys
 from collections.abc import Callable
 from typing import Optional, Dict, Any
@@ -62,6 +63,26 @@ try:
         component="agent",
         needs_component_reload=True,
     )
+    # Engine override for the agentic loop. "Default" == use the active Cortex
+    # engine (BASE_CORTEX); any other value must be a Cortex engine registered
+    # in the Cortex registry. The WebUI populates the option list with the
+    # registered Cortex engines (see core/webui.py cortex selector block).
+    register_exposed_var(
+        "AGENT_CORTEX",
+        label="Agent engine (Cortex override)",
+        default="Default",
+        value_type=str,
+        ui_type="select",
+        options=["Default"],
+        description=(
+            "Which Cortex engine the agentic loop uses. 'Default' reuses the "
+            "active Cortex engine; pick another registered Cortex engine to run "
+            "the agent on an LLM better suited for tool-calling/agent work."
+        ),
+        scope="agent",
+        component="agent",
+        needs_component_reload=True,
+    )
 except Exception:
     # tests / import-time safety
     pass
@@ -80,6 +101,15 @@ def _in_container() -> bool:
     except Exception as e:
         log_debug(f"[agent] Container detection failed: {e}")
     return False
+
+
+def _safe_int(value: Any, default: int, *, min_value: int, max_value: int) -> int:
+    """Parse an int safely and clamp to bounds."""
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(min_value, min(max_value, parsed))
 
 
 class AgentPlugin(AIPluginBase):
@@ -138,6 +168,28 @@ class AgentPlugin(AIPluginBase):
         if loop is not None:
             self._attach_task = loop.create_task(self._attach_to_active_engine())
 
+    def _refresh_runtime_settings(self) -> None:
+        """Refresh policy/config values so WebUI toggles apply at runtime."""
+        try:
+            self._approval_mode = str(
+                config_registry.get_var("AGENT_APPROVAL_MODE", "whitelist")
+            )
+            self._whitelist_raw = str(
+                config_registry.get_var(
+                    "AGENT_SHELL_WHITELIST", "ls,cat,df -h,free -m,uptime,whoami,id"
+                )
+            )
+            self._whitelist = [
+                c.strip() for c in self._whitelist_raw.split(",") if c.strip()
+            ]
+            self._container_required = bool(
+                config_registry.get_var("AGENT_CONTAINER_REQUIRED", True)
+            )
+            self._enabled = bool(config_registry.get_var("AGENT_ENABLED", True))
+        except Exception:
+            # Keep the last known settings if config reads fail transiently.
+            pass
+
     def is_enabled(self) -> bool:
         """Only expose agent actions when the agent is toggled on.
 
@@ -146,6 +198,9 @@ class AgentPlugin(AIPluginBase):
         every prompt even when ``AGENT_ENABLED`` is off or we are not running in
         a container — bloating the tool block for small local LLMs.
         """
+        self._refresh_runtime_settings()
+        if self._container_required and not self._in_container:
+            return False
         return bool(self._enabled)
 
     async def _attach_to_active_engine(self) -> None:
@@ -200,7 +255,14 @@ class AgentPlugin(AIPluginBase):
         return conn_ctx
 
     def get_supported_action_types(self) -> list[str]:
-        return ["agent_execute", "propose_action", "approve_action", "start_task"]
+        return [
+            "agent_execute",
+            "propose_action",
+            "approve_action",
+            "start_task",
+            "agent_list_files",
+            "agent_read_file",
+        ]
 
     def get_supported_actions(self) -> Dict[str, Any]:
         return {
@@ -219,12 +281,115 @@ class AgentPlugin(AIPluginBase):
                 "optional_fields": [],
                 "description": "Approve a previously proposed action.",
             },
+            "reject_action": {
+                "required_fields": ["proposal_id"],
+                "optional_fields": [],
+                "description": "Reject a previously proposed action without executing it.",
+            },
+            "agent_list_files": {
+                "required_fields": [],
+                "optional_fields": ["path", "recursive", "max_depth", "limit"],
+                "description": "List files/directories within the allowed agent filesystem roots.",
+            },
+            "agent_read_file": {
+                "required_fields": ["path"],
+                "optional_fields": ["start_line", "end_line", "max_chars"],
+                "description": "Read a text file within the allowed agent filesystem roots.",
+            },
         }
 
+    def _allowed_roots(self) -> list[Path]:
+        """Return the filesystem roots the agent is allowed to read."""
+        roots_raw = os.getenv("AGENT_FS_ROOTS")
+        if roots_raw:
+            roots = [p.strip() for p in roots_raw.split(":") if p.strip()]
+        else:
+            roots = [
+                os.getenv("AGENT_FS_ROOT", "/app"),
+                os.getenv("SYNTH_LOG_DIR", "/app/logs"),
+            ]
+
+        out: list[Path] = []
+        for root in roots:
+            try:
+                out.append(Path(root).resolve())
+            except Exception:
+                continue
+        return out
+
+    def _resolve_safe_path(self, raw_path: str) -> tuple[Path | None, str | None]:
+        """Resolve a user path and ensure it stays inside allowed roots."""
+        if not raw_path or not str(raw_path).strip():
+            return None, "Missing path"
+
+        p = Path(str(raw_path).strip())
+        if not p.is_absolute():
+            # Relative paths are resolved against first allowed root.
+            roots = self._allowed_roots()
+            if not roots:
+                return None, "No allowed roots configured"
+            p = roots[0] / p
+
+        try:
+            resolved = p.resolve()
+        except Exception as exc:
+            return None, f"Invalid path: {exc}"
+
+        for root in self._allowed_roots():
+            try:
+                resolved.relative_to(root)
+                return resolved, None
+            except ValueError:
+                continue
+
+        return None, "Path is outside allowed roots"
+
+    def _list_files(
+        self, base: Path, *, recursive: bool, max_depth: int, limit: int
+    ) -> list[str]:
+        """Return a bounded directory listing rooted at ``base``."""
+        if not base.exists():
+            return []
+        if base.is_file():
+            return [str(base)]
+
+        results: list[str] = []
+
+        def _walk(path: Path, depth: int) -> None:
+            if len(results) >= limit:
+                return
+            if depth > max_depth:
+                return
+            try:
+                entries = sorted(path.iterdir(), key=lambda x: x.name.lower())
+            except Exception:
+                return
+
+            for entry in entries:
+                if len(results) >= limit:
+                    return
+                marker = "/" if entry.is_dir() else ""
+                results.append(str(entry) + marker)
+                if recursive and entry.is_dir():
+                    _walk(entry, depth + 1)
+
+        _walk(base, 0)
+        return results
+
     def get_prompt_instructions(self, action_name: str) -> dict:
-        return {
-            "description": "Use the agent actions to propose or execute actions. Ensure to return ONLY valid JSON when asked to produce actions.",
-        }
+        enabled = self.is_enabled()
+        if enabled:
+            description = (
+                "You have agentic capabilities. Use the agent actions to propose or execute actions. "
+                "Ensure to return ONLY valid JSON when asked to produce actions."
+            )
+        else:
+            description = (
+                "You would have agentic capabilities, but the agent system is currently disabled. "
+                "To enable it, set AGENT_ENABLED to true or enable it via WebUI. "
+                "When disabled, you can still use regular actions but cannot execute agentic commands."
+            )
+        return {"description": description}
 
     async def handle_incoming_message(self, bot, message, prompt):
         """Send a structured prompt to the active LLM (via plugin_instance) and parse JSON actions."""
@@ -391,8 +556,8 @@ class AgentPlugin(AIPluginBase):
                 log_warning("[agent] No command provided")
                 return "No command provided"
 
-            # Check global enabled flag
-            if not self._enabled:
+            # Check global enabled flag (live value from config registry)
+            if not self.is_enabled():
                 log_warning(
                     "[agent] Agent execution disabled by configuration or not running in container"
                 )
@@ -430,8 +595,19 @@ class AgentPlugin(AIPluginBase):
                 except Exception as e:
                     log_warning(f"[agent] Failed to persist execution record: {e}")
 
+                formatted_result = (
+                    "Agent executed command:\n"
+                    "```\n"
+                    f"{command}\n"
+                    "```\n"
+                    "Output:\n"
+                    "```\n"
+                    f"{res}\n"
+                    "```"
+                )
+
                 try:
-                    self._notify_fn(f"Agent executed command: {command}\nOutput: {res}")
+                    self._notify_fn(formatted_result)
                 except Exception:
                     pass
 
@@ -459,6 +635,7 @@ class AgentPlugin(AIPluginBase):
                                     "type": "agent_execute",
                                     "command": command,
                                     "output": str(res),
+                                    "formatted_output": formatted_result,
                                 }
                             ],
                             original_context={
@@ -492,7 +669,8 @@ class AgentPlugin(AIPluginBase):
                     )
                     try:
                         self._notify_fn(
-                            f"Agent proposes command #{activity_id} (awaiting approval): {cmd}\nReply with '/agent approve {activity_id}' to approve."
+                            f"Agent proposes command #{activity_id} (awaiting approval): {cmd}\n"
+                            f"Reply with '/agent approve {activity_id}' to approve or '/agent reject {activity_id}' to reject."
                         )
                     except Exception:
                         pass
@@ -505,13 +683,78 @@ class AgentPlugin(AIPluginBase):
                 activity_id = await self._create_activity_log(cmd, proposer="system")
                 try:
                     self._notify_fn(
-                        f"Agent proposes command #{activity_id} (awaiting approval): {cmd}\nReply with '/agent approve {activity_id}' to approve."
+                        f"Agent proposes command #{activity_id} (awaiting approval): {cmd}\n"
+                        f"Reply with '/agent approve {activity_id}' to approve or '/agent reject {activity_id}' to reject."
                     )
                 except Exception:
                     pass
                 return f"Command proposal sent for approval: proposal #{activity_id}"
 
             return "Unknown approval mode"
+
+        if action_type == "agent_list_files":
+            raw_path = str(payload.get("path") or ".")
+            recursive = bool(payload.get("recursive", False))
+            max_depth = _safe_int(payload.get("max_depth"), 2, min_value=0, max_value=8)
+            limit = _safe_int(payload.get("limit"), 120, min_value=1, max_value=1000)
+
+            safe_path, err = self._resolve_safe_path(raw_path)
+            if err or safe_path is None:
+                return {"status": "error", "reason": err or "invalid path"}
+
+            items = self._list_files(
+                safe_path,
+                recursive=recursive,
+                max_depth=max_depth,
+                limit=limit,
+            )
+            return {
+                "status": "ok",
+                "path": str(safe_path),
+                "count": len(items),
+                "items": items,
+            }
+
+        if action_type == "agent_read_file":
+            raw_path = str(payload.get("path") or "").strip()
+            safe_path, err = self._resolve_safe_path(raw_path)
+            if err or safe_path is None:
+                return {"status": "error", "reason": err or "invalid path"}
+            if not safe_path.exists():
+                return {"status": "error", "reason": "file not found"}
+            if safe_path.is_dir():
+                return {"status": "error", "reason": "path is a directory"}
+
+            start_line = _safe_int(
+                payload.get("start_line"), 1, min_value=1, max_value=1_000_000
+            )
+            end_line = _safe_int(
+                payload.get("end_line"),
+                start_line + 199,
+                min_value=start_line,
+                max_value=1_000_000,
+            )
+            max_chars = _safe_int(
+                payload.get("max_chars"), 40_000, min_value=500, max_value=200_000
+            )
+
+            try:
+                with safe_path.open("r", encoding="utf-8", errors="replace") as fh:
+                    lines = fh.readlines()
+                slice_lines = lines[start_line - 1 : end_line]
+                content = "".join(slice_lines)
+                if len(content) > max_chars:
+                    content = content[:max_chars] + "\n... (truncated)"
+                return {
+                    "status": "ok",
+                    "path": str(safe_path),
+                    "start_line": start_line,
+                    "end_line": min(end_line, len(lines)),
+                    "total_lines": len(lines),
+                    "content": content,
+                }
+            except Exception as exc:
+                return {"status": "error", "reason": f"read failed: {exc}"}
 
         # Placeholder: other action types may propose or approve
         if action_type == "propose_action":
@@ -524,7 +767,8 @@ class AgentPlugin(AIPluginBase):
             )
             try:
                 self._notify_fn(
-                    f"Agent proposed action #{activity_id}: {cmd}\nReply with '/agent approve {activity_id}' to approve."
+                    f"Agent proposed action #{activity_id}: {cmd}\n"
+                    f"Reply with '/agent approve {activity_id}' to approve or '/agent reject {activity_id}' to reject."
                 )
             except Exception:
                 pass
@@ -613,6 +857,63 @@ class AgentPlugin(AIPluginBase):
                 log_warning(f"[agent] Failed to persist approval execution: {e}")
 
             return {"status": "executed", "proposal_id": proposal_id, "output": res}
+
+        if action_type == "reject_action":
+            # Reject a previously proposed action without executing it.
+            proposal_id = payload.get("proposal_id") or payload.get("proposal")
+            trainer_id = None
+            try:
+                if original_message and isinstance(original_message, dict):
+                    trainer_id = (
+                        original_message.get("sender_id")
+                        or original_message.get("user_id")
+                        or None
+                    )
+                    if trainer_id is not None:
+                        trainer_id = str(trainer_id)
+            except Exception:
+                trainer_id = None
+
+            if not proposal_id:
+                return {"status": "error", "reason": "no proposal_id to reject"}
+
+            # Verify the proposal exists and is still pending.
+            try:
+                conn_ctx = await self._get_conn_ctx()
+                async with conn_ctx as conn:
+                    async with conn.cursor() as cur:
+                        await cur.execute(
+                            "SELECT status FROM agent_activity_log WHERE id=%s",
+                            (int(proposal_id),),
+                        )
+                        row = await cur.fetchone()
+                        if not row:
+                            return {
+                                "status": "error",
+                                "reason": "proposal not found",
+                            }
+                        current_status = row[0]
+                        if current_status != "proposed":
+                            return {
+                                "status": "error",
+                                "reason": f"proposal not in proposed state: {current_status}",
+                            }
+            except Exception as e:
+                log_error(f"[agent] reject_action lookup failed: {e}")
+                return {"status": "error", "reason": "db lookup failed"}
+
+            try:
+                await self._update_activity_log(
+                    int(proposal_id),
+                    status="rejected",
+                    trainer_id=trainer_id,
+                    result="rejected",
+                )
+            except Exception as e:
+                log_warning(f"[agent] Failed to update proposal status: {e}")
+                return {"status": "error", "reason": "db update failed"}
+
+            return {"status": "rejected", "proposal_id": proposal_id}
 
         if action_type == "start_task":
             from core.agent_core import get_agent_loop_manager

@@ -21,8 +21,13 @@ Safety
 The plugin enforces a conservative default: shell execution is disabled by default outside containers and whitelist is used by default. Use `always_approve` only with caution.
 
 - Proposals created via `propose_action` or generated when an unwhitelisted command is attempted are persisted in the `agent_activity_log` table (see `init-db.sql`).
-- When configured to `always_ask` (or when a whitelist block occurs), proposals are sent to the trainer's private chat using the standard `notify_trainer`/trainer notification flow. The trainer can approve a proposal by replying with: ``/agent approve <proposal_id>`` or by triggering the `approve_action` action with the `proposal_id`.
-- Approvals and execution results are recorded in `agent_activity_log` and `agent_action_execs` for auditability and WebUI inspection.
+- When configured to `always_ask` (or when a whitelist block occurs), proposals are sent to the trainer's private chat using the standard `notify_trainer`/trainer notification flow. The trainer can respond directly from any chat interface (Telegram, Discord, Matrix):
+
+  - Approve with ``/agent approve <proposal_id>`` (or the `approve_action` action with the `proposal_id`).
+  - Reject with ``/agent reject <proposal_id>`` (or the `reject_action` action with the `proposal_id`). Rejecting marks the proposal ``rejected`` in `agent_activity_log` without executing it.
+
+  Both commands require trainer privileges: all interfaces route slash commands through ``handle_command_message``, which enforces the ``is_trainer`` check before dispatch. The WebUI Agent panel exposes the same approve/reject actions via ``POST /api/agent/proposals/{id}/approve`` and ``POST /api/agent/proposals/{id}/reject``.
+- Approvals, rejections and execution results are recorded in `agent_activity_log` and `agent_action_execs` for auditability and WebUI inspection.
 
 Usage
 -----

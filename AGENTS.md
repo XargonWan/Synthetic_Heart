@@ -124,6 +124,44 @@ register_iris_engine("my_engine", __name__, capabilities={"vision": True}, label
 
 ---
 
+## 5b. Agentic Runtime (Tools & MCP)
+
+SyntH can act as an **agent**: it calls *tools* — native actions and remote MCP
+tools — inside a bounded reasoning loop. Implemented in the `feat/agentv2` work.
+
+**Golden rule — dev MCP stays separate.** Synth's *own* MCP support lives
+**only** in `config/synth_mcp.json` + `core/mcp_bridge/`. The developer MCP
+servers (`.mcp.json`, `mcp_servers/*.py`) are never touched by this runtime.
+
+| Concern | Location |
+|---------|----------|
+| Synth-owned MCP registry | `config/synth_mcp.json` (top-level key `synthMcpServers`) |
+| Registry loader (fail-safe) | `core/mcp_bridge/config.py` |
+| Unified tool registry | `core/tool_registry.py` (`ToolRegistry`, `UnifiedToolManifest`) |
+| MCP client bridge | `core/mcp_bridge/client.py` (`McpClientBridge`, `mcp_client_bridge`) |
+| Tool executor (single gate) | `core/agent_tool_executor.py` (`AgentToolExecutor`, `agent_tool_executor`) |
+| Bounded agent loop | `core/agent_core.py::AgentLoopManager.run_agentic_turn` |
+| Fast/Agent router | `core/agent_router.py` (`classify`, `route`) |
+| Expose Synth actions as MCP | `core/mcp_bridge/server.py` (`build_server`, FastMCP) |
+
+**Two lanes, one chain.** `core/agent_router.classify` is a pure deterministic
+function: multiple actions, a tool call (`mcp_*` or an internal action with
+external effects), or a multi-step intent → **Agent Lane**; a single pure
+message → **Fast Lane** (unchanged path). Gated by `AGENTIC_ROUTING_ENABLED`
+(default `False`).
+
+**Tools are actions.** Internal actions and remote MCP tools are unified in
+`ToolRegistry`. Every tool — internal or external — funnels through
+`core.action_safety.is_action_allowed_for_execution`. Internal tools dispatch
+via `run_action`; external MCP tools via `mcp_client_bridge.call_tool`. Tool
+names are namespaced `mcp_<server>_<tool>`.
+
+**Config keys:** `AGENTIC_ROUTING_ENABLED`, `AGENT_MAX_ITERATIONS` (5),
+`AGENT_TURN_TIMEOUT_SEC` (120), `AGENT_MCP_EXPOSED_ACTIONS`, `SYNTH_MCP_CONFIG`.
+See `docs/agentic_tools.rst` for the full reference.
+
+---
+
 ## 6. Interfaces
 
 - Manage I/O with external systems.

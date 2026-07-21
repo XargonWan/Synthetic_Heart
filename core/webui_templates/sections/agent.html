@@ -1,10 +1,50 @@
 <section class="tab-panel" id="tab-agent" data-tab="agent" role="tabpanel" aria-hidden="true">
   <div class="card">
-    <h2>Agent Tasks</h2>
+    <h2>Agentic Console</h2>
     <div class="card-content">
-      <div id="agent-tasks-list">Loading tasks...</div>
-      <div id="agent-proposals-list" style="margin-top: 1rem;">Loading proposals...</div>
-      <div id="agent-task-detail" style="margin-top: 1rem;"></div>
+      <div style="display:grid;gap:0.6rem;">
+        <label for="agent-goal-input"><strong>Goal</strong></label>
+        <textarea id="agent-goal-input" rows="4" placeholder="Es: Cerca gli ultimi update su FastMCP e riassumili. Poi leggi gli ultimi 60 log di synth.log."></textarea>
+        <div style="display:flex;gap:0.6rem;flex-wrap:wrap;align-items:center;">
+          <label for="agent-engine-input">Engine</label>
+          <input id="agent-engine-input" type="text" placeholder="default" style="min-width:10rem;" />
+          <label for="agent-max-iter-input">Max Iter</label>
+          <input id="agent-max-iter-input" type="number" min="1" max="20" value="5" style="width:6rem;" />
+          <label for="agent-timeout-input">Timeout (s)</label>
+          <input id="agent-timeout-input" type="number" min="10" max="600" value="120" style="width:7rem;" />
+          <button id="agent-run-btn">Run Agentic Turn</button>
+        </div>
+      </div>
+      <div id="agent-run-result" style="margin-top: 1rem;"></div>
+    </div>
+  </div>
+
+  <div class="card" style="margin-top:1rem;">
+    <h2>Available Tools</h2>
+    <div class="card-content">
+      <div id="agent-tools-list">Loading tools...</div>
+    </div>
+  </div>
+
+  <div class="card" style="margin-top:1rem;">
+    <h2>Legacy Agent Tasks</h2>
+    <div class="card-content">
+      <div id="agent-legacy-layout" style="display:grid;grid-template-columns:minmax(260px,34%) 1fr;gap:1rem;align-items:start;">
+        <div id="agent-left-pane" style="display:grid;gap:1rem;">
+          <div>
+            <h3 style="margin:0 0 0.5rem 0;">Tasks</h3>
+            <div id="agent-tasks-list">Loading tasks...</div>
+          </div>
+          <div>
+            <h3 style="margin:0 0 0.5rem 0;">Pending Proposals</h3>
+            <div id="agent-proposals-list">Loading proposals...</div>
+          </div>
+        </div>
+        <div id="agent-right-pane">
+          <h3 style="margin:0 0 0.5rem 0;">Selected Task</h3>
+          <div id="agent-task-detail">Select a task from the left pane.</div>
+        </div>
+      </div>
     </div>
   </div>
   <script src="/js/agent.js"></script>

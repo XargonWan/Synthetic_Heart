@@ -54,6 +54,8 @@ Fix failures before moving on.
 | Frontend JS | `res/synth_webui/js/` |
 | Animations | `skins/*/animations/` |
 | Persona configs | `skins/*/persona.json` |
+| Agentic runtime (tools/MCP) | `core/agent_core.py`, `core/agent_router.py`, `core/agent_tool_executor.py`, `core/tool_registry.py`, `core/mcp_bridge/` |
+| Synth-owned MCP registry | `config/synth_mcp.json` (separate from dev `.mcp.json`) |
 
 ## MCP Tools
 

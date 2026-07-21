@@ -1148,47 +1148,59 @@ async def agent_command(*args, interface_context=None) -> str:
 
     Usage:
       /agent approve <proposal_id>
+      /agent reject <proposal_id>
     """
+    usage = "Usage: /agent approve <proposal_id> | /agent reject <proposal_id>"
     if not args:
-        return "Usage: /agent approve <proposal_id>"
+        return usage
 
     sub = args[0].lower()
-    if sub == "approve":
-        if len(args) < 2:
-            return "❌ Use: /agent approve <proposal_id>"
-        try:
-            proposal_id = int(args[1])
-        except ValueError:
-            return "❌ proposal_id must be an integer"
+    if sub not in ("approve", "reject"):
+        return f"❌ Unknown agent subcommand. {usage}"
 
-        # Extract possible trainer info from interface_context
+    if len(args) < 2:
+        return f"❌ Use: /agent {sub} <proposal_id>"
+    try:
+        proposal_id = int(args[1])
+    except ValueError:
+        return "❌ proposal_id must be an integer"
+
+    # Extract possible trainer info from interface_context. Different
+    # interfaces populate the context differently:
+    #   - Telegram/Discord: {"update": <update with effective_user>}
+    #   - Matrix:           {"wrapped": <namespace with from_user>}
+    trainer_id = None
+    try:
+        if interface_context and isinstance(interface_context, dict):
+            update = interface_context.get("update")
+            if update and getattr(update, "effective_user", None):
+                trainer_id = getattr(update.effective_user, "id", None)
+            if trainer_id is None:
+                wrapped = interface_context.get("wrapped")
+                from_user = getattr(wrapped, "from_user", None) if wrapped else None
+                if from_user is not None:
+                    trainer_id = getattr(from_user, "id", None)
+    except Exception:
         trainer_id = None
-        try:
-            if interface_context and isinstance(interface_context, dict):
-                update = interface_context.get("update")
-                if update and getattr(update, "effective_user", None):
-                    trainer_id = getattr(update.effective_user, "id", None)
-        except Exception:
-            trainer_id = None
 
-        try:
-            from core.core_initializer import PLUGIN_REGISTRY
+    action_type = "approve_action" if sub == "approve" else "reject_action"
+    try:
+        from core.core_initializer import PLUGIN_REGISTRY
 
-            plugin = PLUGIN_REGISTRY.get("agent")
-            if not plugin:
-                return "❌ Agent plugin not available"
-            original_message = {"sender_id": trainer_id}
-            res = await plugin.execute_action(
-                {"type": "approve_action", "payload": {"proposal_id": proposal_id}},
-                {},
-                None,
-                original_message,
-            )
-            return f"✅ Approval result: {res}"
-        except Exception as e:
-            return f"❌ Error approving proposal: {e}"
-
-    return "❌ Unknown agent subcommand. Use: /agent approve <proposal_id>"
+        plugin = PLUGIN_REGISTRY.get("agent")
+        if not plugin:
+            return "❌ Agent plugin not available"
+        original_message = {"sender_id": trainer_id}
+        res = await plugin.execute_action(
+            {"type": action_type, "payload": {"proposal_id": proposal_id}},
+            {},
+            None,
+            original_message,
+        )
+        verb = "Approval" if sub == "approve" else "Rejection"
+        return f"✅ {verb} result: {res}"
+    except Exception as e:
+        return f"❌ Error handling agent {sub}: {e}"
 
 
 register_command("agent", agent_command)

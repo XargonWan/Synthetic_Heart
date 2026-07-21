@@ -68,6 +68,7 @@ class CoreInitializer:
         # Runtime flag for dev components (NOT persistent, resets on restart)
         self._enable_dev_components = False
         self._trainer_listener_registered = False
+        self._agentic_runtime_bootstrapped = False
 
     def enable_dev_components(self, enabled: bool = True):
         """Enable or disable dev components discovery. NOT persistent across restarts."""
@@ -1603,6 +1604,31 @@ class CoreInitializer:
             "available_actions": available_actions,
             "static_context": static_context,
         }
+
+        # Agentic Runtime 2.0 bootstrap:
+        # 1) mirror available internal actions into the unified tool registry;
+        # 2) connect enabled Synth-owned MCP servers and register their tools.
+        # Keep this fail-safe so startup never aborts if MCP is unavailable.
+        try:
+            from core.tool_registry import tool_registry
+
+            tool_registry.load_internal_actions(available_actions)
+        except Exception as exc:
+            log_warning(
+                f"[core_initializer] Failed to load unified internal tools: {exc}"
+            )
+
+        if not self._agentic_runtime_bootstrapped:
+            try:
+                from core.mcp_bridge.client import mcp_client_bridge
+
+                await mcp_client_bridge.connect_all()
+                self._agentic_runtime_bootstrapped = True
+            except Exception as exc:
+                log_warning(
+                    f"[core_initializer] MCP client bootstrap failed (non-fatal): {exc}"
+                )
+
         log_debug(
             f"[core_initializer] Actions block built with {len(available_actions)} action types, static_context: {list(static_context.keys())}"
         )
