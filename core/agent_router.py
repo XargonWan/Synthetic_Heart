@@ -39,6 +39,26 @@ AGENT = "agent"
 # otherwise be reaped by the event loop before it finishes.
 _AGENT_BACKGROUND_TASKS: set[asyncio.Task[Any]] = set()
 
+# interface_paths that currently have a detached agent turn in flight. Streaming
+# HTTP interfaces (e.g. the OpenAI/Ollama-compatible server) return ``None`` from
+# the message chain when the Agent Lane is taken (work is detached), which would
+# otherwise make them finalize the stream immediately with no text. They consult
+# this set to know they must WAIT for ``_deliver_agent_reply`` to stream the
+# real final text instead of closing the stream empty.
+_INFLIGHT_AGENT_INTERFACE_PATHS: set[str] = set()
+
+
+def has_inflight_agent_turn(interface_path: str | None) -> bool:
+    """Return True if a detached agent turn is currently in flight for ``interface_path``.
+
+    Streaming interfaces use this to decide whether a ``None`` message-chain
+    result means "no reply coming" (finalize now) or "agent working, reply will
+    be delivered asynchronously" (keep the stream open and wait).
+    """
+    if not interface_path:
+        return False
+    return str(interface_path) in _INFLIGHT_AGENT_INTERFACE_PATHS
+
 
 def _action_types(actions: List[Any]) -> List[str]:
     """Extract canonical action type strings from a parsed action list."""
@@ -197,6 +217,18 @@ async def route(
         log_info("[agent_router] Routing to Agent Lane (detached)")
         goal = _derive_goal(actions, context)
 
+        # Mark this interface as having an in-flight agent turn BEFORE spawning
+        # the detached task. The message chain returns ``None`` to the interface
+        # the instant we return below, so a streaming interface could otherwise
+        # observe ``None`` and finalize its stream empty before the detached
+        # turn has even started. Registering here closes that race window; the
+        # detached task clears it in its ``finally`` once delivery is done.
+        inflight_interface_path = (
+            context.get("interface_path") if isinstance(context, dict) else None
+        )
+        if inflight_interface_path:
+            _INFLIGHT_AGENT_INTERFACE_PATHS.add(str(inflight_interface_path))
+
         # If the model chose to resume a specific existing task (by emitting a
         # ``resume_agent_task`` action with a numeric id), capture that id and
         # hand it to the detached turn so it continues THAT task — even one
@@ -321,6 +353,16 @@ async def _run_agent_turn_detached(
         raise
     except Exception as exc:
         log_error(f"[agent_router] Detached agent turn failed: {exc}")
+    finally:
+        # Clear the in-flight marker so a waiting streaming interface stops
+        # blocking. Delivery (or its failure) has already happened above, so any
+        # stream still open will be finalized by ``_deliver_agent_reply`` (real
+        # text) or fall through to its own timeout/fallback with no text.
+        interface_path = (
+            context.get("interface_path") if isinstance(context, dict) else None
+        )
+        if interface_path:
+            _INFLIGHT_AGENT_INTERFACE_PATHS.discard(str(interface_path))
 
 
 def _derive_goal(actions: List[Any], context: Dict[str, Any] | None) -> str:
