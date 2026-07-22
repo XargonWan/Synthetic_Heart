@@ -51,6 +51,17 @@ For implementation and example usage, see ``plugins/agent_plugin.py`` and the
 runtime entry points in ``core/agent_core.py`` (``run_agentic_turn``,
 ``run_drone``).
 
+Inspecting and resuming tasks
+-----------------------------
+Persisted tasks can be inspected and resumed in two ways:
+
+- **From chat** (trainer only): the ``/task`` and ``/task resume <id>`` slash
+  commands (see :doc:`commands`). Resuming from chat runs the agent turn
+  asynchronously and delivers the final reply back to the originating chat.
+- **Over REST**: the ``/api/agent/*`` endpoints (see :doc:`api_endpoints`),
+  gated by ``AGENT_ENABLED``. ``POST /api/agent/tasks/{task_id}/continue`` is
+  the REST resume and runs synchronously.
+
 Testing the feature
 -------------------
 To run the agent-specific unit tests locally:

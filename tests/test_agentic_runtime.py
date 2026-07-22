@@ -643,7 +643,7 @@ def test_router_mixed_non_tool_stays_fast(monkeypatch):
 
 
 def test_mcp_server_build_registers_actions(monkeypatch):
-    """build_server exposes the whitelisted actions as MCP tools."""
+    """build_server exposes registered actions as MCP tools (named synth_*)."""
     import sys
     import types
 

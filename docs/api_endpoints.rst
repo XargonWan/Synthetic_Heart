@@ -94,6 +94,11 @@ Agent‑related APIs
 - **POST** `/api/agent/run` – run a single bounded agentic turn
   (``run_agentic_turn``) and persist it. Body carries the input payload and
   optional engine/context.
+- **POST** `/api/agent/tasks/{task_id}/continue` – resume a ``pending`` task by
+  re-injecting its prior observations with a fresh budget and running the loop
+  synchronously to completion. Returns HTTP 409 if the task is not resumable.
+  This is the REST counterpart of the ``/task resume <id>`` chat command (which
+  instead runs asynchronously in the background).
 - **GET** `/api/agent/tools` – list the unified tool manifest (internal actions
   + remote MCP tools) available to the runtime.
 - **POST** `/api/agent/tasks/{task_id}/message` – append a user message to the

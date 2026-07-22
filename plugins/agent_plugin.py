@@ -1,7 +1,10 @@
 # plugins/agent_plugin.py
 
+import asyncio
 import json
 import os
+import re
+import shutil
 from pathlib import Path
 from collections.abc import Callable
 from typing import Optional, Dict, Any
@@ -46,6 +49,21 @@ try:
         component="agent",
         needs_component_reload=True,
     )
+    register_exposed_var(
+        "AGENT_SHELL_ALLOW_HOST",
+        label="Allow agent shell on host",
+        default=False,
+        value_type=bool,
+        ui_type="bool",
+        description=(
+            "Allow the agent_run_shell action to run when Synth is NOT inside a "
+            "container. Off by default: a shell on the host is a real "
+            "machine-compromise risk. Only enable in trusted local dev."
+        ),
+        scope="agent",
+        component="agent",
+        needs_component_reload=True,
+    )
 except Exception:
     # tests / import-time safety
     pass
@@ -58,6 +76,35 @@ def _safe_int(value: Any, default: int, *, min_value: int, max_value: int) -> in
     except (TypeError, ValueError):
         parsed = default
     return max(min_value, min(max_value, parsed))
+
+
+def _is_in_container() -> bool:
+    """Best-effort detection of whether Synth runs inside a container.
+
+    Order of precedence:
+    1. Explicit ``SYNTH_IN_CONTAINER`` env override (``1``/``true`` or ``0``/``false``).
+    2. Presence of ``/.dockerenv`` (created by Docker) or ``/run/.containerenv`` (Podman).
+    3. A ``docker``/``kubepods``/``containerd`` marker in ``/proc/1/cgroup``.
+
+    Defaults to ``False`` (host) when it cannot tell, which is the safer choice:
+    shell execution is only auto-permitted inside the disposable container.
+    """
+    override = os.getenv("SYNTH_IN_CONTAINER")
+    if override is not None:
+        return override.strip().lower() in ("1", "true", "yes", "on")
+
+    if os.path.exists("/.dockerenv") or os.path.exists("/run/.containerenv"):
+        return True
+
+    try:
+        with open("/proc/1/cgroup", "r", encoding="utf-8", errors="replace") as fh:
+            cgroup = fh.read()
+        if any(m in cgroup for m in ("docker", "kubepods", "containerd", "libpod")):
+            return True
+    except Exception:
+        pass
+
+    return False
 
 
 class AgentPlugin(AIPluginBase):
@@ -104,6 +151,10 @@ class AgentPlugin(AIPluginBase):
         return [
             "agent_list_files",
             "agent_read_file",
+            "agent_write_file",
+            "agent_edit_file",
+            "agent_search_files",
+            "agent_run_shell",
             "spawn_drone",
             "resume_agent_task",
         ]
@@ -119,6 +170,67 @@ class AgentPlugin(AIPluginBase):
                 "required_fields": ["path"],
                 "optional_fields": ["start_line", "end_line", "max_chars"],
                 "description": "Read a text file within the allowed agent filesystem roots.",
+            },
+            "agent_write_file": {
+                "required_fields": ["path", "content"],
+                "optional_fields": ["mode"],
+                "security_level": "medium",
+                "external_effects": ["filesystem"],
+                "description": (
+                    "Write a text file within the allowed agent filesystem roots. "
+                    "Creates parent directories as needed. 'mode' may be 'overwrite' "
+                    "(default) or 'append'. Use this to create/update text files "
+                    "(e.g. notes, logs, generated documents) inside the sandbox."
+                ),
+            },
+            "agent_edit_file": {
+                "required_fields": ["path", "old_string", "new_string"],
+                "optional_fields": ["expected_replacements"],
+                "security_level": "medium",
+                "external_effects": ["filesystem"],
+                "description": (
+                    "Edit an existing text file in place by replacing an exact literal "
+                    "substring ('old_string') with 'new_string'. 'old_string' MUST match "
+                    "the file content verbatim (including whitespace/indentation) and, by "
+                    "default, must occur exactly once — include enough surrounding context "
+                    "to make it unique. Set 'expected_replacements' to replace a known "
+                    "number of occurrences. Use this for surgical edits to an existing file "
+                    "instead of rewriting the whole file with agent_write_file."
+                ),
+            },
+            "agent_search_files": {
+                "required_fields": ["pattern"],
+                "optional_fields": [
+                    "path",
+                    "regex",
+                    "case_sensitive",
+                    "glob",
+                    "max_results",
+                    "max_file_bytes",
+                ],
+                "description": (
+                    "Search file contents within the allowed sandbox roots (a native grep). "
+                    "'pattern' is plain text by default; set 'regex' true for a Python regex. "
+                    "'path' scopes the search (default: first allowed root), 'glob' filters "
+                    "filenames (e.g. '*.py'), 'case_sensitive' defaults to false. Returns "
+                    "matching lines with file path and line number, bounded by 'max_results'."
+                ),
+            },
+            "agent_run_shell": {
+                "required_fields": ["command"],
+                "optional_fields": ["cwd", "timeout"],
+                "security_level": "high",
+                "external_effects": ["shell"],
+                "description": (
+                    "Run a shell command and capture its stdout/stderr/exit code. "
+                    "The working directory ('cwd') defaults to the first allowed "
+                    "filesystem root and MUST stay inside the allowed roots. "
+                    "For safety this action ONLY runs when Synth is executing inside "
+                    "a container (the disposable runtime image); on a bare host it is "
+                    "refused unless AGENT_SHELL_ALLOW_HOST is explicitly enabled. "
+                    "'timeout' is capped in seconds. Use for build/test/git/system "
+                    "commands you cannot express with the file actions."
+                ),
             },
             "spawn_drone": {
                 "required_fields": ["goal"],
@@ -229,11 +341,275 @@ class AgentPlugin(AIPluginBase):
         _walk(base, 0)
         return results
 
+    def _edit_file(self, payload: dict) -> dict:
+        """Replace an exact literal substring in a sandboxed text file.
+
+        Mirrors an editor's search/replace semantics: ``old_string`` must match
+        the file content verbatim and, by default, occur exactly once. Set
+        ``expected_replacements`` to replace a known number of occurrences.
+        """
+        raw_path = str(payload.get("path") or "").strip()
+        old_string = payload.get("old_string")
+        new_string = payload.get("new_string")
+
+        if not isinstance(old_string, str) or not isinstance(new_string, str):
+            return {
+                "status": "error",
+                "reason": "old_string and new_string must be strings",
+            }
+        if old_string == "":
+            return {"status": "error", "reason": "old_string must not be empty"}
+        if old_string == new_string:
+            return {
+                "status": "error",
+                "reason": "old_string and new_string are identical",
+            }
+
+        expected = _safe_int(
+            payload.get("expected_replacements"), 1, min_value=1, max_value=10_000
+        )
+
+        safe_path, err = self._resolve_safe_path(raw_path)
+        if err or safe_path is None:
+            return {"status": "error", "reason": err or "invalid path"}
+        if not safe_path.exists():
+            return {"status": "error", "reason": "file not found"}
+        if safe_path.is_dir():
+            return {"status": "error", "reason": "path is a directory"}
+
+        try:
+            original = safe_path.read_text(encoding="utf-8")
+        except Exception as exc:
+            return {"status": "error", "reason": f"read failed: {exc}"}
+
+        occurrences = original.count(old_string)
+        if occurrences == 0:
+            return {"status": "error", "reason": "old_string not found in file"}
+        if occurrences != expected:
+            return {
+                "status": "error",
+                "reason": (
+                    f"old_string occurs {occurrences} time(s) but "
+                    f"expected_replacements={expected}; add more context to make "
+                    "the match unique or set expected_replacements accordingly"
+                ),
+            }
+
+        updated = original.replace(old_string, new_string)
+        if len(updated.encode("utf-8")) > 2_000_000:
+            return {"status": "error", "reason": "resulting file too large (>2MB)"}
+
+        try:
+            safe_path.write_text(updated, encoding="utf-8")
+        except Exception as exc:
+            return {"status": "error", "reason": f"write failed: {exc}"}
+
+        log_info(
+            f"[agent] agent_edit_file replaced {occurrences} occurrence(s) in {safe_path}"
+        )
+        return {
+            "status": "ok",
+            "path": str(safe_path),
+            "replacements": occurrences,
+            "bytes_written": len(updated.encode("utf-8")),
+        }
+
+    def _search_files(self, payload: dict) -> dict:
+        """Search file contents within the sandbox (a bounded native grep)."""
+        pattern = payload.get("pattern")
+        if not isinstance(pattern, str) or pattern == "":
+            return {"status": "error", "reason": "pattern must be a non-empty string"}
+
+        use_regex = bool(payload.get("regex", False))
+        case_sensitive = bool(payload.get("case_sensitive", False))
+        glob = payload.get("glob")
+        glob_pat = str(glob).strip() if isinstance(glob, str) and glob.strip() else "*"
+        max_results = _safe_int(
+            payload.get("max_results"), 200, min_value=1, max_value=2000
+        )
+        max_file_bytes = _safe_int(
+            payload.get("max_file_bytes"),
+            2_000_000,
+            min_value=1_000,
+            max_value=20_000_000,
+        )
+
+        raw_path = str(payload.get("path") or ".")
+        safe_path, err = self._resolve_safe_path(raw_path)
+        if err or safe_path is None:
+            return {"status": "error", "reason": err or "invalid path"}
+        if not safe_path.exists():
+            return {"status": "error", "reason": "path not found"}
+
+        flags = 0 if case_sensitive else re.IGNORECASE
+        if use_regex:
+            try:
+                matcher = re.compile(pattern, flags)
+            except re.error as exc:
+                return {"status": "error", "reason": f"invalid regex: {exc}"}
+
+            def _matches(line: str) -> bool:
+                return matcher.search(line) is not None
+        else:
+            needle = pattern if case_sensitive else pattern.lower()
+
+            def _matches(line: str) -> bool:
+                haystack = line if case_sensitive else line.lower()
+                return needle in haystack
+
+        if safe_path.is_file():
+            candidates = [safe_path]
+        else:
+            candidates = sorted(p for p in safe_path.rglob(glob_pat) if p.is_file())
+
+        matches: list[dict] = []
+        files_scanned = 0
+        truncated = False
+        for fpath in candidates:
+            if len(matches) >= max_results:
+                truncated = True
+                break
+            try:
+                if fpath.stat().st_size > max_file_bytes:
+                    continue
+            except Exception:
+                continue
+            files_scanned += 1
+            try:
+                with fpath.open("r", encoding="utf-8", errors="replace") as fh:
+                    for lineno, line in enumerate(fh, start=1):
+                        if _matches(line):
+                            matches.append(
+                                {
+                                    "path": str(fpath),
+                                    "line": lineno,
+                                    "text": line.rstrip("\n")[:1000],
+                                }
+                            )
+                            if len(matches) >= max_results:
+                                truncated = True
+                                break
+            except Exception:
+                continue
+
+        return {
+            "status": "ok",
+            "path": str(safe_path),
+            "files_scanned": files_scanned,
+            "count": len(matches),
+            "truncated": truncated,
+            "matches": matches,
+        }
+
+    async def _run_shell(self, payload: dict) -> dict:
+        """Execute a shell command inside the sandbox.
+
+        Security model: the command only runs when Synth executes inside a
+        container (the disposable runtime image). On a bare host it is refused
+        unless ``AGENT_SHELL_ALLOW_HOST`` is explicitly enabled, because a shell
+        on the host is a real machine-compromise risk for a public persona.
+        """
+        command = payload.get("command")
+        if not isinstance(command, str) or not command.strip():
+            return {"status": "error", "reason": "command must be a non-empty string"}
+
+        in_container = _is_in_container()
+        allow_host = bool(config_registry.get_var("AGENT_SHELL_ALLOW_HOST", False))
+        if not in_container and not allow_host:
+            log_warning(
+                "[agent] agent_run_shell refused: not running in a container and "
+                "AGENT_SHELL_ALLOW_HOST is disabled"
+            )
+            return {
+                "status": "error",
+                "reason": (
+                    "shell execution is only allowed inside a container; "
+                    "set AGENT_SHELL_ALLOW_HOST=true to override on a host"
+                ),
+            }
+
+        # Resolve and confine the working directory to the allowed roots.
+        raw_cwd = payload.get("cwd")
+        if raw_cwd:
+            safe_cwd, err = self._resolve_safe_path(str(raw_cwd))
+            if err or safe_cwd is None:
+                return {"status": "error", "reason": err or "invalid cwd"}
+        else:
+            roots = self._allowed_roots()
+            if not roots:
+                return {"status": "error", "reason": "no allowed roots configured"}
+            safe_cwd = roots[0]
+        if not safe_cwd.exists() or not safe_cwd.is_dir():
+            return {
+                "status": "error",
+                "reason": "cwd does not exist or is not a directory",
+            }
+
+        timeout = _safe_int(payload.get("timeout"), 60, min_value=1, max_value=600)
+        shell_exe = shutil.which("bash") or shutil.which("sh") or "/bin/sh"
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                shell_exe,
+                "-c",
+                command,
+                cwd=str(safe_cwd),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except Exception as exc:
+            return {"status": "error", "reason": f"failed to start shell: {exc}"}
+
+        try:
+            stdout_b, stderr_b = await asyncio.wait_for(
+                proc.communicate(), timeout=timeout
+            )
+        except asyncio.TimeoutError:
+            try:
+                proc.kill()
+                await proc.wait()
+            except Exception:
+                pass
+            return {
+                "status": "error",
+                "reason": f"command timed out after {timeout}s",
+                "cwd": str(safe_cwd),
+            }
+
+        max_out = 40_000
+        stdout = stdout_b.decode("utf-8", errors="replace")
+        stderr = stderr_b.decode("utf-8", errors="replace")
+        truncated = False
+        if len(stdout) > max_out:
+            stdout = stdout[:max_out] + "\n... (truncated)"
+            truncated = True
+        if len(stderr) > max_out:
+            stderr = stderr[:max_out] + "\n... (truncated)"
+            truncated = True
+
+        exit_code = proc.returncode
+        log_info(
+            f"[agent] agent_run_shell exit={exit_code} cwd={safe_cwd} "
+            f"in_container={in_container}"
+        )
+        return {
+            "status": "ok" if exit_code == 0 else "error",
+            "exit_code": exit_code,
+            "cwd": str(safe_cwd),
+            "stdout": stdout,
+            "stderr": stderr,
+            "truncated": truncated,
+        }
+
     def get_prompt_instructions(self, action_name: str) -> dict:
         enabled = self.is_enabled()
         if enabled:
             description = (
-                "You have agentic capabilities. Use the agent actions to inspect files "
+                "You have agentic capabilities. Use the agent actions to inspect files, "
+                "search file contents inside the sandbox (agent_search_files), "
+                "write text files inside the allowed sandbox (agent_write_file), "
+                "make surgical edits to an existing file (agent_edit_file), "
+                "run shell commands inside the sandbox (agent_run_shell), "
                 "or delegate a focused sub-task to a Drone. "
                 "Ensure to return ONLY valid JSON when asked to produce actions."
             )
@@ -342,6 +718,54 @@ class AgentPlugin(AIPluginBase):
                 }
             except Exception as exc:
                 return {"status": "error", "reason": f"read failed: {exc}"}
+
+        if action_type == "agent_write_file":
+            raw_path = str(payload.get("path") or "").strip()
+            content = payload.get("content")
+            if not isinstance(content, str):
+                return {"status": "error", "reason": "content must be a string"}
+            if len(content) > 2_000_000:
+                return {"status": "error", "reason": "content too large (>2MB)"}
+
+            mode = str(payload.get("mode") or "overwrite").strip().lower()
+            if mode not in ("overwrite", "append"):
+                return {
+                    "status": "error",
+                    "reason": "mode must be 'overwrite' or 'append'",
+                }
+
+            safe_path, err = self._resolve_safe_path(raw_path)
+            if err or safe_path is None:
+                return {"status": "error", "reason": err or "invalid path"}
+            if safe_path.is_dir():
+                return {"status": "error", "reason": "path is a directory"}
+
+            try:
+                safe_path.parent.mkdir(parents=True, exist_ok=True)
+                open_mode = "a" if mode == "append" else "w"
+                with safe_path.open(open_mode, encoding="utf-8") as fh:
+                    fh.write(content)
+                written = len(content.encode("utf-8"))
+                log_info(
+                    f"[agent] agent_write_file wrote {written} bytes to {safe_path} (mode={mode})"
+                )
+                return {
+                    "status": "ok",
+                    "path": str(safe_path),
+                    "bytes_written": written,
+                    "mode": mode,
+                }
+            except Exception as exc:
+                return {"status": "error", "reason": f"write failed: {exc}"}
+
+        if action_type == "agent_edit_file":
+            return self._edit_file(payload)
+
+        if action_type == "agent_search_files":
+            return self._search_files(payload)
+
+        if action_type == "agent_run_shell":
+            return await self._run_shell(payload)
 
         if action_type == "spawn_drone":
             goal = str(payload.get("goal") or "").strip()

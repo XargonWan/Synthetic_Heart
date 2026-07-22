@@ -470,19 +470,6 @@ class CoreInitializer:
                     component="agent",
                     advanced=True,
                 )
-                _cfg_reg.get_var(
-                    "AGENT_MCP_EXPOSED_ACTIONS",
-                    "",
-                    value_type=str,
-                    label="Agent MCP Exposed Actions",
-                    description=(
-                        "Comma-separated list of Synth actions to expose as MCP "
-                        "tools to the agentic runtime (empty = none)."
-                    ),
-                    group="agent",
-                    component="agent",
-                    advanced=True,
-                )
                 log_debug(
                     "[core_initializer] Eagerly registered agentic-runtime config keys"
                 )

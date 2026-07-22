@@ -1,14 +1,17 @@
-"""Expose selected SyntH actions as an MCP server (FastMCP).
+"""Expose SyntH actions as an MCP server (FastMCP).
 
 This lets external MCP *clients* (e.g. coding agents, other AIs) drive Synth's
 native actions over the Model Context Protocol. It is the inverse of the client
 bridge (``core.mcp_bridge.client``): there Synth *consumes* remote MCP tools;
 here Synth *publishes* its own actions as MCP tools.
 
-Only actions explicitly whitelisted via the ``AGENT_MCP_EXPOSED_ACTIONS`` config
-(or, when unset, a safe default subset) are exposed, and every invocation still
-passes through :func:`core.action_safety.is_action_allowed_for_execution` so the
-existing policy/approval gates apply unchanged.
+By design **every** SyntH action is automatically an MCP tool — no developer
+opt-in and no whitelist. As soon as a plugin/interface registers an action via
+``get_supported_actions()`` it appears here as a tool, named ``synth_<action>``.
+Every invocation still passes through
+:func:`core.action_safety.is_action_allowed_for_execution`, so the existing
+policy/approval gates apply unchanged and the safety level of each action is
+preserved regardless of how it is called.
 
 This module is intentionally isolated from the dev MCP tooling (``.mcp.json``,
 ``mcp_servers/*.py``) — it is part of Synth's own runtime MCP support.
@@ -21,22 +24,24 @@ from typing import Any
 
 from core.logging_utils import log_info, log_warning
 
-# Default safe subset of actions exposed when no explicit whitelist is set.
-DEFAULT_EXPOSED_ACTIONS = (
-    "tts_speak",
-    "message_synth_webui",
-    "create_personal_diary_entry",
-)
-
 
 def _get_exposed_action_names() -> list[str]:
-    """Resolve the whitelist of action names to expose as MCP tools."""
-    from core.config_manager import config_registry
+    """Resolve the action names to expose as MCP tools.
 
-    raw = config_registry.get_var("AGENT_MCP_EXPOSED_ACTIONS", "", value_type=str)
-    if raw and isinstance(raw, str) and raw.strip():
-        return [a.strip() for a in raw.split(",") if a.strip()]
-    return list(DEFAULT_EXPOSED_ACTIONS)
+    By design this is **every** registered internal action: any Synth action is
+    automatically an MCP tool without developer intervention. We read the
+    unified tool registry (populated from every plugin/interface
+    ``get_supported_actions()``) and expose all internal tools.
+    """
+    try:
+        from core.tool_registry import tool_registry
+
+        names = [t.name for t in tool_registry.internal_tools()]
+        if names:
+            return names
+    except Exception as exc:  # pragma: no cover - registry unavailable
+        log_warning(f"[mcp_bridge.server] Could not enumerate actions: {exc}")
+    return []
 
 
 def build_server(name: str = "synth-actions") -> Any:

@@ -196,11 +196,14 @@ Exposing Synth actions as MCP (Phase F)
 ---------------------------------------
 
 :func:`core.mcp_bridge.server.build_server` builds a FastMCP server that
-publishes a whitelist of SyntH actions (``AGENT_MCP_EXPOSED_ACTIONS``, default
-``tts_speak``, ``message_synth_webui``, ``create_personal_diary_entry``) as MCP
-tools. Every invocation still passes through
-:func:`core.action_safety.is_action_allowed_for_execution`, so the existing
-policy/approval gates apply unchanged.
+publishes **every** SyntH action as an MCP tool. By design there is no
+whitelist and no developer opt-in: any action registered through a plugin or
+interface ``get_supported_actions()`` (enumerated from
+:data:`core.tool_registry.tool_registry`) automatically appears as a tool named
+``synth_<action>``. Every invocation still passes through
+:func:`core.action_safety.is_action_allowed_for_execution`, so the safety level
+of each action and the existing policy/approval gates apply unchanged regardless
+of how it is called.
 
 The WebUI Agent panel
 ---------------------
@@ -242,12 +245,10 @@ supports. Create a tiny launcher (e.g. ``scripts/run_synth_mcp.py``)::
     if __name__ == "__main__":
         get_mcp_server("synth-actions").run(transport="stdio")
 
-Only the actions in ``AGENT_MCP_EXPOSED_ACTIONS`` (default ``tts_speak``,
-``message_synth_webui``, ``create_personal_diary_entry``) are published, and each
-call is still gated by :func:`core.action_safety.is_action_allowed_for_execution`.
-Widen the whitelist deliberately::
-
-    AGENT_MCP_EXPOSED_ACTIONS=tts_speak,message_synth_webui,create_personal_diary_entry,create_scheduled_event
+**Every** Synth action is published — there is no whitelist to configure. Each
+call is still gated by
+:func:`core.action_safety.is_action_allowed_for_execution`, so an action's
+security level is enforced no matter how it is invoked.
 
 Step 2 — register the server in your editor
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -306,11 +307,11 @@ Cursor.
 Step 3 — use it
 ~~~~~~~~~~~~~~~
 
-After restarting the editor, the whitelisted Synth actions appear as MCP tools
-named ``synth_<action>`` (e.g. ``synth_tts_speak``,
-``synth_message_synth_webui``). The coding agent can now call them like any other
-MCP tool, and every call is audited and policy-checked exactly as an in-app
-action would be.
+After restarting the editor, **all** Synth actions appear as MCP tools named
+``synth_<action>`` (e.g. ``synth_tts_speak``, ``synth_message_synth_webui``,
+``synth_message_telegram_bot``). The coding agent can now call them like any
+other MCP tool, and every call is audited and policy-checked exactly as an
+in-app action would be.
 
 .. note::
 
@@ -323,8 +324,11 @@ action would be.
 .. warning::
 
    Exposing Synth actions to an external coding agent grants that agent the same
-   privileges as those actions. Keep ``AGENT_MCP_EXPOSED_ACTIONS`` minimal, and
-   never expose privileged or shell-executing actions to an untrusted client.
+   privileges as those actions. Because **every** action is published, only
+   connect the Synth MCP server to a trusted client, and rely on
+   :func:`core.action_safety.is_action_allowed_for_execution` (per-action
+   security levels and the autonomy policy) to gate privileged or
+   shell-executing actions.
 
 Configuration reference
 -----------------------
@@ -335,7 +339,6 @@ Key                               Meaning
 ``AGENTIC_ROUTING_ENABLED``       Enable the Fast/Agent router (default False).
 ``AGENT_MAX_ITERATIONS``          Hard cap on agent-loop iterations (default 30).
 ``AGENT_TURN_TIMEOUT_SEC``        Wall-clock budget per agent turn (default 120).
-``AGENT_MCP_EXPOSED_ACTIONS``     Comma list of actions to expose as MCP tools.
 ``SYNTH_MCP_CONFIG``              Override path to ``config/synth_mcp.json``.
 ``DRONE_MAX_ITERATIONS``          Hard cap on Drone sub-agent iterations (default 3).
 ``DRONE_TURN_TIMEOUT_SEC``        Wall-clock budget per Drone turn (default 90).

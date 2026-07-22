@@ -1,34 +1,28 @@
 {
-  "_comment": "Synth runtime MCP server registry. SEPARATE from .mcp.json (which is DEV-ONLY tooling for Claude Code / Copilot). Servers listed here are consumed by Synth's own MCP client bridge (core/mcp_bridge) at runtime. Add/remove entries to give Synth external tool access. Set 'enabled': false to disable without removing.",
-  "synthMcpServers": {
-    "synth_logs": {
-      "enabled": true,
-      "transport": "stdio",
-      "command": "uv",
-      "args": [
-        "run",
-        "python",
-        "mcp_servers/synth_logs.py"
-      ],
-      "env": {
-        "LOG_DIR": "/app/logs"
-      },
-      "security_level": "low",
-      "description": "Runtime log analysis MCP server shipped with Synth."
+    "_comment": "Synth runtime MCP server registry. SEPARATE from .mcp.json (which is DEV-ONLY tooling for Claude Code / Copilot). Servers listed here are consumed by Synth's own MCP client bridge (core/mcp_bridge) at runtime. Add/remove entries to give Synth external tool access. Set 'enabled': false to disable without removing.",
+    "synthMcpServers": {
+        "synth_logs": {
+            "enabled": true,
+            "transport": "stdio",
+            "command": "uv",
+            "args": ["run", "python", "mcp_servers/synth_logs.py"],
+            "env": {"LOG_DIR": "/app/logs"},
+            "security_level": "low",
+            "description": "Runtime log analysis MCP server shipped with Synth.",
+        },
+        "filesystem": {
+            "enabled": false,
+            "transport": "stdio",
+            "command": "npx",
+            "args": [
+                "-y",
+                "@modelcontextprotocol/server-filesystem",
+                "/videodrome/videodrome-deployment/Synthetic_Heart",
+                "/videodrome/videodrome-deployment/Synthetic_Heart/logs",
+            ],
+            "env": {},
+            "security_level": "medium",
+            "description": "Local filesystem access for Synth (repo + logs roots). DISABLED: the runtime image (python:3.12-slim) has NO node/npx (node exists only in the Dockerfile 'stage_builder' build stage), so 'npx @modelcontextprotocol/server-filesystem' cannot start in-container. Also the paths above are HOST paths, not container paths (/app, /app/logs). For sandboxed file writing, Synth uses the native 'agent_write_file' action in plugins/agent_plugin.py instead (no node dependency). Re-enable only after adding a node runtime to the image AND fixing these paths to container-internal roots.",
+        },
     },
-    "filesystem": {
-      "enabled": false,
-      "transport": "stdio",
-      "command": "npx",
-      "args": [
-        "-y",
-        "@modelcontextprotocol/server-filesystem",
-        "/videodrome/videodrome-deployment/Synthetic_Heart",
-        "/videodrome/videodrome-deployment/Synthetic_Heart/logs"
-      ],
-      "env": {},
-      "security_level": "medium",
-      "description": "Local filesystem access for Synth (repo + logs roots). Requires npx/node inside synth container."
-    }
-  }
 }

@@ -77,7 +77,15 @@ Some plugins are long-running scheduled agents. The canonical example is **G.R.I
 - Configurable via `GRILLO_BEAT_INTERVAL`; includes duplicate suppression and rate-limiting.
 - Extensible: discovers beat-specific plugins (tag compactor, memory compactor, curiosity) via the plugin registry.
 
-The **Agent plugin** (`plugins/agent_plugin.py`) exposes Synth's agentic tools (`agent_list_files`, `agent_read_file`, `spawn_drone`) to the Agentic Runtime 2.0. Task state is persisted in the `agent_tasks` table. Enablement is gated by `AGENT_ENABLED` (user toggle, re-read on every `is_enabled()` call); the router 2.0 additionally requires `AGENTIC_ROUTING_ENABLED`.
+The **Agent plugin** (`plugins/agent_plugin.py`) exposes Synth's agentic tools (`agent_list_files`, `agent_read_file`, `agent_write_file`, `agent_edit_file`, `agent_search_files`, `agent_run_shell`, `spawn_drone`) to the Agentic Runtime 2.0. Task state is persisted in the `agent_tasks` table. Enablement is gated by `AGENT_ENABLED` (user toggle, re-read on every `is_enabled()` call); the router 2.0 additionally requires `AGENTIC_ROUTING_ENABLED`.
+
+`agent_write_file` (`required_fields: ["path", "content"]`, `optional_fields: ["mode"]`, `security_level: "medium"`, `external_effects: ["filesystem"]`) writes a text file inside the sandbox. It reuses `_resolve_safe_path()` / `_allowed_roots()` (same roots as `agent_read_file`: `AGENT_FS_ROOTS`, else `[AGENT_FS_ROOT|/app, SYNTH_LOG_DIR|/app/logs]`), creates parent dirs, supports `mode` = `"overwrite"` (default) or `"append"`, and caps content at 2 MB. `external_effects` makes `core/agent_router.py` route it to the Agent Lane automatically. This is a **native Python** action — chosen over the standard filesystem MCP (`@modelcontextprotocol/server-filesystem`, pre-registered but `"enabled": false` in `config/synth_mcp.json`) because the runtime image (`python:3.12-slim`) has no node/npx (node lives only in the Dockerfile `stage_builder` build stage), so an `npx`-based MCP server cannot start in-container.
+
+`agent_edit_file` (`required_fields: ["path", "old_string", "new_string"]`, `optional_fields: ["expected_replacements"]`, `security_level: "medium"`, `external_effects: ["filesystem"]`) does a literal find-and-replace inside a sandboxed text file. It reads via `_resolve_safe_path()`, counts occurrences of `old_string`, and requires the count to exactly equal `expected_replacements` (default 1, clamped 1–10000 via `_safe_int()`) — an ambiguous or missing match errors out rather than editing the wrong spot. `old_string`/`new_string` must be non-empty strings and must differ; the resulting content is capped at 2 MB. Returns `{"status": "ok", "path", "replacements", "bytes_written"}`. `external_effects: ["filesystem"]` routes it to the Agent Lane automatically. Native Python for the same no-node reason as `agent_write_file`.
+
+`agent_search_files` (`required_fields: ["pattern"]`, `optional_fields: ["path", "regex", "case_sensitive", "glob", "max_results", "max_file_bytes"]`) is a **read-only** in-sandbox grep — it has **no** `security_level`/`external_effects` and stays on the Fast Lane. `pattern` is a plain substring by default, or a Python `re` pattern when `regex` is true; `case_sensitive` (default False) toggles `re.IGNORECASE`. `path` (default the first allowed root) is confined via `_resolve_safe_path()`; when it's a directory the search recurses with `rglob(glob)` (`glob` default `"*"`), skipping files larger than `max_file_bytes` (`_safe_int` default 2 MB, 1000–20 000 000). Results cap at `max_results` (`_safe_int` default 200, 1–2000) and each line is truncated to 1000 chars. Returns `{"status": "ok", "path", "files_scanned", "count", "truncated", "matches": [{"path", "line", "text"}]}`. Native Python for the same no-node reason as `agent_write_file`.
+
+`agent_run_shell` (`required_fields: ["command"]`, `optional_fields: ["cwd", "timeout"]`, `security_level: "high"`, `external_effects: ["shell"]`) runs a shell command and returns `{status, exit_code, cwd, stdout, stderr, truncated}`. **Its security is gated by container detection.** The module-level helper `_is_in_container()` decides the environment via, in order: the explicit `SYNTH_IN_CONTAINER` env override → presence of `/.dockerenv` (Docker) or `/run/.containerenv` (Podman) → a `docker`/`kubepods`/`containerd`/`libpod` marker in `/proc/1/cgroup`; it defaults to `False` (host) when unsure. `_run_shell()` **only executes inside a container** (the disposable runtime image); on a bare host it refuses unless the `AGENT_SHELL_ALLOW_HOST` config var (default `False`) is explicitly enabled — because a shell on the host is a real machine-compromise risk for a public persona. The working directory (`cwd`, default the first allowed root) is confined to `_allowed_roots()` via `_resolve_safe_path()`; the command runs through `bash -c`/`sh -c` under `asyncio.create_subprocess_exec`, with a `timeout` clamped to 1–600 s (default 60) and stdout/stderr each capped at 40 000 chars. `external_effects: ["shell"]` routes it to the Agent Lane automatically. Native Python for the same no-node reason as `agent_write_file`.
 
 ---
 
@@ -144,6 +152,17 @@ servers (`.mcp.json`, `mcp_servers/*.py`) are never touched by this runtime.
 | Fast/Agent router | `core/agent_router.py` (`classify`, `route`) |
 | Expose Synth actions as MCP | `core/mcp_bridge/server.py` (`build_server`, FastMCP) |
 
+**Every action is a tool — automatically.** By design, any action registered
+through a plugin/interface `get_supported_actions()` is *automatically* exposed
+as an MCP tool named `synth_<action_name>` (e.g. `message_telegram_bot` →
+`synth_message_telegram_bot`). There is **no whitelist** and **no developer
+opt-in**: `core/mcp_bridge/server.py::_get_exposed_action_names()` enumerates the
+full internal action set from `core/tool_registry.py::tool_registry.internal_tools()`.
+MCP tool names have no hard `tool_` prefix requirement — the `synth_` prefix is a
+namespacing choice. Safety is unchanged: every call still funnels through
+`core.action_safety.is_action_allowed_for_execution`, so each action's security
+level is enforced regardless of how it is invoked.
+
 **Two lanes, one chain.** `core/agent_router.classify` is a pure deterministic
 function: multiple actions, a tool call (`mcp_*` or an internal action with
 external effects), or a multi-step intent → **Agent Lane**; a single pure
@@ -157,7 +176,7 @@ via `run_action`; external MCP tools via `mcp_client_bridge.call_tool`. Tool
 names are namespaced `mcp_<server>_<tool>`.
 
 **Config keys:** `AGENTIC_ROUTING_ENABLED`, `AGENT_MAX_ITERATIONS` (30),
-`AGENT_TURN_TIMEOUT_SEC` (120), `AGENT_MCP_EXPOSED_ACTIONS`, `SYNTH_MCP_CONFIG`.
+`AGENT_TURN_TIMEOUT_SEC` (120), `SYNTH_MCP_CONFIG`.
 See `docs/agentic_tools.rst` for the full reference.
 
 **Drones — ephemeral sub-agents.** The Agent can delegate a focused, self-contained
@@ -534,6 +553,7 @@ All keys stored in the `config` table and accessible via `config_registry.get_va
 | `AUTONOMY_ALLOWED_SECURITY_LEVEL` | Max security level for autonomous actions |
 | `DRONE_MAX_ITERATIONS` | Hard cap on Drone sub-agent loop iterations (default 3) |
 | `DRONE_TURN_TIMEOUT_SEC` | Wall-clock budget per Drone turn in seconds (default 90) |
+| `AGENT_SHELL_ALLOW_HOST` | Allow `agent_run_shell` to run when NOT in a container (default `False`; a host shell is a real compromise risk) |
 | `LLM_AUTO_EXECUTE_UNSAFE_ACTIONS` | Whether to auto-execute unsafe LLM actions |
 | `AWAIT_RESPONSE_TIMEOUT` | Seconds to wait for LLM response before timeout |
 | `LIVE_VOICE_NAME` | Voice name for live audio TTS |
