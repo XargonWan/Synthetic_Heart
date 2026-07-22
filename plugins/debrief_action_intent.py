@@ -26,6 +26,7 @@ try:
         description="Enable Debrief action-intent plugin",
         scope="agent",
         component="agent",
+        advanced=True,
         needs_component_reload=False,
     )
     register_exposed_var(
@@ -37,6 +38,7 @@ try:
         description="Maximum number of recovery actions returned by Debrief action intent",
         scope="agent",
         component="agent",
+        advanced=True,
         needs_component_reload=False,
     )
     register_exposed_var(
@@ -48,6 +50,7 @@ try:
         description="Allow Debrief to propose message_* actions",
         scope="agent",
         component="agent",
+        advanced=True,
         needs_component_reload=False,
     )
     register_exposed_var(

@@ -86,18 +86,34 @@ Historic data endpoints (used by the WebUI for timeline/history views):
 Agent‑related APIs
 ------------------
 
-(The agent subsystem allows scheduled/background AI tasks.)
+(The Agentic Runtime persists each turn and its iterations. See
+:doc:`agentic_tools` for the runtime model.)
 
 - **GET** `/api/agent/tasks` – list active/past agent tasks.
 - **GET** `/api/agent/tasks/{task_id}` – fetch details for a specific task.
-- **POST** `/api/agent/tasks` – create a new agent task.
-- **POST** `/api/agent/tasks/{task_id}/pause` – pause a running task.
-- **POST** `/api/agent/tasks/{task_id}/resume` – resume a paused task.
-- **POST** `/api/agent/tasks/{task_id}/cancel` – cancel a task.
-- **GET** `/api/agent/proposals` – list agent action proposals waiting
-  approval.
-- **POST** `/api/agent/proposals/{proposal_id}/approve` – approve a pending
-  proposal.
+- **POST** `/api/agent/run` – run a single bounded agentic turn
+  (``run_agentic_turn``) and persist it. Body carries the input payload and
+  optional engine/context.
+- **POST** `/api/agent/tasks/{task_id}/continue` – resume a ``pending`` task by
+  re-injecting its prior observations with a fresh budget and running the loop
+  synchronously to completion. Returns HTTP 409 if the task is not resumable.
+  This is the REST counterpart of the ``/task resume <id>`` chat command (which
+  instead runs asynchronously in the background).
+- **GET** `/api/agent/tools` – list the unified tool manifest (internal actions
+  + remote MCP tools) available to the runtime.
+- **POST** `/api/agent/tasks/{task_id}/message` – append a user message to the
+  task's reasoning timeline (``iterations_meta``). Body: ``{"text": "..."}``.
+  Records the human intervention inline in the conversational WebUI; does not
+  relaunch the agent loop.
+- **PATCH** `/api/agent/tasks/{task_id}` – rename a task by setting a custom
+  display name. Body: ``{"name": "My task"}``. The name is stored inside the
+  task's ``metadata`` JSON blob (key ``name``) — no schema change — and is
+  surfaced by ``GET /api/agent/tasks`` and shown in place of the engine label in
+  the WebUI Agent panel. Send an empty string (``{"name": ""}``) to clear the
+  custom name and revert to the engine label. Returns
+  ``{"status": "renamed", "task_id": <id>, "name": <name|null>}``.
+- **DELETE** `/api/agent/tasks/{task_id}` – permanently delete a task row.
+  Exposed in the WebUI Agent panel as the 🗑 button on each task card.
 
 Animations, VRM & Emotion State
 -------------------------------

@@ -458,20 +458,20 @@ class GrilloGrowthPlugin:
                 async with conn.cursor(DictCursor) as cur:
                     if is_postgres:
                         await cur.execute(
-                            "SELECT DATE(timestamp) AS day, "
+                            "SELECT DATE(created_at) AS day, "
                             "string_agg(content, '\n\n---\n\n' ORDER BY id) AS combined "
                             "FROM ai_diary "
-                            "WHERE DATE(timestamp) >= %s AND DATE(timestamp) < CURRENT_DATE "
-                            "GROUP BY DATE(timestamp) ORDER BY day ASC",
+                            "WHERE DATE(created_at) >= %s AND DATE(created_at) < CURRENT_DATE "
+                            "GROUP BY DATE(created_at) ORDER BY day ASC",
                             (cutoff,),
                         )
                     else:
                         await cur.execute(
-                            "SELECT DATE(timestamp) AS day, "
+                            "SELECT DATE(created_at) AS day, "
                             "GROUP_CONCAT(content ORDER BY id ASC SEPARATOR '\n\n---\n\n') AS combined "
                             "FROM ai_diary "
-                            "WHERE DATE(timestamp) >= %s AND DATE(timestamp) < CURDATE() "
-                            "GROUP BY DATE(timestamp) ORDER BY day ASC",
+                            "WHERE DATE(created_at) >= %s AND DATE(created_at) < CURDATE() "
+                            "GROUP BY DATE(created_at) ORDER BY day ASC",
                             (cutoff,),
                         )
                     rows = await cur.fetchall()

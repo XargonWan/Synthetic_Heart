@@ -197,7 +197,7 @@ def test_format_recalled_memory_marks_entry_as_recalled() -> None:
         atomic_facts=["Alice|likes|jasmine tea"],
         emotional_tag=emotional_tag,
         foresight_signals=[],
-        timestamp=now,
+        event_timestamp=now,
         session_id="telegram_bot/999",
     )
     match = MemCellRecall(
@@ -238,7 +238,7 @@ async def test_static_injection_excludes_diary_merge_housekeeping_memories() -> 
         ],
         emotional_tag=emotional_tag,
         foresight_signals=[],
-        timestamp=now,
+        event_timestamp=now,
         session_id="diary_merge:-1",
     )
     normal_cell = MemCell(
@@ -247,7 +247,7 @@ async def test_static_injection_excludes_diary_merge_housekeeping_memories() -> 
         atomic_facts=["Alice|likes|jasmine tea"],
         emotional_tag=emotional_tag,
         foresight_signals=[],
-        timestamp=now,
+        event_timestamp=now,
         session_id="telegram_bot:321",
     )
 
@@ -451,7 +451,7 @@ def _build_recall_row(
             "valence": 0.2,
         },
         "foresight_signals": [],
-        "timestamp": datetime(2026, 4, 18, 12, 0, tzinfo=timezone.utc),
+        "event_timestamp": datetime(2026, 4, 18, 12, 0, tzinfo=timezone.utc),
         "retrieval_count": 0,
         "explicit_importance": 0.0,
         "consolidated": False,
@@ -616,7 +616,7 @@ async def test_build_daily_transcript_uses_parameterized_cutoff(
 
     executed_sql, params = mock_cursor.execute.await_args_list[0][0]
     assert "INTERVAL 1 DAY" not in executed_sql
-    assert "WHERE timestamp >= %s" in executed_sql
+    assert "WHERE created_at >= %s" in executed_sql
     assert isinstance(params[0], datetime)
     assert '[2026-05-05T11:37:00+00:00] Alice: "first"' in transcript
     assert '[2026-05-05T11:38:00+00:00] self: "second"' in transcript

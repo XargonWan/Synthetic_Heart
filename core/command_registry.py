@@ -35,7 +35,7 @@ async def execute_command(name: str, *args: Any, **kwargs: Any) -> str:
 
 async def handle_command_message(
     command_text: str,
-    user_id: int | None = None,
+    user_id: int | str | None = None,
     interface_id: str | None = None,
     interface_context=None,
 ) -> str | None:
@@ -142,6 +142,8 @@ async def help_command() -> str:
         "`/purge_map [days]` – Purge old mappings\n"
         "`/logchat` – Set the current chat as the log chat\n"
         "`/splitprompt [on|off]` – Enable/disable double-prompt mode (PART1/PART2)\n"
+        "`/task` – List recent agent tasks\n"
+        "`/task resume <id>` – Resume a paused (pending) agent task\n"
     )
     return help_text
 
@@ -1143,57 +1145,6 @@ async def splitprompt_command(*args) -> str:
 register_command("splitprompt", splitprompt_command)
 
 
-async def agent_command(*args, interface_context=None) -> str:
-    """Handle agent subcommands (trainer-only).
-
-    Usage:
-      /agent approve <proposal_id>
-    """
-    if not args:
-        return "Usage: /agent approve <proposal_id>"
-
-    sub = args[0].lower()
-    if sub == "approve":
-        if len(args) < 2:
-            return "❌ Use: /agent approve <proposal_id>"
-        try:
-            proposal_id = int(args[1])
-        except ValueError:
-            return "❌ proposal_id must be an integer"
-
-        # Extract possible trainer info from interface_context
-        trainer_id = None
-        try:
-            if interface_context and isinstance(interface_context, dict):
-                update = interface_context.get("update")
-                if update and getattr(update, "effective_user", None):
-                    trainer_id = getattr(update.effective_user, "id", None)
-        except Exception:
-            trainer_id = None
-
-        try:
-            from core.core_initializer import PLUGIN_REGISTRY
-
-            plugin = PLUGIN_REGISTRY.get("agent")
-            if not plugin:
-                return "❌ Agent plugin not available"
-            original_message = {"sender_id": trainer_id}
-            res = await plugin.execute_action(
-                {"type": "approve_action", "payload": {"proposal_id": proposal_id}},
-                {},
-                None,
-                original_message,
-            )
-            return f"✅ Approval result: {res}"
-        except Exception as e:
-            return f"❌ Error approving proposal: {e}"
-
-    return "❌ Unknown agent subcommand. Use: /agent approve <proposal_id>"
-
-
-register_command("agent", agent_command)
-
-
 async def block_command(*args) -> str:
     """Block a user by ID."""
     if not args:
@@ -1345,5 +1296,96 @@ async def cancel_command(*args, interface_context=None) -> str:
         return f"❌ Error cancelling operations: {e}"
 
 
+async def task_command(*args, interface_context=None) -> str:
+    """List agent tasks, or resume a paused one.
+
+    Usage:
+        /task                 – list the most recent agent tasks
+        /task list            – same as above
+        /task resume <id>     – resume the paused (pending) task <id>
+    """
+    from core.agent_core import AgentLoopManager
+
+    manager = AgentLoopManager()
+
+    sub = args[0].lower() if args else "list"
+
+    # --- Resume a specific task -------------------------------------------
+    if sub == "resume":
+        if len(args) < 2:
+            return "❌ Usage: `/task resume <id>`"
+        try:
+            task_id = int(args[1])
+        except (TypeError, ValueError):
+            return f"❌ Invalid task id: `{args[1]}`"
+
+        resumable = await manager.find_task_by_id(task_id)
+        if not resumable:
+            return (
+                f"⚠️ Task `{task_id}` is not resumable "
+                "(unknown id or not in `pending` state)."
+            )
+
+        # Derive interface_path so the resumed turn's final reply is delivered
+        # back to the interface that issued the command.
+        interface_path = None
+        interface_name = None
+        bot = None
+        message = None
+        if isinstance(interface_context, dict):
+            interface_path = interface_context.get("interface_path")
+            interface_name = interface_context.get("interface_id")
+            bot = interface_context.get("bot")
+            message = interface_context.get("message")
+
+        context: Dict[str, Any] = {}
+        if interface_path:
+            context["interface_path"] = interface_path
+        if interface_name:
+            context["interface_id"] = interface_name
+
+        from core.agent_router import start_task_resume
+
+        scheduled = start_task_resume(
+            task_id, context=context, bot=bot, message=message
+        )
+        if not scheduled:
+            return f"❌ Could not schedule resume for task `{task_id}`."
+        goal = resumable.get("goal") or ""
+        preview = (goal[:120] + "…") if len(goal) > 120 else goal
+        return (
+            f"▶️ Resuming task `{task_id}`. It runs in the background and its "
+            f"result will be delivered here when ready.\n_Goal:_ {preview}"
+        )
+
+    # --- List recent tasks -------------------------------------------------
+    tasks = await manager.list_recent_tasks(limit=15)
+    if not tasks:
+        return "📭 No agent tasks found."
+
+    status_icon = {
+        "pending": "⏸️",
+        "running": "▶️",
+        "waiting_for_approval": "⏳",
+        "paused": "⏸️",
+        "completed": "✅",
+        "failed": "❌",
+        "cancelled": "🚫",
+    }
+    lines = ["🗂️ *Agent tasks* (newest first)\n"]
+    for t in tasks:
+        icon = status_icon.get(t["status"], "•")
+        goal = t.get("goal") or "(no goal)"
+        if len(goal) > 70:
+            goal = goal[:70] + "…"
+        resume_hint = "  ↩️ resumable" if t.get("resumable") else ""
+        lines.append(
+            f"`{t['task_id']}` {icon} *{t['status']}*{resume_hint}\n    {goal}"
+        )
+    lines.append("\n_Use_ `/task resume <id>` _to continue a paused task._")
+    return "\n".join(lines)
+
+
 register_command("cancel", cancel_command)
 register_command("logchat", logchat_command)
+register_command("task", task_command)

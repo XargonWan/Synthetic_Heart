@@ -94,8 +94,8 @@ try:
             value_type=_vtype,
             ui_type="bool" if _vtype is bool else "int",
             description=_desc,
-            scope="agent",
-            component="agent",
+            scope="web_search",
+            component="web_search",
         )
 except Exception:
     pass

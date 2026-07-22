@@ -159,7 +159,7 @@ async def test_peer_already_responded_queries_timestamp_column(monkeypatch):
     )
 
     assert result is True
-    assert any("timestamp >" in sql for sql in cursor.executed_sql)
+    assert any("created_at >" in sql for sql in cursor.executed_sql)
     assert not any("timestamptz" in sql for sql in cursor.executed_sql)
 
 

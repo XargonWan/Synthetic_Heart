@@ -1944,7 +1944,7 @@ async def search_memories(tags=None, scope=None, limit=5):
         conditions = " OR ".join(["JSON_CONTAINS(tags, %s)"] * len(tags))
 
     query = f"""
-        SELECT content, timestamp
+        SELECT content, created_at
         FROM memories
         WHERE ({conditions})
     """
@@ -1959,7 +1959,7 @@ async def search_memories(tags=None, scope=None, limit=5):
         query += " AND scope = %s"
         params.append(scope)
 
-    query += " ORDER BY timestamp DESC LIMIT %s"
+    query += " ORDER BY created_at DESC LIMIT %s"
     params.append(limit)
 
     log_debug("Query:")
@@ -1989,8 +1989,8 @@ async def search_memories(tags=None, scope=None, limit=5):
                 try:
                     diary_conditions = conditions.replace("tags", "context_tags")
                     diary_query = (
-                        "SELECT content, timestamp FROM ai_diary "
-                        f"WHERE ({diary_conditions}) ORDER BY timestamp DESC LIMIT %s"
+                        "SELECT content, created_at FROM ai_diary "
+                        f"WHERE ({diary_conditions}) ORDER BY created_at DESC LIMIT %s"
                     )
                     if not is_postgres:
                         diary_query = diary_query.replace(
@@ -2064,10 +2064,10 @@ async def free_memory_search(query: str, limit: int = 5):
 
     queries = []
     queries.append(
-        f"SELECT 'memories' AS source, id, timestamp, content FROM memories WHERE {where_mem}"
+        f"SELECT 'memories' AS source, id, created_at, content FROM memories WHERE {where_mem}"
     )
     queries.append(
-        f"SELECT 'ai_diary' AS source, id, timestamp, content FROM ai_diary WHERE {where_diary}"
+        f"SELECT 'ai_diary' AS source, id, created_at, content FROM ai_diary WHERE {where_diary}"
     )
 
     # Fetch a larger pool if configured (useful when randomizing results)
@@ -2081,7 +2081,7 @@ async def free_memory_search(query: str, limit: int = 5):
     except Exception:
         pool_max = 100
 
-    union_q = " UNION ALL ".join(queries) + " ORDER BY timestamp DESC LIMIT %s"
+    union_q = " UNION ALL ".join(queries) + " ORDER BY created_at DESC LIMIT %s"
     params.append(pool_max)
 
     log_debug(f"[free_memory_search] Executing query: {union_q} params={params}")

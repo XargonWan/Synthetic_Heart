@@ -120,7 +120,7 @@ def get_trainer_display_name() -> str:
 
 BASE_CORTEX = config_registry.get_var(
     "BASE_CORTEX",
-    "manual",
+    "",
     label="Base Cortex",
     description="Default cortex engine used system-wide unless overridden by scope.",
     group="core",
@@ -158,6 +158,17 @@ LIVE_CORTEX = config_registry.get_var(
     "Default",
     label="Live Cortex",
     description="Cortex engine used for live voice sessions (Default means Base Cortex). Only 'live' kind engines are selectable.",
+    group="core",
+    component="cortex",
+    hidden=True,  # Managed via the Cortex Engines scope selectors
+    allow_env_override=False,
+)
+
+AGENT_CORTEX = config_registry.get_var(
+    "AGENT_CORTEX",
+    "Default",
+    label="Agent Cortex",
+    description="Cortex engine used for the agentic loop (Default means Base Cortex). Lets the agent use an LLM better suited for agent/tool-calling work.",
     group="core",
     component="cortex",
     hidden=True,  # Managed via the Cortex Engines scope selectors
@@ -423,6 +434,8 @@ async def get_active_cortex_engine(scope: str | None = None) -> str:
             override_key = "TRAINER_CORTEX"
         elif scope == "live":
             override_key = "LIVE_CORTEX"
+        elif scope == "agent":
+            override_key = "AGENT_CORTEX"
         else:
             override_key = None
 
@@ -599,6 +612,8 @@ async def set_scope_cortex(scope: str, name: str) -> None:
         key = "GRILLO_CORTEX"
     elif scope == "live":
         key = "LIVE_CORTEX"
+    elif scope == "agent":
+        key = "AGENT_CORTEX"
     else:
         key = "TRAINER_CORTEX"
     try:

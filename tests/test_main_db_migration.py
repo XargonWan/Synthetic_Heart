@@ -37,7 +37,7 @@ def test_normalize_emotion_diary_row_preserves_legacy_numeric_id() -> None:
     assert normalized["id"] == "emotion_17"
     assert normalized["legacy_numeric_id"] == 17
     assert normalized["intensity"] == 1.0
-    assert normalized["timestamp"] is not None
+    assert normalized["created_at"] is not None
 
 
 def test_audit_source_schema_flags_legacy_emotion_diary() -> None:
@@ -52,7 +52,7 @@ def test_audit_source_schema_flags_legacy_emotion_diary() -> None:
 
     assert any("legacy text primary key" in warning for warning in warnings)
     assert any("double precision" in warning for warning in warnings)
-    assert any("missing a timestamp column" in warning for warning in warnings)
+    assert any("missing a created_at column" in warning for warning in warnings)
 
 
 def test_audit_source_schema_flags_ai_diary_user_message_width() -> None:

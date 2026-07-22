@@ -417,9 +417,9 @@ class GrilloChatObserverPlugin:
 
                 rows = await execute_query(
                     """
-                    SELECT COUNT(*) as cnt, MAX(timestamp) as max_ts
+                    SELECT COUNT(*) as cnt, MAX(created_at) as max_ts
                     FROM chat_history_cache
-                    WHERE timestamp > %s
+                    WHERE created_at > %s
                       AND COALESCE(sender_id, '') NOT IN (%s, %s)
                       AND COALESCE(sender_name, '') NOT IN (%s, %s)
                     """,

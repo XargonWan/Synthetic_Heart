@@ -21,8 +21,8 @@ try:
         value_type=bool,
         ui_type="bool",
         description="Enable the Recon Memory Recollector plugin (search memories for Recon).",
-        scope="agent",
-        component="agent",
+        scope="recon",
+        component="recon",
     )
 except Exception:
     from core.config_manager import config_registry
@@ -33,8 +33,8 @@ except Exception:
         value_type=bool,
         label="Enable Recon Memory Recollector",
         description="Enable the Recon Memory Recollector plugin (search memories for Recon).",
-        group="agent",
-        component="agent",
+        group="recon",
+        component="recon",
     )
 
 

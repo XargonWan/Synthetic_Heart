@@ -180,3 +180,74 @@ def test_get_recent_diary_uses_timestamp_column(monkeypatch):
     assert "timestamp" in executed_query
     assert "created_at" not in executed_query
     assert "personal_thought" in output
+
+
+def _docker_target() -> synth_db.DbTarget:
+    return synth_db.DbTarget(
+        name="runtime",
+        db_type="postgres",
+        host="synth-db",
+        port=5432,
+        user="synth",
+        password="synth",
+        database="synth",
+        dsn="postgresql://synth:synth@synth-db:5432/synth",
+    )
+
+
+def test_remap_rewrites_unresolvable_host_to_localhost(monkeypatch):
+    monkeypatch.setattr(synth_db, "_running_inside_container", lambda: False)
+    monkeypatch.setattr(synth_db, "_hostname_resolvable", lambda host: False)
+    monkeypatch.setattr(synth_db, "_REPO_ENV", {"EXT_DB_PORT": "4306"})
+
+    remapped = synth_db._remap_for_host_access(_docker_target())
+
+    assert remapped.host == "127.0.0.1"
+    assert remapped.port == 4306
+    assert remapped.dsn == "postgresql://synth:synth@127.0.0.1:4306/synth"
+
+
+def test_remap_is_noop_inside_container(monkeypatch):
+    monkeypatch.setattr(synth_db, "_running_inside_container", lambda: True)
+    monkeypatch.setattr(synth_db, "_hostname_resolvable", lambda host: False)
+
+    remapped = synth_db._remap_for_host_access(_docker_target())
+
+    assert remapped.host == "synth-db"
+    assert remapped.port == 5432
+
+
+def test_remap_is_noop_for_resolvable_host(monkeypatch):
+    monkeypatch.setattr(synth_db, "_running_inside_container", lambda: False)
+    monkeypatch.setattr(synth_db, "_hostname_resolvable", lambda host: True)
+
+    remapped = synth_db._remap_for_host_access(_docker_target())
+
+    assert remapped.host == "synth-db"
+    assert remapped.port == 5432
+
+
+def test_env_parser_strips_inline_comments():
+    assert synth_db._strip_wrapping_quotes("4306   # external port") == "4306"
+    assert synth_db._strip_wrapping_quotes('"has # hash"') == "has # hash"
+    assert synth_db._strip_wrapping_quotes("plain") == "plain"
+
+
+def test_db_type_inferred_from_port_when_undeclared(monkeypatch):
+    monkeypatch.setattr(
+        synth_db,
+        "_REPO_ENV",
+        {
+            "DB_HOST": "192.168.1.13",
+            "DB_PORT": "5432",
+            "DB_USER": "synth",
+            "DB_PASS": "synth",
+            "DB_NAME": "synth",
+        },
+    )
+    monkeypatch.delenv("SYNTH_DB_TYPE", raising=False)
+    monkeypatch.delenv("DB_TYPE", raising=False)
+
+    target = synth_db._build_runtime_db_target()
+
+    assert target.db_type == "postgres"

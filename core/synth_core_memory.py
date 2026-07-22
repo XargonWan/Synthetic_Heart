@@ -224,8 +224,10 @@ async def search_memories(
         mem_where, mem_params = _mem_where(join_op)
         if mem_where:
             mem_query = (
-                "SELECT 'memories' AS source, id, timestamp, content, tags "
-                "FROM memories WHERE " + mem_where + " ORDER BY timestamp DESC LIMIT %s"
+                "SELECT 'memories' AS source, id, created_at, content, tags "
+                "FROM memories WHERE "
+                + mem_where
+                + " ORDER BY created_at DESC LIMIT %s"
             )
             mem_params.append(pool_limit)
             await cur.execute(mem_query, mem_params)
@@ -236,10 +238,10 @@ async def search_memories(
         diary_where, diary_params = _diary_where(join_op)
         if diary_where:
             diary_query = (
-                "SELECT 'ai_diary' AS source, id, timestamp, content, context_tags "
+                "SELECT 'ai_diary' AS source, id, created_at, content, context_tags "
                 "FROM ai_diary WHERE "
                 + diary_where
-                + " ORDER BY timestamp DESC LIMIT %s"
+                + " ORDER BY created_at DESC LIMIT %s"
             )
             diary_params.append(pool_limit)
             await cur.execute(diary_query, diary_params)
@@ -274,10 +276,10 @@ async def search_memories(
                     if chat_conditions:
                         chat_where = " OR ".join(chat_conditions)
                         chat_query = (
-                            "SELECT 'chat_history' AS source, id, timestamp, message_text, NULL AS context_tags "
+                            "SELECT 'chat_history' AS source, id, created_at, message_text, NULL AS context_tags "
                             "FROM chat_history_cache WHERE "
                             + chat_where
-                            + " ORDER BY timestamp DESC LIMIT %s"
+                            + " ORDER BY created_at DESC LIMIT %s"
                         )
                         chat_params.append(pool_limit)
                         try:

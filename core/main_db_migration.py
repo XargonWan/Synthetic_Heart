@@ -234,7 +234,7 @@ def _normalize_common_row(row: Mapping[str, Any]) -> dict[str, Any]:
         # integers (seconds since 1970). Detect common timestamp column names and
         # convert numeric values to ``datetime`` objects in UTC so asyncpg can bind
         # them correctly.
-        if key.endswith("_at") or key == "timestamp" or key.endswith("_updated"):
+        if key.endswith("_at") or key == "created_at" or key.endswith("_updated"):
             if isinstance(value, (int, float)):
                 try:
                     normalized[key] = datetime.fromtimestamp(float(value), tz=UTC)
@@ -312,24 +312,24 @@ def _normalize_message_map_row(row: Mapping[str, Any]) -> dict[str, Any]:
     """Normalize rows from ``message_map``.
 
     The target PostgreSQL schema defines ``chat_id`` as ``BIGINT``,
-    ``message_id`` as ``INTEGER`` and ``timestamp`` as ``DOUBLE PRECISION``
+    ``message_id`` as ``INTEGER`` and ``created_at`` as ``DOUBLE PRECISION``
     (epoch float).  The generic ``_normalize_common_row`` would convert the
-    ``timestamp`` column to a ``datetime`` object because its name matches
-    ``key == "timestamp"`` – but this column stores raw epoch floats, not
-    TIMESTAMPTZ.  We therefore override the timestamp key before delegating.
+    ``created_at`` column to a ``datetime`` object because its name matches
+    ``key == "created_at"`` – but this column stores raw epoch floats, not
+    TIMESTAMPTZ.  We therefore override the created_at key before delegating.
     """
-    # Keep the raw epoch float for the ``timestamp`` column – Postgres
+    # Keep the raw epoch float for the ``created_at`` column – Postgres
     # expects DOUBLE PRECISION, not TIMESTAMPTZ.
-    raw_ts = row.get("timestamp")
+    raw_ts = row.get("created_at")
     normalized = _normalize_common_row(row)
-    if raw_ts is not None and "timestamp" in normalized:
+    if raw_ts is not None and "created_at" in normalized:
         # _normalize_common_row may have converted the float to a datetime;
         # replace it with the original numeric value (or a coerced float).
         if isinstance(raw_ts, (int, float)):
-            normalized["timestamp"] = float(raw_ts)
+            normalized["created_at"] = float(raw_ts)
         elif isinstance(raw_ts, str):
             try:
-                normalized["timestamp"] = float(raw_ts)
+                normalized["created_at"] = float(raw_ts)
             except ValueError:
                 pass
     return normalized
@@ -531,8 +531,10 @@ def _normalize_emotion_diary_row(row: Mapping[str, Any]) -> dict[str, Any]:
     intensity = normalized.get("intensity")
     normalized["intensity"] = float(intensity) if intensity is not None else None
     normalized["legacy_numeric_id"] = legacy_numeric_id
-    normalized["timestamp"] = (
-        normalized.get("timestamp") or normalized.get("next_check") or datetime.now(UTC)
+    normalized["created_at"] = (
+        normalized.get("created_at")
+        or normalized.get("next_check")
+        or datetime.now(UTC)
     )
     return normalized
 
@@ -582,7 +584,7 @@ TABLE_SPECS: dict[str, TableMigrationSpec] = {
             "sender_id",
             "message_text",
             "metadata",
-            "timestamp",
+            "created_at",
         ),
         conflict_keys=("id",),
         serial_column="id",
@@ -609,7 +611,7 @@ TABLE_SPECS: dict[str, TableMigrationSpec] = {
             "personal_thought",
             "emotions",
             "interaction_summary",
-            "timestamp",
+            "created_at",
             "interface",
             "chat_id",
             "thread_id",
@@ -630,7 +632,7 @@ TABLE_SPECS: dict[str, TableMigrationSpec] = {
             "personal_thought",
             "emotions",
             "interaction_summary",
-            "timestamp",
+            "created_at",
             "interface",
             "chat_id",
             "thread_id",
@@ -647,7 +649,7 @@ TABLE_SPECS: dict[str, TableMigrationSpec] = {
         name="memories",
         columns=(
             "id",
-            "timestamp",
+            "created_at",
             "content",
             "author",
             "source",
@@ -664,7 +666,7 @@ TABLE_SPECS: dict[str, TableMigrationSpec] = {
     ),
     "emotion_state": TableMigrationSpec(
         name="emotion_state",
-        columns=("id", "emotion_name", "intensity", "timestamp", "updated_at"),
+        columns=("id", "emotion_name", "intensity", "created_at", "updated_at"),
         conflict_keys=("id",),
         serial_column="id",
         fetch_order="id",
@@ -683,7 +685,7 @@ TABLE_SPECS: dict[str, TableMigrationSpec] = {
             "trigger_condition",
             "decision_logic",
             "next_check",
-            "timestamp",
+            "created_at",
         ),
         conflict_keys=("id",),
         transform=_normalize_emotion_diary_row,
@@ -737,7 +739,7 @@ TABLE_SPECS: dict[str, TableMigrationSpec] = {
     ),
     "message_map": TableMigrationSpec(
         name="message_map",
-        columns=("trainer_message_id", "chat_id", "message_id", "timestamp"),
+        columns=("trainer_message_id", "chat_id", "message_id", "created_at"),
         conflict_keys=("trainer_message_id",),
         transform=_normalize_message_map_row,
     ),
@@ -785,41 +787,6 @@ TABLE_SPECS: dict[str, TableMigrationSpec] = {
             "action_index",
             "action_type",
             "payload",
-            "status",
-            "error_text",
-            "result",
-            "created_at",
-            "updated_at",
-        ),
-        conflict_keys=("id",),
-        serial_column="id",
-        fetch_order="id",
-        transform=_normalize_common_row,
-    ),
-    "agent_activity_log": TableMigrationSpec(
-        name="agent_activity_log",
-        columns=(
-            "id",
-            "command",
-            "proposer",
-            "status",
-            "trainer_id",
-            "request_ts",
-            "response_ts",
-            "result",
-            "metadata",
-        ),
-        conflict_keys=("id",),
-        serial_column="id",
-        fetch_order="id",
-        transform=_normalize_common_row,
-    ),
-    "agent_action_execs": TableMigrationSpec(
-        name="agent_action_execs",
-        columns=(
-            "id",
-            "activity_log_id",
-            "command",
             "status",
             "error_text",
             "result",
@@ -910,8 +877,6 @@ MIGRATION_ORDER: tuple[str, ...] = (
     "grillo_beats",
     "grillo_activity_log",
     "grillo_action_execs",
-    "agent_activity_log",
-    "agent_action_execs",
     "agent_tasks",
     "message_logs",
     "archived_memories",
@@ -952,9 +917,9 @@ def audit_source_schema(table_name: str, column_types: Mapping[str, str]) -> lis
             warnings.append(
                 "emotion_diary.intensity is integral in MariaDB; target widens it to double precision to preserve low-intensity values."
             )
-        if "timestamp" not in lowered:
+        if "created_at" not in lowered:
             warnings.append(
-                "emotion_diary is missing a timestamp column; migration will backfill timestamp from next_check or current time."
+                "emotion_diary is missing a created_at column; migration will backfill created_at from next_check or current time."
             )
 
     if table_name == "ai_diary":
@@ -1226,7 +1191,7 @@ class MainDbMigrator:
                                 session_part = (
                                     normalized_row.get("session_id") or "unknown"
                                 )
-                                ts_part = normalized_row.get("timestamp")
+                                ts_part = normalized_row.get("created_at")
                                 placeholder = (
                                     f"legacy_{session_part}_{ts_part}"
                                     if ts_part
@@ -1313,13 +1278,6 @@ class MainDbMigrator:
                             "grillo_beats": ("beat_type",),
                             "grillo_activity_log": ("beat_type",),
                             "grillo_action_execs": ("action_type", "status"),
-                            "agent_activity_log": (
-                                "command",
-                                "proposer",
-                                "status",
-                                "result",
-                            ),
-                            "agent_action_execs": ("command", "status"),
                             "agent_tasks": ("engine", "status", "trainer_id"),
                             "archived_memories": (
                                 "tag",

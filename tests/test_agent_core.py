@@ -100,3 +100,65 @@ async def test_propose_and_approve_flow(monkeypatch):
     assert res2.get("proposal_id") == 555
     assert called.get("ran") is not None
     assert "execs" in called
+
+
+@pytest.mark.asyncio
+async def test_diary_only_executed_at_start_and_end(monkeypatch):
+    """The agent loop must execute diary tools only on the first (start) and
+    last (end) iteration, suppressing them on the intermediate ones so a single
+    task produces at most one opening and one closing diary entry."""
+    import json
+
+    from core.agent_core import _agent_loop_manager
+
+    # Engine emits, on every iteration, a working tool call (keeps the loop
+    # alive) plus a diary tool call (which should be suppressed mid-task).
+    async def fake_call_engine_direct(prompt, engine_name):
+        return json.dumps(
+            {
+                "actions": [
+                    {"type": "agent_read_file", "payload": {"path": "/tmp/x"}},
+                    {
+                        "type": "create_personal_diary_entry",
+                        "payload": {"content": "note"},
+                    },
+                ]
+            }
+        )
+
+    monkeypatch.setattr(
+        _agent_loop_manager, "_call_engine_direct", fake_call_engine_direct
+    )
+
+    async def fake_persist(**kwargs):
+        return 1
+
+    monkeypatch.setattr(_agent_loop_manager, "_persist_agentic_turn", fake_persist)
+
+    executed: list[str] = []
+
+    async def fake_execute(name, args, context=None, original_message=None):
+        executed.append(name)
+        return {"ok": True, "result": "done"}
+
+    monkeypatch.setattr(
+        "core.agent_tool_executor.agent_tool_executor.execute", fake_execute
+    )
+
+    max_iterations = 3
+    result = await _agent_loop_manager.run_agentic_turn(
+        goal="multi-step task",
+        engine="fake-engine",
+        max_iterations=max_iterations,
+        timeout_seconds=30.0,
+    )
+
+    diary_execs = [n for n in executed if n == "create_personal_diary_entry"]
+    # Diary executed exactly twice: iteration 1 (start) and iteration 3 (end).
+    assert len(diary_execs) == 2, (
+        f"expected diary to run only at start/end, got {len(diary_execs)}: {executed}"
+    )
+    # The working tool ran on every iteration (never suppressed).
+    work_execs = [n for n in executed if n == "agent_read_file"]
+    assert len(work_execs) == max_iterations
+    assert result is not None

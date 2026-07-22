@@ -36,7 +36,7 @@ class MemCell:
     atomic_facts: list[str]
     emotional_tag: EmotionalTag
     foresight_signals: list[ForesightSignal]
-    timestamp: datetime
+    event_timestamp: datetime
     session_id: str
     embedding: list[float] | None = None
     retrieval_count: int = 0
@@ -207,7 +207,7 @@ class MemCellSummary:
 
     id: str
     episodic_trace: str
-    timestamp: datetime
+    event_timestamp: datetime
     retrieval_count: int
     explicit_importance: float
     emotional_intensity: float

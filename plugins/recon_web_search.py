@@ -20,8 +20,8 @@ try:
         value_type=bool,
         ui_type="bool",
         description="Enable the Recon Web Search plugin (perform web searches based on LLM-generated queries).",
-        scope="agent",
-        component="agent",
+        scope="recon",
+        component="recon",
     )
 except Exception:
     from core.config_manager import config_registry
@@ -32,8 +32,8 @@ except Exception:
         value_type=bool,
         label="Enable Recon Web Search",
         description="Enable the Recon Web Search plugin (perform web searches based on LLM-generated queries).",
-        group="agent",
-        component="agent",
+        group="recon",
+        component="recon",
     )
 
 

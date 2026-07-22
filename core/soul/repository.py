@@ -80,7 +80,7 @@ def _build_recall_match(
     session_id: str | None,
     now: datetime,
 ) -> MemCellRecall:
-    recency = _recency_score(cell.timestamp, now)
+    recency = _recency_score(cell.event_timestamp, now)
     salience = compute_memcell_salience(
         emotional_intensity=abs(float(cell.emotional_tag.intensity)),
         retrieval_count=cell.retrieval_count,
@@ -183,7 +183,7 @@ class InMemorySoulRepository:
 
     async def list_unconsolidated_memcells(self, limit: int = 200) -> list[MemCell]:
         cells = [c for c in self.memcells.values() if not c.consolidated]
-        cells.sort(key=lambda c: c.timestamp)
+        cells.sort(key=lambda c: c.event_timestamp)
         return cells[:limit]
 
     async def set_memcell_scene(self, cell_id: str, scene_id: str) -> None:
@@ -228,7 +228,7 @@ class InMemorySoulRepository:
 
     async def list_memcells_missing_embeddings(self, limit: int = 200) -> list[MemCell]:
         missing = [c for c in self.memcells.values() if not c.embedding]
-        missing.sort(key=lambda c: c.timestamp)
+        missing.sort(key=lambda c: c.event_timestamp)
         return missing[:limit]
 
     async def recall_memories(
@@ -262,7 +262,11 @@ class InMemorySoulRepository:
                 matches.append(match)
 
         matches.sort(
-            key=lambda match: (match.score, match.similarity, match.cell.timestamp),
+            key=lambda match: (
+                match.score,
+                match.similarity,
+                match.cell.event_timestamp,
+            ),
             reverse=True,
         )
         return matches[:candidate_cap]
@@ -285,14 +289,14 @@ class InMemorySoulRepository:
                 MemCellSummary(
                     id=cell.id,
                     episodic_trace=cell.episodic_trace[:200],
-                    timestamp=cell.timestamp,
+                    event_timestamp=cell.event_timestamp,
                     retrieval_count=cell.retrieval_count,
                     explicit_importance=cell.explicit_importance,
                     emotional_intensity=abs(cell.emotional_tag.intensity),
                     has_active_foresight=has_foresight,
                 )
             )
-        summaries.sort(key=lambda s: s.timestamp)
+        summaries.sort(key=lambda s: s.event_timestamp)
         return summaries[:limit]
 
     async def delete_memcells(self, ids: list[str]) -> int:
@@ -358,7 +362,7 @@ class PostgresSoulRepository:
                 atomic_facts JSONB NOT NULL DEFAULT '[]'::jsonb,
                 emotional_tag JSONB NOT NULL,
                 foresight_signals JSONB NOT NULL DEFAULT '[]'::jsonb,
-                timestamp TIMESTAMPTZ NOT NULL,
+                event_timestamp TIMESTAMPTZ NOT NULL,
                 retrieval_count INTEGER NOT NULL DEFAULT 0,
                 explicit_importance REAL NOT NULL DEFAULT 0,
                 consolidated BOOLEAN NOT NULL DEFAULT FALSE,
@@ -373,7 +377,7 @@ class PostgresSoulRepository:
                 embedding VECTOR(768) NOT NULL
             )
             """,
-            "CREATE INDEX IF NOT EXISTS idx_mem_cells_timestamp ON mem_cells (timestamp DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_mem_cells_event_timestamp ON mem_cells (event_timestamp DESC)",
             "CREATE INDEX IF NOT EXISTS idx_mem_cells_session_id ON mem_cells (session_id)",
             "CREATE INDEX IF NOT EXISTS idx_mem_cells_consolidated ON mem_cells (consolidated)",
             "CREATE INDEX IF NOT EXISTS idx_mem_cells_atomic_facts_gin ON mem_cells USING gin (atomic_facts)",
@@ -497,7 +501,7 @@ class PostgresSoulRepository:
                 """
                 INSERT INTO mem_cells (
                     id, session_id, episodic_trace, atomic_facts, emotional_tag,
-                    foresight_signals, timestamp, retrieval_count, explicit_importance,
+                    foresight_signals, event_timestamp, retrieval_count, explicit_importance,
                     consolidated, scene_id, updated_at
                 )
                 VALUES (
@@ -511,7 +515,7 @@ class PostgresSoulRepository:
                     atomic_facts = EXCLUDED.atomic_facts,
                     emotional_tag = EXCLUDED.emotional_tag,
                     foresight_signals = EXCLUDED.foresight_signals,
-                    timestamp = EXCLUDED.timestamp,
+                    event_timestamp = EXCLUDED.event_timestamp,
                     retrieval_count = EXCLUDED.retrieval_count,
                     explicit_importance = EXCLUDED.explicit_importance,
                     consolidated = EXCLUDED.consolidated,
@@ -543,7 +547,7 @@ class PostgresSoulRepository:
                         for s in cell.foresight_signals
                     ]
                 ),
-                cell.timestamp,
+                cell.event_timestamp,
                 cell.retrieval_count,
                 cell.explicit_importance,
                 cell.consolidated,
@@ -570,11 +574,11 @@ class PostgresSoulRepository:
                 """
                 SELECT
                     id, session_id, episodic_trace, atomic_facts, emotional_tag,
-                    foresight_signals, timestamp, retrieval_count, explicit_importance,
+                    foresight_signals, event_timestamp, retrieval_count, explicit_importance,
                     consolidated, scene_id
                 FROM mem_cells
                 WHERE consolidated = FALSE
-                ORDER BY timestamp ASC
+                ORDER BY event_timestamp ASC
                 LIMIT $1
                 """,
                 limit,
@@ -782,7 +786,7 @@ class PostgresSoulRepository:
                 """
                 SELECT
                     c.id, c.session_id, c.episodic_trace, c.atomic_facts, c.emotional_tag,
-                    c.foresight_signals, c.timestamp, c.retrieval_count, c.explicit_importance,
+                    c.foresight_signals, c.event_timestamp, c.retrieval_count, c.explicit_importance,
                     c.consolidated, c.scene_id
                 FROM mem_cells c
                 LEFT JOIN mem_cell_vectors v ON v.mem_cell_id = c.id
@@ -827,13 +831,13 @@ class PostgresSoulRepository:
                 )
                 SELECT
                     c.id, c.session_id, c.episodic_trace, c.atomic_facts, c.emotional_tag,
-                    c.foresight_signals, c.timestamp, c.retrieval_count, c.explicit_importance,
+                    c.foresight_signals, c.event_timestamp, c.retrieval_count, c.explicit_importance,
                     c.consolidated, c.scene_id,
                     vc.vector_similarity
                 FROM vector_candidates vc
                 JOIN mem_cells c ON c.id = vc.mem_cell_id
                 WHERE c.episodic_trace <> ''
-                ORDER BY vc.vector_similarity DESC, c.timestamp DESC
+                ORDER BY vc.vector_similarity DESC, c.event_timestamp DESC
                 LIMIT $2
                 """,
                 vector_literal,
@@ -850,7 +854,7 @@ class PostgresSoulRepository:
                         """
                         SELECT
                             c.id, c.session_id, c.episodic_trace, c.atomic_facts, c.emotional_tag,
-                            c.foresight_signals, c.timestamp, c.retrieval_count, c.explicit_importance,
+                            c.foresight_signals, c.event_timestamp, c.retrieval_count, c.explicit_importance,
                             c.consolidated, c.scene_id,
                             COALESCE((1 - (v.embedding <=> $2::vector)), 0.0) AS vector_similarity
                         FROM mem_cells c
@@ -868,7 +872,7 @@ class PostgresSoulRepository:
                                      websearch_to_tsquery('simple', $1)
                                  )
                              ) DESC,
-                             c.timestamp DESC
+                             c.event_timestamp DESC
                         LIMIT $3
                         """,
                         normalized_query,
@@ -906,7 +910,11 @@ class PostgresSoulRepository:
                 matches.append(match)
 
         matches.sort(
-            key=lambda match: (match.score, match.similarity, match.cell.timestamp),
+            key=lambda match: (
+                match.score,
+                match.similarity,
+                match.cell.event_timestamp,
+            ),
             reverse=True,
         )
         return matches[:candidate_cap]
@@ -942,7 +950,7 @@ class PostgresSoulRepository:
                 SELECT
                     c.id,
                     LEFT(c.episodic_trace, 200) AS episodic_trace,
-                    c.timestamp,
+                    c.event_timestamp,
                     c.retrieval_count,
                     c.explicit_importance,
                     COALESCE((c.emotional_tag->>'intensity')::REAL, 0.0)
@@ -953,7 +961,7 @@ class PostgresSoulRepository:
                         WHERE (fs->>'valid_until')::DATE >= $2
                     ) AS has_active_foresight
                 FROM mem_cells c
-                ORDER BY c.timestamp ASC
+                ORDER BY c.event_timestamp ASC
                 LIMIT $1
                 """,
                 limit,
@@ -963,7 +971,7 @@ class PostgresSoulRepository:
             MemCellSummary(
                 id=str(row["id"]),
                 episodic_trace=str(row["episodic_trace"]),
-                timestamp=row["timestamp"],
+                event_timestamp=row["event_timestamp"],
                 retrieval_count=int(row["retrieval_count"]),
                 explicit_importance=float(row["explicit_importance"]),
                 emotional_intensity=abs(float(row["emotional_intensity"])),
@@ -1085,7 +1093,7 @@ class PostgresSoulRepository:
                 valence=float(tag_raw.get("valence", 0.0)),
             ),
             foresight_signals=signals,
-            timestamp=row["timestamp"],
+            event_timestamp=row["event_timestamp"],
             retrieval_count=int(row["retrieval_count"]),
             explicit_importance=float(row["explicit_importance"]),
             consolidated=bool(row["consolidated"]),

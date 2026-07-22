@@ -1,10 +1,11 @@
 # plugins/agent_plugin.py
 
 import asyncio
-import importlib
 import json
 import os
-import sys
+import re
+import shutil
+from pathlib import Path
 from collections.abc import Callable
 from typing import Optional, Dict, Any
 
@@ -28,36 +29,37 @@ try:
         component="agent",
         needs_component_reload=True,
     )
+    # Engine override for the agentic loop. "Default" == use the active Cortex
+    # engine (BASE_CORTEX); any other value must be a Cortex engine registered
+    # in the Cortex registry. The WebUI populates the option list with the
+    # registered Cortex engines (see core/webui.py cortex selector block).
     register_exposed_var(
-        "AGENT_APPROVAL_MODE",
-        label="Agent approval mode",
-        default="whitelist",
+        "AGENT_CORTEX",
+        label="Agent engine (Cortex override)",
+        default="Default",
         value_type=str,
         ui_type="select",
-        options=["always_approve", "whitelist", "always_ask", "disabled"],
-        description="Approval policy for agent-executed commands",
+        options=["Default"],
+        description=(
+            "Which Cortex engine the agentic loop uses. 'Default' reuses the "
+            "active Cortex engine; pick another registered Cortex engine to run "
+            "the agent on an LLM better suited for tool-calling/agent work."
+        ),
         scope="agent",
         component="agent",
         needs_component_reload=True,
     )
     register_exposed_var(
-        "AGENT_SHELL_WHITELIST",
-        label="Agent shell whitelist",
-        default="ls,cat,df -h,free -m,uptime,whoami,id",
-        value_type=str,
-        ui_type="string",
-        description="Comma-separated list of allowed shell commands when in whitelist mode",
-        scope="agent",
-        component="agent",
-        needs_component_reload=True,
-    )
-    register_exposed_var(
-        "AGENT_CONTAINER_REQUIRED",
-        label="Require container to enable shell execution",
-        default=True,
+        "AGENT_SHELL_ALLOW_HOST",
+        label="Allow agent shell on host",
+        default=False,
         value_type=bool,
         ui_type="bool",
-        description="If true, shell execution will be disabled when not detected inside a container",
+        description=(
+            "Allow the agent_run_shell action to run when Synth is NOT inside a "
+            "container. Off by default: a shell on the host is a real "
+            "machine-compromise risk. Only enable in trusted local dev."
+        ),
         scope="agent",
         component="agent",
         needs_component_reload=True,
@@ -67,18 +69,41 @@ except Exception:
     pass
 
 
-def _in_container() -> bool:
+def _safe_int(value: Any, default: int, *, min_value: int, max_value: int) -> int:
+    """Parse an int safely and clamp to bounds."""
     try:
-        if os.path.exists("/.dockerenv"):
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(min_value, min(max_value, parsed))
+
+
+def _is_in_container() -> bool:
+    """Best-effort detection of whether Synth runs inside a container.
+
+    Order of precedence:
+    1. Explicit ``SYNTH_IN_CONTAINER`` env override (``1``/``true`` or ``0``/``false``).
+    2. Presence of ``/.dockerenv`` (created by Docker) or ``/run/.containerenv`` (Podman).
+    3. A ``docker``/``kubepods``/``containerd`` marker in ``/proc/1/cgroup``.
+
+    Defaults to ``False`` (host) when it cannot tell, which is the safer choice:
+    shell execution is only auto-permitted inside the disposable container.
+    """
+    override = os.getenv("SYNTH_IN_CONTAINER")
+    if override is not None:
+        return override.strip().lower() in ("1", "true", "yes", "on")
+
+    if os.path.exists("/.dockerenv") or os.path.exists("/run/.containerenv"):
+        return True
+
+    try:
+        with open("/proc/1/cgroup", "r", encoding="utf-8", errors="replace") as fh:
+            cgroup = fh.read()
+        if any(m in cgroup for m in ("docker", "kubepods", "containerd", "libpod")):
             return True
-        cgroup = "/proc/self/cgroup"
-        if os.path.isfile(cgroup):
-            with open(cgroup, "r") as fh:
-                data = fh.read()
-            if "docker" in data or "kubepods" in data or "containerd" in data:
-                return True
-    except Exception as e:
-        log_debug(f"[agent] Container detection failed: {e}")
+    except Exception:
+        pass
+
     return False
 
 
@@ -99,132 +124,502 @@ class AgentPlugin(AIPluginBase):
         register_plugin("agent", self)
 
         # Config-derived state
-        self._in_container = _in_container()
-        self._enabled = (
-            bool(config_registry.get_var("AGENT_ENABLED", True)) and self._in_container
-        )
-        self._approval_mode = str(
-            config_registry.get_var("AGENT_APPROVAL_MODE", "whitelist")
-        )
-        self._whitelist_raw = str(
-            config_registry.get_var(
-                "AGENT_SHELL_WHITELIST", "ls,cat,df -h,free -m,uptime,whoami,id"
-            )
-        )
-        self._whitelist = [
-            c.strip() for c in self._whitelist_raw.split(",") if c.strip()
-        ]
-        self._container_required = bool(
-            config_registry.get_var("AGENT_CONTAINER_REQUIRED", True)
-        )
+        self._enabled = bool(config_registry.get_var("AGENT_ENABLED", True))
 
-        # If not in container and container_required => disable shell execution by default
-        if not self._in_container and self._container_required:
-            self._enabled = False
+        log_info(f"[agent] Initialized. enabled={self._enabled}")
 
-        self._engine: Any | None = None
-        self._attached_engine: str | None = None
-        self._attach_task: asyncio.Task[Any] | None = None
-
-        log_info(
-            f"[agent] Initialized. in_container={self._in_container} enabled={self._enabled} approval_mode={self._approval_mode}"
-        )
-
+    def _refresh_runtime_settings(self) -> None:
+        """Refresh config values so WebUI toggles apply at runtime."""
         try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = None
-
-        if loop is not None:
-            self._attach_task = loop.create_task(self._attach_to_active_engine())
+            self._enabled = bool(config_registry.get_var("AGENT_ENABLED", True))
+        except Exception:
+            # Keep the last known settings if config reads fail transiently.
+            pass
 
     def is_enabled(self) -> bool:
         """Only expose agent actions when the agent is toggled on.
 
         Without this, ``core_initializer`` defaults the plugin to enabled and
-        injects ``agent_execute`` / ``propose_action`` / ``approve_action`` into
-        every prompt even when ``AGENT_ENABLED`` is off or we are not running in
-        a container — bloating the tool block for small local LLMs.
+        injects the agent tools (``spawn_drone`` / ``agent_read_file`` /
+        ``agent_list_files``) into every prompt even when ``AGENT_ENABLED`` is
+        off — bloating the tool block for small local LLMs.
         """
+        self._refresh_runtime_settings()
         return bool(self._enabled)
 
-    async def _attach_to_active_engine(self) -> None:
-        try:
-            from core.config import get_active_cortex_engine
-            from core.cortex_registry import get_cortex_registry
-
-            engine_name = await get_active_cortex_engine()
-            if not engine_name:
-                return
-
-            registry = get_cortex_registry()
-            engine = None
-            if hasattr(registry, "get_engine"):
-                engine = registry.get_engine(engine_name)
-            elif hasattr(registry, "load_engine"):
-                engine = registry.load_engine(engine_name)
-
-            if engine is None:
-                log_debug(f"[agent] Active engine '{engine_name}' not loaded")
-                return
-
-            attach_fn = getattr(engine, "attach_agent", None)
-            if callable(attach_fn):
-                attach_fn(self)
-            else:
-                setattr(engine, "_agent_plugin", self)
-
-            self._engine = engine
-            self._attached_engine = str(engine_name)
-            log_debug(f"[agent] Attached to engine '{self._attached_engine}'")
-        except Exception as e:
-            log_warning(f"[agent] Failed to attach to active engine: {e}")
-
-    async def _get_conn_ctx(self) -> Any:
-        try:
-            import core as core_package
-
-            db_module = getattr(core_package, "db", None)
-        except Exception:
-            db_module = None
-
-        if db_module is None:
-            db_module = sys.modules.get("core.db")
-        if db_module is None:
-            db_module = importlib.import_module("core.db")
-
-        get_conn_ctx = getattr(db_module, "get_conn_ctx")
-        conn_ctx = get_conn_ctx()
-        if asyncio.iscoroutine(conn_ctx):
-            conn_ctx = await conn_ctx
-        return conn_ctx
-
     def get_supported_action_types(self) -> list[str]:
-        return ["agent_execute", "propose_action", "approve_action", "start_task"]
+        return [
+            "agent_list_files",
+            "agent_read_file",
+            "agent_write_file",
+            "agent_edit_file",
+            "agent_search_files",
+            "agent_run_shell",
+            "spawn_drone",
+            "resume_agent_task",
+        ]
 
     def get_supported_actions(self) -> Dict[str, Any]:
         return {
-            "agent_execute": {
-                "required_fields": ["command"],
-                "optional_fields": ["description", "requires_approval"],
-                "description": "Execute a shell command (subject to policy).",
+            "agent_list_files": {
+                "required_fields": [],
+                "optional_fields": ["path", "recursive", "max_depth", "limit"],
+                "description": "List files/directories within the allowed agent filesystem roots.",
             },
-            "propose_action": {
-                "required_fields": ["command"],
-                "optional_fields": ["description"],
-                "description": "Propose an action that requires approval before execution.",
+            "agent_read_file": {
+                "required_fields": ["path"],
+                "optional_fields": ["start_line", "end_line", "max_chars"],
+                "description": "Read a text file within the allowed agent filesystem roots.",
             },
-            "approve_action": {
-                "required_fields": ["proposal_id"],
+            "agent_write_file": {
+                "required_fields": ["path", "content"],
+                "optional_fields": ["mode"],
+                "security_level": "medium",
+                "external_effects": ["filesystem"],
+                "description": (
+                    "Write a text file within the allowed agent filesystem roots. "
+                    "Creates parent directories as needed. 'mode' may be 'overwrite' "
+                    "(default) or 'append'. Use this to create/update text files "
+                    "(e.g. notes, logs, generated documents) inside the sandbox."
+                ),
+            },
+            "agent_edit_file": {
+                "required_fields": ["path", "old_string", "new_string"],
+                "optional_fields": ["expected_replacements"],
+                "security_level": "medium",
+                "external_effects": ["filesystem"],
+                "description": (
+                    "Edit an existing text file in place by replacing an exact literal "
+                    "substring ('old_string') with 'new_string'. 'old_string' MUST match "
+                    "the file content verbatim (including whitespace/indentation) and, by "
+                    "default, must occur exactly once — include enough surrounding context "
+                    "to make it unique. Set 'expected_replacements' to replace a known "
+                    "number of occurrences. Use this for surgical edits to an existing file "
+                    "instead of rewriting the whole file with agent_write_file."
+                ),
+            },
+            "agent_search_files": {
+                "required_fields": ["pattern"],
+                "optional_fields": [
+                    "path",
+                    "regex",
+                    "case_sensitive",
+                    "glob",
+                    "max_results",
+                    "max_file_bytes",
+                ],
+                "description": (
+                    "Search file contents within the allowed sandbox roots (a native grep). "
+                    "'pattern' is plain text by default; set 'regex' true for a Python regex. "
+                    "'path' scopes the search (default: first allowed root), 'glob' filters "
+                    "filenames (e.g. '*.py'), 'case_sensitive' defaults to false. Returns "
+                    "matching lines with file path and line number, bounded by 'max_results'."
+                ),
+            },
+            "agent_run_shell": {
+                "required_fields": ["command"],
+                "optional_fields": ["cwd", "timeout"],
+                "security_level": "high",
+                "external_effects": ["shell"],
+                "description": (
+                    "Run a shell command and capture its stdout/stderr/exit code. "
+                    "The working directory ('cwd') defaults to the first allowed "
+                    "filesystem root and MUST stay inside the allowed roots. "
+                    "For safety this action ONLY runs when Synth is executing inside "
+                    "a container (the disposable runtime image); on a bare host it is "
+                    "refused unless AGENT_SHELL_ALLOW_HOST is explicitly enabled. "
+                    "'timeout' is capped in seconds. Use for build/test/git/system "
+                    "commands you cannot express with the file actions."
+                ),
+            },
+            "spawn_drone": {
+                "required_fields": ["goal"],
+                "optional_fields": ["engine", "max_iterations"],
+                "security_level": "medium",
+                "external_effects": ["drone"],
+                "description": (
+                    "Delegate a focused sub-task to an ephemeral sub-agent (a 'Drone'). "
+                    "The Drone runs its own bounded agentic loop with the available tools "
+                    "and returns a concise result. Use this to isolate a self-contained "
+                    "piece of work (research, a multi-step lookup, a scoped file inspection) "
+                    "so the main task stays clean. A Drone CANNOT spawn further Drones. "
+                    "Provide a clear, self-contained 'goal'."
+                ),
+            },
+            "resume_agent_task": {
+                "required_fields": ["task_id"],
                 "optional_fields": [],
-                "description": "Approve a previously proposed action.",
+                "security_level": "medium",
+                "external_effects": ["agent_task"],
+                "description": (
+                    "Resume a previously paused agent task by its numeric id, continuing "
+                    "it where it left off (with a fresh iteration budget) instead of "
+                    "starting a brand-new task. Use this whenever the user asks to continue, "
+                    "resume, or keep working on a specific existing task and refers to it by "
+                    "its number (e.g. 'continue task 37'). Provide the numeric 'task_id'. The "
+                    "task must currently be paused/pending; you can only resume a task that "
+                    "is waiting to be continued."
+                ),
             },
         }
 
-    def get_prompt_instructions(self, action_name: str) -> dict:
+    def _allowed_roots(self) -> list[Path]:
+        """Return the filesystem roots the agent is allowed to read."""
+        roots_raw = os.getenv("AGENT_FS_ROOTS")
+        if roots_raw:
+            roots = [p.strip() for p in roots_raw.split(":") if p.strip()]
+        else:
+            roots = [
+                os.getenv("AGENT_FS_ROOT", "/app"),
+                os.getenv("SYNTH_LOG_DIR", "/app/logs"),
+            ]
+
+        out: list[Path] = []
+        for root in roots:
+            try:
+                out.append(Path(root).resolve())
+            except Exception:
+                continue
+        return out
+
+    def _resolve_safe_path(self, raw_path: str) -> tuple[Path | None, str | None]:
+        """Resolve a user path and ensure it stays inside allowed roots."""
+        if not raw_path or not str(raw_path).strip():
+            return None, "Missing path"
+
+        p = Path(str(raw_path).strip())
+        if not p.is_absolute():
+            # Relative paths are resolved against first allowed root.
+            roots = self._allowed_roots()
+            if not roots:
+                return None, "No allowed roots configured"
+            p = roots[0] / p
+
+        try:
+            resolved = p.resolve()
+        except Exception as exc:
+            return None, f"Invalid path: {exc}"
+
+        for root in self._allowed_roots():
+            try:
+                resolved.relative_to(root)
+                return resolved, None
+            except ValueError:
+                continue
+
+        return None, "Path is outside allowed roots"
+
+    def _list_files(
+        self, base: Path, *, recursive: bool, max_depth: int, limit: int
+    ) -> list[str]:
+        """Return a bounded directory listing rooted at ``base``."""
+        if not base.exists():
+            return []
+        if base.is_file():
+            return [str(base)]
+
+        results: list[str] = []
+
+        def _walk(path: Path, depth: int) -> None:
+            if len(results) >= limit:
+                return
+            if depth > max_depth:
+                return
+            try:
+                entries = sorted(path.iterdir(), key=lambda x: x.name.lower())
+            except Exception:
+                return
+
+            for entry in entries:
+                if len(results) >= limit:
+                    return
+                marker = "/" if entry.is_dir() else ""
+                results.append(str(entry) + marker)
+                if recursive and entry.is_dir():
+                    _walk(entry, depth + 1)
+
+        _walk(base, 0)
+        return results
+
+    def _edit_file(self, payload: dict) -> dict:
+        """Replace an exact literal substring in a sandboxed text file.
+
+        Mirrors an editor's search/replace semantics: ``old_string`` must match
+        the file content verbatim and, by default, occur exactly once. Set
+        ``expected_replacements`` to replace a known number of occurrences.
+        """
+        raw_path = str(payload.get("path") or "").strip()
+        old_string = payload.get("old_string")
+        new_string = payload.get("new_string")
+
+        if not isinstance(old_string, str) or not isinstance(new_string, str):
+            return {
+                "status": "error",
+                "reason": "old_string and new_string must be strings",
+            }
+        if old_string == "":
+            return {"status": "error", "reason": "old_string must not be empty"}
+        if old_string == new_string:
+            return {
+                "status": "error",
+                "reason": "old_string and new_string are identical",
+            }
+
+        expected = _safe_int(
+            payload.get("expected_replacements"), 1, min_value=1, max_value=10_000
+        )
+
+        safe_path, err = self._resolve_safe_path(raw_path)
+        if err or safe_path is None:
+            return {"status": "error", "reason": err or "invalid path"}
+        if not safe_path.exists():
+            return {"status": "error", "reason": "file not found"}
+        if safe_path.is_dir():
+            return {"status": "error", "reason": "path is a directory"}
+
+        try:
+            original = safe_path.read_text(encoding="utf-8")
+        except Exception as exc:
+            return {"status": "error", "reason": f"read failed: {exc}"}
+
+        occurrences = original.count(old_string)
+        if occurrences == 0:
+            return {"status": "error", "reason": "old_string not found in file"}
+        if occurrences != expected:
+            return {
+                "status": "error",
+                "reason": (
+                    f"old_string occurs {occurrences} time(s) but "
+                    f"expected_replacements={expected}; add more context to make "
+                    "the match unique or set expected_replacements accordingly"
+                ),
+            }
+
+        updated = original.replace(old_string, new_string)
+        if len(updated.encode("utf-8")) > 2_000_000:
+            return {"status": "error", "reason": "resulting file too large (>2MB)"}
+
+        try:
+            safe_path.write_text(updated, encoding="utf-8")
+        except Exception as exc:
+            return {"status": "error", "reason": f"write failed: {exc}"}
+
+        log_info(
+            f"[agent] agent_edit_file replaced {occurrences} occurrence(s) in {safe_path}"
+        )
         return {
-            "description": "Use the agent actions to propose or execute actions. Ensure to return ONLY valid JSON when asked to produce actions.",
+            "status": "ok",
+            "path": str(safe_path),
+            "replacements": occurrences,
+            "bytes_written": len(updated.encode("utf-8")),
         }
+
+    def _search_files(self, payload: dict) -> dict:
+        """Search file contents within the sandbox (a bounded native grep)."""
+        pattern = payload.get("pattern")
+        if not isinstance(pattern, str) or pattern == "":
+            return {"status": "error", "reason": "pattern must be a non-empty string"}
+
+        use_regex = bool(payload.get("regex", False))
+        case_sensitive = bool(payload.get("case_sensitive", False))
+        glob = payload.get("glob")
+        glob_pat = str(glob).strip() if isinstance(glob, str) and glob.strip() else "*"
+        max_results = _safe_int(
+            payload.get("max_results"), 200, min_value=1, max_value=2000
+        )
+        max_file_bytes = _safe_int(
+            payload.get("max_file_bytes"),
+            2_000_000,
+            min_value=1_000,
+            max_value=20_000_000,
+        )
+
+        raw_path = str(payload.get("path") or ".")
+        safe_path, err = self._resolve_safe_path(raw_path)
+        if err or safe_path is None:
+            return {"status": "error", "reason": err or "invalid path"}
+        if not safe_path.exists():
+            return {"status": "error", "reason": "path not found"}
+
+        flags = 0 if case_sensitive else re.IGNORECASE
+        if use_regex:
+            try:
+                matcher = re.compile(pattern, flags)
+            except re.error as exc:
+                return {"status": "error", "reason": f"invalid regex: {exc}"}
+
+            def _matches(line: str) -> bool:
+                return matcher.search(line) is not None
+        else:
+            needle = pattern if case_sensitive else pattern.lower()
+
+            def _matches(line: str) -> bool:
+                haystack = line if case_sensitive else line.lower()
+                return needle in haystack
+
+        if safe_path.is_file():
+            candidates = [safe_path]
+        else:
+            candidates = sorted(p for p in safe_path.rglob(glob_pat) if p.is_file())
+
+        matches: list[dict] = []
+        files_scanned = 0
+        truncated = False
+        for fpath in candidates:
+            if len(matches) >= max_results:
+                truncated = True
+                break
+            try:
+                if fpath.stat().st_size > max_file_bytes:
+                    continue
+            except Exception:
+                continue
+            files_scanned += 1
+            try:
+                with fpath.open("r", encoding="utf-8", errors="replace") as fh:
+                    for lineno, line in enumerate(fh, start=1):
+                        if _matches(line):
+                            matches.append(
+                                {
+                                    "path": str(fpath),
+                                    "line": lineno,
+                                    "text": line.rstrip("\n")[:1000],
+                                }
+                            )
+                            if len(matches) >= max_results:
+                                truncated = True
+                                break
+            except Exception:
+                continue
+
+        return {
+            "status": "ok",
+            "path": str(safe_path),
+            "files_scanned": files_scanned,
+            "count": len(matches),
+            "truncated": truncated,
+            "matches": matches,
+        }
+
+    async def _run_shell(self, payload: dict) -> dict:
+        """Execute a shell command inside the sandbox.
+
+        Security model: the command only runs when Synth executes inside a
+        container (the disposable runtime image). On a bare host it is refused
+        unless ``AGENT_SHELL_ALLOW_HOST`` is explicitly enabled, because a shell
+        on the host is a real machine-compromise risk for a public persona.
+        """
+        command = payload.get("command")
+        if not isinstance(command, str) or not command.strip():
+            return {"status": "error", "reason": "command must be a non-empty string"}
+
+        in_container = _is_in_container()
+        allow_host = bool(config_registry.get_var("AGENT_SHELL_ALLOW_HOST", False))
+        if not in_container and not allow_host:
+            log_warning(
+                "[agent] agent_run_shell refused: not running in a container and "
+                "AGENT_SHELL_ALLOW_HOST is disabled"
+            )
+            return {
+                "status": "error",
+                "reason": (
+                    "shell execution is only allowed inside a container; "
+                    "set AGENT_SHELL_ALLOW_HOST=true to override on a host"
+                ),
+            }
+
+        # Resolve and confine the working directory to the allowed roots.
+        raw_cwd = payload.get("cwd")
+        if raw_cwd:
+            safe_cwd, err = self._resolve_safe_path(str(raw_cwd))
+            if err or safe_cwd is None:
+                return {"status": "error", "reason": err or "invalid cwd"}
+        else:
+            roots = self._allowed_roots()
+            if not roots:
+                return {"status": "error", "reason": "no allowed roots configured"}
+            safe_cwd = roots[0]
+        if not safe_cwd.exists() or not safe_cwd.is_dir():
+            return {
+                "status": "error",
+                "reason": "cwd does not exist or is not a directory",
+            }
+
+        timeout = _safe_int(payload.get("timeout"), 60, min_value=1, max_value=600)
+        shell_exe = shutil.which("bash") or shutil.which("sh") or "/bin/sh"
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                shell_exe,
+                "-c",
+                command,
+                cwd=str(safe_cwd),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except Exception as exc:
+            return {"status": "error", "reason": f"failed to start shell: {exc}"}
+
+        try:
+            stdout_b, stderr_b = await asyncio.wait_for(
+                proc.communicate(), timeout=timeout
+            )
+        except asyncio.TimeoutError:
+            try:
+                proc.kill()
+                await proc.wait()
+            except Exception:
+                pass
+            return {
+                "status": "error",
+                "reason": f"command timed out after {timeout}s",
+                "cwd": str(safe_cwd),
+            }
+
+        max_out = 40_000
+        stdout = stdout_b.decode("utf-8", errors="replace")
+        stderr = stderr_b.decode("utf-8", errors="replace")
+        truncated = False
+        if len(stdout) > max_out:
+            stdout = stdout[:max_out] + "\n... (truncated)"
+            truncated = True
+        if len(stderr) > max_out:
+            stderr = stderr[:max_out] + "\n... (truncated)"
+            truncated = True
+
+        exit_code = proc.returncode
+        log_info(
+            f"[agent] agent_run_shell exit={exit_code} cwd={safe_cwd} "
+            f"in_container={in_container}"
+        )
+        return {
+            "status": "ok" if exit_code == 0 else "error",
+            "exit_code": exit_code,
+            "cwd": str(safe_cwd),
+            "stdout": stdout,
+            "stderr": stderr,
+            "truncated": truncated,
+        }
+
+    def get_prompt_instructions(self, action_name: str) -> dict:
+        enabled = self.is_enabled()
+        if enabled:
+            description = (
+                "You have agentic capabilities. Use the agent actions to inspect files, "
+                "search file contents inside the sandbox (agent_search_files), "
+                "write text files inside the allowed sandbox (agent_write_file), "
+                "make surgical edits to an existing file (agent_edit_file), "
+                "run shell commands inside the sandbox (agent_run_shell), "
+                "or delegate a focused sub-task to a Drone. "
+                "Ensure to return ONLY valid JSON when asked to produce actions."
+            )
+        else:
+            description = (
+                "You would have agentic capabilities, but the agent system is currently disabled. "
+                "To enable it, set AGENT_ENABLED to true or enable it via WebUI. "
+                "When disabled, you can still use regular actions but cannot execute agentic commands."
+            )
+        return {"description": description}
 
     async def handle_incoming_message(self, bot, message, prompt):
         """Send a structured prompt to the active LLM (via plugin_instance) and parse JSON actions."""
@@ -256,379 +651,210 @@ class AgentPlugin(AIPluginBase):
             log_error(f"[agent] handle_incoming_message error: {e}")
             raise
 
-    async def _run_command(self, cmd: str, timeout: float = 30.0) -> str:
-        """Execute a single shell command and return output (async)."""
-        try:
-            process = await asyncio.create_subprocess_shell(
-                cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT
-            )
-            stdout, _ = await asyncio.wait_for(process.communicate(), timeout=timeout)
-            return stdout.decode(errors="ignore").strip()
-        except asyncio.TimeoutError:
-            return "⚠️ Command timeout"
-        except Exception as e:
-            log_error(f"[agent] _run_command failed: {e}")
-            return f"⚠️ Command failed: {e}"
-
-    def _is_whitelisted(self, cmd: str) -> bool:
-        # Simple heuristic: command startswith any whitelist entry
-        for w in self._whitelist:
-            if cmd.strip().startswith(w):
-                return True
-        return False
-
-    # --- DB persistence helpers for audit logging ---
-    async def _create_activity_log(
-        self,
-        command: str,
-        proposer: Optional[str] = None,
-        metadata: Optional[dict] = None,
-    ) -> Optional[int]:
-        try:
-            import json
-
-            conn_ctx = await self._get_conn_ctx()
-            async with conn_ctx as conn:
-                async with conn.cursor() as cur:
-                    await cur.execute(
-                        """
-                        INSERT INTO agent_activity_log (command, proposer, status, trainer_id, request_ts, response_ts, result, metadata)
-                        VALUES (%s, %s, %s, NULL, CURRENT_TIMESTAMP, NULL, NULL, %s)
-                        """,
-                        (
-                            command,
-                            proposer,
-                            "proposed",
-                            json.dumps(metadata) if metadata else None,
-                        ),
-                    )
-                    await conn.commit()
-                    return getattr(cur, "lastrowid", None)
-        except Exception as e:
-            log_error(f"[agent] _create_activity_log failed: {e}")
-            return None
-
-    async def _update_activity_log(
-        self,
-        activity_id: int,
-        *,
-        status: Optional[str] = None,
-        trainer_id: Optional[str] = None,
-        result: Optional[str] = None,
-    ) -> None:
-        if not activity_id:
-            return
-        try:
-            conn_ctx = await self._get_conn_ctx()
-            async with conn_ctx as conn:
-                async with conn.cursor() as cur:
-                    updates = []
-                    params = []
-                    if status is not None:
-                        updates.append("status=%s")
-                        params.append(status)
-                    if trainer_id is not None:
-                        updates.append("trainer_id=%s")
-                        params.append(trainer_id)
-                    if result is not None:
-                        updates.append("result=%s")
-                        params.append(result)
-                        updates.append("response_ts=CURRENT_TIMESTAMP")
-                    if not updates:
-                        return
-                    sql = (
-                        "UPDATE agent_activity_log SET "
-                        + ", ".join(updates)
-                        + " WHERE id=%s"
-                    )
-                    params.append(activity_id)
-                    await cur.execute(sql, tuple(params))
-                    await conn.commit()
-        except Exception as e:
-            log_error(f"[agent] _update_activity_log failed: {e}")
-
-    async def _insert_action_exec(
-        self,
-        activity_log_id: int,
-        command: str,
-        *,
-        status: str = "pending",
-        error_text: Optional[str] = None,
-        result: Optional[dict] = None,
-    ) -> Optional[int]:
-        try:
-            import json
-
-            conn_ctx = await self._get_conn_ctx()
-            async with conn_ctx as conn:
-                async with conn.cursor() as cur:
-                    await cur.execute(
-                        """
-                        INSERT INTO agent_action_execs (activity_log_id, command, status, error_text, result)
-                        VALUES (%s, %s, %s, %s, %s)
-                        """,
-                        (
-                            activity_log_id,
-                            command,
-                            status,
-                            error_text,
-                            json.dumps(result) if result is not None else None,
-                        ),
-                    )
-                    await conn.commit()
-                    return getattr(cur, "lastrowid", None)
-        except Exception as e:
-            log_error(f"[agent] _insert_action_exec failed: {e}")
-            return None
-
     async def execute_action(self, action: dict, context: dict, bot, original_message):
         action_type = action.get("type")
         payload = action.get("payload", {})
 
-        if action_type == "agent_execute":
-            cmd = payload.get("command", "").strip()
-            if not cmd:
-                log_warning("[agent] No command provided")
-                return "No command provided"
+        if action_type == "agent_list_files":
+            raw_path = str(payload.get("path") or ".")
+            recursive = bool(payload.get("recursive", False))
+            max_depth = _safe_int(payload.get("max_depth"), 2, min_value=0, max_value=8)
+            limit = _safe_int(payload.get("limit"), 120, min_value=1, max_value=1000)
 
-            # Check global enabled flag
-            if not self._enabled:
-                log_warning(
-                    "[agent] Agent execution disabled by configuration or not running in container"
-                )
-                return "Agent execution is disabled by configuration or runtime environment"
+            safe_path, err = self._resolve_safe_path(raw_path)
+            if err or safe_path is None:
+                return {"status": "error", "reason": err or "invalid path"}
 
-            mode = self._approval_mode or "whitelist"
-
-            if mode == "disabled":
-                return "Agent shell execution disabled (policy)"
-
-            # Helper to persist a direct execution result
-            async def _execute_and_record(command, activity_id=None):
-                try:
-                    res = await self._run_command(command)
-                except Exception as e:
-                    res = f"⚠️ Execution failed: {e}"
-                # Record action exec and update activity log
-                try:
-                    if activity_id is None:
-                        activity_id = await self._create_activity_log(
-                            command, proposer="system", metadata=None
-                        )
-                        # Mark it approved/executed immediately
-                        if activity_id is not None:
-                            await self._update_activity_log(
-                                activity_id, status="executed"
-                            )
-                    if activity_id is not None:
-                        await self._insert_action_exec(
-                            activity_id,
-                            command,
-                            status="executed",
-                            result={"output": res},
-                        )
-                except Exception as e:
-                    log_warning(f"[agent] Failed to persist execution record: {e}")
-
-                try:
-                    self._notify_fn(f"Agent executed command: {command}\nOutput: {res}")
-                except Exception:
-                    pass
-
-                interface_name = context.get("interface") or context.get(
-                    "interface_name"
-                )
-                if interface_name:
-                    if isinstance(original_message, dict):
-                        chat_id = original_message.get("chat_id")
-                        message_id = original_message.get("message_id")
-                        interface_path = original_message.get("interface_path")
-                    else:
-                        chat_id = getattr(original_message, "chat_id", None)
-                        message_id = getattr(original_message, "message_id", None)
-                        interface_path = getattr(
-                            original_message, "interface_path", None
-                        )
-
-                    try:
-                        from core.auto_response import request_llm_delivery
-
-                        await request_llm_delivery(
-                            action_outputs=[
-                                {
-                                    "type": "agent_execute",
-                                    "command": command,
-                                    "output": str(res),
-                                }
-                            ],
-                            original_context={
-                                "chat_id": chat_id,
-                                "message_id": message_id,
-                                "interface_name": interface_name,
-                                "interface_path": interface_path,
-                            },
-                            action_type="agent_execute",
-                        )
-                    except Exception as e:
-                        log_warning(
-                            f"[agent] Failed to deliver execution output to interface: {e}"
-                        )
-
-                return res
-
-            if mode == "always_approve":
-                log_info(f"[agent] executing (always_approve): {cmd}")
-                return await _execute_and_record(cmd)
-
-            if mode == "whitelist":
-                if self._is_whitelisted(cmd):
-                    log_info(f"[agent] executing (whitelisted): {cmd}")
-                    return await _execute_and_record(cmd)
-                else:
-                    log_warning(f"[agent] Command not in whitelist: {cmd}")
-                    # Create a proposal and notify trainer
-                    activity_id = await self._create_activity_log(
-                        cmd, proposer="system"
-                    )
-                    try:
-                        self._notify_fn(
-                            f"Agent proposes command #{activity_id} (awaiting approval): {cmd}\nReply with '/agent approve {activity_id}' to approve."
-                        )
-                    except Exception:
-                        pass
-                    return (
-                        f"Command not allowed without approval: proposal #{activity_id}"
-                    )
-
-            if mode == "always_ask":
-                # Create a proposal and notify trainer
-                activity_id = await self._create_activity_log(cmd, proposer="system")
-                try:
-                    self._notify_fn(
-                        f"Agent proposes command #{activity_id} (awaiting approval): {cmd}\nReply with '/agent approve {activity_id}' to approve."
-                    )
-                except Exception:
-                    pass
-                return f"Command proposal sent for approval: proposal #{activity_id}"
-
-            return "Unknown approval mode"
-
-        # Placeholder: other action types may propose or approve
-        if action_type == "propose_action":
-            cmd = payload.get("command")
-            proposer = payload.get("proposer") or "system"
-            if not cmd:
-                return {"status": "error", "reason": "no command provided"}
-            activity_id = await self._create_activity_log(
-                cmd, proposer=proposer, metadata={"origin": "propose_action"}
+            items = self._list_files(
+                safe_path,
+                recursive=recursive,
+                max_depth=max_depth,
+                limit=limit,
             )
+            return {
+                "status": "ok",
+                "path": str(safe_path),
+                "count": len(items),
+                "items": items,
+            }
+
+        if action_type == "agent_read_file":
+            raw_path = str(payload.get("path") or "").strip()
+            safe_path, err = self._resolve_safe_path(raw_path)
+            if err or safe_path is None:
+                return {"status": "error", "reason": err or "invalid path"}
+            if not safe_path.exists():
+                return {"status": "error", "reason": "file not found"}
+            if safe_path.is_dir():
+                return {"status": "error", "reason": "path is a directory"}
+
+            start_line = _safe_int(
+                payload.get("start_line"), 1, min_value=1, max_value=1_000_000
+            )
+            end_line = _safe_int(
+                payload.get("end_line"),
+                start_line + 199,
+                min_value=start_line,
+                max_value=1_000_000,
+            )
+            max_chars = _safe_int(
+                payload.get("max_chars"), 40_000, min_value=500, max_value=200_000
+            )
+
             try:
-                self._notify_fn(
-                    f"Agent proposed action #{activity_id}: {cmd}\nReply with '/agent approve {activity_id}' to approve."
+                with safe_path.open("r", encoding="utf-8", errors="replace") as fh:
+                    lines = fh.readlines()
+                slice_lines = lines[start_line - 1 : end_line]
+                content = "".join(slice_lines)
+                if len(content) > max_chars:
+                    content = content[:max_chars] + "\n... (truncated)"
+                return {
+                    "status": "ok",
+                    "path": str(safe_path),
+                    "start_line": start_line,
+                    "end_line": min(end_line, len(lines)),
+                    "total_lines": len(lines),
+                    "content": content,
+                }
+            except Exception as exc:
+                return {"status": "error", "reason": f"read failed: {exc}"}
+
+        if action_type == "agent_write_file":
+            raw_path = str(payload.get("path") or "").strip()
+            content = payload.get("content")
+            if not isinstance(content, str):
+                return {"status": "error", "reason": "content must be a string"}
+            if len(content) > 2_000_000:
+                return {"status": "error", "reason": "content too large (>2MB)"}
+
+            mode = str(payload.get("mode") or "overwrite").strip().lower()
+            if mode not in ("overwrite", "append"):
+                return {
+                    "status": "error",
+                    "reason": "mode must be 'overwrite' or 'append'",
+                }
+
+            safe_path, err = self._resolve_safe_path(raw_path)
+            if err or safe_path is None:
+                return {"status": "error", "reason": err or "invalid path"}
+            if safe_path.is_dir():
+                return {"status": "error", "reason": "path is a directory"}
+
+            try:
+                safe_path.parent.mkdir(parents=True, exist_ok=True)
+                open_mode = "a" if mode == "append" else "w"
+                with safe_path.open(open_mode, encoding="utf-8") as fh:
+                    fh.write(content)
+                written = len(content.encode("utf-8"))
+                log_info(
+                    f"[agent] agent_write_file wrote {written} bytes to {safe_path} (mode={mode})"
                 )
-            except Exception:
-                pass
-            return {"status": "proposed", "command": cmd, "proposal_id": activity_id}
+                return {
+                    "status": "ok",
+                    "path": str(safe_path),
+                    "bytes_written": written,
+                    "mode": mode,
+                }
+            except Exception as exc:
+                return {"status": "error", "reason": f"write failed: {exc}"}
 
-        if action_type == "approve_action":
-            # Approve previously proposed action identified by proposal_id OR accept direct command
-            proposal_id = payload.get("proposal_id") or payload.get("proposal")
-            cmd = payload.get("command")
-            trainer_id = None
-            # Try to extract trainer id from original_message if available
-            try:
-                if original_message and isinstance(original_message, dict):
-                    # Accept multiple potential fields
-                    trainer_id = (
-                        original_message.get("sender_id")
-                        or original_message.get("user_id")
-                        or None
-                    )
-                    if trainer_id is not None:
-                        trainer_id = str(trainer_id)
-            except Exception:
-                trainer_id = None
+        if action_type == "agent_edit_file":
+            return self._edit_file(payload)
 
-            if proposal_id and not cmd:
-                # Lookup the proposal in DB to find the command
-                try:
-                    conn_ctx = await self._get_conn_ctx()
-                    async with conn_ctx as conn:
-                        async with conn.cursor() as cur:
-                            await cur.execute(
-                                "SELECT command, status FROM agent_activity_log WHERE id=%s",
-                                (int(proposal_id),),
-                            )
-                            row = await cur.fetchone()
-                            if not row:
-                                return {
-                                    "status": "error",
-                                    "reason": "proposal not found",
-                                }
-                            cmd = row[0]
-                            current_status = row[1]
-                            if current_status != "proposed":
-                                return {
-                                    "status": "error",
-                                    "reason": f"proposal not in proposed state: {current_status}",
-                                }
-                except Exception as e:
-                    log_error(f"[agent] approve_action lookup failed: {e}")
-                    return {"status": "error", "reason": "db lookup failed"}
+        if action_type == "agent_search_files":
+            return self._search_files(payload)
 
-            if not cmd:
-                return {"status": "error", "reason": "no command to approve"}
+        if action_type == "agent_run_shell":
+            return await self._run_shell(payload)
 
-            # Mark as approved
-            try:
-                if proposal_id:
-                    await self._update_activity_log(
-                        int(proposal_id), status="approved", trainer_id=trainer_id
-                    )
-                else:
-                    # Create a new activity row marked as approved
-                    proposal_id = await self._create_activity_log(
-                        cmd, proposer="trainer"
-                    )
-                    if proposal_id is not None:
-                        await self._update_activity_log(
-                            proposal_id, status="approved", trainer_id=trainer_id
-                        )
-            except Exception as e:
-                log_warning(f"[agent] Failed to update proposal status: {e}")
+        if action_type == "spawn_drone":
+            goal = str(payload.get("goal") or "").strip()
+            if not goal:
+                return {"status": "error", "reason": "no goal provided"}
 
-            # Execute
-            res = await self._run_command(cmd)
+            # Recursion guard: Drones cannot spawn Drones (single-level
+            # delegation). The prompt filter already hides spawn_drone from a
+            # Drone's tool list; this is the defensive backstop.
+            ctx = context or {}
+            drone_ctx = ctx.get("drone")
+            if isinstance(drone_ctx, dict) and drone_ctx.get("is_drone"):
+                log_warning("[agent] A Drone attempted to spawn another Drone; blocked")
+                return {"ok": False, "error": "drones_cannot_spawn_drones"}
 
-            # Persist execution details and mark executed
-            try:
-                if proposal_id is not None:
-                    await self._insert_action_exec(
-                        proposal_id, cmd, status="executed", result={"output": res}
-                    )
-                    await self._update_activity_log(
-                        proposal_id, status="executed", result=res
-                    )
-            except Exception as e:
-                log_warning(f"[agent] Failed to persist approval execution: {e}")
+            engine = payload.get("engine") or None
+            max_iterations = payload.get("max_iterations")
+            parent_task_id = ctx.get("agent_task_id") or ctx.get("task_id")
 
-            return {"status": "executed", "proposal_id": proposal_id, "output": res}
-
-        if action_type == "start_task":
             from core.agent_core import get_agent_loop_manager
 
-            engine_name = payload.get("engine") or "manual"
-            input_payload = payload.get("input") or payload.get("input_payload") or {}
-            max_iterations = payload.get("max_iterations")
+            manager = get_agent_loop_manager()
+            try:
+                result = await manager.run_drone(
+                    goal=goal,
+                    engine=engine,
+                    context=ctx,
+                    parent_task_id=parent_task_id,
+                    max_iterations=max_iterations,
+                    original_message=original_message,
+                )
+            except Exception as exc:
+                log_error(f"[agent] spawn_drone failed: {exc}")
+                return {"ok": False, "error": f"drone_failed: {exc}"}
+
+            return {
+                "ok": True,
+                "final_text": result.get("final_text", ""),
+                "iterations": result.get("iterations"),
+                "stop_reason": result.get("stop_reason"),
+                "task_id": result.get("task_id"),
+            }
+
+        if action_type == "resume_agent_task":
+            raw_id = payload.get("task_id")
+            try:
+                task_id = int(raw_id)
+            except (TypeError, ValueError):
+                return {"status": "error", "reason": "invalid or missing task_id"}
+            if task_id <= 0:
+                return {"status": "error", "reason": "invalid task_id"}
+
+            from core.agent_core import get_agent_loop_manager
 
             manager = get_agent_loop_manager()
-            task_id = await manager.run_loop(
-                engine=engine_name,
-                input_payload=input_payload,
-                context=context or {},
-                max_iterations=max_iterations,
-            )
-            return {"status": "started", "task_id": task_id}
+            resumable = await manager.find_task_by_id(task_id)
+            if not resumable:
+                return {
+                    "status": "error",
+                    "reason": f"task {task_id} not found or not pending",
+                }
+
+            ctx = context or {}
+            prior_observations = list(resumable.get("prior_observations") or [])
+            user_goal = str(ctx.get("original_text") or ctx.get("goal") or "").strip()
+            if user_goal:
+                prior_observations.append(
+                    {"iteration": None, "role": "user", "content": user_goal}
+                )
+            try:
+                result = await manager.run_agentic_turn(
+                    goal=resumable.get("goal") or "",
+                    engine=resumable.get("engine"),
+                    context=ctx,
+                    original_message=original_message,
+                    task_id=resumable.get("task_id"),
+                    prior_observations=prior_observations,
+                )
+            except Exception as exc:
+                log_error(f"[agent] resume_agent_task failed: {exc}")
+                return {"ok": False, "error": f"resume_failed: {exc}"}
+
+            return {
+                "ok": True,
+                "final_text": result.get("final_text", ""),
+                "iterations": result.get("iterations"),
+                "stop_reason": result.get("stop_reason"),
+                "task_id": result.get("task_id"),
+            }
 
         log_warning(f"[agent] Unknown action type: {action_type}")
         return None

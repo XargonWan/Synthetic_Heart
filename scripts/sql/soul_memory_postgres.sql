@@ -15,7 +15,7 @@ CREATE TABLE IF NOT EXISTS mem_cells (
     atomic_facts JSONB NOT NULL DEFAULT '[]'::jsonb,
     emotional_tag JSONB NOT NULL,
     foresight_signals JSONB NOT NULL DEFAULT '[]'::jsonb,
-    timestamp TIMESTAMPTZ NOT NULL,
+    event_timestamp TIMESTAMPTZ NOT NULL,
     retrieval_count INTEGER NOT NULL DEFAULT 0,
     explicit_importance REAL NOT NULL DEFAULT 0,
     consolidated BOOLEAN NOT NULL DEFAULT FALSE,
@@ -29,7 +29,7 @@ CREATE TABLE IF NOT EXISTS mem_cell_vectors (
     embedding VECTOR({EMBEDDING_DIM}) NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS idx_mem_cells_timestamp ON mem_cells (timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_mem_cells_event_timestamp ON mem_cells (event_timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_mem_cells_session_id ON mem_cells (session_id);
 CREATE INDEX IF NOT EXISTS idx_mem_cells_consolidated ON mem_cells (consolidated);
 CREATE INDEX IF NOT EXISTS idx_mem_cells_atomic_facts_gin ON mem_cells USING gin (atomic_facts);

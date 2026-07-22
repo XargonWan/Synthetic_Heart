@@ -1923,10 +1923,10 @@ class RadioHostPlugin:
             async with get_conn_ctx() as conn:
                 async with conn.cursor(DictCursor) as cur:
                     await cur.execute(
-                        "SELECT id, timestamp, track_title, track_artist, "
+                        "SELECT id, created_at, track_title, track_artist, "
                         "banter_text, style, status, banter_audio_file "
                         "FROM radio_activity_log "
-                        "ORDER BY timestamp DESC LIMIT 50"
+                        "ORDER BY created_at DESC LIMIT 50"
                     )
                     rows = await cur.fetchall()
                     if rows:

@@ -10,13 +10,11 @@ except Exception:  # pragma: no cover - executed when asyncpg missing
 
 
 _CONFLICT_KEYS: dict[str, tuple[str, ...]] = {
-    "agent_action_execs": ("id",),
-    "agent_activity_log": ("id",),
     "agent_tasks": ("id",),
     "bio": ("id",),
     "blocklist": ("user_id",),
     "chat_archives": ("id",),
-    "chat_history_cache": ("interface_path", "timestamp"),
+    "chat_history_cache": ("interface_path", "created_at"),
     "chat_session_meta": ("interface_path",),
     "config": ("config_key",),
     "emotion_diary": ("id",),

@@ -379,7 +379,7 @@ class ExternalEndpointRegistry:
                     return
             await self._sync_registries(ep)
 
-            # Auto-activate as cortex engine when still on the default "manual"
+            # Auto-activate as cortex engine when no base cortex is set yet
             if status == "success" and ep.effective_subsystem_map().get("cortex"):
                 await self._maybe_auto_activate_cortex(ep.engine_name())
 
@@ -420,8 +420,8 @@ class ExternalEndpointRegistry:
             return  # already active
 
         # Respect any explicitly configured engine — external endpoint or any
-        # registered built-in other than "manual" (the neutral default).
-        if current and current != "manual":
+        # registered built-in. An empty value is the neutral "not set" default.
+        if current:
             try:
                 endpoints = await self.list_endpoints(enabled_only=True)
                 external_names = {ep.engine_name() for ep in endpoints}

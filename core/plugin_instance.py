@@ -414,22 +414,7 @@ async def handle_incoming_message(
                 "[plugin_instance] No LLM plugin loaded! Cannot handle incoming message."
             )
             log_error(f"[plugin_instance] Available plugins: {dir()}")
-            # Try to load manual plugin as fallback
-            try:
-                log_warning(
-                    "[plugin_instance] Attempting to load manual plugin as fallback..."
-                )
-                await load_plugin("manual")
-                if plugin is None:
-                    raise ValueError("Manual plugin failed to load")
-                log_info(
-                    "[plugin_instance] Manual plugin loaded successfully as fallback"
-                )
-            except Exception as fallback_e:
-                log_error(
-                    f"[plugin_instance] Fallback plugin loading failed: {fallback_e}"
-                )
-                raise ValueError("No LLM plugin loaded and fallback failed")
+            raise ValueError("No LLM plugin loaded")
 
         # Normalize message user/date fields to avoid AttributeErrors later
         try:

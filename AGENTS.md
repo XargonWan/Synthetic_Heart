@@ -77,7 +77,15 @@ Some plugins are long-running scheduled agents. The canonical example is **G.R.I
 - Configurable via `GRILLO_BEAT_INTERVAL`; includes duplicate suppression and rate-limiting.
 - Extensible: discovers beat-specific plugins (tag compactor, memory compactor, curiosity) via the plugin registry.
 
-The **Agent plugin** (`plugins/agent_plugin.py`) gives Synth a controlled hand for external tasks under policy-managed approval modes (`always_approve`, `whitelist`, `always_ask`, `disabled`). Uses `agent_activity_log` and `agent_action_execs` tables.
+The **Agent plugin** (`plugins/agent_plugin.py`) exposes Synth's agentic tools (`agent_list_files`, `agent_read_file`, `agent_write_file`, `agent_edit_file`, `agent_search_files`, `agent_run_shell`, `spawn_drone`) to the Agentic Runtime 2.0. Task state is persisted in the `agent_tasks` table. Enablement is gated by `AGENT_ENABLED` (user toggle, re-read on every `is_enabled()` call); the router 2.0 additionally requires `AGENTIC_ROUTING_ENABLED`.
+
+`agent_write_file` (`required_fields: ["path", "content"]`, `optional_fields: ["mode"]`, `security_level: "medium"`, `external_effects: ["filesystem"]`) writes a text file inside the sandbox. It reuses `_resolve_safe_path()` / `_allowed_roots()` (same roots as `agent_read_file`: `AGENT_FS_ROOTS`, else `[AGENT_FS_ROOT|/app, SYNTH_LOG_DIR|/app/logs]`), creates parent dirs, supports `mode` = `"overwrite"` (default) or `"append"`, and caps content at 2 MB. `external_effects` makes `core/agent_router.py` route it to the Agent Lane automatically. This is a **native Python** action — chosen over the standard filesystem MCP (`@modelcontextprotocol/server-filesystem`, pre-registered but `"enabled": false` in `config/synth_mcp.json`) because the runtime image (`python:3.12-slim`) has no node/npx (node lives only in the Dockerfile `stage_builder` build stage), so an `npx`-based MCP server cannot start in-container.
+
+`agent_edit_file` (`required_fields: ["path", "old_string", "new_string"]`, `optional_fields: ["expected_replacements"]`, `security_level: "medium"`, `external_effects: ["filesystem"]`) does a literal find-and-replace inside a sandboxed text file. It reads via `_resolve_safe_path()`, counts occurrences of `old_string`, and requires the count to exactly equal `expected_replacements` (default 1, clamped 1–10000 via `_safe_int()`) — an ambiguous or missing match errors out rather than editing the wrong spot. `old_string`/`new_string` must be non-empty strings and must differ; the resulting content is capped at 2 MB. Returns `{"status": "ok", "path", "replacements", "bytes_written"}`. `external_effects: ["filesystem"]` routes it to the Agent Lane automatically. Native Python for the same no-node reason as `agent_write_file`.
+
+`agent_search_files` (`required_fields: ["pattern"]`, `optional_fields: ["path", "regex", "case_sensitive", "glob", "max_results", "max_file_bytes"]`) is a **read-only** in-sandbox grep — it has **no** `security_level`/`external_effects` and stays on the Fast Lane. `pattern` is a plain substring by default, or a Python `re` pattern when `regex` is true; `case_sensitive` (default False) toggles `re.IGNORECASE`. `path` (default the first allowed root) is confined via `_resolve_safe_path()`; when it's a directory the search recurses with `rglob(glob)` (`glob` default `"*"`), skipping files larger than `max_file_bytes` (`_safe_int` default 2 MB, 1000–20 000 000). Results cap at `max_results` (`_safe_int` default 200, 1–2000) and each line is truncated to 1000 chars. Returns `{"status": "ok", "path", "files_scanned", "count", "truncated", "matches": [{"path", "line", "text"}]}`. Native Python for the same no-node reason as `agent_write_file`.
+
+`agent_run_shell` (`required_fields: ["command"]`, `optional_fields: ["cwd", "timeout"]`, `security_level: "high"`, `external_effects: ["shell"]`) runs a shell command and returns `{status, exit_code, cwd, stdout, stderr, truncated}`. **Its security is gated by container detection.** The module-level helper `_is_in_container()` decides the environment via, in order: the explicit `SYNTH_IN_CONTAINER` env override → presence of `/.dockerenv` (Docker) or `/run/.containerenv` (Podman) → a `docker`/`kubepods`/`containerd`/`libpod` marker in `/proc/1/cgroup`; it defaults to `False` (host) when unsure. `_run_shell()` **only executes inside a container** (the disposable runtime image); on a bare host it refuses unless the `AGENT_SHELL_ALLOW_HOST` config var (default `False`) is explicitly enabled — because a shell on the host is a real machine-compromise risk for a public persona. The working directory (`cwd`, default the first allowed root) is confined to `_allowed_roots()` via `_resolve_safe_path()`; the command runs through `bash -c`/`sh -c` under `asyncio.create_subprocess_exec`, with a `timeout` clamped to 1–600 s (default 60) and stdout/stderr each capped at 40 000 chars. `external_effects: ["shell"]` routes it to the Agent Lane automatically. Native Python for the same no-node reason as `agent_write_file`.
 
 ---
 
@@ -121,6 +129,81 @@ Engine authors subclass `IrisEngineBase` and set `ENGINE_CLASS = MyEngine` at mo
 from core.iris_registry import register_iris_engine
 register_iris_engine("my_engine", __name__, capabilities={"vision": True}, label="My vision engine")
 ```
+
+---
+
+## 5b. Agentic Runtime (Tools & MCP)
+
+SyntH can act as an **agent**: it calls *tools* — native actions and remote MCP
+tools — inside a bounded reasoning loop. Implemented in the `feat/agentv2` work.
+
+**Golden rule — dev MCP stays separate.** Synth's *own* MCP support lives
+**only** in `config/synth_mcp.json` + `core/mcp_bridge/`. The developer MCP
+servers (`.mcp.json`, `mcp_servers/*.py`) are never touched by this runtime.
+
+| Concern | Location |
+|---------|----------|
+| Synth-owned MCP registry | `config/synth_mcp.json` (top-level key `synthMcpServers`) |
+| Registry loader (fail-safe) | `core/mcp_bridge/config.py` |
+| Unified tool registry | `core/tool_registry.py` (`ToolRegistry`, `UnifiedToolManifest`) |
+| MCP client bridge | `core/mcp_bridge/client.py` (`McpClientBridge`, `mcp_client_bridge`) |
+| Tool executor (single gate) | `core/agent_tool_executor.py` (`AgentToolExecutor`, `agent_tool_executor`) |
+| Bounded agent loop | `core/agent_core.py::AgentLoopManager.run_agentic_turn` |
+| Fast/Agent router | `core/agent_router.py` (`classify`, `route`) |
+| Expose Synth actions as MCP | `core/mcp_bridge/server.py` (`build_server`, FastMCP) |
+
+**Every action is a tool — automatically.** By design, any action registered
+through a plugin/interface `get_supported_actions()` is *automatically* exposed
+as an MCP tool named `synth_<action_name>` (e.g. `message_telegram_bot` →
+`synth_message_telegram_bot`). There is **no whitelist** and **no developer
+opt-in**: `core/mcp_bridge/server.py::_get_exposed_action_names()` enumerates the
+full internal action set from `core/tool_registry.py::tool_registry.internal_tools()`.
+MCP tool names have no hard `tool_` prefix requirement — the `synth_` prefix is a
+namespacing choice. Safety is unchanged: every call still funnels through
+`core.action_safety.is_action_allowed_for_execution`, so each action's security
+level is enforced regardless of how it is invoked.
+
+**Two lanes, one chain.** `core/agent_router.classify` is a pure deterministic
+function: multiple actions, a tool call (`mcp_*` or an internal action with
+external effects), or a multi-step intent → **Agent Lane**; a single pure
+message → **Fast Lane** (unchanged path). Gated by `AGENTIC_ROUTING_ENABLED`
+(default `False`).
+
+**Tools are actions.** Internal actions and remote MCP tools are unified in
+`ToolRegistry`. Every tool — internal or external — funnels through
+`core.action_safety.is_action_allowed_for_execution`. Internal tools dispatch
+via `run_action`; external MCP tools via `mcp_client_bridge.call_tool`. Tool
+names are namespaced `mcp_<server>_<tool>`.
+
+**Config keys:** `AGENTIC_ROUTING_ENABLED`, `AGENT_MAX_ITERATIONS` (30),
+`AGENT_TURN_TIMEOUT_SEC` (120), `SYNTH_MCP_CONFIG`.
+See `docs/agentic_tools.rst` for the full reference.
+
+**Drones — ephemeral sub-agents.** The Agent can delegate a focused, self-contained
+sub-task to a **Drone**: a short-lived sub-agent that runs its own bounded
+`run_agentic_turn` loop with the full tool set and returns a concise result. Drones
+keep the parent task clean (research, scoped lookups, multi-step file inspection).
+
+- **Spawn:** only via the `spawn_drone` action (`required_fields: ["goal"]`,
+  `optional_fields: ["engine", "max_iterations"]`, `security_level: "medium"`),
+  handled in `plugins/agent_plugin.py`. There is **no** direct user/interface spawn.
+- **Single-level delegation — Drones cannot spawn Drones.** Enforced twice:
+  (1) `AgentLoopManager._build_agent_prompt` hides `spawn_drone` from a Drone's tool
+  list when `context["drone"]["is_drone"]` is set; (2) the `spawn_drone` handler
+  returns `{"ok": False, "error": "drones_cannot_spawn_drones"}` if invoked from
+  within a Drone.
+- **Engine inheritance:** when `engine` is omitted, a Drone resolves the same
+  agent-scope cortex as its parent (`get_active_cortex_engine(scope="agent")` →
+  `AGENT_CORTEX` → `BASE_CORTEX`). An explicit `engine` in the payload wins.
+- **Budget:** tighter than the parent — `DRONE_MAX_ITERATIONS` (3),
+  `DRONE_TURN_TIMEOUT_SEC` (90).
+- **Persistence:** Drone turns are recorded in `agent_tasks` with
+  `metadata.source = "drone"` and `metadata.drone.parent_task_id` linking them to
+  the spawning Agent task. No new DB table.
+- **Entry point:** `AgentLoopManager.run_drone(...)` in `core/agent_core.py` —
+  additive over `run_agentic_turn` (no signature change to the existing loop).
+
+**Drone config keys:** `DRONE_MAX_ITERATIONS` (3), `DRONE_TURN_TIMEOUT_SEC` (90).
 
 ---
 
@@ -311,6 +394,8 @@ If any step fails, fix it before proceeding.
   - trigger-word routing
   - regex-based intent detection
   - hardcoded phrase matching for feature activation
+- **Never use SQL reserved words as bare column names.**
+  `timestamp` is a PostgreSQL reserved word. A bare `timestamp` column on a fresh Postgres install is auto-translated by the ORM to `timestamptz`, producing an invalid schema that leaves SyntH broken (T-pose, unable to do anything). Always name time columns explicitly, e.g. `created_at`, `event_timestamp`, `updated_at`. This applies to every DDL in `init-db.sql`, `scripts/sql/*.sql`, inline plugin DDL, and `core/migrations.py`. Public API dict keys returned to the WebUI/JS may still be named `"timestamp"` — only the DB-column SQL references are forbidden from using the reserved word.
 
 ---
 
@@ -383,6 +468,18 @@ docker exec synth-dev tail -f /app/logs/synth.log | grep -E "\[grillo\]|grillo"
 > **Notes:** anything that helps the next agent understand it fast
 > ```
 
+### Agent Lane: message/diary actions fail because the source interface is missing  <!-- 2025-02-14 -->
+**Symptom:** An agentic turn (Agent Lane / Drone) writes files fine but the final delivery steps fail: `message_telegram_bot` is rejected by validation ("payload.interface_path or payload.chat_name is required") and `create_personal_diary_entry` persists with `interface="unknown"` / `chat_id=None`.
+**Location:** `core/agent_core.py` (`AgentLoopManager.run_agentic_turn`, `_build_agent_prompt`); consumers `interface/telegram_bot.py` (`message_telegram_bot` requires `interface_path`) and `plugins/ai_diary.py` (`create_personal_diary_entry` reads `context.get("interface", "unknown")`).
+**Status:** fixed.
+**Notes:** Two gaps in the Agent Lane. (1) `_build_agent_prompt` never surfaced the originating `interface_path` in the prompt text, so the model had no value to put in `message_telegram_bot`'s required `interface_path` field → validation rejected the action. Fixed by adding a "SOURCE CONVERSATION" block to the prompt that states the exact `interface_path` (and interface) and instructs delivery/message actions to reuse it verbatim. (2) The router (`core/agent_router.py`) only sets `context["interface_path"]`, never `context["interface"]`; internal tools run by the executor read `context["interface"]`, so the diary saved as "unknown". Fixed by deriving `interface` from `interface_path` once at the top of `run_agentic_turn` (via `core.interface_path_utils.get_interface_from_path`) and enriching the shared `context` — this covers both the prompt text and every executed tool (Drones inherit it, since `run_drone` delegates to `run_agentic_turn`).
+
+### Bare `timestamp` column breaks fresh Postgres installs  <!-- 2025-01-01 -->
+**Symptom:** On a fresh PostgreSQL install, SyntH comes up in a broken state — avatar stuck in T-pose, unable to do anything. Root cause: a bare `timestamp` column is a PostgreSQL reserved word; the ORM auto-translates it to `timestamptz`, producing an invalid schema.
+**Location:** Any DDL using a bare `timestamp` column (`init-db.sql`, `scripts/sql/*.sql`, inline plugin DDL, `core/migrations.py`). Historically affected `chat_history_cache`, `ai_diary`, `ai_diary_archive`, `memories`, `emotion_state`, `emotion_diary`, `message_map`, `radio_activity_log`, and `mem_cells`.
+**Status:** fixed (renamed to `created_at` / `event_timestamp`; startup auto-migration added in `core/migrations.py::_rename_timestamp_columns`).
+**Notes:** A startup migration (`_rename_timestamp_columns`, registered in `_STARTUP_MIGRATIONS`) renames any lingering `timestamp` columns to `created_at` (and `mem_cells.timestamp` → `event_timestamp`) and renames stale indexes (`idx_timestamp` → `idx_created_at`, etc.) on both Postgres and MariaDB. See the Hard Rules entry: never use `timestamp` as a bare DB column name. Public API dict keys named `"timestamp"` returned to the WebUI/JS are intentionally kept — only DB-column SQL references are forbidden.
+
 > Resolved issues (Status: fixed) and general changelog have been moved to [`CHANGELOG.md`](FIXED_ISSUES.md).
 
 ---
@@ -407,9 +504,7 @@ docker exec synth-dev tail -f /app/logs/synth.log | grep -E "\[grillo\]|grillo"
 | `grillo_beats` | `init-db.sql` | Scheduled autonomous beat timers (`beat_type`, `next_beat`, `enabled`) |
 | `grillo_activity_log` | `init-db.sql` | Log of executed Grillo beats with prompt/response text |
 | `grillo_action_execs` | `init-db.sql` | Individual action executions within a Grillo beat |
-| `agent_activity_log` | `init-db.sql` | Agent plugin task log (`command`, `proposer`, `trainer_id`, `result`) |
-| `agent_action_execs` | `init-db.sql` | Individual action steps within an agent task |
-| `agent_tasks` | `init-db.sql` | Structured agent task records with I/O JSON |
+| `agent_tasks` | `init-db.sql` | Agentic Runtime 2.0 task records with I/O JSON (`engine`, `status`, `input`, `output`, `iterations_meta`) |
 | `external_endpoints` | `init-db.sql` | LLM/API endpoint registry (name, protocol, URL, key, capabilities, model list) |
 | `scheduled_events` | `plugins/event_plugin.py` | Date/time triggered events Synth should act on |
 | `blocklist` | `plugins/blocklist.py` | Blocked users/entities |
@@ -462,6 +557,9 @@ All keys stored in the `config` table and accessible via `config_registry.get_va
 | `GRILLO_ALLOWED_SECURITY_LEVEL` | Max security level for Grillo actions |
 | `AUTONOMY_ALLOWED_ACTIONS` | Actions allowed in autonomy mode |
 | `AUTONOMY_ALLOWED_SECURITY_LEVEL` | Max security level for autonomous actions |
+| `DRONE_MAX_ITERATIONS` | Hard cap on Drone sub-agent loop iterations (default 3) |
+| `DRONE_TURN_TIMEOUT_SEC` | Wall-clock budget per Drone turn in seconds (default 90) |
+| `AGENT_SHELL_ALLOW_HOST` | Allow `agent_run_shell` to run when NOT in a container (default `False`; a host shell is a real compromise risk) |
 | `LLM_AUTO_EXECUTE_UNSAFE_ACTIONS` | Whether to auto-execute unsafe LLM actions |
 | `AWAIT_RESPONSE_TIMEOUT` | Seconds to wait for LLM response before timeout |
 | `LIVE_VOICE_NAME` | Voice name for live audio TTS |

@@ -11,25 +11,14 @@ All LLM engines follow a consistent architecture:
 - **Dynamic Switching**: Active engine can be changed without restarting the system
 - **Unified Limits**: Engines report their constraints (token limits, modalities, etc.)
 
-Agent Hooks (optional)
-~~~~~~~~~~~~~~~~~~~~~~~
+Agentic Runtime integration
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Engines may optionally implement a small set of agent hooks to provide richer,
-engine-specific integrations for the Agent plugin. These hooks are optional and
-engines that do not implement them will degrade gracefully — the Agent will
-fall back to calling ``plugin_instance.handle_incoming_message()`` and the
-plugin-level handlers.
-
-Recommended methods (all optional):
-
-- ``supports_agent() -> bool`` — return True if the engine provides agentic features
-- ``attach_agent(agent_plugin)`` / ``detach_agent(agent_plugin)`` — lifecycle hooks
-- ``agent_prepare_prompt(context) -> dict`` — provide additional structured context
-- ``agent_execute(action_dict, context) -> dict`` — optional engine-level action executor
-
-Note: These hooks are intended to be lightweight extensions, not required
-capabilities. The Agent integration remains fully functional with engines that
-do nothing more than implement the standard ``AIPluginBase`` interface.
+Engines require no special hooks to participate in the Agentic Runtime. The
+runtime drives every engine through the standard ``AIPluginBase`` interface;
+tool selection and execution are handled centrally by the unified tool registry
+and the agent tool executor (see :doc:`agentic_tools`), not by per-engine
+methods.
 
 Selenium Plugin Architecture
 -----------------------------
@@ -394,28 +383,6 @@ If your service offers multiple response options, override ``_get_response_choic
 2. **Selector Testing**: Check logs for "Trying response selector" messages
 3. **Integration Testing**: Send test messages and verify response extraction
 4. **Choice Testing**: Test with services that offer multiple response options
-
-Agentic Hooks (optional)
-------------------------
-
-LLM engines can optionally implement *agentic* hooks so the core Agent plugin
-can attach and cooperate with engine-level features. These hooks are
-non-mandatory and engines should degrade gracefully if the Agent plugin is
-absent or disabled.
-
-Suggested hooks for engines:
-
-- ``supports_agent() -> bool`` — Return True if the engine provides agentic extensions.
-- ``attach_agent(agent_plugin)`` / ``detach_agent(agent_plugin)`` — Called when the
-  core Agent plugin attaches or detaches; engines can use this to cache the
-  plugin reference or perform initialization.
-- ``agent_prepare_prompt(context) -> dict`` — Return additional engine-specific
-  prompt material.
-- ``agent_execute(action_dict, context) -> dict`` — Optional execution helper;
-  return a dict with execution result, or ``{"status": "unsupported"}``.
-
-Engines must not raise exceptions if the Agent plugin is absent; calls should be
-protected and degrade safely.
 
 Engine Integration (Cortex)
 ----------------------------

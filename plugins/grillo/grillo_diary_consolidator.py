@@ -134,14 +134,14 @@ class GrilloDiaryConsolidatorPlugin:
                         """
                         SELECT day, entry_id, combined, row_count FROM (
                             SELECT
-                                DATE(timestamp) AS day,
+                                DATE(created_at) AS day,
                                 MAX(id) AS entry_id,
                                 GROUP_CONCAT(content ORDER BY id ASC SEPARATOR '\n\n---\n\n') AS combined,
                                 COUNT(*) AS row_count
                             FROM ai_diary
-                            WHERE DATE(timestamp) >= %s
-                              AND DATE(timestamp) < CURDATE()
-                            GROUP BY DATE(timestamp)
+                            WHERE DATE(created_at) >= %s
+                              AND DATE(created_at) < CURDATE()
+                            GROUP BY DATE(created_at)
                         ) t
                         WHERE row_count > 1 OR combined LIKE '%%---%%'
                         ORDER BY day DESC

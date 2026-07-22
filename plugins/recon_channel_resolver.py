@@ -51,8 +51,8 @@ def _register_var(
             value_type=value_type,
             ui_type=ui_type,
             description=description,
-            scope="agent",
-            component="agent",
+            scope="recon",
+            component="recon",
         )
     except Exception:
         config_registry.get_var(
@@ -61,8 +61,8 @@ def _register_var(
             value_type=value_type,
             label=label,
             description=description,
-            group="agent",
-            component="agent",
+            group="recon",
+            component="recon",
         )
 
 

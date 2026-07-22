@@ -4,6 +4,7 @@ import os
 import importlib
 import inspect
 import asyncio
+import json
 import threading
 from pathlib import Path
 from typing import Any
@@ -68,6 +69,7 @@ class CoreInitializer:
         # Runtime flag for dev components (NOT persistent, resets on restart)
         self._enable_dev_components = False
         self._trainer_listener_registered = False
+        self._agentic_runtime_bootstrapped = False
 
     def enable_dev_components(self, enabled: bool = True):
         """Enable or disable dev components discovery. NOT persistent across restarts."""
@@ -99,6 +101,53 @@ class CoreInitializer:
                 return False, f"Health check failed: {exc}"
 
         return True, ""
+
+    async def _recover_interrupted_agent_tasks(self) -> None:
+        """Reconcile agentic turns left ``running`` by a previous process.
+
+        Agent Lane turns run detached from the message-chain consumer, so a
+        container restart (or crash) mid-turn leaves their ``agent_tasks`` row
+        stuck as ``running`` / ``paused`` forever. On startup we mark those
+        orphans as ``failed`` with a clear stop reason.
+
+        We deliberately do NOT auto-resume them: an interrupted turn may have
+        already executed tool calls with external side effects, so blindly
+        replaying it could duplicate those effects. Surfacing the interruption
+        (and letting the user re-ask) is the safe, non-destructive choice.
+        """
+        try:
+            from core.db import get_conn_ctx
+        except Exception as exc:
+            log_debug(
+                f"[core_initializer] Agent recovery skipped (db unavailable): {exc}"
+            )
+            return
+
+        async with get_conn_ctx() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """
+                    UPDATE agent_tasks
+                    SET status = 'failed',
+                        output = %s
+                    WHERE status IN ('running', 'paused')
+                    """,
+                    (json.dumps({"stop_reason": "interrupted_by_restart"}),),
+                )
+                affected = getattr(cur, "rowcount", 0) or 0
+                commit_fn = getattr(conn, "commit", None)
+                if callable(commit_fn):
+                    res = commit_fn()
+                    if asyncio.iscoroutine(res):
+                        await res
+
+        if affected:
+            log_info(
+                f"[core_initializer] Recovered {affected} interrupted agent "
+                "task(s) left running by a previous process (marked failed)."
+            )
+        else:
+            log_debug("[core_initializer] No interrupted agent tasks to recover.")
 
     async def initialize_all(self, notify_fn=None):
         """Initialize all synth components in the correct order."""
@@ -341,6 +390,94 @@ class CoreInitializer:
                         f"[core_initializer] Early import of '{_early_mod}' failed: {_e}"
                     )
 
+            # 4.5.1. Eagerly register agentic-runtime config keys.
+            # These keys are only ever read via config_registry.get_var(...) INSIDE
+            # functions on the chat path (core.agent_router.classify, the gate in
+            # core.message_chain, plugins.recon_agent_intent), never at module import
+            # time. That means they are not in _definitions when load_all_from_db()
+            # runs below, so their DB value (e.g. AGENTIC_ROUTING_ENABLED=true) is
+            # never loaded and they permanently fall back to their code default —
+            # the Fast/Agent router would stay disabled even when enabled in the DB.
+            # Registering them here ensures the DB sweep populates them. Same class
+            # of bug as BOTFATHER_TOKEN (see FIXED_ISSUES.md).
+            try:
+                from core.config_manager import config_registry as _cfg_reg
+
+                _cfg_reg.get_var(
+                    "AGENTIC_ROUTING_ENABLED",
+                    False,
+                    value_type=bool,
+                    label="Enable Agentic Routing",
+                    description=(
+                        "Enable the deterministic Fast/Agent router. When on, "
+                        "turns that need tools or multiple steps are escalated "
+                        "to the bounded Agent lane; otherwise every turn uses "
+                        "the Fast lane."
+                    ),
+                    group="agent",
+                    component="agent",
+                )
+                # AGENT_ENABLED (the user-facing on/off toggle) is registered at
+                # module import time by plugins.agent_plugin, but the plugin is
+                # loaded AFTER load_all_from_db() runs — so its DB value would
+                # never be swept in and get_var(...) on the chat path would
+                # permanently fall back to the code default (True), keeping the
+                # Agent Lane engaged even when the user switched the agent OFF.
+                # Register it eagerly here so the DB sweep populates it.
+                _cfg_reg.get_var(
+                    "AGENT_ENABLED",
+                    True,
+                    value_type=bool,
+                    component="agent",
+                )
+                _cfg_reg.get_var(
+                    "AGENT_MAX_ITERATIONS",
+                    30,
+                    value_type=int,
+                    label="Agent Max Iterations",
+                    description="Hard cap on the Agent reasoning-loop iterations per turn.",
+                    group="agent",
+                    component="agent",
+                    advanced=True,
+                )
+                _cfg_reg.get_var(
+                    "AGENT_TURN_TIMEOUT_SEC",
+                    120,
+                    value_type=int,
+                    label="Agent Turn Timeout (s)",
+                    description="Wall-clock budget in seconds for a single Agent turn.",
+                    group="agent",
+                    component="agent",
+                    advanced=True,
+                )
+                _cfg_reg.get_var(
+                    "DRONE_MAX_ITERATIONS",
+                    3,
+                    value_type=int,
+                    label="Drone Max Iterations",
+                    description="Hard cap on a Drone sub-agent's reasoning-loop iterations.",
+                    group="agent",
+                    component="agent",
+                    advanced=True,
+                )
+                _cfg_reg.get_var(
+                    "DRONE_TURN_TIMEOUT_SEC",
+                    90,
+                    value_type=int,
+                    label="Drone Turn Timeout (s)",
+                    description="Wall-clock budget in seconds for a single Drone turn.",
+                    group="agent",
+                    component="agent",
+                    advanced=True,
+                )
+                log_debug(
+                    "[core_initializer] Eagerly registered agentic-runtime config keys"
+                )
+            except Exception as _e:
+                log_warning(
+                    f"[core_initializer] Failed to eagerly register agentic config keys: {_e}"
+                )
+
             # 3.5. Load all configurations from DB AFTER persona manager initialization
             # This ensures SYNTH_NAME, SYNTH_PROFILE, SYNTH_ALIASES have been registered and can be loaded from DB
             log_info("[core_initializer] Loading all configurations from database...")
@@ -474,6 +611,16 @@ class CoreInitializer:
                 log_warning(
                     f"[core_initializer] Failed to start pool cleanup task: {e}"
                 )
+
+            # Recover agentic turns that were in-flight when the process last
+            # stopped. Agent Lane turns run detached from the message chain, so a
+            # container restart leaves their ``agent_tasks`` row stuck as
+            # ``running``. Reconcile those orphans on startup so they don't linger
+            # forever and so the WebUI reflects reality.
+            try:
+                await self._recover_interrupted_agent_tasks()
+            except Exception as e:
+                log_warning(f"[core_initializer] Agent task recovery sweep failed: {e}")
 
             # Start chat update checker service (non-critical) — only if explicitly configured to auto-start
             try:
@@ -1603,6 +1750,31 @@ class CoreInitializer:
             "available_actions": available_actions,
             "static_context": static_context,
         }
+
+        # Agentic Runtime 2.0 bootstrap:
+        # 1) mirror available internal actions into the unified tool registry;
+        # 2) connect enabled Synth-owned MCP servers and register their tools.
+        # Keep this fail-safe so startup never aborts if MCP is unavailable.
+        try:
+            from core.tool_registry import tool_registry
+
+            tool_registry.load_internal_actions(available_actions)
+        except Exception as exc:
+            log_warning(
+                f"[core_initializer] Failed to load unified internal tools: {exc}"
+            )
+
+        if not self._agentic_runtime_bootstrapped:
+            try:
+                from core.mcp_bridge.client import mcp_client_bridge
+
+                await mcp_client_bridge.connect_all()
+                self._agentic_runtime_bootstrapped = True
+            except Exception as exc:
+                log_warning(
+                    f"[core_initializer] MCP client bootstrap failed (non-fatal): {exc}"
+                )
+
         log_debug(
             f"[core_initializer] Actions block built with {len(available_actions)} action types, static_context: {list(static_context.keys())}"
         )

@@ -54,6 +54,8 @@ getting started.
    COMPONENT_DEVELOPMENT_GUIDE
    dev_components
    api_endpoints
+   agent_integration
+   agentic_tools
    component_pattern
    two_phase_init_implementation
    config_management

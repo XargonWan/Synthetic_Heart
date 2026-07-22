@@ -48,6 +48,7 @@ def _register_var(
     value_type: type,
     ui_type: str,
     description: str,
+    advanced: bool = False,
 ) -> None:
     try:
         from core.variables_engine import register_exposed_var
@@ -59,8 +60,9 @@ def _register_var(
             value_type=value_type,
             ui_type=ui_type,
             description=description,
-            scope="agent",
-            component="agent",
+            scope="recon",
+            component="recon",
+            advanced=advanced,
         )
     except Exception:
         config_registry.get_var(
@@ -69,8 +71,9 @@ def _register_var(
             value_type=value_type,
             label=label,
             description=description,
-            group="agent",
-            component="agent",
+            group="recon",
+            component="recon",
+            advanced=advanced,
         )
 
 
@@ -90,6 +93,7 @@ _register_var(
     value_type=int,
     ui_type="int",
     description="Skip videos longer than this many seconds (0 = no limit).",
+    advanced=True,
 )
 _register_var(
     "RECON_VIDEO_INCLUDE_VISION",
@@ -107,6 +111,7 @@ _register_var(
     ui_type="int",
     description="Truncate each video's combined transcript to this many "
     "characters to avoid bloating the prompt (0 = no limit).",
+    advanced=True,
 )
 
 # Local video file extensions recognised on incoming attachments.

@@ -415,6 +415,57 @@ class OpenAIApiServer:
             # Add interface_path to message object
             message_obj.interface_path = interface_path
 
+            # Intercept slash commands (e.g. /task) before the message chain.
+            # handle_command_message returns:
+            #   - a string -> immediate reply text to stream back
+            #   - None     -> not a known command; fall through to the chain
+            # A command may also start a DETACHED agent turn (e.g. /task resume),
+            # in which case its final text is delivered later via the in-flight
+            # agent mechanism, exactly like the Agent Lane path below.
+            raw_content = (last_message.get("content") or "").strip()
+            if raw_content.startswith("/"):
+                from core.command_registry import handle_command_message
+
+                interface_context = {
+                    "bot": self,
+                    "message": message_obj,
+                    "interface_id": "ollama_serve",
+                    "interface_path": interface_path,
+                }
+                command_reply = await handle_command_message(
+                    raw_content,
+                    user_id=chat_id,
+                    interface_id="ollama_serve",
+                    interface_context=interface_context,
+                )
+                if command_reply is not None:
+                    await self._stream_text(
+                        chat_id=chat_id,
+                        model=model,
+                        conversation_id=conversation_id,
+                        text=command_reply,
+                    )
+                    # If the command scheduled a detached agent turn, its final
+                    # result will be delivered asynchronously; do not finalize
+                    # yet so that delivery can stream + finalize the stream.
+                    agent_in_flight = False
+                    try:
+                        from core.agent_router import has_inflight_agent_turn
+
+                        agent_in_flight = has_inflight_agent_turn(interface_path)
+                    except Exception:
+                        agent_in_flight = False
+
+                    if not agent_in_flight:
+                        await self._finalize_stream(
+                            chat_id=chat_id,
+                            model=model,
+                            conversation_id=conversation_id,
+                        )
+                        if completion_event and not completion_event.is_set():
+                            completion_event.set()
+                    return
+
             # Update context memory with the latest user message so the prompt
             # reflects the current conversation state.
             history = self.context_memory.setdefault(
@@ -461,17 +512,44 @@ class OpenAIApiServer:
                     conversation_id=conversation_id,
                 )
             elif response is None:
-                # The message chain may have executed actions instead of producing
-                # a text response (e.g. ACTIONS_EXECUTED). Ensure the Ollama request
-                # completes cleanly by sending a final empty completion.
-                log_debug(
-                    f"[ollama_serve] No text response for chat_id={chat_id}; finalizing stream."
-                )
-                await self._finalize_stream(
-                    chat_id=chat_id,
-                    model=model,
-                    conversation_id=conversation_id,
-                )
+                # The message chain returns ``None`` in two very different cases:
+                #
+                # 1. Fast Lane executed actions with no text reply (e.g.
+                #    ACTIONS_EXECUTED) — nothing more is coming, so we finalize
+                #    the stream cleanly right now.
+                # 2. Agent Lane took the message: the real work runs in a
+                #    DETACHED task and the final text is streamed later via
+                #    ``send_message`` -> ``_stream_text`` -> ``_finalize_stream``.
+                #    Finalizing here would close the stream empty before that
+                #    text arrives (the observed "empty API response" bug). So we
+                #    must NOT finalize — we fall through to the ``completion_event``
+                #    wait below and let the detached delivery finalize the stream.
+                agent_in_flight = False
+                try:
+                    from core.agent_router import has_inflight_agent_turn
+
+                    agent_in_flight = has_inflight_agent_turn(interface_path)
+                except Exception:
+                    agent_in_flight = False
+
+                if agent_in_flight:
+                    log_debug(
+                        f"[ollama_serve] No inline text for chat_id={chat_id}; "
+                        "detached agent turn in flight, awaiting its delivery "
+                        "before finalizing stream."
+                    )
+                else:
+                    # The message chain may have executed actions instead of
+                    # producing a text response (e.g. ACTIONS_EXECUTED). Ensure
+                    # the request completes cleanly by finalizing now.
+                    log_debug(
+                        f"[ollama_serve] No text response for chat_id={chat_id}; finalizing stream."
+                    )
+                    await self._finalize_stream(
+                        chat_id=chat_id,
+                        model=model,
+                        conversation_id=conversation_id,
+                    )
 
             if completion_event:
                 timeout = self.stream_timeout
@@ -486,6 +564,35 @@ class OpenAIApiServer:
                         break
                     except asyncio.TimeoutError:
                         waited += timeout
+
+                        # Safety net for the detached Agent Lane: if the agent
+                        # turn is no longer in flight (it finished but delivered
+                        # no text, so the completion_event was never set) we must
+                        # finalize the stream ourselves instead of hanging until
+                        # a client disconnect. This does not apply while the turn
+                        # is still working — we keep waiting for its delivery.
+                        agent_still_running = False
+                        try:
+                            from core.agent_router import has_inflight_agent_turn
+
+                            agent_still_running = has_inflight_agent_turn(
+                                interface_path
+                            )
+                        except Exception:
+                            agent_still_running = False
+
+                        if not agent_still_running and not completion_event.is_set():
+                            log_debug(
+                                f"[ollama_serve] Detached agent turn finished with no "
+                                f"deliverable text for chat_id={chat_id}; finalizing stream."
+                            )
+                            await self._finalize_stream(
+                                chat_id=chat_id,
+                                model=model,
+                                conversation_id=conversation_id,
+                            )
+                            break
+
                         if max_wait and waited >= max_wait:
                             if not completion_event.is_set():
                                 await self._fail_stream(

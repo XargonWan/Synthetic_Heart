@@ -114,11 +114,12 @@ Run this migration in a maintenance window; the operation is fast and safe but r
 Priority System
 ---------------
 
-G.R.I.L.L.O. beats use the message queue's three-tier priority system:
+G.R.I.L.L.O. beats use the message queue's priority system:
 
 - **HIGH_PRIORITY (0):** Scheduled events, critical notifications
 - **NORMAL_PRIORITY (1):** User messages, standard interactions
-- **LOW_PRIORITY (2):** G.R.I.L.L.O. beats (new)
+- **AGENT_PRIORITY (2):** Agentic turns / tool work (above beats, below user traffic)
+- **LOW_PRIORITY (3):** G.R.I.L.L.O. beats
 
 Low-priority beats are only processed when no higher-priority messages are waiting, ensuring user interactions are never delayed by autonomous reflections.
 
@@ -402,7 +403,7 @@ Beats Interrupting Conversations
 
 This should never happen due to LOW_PRIORITY queuing. If it does:
 
-1. Verify ``LOW_PRIORITY = 2`` exists in ``core/message_queue.py``
+1. Verify ``LOW_PRIORITY = 3`` exists in ``core/message_queue.py``
 2. Check ``_enqueue_with_low_priority()`` is using correct priority value
 3. Examine queue consumer to ensure priority ordering
 

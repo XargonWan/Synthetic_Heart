@@ -44,14 +44,14 @@ def test_build_query_tags(monkeypatch):
         "AND personal_thought NOT LIKE '%%@grillo%%')"
     )
     expected_q = (
-        "(SELECT 'memories' AS source, MIN(id) AS id, MAX(timestamp) AS timestamp, content "
+        "(SELECT 'memories' AS source, MIN(id) AS id, MAX(created_at) AS created_at, content "
         "FROM memories WHERE (JSON_CONTAINS(tags, %s) OR JSON_CONTAINS(tags, %s)) "
-        "GROUP BY content ORDER BY timestamp DESC LIMIT %s) "
+        "GROUP BY content ORDER BY created_at DESC LIMIT %s) "
         "UNION ALL "
-        f"(SELECT 'ai_diary' AS source, id, timestamp, content FROM ai_diary "
+        f"(SELECT 'ai_diary' AS source, id, created_at, content FROM ai_diary "
         f"WHERE (JSON_CONTAINS(context_tags, %s) OR JSON_CONTAINS(context_tags, %s)) AND {_GRILLO_EXC} "
-        "ORDER BY timestamp DESC LIMIT %s) "
-        "ORDER BY timestamp DESC LIMIT %s"
+        "ORDER BY created_at DESC LIMIT %s) "
+        "ORDER BY created_at DESC LIMIT %s"
     )
 
     assert union_q == expected_q
@@ -83,20 +83,20 @@ def test_build_query_free_includes_chat(monkeypatch):
         "AND personal_thought NOT LIKE '%%@grillo%%')"
     )
     expected_q = (
-        "(SELECT 'memories' AS source, MIN(id) AS id, MAX(timestamp) AS timestamp, content "
+        "(SELECT 'memories' AS source, MIN(id) AS id, MAX(created_at) AS created_at, content "
         "FROM memories WHERE (content LIKE %s OR content LIKE %s) "
-        "GROUP BY content ORDER BY timestamp DESC LIMIT %s) "
+        "GROUP BY content ORDER BY created_at DESC LIMIT %s) "
         "UNION ALL "
-        f"(SELECT 'ai_diary' AS source, id, timestamp, content FROM ai_diary "
+        f"(SELECT 'ai_diary' AS source, id, created_at, content FROM ai_diary "
         "WHERE (personal_thought LIKE %s OR interaction_summary LIKE %s OR user_message LIKE %s "
         "OR personal_thought LIKE %s OR interaction_summary LIKE %s OR user_message LIKE %s) "
         f"AND {_GRILLO_EXC} "
-        "ORDER BY timestamp DESC LIMIT %s) "
+        "ORDER BY created_at DESC LIMIT %s) "
         "UNION ALL "
-        "(SELECT 'chat' AS source, id, timestamp, message_text AS content FROM chat_history_cache "
+        "(SELECT 'chat' AS source, id, created_at, message_text AS content FROM chat_history_cache "
         "WHERE (message_text LIKE %s OR message_text LIKE %s) "
-        "ORDER BY timestamp DESC LIMIT %s) "
-        "ORDER BY timestamp DESC LIMIT %s"
+        "ORDER BY created_at DESC LIMIT %s) "
+        "ORDER BY created_at DESC LIMIT %s"
     )
 
     assert union_q == expected_q
@@ -168,8 +168,8 @@ def test_build_query_includes_timestamp_for_time_only():
     payload = {"mode": "free", "time_window": "yesterday"}
     q, params = plugin._build_query_and_params(payload, max_results=5)
     assert q
-    # Should include timestamp clause
-    assert "timestamp" in q
+    # Should include created_at clause
+    assert "created_at" in q
     # Params should contain at least one ISO-like timestamp
     found_iso = any(
         re.search(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}", str(x)) for x in params

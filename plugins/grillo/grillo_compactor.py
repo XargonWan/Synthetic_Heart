@@ -331,12 +331,12 @@ class GrilloCompactorPlugin:
                         if marker:
                             if is_postgres:
                                 await cur.execute(
-                                    "SELECT id, content, context_tags as tags, timestamp FROM ai_diary WHERE timestamp < %s AND COALESCE(NULLIF(BTRIM(context_tags), ''), '[]')::jsonb ? %s ORDER BY timestamp ASC LIMIT %s OFFSET %s",
+                                    "SELECT id, content, context_tags as tags, created_at FROM ai_diary WHERE created_at < %s AND COALESCE(NULLIF(BTRIM(context_tags), ''), '[]')::jsonb ? %s ORDER BY created_at ASC LIMIT %s OFFSET %s",
                                     (cutoff_dt, str(marker), limit, offset),
                                 )
                             else:
                                 await cur.execute(
-                                    "SELECT id, content, context_tags as tags, timestamp FROM ai_diary WHERE timestamp < DATE_SUB(NOW(), INTERVAL %s DAY) AND JSON_CONTAINS(context_tags, %s) ORDER BY timestamp ASC LIMIT %s OFFSET %s",
+                                    "SELECT id, content, context_tags as tags, created_at FROM ai_diary WHERE created_at < DATE_SUB(NOW(), INTERVAL %s DAY) AND JSON_CONTAINS(context_tags, %s) ORDER BY created_at ASC LIMIT %s OFFSET %s",
                                     (age_days, json.dumps(marker), limit, offset),
                                 )
                             candidates = await cur.fetchall()
@@ -348,7 +348,7 @@ class GrilloCompactorPlugin:
                                     )
                                     if is_postgres:
                                         await cur.execute(
-                                            "SELECT id, content, context_tags as tags, timestamp FROM ai_diary WHERE timestamp < %s AND context_tags LIKE %s ORDER BY timestamp ASC LIMIT %s OFFSET %s",
+                                            "SELECT id, content, context_tags as tags, created_at FROM ai_diary WHERE created_at < %s AND context_tags LIKE %s ORDER BY created_at ASC LIMIT %s OFFSET %s",
                                             (
                                                 cutoff_dt,
                                                 "%" + str(marker) + "%",
@@ -358,7 +358,7 @@ class GrilloCompactorPlugin:
                                         )
                                     else:
                                         await cur.execute(
-                                            "SELECT id, content, context_tags as tags, timestamp FROM ai_diary WHERE timestamp < DATE_SUB(NOW(), INTERVAL %s DAY) AND context_tags LIKE %s ORDER BY timestamp ASC LIMIT %s OFFSET %s",
+                                            "SELECT id, content, context_tags as tags, created_at FROM ai_diary WHERE created_at < DATE_SUB(NOW(), INTERVAL %s DAY) AND context_tags LIKE %s ORDER BY created_at ASC LIMIT %s OFFSET %s",
                                             (
                                                 age_days,
                                                 "%" + str(marker) + "%",
@@ -372,12 +372,12 @@ class GrilloCompactorPlugin:
                         else:
                             if is_postgres:
                                 await cur.execute(
-                                    "SELECT id, content, context_tags as tags, timestamp FROM ai_diary WHERE timestamp < %s ORDER BY timestamp ASC LIMIT %s OFFSET %s",
+                                    "SELECT id, content, context_tags as tags, created_at FROM ai_diary WHERE created_at < %s ORDER BY created_at ASC LIMIT %s OFFSET %s",
                                     (cutoff_dt, limit, offset),
                                 )
                             else:
                                 await cur.execute(
-                                    "SELECT id, content, context_tags as tags, timestamp FROM ai_diary WHERE timestamp < DATE_SUB(NOW(), INTERVAL %s DAY) ORDER BY timestamp ASC LIMIT %s OFFSET %s",
+                                    "SELECT id, content, context_tags as tags, created_at FROM ai_diary WHERE created_at < DATE_SUB(NOW(), INTERVAL %s DAY) ORDER BY created_at ASC LIMIT %s OFFSET %s",
                                     (age_days, limit, offset),
                                 )
                             candidates = await cur.fetchall()
@@ -396,10 +396,10 @@ class GrilloCompactorPlugin:
                     if isinstance(r, dict):
                         rid = r.get("id")
                         content = r.get("content")
-                        ts = r.get("timestamp")
+                        ts = r.get("created_at")
                         tags_raw = r.get("tags")
                     else:
-                        # row is (id, content, tags, timestamp)
+                        # row is (id, content, tags, created_at)
                         rid, content, tags_raw, ts = r
 
                     # Parse tags (stored as JSON string in DB) into a Python list when possible
@@ -420,7 +420,7 @@ class GrilloCompactorPlugin:
                         {
                             "id": rid,
                             "content": content or "",
-                            "timestamp": ts,
+                            "created_at": ts,
                             "tags": tags_parsed,
                         }
                     )
@@ -452,7 +452,7 @@ class GrilloCompactorPlugin:
                 try:
                     i = 0
                     while i < len(norm):
-                        start_ts = norm[i]["timestamp"]
+                        start_ts = norm[i]["created_at"]
                         try:
                             if isinstance(start_ts, str):
                                 start_dt = datetime.fromisoformat(start_ts)
@@ -464,7 +464,7 @@ class GrilloCompactorPlugin:
                         j = i + 1
                         while j < len(norm):
                             try:
-                                other_ts = norm[j]["timestamp"]
+                                other_ts = norm[j]["created_at"]
                                 if isinstance(other_ts, str):
                                     other_dt = datetime.fromisoformat(other_ts)
                                 else:
@@ -488,8 +488,8 @@ class GrilloCompactorPlugin:
                                 "content": (
                                     r.get("content") if isinstance(r, dict) else r[1]
                                 ),
-                                "timestamp": (
-                                    r.get("timestamp") if isinstance(r, dict) else r[3]
+                                "created_at": (
+                                    r.get("created_at") if isinstance(r, dict) else r[3]
                                 ),
                             }
                             for r in norm
@@ -792,7 +792,7 @@ class GrilloCompactorPlugin:
                                 # Insert into archive (select relevant columns)
                                 try:
                                     await cur.execute(
-                                        "INSERT INTO ai_diary_archive (content, personal_thought, emotions, interaction_summary, timestamp, interface, chat_id, thread_id, user_message, context_tags, involved_users) SELECT content, personal_thought, emotions, interaction_summary, timestamp, interface, chat_id, thread_id, user_message, context_tags, involved_users FROM ai_diary WHERE id IN ("
+                                        "INSERT INTO ai_diary_archive (content, personal_thought, emotions, interaction_summary, created_at, interface, chat_id, thread_id, user_message, context_tags, involved_users) SELECT content, personal_thought, emotions, interaction_summary, created_at, interface, chat_id, thread_id, user_message, context_tags, involved_users FROM ai_diary WHERE id IN ("
                                         + ",".join(["%s"] * len(source_ids))
                                         + ")",
                                         tuple(source_ids),
@@ -804,7 +804,7 @@ class GrilloCompactorPlugin:
                                             f"[grillo_compactor] ai_diary_archive insert with involved_users failed: {e}; retrying without involved_users"
                                         )
                                         await cur.execute(
-                                            "INSERT INTO ai_diary_archive (content, personal_thought, emotions, interaction_summary, timestamp, interface, chat_id, thread_id, user_message, context_tags) SELECT content, personal_thought, emotions, interaction_summary, timestamp, interface, chat_id, thread_id, user_message, context_tags FROM ai_diary WHERE id IN ("
+                                            "INSERT INTO ai_diary_archive (content, personal_thought, emotions, interaction_summary, created_at, interface, chat_id, thread_id, user_message, context_tags) SELECT content, personal_thought, emotions, interaction_summary, created_at, interface, chat_id, thread_id, user_message, context_tags FROM ai_diary WHERE id IN ("
                                             + ",".join(["%s"] * len(source_ids))
                                             + ")",
                                             tuple(source_ids),
@@ -838,7 +838,7 @@ class GrilloCompactorPlugin:
                                     f"[grillo_compactor] Failed to insert new compacted memory using helper: {e}"
                                 )
                                 await cur.execute(
-                                    "INSERT INTO memories (timestamp, content, author, source, tags, scope, emotion, intensity, emotion_state) VALUES (NOW(), %s, %s, %s, %s, %s, %s, %s, %s)",
+                                    "INSERT INTO memories (created_at, content, author, source, tags, scope, emotion, intensity, emotion_state) VALUES (NOW(), %s, %s, %s, %s, %s, %s, %s, %s)",
                                     (
                                         memory_content,
                                         "grillo",

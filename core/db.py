@@ -1646,8 +1646,8 @@ async def ensure_plugin_tables() -> None:
                             CREATE TABLE IF NOT EXISTS ai_diary (
                                 id INT AUTO_INCREMENT PRIMARY KEY,
                                 content LONGTEXT,
-                                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                                INDEX idx_timestamp (timestamp)
+                                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                                INDEX idx_created_at (created_at)
                             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
                         """)
 
@@ -1655,8 +1655,8 @@ async def ensure_plugin_tables() -> None:
                             CREATE TABLE IF NOT EXISTS ai_diary_archive (
                                 id INT AUTO_INCREMENT PRIMARY KEY,
                                 content LONGTEXT,
-                                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                                INDEX idx_timestamp (timestamp)
+                                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                                INDEX idx_created_at (created_at)
                             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
                         """)
                     try:
@@ -1713,39 +1713,7 @@ async def ensure_plugin_tables() -> None:
                 await cur.execute(_GRILLO_ACTIVITY_LOG_DDL)
                 await cur.execute(_GRILLO_ACTION_EXECS_DDL)
 
-                # agent tables (init-db.sql)
-                await cur.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS agent_activity_log (
-                        id INT AUTO_INCREMENT PRIMARY KEY,
-                        command TEXT NOT NULL,
-                        proposer VARCHAR(100),
-                        status ENUM('proposed','approved','rejected','executed') NOT NULL DEFAULT 'proposed',
-                        trainer_id VARCHAR(100),
-                        request_ts DATETIME DEFAULT CURRENT_TIMESTAMP,
-                        response_ts DATETIME,
-                        result LONGTEXT,
-                        metadata JSON
-                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-                    """
-                )
-
-                await cur.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS agent_action_execs (
-                        id INT AUTO_INCREMENT PRIMARY KEY,
-                        activity_log_id INT NOT NULL,
-                        command TEXT NOT NULL,
-                        status ENUM('pending','executed','failed') NOT NULL DEFAULT 'pending',
-                        error_text TEXT,
-                        result JSON,
-                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-                        INDEX idx_activity_log_id (activity_log_id)
-                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-                    """
-                )
-
+                # agent task table (init-db.sql) — Agentic Runtime 2.0
                 await cur.execute(
                     """
                     CREATE TABLE IF NOT EXISTS agent_tasks (
@@ -1854,7 +1822,7 @@ async def insert_memory(
             async with conn.cursor() as cur:
                 await cur.execute(
                     """
-                    INSERT INTO memories (timestamp, content, author, source, tags, scope, emotion, intensity, emotion_state)
+                    INSERT INTO memories (created_at, content, author, source, tags, scope, emotion, intensity, emotion_state)
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
@@ -1990,8 +1958,8 @@ async def get_recent_responses(since_timestamp: str) -> list[dict]:
                 await cur.execute(
                     """
                     SELECT * FROM memories
-                    WHERE source = 'synth' AND timestamp >= %s
-                    ORDER BY timestamp DESC
+                    WHERE source = 'synth' AND created_at >= %s
+                    ORDER BY created_at DESC
                     """,
                     (since_timestamp,),
                 )

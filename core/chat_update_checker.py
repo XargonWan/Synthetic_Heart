@@ -116,7 +116,7 @@ class ChatUpdateChecker:
             # Query DB for most recent non-self message timestamp
             rows = await execute_query(
                 """
-                                SELECT MAX(timestamp) as max_ts
+                                SELECT MAX(created_at) as max_ts
                 FROM chat_history_cache
                 WHERE COALESCE(sender_id, '') NOT IN (%s, %s)
                   AND COALESCE(sender_name, '') NOT IN (%s, %s)
@@ -161,12 +161,12 @@ class ChatUpdateChecker:
                         # Get chats that updated since last known ts (non-self only)
                         rows2 = await execute_query(
                             """
-                            SELECT interface_path, sender_name, sender_id, timestamp as ts
+                            SELECT interface_path, sender_name, sender_id, created_at as ts
                             FROM chat_history_cache
-                            WHERE timestamp > %s
+                            WHERE created_at > %s
                               AND COALESCE(sender_id, '') NOT IN (%s, %s)
                               AND COALESCE(sender_name, '') NOT IN (%s, %s)
-                            ORDER BY timestamp ASC
+                            ORDER BY created_at ASC
                             """,
                             (since_dt, "self", "synth", "self", "synth"),
                         )
@@ -217,12 +217,12 @@ class ChatUpdateChecker:
                         )
                         rows2 = await execute_query(
                             """
-                            SELECT interface_path, sender_name, sender_id, timestamp as ts
+                            SELECT interface_path, sender_name, sender_id, created_at as ts
                             FROM chat_history_cache
-                            WHERE timestamp > %s
+                            WHERE created_at > %s
                               AND COALESCE(sender_id, '') NOT IN (%s, %s)
                               AND COALESCE(sender_name, '') NOT IN (%s, %s)
-                            ORDER BY timestamp ASC
+                            ORDER BY created_at ASC
                             """,
                             (since_dt, "self", "synth", "self", "synth"),
                         )

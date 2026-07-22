@@ -67,7 +67,7 @@ async def init_message_map_table():
                             trainer_message_id INTEGER PRIMARY KEY,
                             chat_id BIGINT NOT NULL,
                             message_id INTEGER NOT NULL,
-                            timestamp REAL
+                            created_at REAL
                         )
                         """
                     )
@@ -114,12 +114,12 @@ async def store_message_mapping(trainer_message_id: int, chat_id: int, message_i
                         await cur.execute(
                             """
                             INSERT INTO message_map 
-                            (trainer_message_id, chat_id, message_id, timestamp)
+                            (trainer_message_id, chat_id, message_id, created_at)
                             VALUES (%s, %s, %s, %s)
                             ON CONFLICT (trainer_message_id) 
                             DO UPDATE SET chat_id = EXCLUDED.chat_id, 
                                           message_id = EXCLUDED.message_id, 
-                                          timestamp = EXCLUDED.timestamp
+                                          created_at = EXCLUDED.created_at
                             """,
                             (trainer_message_id, chat_id, message_id, time.time()),
                         )
@@ -127,7 +127,7 @@ async def store_message_mapping(trainer_message_id: int, chat_id: int, message_i
                         await cur.execute(
                             """
                             REPLACE INTO message_map 
-                            (trainer_message_id, chat_id, message_id, timestamp)
+                            (trainer_message_id, chat_id, message_id, created_at)
                             VALUES (%s, %s, %s, %s)
                             """,
                             (trainer_message_id, chat_id, message_id, time.time()),
@@ -222,7 +222,7 @@ async def cleanup_old_mappings(older_than_hours: int = 24):
                 await cur.execute(
                     """
                     DELETE FROM message_map 
-                    WHERE timestamp < %s
+                    WHERE created_at < %s
                     """,
                     (cutoff_time,),
                 )
@@ -247,7 +247,7 @@ async def get_mapping_stats() -> Dict[str, int]:
                 # Count mappings from last 24 hours
                 cutoff_time = time.time() - (24 * 3600)
                 await cur.execute(
-                    "SELECT COUNT(*) FROM message_map WHERE timestamp > %s",
+                    "SELECT COUNT(*) FROM message_map WHERE created_at > %s",
                     (cutoff_time,),
                 )
                 recent_count = (await cur.fetchone())[0]

@@ -506,33 +506,6 @@ class OpenRouterPlugin(AIPluginBase):
             "model_name": self._current_model,
         }
 
-    # --- Agent hooks ---
-    def supports_agent(self) -> bool:
-        return True
-
-    def agent_execute(self, action_dict: dict, context: dict | None = None) -> dict:
-        try:
-            from core.core_initializer import PLUGIN_REGISTRY
-
-            agent_plugin = (
-                PLUGIN_REGISTRY.get("agent")
-                if isinstance(PLUGIN_REGISTRY, dict)
-                else None
-            )
-            if agent_plugin and hasattr(agent_plugin, "execute_action"):
-                res = agent_plugin.execute_action(
-                    action_dict, context or {}, None, None
-                )
-                if hasattr(res, "__await__"):
-                    return {
-                        "status": "pending_async",
-                        "note": "Agent plugin returned coroutine",
-                    }
-                return res or {"status": "ok"}
-        except Exception as exc:
-            log_warning(f"[openrouter] agent_execute adapter failed: {exc}")
-        return {"status": "unsupported", "reason": "agent plugin not available"}
-
     # ------------------------------------------------------------------
     # Model resolution
     # ------------------------------------------------------------------

@@ -62,9 +62,9 @@ class GrilloTemporalReflectionPlugin(AIPluginBase):
                     # Query chat_history_cache first. The agent's own messages are
                     # stored with sender_name='self'; sender_id holds the session id.
                     await cur.execute(
-                        "SELECT timestamp FROM chat_history_cache "
+                        "SELECT created_at FROM chat_history_cache "
                         "WHERE (sender_name IS NULL OR sender_name != 'self') "
-                        "ORDER BY timestamp DESC LIMIT 1"
+                        "ORDER BY created_at DESC LIMIT 1"
                     )
                     row = await cur.fetchone()
                     if row and row[0]:
@@ -72,9 +72,9 @@ class GrilloTemporalReflectionPlugin(AIPluginBase):
 
                     # Fallback to ai_diary user messages
                     await cur.execute(
-                        "SELECT timestamp FROM ai_diary "
+                        "SELECT created_at FROM ai_diary "
                         "WHERE user_message IS NOT NULL "
-                        "ORDER BY timestamp DESC LIMIT 1"
+                        "ORDER BY created_at DESC LIMIT 1"
                     )
                     row = await cur.fetchone()
                     if row and row[0]:

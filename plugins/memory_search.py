@@ -414,8 +414,8 @@ class MemorySearchPlugin:
         time_params: List[Any] = []
         if time_range:
             start_dt, end_dt = time_range
-            time_clause_parts.append("timestamp >= %s")
-            time_clause_parts.append("timestamp <= %s")
+            time_clause_parts.append("created_at >= %s")
+            time_clause_parts.append("created_at <= %s")
             # Use ISOformat UTC strings so DB comparison is deterministic
             time_params.extend([start_dt.isoformat(), end_dt.isoformat()])
 
@@ -446,7 +446,7 @@ class MemorySearchPlugin:
                 q = f"{select_expr} WHERE {where}"
                 if group_by:
                     q += f" GROUP BY {group_by}"
-                order_by = random_order_by if randomize else "timestamp DESC"
+                order_by = random_order_by if randomize else "created_at DESC"
                 queries.append(f"({q} ORDER BY {order_by} LIMIT %s)")
                 # Params must match placeholder order: content/keyword params FIRST, then time params, then per-source limit
                 final_params.extend(table_content_params)
@@ -505,7 +505,7 @@ class MemorySearchPlugin:
                 mem_content_params,
                 where_clauses_mem,
                 "memories",
-                "SELECT 'memories' AS source, MIN(id) AS id, MAX(timestamp) AS timestamp, content FROM memories",
+                "SELECT 'memories' AS source, MIN(id) AS id, MAX(created_at) AS created_at, content FROM memories",
                 group_by="content",
             )
         if where_clauses_diary or time_clause_parts:
@@ -528,7 +528,7 @@ class MemorySearchPlugin:
                 diary_content_params,
                 where_clauses_diary,
                 "ai_diary",
-                "SELECT 'ai_diary' AS source, id, timestamp, content FROM ai_diary",
+                "SELECT 'ai_diary' AS source, id, created_at, content FROM ai_diary",
             )
         # Chat history is only searched in free mode; in tags mode a bare time
         # window would otherwise pull in every chat message of the window.
@@ -537,17 +537,17 @@ class MemorySearchPlugin:
                 chat_content_params,
                 where_clauses_chat,
                 "chat_history_cache",
-                "SELECT 'chat' AS source, id, timestamp, message_text AS content FROM chat_history_cache",
+                "SELECT 'chat' AS source, id, created_at, message_text AS content FROM chat_history_cache",
             )
 
         if not queries:
             return "", []
 
-        # If randomize: use the backend's random order function, otherwise order by timestamp desc
+        # If randomize: use the backend's random order function, otherwise order by created_at desc
         order_clause = (
             f" ORDER BY {random_order_by} LIMIT %s"
             if randomize
-            else " ORDER BY timestamp DESC LIMIT %s"
+            else " ORDER BY created_at DESC LIMIT %s"
         )
         union_q = " UNION ALL ".join(queries) + order_clause
         # For the LIMIT param

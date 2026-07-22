@@ -26,11 +26,16 @@ from plugins.blocklist import is_user_blocked
 from core.interface_paths import get_name_resolver
 from core.user_utils import ensure_message_user_fields
 
-# Use a priority queue so events can be processed before regular messages
-HIGH_PRIORITY = 0
-NORMAL_PRIORITY = 1
+# Use a priority queue so events can be processed before regular messages.
+# Lower value = processed first. The agent lane sits BETWEEN user-facing traffic
+# (messages / radio) and the generic autonomous beats: an agentic turn must yield
+# to real user messages and radio speech, but take precedence over background
+# G.R.I.L.L.O. beats.
+HIGH_PRIORITY = 0  # Scheduled events, urgent notifications
+NORMAL_PRIORITY = 1  # User messages, radio speech — user-facing traffic
+AGENT_PRIORITY = 2  # Agentic turns / tool work — below user traffic, above beats
 LOW_PRIORITY = (
-    2  # For autonomous beats (G.R.I.L.L.O.) - processed only when queue is idle
+    3  # For autonomous beats (G.R.I.L.L.O.) - processed only when queue is idle
 )
 
 _queue: asyncio.PriorityQueue | None = None

@@ -853,18 +853,17 @@ class SynthWebUIInterface:
         self.app.get("/api/log-failures")(self.list_log_failures)
         self.app.delete("/api/log-failures/{failure_id}")(self.delete_log_failure)
 
-        # Agent tasks endpoints (Agent Loop persistence & control)
+        # Agent tasks endpoints (Agentic Runtime persistence)
         self.app.get("/api/agent/tasks")(self.list_agent_tasks)
         self.app.get("/api/agent/tasks/{task_id}")(self.get_agent_task)
-        self.app.post("/api/agent/tasks")(self.create_agent_task)
-        self.app.post("/api/agent/tasks/{task_id}/pause")(self.pause_agent_task)
-        self.app.post("/api/agent/tasks/{task_id}/resume")(self.resume_agent_task)
-        self.app.post("/api/agent/tasks/{task_id}/cancel")(self.cancel_agent_task)
-        # Agent proposal approval endpoint
-        self.app.get("/api/agent/proposals")(self.list_agent_proposals)
-        self.app.post("/api/agent/proposals/{proposal_id}/approve")(
-            self.approve_agent_proposal
+        self.app.post("/api/agent/run")(self.run_agent_turn)
+        self.app.get("/api/agent/tools")(self.list_agent_tools)
+        self.app.delete("/api/agent/tasks/{task_id}")(self.delete_agent_task)
+        self.app.patch("/api/agent/tasks/{task_id}")(self.rename_agent_task)
+        self.app.post("/api/agent/tasks/{task_id}/message")(
+            self.send_agent_task_message
         )
+        self.app.post("/api/agent/tasks/{task_id}/continue")(self.continue_agent_task)
         self.app.get("/api/animations/{skin}/{animation_type}")(
             self.get_animations_for_type
         )
@@ -1073,12 +1072,19 @@ class SynthWebUIInterface:
             async with get_conn_ctx() as conn:
                 async with conn.cursor() as cur:
                     await cur.execute(
-                        "SELECT id, engine, status, created_at, updated_at FROM agent_tasks ORDER BY created_at DESC LIMIT %s",
+                        "SELECT id, engine, status, created_at, updated_at, metadata FROM agent_tasks ORDER BY created_at DESC LIMIT %s",
                         (int(limit),),
                     )
                     rows = await cur.fetchall()
                     tasks = []
                     for r in rows:
+                        name = None
+                        try:
+                            meta = json.loads(r[5]) if r[5] else None
+                            if isinstance(meta, dict):
+                                name = meta.get("name") or None
+                        except Exception:
+                            name = None
                         tasks.append(
                             {
                                 "id": r[0],
@@ -1086,6 +1092,7 @@ class SynthWebUIInterface:
                                 "status": r[2],
                                 "created_at": r[3].isoformat() if r[3] else None,
                                 "updated_at": r[4].isoformat() if r[4] else None,
+                                "name": name,
                             }
                         )
                     return JSONResponse({"tasks": tasks})
@@ -1133,38 +1140,294 @@ class SynthWebUIInterface:
             log_error(f"{LOG_PREFIX} get_agent_task failed: {error_msg}")
             raise HTTPException(status_code=500, detail=error_msg)
 
-    async def create_agent_task(self, request: Request):
+    async def send_agent_task_message(self, task_id: int, request: Request):
+        """Append a user message to a task's reasoning timeline.
+
+        This records the human intervention as a ``user_message`` entry in
+        ``agent_tasks.iterations_meta`` so it appears inline in the
+        conversational UI. It does NOT relaunch the agent loop — that
+        "continue with new input" behaviour is a separate future feature.
+        """
         try:
             body = await request.json()
-            engine = body.get("engine", "default")
-            input_payload = body.get("input") or body.get("prompt") or {}
-            max_iterations = body.get("max_iterations")
+            text = (body.get("text") or "").strip()
+            if not text:
+                raise HTTPException(status_code=400, detail="text is required")
 
-            # Check agent enabled
+            from core.db import get_conn_ctx
+
+            async with get_conn_ctx() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "SELECT iterations_meta FROM agent_tasks WHERE id=%s",
+                        (int(task_id),),
+                    )
+                    row = await cur.fetchone()
+                    if not row:
+                        raise HTTPException(status_code=404, detail="task not found")
+
+                    meta = json.loads(row[0]) if row[0] else []
+                    if not isinstance(meta, list):
+                        meta = []
+
+                    next_iteration = len(meta) + 1
+                    entry = {
+                        "iteration": next_iteration,
+                        "role": "user_message",
+                        "result": text,
+                    }
+                    meta.append(entry)
+
+                    await cur.execute(
+                        "UPDATE agent_tasks SET iterations_meta=%s, updated_at=CURRENT_TIMESTAMP WHERE id=%s",
+                        (json.dumps(meta, ensure_ascii=False), int(task_id)),
+                    )
+                    await conn.commit()
+
+            return JSONResponse({"success": True, "entry": entry})
+        except HTTPException:
+            raise
+        except Exception as e:
+            error_msg = str(e)
+            log_error(f"{LOG_PREFIX} send_agent_task_message failed: {error_msg}")
+            raise HTTPException(status_code=500, detail=error_msg)
+
+    async def list_agent_tools(self):
+        """Return the unified tool catalog (internal actions + MCP tools)."""
+        try:
+            from core.tool_registry import tool_registry
+            from core.core_initializer import core_initializer
+            from core.mcp_bridge.client import mcp_client_bridge
+
+            # Rebuild actions so plugin enable/disable toggles are applied immediately.
+            await core_initializer._build_actions_block()
+
+            available_actions = {}
+            if isinstance(core_initializer.actions_block, dict):
+                available_actions = (
+                    core_initializer.actions_block.get("available_actions", {}) or {}
+                )
+
+            # Refresh internal tools from the latest actions block.
+            tool_registry.load_internal_actions(available_actions)
+            await mcp_client_bridge.connect_all(force=True)
+
+            tools = []
+            for tool in tool_registry.all_tools():
+                parameters = []
+                for p in tool.parameters:
+                    parameters.append(
+                        {
+                            "name": p.name,
+                            "type": p.type,
+                            "description": p.description,
+                            "required": bool(p.required),
+                            "enum": p.enum,
+                        }
+                    )
+                tools.append(
+                    {
+                        "name": tool.name,
+                        "description": tool.description,
+                        "source": tool.source,
+                        "security_level": tool.security_level,
+                        "external_effects": list(tool.external_effects or []),
+                        "server_name": tool.server_name,
+                        "parameters": parameters,
+                    }
+                )
+
+            tools.sort(key=lambda t: t["name"])
+            return JSONResponse({"tools": tools})
+        except Exception as e:
+            error_msg = str(e)
+            log_error(f"{LOG_PREFIX} list_agent_tools failed: {error_msg}")
+            raise HTTPException(status_code=500, detail=error_msg)
+
+    async def run_agent_turn(self, request: Request):
+        """Run one synchronous Agentic Runtime turn from WebUI."""
+        try:
+            body = await request.json()
+            prompt = str(body.get("prompt") or body.get("goal") or "").strip()
+            planned_actions = body.get("actions")
+            if not prompt and not isinstance(planned_actions, list):
+                raise HTTPException(status_code=400, detail="Missing prompt")
+
+            engine = body.get("engine")
+            max_iterations = body.get("max_iterations")
+            timeout_seconds = body.get("timeout_seconds")
+
+            # Ensure unified registry is fresh and MCP servers are connected.
+            from core.core_initializer import core_initializer
+            from core.tool_registry import tool_registry
+            from core.mcp_bridge.client import mcp_client_bridge
+            from core.agent_core import get_agent_loop_manager
             from core.config_manager import config_registry as cfg
 
             if not bool(cfg.get_var("AGENT_ENABLED", True)):
                 raise HTTPException(status_code=403, detail="Agent disabled")
 
-            from core.agent_core import get_agent_loop_manager
+            # Rebuild actions so plugin enable/disable toggles are applied immediately.
+            await core_initializer._build_actions_block()
+
+            available_actions = {}
+            if isinstance(core_initializer.actions_block, dict):
+                available_actions = (
+                    core_initializer.actions_block.get("available_actions", {}) or {}
+                )
+            tool_registry.load_internal_actions(available_actions)
+            await mcp_client_bridge.connect_all(force=True)
 
             manager = get_agent_loop_manager()
-            task_id = await manager.run_loop(
+            result = await manager.run_agentic_turn(
+                goal=prompt or "Execute planned agent actions",
                 engine=engine,
-                input_payload=input_payload,
-                context={},
+                context={
+                    "goal": prompt,
+                    "interface": "synth_webui",
+                    "interface_name": "synth_webui",
+                    "interface_path": "synth_webui/agent",
+                    "chat_id": "agent",
+                },
                 max_iterations=max_iterations,
+                timeout_seconds=timeout_seconds,
+                original_message={"sender_id": "webui"},
+                preplanned_calls=planned_actions
+                if isinstance(planned_actions, list)
+                else None,
             )
-            if not task_id:
-                raise HTTPException(
-                    status_code=500, detail="Failed to create agent task"
-                )
-            return JSONResponse({"task_id": task_id})
+
+            # Persistence into agent_tasks is centralised in run_agentic_turn
+            # (source-agnostic), which returns the created task id. This avoids
+            # a duplicate WebUI-only row for the same turn.
+            task_id = result.get("task_id")
+
+            return JSONResponse({"result": result, "task_id": task_id})
         except HTTPException:
             raise
         except Exception as e:
             error_msg = str(e)
-            log_error(f"{LOG_PREFIX} create_agent_task failed: {error_msg}")
+            log_error(f"{LOG_PREFIX} run_agent_turn failed: {error_msg}")
+            raise HTTPException(status_code=500, detail=error_msg)
+
+    async def continue_agent_task(self, task_id: int):
+        """Resume a paused (``pending``) agentic task for another iteration batch.
+
+        A task is parked as ``pending`` when it exhausts its iteration budget
+        without the model calling ``attempt_completion`` (see
+        ``core.agent_core.AgentLoopManager.run_agentic_turn``). This endpoint
+        re-runs the loop ON THE SAME ``agent_tasks`` row, re-injecting the prior
+        observation history so the model continues where it left off, with a
+        fresh ``AGENT_MAX_ITERATIONS`` budget.
+        """
+        try:
+            from core.db import get_conn_ctx
+            from core.core_initializer import core_initializer
+            from core.tool_registry import tool_registry
+            from core.mcp_bridge.client import mcp_client_bridge
+            from core.agent_core import get_agent_loop_manager
+            from core.config_manager import config_registry as cfg
+
+            if not bool(cfg.get_var("AGENT_ENABLED", True)):
+                raise HTTPException(status_code=403, detail="Agent disabled")
+
+            async with get_conn_ctx() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "SELECT status, engine, input, iterations_meta, metadata "
+                        "FROM agent_tasks WHERE id=%s",
+                        (int(task_id),),
+                    )
+                    row = await cur.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="task not found")
+
+            status, engine, input_raw, iterations_raw, metadata_raw = (
+                row[0],
+                row[1],
+                row[2],
+                row[3],
+                row[4],
+            )
+            if status != "pending":
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"task is not pending (status={status})",
+                )
+
+            input_payload = json.loads(input_raw) if input_raw else {}
+            if not isinstance(input_payload, dict):
+                input_payload = {}
+            goal = str(input_payload.get("goal") or "").strip()
+            if not goal:
+                raise HTTPException(
+                    status_code=422, detail="task has no goal to resume"
+                )
+
+            metadata = json.loads(metadata_raw) if metadata_raw else {}
+            if not isinstance(metadata, dict):
+                metadata = {}
+            interface_path = metadata.get("interface_path") or "synth_webui/agent"
+
+            # Rebuild the observation history from the persisted iterations so
+            # the resumed loop continues with the context it already built.
+            prior_observations: list[dict] = []
+            iterations_meta = json.loads(iterations_raw) if iterations_raw else []
+            if isinstance(iterations_meta, list):
+                for entry in iterations_meta:
+                    if not isinstance(entry, dict):
+                        continue
+                    prior_observations.append(
+                        {
+                            "iteration": entry.get("iteration"),
+                            "role": entry.get("role") or "observation",
+                            "content": entry.get("result"),
+                        }
+                    )
+
+            # Mark the row back to ``running`` so the UI reflects the resume.
+            async with get_conn_ctx() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "UPDATE agent_tasks SET status='running', "
+                        "updated_at=CURRENT_TIMESTAMP WHERE id=%s",
+                        (int(task_id),),
+                    )
+                    await conn.commit()
+
+            # Refresh the unified tool registry (same as run_agent_turn).
+            await core_initializer._build_actions_block()
+            available_actions = {}
+            if isinstance(core_initializer.actions_block, dict):
+                available_actions = (
+                    core_initializer.actions_block.get("available_actions", {}) or {}
+                )
+            tool_registry.load_internal_actions(available_actions)
+            await mcp_client_bridge.connect_all(force=True)
+
+            manager = get_agent_loop_manager()
+            result = await manager.run_agentic_turn(
+                goal=goal,
+                engine=engine if engine and engine != "default" else None,
+                context={
+                    "goal": goal,
+                    "interface": "synth_webui",
+                    "interface_name": "synth_webui",
+                    "interface_path": interface_path,
+                    "chat_id": "agent",
+                    "resumed": True,
+                },
+                original_message={"sender_id": "webui"},
+                task_id=int(task_id),
+                prior_observations=prior_observations,
+            )
+
+            return JSONResponse({"result": result, "task_id": int(task_id)})
+        except HTTPException:
+            raise
+        except Exception as e:
+            error_msg = str(e)
+            log_error(f"{LOG_PREFIX} continue_agent_task failed: {error_msg}")
             raise HTTPException(status_code=500, detail=error_msg)
 
     async def create_database_backup_endpoint(self):
@@ -1196,130 +1459,73 @@ class SynthWebUIInterface:
             )
             raise HTTPException(status_code=500, detail=error_msg)
 
-    async def pause_agent_task(self, task_id: int):
+    async def delete_agent_task(self, task_id: int):
         try:
-            from core.agent_core import get_agent_loop_manager
-
-            manager = get_agent_loop_manager()
-            manager.pause_task(int(task_id))
-            # Persist status
             from core.db import get_conn_ctx
 
             async with get_conn_ctx() as conn:
                 async with conn.cursor() as cur:
                     await cur.execute(
-                        "UPDATE agent_tasks SET status=%s WHERE id=%s",
-                        ("paused", int(task_id)),
+                        "DELETE FROM agent_tasks WHERE id=%s",
+                        (int(task_id),),
                     )
                     await conn.commit()
-            return JSONResponse({"status": "paused"})
+            return JSONResponse({"status": "deleted", "task_id": int(task_id)})
         except Exception as e:
             error_msg = str(e)
-            log_error(f"{LOG_PREFIX} pause_agent_task failed: {error_msg}")
+            log_error(f"{LOG_PREFIX} delete_agent_task failed: {error_msg}")
             raise HTTPException(status_code=500, detail=error_msg)
 
-    async def resume_agent_task(self, task_id: int):
-        try:
-            from core.agent_core import get_agent_loop_manager
+    async def rename_agent_task(self, task_id: int, request: Request):
+        """Set (or clear) a human-friendly display name for a task.
 
-            manager = get_agent_loop_manager()
-            manager.resume_task(int(task_id))
-            from core.db import get_conn_ctx
-
-            async with get_conn_ctx() as conn:
-                async with conn.cursor() as cur:
-                    await cur.execute(
-                        "UPDATE agent_tasks SET status=%s WHERE id=%s",
-                        ("running", int(task_id)),
-                    )
-                    await conn.commit()
-            return JSONResponse({"status": "running"})
-        except Exception as e:
-            error_msg = str(e)
-            log_error(f"{LOG_PREFIX} resume_agent_task failed: {error_msg}")
-            raise HTTPException(status_code=500, detail=error_msg)
-
-    async def cancel_agent_task(self, task_id: int):
-        try:
-            from core.agent_core import get_agent_loop_manager
-
-            manager = get_agent_loop_manager()
-            manager.cancel_task(int(task_id))
-            from core.db import get_conn_ctx
-
-            async with get_conn_ctx() as conn:
-                async with conn.cursor() as cur:
-                    await cur.execute(
-                        "UPDATE agent_tasks SET status=%s WHERE id=%s",
-                        ("cancelled", int(task_id)),
-                    )
-                    await conn.commit()
-            return JSONResponse({"status": "cancelled"})
-        except Exception as e:
-            error_msg = str(e)
-            log_error(f"{LOG_PREFIX} cancel_agent_task failed: {error_msg}")
-            raise HTTPException(status_code=500, detail=error_msg)
-
-    async def approve_agent_proposal(self, proposal_id: int, request: Request):
+        The name is stored inside the ``metadata`` JSON blob under the
+        ``name`` key so no schema change is required. Passing an empty or
+        null name clears it.
+        """
         try:
             body = await request.json()
-            trainer = body.get("trainer") or body.get("trainer_id") or None
-            original_message = {"sender_id": trainer} if trainer else None
+            raw_name = body.get("name")
+            name = (raw_name or "").strip() if isinstance(raw_name, str) else ""
 
-            from core.core_initializer import PLUGIN_REGISTRY
+            from core.db import get_conn_ctx
 
-            plugin = PLUGIN_REGISTRY.get("agent")
-            if not plugin:
-                raise HTTPException(status_code=404, detail="Agent plugin not loaded")
+            async with get_conn_ctx() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "SELECT metadata FROM agent_tasks WHERE id=%s",
+                        (int(task_id),),
+                    )
+                    row = await cur.fetchone()
+                    if not row:
+                        raise HTTPException(status_code=404, detail="task not found")
 
-            res = await plugin.execute_action(
-                {
-                    "type": "approve_action",
-                    "payload": {"proposal_id": int(proposal_id)},
-                },
-                {},
-                None,
-                original_message,
+                    try:
+                        meta = json.loads(row[0]) if row[0] else {}
+                    except Exception:
+                        meta = {}
+                    if not isinstance(meta, dict):
+                        meta = {}
+
+                    if name:
+                        meta["name"] = name
+                    else:
+                        meta.pop("name", None)
+
+                    await cur.execute(
+                        "UPDATE agent_tasks SET metadata=%s, updated_at=CURRENT_TIMESTAMP WHERE id=%s",
+                        (json.dumps(meta, ensure_ascii=False), int(task_id)),
+                    )
+                    await conn.commit()
+
+            return JSONResponse(
+                {"status": "renamed", "task_id": int(task_id), "name": name or None}
             )
-            return JSONResponse({"result": res})
         except HTTPException:
             raise
         except Exception as e:
             error_msg = str(e)
-            log_error(f"{LOG_PREFIX} approve_agent_proposal failed: {error_msg}")
-            raise HTTPException(status_code=500, detail=error_msg)
-
-    async def list_agent_proposals(self, limit: int = 50):
-        try:
-            from core.db import get_conn_ctx
-
-            async with get_conn_ctx() as conn:
-                async with conn.cursor() as cur:
-                    await cur.execute(
-                        "SELECT id, command, proposer, status, request_ts FROM agent_activity_log WHERE status=%s ORDER BY request_ts DESC LIMIT %s",
-                        ("proposed", int(limit)),
-                    )
-                    rows = await cur.fetchall()
-                    proposals = []
-                    for r in rows:
-                        proposals.append(
-                            {
-                                "id": r[0],
-                                "command": r[1],
-                                "proposer": r[2],
-                                "status": r[3],
-                                "requested_at": r[4].isoformat() if r[4] else None,
-                            }
-                        )
-                    return JSONResponse({"proposals": proposals})
-        except Exception as e:
-            if self._is_missing_agent_table_error(e):
-                log_warning(
-                    f"{LOG_PREFIX} list_agent_proposals: agent_activity_log table missing, returning empty list"
-                )
-                return JSONResponse({"proposals": []})
-            error_msg = str(e)
-            log_error(f"{LOG_PREFIX} list_agent_proposals failed: {error_msg}")
+            log_error(f"{LOG_PREFIX} rename_agent_task failed: {error_msg}")
             raise HTTPException(status_code=500, detail=error_msg)
 
     async def set_animation_state(self, request: Request):
@@ -5534,7 +5740,9 @@ class SynthWebUIInterface:
         component_descriptions = {
             "core": "Core runtime configuration for the Synthetic Heart system.",
             "persona": "Persona identity, triggers, and autonomy preferences.",
+            "agent": "Agentic runtime controls (Fast/Agent routing, iteration and timeout budgets, exposed MCP actions).",
             "recon": "Recon preflight controls (language/tone hints and timeouts).",
+            "web_search": "Web Search tunables (queries, result and page fetching limits, timeouts).",
             "debrief": "Debrief postflight recovery and audit behavior.",
             "grillo": "Grillo scheduling and internal beat behavior.",
             "grillo_chat_observer": "Grillo chat observer scheduling and sampling.",
@@ -5545,7 +5753,7 @@ class SynthWebUIInterface:
             "message_send": "Outbound message delivery tuning.",
             "action_safety": "Action execution safety policy settings.",
             "weather_plugin": "Weather plugin scheduling and delivery settings.",
-            "cortex": "Cortex engine selection for base, trainer, and Grillo scopes.",
+            "cortex": "Cortex engine selection for base, trainer, agent, Grillo and live scopes.",
         }
 
         try:
@@ -5606,6 +5814,7 @@ class SynthWebUIInterface:
                 "GRILLO_CORTEX",
                 "TRAINER_CORTEX",
                 "LIVE_CORTEX",
+                "AGENT_CORTEX",
             ):
                 ui_type = "select"
                 if entry.get("key") == "LIVE_CORTEX":
@@ -5619,7 +5828,11 @@ class SynthWebUIInterface:
                     combined = sorted(set(live_engines + extra))
                     # always allow explicit disable
                     options = ["Default", "disabled"] + combined
-                elif entry.get("key") in ("GRILLO_CORTEX", "TRAINER_CORTEX"):
+                elif entry.get("key") in (
+                    "GRILLO_CORTEX",
+                    "TRAINER_CORTEX",
+                    "AGENT_CORTEX",
+                ):
                     options = ["Default"] + available_cortex_engines
                 else:
                     options = available_cortex_engines
@@ -6827,18 +7040,18 @@ class SynthWebUIInterface:
                         # Note: try to include involved_users if column exists
                         try:
                             query = f"""
-                                (SELECT id, content, personal_thought, timestamp, context_tags, involved_users, 
+                                (SELECT id, content, personal_thought, created_at, context_tags, involved_users, 
                                        emotions, interface, chat_id, thread_id, interaction_summary, user_message,
                                        FALSE as archived
                                 FROM ai_diary
                                 WHERE 1=1 {search_condition})
                                 UNION ALL
-                                (SELECT id, content, personal_thought, timestamp, context_tags, involved_users, 
+                                (SELECT id, content, personal_thought, created_at, context_tags, involved_users, 
                                        emotions, interface, chat_id, thread_id, interaction_summary, user_message,
                                        TRUE as archived
                                 FROM ai_diary_archive
                                 WHERE 1=1 {search_condition})
-                                ORDER BY timestamp DESC
+                                ORDER BY created_at DESC
                                 LIMIT %s OFFSET %s
                             """
                             await cur.execute(query, search_params + [limit, offset])
@@ -6846,18 +7059,18 @@ class SynthWebUIInterface:
                             # If involved_users column doesn't exist, fallback to query without it
                             if "Unknown column" in str(e):
                                 query = f"""
-                                    (SELECT id, content, personal_thought, timestamp, context_tags, '[]' as involved_users, 
+                                    (SELECT id, content, personal_thought, created_at, context_tags, '[]' as involved_users, 
                                            emotions, interface, chat_id, thread_id, interaction_summary, user_message,
                                            FALSE as archived
                                     FROM ai_diary
                                     WHERE 1=1 {search_condition})
                                     UNION ALL
-                                    (SELECT id, content, personal_thought, timestamp, context_tags, '[]' as involved_users, 
+                                    (SELECT id, content, personal_thought, created_at, context_tags, '[]' as involved_users, 
                                            emotions, interface, chat_id, thread_id, interaction_summary, user_message,
                                            TRUE as archived
                                     FROM ai_diary_archive
                                     WHERE 1=1 {search_condition})
-                                    ORDER BY timestamp DESC
+                                    ORDER BY created_at DESC
                                     LIMIT %s OFFSET %s
                                 """
                                 await cur.execute(
@@ -6868,12 +7081,12 @@ class SynthWebUIInterface:
                     else:
                         try:
                             query = f"""
-                                SELECT id, content, personal_thought, timestamp, context_tags, involved_users, 
+                                SELECT id, content, personal_thought, created_at, context_tags, involved_users, 
                                        emotions, interface, chat_id, thread_id, interaction_summary, user_message,
                                        FALSE as archived
                                 FROM ai_diary
                                 WHERE 1=1 {search_condition}
-                                ORDER BY timestamp DESC
+                                ORDER BY created_at DESC
                                 LIMIT %s OFFSET %s
                             """
                             await cur.execute(query, search_params + [limit, offset])
@@ -6881,12 +7094,12 @@ class SynthWebUIInterface:
                             # If involved_users column doesn't exist, fallback
                             if "Unknown column" in str(e):
                                 query = f"""
-                                    SELECT id, content, personal_thought, timestamp, context_tags, '[]' as involved_users, 
+                                    SELECT id, content, personal_thought, created_at, context_tags, '[]' as involved_users, 
                                            emotions, interface, chat_id, thread_id, interaction_summary, user_message,
                                            FALSE as archived
                                     FROM ai_diary
                                     WHERE 1=1 {search_condition}
-                                    ORDER BY timestamp DESC
+                                    ORDER BY created_at DESC
                                     LIMIT %s OFFSET %s
                                 """
                                 await cur.execute(
@@ -7062,7 +7275,7 @@ class SynthWebUIInterface:
 
                     # Count distinct days that match the filter
                     count_query = f"""
-                        SELECT COUNT(DISTINCT DATE(timestamp))
+                        SELECT COUNT(DISTINCT DATE(created_at))
                         FROM ai_diary
                         {where_clause}
                     """
@@ -7079,12 +7292,12 @@ class SynthWebUIInterface:
                             MAX(id)                                                           AS id,
                             GROUP_CONCAT(content ORDER BY id ASC SEPARATOR '\n\n---\n\n')    AS content,
                             MAX(personal_thought)                                             AS personal_thought,
-                            MAX(timestamp)                                                    AS timestamp,
+                            MAX(created_at)                                                    AS timestamp,
                             JSON_EXTRACT(MAX(emotions), '$[0].type')                          AS primary_emotion
                         FROM ai_diary
                         {where_clause}
-                        GROUP BY DATE(timestamp)
-                        ORDER BY MAX(timestamp) {order}
+                        GROUP BY DATE(created_at)
+                        ORDER BY MAX(created_at) {order}
                         LIMIT %s OFFSET %s
                     """
                     await cur.execute(query, search_params + [per_page, offset])
@@ -7897,8 +8110,8 @@ class SynthWebUIInterface:
             async with get_conn_ctx() as conn:
                 async with conn.cursor() as cur:
                     await cur.execute(
-                        "DELETE FROM ai_diary WHERE DATE(timestamp) = "
-                        "(SELECT DATE(timestamp) FROM ai_diary WHERE id = %s)",
+                        "DELETE FROM ai_diary WHERE DATE(created_at) = "
+                        "(SELECT DATE(created_at) FROM ai_diary WHERE id = %s)",
                         (entry_id,),
                     )
                     deleted = getattr(cur, "rowcount", 0) or 0
@@ -8294,10 +8507,10 @@ class SynthWebUIInterface:
             async with get_conn_ctx() as conn:
                 async with conn.cursor() as cur:
                     query = f"""
-                        SELECT interface_path, sender_name, message_text, timestamp, metadata
+                        SELECT interface_path, sender_name, message_text, created_at, metadata
                         FROM chat_history_cache
                         WHERE {where_clause}
-                        ORDER BY timestamp {order}
+                        ORDER BY created_at {order}
                         LIMIT %s OFFSET %s
                     """
 
@@ -8315,7 +8528,7 @@ class SynthWebUIInterface:
                             raw_interface_path = row.get("interface_path")
                             raw_sender_name = row.get("sender_name")
                             raw_message_text = row.get("message_text")
-                            raw_timestamp = row.get("timestamp")
+                            raw_timestamp = row.get("created_at")
                             raw_meta = row.get("metadata")
                         else:
                             raw_interface_path = row[0]
@@ -8912,6 +9125,18 @@ class SynthWebUIInterface:
                 _invalidate_vox_lang_override_cache()
             except Exception:
                 pass
+
+        if key in {"AGENT_ENABLED", "AGENT_APPROVAL_MODE", "AGENT_SHELL_WHITELIST"}:
+            try:
+                from core.core_initializer import core_initializer
+
+                # Agent plugin checks is_enabled() while rebuilding this map, so
+                # a config toggle instantly updates the available tool/action set.
+                await core_initializer._build_actions_block()
+            except Exception as exc:
+                log_warning(
+                    f"{LOG_PREFIX} failed to rebuild actions after {key} update: {exc}"
+                )
 
         response_data = {"status": "ok"}
 
@@ -10283,10 +10508,16 @@ class SynthWebUIInterface:
         # Single source of truth: derive options from the same data already built above.
         cortex_scopes: list[dict] = []
         try:
-            # Grillo/Trainer: only llm_provider engines — same source as the main
-            # engine selector in the Engines tab (by_cortex is already built above).
+            # Grillo/Trainer/Agent: only registered & enabled llm_provider engines.
+            # Mirror the main engine selector in the Engines tab, which shows only
+            # external-endpoint engines (is_external=True) for the llm_provider kind
+            # — those are the endpoints actually configured and enabled. Static
+            # protocol-template modules (is_external=False) and disabled endpoints
+            # (never registered) are excluded.
             llm_engines_sorted = sorted(
-                e["name"] for e in by_cortex.get("llm_provider", [])
+                e["name"]
+                for e in by_cortex.get("llm_provider", [])
+                if e.get("is_external")
             )
             # Live scope: LIVE_REGISTRY is the authoritative source for streaming
             # engines; fall back to CortexRegistry if the registry is unavailable.
@@ -10313,6 +10544,12 @@ class SynthWebUIInterface:
                     "key": "TRAINER_CORTEX",
                     "label": "Trainer",
                     "value": config_registry.get_value("TRAINER_CORTEX", "Default"),
+                    "options": ["Default"] + llm_engines_sorted,
+                },
+                {
+                    "key": "AGENT_CORTEX",
+                    "label": "Agent",
+                    "value": config_registry.get_value("AGENT_CORTEX", "Default"),
                     "options": ["Default"] + llm_engines_sorted,
                 },
                 {

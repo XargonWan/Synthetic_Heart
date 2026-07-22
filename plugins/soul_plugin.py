@@ -509,10 +509,10 @@ class SoulPlugin(PluginBase):
                 async with conn.cursor() as cur:
                     await cur.execute(
                         """
-                        SELECT sender_name, sender_id, message_text, timestamp
+                        SELECT sender_name, sender_id, message_text, created_at
                         FROM chat_history_cache
-                        WHERE timestamp >= %s
-                        ORDER BY timestamp ASC
+                        WHERE created_at >= %s
+                        ORDER BY created_at ASC
                         LIMIT 500
                         """,
                         (cutoff,),
@@ -588,7 +588,11 @@ class SoulPlugin(PluginBase):
             seen_ids.add(cell.id)
 
         reranked.sort(
-            key=lambda match: (match.score, match.similarity, match.cell.timestamp),
+            key=lambda match: (
+                match.score,
+                match.similarity,
+                match.cell.event_timestamp,
+            ),
             reverse=True,
         )
         selected = reranked[:_SOUL_RECALL_LIMIT]
@@ -654,7 +658,7 @@ class SoulPlugin(PluginBase):
 
         header_parts = [
             "SOUL recalled memory",
-            cell.timestamp.astimezone(timezone.utc).date().isoformat(),
+            cell.event_timestamp.astimezone(timezone.utc).date().isoformat(),
         ]
         if cell.session_id == active_session_id:
             header_parts.append("same chat")

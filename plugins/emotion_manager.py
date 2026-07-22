@@ -166,18 +166,18 @@ EMOTION_BASELINES = {
 
 @dataclass
 class EmotionState:
-    """Represents an emotion with intensity and timestamp."""
+    """Represents an emotion with intensity and created_at."""
 
     emotion_name: str
     intensity: float  # 0.0-10.0
-    timestamp: datetime  # When this emotion was created/updated
+    created_at: datetime  # When this emotion was created/updated
 
     def to_dict(self) -> dict:
         """Convert to dictionary for JSON serialization."""
         return {
             "emotion": self.emotion_name,
             "intensity": self.intensity,
-            "timestamp": self.timestamp.isoformat(),
+            "timestamp": self.created_at.isoformat(),
         }
 
     @staticmethod
@@ -199,7 +199,7 @@ class EmotionState:
             current_time = datetime.now(timezone.utc)
 
         current_time = self._normalize_datetime(current_time)
-        emotion_timestamp = self._normalize_datetime(self.timestamp)
+        emotion_timestamp = self._normalize_datetime(self.created_at)
 
         # Get decay half-life from config (in seconds, default 1 hour = 3600s)
         tau = config_registry.get_value("EMOTION_DECAY_TAU", 3600)
@@ -373,10 +373,10 @@ class EmotionManager(PluginBase):
                         id INT AUTO_INCREMENT PRIMARY KEY,
                         emotion_name VARCHAR(100) NOT NULL,
                         intensity FLOAT NOT NULL DEFAULT 5.0,
-                        timestamp DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
                         updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
                         INDEX idx_emotion_name (emotion_name),
-                        INDEX idx_timestamp (timestamp)
+                        INDEX idx_created_at (created_at)
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
                 """)
                 log_debug("[emotion_manager] emotion_state table ensured")
@@ -392,8 +392,8 @@ class EmotionManager(PluginBase):
                         trigger_condition VARCHAR(255),
                         decision_logic TEXT,
                         next_check DATETIME,
-                        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-                        INDEX idx_timestamp (timestamp)
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        INDEX idx_created_at (created_at)
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
                 """)
                 log_debug("[emotion_manager] emotion_diary table ensured")
@@ -414,7 +414,7 @@ class EmotionManager(PluginBase):
                     cm = await cm
                 async with cm as cur:
                     await cur.execute(
-                        "SELECT emotion_name, intensity, timestamp FROM emotion_state ORDER BY timestamp DESC"
+                        "SELECT emotion_name, intensity, created_at FROM emotion_state ORDER BY created_at DESC"
                     )
                     rows = await cur.fetchall()
 
@@ -422,13 +422,13 @@ class EmotionManager(PluginBase):
             now = datetime.now(timezone.utc)
 
             for row in rows:
-                emotion_name, intensity, timestamp = row
+                emotion_name, intensity, created_at = row
 
                 if include_raw:
                     result[emotion_name] = intensity
                 else:
                     # Apply decay
-                    state = EmotionState(emotion_name, intensity, timestamp)
+                    state = EmotionState(emotion_name, intensity, created_at)
                     decayed = state.get_decayed_intensity(now)
                     result[emotion_name] = decayed
 
@@ -452,14 +452,14 @@ class EmotionManager(PluginBase):
                     cm = await cm
                 async with cm as cur:
                     await cur.execute(
-                        "SELECT emotion_name, intensity, timestamp FROM emotion_state"
+                        "SELECT emotion_name, intensity, created_at FROM emotion_state"
                     )
                     rows = await cur.fetchall()
 
             result = {}
             for row in rows:
-                emotion_name, intensity, timestamp = row
-                result[emotion_name] = (intensity, timestamp)
+                emotion_name, intensity, created_at = row
+                result[emotion_name] = (intensity, created_at)
 
             return result
 
@@ -577,8 +577,8 @@ class EmotionManager(PluginBase):
                 sql_values.append("%s")
                 params.append(value)
 
-        if "timestamp" in columns:
-            sql_columns.append("timestamp")
+        if "created_at" in columns:
+            sql_columns.append("created_at")
             sql_values.append("%s")
             params.append(datetime.now(timezone.utc))
 
@@ -637,7 +637,7 @@ class EmotionManager(PluginBase):
                     if existing:
                         # Update existing
                         await cur.execute(
-                            "UPDATE emotion_state SET intensity = %s, timestamp = NOW() WHERE emotion_name = %s",
+                            "UPDATE emotion_state SET intensity = %s, created_at = NOW() WHERE emotion_name = %s",
                             (intensity, emotion),
                         )
                     else:
@@ -858,7 +858,7 @@ class EmotionManager(PluginBase):
                 async with conn.cursor() as cur:
                     # Get all emotions
                     await cur.execute(
-                        "SELECT emotion_name, intensity, timestamp FROM emotion_state"
+                        "SELECT emotion_name, intensity, created_at FROM emotion_state"
                     )
                     rows = await cur.fetchall()
                     existing_emotions = {row[0] for row in rows}
@@ -868,8 +868,8 @@ class EmotionManager(PluginBase):
                     to_update = []
 
                     # 1. Decay existing emotions
-                    for emotion_name, intensity, timestamp in rows:
-                        state = EmotionState(emotion_name, intensity, timestamp)
+                    for emotion_name, intensity, created_at in rows:
+                        state = EmotionState(emotion_name, intensity, created_at)
                         decayed = state.get_decayed_intensity(now)
 
                         baseline = EMOTION_BASELINES.get(emotion_name, DEFAULT_BASELINE)
@@ -909,7 +909,7 @@ class EmotionManager(PluginBase):
                     # decayed value, compounding the decay each cycle.
                     if to_update:
                         await cur.executemany(
-                            "UPDATE emotion_state SET intensity = %s, timestamp = NOW() "
+                            "UPDATE emotion_state SET intensity = %s, created_at = NOW() "
                             "WHERE emotion_name = %s",
                             to_update,
                         )
@@ -926,7 +926,7 @@ class EmotionManager(PluginBase):
 
                     if to_insert:
                         await cur.executemany(
-                            "INSERT INTO emotion_state (emotion_name, intensity, timestamp) VALUES (%s, %s, NOW())",
+                            "INSERT INTO emotion_state (emotion_name, intensity, created_at) VALUES (%s, %s, NOW())",
                             to_insert,
                         )
 
@@ -963,16 +963,16 @@ class EmotionManager(PluginBase):
                     if inspect.iscoroutine(cm):
                         cm = await cm
                     async with cm as cur:
-                        # Get latest 20 diary entries with emotions AND timestamp
+                        # Get latest 20 diary entries with emotions AND created_at
                         await cur.execute(
-                            """SELECT emotions, timestamp FROM ai_diary 
+                            """SELECT emotions, created_at FROM ai_diary 
                                WHERE emotions IS NOT NULL AND emotions != '[]' 
-                               ORDER BY timestamp DESC LIMIT 20"""
+                               ORDER BY created_at DESC LIMIT 20"""
                         )
                         rows = await cur.fetchall()
 
                         for row in rows:
-                            if row and row[0]:  # emotions, timestamp
+                            if row and row[0]:  # emotions, created_at
                                 emotions_json = row[0]
                                 entry_ts = row[1]
 

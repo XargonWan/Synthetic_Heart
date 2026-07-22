@@ -21,8 +21,8 @@ try:
         value_type=bool,
         ui_type="bool",
         description="Enable the Recon Log Reader plugin (include log snippets in Recon).",
-        scope="agent",
-        component="agent",
+        scope="recon",
+        component="recon",
     )
 except Exception:
     from core.config_manager import config_registry
@@ -33,8 +33,8 @@ except Exception:
         value_type=bool,
         label="Enable Recon Log Reader",
         description="Enable the Recon Log Reader plugin (include log snippets in Recon).",
-        group="agent",
-        component="agent",
+        group="recon",
+        component="recon",
     )
 
 LOG_DIR = os.getenv("SYNTH_LOG_DIR", "logs")
