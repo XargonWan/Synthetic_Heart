@@ -342,6 +342,107 @@ class CoreInitializer:
                         f"[core_initializer] Early import of '{_early_mod}' failed: {_e}"
                     )
 
+            # 4.5.1. Eagerly register agentic-runtime config keys.
+            # These keys are only ever read via config_registry.get_var(...) INSIDE
+            # functions on the chat path (core.agent_router.classify, the gate in
+            # core.message_chain, plugins.recon_agent_intent), never at module import
+            # time. That means they are not in _definitions when load_all_from_db()
+            # runs below, so their DB value (e.g. AGENTIC_ROUTING_ENABLED=true) is
+            # never loaded and they permanently fall back to their code default —
+            # the Fast/Agent router would stay disabled even when enabled in the DB.
+            # Registering them here ensures the DB sweep populates them. Same class
+            # of bug as BOTFATHER_TOKEN (see FIXED_ISSUES.md).
+            try:
+                from core.config_manager import config_registry as _cfg_reg
+
+                _cfg_reg.get_var(
+                    "AGENTIC_ROUTING_ENABLED",
+                    False,
+                    value_type=bool,
+                    label="Enable Agentic Routing",
+                    description=(
+                        "Enable the deterministic Fast/Agent router. When on, "
+                        "turns that need tools or multiple steps are escalated "
+                        "to the bounded Agent lane; otherwise every turn uses "
+                        "the Fast lane."
+                    ),
+                    group="agent",
+                    component="agent",
+                )
+                # AGENT_ENABLED (the user-facing on/off toggle) is registered at
+                # module import time by plugins.agent_plugin, but the plugin is
+                # loaded AFTER load_all_from_db() runs — so its DB value would
+                # never be swept in and get_var(...) on the chat path would
+                # permanently fall back to the code default (True), keeping the
+                # Agent Lane engaged even when the user switched the agent OFF.
+                # Register it eagerly here so the DB sweep populates it.
+                _cfg_reg.get_var(
+                    "AGENT_ENABLED",
+                    True,
+                    value_type=bool,
+                    component="agent",
+                )
+                _cfg_reg.get_var(
+                    "AGENT_MAX_ITERATIONS",
+                    5,
+                    value_type=int,
+                    label="Agent Max Iterations",
+                    description="Hard cap on the Agent reasoning-loop iterations per turn.",
+                    group="agent",
+                    component="agent",
+                    advanced=True,
+                )
+                _cfg_reg.get_var(
+                    "AGENT_TURN_TIMEOUT_SEC",
+                    120,
+                    value_type=int,
+                    label="Agent Turn Timeout (s)",
+                    description="Wall-clock budget in seconds for a single Agent turn.",
+                    group="agent",
+                    component="agent",
+                    advanced=True,
+                )
+                _cfg_reg.get_var(
+                    "DRONE_MAX_ITERATIONS",
+                    3,
+                    value_type=int,
+                    label="Drone Max Iterations",
+                    description="Hard cap on a Drone sub-agent's reasoning-loop iterations.",
+                    group="agent",
+                    component="agent",
+                    advanced=True,
+                )
+                _cfg_reg.get_var(
+                    "DRONE_TURN_TIMEOUT_SEC",
+                    90,
+                    value_type=int,
+                    label="Drone Turn Timeout (s)",
+                    description="Wall-clock budget in seconds for a single Drone turn.",
+                    group="agent",
+                    component="agent",
+                    advanced=True,
+                )
+                _cfg_reg.get_var(
+                    "AGENT_MCP_EXPOSED_ACTIONS",
+                    "",
+                    value_type=str,
+                    label="Agent MCP Exposed Actions",
+                    description=(
+                        "Comma-separated list of Synth actions to expose as MCP "
+                        "tools to the agentic runtime (empty = none)."
+                    ),
+                    group="agent",
+                    component="agent",
+                    advanced=True,
+                )
+                log_debug(
+                    "[core_initializer] Eagerly registered agentic-runtime config keys"
+                )
+            except Exception as _e:
+                log_warning(
+                    f"[core_initializer] Failed to eagerly register agentic config keys: {_e}"
+                )
+
             # 3.5. Load all configurations from DB AFTER persona manager initialization
             # This ensures SYNTH_NAME, SYNTH_PROFILE, SYNTH_ALIASES have been registered and can be loaded from DB
             log_info("[core_initializer] Loading all configurations from database...")

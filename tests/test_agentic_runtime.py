@@ -122,8 +122,12 @@ def test_router_agent_lane_tool_call(monkeypatch):
     assert lane == "agent"
 
 
-def test_router_agent_lane_multi_action(monkeypatch):
-    """Multiple actions force the Agent Lane."""
+def test_router_message_only_batch_stays_fast(monkeypatch):
+    """A batch of pure message actions must NOT engage the Agent Lane.
+
+    Synth actions such as ``message_*`` / ``tts_speak`` are plain replies; they
+    must be delivered on the classic Fast Lane and never drive the agent loop.
+    """
     monkeypatch.setattr(
         "core.agent_router.config_registry",
         type("C", (), {"get_var": lambda *a, **k: True})(),
@@ -132,6 +136,21 @@ def test_router_agent_lane_multi_action(monkeypatch):
         [
             {"type": "message", "payload": {"text": "a"}},
             {"type": "tts_speak", "payload": {"text": "b"}},
+        ]
+    )
+    assert lane == "fast"
+
+
+def test_router_mixed_actions_force_agent(monkeypatch):
+    """A mixed batch containing a real tool call forces the Agent Lane."""
+    monkeypatch.setattr(
+        "core.agent_router.config_registry",
+        type("C", (), {"get_var": lambda *a, **k: True})(),
+    )
+    lane = classify(
+        [
+            {"type": "message", "payload": {"text": "a"}},
+            {"type": "mcp_fs_read", "payload": {"path": "/x"}},
         ]
     )
     assert lane == "agent"
@@ -144,6 +163,46 @@ def test_router_disabled_returns_fast(monkeypatch):
         type("C", (), {"get_var": lambda *a, **k: False})(),
     )
     lane = classify([{"type": "mcp_fs_read", "payload": {}}])
+    assert lane == "fast"
+
+
+def test_router_context_agent_needed_forces_agent(monkeypatch):
+    """The pre-LLM recon flag ``agent_needed`` deterministically forces AGENT.
+
+    This is the authoritative routing signal: even a batch that would otherwise
+    look like a plain message must go to the Agent Lane when the recon judged
+    the user's request as agentic work.
+    """
+    monkeypatch.setattr(
+        "core.agent_router.config_registry",
+        type("C", (), {"get_var": lambda *a, **k: True})(),
+    )
+    lane = classify(
+        [{"type": "message", "payload": {"text": "hi"}}],
+        context={"agent_needed": True},
+    )
+    assert lane == "agent"
+
+
+def test_router_mixed_non_tool_stays_fast(monkeypatch):
+    """A multi-action batch with no tool call and no ``agent_needed`` flag stays
+    on the Fast Lane.
+
+    This is the regression guard for the misrouted greeting: the main model
+    emitting several non-tool actions (e.g. message + diary + emotion) must no
+    longer escalate on its own — the decision belongs to the recon flag.
+    """
+    monkeypatch.setattr(
+        "core.agent_router.config_registry",
+        type("C", (), {"get_var": lambda *a, **k: True})(),
+    )
+    lane = classify(
+        [
+            {"type": "message", "payload": {"text": "hi"}},
+            {"type": "diary_entry", "payload": {"text": "note"}},
+            {"type": "emotion_update", "payload": {"joy": 0.2}},
+        ]
+    )
     assert lane == "fast"
 
 
@@ -187,3 +246,61 @@ def test_mcp_server_build_registers_actions(monkeypatch):
 
     build_server("test")
     assert "synth_tts_speak" in registered
+
+
+@pytest.mark.asyncio
+async def test_call_engine_direct_agent_mode_uses_role_separated_messages(monkeypatch):
+    """An agent-mode prompt must reach the engine via role-separated messages.
+
+    Regression guard for the ``system_message`` collision: the agent prompt
+    carries its ``agent_turn`` block under the ``system_message`` key, which the
+    cortex bridge's _build_messages mistakes for a corrector payload — discarding
+    the real GOAL/TOOLS/system text and emitting a near-empty prompt (which
+    external web-driven engines pad with canvas/JSON boilerplate). _call_engine_direct
+    must instead build explicit role-separated messages from
+    ``input.payload.system``/``input.payload.text`` and call ``generate_response``,
+    never ``handle_incoming_message``.
+    """
+    captured = {}
+
+    class FakeEngine:
+        async def generate_response(self, messages):
+            captured["messages"] = messages
+            return "engine reply"
+
+        async def handle_incoming_message(self, bot, message, context_memory_or_prompt):
+            captured["hidden_path"] = True
+            return "SHOULD NOT BE USED"
+
+    fake_engine = FakeEngine()
+
+    class FakeRegistry:
+        def get_engine(self, name):
+            return fake_engine
+
+        def load_engine(self, name):
+            return fake_engine
+
+    monkeypatch.setattr(
+        "core.cortex_registry.get_cortex_registry", lambda: FakeRegistry()
+    )
+    monkeypatch.setattr(
+        "core.config.get_active_cortex_engine",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("should use pinned")),
+    )
+
+    prompt = {
+        "input": {"payload": {"text": "GOAL: do the thing", "system": "AGENTIC SYS"}},
+        "system_message": {"type": "agent_turn", "goal": "do the thing"},
+        "agent_mode": True,
+    }
+
+    manager = AgentLoopManager()
+    out = await manager._call_engine_direct(prompt, "pinned-engine")
+
+    assert out == "engine reply"
+    assert "hidden_path" not in captured, "handle_incoming_message must not be used"
+    assert captured["messages"] == [
+        {"role": "system", "content": "AGENTIC SYS"},
+        {"role": "user", "content": "GOAL: do the thing"},
+    ]

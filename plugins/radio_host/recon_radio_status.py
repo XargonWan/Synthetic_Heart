@@ -24,8 +24,8 @@ try:
             "Inject the live radio status (current/next track, listeners) into "
             "the main prompt when the conversation is about the radio."
         ),
-        scope="agent",
-        component="agent",
+        scope="recon",
+        component="recon",
     )
 except Exception:
     config_registry.get_var(
@@ -37,8 +37,8 @@ except Exception:
             "Inject the live radio status (current/next track, listeners) into "
             "the main prompt when the conversation is about the radio."
         ),
-        group="agent",
-        component="agent",
+        group="recon",
+        component="recon",
     )
 
 

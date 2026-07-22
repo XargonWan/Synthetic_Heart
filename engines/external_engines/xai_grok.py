@@ -255,25 +255,6 @@ class XaiGrokPlugin(AIPluginBase):
             "model_name": self._current_model,
         }
 
-    def supports_agent(self) -> bool:
-        return True
-
-    def agent_execute(
-        self, action_dict: dict[str, Any], context: dict[str, Any] | None = None
-    ) -> dict[str, Any]:
-        try:
-            from core.core_initializer import PLUGIN_REGISTRY
-
-            agent_plugin = PLUGIN_REGISTRY.get("agent") if PLUGIN_REGISTRY else None
-            if agent_plugin and hasattr(agent_plugin, "execute_action"):
-                res = agent_plugin.execute_action(action_dict, context=context)
-                if isinstance(res, dict):
-                    return res
-                return {"success": True, "result": res}
-        except Exception as exc:
-            log_warning(f"[xai_grok] agent_execute delegation failed: {exc}")
-        return {"success": False, "error": "agent plugin unavailable"}
-
     async def handle_incoming_message(self, bot: Any, message: Any, prompt: Any) -> str:
         """Process a message using a pre-built prompt and return the response."""
         from core.notifier import notify_trainer

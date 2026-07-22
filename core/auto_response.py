@@ -105,24 +105,6 @@ class AutoResponseSystem:
                 f"DO NOT call '{action_type}' again. Respond directly to the user with these results. "
                 f"Output a single message_* action with your response text. No additional actions needed."
             )
-            # Shell command results must be delivered to the interfaces with the
-            # executed command and its raw output kept verbatim inside fenced
-            # triple-backtick code blocks (legacy delivery path — mirrors the
-            # PromptRequest delivery note in build_delivery_request).
-            if action_type == "agent_execute":
-                loop_prevention_instruction += (
-                    " Because this is a shell command execution, preserve the "
-                    "executed command and its raw output verbatim inside fenced "
-                    "triple-backtick code blocks. Format the message exactly like "
-                    "this (translate only the two labels into the conversation "
-                    "language, keep the code fences and their contents unchanged):\n"
-                    "<label for 'command'>:\n"
-                    "```\n<the executed command>\n```\n"
-                    "<label for 'output'>:\n"
-                    "```\n<the raw command output>\n```\n"
-                    "Do not summarise, paraphrase, or truncate the command or its "
-                    "output."
-                )
 
             system_payload = {
                 "system_message": {

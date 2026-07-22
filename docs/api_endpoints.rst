@@ -86,14 +86,16 @@ Historic data endpoints (used by the WebUI for timeline/history views):
 Agent‑related APIs
 ------------------
 
-(The agent subsystem allows scheduled/background AI tasks.)
+(The Agentic Runtime persists each turn and its iterations. See
+:doc:`agentic_tools` for the runtime model.)
 
 - **GET** `/api/agent/tasks` – list active/past agent tasks.
 - **GET** `/api/agent/tasks/{task_id}` – fetch details for a specific task.
-- **POST** `/api/agent/tasks` – create a new agent task.
-- **POST** `/api/agent/tasks/{task_id}/pause` – pause a running task.
-- **POST** `/api/agent/tasks/{task_id}/resume` – resume a paused task.
-- **POST** `/api/agent/tasks/{task_id}/cancel` – cancel a task.
+- **POST** `/api/agent/run` – run a single bounded agentic turn
+  (``run_agentic_turn``) and persist it. Body carries the input payload and
+  optional engine/context.
+- **GET** `/api/agent/tools` – list the unified tool manifest (internal actions
+  + remote MCP tools) available to the runtime.
 - **POST** `/api/agent/tasks/{task_id}/message` – append a user message to the
   task's reasoning timeline (``iterations_meta``). Body: ``{"text": "..."}``.
   Records the human intervention inline in the conversational WebUI; does not
@@ -105,18 +107,8 @@ Agent‑related APIs
   the WebUI Agent panel. Send an empty string (``{"name": ""}``) to clear the
   custom name and revert to the engine label. Returns
   ``{"status": "renamed", "task_id": <id>, "name": <name|null>}``.
-- **DELETE** `/api/agent/tasks/{task_id}` – permanently delete a task row. Any
-  running agent loop for that task is cancelled on a best-effort basis before the
-  row is removed. Exposed in the WebUI Agent panel as the 🗑 button on each task
-  card.
-- **GET** `/api/agent/proposals` – list agent action proposals waiting
-  approval.
-- **POST** `/api/agent/proposals/{proposal_id}/approve` – approve a pending
-  proposal.
-- **POST** `/api/agent/proposals/{proposal_id}/reject` – reject a pending
-  proposal, marking its status as ``rejected`` (explicit human refusal).
-- **DELETE** `/api/agent/proposals/{proposal_id}` – soft-cancel a pending
-  proposal (marks status ``cancelled``).
+- **DELETE** `/api/agent/tasks/{task_id}` – permanently delete a task row.
+  Exposed in the WebUI Agent panel as the 🗑 button on each task card.
 
 Animations, VRM & Emotion State
 -------------------------------

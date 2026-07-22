@@ -154,7 +154,6 @@ async function runAgenticTurn(){
     </div>`;
 
     fetchAgentTasks();
-    fetchAgentProposals();
   }catch(e){
     console.error(e);
     out.innerHTML = '<div class="card">Run failed due to network/runtime error.</div>';
@@ -241,9 +240,28 @@ async function fetchAgentTasks(){
 
 // ── Selected task: linear conversation stream ─────────────────────────────
 
-function _scrollConversationToBottom(){
+// Distance from the bottom (px) within which we still consider the user
+// "pinned" to the latest content and are allowed to auto-scroll.
+const _AGENT_SCROLL_STICK_THRESHOLD = 60;
+
+// True when the user is at (or very near) the bottom of the conversation.
+// Used to decide whether a re-render should keep following new content or
+// leave the scroll position alone so the user can read earlier messages.
+function _isConversationNearBottom(conv){
+  if(!conv) return true;
+  const distance = conv.scrollHeight - conv.scrollTop - conv.clientHeight;
+  return distance <= _AGENT_SCROLL_STICK_THRESHOLD;
+}
+
+// Auto-scroll to the bottom ONLY if the user was already near the bottom.
+// While the agent runs, re-renders would otherwise keep yanking the view
+// back down and prevent the user from scrolling up to read earlier steps.
+function _scrollConversationToBottom(force){
   const conv = document.getElementById('agent-conversation');
-  if(conv) conv.scrollTop = conv.scrollHeight;
+  if(!conv) return;
+  if(force || _isConversationNearBottom(conv)){
+    conv.scrollTop = conv.scrollHeight;
+  }
 }
 
 async function loadAgentTask(id){
@@ -267,19 +285,14 @@ async function loadAgentTask(id){
     const createdAt = data.created_at ? new Date(data.created_at).toLocaleString() : '-';
     const goal = (data.input && data.input.goal) || '';
 
-    // Slim meta bar with inline lifecycle controls.
+    // Slim meta bar.
     if(metaBar){
       metaBar.innerHTML = `
         <span>Task <strong>#${_escapeHtml(String(data.id))}</strong></span>
         <span>engine <strong>${_escapeHtml(engine)}</strong></span>
         <span>status <strong>${_escapeHtml(status)}</strong></span>
         <span>stop <strong>${_escapeHtml(stopReason)}</strong></span>
-        <span>${_escapeHtml(createdAt)}</span>
-        <span class="agent-meta-actions">
-          <button class="pill secondary" onclick="pauseTask(${data.id})" title="Pause">⏸️</button>
-          <button class="pill" onclick="resumeTask(${data.id})" title="Resume">▶️</button>
-          <button class="pill" onclick="cancelTask(${data.id})" title="Cancel">✖️</button>
-        </span>`;
+        <span>${_escapeHtml(createdAt)}</span>`;
     }
 
     const parts = [];
@@ -304,17 +317,15 @@ async function loadAgentTask(id){
       parts.push('<div class="agent-empty">No steps captured for this task yet.</div>');
     }
 
+    // Capture whether the user was pinned to the bottom BEFORE we replace the
+    // HTML (which resets scrollTop). Only re-follow new content if they were.
+    const wasNearBottom = _isConversationNearBottom(conv);
     conv.innerHTML = parts.join('');
 
-    // Render inline proposals below the stream.
-    await fetchAgentProposals();
-    _scrollConversationToBottom();
+    if(wasNearBottom) _scrollConversationToBottom(true);
   }catch(e){ console.error(e); }
 }
 
-async function pauseTask(id){ await fetch(_apiBase + `/api/agent/tasks/${id}/pause`, {method:'POST'}); await fetchAgentTasks(); loadAgentTask(id);} 
-async function resumeTask(id){ await fetch(_apiBase + `/api/agent/tasks/${id}/resume`, {method:'POST'}); await fetchAgentTasks(); loadAgentTask(id);} 
-async function cancelTask(id){ await fetch(_apiBase + `/api/agent/tasks/${id}/cancel`, {method:'POST'}); await fetchAgentTasks(); loadAgentTask(id);} 
 async function deleteAgentTask(id){
   if(!window.confirm(`Delete agent task #${id}? This cannot be undone.`)) return;
   try{
@@ -337,79 +348,6 @@ async function renameAgentTask(id, currentName){
     if(!resp.ok){ console.error('Failed to rename agent task', id, resp.status); return; }
     await fetchAgentTasks();
   }catch(e){ console.error(e); }
-}
-
-// ── Inline proposals (Allow / Refuse) ─────────────────────────────────────
-
-async function fetchAgentProposals(){
-  try{
-    const resp = await fetch(_apiBase + '/api/agent/proposals');
-    const data = await resp.json();
-    const list = data.proposals || [];
-    const conv = document.getElementById('agent-conversation');
-    if(!conv) return;
-
-    // Remove any previously rendered inline proposals before re-appending.
-    conv.querySelectorAll('.agent-proposal').forEach(el=>el.remove());
-    // Don't append proposals onto the empty placeholder.
-    if(conv.querySelector('.agent-empty')) return;
-    if(!list.length) return;
-
-    const html = list.map(p=>{
-      const when = p.requested_at ? new Date(p.requested_at).toLocaleString() : '';
-      return `<div class="agent-proposal" data-proposal-id="${p.id}">
-        <div class="agent-proposal-head">
-          <strong>#${p.id}</strong>
-          <span>${_escapeHtml(p.proposer || 'system')}</span>
-          <span style="margin-left:auto;">${_escapeHtml(when)}</span>
-        </div>
-        <pre>${_escapeHtml(p.command)}</pre>
-        <div class="agent-proposal-actions">
-          <button class="agent-btn-allow" onclick="approveProposal(${p.id})">Allow</button>
-          <button class="agent-btn-refuse" onclick="refuseProposal(${p.id})">Refuse</button>
-        </div>
-      </div>`;
-    }).join('');
-
-    conv.insertAdjacentHTML('beforeend', html);
-    _scrollConversationToBottom();
-  }catch(e){ console.error(e); }
-}
-
-async function approveProposal(id){
-  try{
-    const resp = await fetch(_apiBase + `/api/agent/proposals/${id}/approve`, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({trainer: 'webui'})});
-    if(!resp.ok){
-      const data = await resp.json().catch(()=>({}));
-      console.error('Approve failed', data.detail || resp.statusText);
-    }
-    await fetchAgentProposals();
-    await fetchAgentTasks();
-  }catch(e){ console.error('Approval failed', e); }
-}
-
-async function refuseProposal(id){
-  try{
-    const resp = await fetch(_apiBase + `/api/agent/proposals/${id}/reject`, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({trainer: 'webui'})});
-    if(!resp.ok){
-      const data = await resp.json().catch(()=>({}));
-      console.error('Refuse failed', data.detail || resp.statusText);
-    }
-    await fetchAgentProposals();
-    await fetchAgentTasks();
-  }catch(e){ console.error('Refuse failed', e); }
-}
-
-async function deleteProposal(id){
-  try{
-    const resp = await fetch(_apiBase + `/api/agent/proposals/${id}`, {method:'DELETE'});
-    if(!resp.ok){
-      const data = await resp.json().catch(()=>({}));
-      console.error('Delete failed', data.detail || resp.statusText);
-      return;
-    }
-    await fetchAgentProposals();
-  }catch(e){ console.error('Delete failed', e); }
 }
 
 // ── Composer: send a user message into the task timeline ──────────────────
@@ -453,14 +391,8 @@ async function sendTaskMessage(){
 }
 
 // Keep compatibility with inline onclick handlers rendered in template strings.
-window.pauseTask = pauseTask;
-window.resumeTask = resumeTask;
-window.cancelTask = cancelTask;
 window.deleteAgentTask = deleteAgentTask;
 window.renameAgentTask = renameAgentTask;
-window.approveProposal = approveProposal;
-window.refuseProposal = refuseProposal;
-window.deleteProposal = deleteProposal;
 window.sendTaskMessage = sendTaskMessage;
 
 // Expose for loader

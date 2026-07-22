@@ -106,28 +106,6 @@ class TestXaiGrokPlugin:
         assert limits["max_prompt_chars"] == 32768 * 3
         assert limits["supports_images"] is True
 
-    def test_supports_agent(self) -> None:
-        plugin = self._make_plugin()
-        assert plugin.supports_agent() is True
-
-    def test_agent_execute_delegation(self) -> None:
-        plugin = self._make_plugin()
-
-        mock_agent = MagicMock()
-        mock_agent.execute_action.return_value = {"success": True, "result": "done"}
-
-        # Test with agent plugin available in registry
-        with patch("core.core_initializer.PLUGIN_REGISTRY", {"agent": mock_agent}):
-            res = plugin.agent_execute({"type": "test_action"}, {})
-            assert res == {"success": True, "result": "done"}
-            mock_agent.execute_action.assert_called_once()
-
-        # Test when agent plugin is not available
-        with patch("core.core_initializer.PLUGIN_REGISTRY", {}):
-            res = plugin.agent_execute({"type": "test_action"}, {})
-            assert res["success"] is False
-            assert "unavailable" in res["error"]
-
     def test_extract_image_parts(self) -> None:
         plugin = self._make_plugin()
 

@@ -120,7 +120,7 @@ def get_trainer_display_name() -> str:
 
 BASE_CORTEX = config_registry.get_var(
     "BASE_CORTEX",
-    "manual",
+    "",
     label="Base Cortex",
     description="Default cortex engine used system-wide unless overridden by scope.",
     group="core",

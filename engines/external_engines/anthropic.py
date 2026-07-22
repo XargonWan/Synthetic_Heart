@@ -275,20 +275,6 @@ class AnthropicPlugin(AIPluginBase):
             "model_name": self._current_model,
         }
 
-    def supports_agent(self) -> bool:
-        return True
-
-    def agent_execute(self, action_dict: dict, context: dict | None = None) -> dict:
-        try:
-            from core.core_initializer import PLUGIN_REGISTRY
-
-            agent_plugin = PLUGIN_REGISTRY.get("agent") if PLUGIN_REGISTRY else None
-            if agent_plugin and hasattr(agent_plugin, "execute_action"):
-                return agent_plugin.execute_action(action_dict, context=context)
-        except Exception as exc:
-            log_warning(f"[anthropic] agent_execute delegation failed: {exc}")
-        return {"success": False, "error": "agent plugin unavailable"}
-
     async def handle_incoming_message(self, bot: Any, message: Any, prompt: Any) -> str:
         """Process a message using a pre-built prompt and return the response."""
         from core.notifier import notify_trainer

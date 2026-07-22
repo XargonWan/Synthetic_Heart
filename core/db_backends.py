@@ -10,8 +10,6 @@ except Exception:  # pragma: no cover - executed when asyncpg missing
 
 
 _CONFLICT_KEYS: dict[str, tuple[str, ...]] = {
-    "agent_action_execs": ("id",),
-    "agent_activity_log": ("id",),
     "agent_tasks": ("id",),
     "bio": ("id",),
     "blocklist": ("user_id",),

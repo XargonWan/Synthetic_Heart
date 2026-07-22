@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import os
 import re
+import socket
 from typing import Any, Optional
 from urllib.parse import unquote, urlparse
 
@@ -99,6 +100,10 @@ def _strip_wrapping_quotes(value: str) -> str:
     stripped = value.strip()
     if len(stripped) >= 2 and stripped[0] == stripped[-1] and stripped[0] in {'"', "'"}:
         return stripped[1:-1]
+    # Drop inline comments on unquoted values (e.g. ``4306   # external port``).
+    hash_index = stripped.find("#")
+    if hash_index != -1:
+        stripped = stripped[:hash_index].strip()
     return stripped
 
 
@@ -133,6 +138,23 @@ def _normalize_db_type(value: str | None, default: str = "mariadb") -> str:
     if normalized in {"postgres", "postgresql"}:
         return "postgres"
     return default
+
+
+def _infer_db_type_from_port(port_value: str | None) -> str | None:
+    """Infer the DB engine from a well-known port when the type is undeclared.
+
+    5432 -> postgres, 3306 -> mariadb. Returns None for anything else so the
+    caller keeps its explicit default.
+    """
+    try:
+        port = int(str(port_value).strip())
+    except (TypeError, ValueError):
+        return None
+    if port == 5432:
+        return "postgres"
+    if port == 3306:
+        return "mariadb"
+    return None
 
 
 def _normalize_primary_db_target(value: str | None) -> str | None:
@@ -184,10 +206,14 @@ def _coerce_port(value: str | None, default: int) -> int:
 def _build_runtime_db_target(
     *, forced_db_type: str | None = None, include_dsn: bool = True
 ) -> DbTarget:
+    declared_type = _repo_or_process_value(
+        "SYNTH_DB_TYPE", _repo_or_process_value("DB_TYPE")
+    )
+    inferred_default = (
+        _infer_db_type_from_port(_repo_or_process_value("DB_PORT")) or "mariadb"
+    )
     db_type = forced_db_type or _normalize_db_type(
-        _repo_or_process_value(
-            "SYNTH_DB_TYPE", _repo_or_process_value("DB_TYPE", "mariadb")
-        )
+        declared_type, default=inferred_default
     )
     default_port = 5432 if db_type == "postgres" else 3306
     dsn = None
@@ -424,6 +450,75 @@ def _configured_targets() -> dict[str, DbTarget]:
     return targets
 
 
+def _running_inside_container() -> bool:
+    """Best-effort detection of whether this process runs inside the Synth container.
+
+    When true, Docker-internal service hostnames (e.g. ``synth-db``) resolve and
+    must be used as-is. When false (running on the host), those hostnames are not
+    resolvable and connections must go through the published port on localhost.
+    """
+    return Path("/.dockerenv").exists()
+
+
+def _hostname_resolvable(hostname: str) -> bool:
+    if not hostname:
+        return False
+    try:
+        socket.getaddrinfo(hostname, None)
+        return True
+    except OSError:
+        return False
+
+
+def _host_exposed_port(target: DbTarget) -> int:
+    """Return the host-published port for a Docker-internal DB target."""
+    if target.db_type == "postgres":
+        return _coerce_port(_repo_or_process_value("EXT_DB_PORT"), target.port)
+    return _coerce_port(_repo_or_process_value("EXT_DB_PORT"), target.port)
+
+
+def _remap_dsn_for_host_access(dsn: str, host: str, port: int) -> str:
+    parsed = urlparse(dsn)
+    userinfo = ""
+    if parsed.username:
+        userinfo = unquote(parsed.username)
+        if parsed.password:
+            userinfo += f":{unquote(parsed.password)}"
+        userinfo += "@"
+    rebuilt = parsed._replace(netloc=f"{userinfo}{host}:{port}")
+    return rebuilt.geturl()
+
+
+def _remap_for_host_access(target: DbTarget) -> DbTarget:
+    """Rewrite Docker-internal hostnames to localhost when running on the host.
+
+    Inside the container the service hostname (``synth-db``) resolves and is left
+    untouched. On the host it does not resolve, so we fall back to ``127.0.0.1``
+    and the published port (``EXT_DB_PORT``) so the MCP server can reach the DB.
+    """
+    if _running_inside_container():
+        return target
+    if _hostname_resolvable(target.host):
+        return target
+
+    new_host = "127.0.0.1"
+    new_port = _host_exposed_port(target)
+    new_dsn = target.dsn
+    if new_dsn:
+        new_dsn = _remap_dsn_for_host_access(new_dsn, new_host, new_port)
+
+    return DbTarget(
+        name=target.name,
+        db_type=target.db_type,
+        host=new_host,
+        port=new_port,
+        user=target.user,
+        password=target.password,
+        database=target.database,
+        dsn=new_dsn,
+    )
+
+
 def _resolve_target(target: str | None = None) -> DbTarget:
     requested = str(target or os.getenv("SYNTH_DB_TARGET", "runtime")).strip().lower()
     resolved_name = _TARGET_ALIASES.get(requested, requested)
@@ -436,7 +531,7 @@ def _resolve_target(target: str | None = None) -> DbTarget:
         raise ValueError(
             f"Unknown target '{requested}'. Available targets: {available}"
         )
-    return targets[resolved_name]
+    return _remap_for_host_access(targets[resolved_name])
 
 
 def _target_summary(target: DbTarget) -> str:
@@ -592,6 +687,7 @@ def _select_recent_diary_columns(cur: Any, target: str | None = None) -> list[st
 
 
 def _list_tables_for_target(target: DbTarget) -> str:
+    target = _remap_for_host_access(target)
     conn = _connect(target.name)
     with conn:
         with conn.cursor() as cur:
@@ -635,7 +731,7 @@ def get_db_targets() -> str:
     targets = _configured_targets()
     lines = [f"Loaded repo env: {_ENV_FILE}"]
     for name in sorted(targets):
-        lines.append(f"- {_target_summary(targets[name])}")
+        lines.append(f"- {_target_summary(_remap_for_host_access(targets[name]))}")
     return "\n".join(lines)
 
 

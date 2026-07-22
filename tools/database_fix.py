@@ -328,48 +328,7 @@ TABLE_DEFINITIONS: list[tuple[str, str]] = [
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
         """,
     ),
-    # ── agent tables ─────────────────────────────────────────────
-    # NOTE: agent_activity_log and agent_action_execs schemas are the
-    # union of columns used by BOTH agent_plugin.py and agent_core.py,
-    # which reference slightly different column sets.
-    (
-        "agent_activity_log",
-        """
-        CREATE TABLE IF NOT EXISTS agent_activity_log (
-            id BIGINT AUTO_INCREMENT PRIMARY KEY,
-            command JSON,
-            proposer VARCHAR(255),
-            status ENUM('proposed','approved','rejected','executed','cancelled') NOT NULL DEFAULT 'proposed',
-            trainer_id VARCHAR(100),
-            request_ts DATETIME DEFAULT CURRENT_TIMESTAMP,
-            response_ts DATETIME,
-            response_text LONGTEXT,
-            result LONGTEXT,
-            metadata JSON,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-        """,
-    ),
-    (
-        "agent_action_execs",
-        """
-        CREATE TABLE IF NOT EXISTS agent_action_execs (
-            id BIGINT AUTO_INCREMENT PRIMARY KEY,
-            activity_log_id BIGINT NOT NULL,
-            action_index INT NOT NULL DEFAULT 0,
-            action_type VARCHAR(150) DEFAULT NULL,
-            command TEXT,
-            payload JSON,
-            status ENUM('pending','processed','executed','failed') NOT NULL DEFAULT 'pending',
-            error_text TEXT,
-            result JSON,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-            INDEX idx_activity_log_id (activity_log_id)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-        """,
-    ),
+    # ── agent task table (Agentic Runtime 2.0) ──────────────────
     (
         "agent_tasks",
         """
@@ -675,47 +634,7 @@ EXPECTED_COLUMNS: dict[str, list[tuple[str, str]]] = {
             "updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP",
         ),
     ],
-    # ── agent ────────────────────────────────────────────────────
-    # Union of columns from agent_plugin.py and agent_core.py
-    "agent_activity_log": [
-        ("id", "id BIGINT AUTO_INCREMENT PRIMARY KEY"),
-        ("command", "command JSON"),
-        ("proposer", "proposer VARCHAR(255)"),
-        (
-            "status",
-            "status ENUM('proposed','approved','rejected','executed','cancelled') NOT NULL DEFAULT 'proposed'",
-        ),
-        ("trainer_id", "trainer_id VARCHAR(100)"),
-        ("request_ts", "request_ts DATETIME DEFAULT CURRENT_TIMESTAMP"),
-        ("response_ts", "response_ts DATETIME"),
-        ("response_text", "response_text LONGTEXT"),
-        ("result", "`result` LONGTEXT"),
-        ("metadata", "metadata JSON"),
-        ("created_at", "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP"),
-        (
-            "updated_at",
-            "updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP",
-        ),
-    ],
-    "agent_action_execs": [
-        ("id", "id BIGINT AUTO_INCREMENT PRIMARY KEY"),
-        ("activity_log_id", "activity_log_id BIGINT NOT NULL"),
-        ("action_index", "action_index INT NOT NULL DEFAULT 0"),
-        ("action_type", "action_type VARCHAR(150) DEFAULT NULL"),
-        ("command", "command TEXT"),
-        ("payload", "payload JSON"),
-        (
-            "status",
-            "status ENUM('pending','processed','executed','failed') NOT NULL DEFAULT 'pending'",
-        ),
-        ("error_text", "error_text TEXT"),
-        ("result", "`result` JSON"),
-        ("created_at", "created_at DATETIME DEFAULT CURRENT_TIMESTAMP"),
-        (
-            "updated_at",
-            "updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP",
-        ),
-    ],
+    # ── agent (Agentic Runtime 2.0) ─────────────────────────────
     "agent_tasks": [
         ("id", "id BIGINT AUTO_INCREMENT PRIMARY KEY"),
         ("engine", "engine VARCHAR(64)"),

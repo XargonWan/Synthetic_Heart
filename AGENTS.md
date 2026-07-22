@@ -77,7 +77,7 @@ Some plugins are long-running scheduled agents. The canonical example is **G.R.I
 - Configurable via `GRILLO_BEAT_INTERVAL`; includes duplicate suppression and rate-limiting.
 - Extensible: discovers beat-specific plugins (tag compactor, memory compactor, curiosity) via the plugin registry.
 
-The **Agent plugin** (`plugins/agent_plugin.py`) gives Synth a controlled hand for external tasks under policy-managed approval modes (`always_approve`, `whitelist`, `always_ask`, `disabled`). Uses `agent_activity_log` and `agent_action_execs` tables.
+The **Agent plugin** (`plugins/agent_plugin.py`) exposes Synth's agentic tools (`agent_list_files`, `agent_read_file`, `spawn_drone`) to the Agentic Runtime 2.0. Task state is persisted in the `agent_tasks` table. Enablement is gated by `AGENT_ENABLED` (user toggle, re-read on every `is_enabled()` call); the router 2.0 additionally requires `AGENTIC_ROUTING_ENABLED`.
 
 ---
 
@@ -479,9 +479,7 @@ docker exec synth-dev tail -f /app/logs/synth.log | grep -E "\[grillo\]|grillo"
 | `grillo_beats` | `init-db.sql` | Scheduled autonomous beat timers (`beat_type`, `next_beat`, `enabled`) |
 | `grillo_activity_log` | `init-db.sql` | Log of executed Grillo beats with prompt/response text |
 | `grillo_action_execs` | `init-db.sql` | Individual action executions within a Grillo beat |
-| `agent_activity_log` | `init-db.sql` | Agent plugin task log (`command`, `proposer`, `trainer_id`, `result`) |
-| `agent_action_execs` | `init-db.sql` | Individual action steps within an agent task |
-| `agent_tasks` | `init-db.sql` | Structured agent task records with I/O JSON |
+| `agent_tasks` | `init-db.sql` | Agentic Runtime 2.0 task records with I/O JSON (`engine`, `status`, `input`, `output`, `iterations_meta`) |
 | `external_endpoints` | `init-db.sql` | LLM/API endpoint registry (name, protocol, URL, key, capabilities, model list) |
 | `scheduled_events` | `plugins/event_plugin.py` | Date/time triggered events Synth should act on |
 | `blocklist` | `plugins/blocklist.py` | Blocked users/entities |

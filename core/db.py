@@ -1713,39 +1713,7 @@ async def ensure_plugin_tables() -> None:
                 await cur.execute(_GRILLO_ACTIVITY_LOG_DDL)
                 await cur.execute(_GRILLO_ACTION_EXECS_DDL)
 
-                # agent tables (init-db.sql)
-                await cur.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS agent_activity_log (
-                        id INT AUTO_INCREMENT PRIMARY KEY,
-                        command TEXT NOT NULL,
-                        proposer VARCHAR(100),
-                        status ENUM('proposed','approved','rejected','executed') NOT NULL DEFAULT 'proposed',
-                        trainer_id VARCHAR(100),
-                        request_ts DATETIME DEFAULT CURRENT_TIMESTAMP,
-                        response_ts DATETIME,
-                        result LONGTEXT,
-                        metadata JSON
-                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-                    """
-                )
-
-                await cur.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS agent_action_execs (
-                        id INT AUTO_INCREMENT PRIMARY KEY,
-                        activity_log_id INT NOT NULL,
-                        command TEXT NOT NULL,
-                        status ENUM('pending','executed','failed') NOT NULL DEFAULT 'pending',
-                        error_text TEXT,
-                        result JSON,
-                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-                        INDEX idx_activity_log_id (activity_log_id)
-                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-                    """
-                )
-
+                # agent task table (init-db.sql) — Agentic Runtime 2.0
                 await cur.execute(
                     """
                     CREATE TABLE IF NOT EXISTS agent_tasks (

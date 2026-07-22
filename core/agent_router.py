@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
-from core.logging_utils import log_debug, log_info
+from core.logging_utils import log_debug, log_error, log_info
 from core.config_manager import config_registry
 
 # Lane constants
@@ -89,36 +89,61 @@ def classify(actions: List[Any], *, context: Dict[str, Any] | None = None) -> st
 
     Args:
         actions: The list of action dicts from the LLM response.
-        context: Optional message-chain context (unused today, reserved for
-            future per-interface overrides).
+        context: Optional message-chain context. The authoritative routing
+            signal ``agent_needed`` is read from here — it is set pre-LLM by the
+            ``recon_agent_intent`` recon plugin, which semantically judges the
+            *user's request* (not the shape of Synth's proposed actions).
 
     Returns:
         ``FAST`` or ``AGENT``.
     """
+    # Two independent gates must BOTH be on to ever leave the Fast Lane:
+    #  * AGENTIC_ROUTING_ENABLED — the Fast/Agent router feature flag.
+    #  * AGENT_ENABLED — the user-facing agent on/off toggle (WebUI + agent
+    #    plugin). When the user switches the agent OFF, behaviour must fall back
+    #    to the classic Fast Lane exactly like the ``develop`` branch, even if
+    #    the routing flag is still set. Keeping these decoupled caused the agent
+    #    to keep engaging while toggled off.
     if not config_registry.get_var("AGENTIC_ROUTING_ENABLED", False, value_type=bool):
         return FAST
+    if not config_registry.get_var("AGENT_ENABLED", True, value_type=bool):
+        log_debug("[agent_router] AGENT_ENABLED off -> FAST lane (classic behaviour)")
+        return FAST
+
+    # Authoritative, pre-LLM decision: the recon plugin evaluated the user's
+    # request and flagged it as agentic work. This is deterministic and does not
+    # depend on how many actions the main model happened to emit — which is what
+    # previously caused a plain greeting (message + diary/emotion) to be
+    # misrouted to the Agent lane via the removed ``len(types) > 1`` heuristic.
+    if context and context.get("agent_needed"):
+        log_debug("[agent_router] context agent_needed -> AGENT lane")
+        return AGENT
 
     if not actions:
         return FAST
 
     types = _action_types(actions)
 
-    # Multi-action batches go to the Agent Lane (coordinated execution).
-    if len(types) > 1:
-        log_debug("[agent_router] Multiple actions -> AGENT lane")
+    # A batch made up entirely of plain outbound message actions is NOT agentic
+    # work — it is just Synth talking (possibly on several interfaces at once).
+    # Those synth actions (e.g. ``message_telegram_bot``) must be recognised and
+    # delivered through the classic Fast Lane so they never get swept into the
+    # agent tool loop, where they would be executed as "tools" and interfere
+    # with the agent.
+    if types and all(_is_pure_message(t) for t in types):
+        log_debug("[agent_router] Message-only batch -> FAST lane")
+        return FAST
+
+    # Safety net: any batch containing a real tool call is agentic work, even if
+    # the recon somehow missed it. This keeps tool actions out of the Fast Lane.
+    if any(_is_tool_call(t) for t in types):
+        log_debug("[agent_router] Batch contains a tool call -> AGENT lane")
         return AGENT
 
-    if len(types) == 1:
-        t = types[0]
-        if _is_tool_call(t):
-            log_debug(f"[agent_router] Tool call '{t}' -> AGENT lane")
-            return AGENT
-        if _is_pure_message(t):
-            log_debug(f"[agent_router] Pure message '{t}' -> FAST lane")
-            return FAST
-
-    # Unknown single action: keep it on the Fast Lane (unchanged behaviour).
-    log_debug("[agent_router] Unrecognized single action -> FAST lane")
+    # No agent_needed flag and no tool call: the request was not judged agentic,
+    # so it stays on the classic Fast Lane regardless of how many non-tool
+    # actions the model emitted.
+    log_debug("[agent_router] No agentic signal -> FAST lane")
     return FAST
 
 
@@ -140,11 +165,18 @@ async def route(
 
         goal = _derive_goal(actions, context)
         manager = AgentLoopManager()
-        return await manager.run_agentic_turn(
+        result = await manager.run_agentic_turn(
             goal=goal,
             context=context,
             original_message=message,
         )
+
+        # The agent loop runs detached from the Fast-Lane reply path, so the
+        # user's interface receives nothing while it works and nothing when it
+        # finishes. Deliver the loop's final text back to the originating
+        # interface so the user actually sees the outcome instead of silence.
+        await _deliver_agent_reply(result, context, bot, message)
+        return result
 
     # Fast Lane: unchanged direct execution.
     log_info("[agent_router] Routing to Fast Lane")
@@ -167,3 +199,74 @@ def _derive_goal(actions: List[Any], context: Dict[str, Any] | None) -> str:
         return f"Execute: {json.dumps(actions, default=str)}"
     except Exception:
         return "Execute the requested agentic actions."
+
+
+async def _deliver_agent_reply(
+    result: Dict[str, Any],
+    context: Dict[str, Any],
+    bot: Any,
+    message: Any,
+) -> None:
+    """Send the agent loop's final text back to the originating interface.
+
+    The Agent Lane runs detached from the Fast-Lane reply path, so the user
+    otherwise sees nothing when the loop finishes. We deliver ``final_text`` as
+    an ordinary outbound ``message`` on the originating interface — exactly like
+    a normal Telegram/Discord/WebUI reply — using the standard action dispatch
+    so routing, TTS and history all behave as usual.
+    """
+    if not isinstance(result, dict):
+        return
+    final_text = result.get("final_text")
+    if not isinstance(final_text, str) or not final_text.strip():
+        return
+
+    interface_path = context.get("interface_path") if context else None
+    if not interface_path:
+        log_debug(
+            "[agent_router] No interface_path in context; skipping agent reply delivery"
+        )
+        return
+
+    from core.interface_path_utils import get_interface_from_path
+    from core.action_parser import run_action
+
+    interface_name = get_interface_from_path(str(interface_path))
+    if not interface_name:
+        log_debug(
+            f"[agent_router] Could not derive interface from path '{interface_path}'; "
+            "skipping agent reply delivery"
+        )
+        return
+
+    # The message_* action schema requires an explicit `target`. The message
+    # plugin ultimately re-derives target/thread_id from interface_path, but
+    # the action validator runs first and rejects the action outright when
+    # `target` is missing — which silently dropped the agent's final reply
+    # (the client saw an empty response). Derive target (and thread_id) from
+    # interface_path here so the delivery action passes validation, matching
+    # exactly what the message plugin would compute.
+    payload: Dict[str, Any] = {
+        "text": final_text,
+        "interface_path": interface_path,
+    }
+    path_parts = str(interface_path).split("/")
+    if len(path_parts) >= 2:
+        payload["target"] = path_parts[1]
+        if len(path_parts) >= 3:
+            thread_id = path_parts[2].strip()
+            if thread_id:
+                payload["thread_id"] = thread_id
+    action = {
+        "type": f"message_{interface_name}",
+        "interface": interface_name,
+        "payload": payload,
+    }
+    try:
+        log_info(
+            f"[agent_router] Delivering agent reply to {interface_name} "
+            f"(path={interface_path})"
+        )
+        await run_action(action, context, bot, message)
+    except Exception as exc:
+        log_error(f"[agent_router] Failed to deliver agent reply: {exc}")

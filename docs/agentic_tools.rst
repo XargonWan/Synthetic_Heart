@@ -218,7 +218,7 @@ Two per-card controls are available (both styled with the shared
   custom name replaces the engine label on the card. Submitting an empty name
   clears it. No database schema change is involved.
 * **🗑 Delete** — permanently removes the task row via
-  ``DELETE /api/agent/tasks/{task_id}``, cancelling any running loop first.
+  ``DELETE /api/agent/tasks/{task_id}``.
 
 See :doc:`api_endpoints` for the full request/response shapes.
 

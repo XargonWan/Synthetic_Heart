@@ -240,32 +240,6 @@ CREATE TABLE IF NOT EXISTS growth_states (
 CREATE INDEX IF NOT EXISTS idx_growth_states_current ON growth_states (is_current);
 CREATE INDEX IF NOT EXISTS idx_growth_states_created_at ON growth_states (created_at DESC);
 
-CREATE TABLE IF NOT EXISTS agent_activity_log (
-    id BIGSERIAL PRIMARY KEY,
-    command TEXT NOT NULL,
-    proposer TEXT,
-    status TEXT NOT NULL DEFAULT 'proposed' CHECK (status IN ('proposed', 'approved', 'rejected', 'executed', 'cancelled')),
-    trainer_id TEXT,
-    request_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    response_ts TIMESTAMPTZ,
-    result TEXT,
-    metadata TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_agent_activity_log_status ON agent_activity_log (status);
-CREATE INDEX IF NOT EXISTS idx_agent_activity_log_proposer ON agent_activity_log (proposer);
-
-CREATE TABLE IF NOT EXISTS agent_action_execs (
-    id BIGSERIAL PRIMARY KEY,
-    activity_log_id BIGINT NOT NULL REFERENCES agent_activity_log(id) ON DELETE CASCADE,
-    command TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'executed', 'failed')),
-    error_text TEXT,
-    result TEXT,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-CREATE INDEX IF NOT EXISTS idx_agent_action_execs_activity_log_id ON agent_action_execs (activity_log_id);
-
 CREATE TABLE IF NOT EXISTS agent_tasks (
     id BIGSERIAL PRIMARY KEY,
     engine TEXT,
