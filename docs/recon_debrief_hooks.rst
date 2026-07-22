@@ -36,7 +36,7 @@ Plugin hooks and schemas
 - ``get_recon_contributions(self, *, message, context_memory, text, tags=None, keywords=None, max_results=5)``
   Return list of normalized contributions. Contribution ``type`` values:
   ``memory``, ``snippet``, ``instruction``, ``language_hint``,
-  ``tone_hint``, ``log_flag``.
+  ``tone_hint``.
 
   Contribution example::
 
@@ -100,7 +100,7 @@ Examples
 --------
 - Implement a small Recon plugin that returns a `language_hint` and an
   `instruction` to be injected into the prompt (see `plugins/` for
-  examples like `recon_log_reader.py`).
+  examples like `recon_tone_evaluator.py`).
 
 Video transcription (Recon Video Transcriber)
 ---------------------------------------------

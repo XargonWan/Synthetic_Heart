@@ -570,7 +570,6 @@ All keys stored in the `config` table and accessible via `config_registry.get_va
 | `GEMINI_API_KEY` | Gemini API key (also settable via env) |
 | `RECON_MAX_RESULTS` | Max results for recon/search operations |
 | `RECON_TIMEOUT` | Timeout for recon operations |
-| `RECON_LOG_READER_LINES` | Lines to read for log recon actions |
 | `VOSK_MODEL_PATH` | Path to VOSK STT model |
 | `CHAT_SLEEP_COMMANDS` | Commands that put Synth into sleep/quiet mode |
 | `CHAT_WAKE_COMMANDS` | Commands that wake Synth from sleep mode |
