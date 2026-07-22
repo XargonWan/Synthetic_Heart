@@ -263,6 +263,50 @@ async def route(
     return await run_actions(actions, context, bot, message)
 
 
+def start_task_resume(
+    task_id: int,
+    *,
+    context: Dict[str, Any],
+    bot: Any = None,
+    message: Any = None,
+) -> bool:
+    """Kick off a detached resume of a specific ``pending`` agent task.
+
+    This is the manual counterpart to the model-driven ``resume_agent_task``
+    action: it lets an interface command (e.g. ``/task resume <id>``) continue a
+    parked task on demand. The turn runs OFF the message-chain consumer lock via
+    the same detached machinery as :func:`route`, so the caller returns
+    immediately and the final reply is delivered asynchronously through
+    :func:`_deliver_agent_reply`.
+
+    The interface is registered as in-flight BEFORE the task is spawned so a
+    streaming interface (OpenAI/Ollama-compatible) waits for the async delivery
+    instead of finalizing its stream empty (same race guard as ``route``).
+
+    Returns ``True`` if the resume task was scheduled, ``False`` on invalid input.
+    """
+    try:
+        tid = int(task_id)
+    except (TypeError, ValueError):
+        return False
+    if tid <= 0:
+        return False
+
+    inflight_interface_path = (
+        context.get("interface_path") if isinstance(context, dict) else None
+    )
+    if inflight_interface_path:
+        _INFLIGHT_AGENT_INTERFACE_PATHS.add(str(inflight_interface_path))
+
+    task = asyncio.create_task(
+        _run_agent_turn_detached("", context, bot, message, explicit_resume_id=tid)
+    )
+    _AGENT_BACKGROUND_TASKS.add(task)
+    task.add_done_callback(_AGENT_BACKGROUND_TASKS.discard)
+    log_info(f"[agent_router] Manual resume scheduled for task {tid}")
+    return True
+
+
 async def _run_agent_turn_detached(
     goal: str,
     context: Dict[str, Any],

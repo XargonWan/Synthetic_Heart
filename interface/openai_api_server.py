@@ -415,6 +415,57 @@ class OpenAIApiServer:
             # Add interface_path to message object
             message_obj.interface_path = interface_path
 
+            # Intercept slash commands (e.g. /task) before the message chain.
+            # handle_command_message returns:
+            #   - a string -> immediate reply text to stream back
+            #   - None     -> not a known command; fall through to the chain
+            # A command may also start a DETACHED agent turn (e.g. /task resume),
+            # in which case its final text is delivered later via the in-flight
+            # agent mechanism, exactly like the Agent Lane path below.
+            raw_content = (last_message.get("content") or "").strip()
+            if raw_content.startswith("/"):
+                from core.command_registry import handle_command_message
+
+                interface_context = {
+                    "bot": self,
+                    "message": message_obj,
+                    "interface_id": "ollama_serve",
+                    "interface_path": interface_path,
+                }
+                command_reply = await handle_command_message(
+                    raw_content,
+                    user_id=chat_id,
+                    interface_id="ollama_serve",
+                    interface_context=interface_context,
+                )
+                if command_reply is not None:
+                    await self._stream_text(
+                        chat_id=chat_id,
+                        model=model,
+                        conversation_id=conversation_id,
+                        text=command_reply,
+                    )
+                    # If the command scheduled a detached agent turn, its final
+                    # result will be delivered asynchronously; do not finalize
+                    # yet so that delivery can stream + finalize the stream.
+                    agent_in_flight = False
+                    try:
+                        from core.agent_router import has_inflight_agent_turn
+
+                        agent_in_flight = has_inflight_agent_turn(interface_path)
+                    except Exception:
+                        agent_in_flight = False
+
+                    if not agent_in_flight:
+                        await self._finalize_stream(
+                            chat_id=chat_id,
+                            model=model,
+                            conversation_id=conversation_id,
+                        )
+                        if completion_event and not completion_event.is_set():
+                            completion_event.set()
+                    return
+
             # Update context memory with the latest user message so the prompt
             # reflects the current conversation state.
             history = self.context_memory.setdefault(

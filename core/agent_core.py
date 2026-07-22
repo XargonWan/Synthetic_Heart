@@ -388,6 +388,55 @@ class AgentLoopManager:
             log_warning(f"[agent_core] find_task_by_id failed: {e}")
             return None
 
+    async def list_recent_tasks(self, limit: int = 15) -> list[Dict[str, Any]]:
+        """Return the most recent agent tasks for display (newest first).
+
+        Each entry is ``{"task_id", "status", "engine", "goal", "resumable"}``.
+        ``resumable`` mirrors :meth:`find_task_by_id` semantics — only
+        ``pending`` tasks can be resumed. Best-effort: returns ``[]`` on any DB
+        error so a display command never raises.
+        """
+        try:
+            lim = int(limit)
+        except (TypeError, ValueError):
+            lim = 15
+        if lim <= 0:
+            lim = 15
+        try:
+            conn_ctx = await self._get_conn_ctx()
+            async with conn_ctx as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "SELECT id, status, engine, input "
+                        "FROM agent_tasks ORDER BY id DESC LIMIT %s",
+                        (lim,),
+                    )
+                    rows = await cur.fetchall()
+        except Exception as e:
+            log_warning(f"[agent_core] list_recent_tasks failed: {e}")
+            return []
+
+        tasks: list[Dict[str, Any]] = []
+        for row in rows or []:
+            try:
+                input_payload = json.loads(row[3]) if row[3] else {}
+            except Exception:
+                input_payload = {}
+            goal = ""
+            if isinstance(input_payload, dict):
+                goal = str(input_payload.get("goal") or "").strip()
+            status = row[1]
+            tasks.append(
+                {
+                    "task_id": int(row[0]),
+                    "status": status,
+                    "engine": row[2],
+                    "goal": goal,
+                    "resumable": status == "pending",
+                }
+            )
+        return tasks
+
     async def _mark_task_running(self, task_id: int) -> None:
         """Flip an existing ``agent_tasks`` row back to ``running``.
 
