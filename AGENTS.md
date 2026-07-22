@@ -468,6 +468,12 @@ docker exec synth-dev tail -f /app/logs/synth.log | grep -E "\[grillo\]|grillo"
 > **Notes:** anything that helps the next agent understand it fast
 > ```
 
+### Agent Lane: message/diary actions fail because the source interface is missing  <!-- 2025-02-14 -->
+**Symptom:** An agentic turn (Agent Lane / Drone) writes files fine but the final delivery steps fail: `message_telegram_bot` is rejected by validation ("payload.interface_path or payload.chat_name is required") and `create_personal_diary_entry` persists with `interface="unknown"` / `chat_id=None`.
+**Location:** `core/agent_core.py` (`AgentLoopManager.run_agentic_turn`, `_build_agent_prompt`); consumers `interface/telegram_bot.py` (`message_telegram_bot` requires `interface_path`) and `plugins/ai_diary.py` (`create_personal_diary_entry` reads `context.get("interface", "unknown")`).
+**Status:** fixed.
+**Notes:** Two gaps in the Agent Lane. (1) `_build_agent_prompt` never surfaced the originating `interface_path` in the prompt text, so the model had no value to put in `message_telegram_bot`'s required `interface_path` field → validation rejected the action. Fixed by adding a "SOURCE CONVERSATION" block to the prompt that states the exact `interface_path` (and interface) and instructs delivery/message actions to reuse it verbatim. (2) The router (`core/agent_router.py`) only sets `context["interface_path"]`, never `context["interface"]`; internal tools run by the executor read `context["interface"]`, so the diary saved as "unknown". Fixed by deriving `interface` from `interface_path` once at the top of `run_agentic_turn` (via `core.interface_path_utils.get_interface_from_path`) and enriching the shared `context` — this covers both the prompt text and every executed tool (Drones inherit it, since `run_drone` delegates to `run_agentic_turn`).
+
 ### Bare `timestamp` column breaks fresh Postgres installs  <!-- 2025-01-01 -->
 **Symptom:** On a fresh PostgreSQL install, SyntH comes up in a broken state — avatar stuck in T-pose, unable to do anything. Root cause: a bare `timestamp` column is a PostgreSQL reserved word; the ORM auto-translates it to `timestamptz`, producing an invalid schema.
 **Location:** Any DDL using a bare `timestamp` column (`init-db.sql`, `scripts/sql/*.sql`, inline plugin DDL, `core/migrations.py`). Historically affected `chat_history_cache`, `ai_diary`, `ai_diary_archive`, `memories`, `emotion_state`, `emotion_diary`, `message_map`, `radio_activity_log`, and `mem_cells`.

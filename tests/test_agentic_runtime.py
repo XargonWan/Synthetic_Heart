@@ -112,6 +112,39 @@ async def test_run_agentic_turn_completed(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_run_agentic_turn_completed_tool_key(monkeypatch):
+    """Completion via the ``{"tool": ..., "payload": ...}`` shape must be honoured.
+
+    Regression: some engines (e.g. logfare-claude) emit a single top-level object
+    keyed by ``tool`` instead of ``type``/``name`` — e.g.
+    ``{"tool": "attempt_completion", "payload": {"summary": "..."}}``. Previously
+    ``_extract_tool_calls`` did not recognise the ``tool`` key, so the completion
+    sentinel was silently dropped and the raw JSON leaked into ``final_text`` and
+    got delivered verbatim to the interface (then rejected as unrecognised JSON).
+    """
+
+    calls = []
+
+    async def fake_handle(bot, message, context_memory_or_prompt):
+        calls.append(context_memory_or_prompt)
+        return json.dumps(
+            {
+                "tool": "attempt_completion",
+                "payload": {"summary": "Message delivered to Jay."},
+            }
+        )
+
+    monkeypatch.setattr("core.plugin_instance.handle_incoming_message", fake_handle)
+
+    manager = AgentLoopManager()
+    out = await manager.run_agentic_turn(
+        goal="tell Jay", max_iterations=5, timeout_seconds=30
+    )
+    assert out["stop_reason"] == "completed"
+    assert out["final_text"] == "Message delivered to Jay."
+
+
+@pytest.mark.asyncio
 async def test_run_agentic_turn_intent_text_does_not_stop(monkeypatch):
     """Plain intent text (no tool call) must NOT end the turn prematurely.
 

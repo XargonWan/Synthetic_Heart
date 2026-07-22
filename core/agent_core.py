@@ -727,6 +727,28 @@ class AgentLoopManager:
         from core.agent_tool_executor import agent_tool_executor
         from core.transport_layer import extract_json_from_text
 
+        # Derive the interface name from the originating interface_path when the
+        # caller did not already supply it. The Agent Lane router only sets
+        # ``interface_path`` on the context, but internal actions run by the tool
+        # executor read ``context["interface"]`` (e.g. create_personal_diary_entry
+        # would otherwise persist the entry as interface="unknown"). Enriching the
+        # shared context once here means both the prompt and every executed tool
+        # see the correct interface. Best-effort and purely structural.
+        if isinstance(context, dict) and not context.get("interface"):
+            src_path = context.get("interface_path")
+            if isinstance(src_path, str) and src_path:
+                try:
+                    from core.interface_path_utils import get_interface_from_path
+
+                    derived_interface = get_interface_from_path(src_path)
+                    if derived_interface:
+                        context["interface"] = derived_interface
+                except Exception as exc:
+                    log_debug(
+                        f"[agent_core] Could not derive interface from "
+                        f"interface_path {src_path!r}: {exc}"
+                    )
+
         # Open a durable ``running`` row BEFORE the loop starts. A detached turn
         # (message-chain Agent Lane) can be interrupted by a container restart
         # mid-flight; persisting up-front means the startup recovery sweep can
@@ -1442,6 +1464,35 @@ class AgentLoopManager:
 
         observation_block = "\n".join(history_lines)
 
+        # Expose the originating conversation to the model. Message-delivery
+        # actions (e.g. message_telegram_bot / audio_telegram_bot) declare
+        # ``interface_path`` as a REQUIRED field, but the agentic prompt only
+        # carried GOAL + TOOLS + OBSERVATIONS — the model never saw the source
+        # interface_path and therefore either omitted it (payload validation
+        # failed with "interface_path or chat_name is required") or invented a
+        # wrong one, so the message and the diary entry silently failed to land.
+        # Surfacing it here lets the model reply in the same conversation and
+        # gives diary actions the context they need. No keyword/language logic —
+        # purely structural, driven by the interface_path already in context.
+        source_block = ""
+        if isinstance(context, dict):
+            source_interface_path = context.get("interface_path")
+            source_interface = context.get("interface")
+            if source_interface_path:
+                lines = [
+                    "SOURCE CONVERSATION (use this to talk back to the user):",
+                    f"- interface_path: {source_interface_path}",
+                ]
+                if source_interface:
+                    lines.append(f"- interface: {source_interface}")
+                lines.append(
+                    "When you call a message/delivery action (e.g. "
+                    "message_telegram_bot), you MUST set its 'interface_path' "
+                    "field to EXACTLY the interface_path above so the reply "
+                    "reaches this same conversation."
+                )
+                source_block = "\n".join(lines)
+
         # Drones cannot spawn Drones: hide the spawn_drone tool from a Drone's
         # available tool list (single-level delegation). The handler enforces the
         # same rule defensively, this just keeps the model from ever proposing it.
@@ -1503,15 +1554,20 @@ class AgentLoopManager:
             "already show a diary entry was written for this task, do not write "
             "another one until the task is complete."
         )
+        source_prefix = f"{source_block}\n\n" if source_block else ""
         prompt = {
             "input": {
                 "payload": {
                     "text": (
+                        f"{source_prefix}"
                         f"GOAL: {goal}\n\n"
                         f"AVAILABLE TOOLS:\n{tools_block}\n\n"
                         f"PRIOR OBSERVATIONS:\n{observation_block}\n"
                         if observation_block
-                        else f"GOAL: {goal}\n\nAVAILABLE TOOLS:\n{tools_block}\n"
+                        else (
+                            f"{source_prefix}"
+                            f"GOAL: {goal}\n\nAVAILABLE TOOLS:\n{tools_block}\n"
+                        )
                     ),
                 }
             },
@@ -1593,25 +1649,30 @@ class AgentLoopManager:
             if calls:
                 return calls
 
-        # Single action object.
-        if parsed.get("type"):
-            return [
-                {
-                    "name": parsed["type"],
-                    "arguments": _normalize_args(parsed.get("payload", {})),
-                }
-            ]
-        if parsed.get("name") and (
+        # Single action object. The tool/action name may be carried under any of
+        # ``type`` / ``name`` / ``tool`` — different engines pick different keys
+        # (e.g. logfare-claude emits ``{"tool": "attempt_completion", "payload":
+        # {...}}``). Normalize all three the same way so the completion sentinel
+        # and single tool calls are never silently dropped.
+        name_key = parsed.get("type") or parsed.get("name") or parsed.get("tool")
+        if name_key and (
             "arguments" in parsed or "payload" in parsed or "args" in parsed
         ):
             return [
                 {
-                    "name": str(parsed.get("name")),
+                    "name": str(name_key),
                     "arguments": _normalize_args(
                         parsed.get(
                             "arguments", parsed.get("payload", parsed.get("args", {}))
                         )
                     ),
+                }
+            ]
+        if parsed.get("type"):
+            return [
+                {
+                    "name": parsed["type"],
+                    "arguments": _normalize_args(parsed.get("payload", {})),
                 }
             ]
         return []

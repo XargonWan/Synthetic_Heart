@@ -5,6 +5,37 @@
 const _apiBase = (window.__getApiBase && window.__getApiBase()) || '';
 let _selectedAgentTaskId = null;
 
+// True when the user currently has a (non-collapsed) text selection whose
+// anchor lives inside `el`. Periodic refreshes must NOT rewrite innerHTML while
+// this is true, otherwise the DOM nodes backing the selection are destroyed and
+// the highlight vanishes the instant the user tries to copy.
+function _userIsSelectingIn(el){
+  if(!el) return false;
+  const sel = window.getSelection && window.getSelection();
+  if(!sel || sel.isCollapsed || sel.rangeCount === 0) return false;
+  const node = sel.anchorNode;
+  return !!(node && el.contains(node.nodeType === 1 ? node : node.parentNode));
+}
+
+// Replace `el`'s markup ONLY when it actually changed, and never while the user
+// is selecting text inside it. This kills the flicker/scroll-jump caused by the
+// 5s poll blindly rewriting identical HTML on every tick, and lets the user
+// select/copy freely — the view still updates the moment real new content lands
+// (and the deferred flag catches up once the selection is released).
+// Returns true when the DOM was actually rewritten.
+function _renderIfChanged(el, html){
+  if(!el) return false;
+  if(el.__lastRenderedHtml === html) return false;
+  if(_userIsSelectingIn(el)){
+    el.__pendingRenderHtml = html;
+    return false;
+  }
+  el.__pendingRenderHtml = null;
+  el.__lastRenderedHtml = html;
+  el.innerHTML = html;
+  return true;
+}
+
 function _escapeHtml(value){
   return String(value == null ? '' : value)
     .replace(/&/g, '&amp;')
@@ -80,7 +111,7 @@ async function fetchAgentTools(){
     const container = document.getElementById('agent-tools-list');
     if(!container) return;
     if(!tools.length){
-      container.innerHTML = '<div class="card">No tools available.</div>';
+      _renderIfChanged(container, '<div class="card">No tools available.</div>');
       return;
     }
     const html = tools.map(t=>{
@@ -96,7 +127,7 @@ async function fetchAgentTools(){
         <div style="margin-top:4px;"><small><strong>effects:</strong> ${effects}</small></div>
       </div>`;
     }).join('');
-    container.innerHTML = html;
+    _renderIfChanged(container, html);
   }catch(e){
     console.error(e);
     const el = document.getElementById('agent-tools-list');
@@ -168,9 +199,9 @@ async function fetchAgentTasks(){
     const container = document.getElementById('agent-tasks-list');
     if(!container) return;
     if(!list.length){
-      container.innerHTML = '<div class="card">No agent tasks found.</div>';
+      _renderIfChanged(container, '<div class="card">No agent tasks found.</div>');
       const conv = document.getElementById('agent-conversation');
-      if(conv) conv.innerHTML = '<div class="agent-empty">No task selected.</div>';
+      if(conv) _renderIfChanged(conv, '<div class="agent-empty">No task selected.</div>');
       const meta = document.getElementById('agent-task-meta');
       if(meta) meta.textContent = 'No task selected.';
       _selectedAgentTaskId = null;
@@ -202,35 +233,40 @@ async function fetchAgentTasks(){
         <button type="button" class="history-delete-btn" data-agent-task-delete="${idStr}" title="Delete this task" style="position:absolute;top:4px;right:4px;padding:0.15rem 0.35rem;">🗑</button>
       </div>`;
     }).join('');
-    container.innerHTML = html;
 
-    container.querySelectorAll('[data-agent-task-id]').forEach(btn=>{
-      btn.addEventListener('click', ()=>{
-        const id = parseInt(btn.getAttribute('data-agent-task-id') || '', 10);
-        if(!Number.isFinite(id)) return;
-        _selectedAgentTaskId = String(id);
-        fetchAgentTasks();
-        loadAgentTask(id);
+    // Only (re)bind click handlers when the list markup actually changed. When
+    // the poll re-fetches identical tasks, the DOM (and its existing listeners)
+    // is left untouched, so an in-progress text selection survives.
+    const listChanged = _renderIfChanged(container, html);
+    if(listChanged){
+      container.querySelectorAll('[data-agent-task-id]').forEach(btn=>{
+        btn.addEventListener('click', ()=>{
+          const id = parseInt(btn.getAttribute('data-agent-task-id') || '', 10);
+          if(!Number.isFinite(id)) return;
+          _selectedAgentTaskId = String(id);
+          fetchAgentTasks();
+          loadAgentTask(id);
+        });
       });
-    });
 
-    container.querySelectorAll('[data-agent-task-rename]').forEach(btn=>{
-      btn.addEventListener('click', (ev)=>{
-        ev.stopPropagation();
-        const id = parseInt(btn.getAttribute('data-agent-task-rename') || '', 10);
-        if(!Number.isFinite(id)) return;
-        renameAgentTask(id, btn.getAttribute('data-agent-task-name') || '');
+      container.querySelectorAll('[data-agent-task-rename]').forEach(btn=>{
+        btn.addEventListener('click', (ev)=>{
+          ev.stopPropagation();
+          const id = parseInt(btn.getAttribute('data-agent-task-rename') || '', 10);
+          if(!Number.isFinite(id)) return;
+          renameAgentTask(id, btn.getAttribute('data-agent-task-name') || '');
+        });
       });
-    });
 
-    container.querySelectorAll('[data-agent-task-delete]').forEach(btn=>{
-      btn.addEventListener('click', (ev)=>{
-        ev.stopPropagation();
-        const id = parseInt(btn.getAttribute('data-agent-task-delete') || '', 10);
-        if(!Number.isFinite(id)) return;
-        deleteAgentTask(id);
+      container.querySelectorAll('[data-agent-task-delete]').forEach(btn=>{
+        btn.addEventListener('click', (ev)=>{
+          ev.stopPropagation();
+          const id = parseInt(btn.getAttribute('data-agent-task-delete') || '', 10);
+          if(!Number.isFinite(id)) return;
+          deleteAgentTask(id);
+        });
       });
-    });
+    }
 
     if(_selectedAgentTaskId != null){
       loadAgentTask(_selectedAgentTaskId);
@@ -330,9 +366,13 @@ async function loadAgentTask(id){
     // Capture whether the user was pinned to the bottom BEFORE we replace the
     // HTML (which resets scrollTop). Only re-follow new content if they were.
     const wasNearBottom = _isConversationNearBottom(conv);
-    conv.innerHTML = parts.join('');
+    // Rewrite the stream ONLY when the content changed and the user is not
+    // mid-selection. Blindly rewriting identical HTML on every 5s poll is what
+    // made the pane feel like it was constantly "refreshing" and wiped any text
+    // the user was trying to select or copy.
+    const changed = _renderIfChanged(conv, parts.join(''));
 
-    if(wasNearBottom) _scrollConversationToBottom(true);
+    if(changed && wasNearBottom) _scrollConversationToBottom(true);
   }catch(e){ console.error(e); }
 }
 
