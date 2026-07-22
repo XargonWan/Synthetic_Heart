@@ -111,7 +111,7 @@ The bounded loop
 3. Parses tool calls out of the response.
 4. Executes them through ``agent_tool_executor``.
 5. Appends the results as observations and loops, until the model emits no more
-   tool calls, hits ``AGENT_MAX_ITERATIONS`` (default 5), or exceeds
+   tool calls, hits ``AGENT_MAX_ITERATIONS`` (default 30), or exceeds
    ``AGENT_TURN_TIMEOUT_SEC`` (default 120).
 
 When the turn ends (at either exit point — the deterministic
@@ -333,7 +333,7 @@ Configuration reference
 Key                               Meaning
 ================================  ============================================
 ``AGENTIC_ROUTING_ENABLED``       Enable the Fast/Agent router (default False).
-``AGENT_MAX_ITERATIONS``          Hard cap on agent-loop iterations (default 5).
+``AGENT_MAX_ITERATIONS``          Hard cap on agent-loop iterations (default 30).
 ``AGENT_TURN_TIMEOUT_SEC``        Wall-clock budget per agent turn (default 120).
 ``AGENT_MCP_EXPOSED_ACTIONS``     Comma list of actions to expose as MCP tools.
 ``SYNTH_MCP_CONFIG``              Override path to ``config/synth_mcp.json``.

@@ -863,6 +863,7 @@ class SynthWebUIInterface:
         self.app.post("/api/agent/tasks/{task_id}/message")(
             self.send_agent_task_message
         )
+        self.app.post("/api/agent/tasks/{task_id}/continue")(self.continue_agent_task)
         self.app.get("/api/animations/{skin}/{animation_type}")(
             self.get_animations_for_type
         )
@@ -1307,6 +1308,126 @@ class SynthWebUIInterface:
         except Exception as e:
             error_msg = str(e)
             log_error(f"{LOG_PREFIX} run_agent_turn failed: {error_msg}")
+            raise HTTPException(status_code=500, detail=error_msg)
+
+    async def continue_agent_task(self, task_id: int):
+        """Resume a paused (``pending``) agentic task for another iteration batch.
+
+        A task is parked as ``pending`` when it exhausts its iteration budget
+        without the model calling ``attempt_completion`` (see
+        ``core.agent_core.AgentLoopManager.run_agentic_turn``). This endpoint
+        re-runs the loop ON THE SAME ``agent_tasks`` row, re-injecting the prior
+        observation history so the model continues where it left off, with a
+        fresh ``AGENT_MAX_ITERATIONS`` budget.
+        """
+        try:
+            from core.db import get_conn_ctx
+            from core.core_initializer import core_initializer
+            from core.tool_registry import tool_registry
+            from core.mcp_bridge.client import mcp_client_bridge
+            from core.agent_core import get_agent_loop_manager
+            from core.config_manager import config_registry as cfg
+
+            if not bool(cfg.get_var("AGENT_ENABLED", True)):
+                raise HTTPException(status_code=403, detail="Agent disabled")
+
+            async with get_conn_ctx() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "SELECT status, engine, input, iterations_meta, metadata "
+                        "FROM agent_tasks WHERE id=%s",
+                        (int(task_id),),
+                    )
+                    row = await cur.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="task not found")
+
+            status, engine, input_raw, iterations_raw, metadata_raw = (
+                row[0],
+                row[1],
+                row[2],
+                row[3],
+                row[4],
+            )
+            if status != "pending":
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"task is not pending (status={status})",
+                )
+
+            input_payload = json.loads(input_raw) if input_raw else {}
+            if not isinstance(input_payload, dict):
+                input_payload = {}
+            goal = str(input_payload.get("goal") or "").strip()
+            if not goal:
+                raise HTTPException(
+                    status_code=422, detail="task has no goal to resume"
+                )
+
+            metadata = json.loads(metadata_raw) if metadata_raw else {}
+            if not isinstance(metadata, dict):
+                metadata = {}
+            interface_path = metadata.get("interface_path") or "synth_webui/agent"
+
+            # Rebuild the observation history from the persisted iterations so
+            # the resumed loop continues with the context it already built.
+            prior_observations: list[dict] = []
+            iterations_meta = json.loads(iterations_raw) if iterations_raw else []
+            if isinstance(iterations_meta, list):
+                for entry in iterations_meta:
+                    if not isinstance(entry, dict):
+                        continue
+                    prior_observations.append(
+                        {
+                            "iteration": entry.get("iteration"),
+                            "role": entry.get("role") or "observation",
+                            "content": entry.get("result"),
+                        }
+                    )
+
+            # Mark the row back to ``running`` so the UI reflects the resume.
+            async with get_conn_ctx() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "UPDATE agent_tasks SET status='running', "
+                        "updated_at=CURRENT_TIMESTAMP WHERE id=%s",
+                        (int(task_id),),
+                    )
+                    await conn.commit()
+
+            # Refresh the unified tool registry (same as run_agent_turn).
+            await core_initializer._build_actions_block()
+            available_actions = {}
+            if isinstance(core_initializer.actions_block, dict):
+                available_actions = (
+                    core_initializer.actions_block.get("available_actions", {}) or {}
+                )
+            tool_registry.load_internal_actions(available_actions)
+            await mcp_client_bridge.connect_all(force=True)
+
+            manager = get_agent_loop_manager()
+            result = await manager.run_agentic_turn(
+                goal=goal,
+                engine=engine if engine and engine != "default" else None,
+                context={
+                    "goal": goal,
+                    "interface": "synth_webui",
+                    "interface_name": "synth_webui",
+                    "interface_path": interface_path,
+                    "chat_id": "agent",
+                    "resumed": True,
+                },
+                original_message={"sender_id": "webui"},
+                task_id=int(task_id),
+                prior_observations=prior_observations,
+            )
+
+            return JSONResponse({"result": result, "task_id": int(task_id)})
+        except HTTPException:
+            raise
+        except Exception as e:
+            error_msg = str(e)
+            log_error(f"{LOG_PREFIX} continue_agent_task failed: {error_msg}")
             raise HTTPException(status_code=500, detail=error_msg)
 
     async def create_database_backup_endpoint(self):

@@ -105,6 +105,7 @@ class AgentPlugin(AIPluginBase):
             "agent_list_files",
             "agent_read_file",
             "spawn_drone",
+            "resume_agent_task",
         ]
 
     def get_supported_actions(self) -> Dict[str, Any]:
@@ -131,6 +132,21 @@ class AgentPlugin(AIPluginBase):
                     "piece of work (research, a multi-step lookup, a scoped file inspection) "
                     "so the main task stays clean. A Drone CANNOT spawn further Drones. "
                     "Provide a clear, self-contained 'goal'."
+                ),
+            },
+            "resume_agent_task": {
+                "required_fields": ["task_id"],
+                "optional_fields": [],
+                "security_level": "medium",
+                "external_effects": ["agent_task"],
+                "description": (
+                    "Resume a previously paused agent task by its numeric id, continuing "
+                    "it where it left off (with a fresh iteration budget) instead of "
+                    "starting a brand-new task. Use this whenever the user asks to continue, "
+                    "resume, or keep working on a specific existing task and refers to it by "
+                    "its number (e.g. 'continue task 37'). Provide the numeric 'task_id'. The "
+                    "task must currently be paused/pending; you can only resume a task that "
+                    "is waiting to be continued."
                 ),
             },
         }
@@ -360,6 +376,53 @@ class AgentPlugin(AIPluginBase):
             except Exception as exc:
                 log_error(f"[agent] spawn_drone failed: {exc}")
                 return {"ok": False, "error": f"drone_failed: {exc}"}
+
+            return {
+                "ok": True,
+                "final_text": result.get("final_text", ""),
+                "iterations": result.get("iterations"),
+                "stop_reason": result.get("stop_reason"),
+                "task_id": result.get("task_id"),
+            }
+
+        if action_type == "resume_agent_task":
+            raw_id = payload.get("task_id")
+            try:
+                task_id = int(raw_id)
+            except (TypeError, ValueError):
+                return {"status": "error", "reason": "invalid or missing task_id"}
+            if task_id <= 0:
+                return {"status": "error", "reason": "invalid task_id"}
+
+            from core.agent_core import get_agent_loop_manager
+
+            manager = get_agent_loop_manager()
+            resumable = await manager.find_task_by_id(task_id)
+            if not resumable:
+                return {
+                    "status": "error",
+                    "reason": f"task {task_id} not found or not pending",
+                }
+
+            ctx = context or {}
+            prior_observations = list(resumable.get("prior_observations") or [])
+            user_goal = str(ctx.get("original_text") or ctx.get("goal") or "").strip()
+            if user_goal:
+                prior_observations.append(
+                    {"iteration": None, "role": "user", "content": user_goal}
+                )
+            try:
+                result = await manager.run_agentic_turn(
+                    goal=resumable.get("goal") or "",
+                    engine=resumable.get("engine"),
+                    context=ctx,
+                    original_message=original_message,
+                    task_id=resumable.get("task_id"),
+                    prior_observations=prior_observations,
+                )
+            except Exception as exc:
+                log_error(f"[agent] resume_agent_task failed: {exc}")
+                return {"ok": False, "error": f"resume_failed: {exc}"}
 
             return {
                 "ok": True,

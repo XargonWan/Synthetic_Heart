@@ -156,7 +156,7 @@ message → **Fast Lane** (unchanged path). Gated by `AGENTIC_ROUTING_ENABLED`
 via `run_action`; external MCP tools via `mcp_client_bridge.call_tool`. Tool
 names are namespaced `mcp_<server>_<tool>`.
 
-**Config keys:** `AGENTIC_ROUTING_ENABLED`, `AGENT_MAX_ITERATIONS` (5),
+**Config keys:** `AGENTIC_ROUTING_ENABLED`, `AGENT_MAX_ITERATIONS` (30),
 `AGENT_TURN_TIMEOUT_SEC` (120), `AGENT_MCP_EXPOSED_ACTIONS`, `SYNTH_MCP_CONFIG`.
 See `docs/agentic_tools.rst` for the full reference.
 

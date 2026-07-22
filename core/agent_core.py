@@ -29,7 +29,7 @@ try:
     register_exposed_var(
         "AGENT_MAX_ITERATIONS",
         label="Agent max iterations",
-        default=5,
+        default=30,
         value_type=int,
         ui_type="number",
         description="Maximum iterations allowed for Agent loops before automatic stop.",
@@ -62,8 +62,35 @@ try:
         component="agent",
         needs_component_reload=False,
     )
+    # Explicit-completion contract: when enabled (default), the agentic loop does
+    # NOT treat a bare natural-language response (no tool calls) as "task done".
+    # The model must either send a real user message or call the dedicated
+    # ``attempt_completion`` tool to end the turn; otherwise the loop re-injects
+    # a nudge and keeps working until the goal is finished or iterations run out.
+    # This prevents premature final answers (the model announcing intent — e.g.
+    # "I'll check the codebase now..." — and stopping without doing the work).
+    register_exposed_var(
+        "AGENT_REQUIRE_EXPLICIT_COMPLETION",
+        label="Agent requires explicit completion",
+        default=True,
+        value_type=bool,
+        ui_type="toggle",
+        description=(
+            "When on, an agentic turn ends only via a user message or the "
+            "attempt_completion tool — plain text with no tool calls does not "
+            "stop the loop, preventing premature final answers."
+        ),
+        scope="agent",
+        component="agent",
+        needs_component_reload=False,
+    )
 except Exception:
     pass
+
+# Sentinel tool the model calls to explicitly declare the task finished. It is
+# not a real executable action — the loop intercepts it, extracts its summary as
+# the final answer, and stops. Recognised in the prompt's AVAILABLE TOOLS block.
+_COMPLETION_TOOL = "attempt_completion"
 
 # DB helper is imported lazily inside methods for testability/mocking
 
@@ -111,6 +138,276 @@ class AgentLoopManager:
             conn_ctx = await conn_ctx
         return conn_ctx
 
+    async def _begin_agentic_turn(
+        self,
+        *,
+        engine: str | None,
+        goal: str,
+        context: Optional[Dict[str, Any]] = None,
+        original_message: Any = None,
+        preplanned_calls: Optional[list[Dict[str, Any]]] = None,
+    ) -> Optional[int]:
+        """Insert a ``running`` row for an in-flight agentic turn.
+
+        Called BEFORE the reasoning loop starts so the turn is durable from the
+        moment it begins. This is what makes a detached turn survivable across a
+        container restart: an interrupted turn is left as a ``running`` row in
+        ``agent_tasks`` that the startup recovery sweep can detect and mark as
+        interrupted (rather than the turn silently vanishing with the process).
+
+        Returns the new row id, or ``None`` on any DB failure (best-effort: a
+        persistence problem must never prevent the turn from running).
+        """
+        try:
+            trainer_id: str | None = None
+            if isinstance(original_message, dict):
+                raw_id = original_message.get("sender_id") or original_message.get(
+                    "user_id"
+                )
+                if raw_id is not None:
+                    trainer_id = str(raw_id)
+            elif original_message is not None:
+                raw_id = getattr(original_message, "sender_id", None) or getattr(
+                    original_message, "user_id", None
+                )
+                if raw_id is not None:
+                    trainer_id = str(raw_id)
+
+            source = "agentic_turn"
+            interface_path = None
+            if isinstance(context, dict):
+                source = str(
+                    context.get("interface_name") or context.get("interface") or source
+                )
+                interface_path = context.get("interface_path")
+
+            task_name: str | None = None
+            if isinstance(context, dict):
+                raw_title = context.get("agent_task_title")
+                if isinstance(raw_title, str) and raw_title.strip():
+                    task_name = raw_title.strip()[:120]
+            if not task_name and isinstance(goal, str) and goal.strip():
+                task_name = goal.strip()[:120]
+
+            input_payload = {
+                "goal": goal,
+                "planned_actions": preplanned_calls
+                if isinstance(preplanned_calls, list)
+                else None,
+            }
+            metadata = {
+                "source": source,
+                "interface_path": interface_path,
+                "has_preplanned_calls": bool(isinstance(preplanned_calls, list)),
+                "name": task_name,
+            }
+            if isinstance(context, dict) and isinstance(context.get("drone"), dict):
+                drone_meta = context["drone"]
+                if drone_meta.get("is_drone"):
+                    metadata["source"] = "drone"
+                    metadata["drone"] = {
+                        "parent_task_id": drone_meta.get("parent_task_id"),
+                    }
+
+            conn_ctx = await self._get_conn_ctx()
+            async with conn_ctx as conn:
+                async with conn.cursor() as cur:
+                    params = (
+                        str(engine or "default"),
+                        "running",
+                        json.dumps(input_payload),
+                        trainer_id,
+                        json.dumps(metadata),
+                    )
+                    new_id: Optional[int] = None
+                    try:
+                        await cur.execute(
+                            """
+                            INSERT INTO agent_tasks (engine, status, input, trainer_id, metadata)
+                            VALUES (%s, %s, %s, %s, %s)
+                            RETURNING id
+                            """,
+                            params,
+                        )
+                        row = await cur.fetchone()
+                        if row is not None:
+                            new_id = int(row[0])
+                    except Exception:
+                        await cur.execute(
+                            """
+                            INSERT INTO agent_tasks (engine, status, input, trainer_id, metadata)
+                            VALUES (%s, %s, %s, %s, %s)
+                            """,
+                            params,
+                        )
+                        last = getattr(cur, "lastrowid", None)
+                        new_id = int(last) if last else None
+                    await self._maybe_commit(conn)
+                    return new_id
+        except Exception as e:
+            log_warning(f"[agent_core] _begin_agentic_turn failed: {e}")
+            return None
+
+    async def find_resumable_task_for_interface(
+        self, interface_path: str | None
+    ) -> Optional[Dict[str, Any]]:
+        """Find a paused (``pending``) agentic task for the given interface.
+
+        A single interface (a Telegram chat, a Discord channel, a WebUI
+        session) must never own two parallel pending agentic tasks. When a
+        turn exhausts its budget without an explicit completion it is parked as
+        ``pending``; the very next message from that same ``interface_path``
+        should RESUME that task, not spawn a brand-new one. This is what lets a
+        user reply "yes, keep going" (in any language) in chat and have Synth
+        continue the same task — without any keyword/language detection, purely
+        by matching the originating interface.
+
+        Returns a dict ``{"task_id", "goal", "engine", "prior_observations"}``
+        for the most recent pending task on that interface, or ``None`` when
+        there is none (or on any DB error — best-effort, never blocks a turn).
+        """
+        if not interface_path or not isinstance(interface_path, str):
+            return None
+        try:
+            conn_ctx = await self._get_conn_ctx()
+            async with conn_ctx as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "SELECT id, engine, input, iterations_meta "
+                        "FROM agent_tasks "
+                        "WHERE status='pending' "
+                        "AND metadata::json->>'interface_path' = %s "
+                        "ORDER BY id DESC LIMIT 1",
+                        (interface_path,),
+                    )
+                    row = await cur.fetchone()
+            if not row:
+                return None
+            task_id = int(row[0])
+            engine = row[1]
+            input_raw = row[2]
+            iterations_raw = row[3]
+
+            input_payload = json.loads(input_raw) if input_raw else {}
+            if not isinstance(input_payload, dict):
+                input_payload = {}
+            goal = str(input_payload.get("goal") or "").strip()
+            if not goal:
+                return None
+
+            prior_observations: list[Dict[str, Any]] = []
+            iterations_meta = json.loads(iterations_raw) if iterations_raw else []
+            if isinstance(iterations_meta, list):
+                for entry in iterations_meta:
+                    if not isinstance(entry, dict):
+                        continue
+                    prior_observations.append(
+                        {
+                            "iteration": entry.get("iteration"),
+                            "role": entry.get("role") or "observation",
+                            "content": entry.get("result"),
+                        }
+                    )
+            return {
+                "task_id": task_id,
+                "goal": goal,
+                "engine": engine if engine and engine != "default" else None,
+                "prior_observations": prior_observations,
+            }
+        except Exception as e:
+            log_warning(f"[agent_core] find_resumable_task_for_interface failed: {e}")
+            return None
+
+    async def find_task_by_id(self, task_id: int) -> Optional[Dict[str, Any]]:
+        """Load a specific paused (``pending``) agentic task by its id.
+
+        Unlike :meth:`find_resumable_task_for_interface` this does NOT match on
+        the originating interface: the user may refer to a task created on a
+        different interface (e.g. a Grillo-originated task referenced from a
+        Telegram chat). The task id is chosen by the model — this method only
+        loads and validates it, it never parses user text.
+
+        Returns a dict ``{"task_id", "goal", "engine", "prior_observations"}``
+        when the task exists and is ``pending``; otherwise ``None`` (unknown id,
+        wrong status, or any DB error — best-effort, never blocks a turn).
+        """
+        try:
+            tid = int(task_id)
+        except (TypeError, ValueError):
+            return None
+        try:
+            conn_ctx = await self._get_conn_ctx()
+            async with conn_ctx as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "SELECT id, engine, input, iterations_meta, status "
+                        "FROM agent_tasks WHERE id=%s LIMIT 1",
+                        (tid,),
+                    )
+                    row = await cur.fetchone()
+            if not row:
+                return None
+            status = row[4]
+            if status != "pending":
+                log_info(
+                    f"[agent_core] find_task_by_id: task {tid} is '{status}', "
+                    "not resumable"
+                )
+                return None
+            engine = row[1]
+            input_raw = row[2]
+            iterations_raw = row[3]
+
+            input_payload = json.loads(input_raw) if input_raw else {}
+            if not isinstance(input_payload, dict):
+                input_payload = {}
+            goal = str(input_payload.get("goal") or "").strip()
+            if not goal:
+                return None
+
+            prior_observations: list[Dict[str, Any]] = []
+            iterations_meta = json.loads(iterations_raw) if iterations_raw else []
+            if isinstance(iterations_meta, list):
+                for entry in iterations_meta:
+                    if not isinstance(entry, dict):
+                        continue
+                    prior_observations.append(
+                        {
+                            "iteration": entry.get("iteration"),
+                            "role": entry.get("role") or "observation",
+                            "content": entry.get("result"),
+                        }
+                    )
+            return {
+                "task_id": int(row[0]),
+                "goal": goal,
+                "engine": engine if engine and engine != "default" else None,
+                "prior_observations": prior_observations,
+            }
+        except Exception as e:
+            log_warning(f"[agent_core] find_task_by_id failed: {e}")
+            return None
+
+    async def _mark_task_running(self, task_id: int) -> None:
+        """Flip an existing ``agent_tasks`` row back to ``running``.
+
+        Used when resuming a paused task so the UI/state reflects the in-flight
+        resume immediately. Best-effort: a failure here must never abort the
+        turn (the finalising persist will set the real terminal status anyway).
+        """
+        try:
+            conn_ctx = await self._get_conn_ctx()
+            async with conn_ctx as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "UPDATE agent_tasks SET status='running', "
+                        "updated_at=CURRENT_TIMESTAMP WHERE id=%s",
+                        (int(task_id),),
+                    )
+                await self._maybe_commit(conn)
+        except Exception as e:
+            log_warning(f"[agent_core] _mark_task_running failed: {e}")
+
     async def _persist_agentic_turn(
         self,
         *,
@@ -120,6 +417,7 @@ class AgentLoopManager:
         context: Optional[Dict[str, Any]] = None,
         original_message: Any = None,
         preplanned_calls: Optional[list[Dict[str, Any]]] = None,
+        task_id: Optional[int] = None,
     ) -> Optional[int]:
         """Persist a completed agentic turn into ``agent_tasks``.
 
@@ -148,11 +446,27 @@ class AgentLoopManager:
                     )
 
             stop_reason = str(result.get("stop_reason") or "")
-            status = (
-                "failed"
-                if stop_reason in {"timeout", "engine_error", "empty_response"}
-                else "completed"
-            )
+            if stop_reason in {"timeout", "engine_error", "empty_response"}:
+                status = "failed"
+            elif stop_reason == "paused_max_iterations":
+                # Iteration budget exhausted without an explicit completion: the
+                # goal is not finished. Park the task as ``pending`` so the user
+                # can grant more iterations via "Continue" (WebUI) instead of it
+                # being falsely reported as ``completed``.
+                status = "pending"
+            else:
+                status = "completed"
+
+            # Count the tool actions actually executed across the turn so the
+            # proactive "I've done X actions, continue?" message and the WebUI
+            # can show a concrete number.
+            actions_executed = 0
+            if isinstance(observations, list):
+                for obs in observations:
+                    if isinstance(obs, dict) and obs.get("role") == "tool_results":
+                        content = obs.get("content")
+                        if isinstance(content, list):
+                            actions_executed += len(content)
 
             # Derive a trainer/originator id and a source label from the
             # originating context/message so the WebUI can attribute the task.
@@ -188,6 +502,8 @@ class AgentLoopManager:
                 "iterations": int(result.get("iterations") or len(iterations_meta)),
                 "final_text": result.get("final_text") or "",
                 "stop_reason": stop_reason,
+                "actions_executed": actions_executed,
+                "paused": status == "pending",
             }
             # Task name shown in the WebUI Agents panel. Prefer the recon-derived
             # title (set on the shared context by the agent-intent recon hook);
@@ -219,6 +535,35 @@ class AgentLoopManager:
             conn_ctx = await self._get_conn_ctx()
             async with conn_ctx as conn:
                 async with conn.cursor() as cur:
+                    # When ``task_id`` is provided, a ``running`` row already
+                    # exists (opened by ``_begin_agentic_turn`` so the turn is
+                    # durable from the start). Finalise it in place with the
+                    # loop results instead of inserting a duplicate row.
+                    if task_id is not None:
+                        await cur.execute(
+                            """
+                            UPDATE agent_tasks
+                            SET engine = %s,
+                                status = %s,
+                                iterations_meta = %s,
+                                output = %s,
+                                trainer_id = %s,
+                                metadata = %s
+                            WHERE id = %s
+                            """,
+                            (
+                                str(engine or "default"),
+                                status,
+                                json.dumps(iterations_meta),
+                                json.dumps(output_payload),
+                                trainer_id,
+                                json.dumps(metadata),
+                                int(task_id),
+                            ),
+                        )
+                        await self._maybe_commit(conn)
+                        return int(task_id)
+
                     params = (
                         str(engine or "default"),
                         status,
@@ -269,6 +614,8 @@ class AgentLoopManager:
         timeout_seconds: float | None = None,
         original_message: Any = None,
         preplanned_calls: list[Dict[str, Any]] | None = None,
+        task_id: int | None = None,
+        prior_observations: list[Dict[str, Any]] | None = None,
     ) -> Dict[str, Any]:
         """Run a bounded agentic turn that re-injects tool results into the model.
 
@@ -291,13 +638,19 @@ class AgentLoopManager:
             max_iterations: Hard cap on iterations (defaults to AGENT_MAX_ITERATIONS).
             timeout_seconds: Optional wall-clock budget for the whole turn.
             original_message: Optional originating message (for audit/safety).
+            task_id: Optional existing ``agent_tasks`` row id to resume/finalise
+                in place (used by "Continue" to re-run a paused task on the same
+                record instead of creating a new one).
+            prior_observations: Optional observation history from a previous
+                (paused) turn, re-injected so the model continues with the
+                context it already built instead of starting from scratch.
 
         Returns:
             A dict with ``iterations``, ``observations``, ``final_text`` and
             ``stop_reason``.
         """
         if max_iterations is None:
-            max_iterations = int(config_registry.get_var("AGENT_MAX_ITERATIONS", 5))
+            max_iterations = int(config_registry.get_var("AGENT_MAX_ITERATIONS", 30))
         if timeout_seconds is None:
             timeout_seconds = float(
                 config_registry.get_var("AGENT_TURN_TIMEOUT_SEC", 120)
@@ -325,7 +678,32 @@ class AgentLoopManager:
         from core.agent_tool_executor import agent_tool_executor
         from core.transport_layer import extract_json_from_text
 
-        observations: list[Dict[str, Any]] = []
+        # Open a durable ``running`` row BEFORE the loop starts. A detached turn
+        # (message-chain Agent Lane) can be interrupted by a container restart
+        # mid-flight; persisting up-front means the startup recovery sweep can
+        # detect the orphaned ``running`` row and surface it instead of the turn
+        # vanishing silently. Best-effort: a None id just means the finalising
+        # persist will INSERT a fresh row as before.
+        #
+        # When ``task_id`` is supplied (resume/"Continue" of a paused task) we
+        # reuse that existing row instead of opening a new one, so the whole
+        # multi-batch effort stays a single ``agent_tasks`` record.
+        if task_id is None:
+            task_id = await self._begin_agentic_turn(
+                engine=engine,
+                goal=goal,
+                context=context,
+                original_message=original_message,
+                preplanned_calls=preplanned_calls,
+            )
+        else:
+            # Resuming an existing (paused) row: flip it back to ``running`` so
+            # the UI reflects the in-flight resume instead of showing it as
+            # ``pending`` for the whole batch. Best-effort — never block the
+            # turn on a status update failure.
+            await self._mark_task_running(task_id)
+
+        observations: list[Dict[str, Any]] = list(prior_observations or [])
         final_text = ""
         stop_reason = "max_iterations"
 
@@ -411,6 +789,7 @@ class AgentLoopManager:
                 context=context,
                 original_message=original_message,
                 preplanned_calls=preplanned_calls,
+                task_id=task_id,
             )
             return result
 
@@ -493,6 +872,42 @@ class AgentLoopManager:
             parsed, _meta = extract_json_from_text(raw_text, return_metadata=True)
             tool_calls = self._extract_tool_calls(parsed)
 
+            # Explicit completion signal. The model ends the turn by calling the
+            # dedicated ``attempt_completion`` tool (a sentinel, not a real
+            # action). Its ``summary``/``text`` becomes the final answer. This is
+            # the language-agnostic, structural end-of-turn marker used by robust
+            # agents — absence of tool calls alone concludes nothing.
+            completion_calls = [
+                c
+                for c in tool_calls
+                if str(c.get("name") or c.get("type") or "").strip() == _COMPLETION_TOOL
+            ]
+            if completion_calls:
+                tool_calls = [c for c in tool_calls if c not in completion_calls]
+                summary_parts: list[str] = []
+                for cc in completion_calls:
+                    args = cc.get("arguments") or cc.get("payload") or {}
+                    if isinstance(args, dict):
+                        text = str(
+                            args.get("summary")
+                            or args.get("text")
+                            or args.get("content")
+                            or ""
+                        ).strip()
+                        if text:
+                            summary_parts.append(text)
+                if summary_parts:
+                    final_text = "\n\n".join(summary_parts)
+                observations.append(
+                    {
+                        "iteration": i,
+                        "role": "assistant",
+                        "content": final_text or "(completed)",
+                    }
+                )
+                stop_reason = "completed"
+                break
+
             # Synth actions vs tools. A plain outbound message action (e.g.
             # ``message_telegram_bot``) is Synth talking to the user, NOT a tool
             # the agent should feed back into its loop. Recognise those synth
@@ -519,11 +934,61 @@ class AgentLoopManager:
                 if collected:
                     final_text = "\n\n".join(collected)
 
+            # Under the explicit-completion contract, the ONLY structural
+            # end-of-turn signal is ``attempt_completion`` (handled above) or
+            # exhausting the iteration budget. A plain outbound message — even on
+            # a synchronous interface like Ollama — is NOT proof the goal is
+            # done: weak models routinely emit an intent statement ("I'll check
+            # the codebase now...") as a message and would otherwise stop there.
+            require_explicit_completion = bool(
+                config_registry.get_var("AGENT_REQUIRE_EXPLICIT_COMPLETION", True)
+            )
+
             if not tool_calls:
-                # Only synth message actions this iteration (no real tools left):
-                # Synth has produced its reply, so end the turn and let the
-                # normal delivery path send ``final_text`` to the interface.
+                # Only synth message actions this iteration (no real tools left).
                 if message_calls and final_text.strip():
+                    if require_explicit_completion and i < max_iterations:
+                        # Deliver the message as an intermediate reply but keep
+                        # working: the model must still call attempt_completion
+                        # (or run out of iterations) to genuinely end the turn.
+                        observations.append(
+                            {
+                                "iteration": i,
+                                "role": "assistant",
+                                "content": final_text,
+                            }
+                        )
+                        observations.append(
+                            {
+                                "iteration": i,
+                                "role": "system",
+                                "content": (
+                                    "You sent a message but the goal is NOT "
+                                    "finished yet. A message is not a completion "
+                                    "signal. Do not stop at an intent statement — "
+                                    "take the next tool action to make real "
+                                    "progress. When (and only when) the goal is "
+                                    "genuinely accomplished, call the "
+                                    f"{_COMPLETION_TOOL} tool with a short summary."
+                                ),
+                            }
+                        )
+                        stop_reason = "max_iterations"
+                        continue
+
+                    # Explicit-completion ON but iterations exhausted: the goal
+                    # was never explicitly completed. Do NOT declare the task
+                    # done — pause it so the user can grant more iterations via
+                    # "Continue". The message is kept as the latest reply.
+                    if require_explicit_completion:
+                        observations.append(
+                            {"iteration": i, "role": "assistant", "content": final_text}
+                        )
+                        stop_reason = "paused_max_iterations"
+                        break
+
+                    # Explicit-completion disabled: the message is the final
+                    # reply; end the turn.
                     observations.append(
                         {"iteration": i, "role": "assistant", "content": final_text}
                     )
@@ -541,7 +1006,50 @@ class AgentLoopManager:
                     stop_reason = "empty_response"
                     continue
 
-                # No more tool calls -> model is done; keep its text as final.
+                # Bare text, no tool calls, no user-facing message. Under the
+                # explicit-completion contract this is NOT "done": weak models
+                # often stop here with an intent statement ("I'll check the
+                # codebase now...") instead of actually finishing the goal. Keep
+                # the text as an intermediate observation, re-inject a structural
+                # nudge, and continue the loop. The turn only ends via a user
+                # message, ``attempt_completion``, or exhausting iterations.
+                if require_explicit_completion and i < max_iterations:
+                    observations.append(
+                        {"iteration": i, "role": "assistant", "content": raw_text}
+                    )
+                    observations.append(
+                        {
+                            "iteration": i,
+                            "role": "system",
+                            "content": (
+                                "You responded with text but no tool calls and no "
+                                "user message. The goal is NOT finished yet. Do not "
+                                "stop at an intent statement — take the next tool "
+                                "action to make real progress. When (and only when) "
+                                "the goal is genuinely accomplished, call the "
+                                f"{_COMPLETION_TOOL} tool with a short summary, or "
+                                "send the final answer as a user message."
+                            ),
+                        }
+                    )
+                    final_text = raw_text
+                    stop_reason = "max_iterations"
+                    continue
+
+                # Explicit-completion ON but iterations exhausted with only a
+                # bare intent statement: the goal was never explicitly finished.
+                # Pause the task instead of faking completion, so the user can
+                # grant more iterations via "Continue".
+                if require_explicit_completion:
+                    final_text = raw_text
+                    observations.append(
+                        {"iteration": i, "role": "assistant", "content": raw_text}
+                    )
+                    stop_reason = "paused_max_iterations"
+                    break
+
+                # Explicit-completion disabled: fall back to the legacy
+                # behaviour and keep the text as final.
                 final_text = raw_text
                 observations.append(
                     {"iteration": i, "role": "assistant", "content": raw_text}
@@ -605,6 +1113,37 @@ class AgentLoopManager:
                 }
             )
 
+        # Loop fell through the iteration budget while still executing tool
+        # calls (never called attempt_completion). Under the explicit-completion
+        # contract this is NOT a completion — pause the task so the user can
+        # grant more iterations via "Continue" instead of marking it done.
+        if stop_reason == "max_iterations" and bool(
+            config_registry.get_var("AGENT_REQUIRE_EXPLICIT_COMPLETION", True)
+        ):
+            stop_reason = "paused_max_iterations"
+
+        # Paused (budget exhausted without explicit completion): let Synth
+        # author the "I'm not done, shall I continue?" message itself, in the
+        # conversation's own language/tone, instead of shipping a hardcoded
+        # English string. Overwrite ``final_text`` with the composed message so
+        # every delivery path (Telegram/Discord/API) shows Synth's own words.
+        if stop_reason == "paused_max_iterations":
+            actions_executed = 0
+            for obs in observations:
+                if isinstance(obs, dict) and obs.get("role") == "tool_results":
+                    content = obs.get("content")
+                    if isinstance(content, list):
+                        actions_executed += len(content)
+            composed = await self._compose_pause_message(
+                goal=goal,
+                observations=observations,
+                actions_executed=actions_executed,
+                engine=engine,
+                context=context,
+            )
+            if composed:
+                final_text = composed
+
         result: Dict[str, Any] = {
             "iterations": len(observations),
             "observations": observations,
@@ -618,6 +1157,7 @@ class AgentLoopManager:
             context=context,
             original_message=original_message,
             preplanned_calls=preplanned_calls,
+            task_id=task_id,
         )
         return result
 
@@ -754,6 +1294,79 @@ class AgentLoopManager:
             log_debug(f"[agent_core] Direct engine fallback failed: {exc}")
         return ""
 
+    async def _compose_pause_message(
+        self,
+        *,
+        goal: str,
+        observations: list[Dict[str, Any]],
+        actions_executed: int,
+        engine: str | None,
+        context: Dict[str, Any] | None,
+    ) -> str:
+        """Have Synth write the "I need more turns, shall I continue?" message.
+
+        When an agentic turn exhausts its iteration budget without an explicit
+        completion, the user must be told — but the text must be authored BY the
+        model in the language and tone of the ongoing conversation, never a
+        hardcoded English string (which would also wrongly reference a WebUI-only
+        "Continue" button on chat interfaces where none exists).
+
+        This asks the active cortex to produce a short, natural, plain-text
+        message summarising what was done so far and asking whether to keep
+        going. It returns the generated text, or an empty string on any failure
+        (the caller then falls back to the model's last real reply).
+        """
+        try:
+            instruction = (
+                "You are Synth. You have been working on a task for a user but "
+                "have reached your action budget for this turn WITHOUT finishing "
+                f"it. So far you have carried out {actions_executed} action(s). "
+                "Write a SHORT, natural message to the user, in the SAME language "
+                "and tone as the ongoing conversation, that: (1) briefly says what "
+                "you have been doing, (2) makes clear the task is not finished "
+                "yet, and (3) asks whether they want you to continue. Do NOT "
+                "mention any button, UI element or technical detail — the user "
+                "may just reply in chat to tell you to keep going. Reply with the "
+                "message text ONLY, no JSON, no tool call, no quotes."
+            )
+            history_lines: list[str] = []
+            for obs in observations[-12:]:
+                role = obs.get("role", "system")
+                content = obs.get("content", "")
+                if isinstance(content, list):
+                    for item in content:
+                        status = (
+                            "OK" if item.get("ok") else f"ERROR: {item.get('error')}"
+                        )
+                        history_lines.append(f"[tool:{item.get('tool')}] {status}")
+                else:
+                    history_lines.append(f"[{role}] {content}")
+            history_block = "\n".join(history_lines)
+            prompt: Dict[str, Any] = {
+                "input": {
+                    "payload": {
+                        "text": (
+                            f"GOAL: {goal}\n\nWHAT YOU DID SO FAR:\n{history_block}\n"
+                        ),
+                        "system": instruction,
+                    }
+                },
+                "system_message": {
+                    "type": "agent_turn",
+                    "engine": engine,
+                    "goal": goal,
+                },
+                "agent_mode": True,
+                "observation_history": observations,
+            }
+            if context:
+                prompt["context"] = context
+            text = await self._call_engine_direct(prompt, engine)
+            return text.strip() if isinstance(text, str) else ""
+        except Exception as exc:
+            log_debug(f"[agent_core] _compose_pause_message failed: {exc}")
+            return ""
+
     @staticmethod
     def _build_agent_prompt(
         goal: str,
@@ -802,14 +1415,36 @@ class AgentLoopManager:
             tool_lines.append(
                 f"- {tool.name} | source={tool.source} | security={tool.security_level} | params=[{params_block}]"
             )
+        # The completion sentinel is always available and is how the model ends
+        # the turn. It is intercepted by the loop, not executed as a real action.
+        tool_lines.append(
+            f"- {_COMPLETION_TOOL} | source=agent | security=safe | "
+            "params=[summary:string(required)]"
+        )
         tools_block = "\n".join(tool_lines) if tool_lines else "- (no tools registered)"
 
         system_text = (
             "You are Synth operating in agentic mode. Achieve the goal using "
             "the available tools. When you need a tool, respond ONLY with the "
-            "tool-call JSON actions. When the goal is complete, respond with a "
-            "final natural-language answer and no tool calls. Use only tool names "
-            "from the AVAILABLE TOOLS block.\n"
+            "tool-call JSON actions. Use only tool names from the AVAILABLE TOOLS "
+            "block.\n"
+            "Work like a careful engineer: break the goal into steps and keep "
+            "calling tools to gather information, verify assumptions and make "
+            "progress until the goal is genuinely achieved. Do NOT stop and give "
+            "a final answer while the goal is only partially done or still "
+            "unverified — inspect results, and take the next tool action if more "
+            "work remains.\n"
+            "ENDING THE TURN: neither plain text NOR a message action ends the "
+            "task on its own — the loop keeps going. Announcing what you are "
+            'about to do ("I\'ll now check...") is never a completion, even if '
+            f"phrased as a message. The ONLY way to finish is to call the "
+            f"{_COMPLETION_TOOL} tool with a short summary of what you "
+            "accomplished, once the goal is genuinely done (or you can clearly "
+            "explain, based on tool results, why it cannot be). Send message "
+            "actions to talk to the user while you work, but keep emitting the "
+            f"next tool call until you call {_COMPLETION_TOOL}.\n"
+            "Each tool observation is already in PRIOR OBSERVATIONS — build on it "
+            "rather than repeating an identical call.\n"
             "Diary discipline: this is a single agentic task, not many separate "
             "moments. Do NOT write a diary entry on every iteration. At most, "
             "record one diary entry when you begin the task and one when it is "

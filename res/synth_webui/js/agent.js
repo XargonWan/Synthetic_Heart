@@ -285,14 +285,24 @@ async function loadAgentTask(id){
     const createdAt = data.created_at ? new Date(data.created_at).toLocaleString() : '-';
     const goal = (data.input && data.input.goal) || '';
 
-    // Slim meta bar.
+    const actionsExecuted = Number.isFinite(output.actions_executed) ? output.actions_executed : null;
+
+    // Slim meta bar. When the task is paused (pending) because it ran out of
+    // iterations without finishing, surface a "Continue" button that grants it
+    // another batch of iterations on the same task.
     if(metaBar){
+      let continueBtn = '';
+      if(status === 'pending'){
+        const done = actionsExecuted != null ? actionsExecuted : '?';
+        continueBtn = `<button type="button" class="agent-continue-btn" onclick="continueAgentTask(${Number(data.id)})" title="Grant another batch of iterations">▶ Continue (${_escapeHtml(String(done))} actions so far)</button>`;
+      }
       metaBar.innerHTML = `
         <span>Task <strong>#${_escapeHtml(String(data.id))}</strong></span>
         <span>engine <strong>${_escapeHtml(engine)}</strong></span>
         <span>status <strong>${_escapeHtml(status)}</strong></span>
         <span>stop <strong>${_escapeHtml(stopReason)}</strong></span>
-        <span>${_escapeHtml(createdAt)}</span>`;
+        <span>${_escapeHtml(createdAt)}</span>
+        ${continueBtn}`;
     }
 
     const parts = [];
@@ -390,10 +400,38 @@ async function sendTaskMessage(){
   }
 }
 
+// ── Continue: resume a paused (pending) task for another iteration batch ──
+
+async function continueAgentTask(id){
+  const taskId = id != null ? id : _selectedAgentTaskId;
+  if(taskId == null) return;
+  const btn = document.querySelector('.agent-continue-btn');
+  if(btn){ btn.disabled = true; btn.textContent = '▶ Continuing…'; }
+  try{
+    const resp = await fetch(_apiBase + `/api/agent/tasks/${taskId}/continue`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({}),
+    });
+    if(!resp.ok){
+      const data = await resp.json().catch(()=>({}));
+      console.error('Continue failed', data.detail || resp.statusText);
+      if(btn){ btn.disabled = false; btn.textContent = '▶ Continue'; }
+      return;
+    }
+    await loadAgentTask(taskId);
+    await fetchAgentTasks();
+  }catch(e){
+    console.error('Continue failed', e);
+    if(btn){ btn.disabled = false; btn.textContent = '▶ Continue'; }
+  }
+}
+
 // Keep compatibility with inline onclick handlers rendered in template strings.
 window.deleteAgentTask = deleteAgentTask;
 window.renameAgentTask = renameAgentTask;
 window.sendTaskMessage = sendTaskMessage;
+window.continueAgentTask = continueAgentTask;
 
 // Expose for loader
 window.SynthWebUI = window.SynthWebUI || {};
@@ -405,11 +443,72 @@ window.SynthWebUI.initAgentTab = function(){
 
     const layout = document.getElementById('agent-legacy-layout');
     if(layout){
+      const resizer = document.getElementById('agent-col-resizer');
+      const LS_KEY = 'synth.agent.leftPaneWidth';
+      const MIN_LEFT = 200;   // px
+      const MIN_RIGHT = 320;  // px reserved for the detail pane
+
+      const isNarrow = ()=> window.innerWidth < 900;
+
       const applyLayout = ()=>{
-        layout.style.gridTemplateColumns = window.innerWidth < 900 ? '1fr' : 'minmax(260px,34%) 1fr';
+        if(isNarrow()){
+          layout.style.gridTemplateColumns = '1fr';
+          if(resizer) resizer.style.display = 'none';
+          return;
+        }
+        if(resizer) resizer.style.display = '';
+        const stored = parseFloat(localStorage.getItem(LS_KEY) || '');
+        if(stored && !Number.isNaN(stored)){
+          const maxLeft = Math.max(MIN_LEFT, layout.clientWidth - MIN_RIGHT - 6);
+          const w = Math.min(Math.max(stored, MIN_LEFT), maxLeft);
+          layout.style.setProperty('--agent-left-w', w + 'px');
+        }else{
+          layout.style.removeProperty('--agent-left-w');
+        }
       };
       applyLayout();
       window.addEventListener('resize', applyLayout);
+
+      if(resizer && !resizer.__agentBound){
+        let dragging = false;
+        const onMove = (ev)=>{
+          if(!dragging) return;
+          const rect = layout.getBoundingClientRect();
+          const clientX = (ev.touches && ev.touches[0]) ? ev.touches[0].clientX : ev.clientX;
+          let w = clientX - rect.left;
+          const maxLeft = Math.max(MIN_LEFT, layout.clientWidth - MIN_RIGHT - 6);
+          w = Math.min(Math.max(w, MIN_LEFT), maxLeft);
+          layout.style.setProperty('--agent-left-w', w + 'px');
+          if(ev.cancelable) ev.preventDefault();
+        };
+        const onUp = ()=>{
+          if(!dragging) return;
+          dragging = false;
+          resizer.classList.remove('dragging');
+          document.body.classList.remove('agent-col-resizing');
+          const cur = layout.style.getPropertyValue('--agent-left-w');
+          const px = parseFloat(cur);
+          if(px && !Number.isNaN(px)) localStorage.setItem(LS_KEY, String(Math.round(px)));
+          document.removeEventListener('mousemove', onMove);
+          document.removeEventListener('mouseup', onUp);
+          document.removeEventListener('touchmove', onMove);
+          document.removeEventListener('touchend', onUp);
+        };
+        const onDown = (ev)=>{
+          if(isNarrow()) return;
+          dragging = true;
+          resizer.classList.add('dragging');
+          document.body.classList.add('agent-col-resizing');
+          document.addEventListener('mousemove', onMove);
+          document.addEventListener('mouseup', onUp);
+          document.addEventListener('touchmove', onMove, {passive:false});
+          document.addEventListener('touchend', onUp);
+          if(ev.cancelable) ev.preventDefault();
+        };
+        resizer.addEventListener('mousedown', onDown);
+        resizer.addEventListener('touchstart', onDown, {passive:false});
+        resizer.__agentBound = true;
+      }
     }
 
     const runBtn = document.getElementById('agent-run-btn');

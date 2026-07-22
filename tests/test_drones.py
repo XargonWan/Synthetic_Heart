@@ -193,6 +193,7 @@ async def test_drone_metadata_tagged_on_persist(monkeypatch):
         context=None,
         original_message=None,
         preplanned_calls=None,
+        task_id=None,
     ):
         captured["context"] = context
         return None

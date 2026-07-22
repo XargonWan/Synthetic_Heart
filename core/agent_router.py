@@ -23,7 +23,8 @@ router always returns ``FAST`` so existing behaviour is preserved.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List
+import asyncio
+from typing import Any, Dict, List, Optional
 
 from core.logging_utils import log_debug, log_error, log_info
 from core.config_manager import config_registry
@@ -31,6 +32,12 @@ from core.config_manager import config_registry
 # Lane constants
 FAST = "fast"
 AGENT = "agent"
+
+# Strong references to detached agent turns so they are not garbage-collected
+# mid-flight (see AGENTS.md RUF006 note). The agent loop runs OFF the message
+# chain consumer lock, so a background task holding the only reference would
+# otherwise be reaped by the event loop before it finishes.
+_AGENT_BACKGROUND_TASKS: set[asyncio.Task[Any]] = set()
 
 
 def _action_types(actions: List[Any]) -> List[str]:
@@ -67,6 +74,33 @@ def _is_tool_call(action_type: str) -> bool:
         # only mcp_ prefixed names are treated as tool calls.
         pass
     return False
+
+
+def _extract_resume_task_id(actions: List[Any]) -> int | None:
+    """Return the task id from a ``resume_agent_task`` action, if the model emitted one.
+
+    The model — not any keyword/text matching — decides to resume a specific
+    task by emitting a ``resume_agent_task`` action carrying the numeric id it
+    saw referenced in the conversation. This lets a user continue a task created
+    on a *different* interface (e.g. a Grillo task referenced from Telegram),
+    which interface-based auto-resume cannot bridge. Returns the first valid
+    positive id found, or ``None``.
+    """
+    for a in actions:
+        if not isinstance(a, dict):
+            continue
+        t = a.get("type") or a.get("action")
+        if t != "resume_agent_task":
+            continue
+        payload = a.get("payload")
+        raw = payload.get("task_id") if isinstance(payload, dict) else a.get("task_id")
+        try:
+            tid = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if tid > 0:
+            return tid
+    return None
 
 
 def _is_pure_message(action_type: str) -> bool:
@@ -160,29 +194,133 @@ async def route(
     """
     lane = classify(actions, context=context)
     if lane == AGENT:
-        log_info("[agent_router] Routing to Agent Lane")
-        from core.agent_core import AgentLoopManager
-
+        log_info("[agent_router] Routing to Agent Lane (detached)")
         goal = _derive_goal(actions, context)
-        manager = AgentLoopManager()
-        result = await manager.run_agentic_turn(
-            goal=goal,
-            context=context,
-            original_message=message,
-        )
 
-        # The agent loop runs detached from the Fast-Lane reply path, so the
-        # user's interface receives nothing while it works and nothing when it
-        # finishes. Deliver the loop's final text back to the originating
-        # interface so the user actually sees the outcome instead of silence.
-        await _deliver_agent_reply(result, context, bot, message)
-        return result
+        # If the model chose to resume a specific existing task (by emitting a
+        # ``resume_agent_task`` action with a numeric id), capture that id and
+        # hand it to the detached turn so it continues THAT task — even one
+        # created on a different interface — instead of the interface-scoped
+        # auto-resume.
+        explicit_resume_id = _extract_resume_task_id(actions)
+
+        # CRITICAL: the agent loop must NOT run inline here. The message chain
+        # invokes this router while holding the consumer lock, so awaiting a
+        # multi-iteration agentic turn (LLM calls + tool work, up to minutes)
+        # would freeze Synth: no other queued message — a user writing mid-turn,
+        # radio speech — could be processed until the agent finished.
+        #
+        # Instead we spawn the turn as a detached background task and return
+        # immediately, releasing the consumer slot. The agent works
+        # concurrently; when a user writes while it runs, that message flows
+        # through the queue and is answered normally. The turn's final reply is
+        # delivered from inside the task via ``_deliver_agent_reply``.
+        task = asyncio.create_task(
+            _run_agent_turn_detached(
+                goal, context, bot, message, explicit_resume_id=explicit_resume_id
+            )
+        )
+        _AGENT_BACKGROUND_TASKS.add(task)
+        task.add_done_callback(_AGENT_BACKGROUND_TASKS.discard)
+        return {"lane": "agent", "status": "accepted", "detached": True}
 
     # Fast Lane: unchanged direct execution.
     log_info("[agent_router] Routing to Fast Lane")
     from core.action_parser import run_actions
 
     return await run_actions(actions, context, bot, message)
+
+
+async def _run_agent_turn_detached(
+    goal: str,
+    context: Dict[str, Any],
+    bot: Any,
+    message: Any,
+    *,
+    explicit_resume_id: int | None = None,
+) -> None:
+    """Run one agentic turn off the message-chain consumer lock.
+
+    This coroutine is scheduled as a detached task by :func:`route`. It owns the
+    full turn lifecycle — running the bounded loop and delivering the final text
+    back to the originating interface — without ever blocking the queue
+    consumer. Failures are logged and swallowed so a background turn can never
+    take down the message chain.
+    """
+    try:
+        from core.agent_core import AgentLoopManager
+
+        manager = AgentLoopManager()
+
+        # Resume-in-place: if this same interface already owns a paused
+        # (``pending``) agentic task, the incoming message is the user granting
+        # another batch — RESUME that task instead of spawning a duplicate. This
+        # is purely interface-based (no keyword/language detection): a chat that
+        # has a parked task and receives a new message continues it. The user's
+        # words are appended as an observation so the model sees what was said
+        # (e.g. an approval, a correction, extra detail) as it continues.
+        resume_task_id: int | None = None
+        prior_observations: list[Dict[str, Any]] | None = None
+        resume_engine: str | None = None
+        resume_goal: str | None = None
+        interface_path = (
+            context.get("interface_path") if isinstance(context, dict) else None
+        )
+
+        # Precedence: an explicit resume-by-id (the model chose a specific task,
+        # possibly on another interface) wins over interface-scoped auto-resume.
+        resumable: Optional[Dict[str, Any]] = None
+        if explicit_resume_id is not None:
+            resumable = await manager.find_task_by_id(explicit_resume_id)
+            if resumable:
+                log_info(
+                    f"[agent_router] Resuming explicitly-referenced task "
+                    f"{explicit_resume_id} (cross-interface allowed)"
+                )
+            else:
+                log_info(
+                    f"[agent_router] Requested task {explicit_resume_id} is not "
+                    "resumable (unknown or not pending); falling back to "
+                    "interface-scoped auto-resume"
+                )
+        if resumable is None:
+            resumable = await manager.find_resumable_task_for_interface(interface_path)
+        if resumable:
+            resume_task_id = resumable["task_id"]
+            resume_goal = resumable["goal"]
+            resume_engine = resumable["engine"]
+            prior_observations = resumable["prior_observations"]
+            if goal and goal.strip():
+                prior_observations = list(prior_observations or [])
+                prior_observations.append(
+                    {
+                        "iteration": None,
+                        "role": "user",
+                        "content": goal.strip(),
+                    }
+                )
+            log_info(
+                f"[agent_router] Resuming pending task {resume_task_id} for "
+                f"interface {interface_path!r} instead of opening a new one"
+            )
+
+        result = await manager.run_agentic_turn(
+            goal=resume_goal or goal,
+            engine=resume_engine,
+            context=context,
+            original_message=message,
+            task_id=resume_task_id,
+            prior_observations=prior_observations,
+        )
+        # The agent loop runs detached from the Fast-Lane reply path, so the
+        # user's interface receives nothing while it works and nothing when it
+        # finishes. Deliver the loop's final text back to the originating
+        # interface so the user actually sees the outcome instead of silence.
+        await _deliver_agent_reply(result, context, bot, message)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        log_error(f"[agent_router] Detached agent turn failed: {exc}")
 
 
 def _derive_goal(actions: List[Any], context: Dict[str, Any] | None) -> str:
@@ -217,6 +355,14 @@ async def _deliver_agent_reply(
     """
     if not isinstance(result, dict):
         return
+
+    # When the turn was paused (iteration budget exhausted without an explicit
+    # completion), the model has already authored a natural-language "I'm not
+    # finished, shall I continue?" message into ``final_text`` (see
+    # ``AgentLoopManager._compose_pause_message``), in the conversation's own
+    # language/tone. The task is parked as ``pending`` and the same interface
+    # can simply reply to resume it — no hardcoded string, no WebUI-only button
+    # reference. We deliver ``final_text`` exactly like any other reply.
     final_text = result.get("final_text")
     if not isinstance(final_text, str) or not final_text.strip():
         return

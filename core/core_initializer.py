@@ -4,6 +4,7 @@ import os
 import importlib
 import inspect
 import asyncio
+import json
 import threading
 from pathlib import Path
 from typing import Any
@@ -100,6 +101,53 @@ class CoreInitializer:
                 return False, f"Health check failed: {exc}"
 
         return True, ""
+
+    async def _recover_interrupted_agent_tasks(self) -> None:
+        """Reconcile agentic turns left ``running`` by a previous process.
+
+        Agent Lane turns run detached from the message-chain consumer, so a
+        container restart (or crash) mid-turn leaves their ``agent_tasks`` row
+        stuck as ``running`` / ``paused`` forever. On startup we mark those
+        orphans as ``failed`` with a clear stop reason.
+
+        We deliberately do NOT auto-resume them: an interrupted turn may have
+        already executed tool calls with external side effects, so blindly
+        replaying it could duplicate those effects. Surfacing the interruption
+        (and letting the user re-ask) is the safe, non-destructive choice.
+        """
+        try:
+            from core.db import get_conn_ctx
+        except Exception as exc:
+            log_debug(
+                f"[core_initializer] Agent recovery skipped (db unavailable): {exc}"
+            )
+            return
+
+        async with get_conn_ctx() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """
+                    UPDATE agent_tasks
+                    SET status = 'failed',
+                        output = %s
+                    WHERE status IN ('running', 'paused')
+                    """,
+                    (json.dumps({"stop_reason": "interrupted_by_restart"}),),
+                )
+                affected = getattr(cur, "rowcount", 0) or 0
+                commit_fn = getattr(conn, "commit", None)
+                if callable(commit_fn):
+                    res = commit_fn()
+                    if asyncio.iscoroutine(res):
+                        await res
+
+        if affected:
+            log_info(
+                f"[core_initializer] Recovered {affected} interrupted agent "
+                "task(s) left running by a previous process (marked failed)."
+            )
+        else:
+            log_debug("[core_initializer] No interrupted agent tasks to recover.")
 
     async def initialize_all(self, notify_fn=None):
         """Initialize all synth components in the correct order."""
@@ -384,7 +432,7 @@ class CoreInitializer:
                 )
                 _cfg_reg.get_var(
                     "AGENT_MAX_ITERATIONS",
-                    5,
+                    30,
                     value_type=int,
                     label="Agent Max Iterations",
                     description="Hard cap on the Agent reasoning-loop iterations per turn.",
@@ -576,6 +624,16 @@ class CoreInitializer:
                 log_warning(
                     f"[core_initializer] Failed to start pool cleanup task: {e}"
                 )
+
+            # Recover agentic turns that were in-flight when the process last
+            # stopped. Agent Lane turns run detached from the message chain, so a
+            # container restart leaves their ``agent_tasks`` row stuck as
+            # ``running``. Reconcile those orphans on startup so they don't linger
+            # forever and so the WebUI reflects reality.
+            try:
+                await self._recover_interrupted_agent_tasks()
+            except Exception as e:
+                log_warning(f"[core_initializer] Agent task recovery sweep failed: {e}")
 
             # Start chat update checker service (non-critical) — only if explicitly configured to auto-start
             try:
