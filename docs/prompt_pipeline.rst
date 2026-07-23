@@ -148,6 +148,13 @@ vision-capable (the ``vision`` capability / subsystem flag, or a configured
 warning — see ``_supports_vision_for_mm_parts`` in
 ``core/external_endpoints/bridges/cortex_bridge.py``.
 
+Supported image MIME types are defined in
+``core/multimodal_attachment.py::SUPPORTED_IMAGE_TYPES``: ``image/jpeg``,
+``image/png``, ``image/gif``, ``image/webp``, ``image/heic`` and ``image/heif``.
+Adapter support varies: Anthropic accepts only ``jpeg``/``png``/``gif``/``webp``
+(its real API limit, enforced in ``anthropic_adapter.describe_image``), while
+Gemini and OpenAI-compatible endpoints additionally accept HEIC/HEIF.
+
 Audio handling: Auris vs. inline
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -169,6 +176,42 @@ Note that the OpenAI-compatible wire format only expresses ``audio/wav`` and
 Telegram voice notes are downgraded to a document placeholder for those
 endpoints. Gemini endpoints accept any format via ``inline_data``.
 
+Document handling: PDF and text
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Documents (PDF and textual files) are **not** handled by Iris — they follow a
+separate extraction path in ``core/prompt_engine.py`` that runs while building
+``PromptRequest.attachments`` (``_build_pr_attachments``). The extracted text is
+stored in ``attachment.media_metadata['extracted_text']`` and injected into the
+prompt by ``core/prompt_renderers.py::_build_multimodal_turn_text``.
+
+For PDFs the extraction (``_extract_attachment_text_preview``) combines two
+sources:
+
+1. **Static page text** via ``pypdf``'s ``page.extract_text()``.
+2. **AcroForm field values** via ``_extract_pdf_form_fields``. Fillable PDFs
+   (character sheets, application forms, etc.) store user-entered data in
+   interactive form fields, which ``extract_text()`` never reads. These are
+   rendered as ``label: value`` pairs under a ``=== Form fields ===`` heading and
+   appended to the page text (checkbox/radio ``/Off`` states are skipped). The
+   combined text is capped at ``_ATTACHMENT_TEXT_CHAR_LIMIT`` (12000 chars).
+
+When a PDF yields **no extractable text at all**, the pipeline falls back to
+images (``_extract_pdf_page_images``):
+
+- First it tries to pull the largest **embedded raster image** per page (typical
+  of scanned documents that store one full-page image per page).
+- If there are no embedded images either (vector/text-only scans), it
+  **rasterizes** the pages to PNG via ``pypdfium2`` (``_rasterize_pdf_pages``).
+  ``pypdfium2`` is used deliberately for its permissive Apache-2.0/BSD license
+  (PyMuPDF's AGPL is incompatible with this project) and because it bundles the
+  pdfium wheels — no system binary is required. The import is guarded, so a
+  missing dependency degrades gracefully instead of breaking ingest.
+
+Up to ``_PDF_PAGE_IMAGE_LIMIT`` (4) page images are produced and stored in
+``media_metadata['page_images']``; a vision-capable Cortex model then reads them
+like any other image.
+
 Operational notes
 -----------------
 
@@ -186,6 +229,7 @@ See also
 - ``core/prompt_request.py``
 - ``core/prompt_renderers.py``
 - ``core/prompt_engine.py``
+- ``core/multimodal_attachment.py``
 - ``core/auto_response.py``
 - ``engines/external_engines/openapi.py``
 - ``engines/external_engines/anthropic.py``

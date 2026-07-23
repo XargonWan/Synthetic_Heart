@@ -61,6 +61,7 @@ dependencies = [
     "caldav>=3.2.1",
     "recurring-ical-events>=3.8.2",
     "pillow>=10.0.0",
+    "pypdfium2>=5.12.1",
 ]
 
 [project.optional-dependencies]

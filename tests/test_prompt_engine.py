@@ -663,6 +663,86 @@ def test_build_pr_attachments_extracts_pdf_page_images_when_text_missing(monkeyp
     )
 
 
+def _build_acroform_pdf() -> bytes:
+    """Build a minimal one-page PDF with a filled AcroForm text field."""
+    from io import BytesIO
+
+    from pypdf import PdfWriter
+    from pypdf.generic import (
+        ArrayObject,
+        BooleanObject,
+        DictionaryObject,
+        NameObject,
+        NumberObject,
+        TextStringObject,
+    )
+
+    writer = PdfWriter()
+    writer.add_blank_page(width=200, height=200)
+    page = writer.pages[0]
+
+    field = DictionaryObject()
+    field.update(
+        {
+            NameObject("/FT"): NameObject("/Tx"),
+            NameObject("/T"): TextStringObject("CharacterName"),
+            NameObject("/V"): TextStringObject("Rekku the Bard"),
+            NameObject("/Type"): NameObject("/Annot"),
+            NameObject("/Subtype"): NameObject("/Widget"),
+            NameObject("/Rect"): ArrayObject(
+                [NumberObject(0), NumberObject(0), NumberObject(100), NumberObject(20)]
+            ),
+        }
+    )
+    ref = writer._add_object(field)
+    page[NameObject("/Annots")] = ArrayObject([ref])
+
+    acroform = DictionaryObject()
+    acroform.update(
+        {
+            NameObject("/Fields"): ArrayObject([ref]),
+            NameObject("/NeedAppearances"): BooleanObject(True),
+        }
+    )
+    writer._root_object[NameObject("/AcroForm")] = writer._add_object(acroform)
+
+    buffer = BytesIO()
+    writer.write(buffer)
+    return buffer.getvalue()
+
+
+def test_extract_attachment_text_preview_reads_acroform_fields():
+    from core.prompt_engine import _extract_attachment_text_preview
+
+    pdf_bytes = _build_acroform_pdf()
+
+    text, _truncated = _extract_attachment_text_preview(
+        mime_type="application/pdf",
+        filename="sheet.pdf",
+        data=pdf_bytes,
+    )
+
+    assert text is not None
+    assert "=== Form fields ===" in text
+    assert "CharacterName: Rekku the Bard" in text
+
+
+def test_rasterize_pdf_pages_renders_vector_only_pdf():
+    from core.prompt_engine import _rasterize_pdf_pages
+
+    # A blank PDF page has no extractable text and no embedded raster image;
+    # rasterization is the only way to make it visible to a vision model.
+    pdf_bytes = _build_acroform_pdf()
+
+    images, _truncated = _rasterize_pdf_pages(pdf_bytes, "sheet", "sheet.pdf")
+
+    assert len(images) == 1
+    assert images[0]["mime_type"] == "image/png"
+    assert images[0]["filename"] == "sheet_page_1.png"
+    # Rendered PNG payload must be non-empty base64.
+    assert len(images[0]["data"]) > 0
+
+
 # ── _history_to_turns tests ──────────────────────────────────────────────
 
 

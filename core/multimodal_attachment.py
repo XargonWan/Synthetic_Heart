@@ -22,8 +22,17 @@ from typing import Any
 from core.logging_utils import log_debug, log_warning, log_error
 
 
-# Supported MIME types (matching gemini_api.py)
-SUPPORTED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/gif", "image/webp"}
+# Supported MIME types (matching gemini_api.py).
+# Note: Anthropic only accepts jpeg/png/gif/webp (its real API limit); Gemini and
+# OpenAI-compatible vision endpoints additionally accept HEIC/HEIF.
+SUPPORTED_IMAGE_TYPES = {
+    "image/jpeg",
+    "image/png",
+    "image/gif",
+    "image/webp",
+    "image/heic",
+    "image/heif",
+}
 SUPPORTED_AUDIO_TYPES = {
     "audio/mpeg",
     "audio/mp3",
@@ -87,6 +96,8 @@ def get_mime_type(file_path: str | Path | None, file_name: str | None = None) ->
         ".png": "image/png",
         ".gif": "image/gif",
         ".webp": "image/webp",
+        ".heic": "image/heic",
+        ".heif": "image/heif",
         ".mp3": "audio/mpeg",
         ".wav": "audio/wav",
         ".ogg": "audio/ogg",

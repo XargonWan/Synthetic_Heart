@@ -793,6 +793,12 @@ def _extract_attachment_text_preview(
                 if len(joined) >= _ATTACHMENT_TEXT_CHAR_LIMIT:
                     return _truncate_attachment_text(joined)
 
+            # AcroForm fields (fillable PDFs, e.g. character sheets) store data
+            # in form fields, NOT in the static page text extract_text() reads.
+            form_text = _extract_pdf_form_fields(reader, filename)
+            if form_text:
+                page_chunks.append(form_text)
+
             if page_chunks:
                 return _truncate_attachment_text("\n\n".join(page_chunks))
         except Exception as exc:
@@ -808,6 +814,48 @@ def _extract_attachment_text_preview(
     if not text:
         return None, False
     return _truncate_attachment_text(text)
+
+
+def _extract_pdf_form_fields(reader: Any, filename: str | None) -> str | None:
+    """Extract filled AcroForm field values from a PDF.
+
+    Fillable PDFs (e.g. character sheets, application forms) store user-entered
+    data in interactive form fields rather than the static page content stream.
+    ``PdfReader.extract_text()`` never sees these values, so we read them
+    explicitly and render them as ``label: value`` pairs.
+    """
+
+    try:
+        fields = reader.get_fields()
+    except Exception as exc:
+        log_debug(
+            f"[prompt_engine] Failed to read PDF form fields from {filename or 'attachment'}: {exc}"
+        )
+        return None
+
+    if not fields:
+        return None
+
+    lines: list[str] = []
+    for name, field in fields.items():
+        try:
+            value = field.get("/V") if hasattr(field, "get") else None
+        except Exception:
+            value = None
+        if value is None:
+            continue
+        # Checkbox/radio "off" states carry no meaningful information.
+        value_str = str(value).strip()
+        if not value_str or value_str in ("/Off", "Off"):
+            continue
+        value_str = value_str.lstrip("/")
+        label = str(name).strip() or "field"
+        lines.append(f"{label}: {value_str}")
+
+    if not lines:
+        return None
+
+    return "=== Form fields ===\n" + "\n".join(lines)
 
 
 def _extract_pdf_page_images(
@@ -870,12 +918,87 @@ def _extract_pdf_page_images(
                 }
             )
 
+        # Scanned PDFs with vector/text-only pages (no embedded raster images and
+        # no extractable text) yield nothing above. Rasterize the pages so a
+        # vision-capable model can still read them.
+        if not images:
+            return _rasterize_pdf_pages(raw_bytes, stem, filename)
+
         return images, truncated
     except Exception as exc:
         log_warning(
             f"[prompt_engine] Failed to extract PDF page images from {filename or 'attachment'}: {exc}"
         )
         return [], False
+
+
+def _rasterize_pdf_pages(
+    raw_bytes: bytes,
+    stem: str,
+    filename: str | None,
+) -> tuple[list[dict[str, str]], bool]:
+    """Render PDF pages to PNG images via pdfium (permissive Apache/BSD license).
+
+    Used as a last resort for scanned PDFs that have neither extractable text nor
+    embedded raster images. The import is guarded so a missing dependency degrades
+    gracefully instead of breaking attachment ingest.
+    """
+
+    try:
+        import pypdfium2 as pdfium
+    except Exception as exc:  # pragma: no cover - optional dependency guard
+        log_debug(
+            f"[prompt_engine] pypdfium2 unavailable, skipping PDF rasterization for {filename or 'attachment'}: {exc}"
+        )
+        return [], False
+
+    from io import BytesIO
+
+    pdf = None
+    try:
+        pdf = pdfium.PdfDocument(raw_bytes)
+        images: list[dict[str, str]] = []
+        truncated = False
+        page_count = len(pdf)
+
+        for page_index in range(page_count):
+            if len(images) >= _PDF_PAGE_IMAGE_LIMIT:
+                truncated = page_count > _PDF_PAGE_IMAGE_LIMIT
+                break
+
+            page = pdf[page_index]
+            try:
+                bitmap = page.render(scale=2.0)
+                pil_image = bitmap.to_pil()
+                buffer = BytesIO()
+                pil_image.save(buffer, format="PNG")
+                image_bytes = buffer.getvalue()
+            finally:
+                page.close()
+
+            if not image_bytes:
+                continue
+
+            images.append(
+                {
+                    "mime_type": "image/png",
+                    "data": base64.b64encode(image_bytes).decode("ascii"),
+                    "filename": f"{stem}_page_{page_index + 1}.png",
+                }
+            )
+
+        return images, truncated
+    except Exception as exc:
+        log_warning(
+            f"[prompt_engine] Failed to rasterize PDF pages for {filename or 'attachment'}: {exc}"
+        )
+        return [], False
+    finally:
+        if pdf is not None:
+            try:
+                pdf.close()
+            except Exception:
+                pass
 
 
 def _coerce_attachment_bytes(data: Any) -> bytes | None:

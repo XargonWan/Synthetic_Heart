@@ -130,6 +130,19 @@ from core.iris_registry import register_iris_engine
 register_iris_engine("my_engine", __name__, capabilities={"vision": True}, label="My vision engine")
 ```
 
+**Supported image MIME types** live in `core/multimodal_attachment.py::SUPPORTED_IMAGE_TYPES`: `image/jpeg`, `image/png`, `image/gif`, `image/webp`, `image/heic`, `image/heif`. Adapter support differs — Anthropic accepts only jpeg/png/gif/webp (its real API limit, enforced in `anthropic_adapter.describe_image`); Gemini and OpenAI-compatible endpoints additionally accept HEIC/HEIF.
+
+### Documents (PDF / text) — NOT Iris
+
+Documents are a **separate concern** from Iris. PDFs and textual files are extracted in `core/prompt_engine.py` while building `PromptRequest.attachments` (`_build_pr_attachments`), and the extracted text lands in `attachment.media_metadata["extracted_text"]`, injected into the prompt by `core/prompt_renderers.py::_build_multimodal_turn_text`. Never route PDFs through Iris.
+
+PDF extraction (`_extract_attachment_text_preview`) merges:
+
+1. **Static page text** — `pypdf` `page.extract_text()`.
+2. **AcroForm field values** — `_extract_pdf_form_fields` reads `reader.get_fields()` (the `/V` value of each field) and appends a `=== Form fields ===` section of `label: value` pairs. Fillable PDFs (character sheets, forms) store data in interactive form fields that `extract_text()` never sees, so without this a filled sheet looks empty.
+
+If a PDF yields **no text at all**, `_extract_pdf_page_images` falls back to images: first the largest embedded raster image per page, and if there are none (vector/text-only scans) it **rasterizes** pages to PNG via `pypdfium2` (`_rasterize_pdf_pages`, up to `_PDF_PAGE_IMAGE_LIMIT`=4). **`pypdfium2` (Apache-2.0/BSD) is used deliberately — PyMuPDF's AGPL is incompatible with this project** — and it bundles the pdfium wheels, so no system binary is needed. The import is guarded; a missing dependency degrades gracefully. Page images go into `media_metadata["page_images"]` and are read by a vision-capable Cortex model.
+
 ---
 
 ## 5b. Agentic Runtime (Tools & MCP)
