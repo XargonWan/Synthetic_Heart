@@ -912,8 +912,9 @@ async def handle_incoming_message(
     # derive_cortex_scope() is the single authoritative mapping from context
     # flags (is_trainer, grillo_beat) to scope strings.
     effective_plugin = plugin
+    _scope_model: str | None = None
     try:
-        from core.config import derive_cortex_scope, get_active_cortex_engine
+        from core.config import derive_cortex_scope, get_active_cortex_scope
 
         _scope = derive_cortex_scope(
             context_memory_or_prompt
@@ -927,7 +928,7 @@ async def handle_incoming_message(
             f"global_plugin={plugin.__class__.__name__ if plugin else None}"
         )
 
-        active_engine_name = await get_active_cortex_engine(scope=_scope)
+        active_engine_name, _scope_model = await get_active_cortex_scope(scope=_scope)
         reg = get_cortex_registry()
         resolved = reg.get_engine(active_engine_name)
         if resolved is None:
@@ -936,7 +937,7 @@ async def handle_incoming_message(
             effective_plugin = resolved
             log_info(
                 f"[plugin_instance] Engine resolved from registry: '{active_engine_name}' "
-                f"(scope={_scope!r})"
+                f"(scope={_scope!r}, model={_scope_model!r})"
             )
     except Exception as scope_exc:
         log_warning(
@@ -953,9 +954,12 @@ async def handle_incoming_message(
             getattr(effective_plugin, "supports_prompt_request", False)
         ):
             prompt_for_engine = prompt_request_obj
-        result = await effective_plugin.handle_incoming_message(
-            bot, message, prompt_for_engine
-        )
+        from core.config import scope_model_override
+
+        with scope_model_override(effective_plugin, _scope_model):
+            result = await effective_plugin.handle_incoming_message(
+                bot, message, prompt_for_engine
+            )
         try:
             _log_llm_traffic(prompt, result, interface)
         except Exception as e:

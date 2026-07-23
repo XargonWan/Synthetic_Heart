@@ -1306,10 +1306,30 @@ class AgentLoopManager:
         directly and returns its raw text response.
         """
         try:
-            from core.config import get_active_cortex_engine
+            from core.config import (
+                get_active_cortex_engine,
+                get_active_cortex_scope,
+                scope_model_override,
+            )
             from core.cortex_registry import get_cortex_registry
 
-            resolved_engine = engine_name or await get_active_cortex_engine()
+            # Agentic turns always run on the "agent" cortex scope; resolve its
+            # per-scope model so a scope-specific model override is honoured even
+            # on this direct fallback path.
+            scope_model: str | None = None
+            if engine_name:
+                resolved_engine = engine_name
+                try:
+                    _, scope_model = await get_active_cortex_scope(scope="agent")
+                except Exception:
+                    scope_model = None
+            else:
+                try:
+                    resolved_engine, scope_model = await get_active_cortex_scope(
+                        scope="agent"
+                    )
+                except Exception:
+                    resolved_engine = await get_active_cortex_engine()
             if not resolved_engine:
                 return ""
 
@@ -1338,20 +1358,23 @@ class AgentLoopManager:
                     {"role": "system", "content": system},
                     {"role": "user", "content": text},
                 ]
-                res = await engine.generate_response(messages)
+                with scope_model_override(engine, scope_model):
+                    res = await engine.generate_response(messages)
                 return res if isinstance(res, str) else (str(res) if res else "")
 
             if hasattr(engine, "handle_incoming_message"):
                 try:
                     # Common signature used by many Cortex engines
-                    res = await engine.handle_incoming_message(
-                        bot=None,
-                        message=None,
-                        context_memory_or_prompt=prompt,
-                    )
+                    with scope_model_override(engine, scope_model):
+                        res = await engine.handle_incoming_message(
+                            bot=None,
+                            message=None,
+                            context_memory_or_prompt=prompt,
+                        )
                 except TypeError:
                     # Fallback for engines expecting positional prompt arg.
-                    res = await engine.handle_incoming_message(None, None, prompt)
+                    with scope_model_override(engine, scope_model):
+                        res = await engine.handle_incoming_message(None, None, prompt)
                 return res if isinstance(res, str) else (str(res) if res else "")
 
             if hasattr(engine, "generate_response"):
@@ -1359,7 +1382,8 @@ class AgentLoopManager:
                     {"role": "system", "content": system},
                     {"role": "user", "content": text},
                 ]
-                res = await engine.generate_response(messages)
+                with scope_model_override(engine, scope_model):
+                    res = await engine.generate_response(messages)
                 return res if isinstance(res, str) else (str(res) if res else "")
         except Exception as exc:
             log_debug(f"[agent_core] Direct engine fallback failed: {exc}")

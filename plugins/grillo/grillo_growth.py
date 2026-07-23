@@ -37,7 +37,11 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
-from core.config import get_active_cortex_engine
+from core.config import (
+    get_active_cortex_engine,
+    get_active_cortex_scope,
+    scope_model_override,
+)
 from core.config_manager import config_registry
 from core.core_initializer import register_plugin
 from core.cortex_registry import get_cortex_registry
@@ -761,7 +765,12 @@ class GrilloGrowthPlugin:
         be extracted.
         """
         try:
-            llm_response = await engine.generate_response(prompt)
+            _, scope_model = await get_active_cortex_scope(scope="grillo")
+        except Exception:
+            scope_model = None
+        try:
+            with scope_model_override(engine, scope_model):
+                llm_response = await engine.generate_response(prompt)
         except Exception as e:
             log_error(f"[grillo_growth] generate_response failed: {e}")
             return None

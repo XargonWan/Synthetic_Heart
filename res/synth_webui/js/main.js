@@ -4689,26 +4689,59 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                                 lbl.textContent = scope.label + ':';
                                 const sel = document.createElement('select');
                                 sel.style.cssText = 'padding:5px 10px; background:var(--background); color:var(--text); border:1px solid var(--primary); border-radius:8px; font-size:0.88rem;';
-                                (scope.options || []).forEach((opt) => {
+
+                                // Build a single "engine / model" combo. Each option
+                                // encodes {engine, model} as JSON in its value. The
+                                // model map (engine -> [models]) comes from the API.
+                                const modelsByEngine = scope.models || {};
+                                const curEngine = scope.value_engine || 'Default';
+                                const curModel = scope.value_model || '';
+
+                                const addOpt = (label, engine, model) => {
                                     const o = document.createElement('option');
-                                    o.value = opt;
-                                    o.textContent = opt;
-                                    if (opt === scope.value) o.selected = true;
+                                    o.value = JSON.stringify({ engine: engine, model: model || '' });
+                                    o.textContent = label;
+                                    if (engine === curEngine && (model || '') === curModel) {
+                                        o.selected = true;
+                                    }
                                     sel.appendChild(o);
+                                };
+
+                                (scope.options || []).forEach((engineName) => {
+                                    if (engineName === 'Default' || engineName === 'disabled') {
+                                        // Special sentinels carry no model.
+                                        addOpt(engineName, engineName, '');
+                                        return;
+                                    }
+                                    const models = modelsByEngine[engineName] || [];
+                                    // Base "engine" entry (uses the endpoint default model).
+                                    addOpt(engineName, engineName, '');
+                                    // One entry per selectable model: "engine / model".
+                                    models.forEach((m) => {
+                                        addOpt(engineName + ' / ' + m, engineName, m);
+                                    });
                                 });
+
+                                const revertValue = JSON.stringify({ engine: curEngine, model: curModel });
                                 sel.addEventListener('change', async () => {
+                                    let parsed;
+                                    try {
+                                        parsed = JSON.parse(sel.value);
+                                    } catch (_e) {
+                                        parsed = { engine: sel.value, model: '' };
+                                    }
                                     try {
                                         const res = await fetch('/api/config', {
                                             method: 'POST',
                                             headers: { 'Content-Type': 'application/json' },
-                                            body: JSON.stringify({ key: scope.key, value: sel.value })
+                                            body: JSON.stringify({ key: scope.key, value: parsed })
                                         });
                                         if (!res.ok) throw new Error('HTTP ' + res.status);
                                         window.showToast && window.showToast(scope.label + ' cortex updated');
                                     } catch (e) {
                                         console.error('[synth_webui] Failed to update scope cortex', e);
                                         window.showToast && window.showToast('Failed to update ' + scope.label + ' cortex', true);
-                                        sel.value = scope.value; // revert
+                                        sel.value = revertValue; // revert
                                     }
                                 });
                                 wrap.appendChild(lbl);
@@ -5705,24 +5738,24 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
             async function initAboutTab() {
                 if (window.__synth_about_initialized) return;
                 const uptimeEl = document.getElementById('stats-uptime');
-                const sessionsEl = document.getElementById('stats-sessions');
                 const componentsEl = document.getElementById('stats-components');
-                const messagesEl = document.getElementById('stats-messages');
                 const versionEl = document.getElementById('system-version');
+                const versionDetailEl = document.getElementById('system-version-detail');
                 const pythonEl = document.getElementById('system-python');
                 const platformEl = document.getElementById('system-platform');
                 const databaseEl = document.getElementById('system-database');
-                if (!uptimeEl && !sessionsEl && !versionEl) return;
+                if (!uptimeEl && !versionEl && !componentsEl) return;
 
                 try {
                     const res = await fetch('/api/about');
                     if (res.ok) {
                         const data = await res.json();
                         if (uptimeEl && data.uptime !== undefined) uptimeEl.textContent = formatUptime(data.uptime);
-                        if (sessionsEl && data.sessions !== undefined) sessionsEl.textContent = String(data.sessions);
                         if (componentsEl && data.components !== undefined) componentsEl.textContent = String(data.components);
-                        if (messagesEl && data.messages_today !== undefined && data.messages_today !== null) messagesEl.textContent = String(data.messages_today);
-                        if (versionEl && data.version) versionEl.textContent = data.version;
+                        if (data.version) {
+                            if (versionEl) versionEl.textContent = data.version;
+                            if (versionDetailEl) versionDetailEl.textContent = data.version;
+                        }
                         if (pythonEl && data.python) pythonEl.textContent = data.python;
                         if (platformEl && data.platform) platformEl.textContent = data.platform;
                         if (databaseEl && data.database) databaseEl.textContent = data.database;

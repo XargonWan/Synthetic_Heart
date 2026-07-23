@@ -419,6 +419,55 @@ _register_exposed_var(
 )
 
 
+# ---------------------------------------------------------------------------
+# Cortex scope value (engine + optional model) storage helpers
+# ---------------------------------------------------------------------------
+# Each scope config key (BASE_CORTEX, AGENT_CORTEX, GRILLO_CORTEX,
+# TRAINER_CORTEX, LIVE_CORTEX) stores either:
+#   - a bare engine name string (legacy): the endpoint's default_model is used;
+#   - a JSON object {"engine": "...", "model": "..."}: the model overrides the
+#     endpoint default for that scope only.
+# These helpers parse/serialize both forms so the rest of the system can move
+# to per-scope model selection without breaking existing string values.
+
+
+def parse_cortex_scope_value(raw: str | None) -> tuple[str, str | None]:
+    """Split a raw scope config value into ``(engine, model)``.
+
+    Accepts a bare engine-name string (legacy) or a JSON object with
+    ``engine``/``model`` keys. ``model`` is ``None`` when unset, so callers
+    fall back to the endpoint's ``default_model``.
+    """
+    text = str(raw or "").strip()
+    if not text:
+        return "", None
+    if text.startswith("{"):
+        try:
+            data = json.loads(text)
+        except Exception:
+            return text, None
+        if isinstance(data, dict):
+            engine = str(data.get("engine") or "").strip()
+            model_raw = data.get("model")
+            model = str(model_raw).strip() if model_raw else ""
+            return engine, (model or None)
+        return text, None
+    return text, None
+
+
+def serialize_cortex_scope_value(engine: str, model: str | None = None) -> str:
+    """Serialize an ``(engine, model)`` selection for storage.
+
+    Returns a bare engine string when ``model`` is empty (keeps legacy values
+    tidy and retrocompatible), otherwise a compact JSON object.
+    """
+    engine = str(engine or "").strip()
+    model = str(model or "").strip()
+    if not model:
+        return engine
+    return json.dumps({"engine": engine, "model": model})
+
+
 async def get_active_cortex_engine(scope: str | None = None) -> str:
     """Return the effective cortex engine for a given scope.
 
@@ -426,7 +475,7 @@ async def get_active_cortex_engine(scope: str | None = None) -> str:
     in the Cortex registry, otherwise a ValueError is raised.
     """
     try:
-        base = config_registry.get_value("BASE_CORTEX", "")
+        base, _ = parse_cortex_scope_value(config_registry.get_value("BASE_CORTEX", ""))
         override_key: str | None = None
         if scope == "grillo":
             override_key = "GRILLO_CORTEX"
@@ -439,11 +488,14 @@ async def get_active_cortex_engine(scope: str | None = None) -> str:
         else:
             override_key = None
 
-        override = (
+        override_raw = (
             config_registry.get_value(override_key, "Default")
             if override_key is not None
             else "Default"
         )
+        override, _ = parse_cortex_scope_value(override_raw)
+        if not override:
+            override = "Default"
 
         use_override = override_key is not None and override not in (
             None,
@@ -533,7 +585,9 @@ async def get_active_cortex_engine(scope: str | None = None) -> str:
                     # trainer/grillo scope on this same instance instead of
                     # guessing at an arbitrary external endpoint.
                     for sibling_key in ("TRAINER_CORTEX", "GRILLO_CORTEX"):
-                        sibling = config_registry.get_value(sibling_key, "Default")
+                        sibling, _ = parse_cortex_scope_value(
+                            config_registry.get_value(sibling_key, "Default")
+                        )
                         if (
                             sibling
                             and sibling not in ("Default", "None")
@@ -570,6 +624,73 @@ async def get_active_cortex_engine(scope: str | None = None) -> str:
         raise
 
 
+async def get_active_cortex_scope(scope: str | None = None) -> tuple[str, str | None]:
+    """Resolve the effective ``(engine, model)`` for a given scope.
+
+    The engine is resolved via :func:`get_active_cortex_engine` (which owns the
+    self-heal / fallback logic and returns a bare engine name). The model is the
+    per-scope override stored alongside the engine; it is only honoured when the
+    resolved engine actually matches the scope's configured engine — if a
+    fallback kicked in (stale/removed engine) the stored model no longer applies
+    and ``None`` is returned so the endpoint's ``default_model`` is used.
+
+    Resolution order for the model:
+      1. the scope override key's model (e.g. ``AGENT_CORTEX``), if the scope's
+         configured engine survived resolution;
+      2. otherwise the base ``BASE_CORTEX`` model, if the resolved engine equals
+         the base engine;
+      3. otherwise ``None`` (endpoint default).
+    """
+    engine = await get_active_cortex_engine(scope=scope)
+
+    override_key: str | None = None
+    if scope == "grillo":
+        override_key = "GRILLO_CORTEX"
+    elif scope == "trainer":
+        override_key = "TRAINER_CORTEX"
+    elif scope == "live":
+        override_key = "LIVE_CORTEX"
+    elif scope == "agent":
+        override_key = "AGENT_CORTEX"
+
+    if override_key is not None:
+        ov_engine, ov_model = parse_cortex_scope_value(
+            config_registry.get_value(override_key, "Default")
+        )
+        if ov_engine and ov_engine not in ("Default", "None") and ov_engine == engine:
+            return engine, ov_model
+
+    base_engine, base_model = parse_cortex_scope_value(
+        config_registry.get_value("BASE_CORTEX", "")
+    )
+    if base_engine and base_engine == engine:
+        return engine, base_model
+
+    return engine, None
+
+
+def scope_model_override(engine_instance: object, model: str | None):
+    """Return a context manager applying a per-scope ``model`` to ``engine_instance``.
+
+    Scope-aware call sites resolve ``(engine_name, model)`` via
+    :func:`get_active_cortex_scope`, load the engine instance from the cortex
+    registry, then wrap the generation call with this helper. When the instance
+    is an external ``CortexBridge`` it delegates to the bridge's own
+    ``scope_model_override`` (transient, per-call); for built-in engines (which
+    have no per-call model concept) it is a no-op. This keeps the ``isinstance``
+    detail in one place instead of every call site.
+    """
+    override = getattr(engine_instance, "scope_model_override", None)
+    if callable(override) and model:
+        try:
+            return override(model)
+        except Exception as exc:  # pragma: no cover - defensive
+            log_warning(f"[config] scope_model_override failed: {exc}")
+    from contextlib import nullcontext
+
+    return nullcontext()
+
+
 def derive_cortex_scope(context: dict | None) -> str | None:
     """Return the scope string implied by *context*, or ``None`` for the base engine.
 
@@ -596,18 +717,19 @@ def derive_cortex_scope(context: dict | None) -> str | None:
     return None
 
 
-async def set_base_cortex(name: str) -> None:
-    """Persist the base cortex engine selection."""
+async def set_base_cortex(name: str, model: str | None = None) -> None:
+    """Persist the base cortex engine selection (with an optional model)."""
+    value = serialize_cortex_scope_value(name, model)
     try:
-        await config_registry.set_value("BASE_CORTEX", name)
-        log_info(f"[config] 💾 Saved base cortex to database: {name}")
+        await config_registry.set_value("BASE_CORTEX", value)
+        log_info(f"[config] 💾 Saved base cortex to database: {value}")
     except Exception as e:
         log_error(f"[config] ❌ Error saving BASE_CORTEX to database: {repr(e)}")
         raise
 
 
-async def set_scope_cortex(scope: str, name: str) -> None:
-    """Persist a scope-specific cortex override."""
+async def set_scope_cortex(scope: str, name: str, model: str | None = None) -> None:
+    """Persist a scope-specific cortex override (with an optional model)."""
     if scope == "grillo":
         key = "GRILLO_CORTEX"
     elif scope == "live":
@@ -616,9 +738,10 @@ async def set_scope_cortex(scope: str, name: str) -> None:
         key = "AGENT_CORTEX"
     else:
         key = "TRAINER_CORTEX"
+    value = serialize_cortex_scope_value(name, model)
     try:
-        await config_registry.set_value(key, name)
-        log_info(f"[config] 💾 Saved {key} to database: {name}")
+        await config_registry.set_value(key, value)
+        log_info(f"[config] 💾 Saved {key} to database: {value}")
     except Exception as e:
         log_error(f"[config] ❌ Error saving {key} to database: {repr(e)}")
         raise

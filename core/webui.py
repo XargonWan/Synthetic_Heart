@@ -9088,6 +9088,31 @@ class SynthWebUIInterface:
             raise HTTPException(status_code=400, detail="Missing configuration value")
 
         value = payload.get("value")
+
+        # Cortex scope overrides ship a combined engine/model selection. Accept
+        # either a bare engine string (legacy) or an object {engine, model} and
+        # normalise it to the canonical stored form (bare string when no model,
+        # else compact JSON) via serialize_cortex_scope_value.
+        _CORTEX_SCOPE_KEYS = {
+            "BASE_CORTEX",
+            "GRILLO_CORTEX",
+            "TRAINER_CORTEX",
+            "AGENT_CORTEX",
+            "LIVE_CORTEX",
+        }
+        if key in _CORTEX_SCOPE_KEYS and isinstance(value, dict):
+            try:
+                from core.config import serialize_cortex_scope_value
+
+                _sc_engine = str(value.get("engine") or "").strip()
+                _sc_model = value.get("model")
+                _sc_model = str(_sc_model).strip() if _sc_model else None
+                value = serialize_cortex_scope_value(_sc_engine, _sc_model or None)
+            except Exception as exc:
+                log_warning(
+                    f"{LOG_PREFIX} failed to serialize cortex scope value for {key}: {exc}"
+                )
+
         log_debug(
             f"{LOG_PREFIX} Updating config: key={key}, value_type={type(value)}, value_len={len(str(value)) if value else 0}"
         )
@@ -10533,31 +10558,45 @@ class SynthWebUIInterface:
                     )
                 except Exception:
                     pass
+            # Map engine name -> its selectable models, so the UI can render a
+            # single "engine / model" combo per scope. Derived from the same
+            # cortex_engines list built above (supported_models per engine).
+            engine_models: dict[str, list[str]] = {}
+            for _e in cortex_engines:
+                _ename = _e.get("name")
+                if not _ename:
+                    continue
+                engine_models[_ename] = list(_e.get("supported_models") or [])
+
+            from core.config import parse_cortex_scope_value
+
+            def _build_scope_entry(key: str, label: str, options: list[str]) -> dict:
+                raw = config_registry.get_value(key, "Default")
+                v_engine, v_model = parse_cortex_scope_value(raw)
+                return {
+                    "key": key,
+                    "label": label,
+                    # Kept for retro-compat with any consumer reading `value`.
+                    "value": raw,
+                    "value_engine": v_engine or "Default",
+                    "value_model": v_model or "",
+                    "options": options,
+                    "models": engine_models,
+                }
+
             cortex_scopes = [
-                {
-                    "key": "GRILLO_CORTEX",
-                    "label": "Grillo",
-                    "value": config_registry.get_value("GRILLO_CORTEX", "Default"),
-                    "options": ["Default"] + llm_engines_sorted,
-                },
-                {
-                    "key": "TRAINER_CORTEX",
-                    "label": "Trainer",
-                    "value": config_registry.get_value("TRAINER_CORTEX", "Default"),
-                    "options": ["Default"] + llm_engines_sorted,
-                },
-                {
-                    "key": "AGENT_CORTEX",
-                    "label": "Agent",
-                    "value": config_registry.get_value("AGENT_CORTEX", "Default"),
-                    "options": ["Default"] + llm_engines_sorted,
-                },
-                {
-                    "key": "LIVE_CORTEX",
-                    "label": "Live",
-                    "value": config_registry.get_value("LIVE_CORTEX", "Default"),
-                    "options": ["Default"] + live_engine_names,
-                },
+                _build_scope_entry(
+                    "GRILLO_CORTEX", "Grillo", ["Default"] + llm_engines_sorted
+                ),
+                _build_scope_entry(
+                    "TRAINER_CORTEX", "Trainer", ["Default"] + llm_engines_sorted
+                ),
+                _build_scope_entry(
+                    "AGENT_CORTEX", "Agent", ["Default"] + llm_engines_sorted
+                ),
+                _build_scope_entry(
+                    "LIVE_CORTEX", "Live", ["Default"] + live_engine_names
+                ),
             ]
         except Exception as exc:
             log_warning(f"{LOG_PREFIX} unable to build cortex scopes: {exc}")

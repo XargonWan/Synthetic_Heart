@@ -526,7 +526,11 @@ class GrilloCompactorPlugin:
             # Local imports
             from core.db import get_conn_ctx, insert_memory
             from core.cortex_registry import get_cortex_registry
-            from core.config import get_active_cortex_engine
+            from core.config import (
+                get_active_cortex_engine,
+                get_active_cortex_scope,
+                scope_model_override,
+            )
 
             # Normalize window entries
             batch = window
@@ -575,6 +579,10 @@ class GrilloCompactorPlugin:
 
             # Call LLM
             active_cortex = await get_active_cortex_engine(scope="grillo")
+            try:
+                _, scope_model = await get_active_cortex_scope(scope="grillo")
+            except Exception:
+                scope_model = None
             registry = get_cortex_registry()
             engine = registry.get_engine(active_cortex)
             if engine is None:
@@ -598,7 +606,8 @@ class GrilloCompactorPlugin:
 
             # Generate response
             try:
-                llm_response = await engine.generate_response(prompt)
+                with scope_model_override(engine, scope_model):
+                    llm_response = await engine.generate_response(prompt)
             except Exception as e:
                 log_error(f"[grillo_compactor] LLM generate_response failed: {e}")
                 return False
@@ -684,9 +693,10 @@ class GrilloCompactorPlugin:
                                         },
                                         "instructions": f'SHORTEN this summary to EXACTLY {target_chars} characters or fewer. Keep the essential facts. Reply with ONLY JSON: {{"short_summary":"your shortened text here"}}',
                                     }
-                                    resp = await engine.generate_response(
-                                        shorten_prompt
-                                    )
+                                    with scope_model_override(engine, scope_model):
+                                        resp = await engine.generate_response(
+                                            shorten_prompt
+                                        )
                                     parsed_short = extract_json_from_text(resp)
                                     if parsed_short and parsed_short.get(
                                         "short_summary"

@@ -649,15 +649,20 @@ async def gather_recon_contributions(
     if parsed is None:
         # Single LLM call
         engine = None
+        scope_model: str | None = None
         try:
-            from core.config import derive_cortex_scope, get_active_cortex_engine
+            from core.config import (
+                derive_cortex_scope,
+                get_active_cortex_engine,
+                get_active_cortex_scope,
+            )
             from core.cortex_registry import get_cortex_registry
 
             scope = derive_cortex_scope(
                 context_memory if isinstance(context_memory, dict) else None
             )
             try:
-                active_cortex = await get_active_cortex_engine(scope=scope)
+                active_cortex, scope_model = await get_active_cortex_scope(scope=scope)
             except TypeError:
                 # Backward/test compatibility: some monkeypatched helpers still
                 # expose the older no-kwargs signature.
@@ -679,15 +684,18 @@ async def gather_recon_contributions(
         llm_text = None
         if parsed is None and engine is not None:
             try:
-                llm_text = await asyncio.wait_for(
-                    engine.generate_response(
-                        [
-                            {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": user_prompt},
-                        ]
-                    ),
-                    timeout=timeout,
-                )
+                from core.config import scope_model_override
+
+                with scope_model_override(engine, scope_model):
+                    llm_text = await asyncio.wait_for(
+                        engine.generate_response(
+                            [
+                                {"role": "system", "content": system_prompt},
+                                {"role": "user", "content": user_prompt},
+                            ]
+                        ),
+                        timeout=timeout,
+                    )
                 log_debug(f"[recon] LLM response:\n{llm_text}")
             except Exception as e:
                 log_warning(f"[recon] Combined Recon LLM call failed: {e}")
