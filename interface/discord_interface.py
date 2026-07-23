@@ -749,6 +749,7 @@ class DiscordInterface:
             "join_voice_discord",
             "leave_voice_discord",
             "audio_discord_bot",
+            "send_file_discord_bot",
         ]
 
     @staticmethod
@@ -789,6 +790,23 @@ class DiscordInterface:
                 "description": "Send audio to Discord. Streams if in voice, otherwise sends as file.",
                 "required_fields": ["audio"],
                 "optional_fields": ["interface_path", "channel_id", "caption"],
+            },
+            "send_file_discord_bot": {
+                "description": (
+                    "Send a file attachment (image, video, audio or document) to a "
+                    "Discord channel or DM. The media kind is auto-detected and "
+                    "delivered so the recipient can view/play it natively. The file "
+                    "must live inside Synth's filesystem sandbox."
+                ),
+                "required_fields": ["path"],
+                "optional_fields": [
+                    "interface_path",
+                    "target",
+                    "channel_id",
+                    "caption",
+                ],
+                "security_level": "medium",
+                "external_effects": ["filesystem"],
             },
         }
 
@@ -891,6 +909,31 @@ class DiscordInterface:
                     },
                 },
             }
+        if action_name == "send_file_discord_bot":
+            return {
+                "description": (
+                    "Send a file attachment to a Discord channel or DM. The media "
+                    "kind (image, video, audio, document) is auto-detected."
+                ),
+                "payload": {
+                    "path": {
+                        "type": "string",
+                        "example": "/app/data/report.pdf",
+                        "description": "Path to the file to send. Must be inside Synth's filesystem sandbox.",
+                    },
+                    "interface_path": {
+                        "type": "string",
+                        "example": "discord_bot/1234567890/9876543210",
+                        "description": "REQUIRED. Interface path from input.payload.source.interface_path to target the same conversation.",
+                    },
+                    "caption": {
+                        "type": "string",
+                        "example": "Here is the report you asked for",
+                        "description": "Optional text shown alongside the file.",
+                        "optional": True,
+                    },
+                },
+            }
         return {}
 
     @staticmethod
@@ -915,6 +958,20 @@ class DiscordInterface:
             if not payload.get("interface_path") and not payload.get("channel_id"):
                 errors.append(
                     "payload.interface_path or payload.channel_id is required"
+                )
+            return errors
+
+        if action_type == "send_file_discord_bot":
+            path = payload.get("path")
+            if not isinstance(path, str) or not path:
+                errors.append("payload.path must be a non-empty string")
+            if (
+                not payload.get("interface_path")
+                and not payload.get("channel_id")
+                and payload.get("target") is None
+            ):
+                errors.append(
+                    "payload.interface_path, payload.channel_id or payload.target is required"
                 )
             return errors
 
@@ -950,7 +1007,7 @@ class DiscordInterface:
 
         return errors
 
-    async def send_message(self, channel_id=None, text=None, **kwargs):
+    async def send_message(self, channel_id=None, text=None, **kwargs) -> bool:
         """Send a message to a Discord channel.
 
         Supports multiple calling conventions:
@@ -959,12 +1016,14 @@ class DiscordInterface:
         - send_message({"interface_path": ..., "text": ...})
         """
         audio_path = None
+        file_path = None
         skip_history = kwargs.pop("skip_history", False)
         if isinstance(channel_id, dict):
             payload = channel_id
             text = payload.get("text", text)
             interface_path = payload.get("interface_path")
             audio_path = payload.get("audio") or payload.get("audio_path")
+            file_path = payload.get("file_path") or payload.get("file")
             skip_history = payload.get("skip_history", skip_history)
 
             # Extract channel_id from interface_path if provided
@@ -1002,12 +1061,15 @@ class DiscordInterface:
                 text = kwargs.get("text")
 
             audio_path = kwargs.get("audio") or kwargs.get("audio_path")
+            file_path = kwargs.get("file_path") or kwargs.get("file")
 
-        if channel_id is None or (text is None and audio_path is None):
+        if channel_id is None or (
+            text is None and audio_path is None and file_path is None
+        ):
             log_warning(
-                "[discord_interface] Missing channel_id or contents (text/audio) in send_message"
+                "[discord_interface] Missing channel_id or contents (text/audio/file) in send_message"
             )
-            return
+            return False
 
         try:
             reply_to = kwargs.get("reply_to_message_id")
@@ -1021,6 +1083,7 @@ class DiscordInterface:
                 text=text,
                 reply_to_message_id=reply_to,
                 audio_path=audio_path,
+                file_path=file_path,
             )
             # Clear temporary attribute
             if hasattr(self, "_last_reply_to_id"):
@@ -1050,10 +1113,12 @@ class DiscordInterface:
             log_debug(
                 f"[discord_interface] Message sent to {channel_id}: {text[:50] if text else '[Audio]'}"
             )
+            return True
         except Exception as e:
             log_error(
                 f"[discord_interface] Failed to send message to {channel_id}: {repr(e)}"
             )
+            return False
 
     async def _stream_audio(self, voice_client, audio_path):
         """Stream audio to voice client."""
@@ -1856,16 +1921,29 @@ class DiscordInterface:
                     await self._stop_live_voice(guild_id)
 
     async def _discord_send(
-        self, channel_id, text, reply_to_message_id=None, audio_path=None
+        self,
+        channel_id,
+        text,
+        reply_to_message_id=None,
+        audio_path=None,
+        file_path=None,
     ):
         """Internal Discord send method.
 
         This method is robust: it will try to resolve the provided numeric id
         as a channel first (server/channel/thread), and if not found it will
         attempt to resolve it as a user id and send a direct message (DM).
+
+        ``file_path`` is a generic outbound attachment (any media kind); it is
+        treated the same as ``audio_path`` for delivery but kept separate so
+        callers can distinguish a plain file from a voice note.
         """
         if self.client is None:  # pragma: no cover - safety
             raise RuntimeError("Discord client not initialized")
+
+        # A generic attachment and a voice attachment are delivered the same
+        # way via discord.File; normalise to a single source path.
+        attachment_path = file_path or audio_path
 
         # Try channel first
         try:
@@ -1906,8 +1984,8 @@ class DiscordInterface:
                     log_debug(f"[discord_interface] Sending DM to user {channel_id}")
 
                     file_obj = None
-                    if audio_path and os.path.exists(audio_path):
-                        file_obj = discord.File(audio_path)
+                    if attachment_path and os.path.exists(attachment_path):
+                        file_obj = discord.File(attachment_path)
 
                     if text or file_obj:
                         await user.send(text or "", file=file_obj)
@@ -1922,11 +2000,13 @@ class DiscordInterface:
 
         # Prepare file object
         file_obj = None
-        if audio_path:
-            if os.path.exists(audio_path):
-                file_obj = discord.File(audio_path)
+        if attachment_path:
+            if os.path.exists(attachment_path):
+                file_obj = discord.File(attachment_path)
             else:
-                log_warning(f"[discord_interface] Audio file not found: {audio_path}")
+                log_warning(
+                    f"[discord_interface] Attachment file not found: {attachment_path}"
+                )
 
         # If reply to a specific message was requested, try to fetch and reply
         if reply_to_message_id:
@@ -3116,6 +3196,47 @@ class DiscordInterface:
                 interface_path=interface_path,
             )
 
+        elif action_type == "send_file_discord_bot":
+            from core.outbound_file_utils import resolve_safe_outbound_path
+
+            payload = action.get("payload", {})
+            raw_path = payload.get("path")
+            channel_id = payload.get("channel_id") or payload.get("target")
+            interface_path = payload.get("interface_path")
+            caption = payload.get("caption")
+
+            resolved, err = resolve_safe_outbound_path(raw_path)
+            if err or resolved is None:
+                log_warning(
+                    f"[discord_interface] Rejected file path {raw_path!r}: {err}"
+                )
+                return {"status": "failed", "message": err or "Invalid path"}
+
+            if not channel_id and interface_path:
+                try:
+                    from core.interface_path_utils import parse_interface_path
+
+                    _, levels = parse_interface_path(interface_path)
+                    if len(levels) >= 3:
+                        channel_id = levels[2]
+                    elif len(levels) >= 2:
+                        channel_id = levels[1]
+                    elif len(levels) >= 1:
+                        channel_id = levels[0]
+                except Exception as e:
+                    log_debug(
+                        f"[discord_interface] Failed to parse path {interface_path}: {e}"
+                    )
+
+            log_debug(f"[discord_interface] Sending file to {channel_id}: {resolved}")
+            await self.send_message(
+                channel_id=channel_id,
+                text=caption,
+                file_path=str(resolved),
+                interface_path=interface_path,
+            )
+            return {"status": "success"}
+
         else:
             log_warning(
                 f"[discord_interface] execute_action: unknown action_type={action_type}"
@@ -3209,9 +3330,38 @@ class DiscordInterface:
                 component_name="discord_interface",
             )
 
+            def validate_discord_file(payload):
+                """Enhanced validation for Discord send_file actions."""
+                errors = []
+
+                path = payload.get("path")
+                if path is None or (isinstance(path, str) and not path.strip()):
+                    errors.append("File path cannot be empty")
+                elif not isinstance(path, str):
+                    errors.append("File path must be a string")
+
+                interface_path = payload.get("interface_path")
+                channel_id = payload.get("channel_id")
+                target = payload.get("target")
+                if not interface_path and channel_id is None and target is None:
+                    errors.append(
+                        "Either payload.interface_path, payload.channel_id or payload.target is required"
+                    )
+                if interface_path is not None and not isinstance(interface_path, str):
+                    errors.append("payload.interface_path must be a string")
+
+                return errors
+
+            file_rule = ValidationRule(
+                action_type="send_file_discord_bot",
+                required_fields=["path"],
+                custom_validator=validate_discord_file,
+                component_name="discord_interface",
+            )
+
             # Register with validation registry
             registry = get_validation_registry()
-            registry.register_component_rules("discord_interface", [rule])
+            registry.register_component_rules("discord_interface", [rule, file_rule])
 
             log_debug(
                 "[discord_interface] Registered custom validation rules with validation registry"

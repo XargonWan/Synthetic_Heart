@@ -130,19 +130,6 @@ from core.iris_registry import register_iris_engine
 register_iris_engine("my_engine", __name__, capabilities={"vision": True}, label="My vision engine")
 ```
 
-**Supported image MIME types** live in `core/multimodal_attachment.py::SUPPORTED_IMAGE_TYPES`: `image/jpeg`, `image/png`, `image/gif`, `image/webp`, `image/heic`, `image/heif`. Adapter support differs — Anthropic accepts only jpeg/png/gif/webp (its real API limit, enforced in `anthropic_adapter.describe_image`); Gemini and OpenAI-compatible endpoints additionally accept HEIC/HEIF.
-
-### Documents (PDF / text) — NOT Iris
-
-Documents are a **separate concern** from Iris. PDFs and textual files are extracted in `core/prompt_engine.py` while building `PromptRequest.attachments` (`_build_pr_attachments`), and the extracted text lands in `attachment.media_metadata["extracted_text"]`, injected into the prompt by `core/prompt_renderers.py::_build_multimodal_turn_text`. Never route PDFs through Iris.
-
-PDF extraction (`_extract_attachment_text_preview`) merges:
-
-1. **Static page text** — `pypdf` `page.extract_text()`.
-2. **AcroForm field values** — `_extract_pdf_form_fields` reads `reader.get_fields()` (the `/V` value of each field) and appends a `=== Form fields ===` section of `label: value` pairs. Fillable PDFs (character sheets, forms) store data in interactive form fields that `extract_text()` never sees, so without this a filled sheet looks empty.
-
-If a PDF yields **no text at all**, `_extract_pdf_page_images` falls back to images: first the largest embedded raster image per page, and if there are none (vector/text-only scans) it **rasterizes** pages to PNG via `pypdfium2` (`_rasterize_pdf_pages`, up to `_PDF_PAGE_IMAGE_LIMIT`=4). **`pypdfium2` (Apache-2.0/BSD) is used deliberately — PyMuPDF's AGPL is incompatible with this project** — and it bundles the pdfium wheels, so no system binary is needed. The import is guarded; a missing dependency degrades gracefully. Page images go into `media_metadata["page_images"]` and are read by a vision-capable Cortex model.
-
 ---
 
 ## 5b. Agentic Runtime (Tools & MCP)
@@ -226,6 +213,36 @@ keep the parent task clean (research, scoped lookups, multi-step file inspection
 - Must forward all input into the core message chain and dispatch outputs from it.
 - Never bypass the chain.
 - Register actions via `get_supported_actions()`.
+
+### Outbound file sending
+
+Telegram, Discord, and Matrix each expose a single generic **send-file** action so
+Synth can push a local file to a user/channel/room. All three share the sandbox
+path-safety and MIME-detection helper `core/outbound_file_utils.py`:
+
+- `resolve_safe_outbound_path(raw_path)` confines the source to the same sandbox
+  roots as the Agent tools (`AGENT_FS_ROOTS`, else `[AGENT_FS_ROOT|/app, SYNTH_LOG_DIR|/app/logs]`);
+  relative paths resolve against the first root. Only existing regular files inside a
+  root pass — traversal, missing files, and directories are rejected.
+- `classify_media(path)` returns `image` / `video` / `audio` / `document` (MIME first,
+  extension fallback); `guess_mime_type(path)` backs it with an
+  `application/octet-stream` fallback.
+
+| Action | Interface | Required | Optional |
+|--------|-----------|----------|----------|
+| `send_file_telegram_bot` | `interface/telegram_bot.py` | `path`, `interface_path` | `chat_name`, `caption` |
+| `send_file_discord_bot` | `interface/discord_interface.py` | `path` | `interface_path`, `target`, `channel_id`, `caption` |
+| `send_file_matrix_chat` | `interface/matrix_interface.py` | `path`, `target` | `caption`, `thread_event_id` |
+
+All three are `security_level: "medium"`, `external_effects: ["filesystem"]` — so the
+router 2.0 auto-routes them to the Agent Lane, and (like every action) each is
+auto-exposed as an MCP tool (`synth_send_file_*`). Captions longer than the
+interface limit are split into a follow-up text message.
+
+**Audio stays playable.** A file classified as audio is delivered as a *playable*
+message, not an inert attachment: Telegram uses `send_audio`, Matrix uses the
+`m.audio` msgtype. The pre-existing dedicated `audio_*` actions are untouched — use
+`send_file_*` only when a caller explicitly wants a generic file.
 
 ---
 

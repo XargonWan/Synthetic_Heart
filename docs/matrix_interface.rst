@@ -93,6 +93,21 @@ Checking Delivery
 - Outgoing replies use the ``message_matrix_chat`` action. You can confirm by
   searching for the action name in the debug logs.
 
+Sending Files
+-------------
+
+Synth can push a local file to a room with the ``send_file_matrix_chat`` action
+(``required_fields: ["path", "target"]``, ``optional_fields: ["caption",
+"thread_event_id"]``, ``security_level: "medium"``,
+``external_effects: ["filesystem"]``). The source ``path`` is confined to the
+Agent sandbox roots by ``core/outbound_file_utils.py`` — traversal, missing
+files, and directories are rejected. The media kind is auto-detected from the
+MIME type (image / audio / video / document) and mapped to the corresponding
+Matrix msgtype; audio is delivered as a playable ``m.audio`` message rather than
+an inert ``m.file`` attachment. A ``caption`` longer than the interface limit is
+sent as a follow-up text message. This action mirrors ``send_file_telegram_bot``
+and ``send_file_discord_bot`` on the other interfaces.
+
 Troubleshooting
 ---------------
 

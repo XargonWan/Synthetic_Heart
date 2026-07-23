@@ -2279,6 +2279,18 @@ class TelegramInterface:
                 ],
                 "description": "Send a voice message via Telegram",
             },
+            "send_file_telegram_bot": {
+                "required_fields": ["path", "interface_path"],
+                "optional_fields": ["chat_name", "caption"],
+                "description": (
+                    "Send a file attachment (image, video, audio or document) via "
+                    "Telegram. The media kind is auto-detected from the file and "
+                    "delivered so the recipient can view/play it natively. The file "
+                    "must live inside Synth's filesystem sandbox."
+                ),
+                "security_level": "medium",
+                "external_effects": ["filesystem"],
+            },
         }
 
     @staticmethod
@@ -2363,6 +2375,37 @@ class TelegramInterface:
                     },
                 },
             }
+        if action_name == "send_file_telegram_bot":
+            return {
+                "description": (
+                    "Send a file attachment via Telegram. The media kind (photo, "
+                    "video, audio or document) is auto-detected from the file."
+                ),
+                "payload": {
+                    "path": {
+                        "type": "string",
+                        "example": "/app/data/report.pdf",
+                        "description": "Path to the file to send. Must be inside Synth's filesystem sandbox.",
+                    },
+                    "interface_path": {
+                        "type": "string",
+                        "example": "telegram_bot/123456789/456",
+                        "description": "REQUIRED. Complete interface path. Use input.payload.source.interface_path to reply in same context.",
+                    },
+                    "chat_name": {
+                        "type": "string",
+                        "example": "Synth Hideout",
+                        "description": "Alternative to interface_path for specifying the chat by name",
+                        "optional": True,
+                    },
+                    "caption": {
+                        "type": "string",
+                        "example": "Here is the report you asked for",
+                        "description": "Optional caption shown alongside the file",
+                        "optional": True,
+                    },
+                },
+            }
         return None
 
     @staticmethod
@@ -2382,6 +2425,11 @@ class TelegramInterface:
             audio = payload.get("audio")
             if not isinstance(audio, str) or not audio:
                 errors.append("payload.audio must be a non-empty string")
+
+        elif action_type == "send_file_telegram_bot":
+            path = payload.get("path")
+            if not isinstance(path, str) or not path:
+                errors.append("payload.path must be a non-empty string")
         else:
             return []
 
@@ -2469,6 +2517,100 @@ class TelegramInterface:
                 log_error(f"[telegram_interface] Failed to send audio: {e}")
                 return {"status": "failed", "error": str(e)}
 
+        if action_type == "send_file_telegram_bot":
+            from core.outbound_file_utils import (
+                MEDIA_AUDIO,
+                MEDIA_IMAGE,
+                MEDIA_VIDEO,
+                classify_media,
+                resolve_safe_outbound_path,
+            )
+
+            interface_path = payload.get("interface_path")
+            raw_path = payload.get("path")
+            caption = payload.get("caption")
+
+            resolved, err = resolve_safe_outbound_path(raw_path)
+            if err or resolved is None:
+                log_warning(
+                    f"[telegram_interface] Rejected file path {raw_path!r}: {err}"
+                )
+                return {"status": "failed", "message": err or "Invalid path"}
+
+            # Telegram has a 1024 char limit for captions.
+            if caption and len(caption) > 1024:
+                log_warning(
+                    f"[telegram_interface] Caption length {len(caption)} exceeds limit (1024). Sending as separate text message."
+                )
+                await self.send_message(
+                    {
+                        "text": caption,
+                        "interface_path": interface_path,
+                        "chat_name": payload.get("chat_name"),
+                    }
+                )
+                caption = None
+
+            target = None
+            thread_id = None
+            if interface_path:
+                try:
+                    from core.interface_path_utils import parse_interface_path
+
+                    _, levels = parse_interface_path(interface_path)
+                    if len(levels) >= 1:
+                        target = levels[0]
+                    if len(levels) >= 2:
+                        thread_id = levels[1]
+                except Exception as e:
+                    log_warning(
+                        f"[telegram_interface] Failed to parse path {interface_path}: {e}"
+                    )
+
+            if not target:
+                log_warning("[telegram_interface] Missing target for file")
+                return {"status": "failed", "message": "Missing target"}
+
+            kind = classify_media(resolved)
+            try:
+                log_debug(
+                    f"[telegram_interface] Sending file ({kind}) to {target} (thread={thread_id}): {resolved}"
+                )
+                with open(resolved, "rb") as file_obj:
+                    if kind == MEDIA_IMAGE:
+                        await self.bot.send_photo(
+                            chat_id=target,
+                            photo=file_obj,
+                            caption=caption,
+                            message_thread_id=thread_id,
+                        )
+                    elif kind == MEDIA_VIDEO:
+                        await self.bot.send_video(
+                            chat_id=target,
+                            video=file_obj,
+                            caption=caption,
+                            message_thread_id=thread_id,
+                        )
+                    elif kind == MEDIA_AUDIO:
+                        await self.bot.send_audio(
+                            chat_id=target,
+                            audio=file_obj,
+                            caption=caption,
+                            message_thread_id=thread_id,
+                        )
+                    else:
+                        await self.bot.send_document(
+                            chat_id=target,
+                            document=file_obj,
+                            caption=caption,
+                            message_thread_id=thread_id,
+                        )
+                log_info(f"[telegram_interface] Sent file ({kind}) to {target}")
+                return {"status": "success"}
+            except Exception as e:
+                log_error(f"[telegram_interface] Failed to send file: {e}")
+                return {"status": "failed", "error": str(e)}
+
         return {"status": "failed", "message": f"Unknown action {action_type}"}
 
     def _register_custom_validation(self):
@@ -2548,10 +2690,44 @@ class TelegramInterface:
                 component_name="telegram_bot",
             )
 
+            def validate_telegram_file(payload):
+                """Enhanced validation for Telegram send_file actions."""
+                errors = []
+
+                path = payload.get("path")
+                if path is None or (isinstance(path, str) and not path.strip()):
+                    errors.append("File path cannot be empty")
+                elif not isinstance(path, str):
+                    errors.append("File path must be a string")
+
+                interface_path = payload.get("interface_path")
+                chat_name = payload.get("chat_name")
+
+                if interface_path is None and chat_name is None:
+                    errors.append("Either interface_path or chat_name must be provided")
+
+                if interface_path is not None and not isinstance(interface_path, str):
+                    errors.append("interface_path must be a string")
+                elif interface_path is not None and not interface_path.strip():
+                    errors.append("interface_path cannot be empty")
+
+                if chat_name is not None and not isinstance(chat_name, str):
+                    errors.append("chat_name must be a string")
+
+                return errors
+
+            # Create validation rules for send_file_telegram_bot
+            file_rule = ValidationRule(
+                action_type="send_file_telegram_bot",
+                required_fields=["path"],
+                custom_validator=validate_telegram_file,
+                component_name="telegram_bot",
+            )
+
             # Register with validation registry
             registry = get_validation_registry()
             registry.register_component_rules(
-                "telegram_bot", [message_rule, audio_rule]
+                "telegram_bot", [message_rule, audio_rule, file_rule]
             )
 
             log_debug(
