@@ -21,7 +21,8 @@ try:
         ui_type="bool",
         description="Enable the Recon Tone Evaluator plugin (produce tone hints for Recon).",
         scope="recon",
-        component="recon",
+        component="recon_tone_evaluator",
+        hidden=True,
     )
 except Exception:
     from core.config_manager import config_registry
@@ -33,7 +34,8 @@ except Exception:
         label="Enable Recon Tone Evaluator",
         description="Enable the Recon Tone Evaluator plugin (produce tone hints for Recon).",
         group="recon",
-        component="recon",
+        component="recon_tone_evaluator",
+        hidden=True,
     )
 
 

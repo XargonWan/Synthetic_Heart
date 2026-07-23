@@ -28,6 +28,7 @@ try:
         scope="agent",
         component="agent",
         needs_component_reload=True,
+        hidden=True,
     )
     # Engine override for the agentic loop. "Default" == use the active Cortex
     # engine (BASE_CORTEX); any other value must be a Cortex engine registered
@@ -109,6 +110,27 @@ def _is_in_container() -> bool:
 
 class AgentPlugin(AIPluginBase):
     display_name = "Agent Plugin"
+
+    def get_metadata(self) -> dict:
+        """Expose WebUI presentation metadata for the Plugins tab.
+
+        Provides a human-readable description so the plugin detail pane shows
+        an explanation instead of the generic "Plugin with N actions"
+        fallback. The guide lives in ``agent_plugin.guide.md`` alongside this
+        module.
+        """
+        return {
+            "name": "agent",
+            "display_name": self.display_name,
+            "description": (
+                "Exposes Synth's agentic toolset to the Agentic Runtime 2.0: "
+                "sandboxed filesystem access (list/read/write/edit/search), "
+                "shell execution, and drone spawning for delegated sub-tasks. "
+                "Gated by AGENT_ENABLED."
+            ),
+            "category": "Agent",
+            "guide": "agent_plugin.guide.md",
+        }
 
     def __init__(self, notify_fn: Optional[Callable[[str], None]] = None):
         # Prefer core.notifier.notify_trainer when available

@@ -52,7 +52,7 @@ register_exposed_var(
     ui_type="number",
     description="Minutes between weather data fetches",
     scope="plugins",
-    component="weather_plugin",
+    component="weather",
     tags=["plugin"],
 )
 
@@ -64,7 +64,7 @@ register_exposed_var(
     ui_type="boolean",
     description="Send a daily weather announcement at the configured local time",
     scope="plugins",
-    component="weather_plugin",
+    component="weather",
     tags=["plugin"],
 )
 
@@ -76,7 +76,7 @@ register_exposed_var(
     ui_type="string",
     description="Local time (HH:MM) for the daily weather announcement",
     scope="plugins",
-    component="weather_plugin",
+    component="weather",
     tags=["plugin"],
 )
 
@@ -88,7 +88,7 @@ register_exposed_var(
     ui_type="string",
     description="Language for the daily weather announcement (e.g., Italian)",
     scope="plugins",
-    component="weather_plugin",
+    component="weather",
     tags=["plugin"],
 )
 
@@ -100,7 +100,7 @@ register_exposed_var(
     ui_type="interface-path",
     description="Interface id used for the daily weather announcement",
     scope="plugins",
-    component="weather_plugin",
+    component="weather",
     tags=["plugin"],
 )
 
@@ -148,7 +148,7 @@ class WeatherPlugin:
             description="Minutes between weather data fetches",
             value_type=int,
             group="plugins",
-            component="weather_plugin",
+            component="weather",
             advanced=False,
         )
         config_registry.get_value(
@@ -158,7 +158,7 @@ class WeatherPlugin:
             description="Send a daily weather announcement at the configured local time",
             value_type=bool,
             group="plugins",
-            component="weather_plugin",
+            component="weather",
             advanced=False,
         )
         config_registry.get_value(
@@ -168,7 +168,7 @@ class WeatherPlugin:
             description="Local time (HH:MM) for the daily weather announcement",
             value_type=str,
             group="plugins",
-            component="weather_plugin",
+            component="weather",
             advanced=False,
         )
         config_registry.get_value(
@@ -178,7 +178,7 @@ class WeatherPlugin:
             description="Language for the daily weather announcement (e.g., Italian)",
             value_type=str,
             group="plugins",
-            component="weather_plugin",
+            component="weather",
             advanced=False,
         )
         config_registry.get_value(
@@ -188,7 +188,7 @@ class WeatherPlugin:
             description="Interface id used for the daily weather announcement",
             value_type=str,
             group="plugins",
-            component="weather_plugin",
+            component="weather",
             advanced=False,
         )
 
@@ -734,6 +734,46 @@ class WeatherPlugin:
             return f"{interface_name}/{trainer_id}"
         return None
 
+    @staticmethod
+    def _build_synthetic_message(interface_path: str, text: str) -> Optional[object]:
+        """Build a synthetic message anchored to a real recipient.
+
+        ``request_llm_delivery`` falls back to a mock message with
+        ``chat_id = -1`` when no ``message`` is supplied, which routes the
+        autonomous turn to ``<interface>/-1`` instead of the configured
+        recipient. By constructing a message that already carries the resolved
+        ``interface_path`` and the real ``chat_id`` (the trailing segment of the
+        path), the downstream chain anchors the turn to the intended chat so the
+        weather bulletin actually reaches the trainer.
+
+        Returns ``None`` when the ``chat_id`` cannot be derived (in that case the
+        caller falls back to the previous synthetic-message behaviour).
+        """
+        from types import SimpleNamespace
+
+        chat_segment = interface_path.rsplit("/", 1)[-1].strip()
+        if not chat_segment:
+            return None
+        # Telegram chat ids are integers; keep the raw string when it is not
+        # numeric so non-Telegram interfaces still get a usable target.
+        chat_id: object
+        try:
+            chat_id = int(chat_segment)
+        except (TypeError, ValueError):
+            chat_id = chat_segment
+
+        mock_message = SimpleNamespace()
+        mock_message.chat_id = chat_id
+        mock_message.message_id = 0
+        mock_message.text = text
+        mock_message.interface_path = interface_path
+        mock_message.date = datetime.utcnow()
+        mock_message.from_user = SimpleNamespace(
+            id=0, username="weather_plugin", full_name="WeatherReporter"
+        )
+        mock_message.chat = SimpleNamespace(id=chat_id, type="private")
+        return mock_message
+
     async def _trigger_daily_report(self) -> bool:
         """Trigger a daily weather announcement via the LLM."""
         try:
@@ -796,7 +836,24 @@ class WeatherPlugin:
                 f"professional. Weather data: {self._cached_weather}"
             )
 
+            # Anchor the autonomous turn to the resolved recipient. Without an
+            # explicit message, request_llm_delivery synthesises a mock message
+            # with chat_id = -1, so the turn is routed to '<interface>/-1' and the
+            # bulletin never reaches the trainer. Supplying a synthetic message
+            # that carries the real interface_path/chat_id fixes the routing.
+            synthetic_message = None
+            if interface_path is not None:
+                synthetic_message = self._build_synthetic_message(
+                    interface_path, prompt
+                )
+                if synthetic_message is None:
+                    log_warning(
+                        f"[weather_plugin] Could not derive chat_id from "
+                        f"interface_path '{interface_path}'; delivery may be misrouted"
+                    )
+
             success = await request_llm_delivery(
+                message=synthetic_message,
                 interface=interface,
                 context={
                     "input": {"type": "event_reminder", "text": prompt},
@@ -857,7 +914,20 @@ class WeatherPlugin:
                 f"{self._cached_weather}"
             )
 
+            # Anchor the turn to the resolved recipient (see _trigger_daily_report).
+            synthetic_message = None
+            if interface_path is not None:
+                synthetic_message = self._build_synthetic_message(
+                    interface_path, prompt
+                )
+                if synthetic_message is None:
+                    log_warning(
+                        f"[weather_plugin] Could not derive chat_id from "
+                        f"interface_path '{interface_path}'; delivery may be misrouted"
+                    )
+
             success = await request_llm_delivery(
+                message=synthetic_message,
                 interface=interface,
                 context={
                     "input": {"type": "event_reminder", "text": prompt},

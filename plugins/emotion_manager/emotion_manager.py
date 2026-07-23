@@ -232,12 +232,13 @@ class EmotionManager(PluginBase):
         self._decay_threshold = 0.1  # Emotions below this are removed
 
     def get_metadata(self) -> dict:
-        """Return plugin metadata."""
+        """Return declarative plugin metadata (see PluginBase.get_metadata)."""
         return {
             "name": "emotion_manager",
-            "description": "Centralized emotional state management with decay and balancing",
+            "display_name": "Emotion Manager",
+            "description": "Centralized emotional state management with decay and balancing.",
+            "category": "Core",
             "version": "1.0.0",
-            "type": "core",  # Mark as core plugin
         }
 
     def get_supported_actions(self) -> dict:

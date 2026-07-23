@@ -1,5 +1,5 @@
 """
-plugins/grillo/history_evaluator.py
+plugins/grillo/history_evaluator/history_evaluator.py
 
 History Evaluator plugin for G.R.I.L.L.O.:
 Provides evaluate_history(interface_path, entries) to format the last N chat
@@ -15,7 +15,7 @@ from core.plugin_base import PluginBase
 from core.logging_utils import log_error
 from core.config_manager import config_registry
 
-display_name = "Grillo History Evaluator"
+display_name = "G.R.I.L.L.O. History Evaluator"
 
 
 def _truncate(text: str, max_chars: int = 240) -> str:
@@ -48,10 +48,13 @@ class HistoryEvaluatorPlugin(PluginBase):
         return {}
 
     def get_metadata(self) -> dict:
+        """Return declarative plugin metadata (see PluginBase.get_metadata)."""
         return {
             "name": "grillo.history_evaluator",
+            "display_name": "History Evaluator",
+            "description": "Utility plugin to create short reflective prompts from recent history.",
+            "category": "Grillo",
             "version": "0.1",
-            "description": "Utility plugin to create short reflective prompts from recent history",
         }
 
     async def evaluate_history(

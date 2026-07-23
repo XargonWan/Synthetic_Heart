@@ -1,4 +1,4 @@
-# plugins/grillo/grillo_temporal_reflection.py
+# plugins/grillo/grillo_temporal_reflection/grillo_temporal_reflection.py
 """Temporal reflection prompt builder for G.R.I.L.L.O.
 
 Calculates the time elapsed since the last active user message and instructs

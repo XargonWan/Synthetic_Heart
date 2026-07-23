@@ -22,7 +22,8 @@ try:
         ui_type="bool",
         description="Enable the Recon Memory Recollector plugin (search memories for Recon).",
         scope="recon",
-        component="recon",
+        component="recon_memory_recollector",
+        hidden=True,
     )
 except Exception:
     from core.config_manager import config_registry
@@ -34,7 +35,8 @@ except Exception:
         label="Enable Recon Memory Recollector",
         description="Enable the Recon Memory Recollector plugin (search memories for Recon).",
         group="recon",
-        component="recon",
+        component="recon_memory_recollector",
+        hidden=True,
     )
 
 

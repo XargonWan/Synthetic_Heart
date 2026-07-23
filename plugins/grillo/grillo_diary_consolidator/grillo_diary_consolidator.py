@@ -50,6 +50,7 @@ class GrilloDiaryConsolidatorPlugin:
             value_type=bool,
             group="grillo",
             component="grillo_diary_consolidator",
+            hidden=True,
         )
         self.lookback_days = int(
             config_registry.get_value(

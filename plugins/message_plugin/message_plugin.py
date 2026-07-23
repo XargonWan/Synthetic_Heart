@@ -292,7 +292,7 @@ class MessagePlugin:
                         "When enabled, Grillo will skip outbound messages if the most recent message in the target chat was sent by the synth."
                     ),
                     group="grillo",
-                    component="grillo",
+                    component="grillo_impl",
                 )
             except Exception:
                 suppress_enabled = True
@@ -372,7 +372,7 @@ class MessagePlugin:
                                 ),
                                 value_type=float,
                                 group="grillo",
-                                component="grillo",
+                                component="grillo_impl",
                             )
                         )
                         candidate_text = str(text or "").strip().lower()

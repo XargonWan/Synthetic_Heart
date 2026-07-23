@@ -32,7 +32,7 @@ try:
         ui_type="number",
         description="Maximum number of diary characters allowed in prompt context after diary entries are trimmed.",
         scope="core",
-        component="diary",
+        component="ai_diary",
         advanced=True,
     )
 except Exception:

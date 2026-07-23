@@ -1,5 +1,5 @@
 """
-plugins/grillo/grillo_compactor.py
+plugins/grillo/grillo_compactor/grillo_compactor.py
 
 Nightly memory compaction plugin for G.R.I.L.L.O.: groups older memories by tag,
 asks the active LLM (English prompt) to synthesize them into a single compacted
@@ -38,6 +38,7 @@ class GrilloCompactorPlugin:
             value_type=bool,
             group="grillo",
             component="grillo_compactor",
+            hidden=True,
         )
         self.compact_time = config_registry.get_value(
             "GRILLO_COMPACT_TIME",

@@ -1,5 +1,5 @@
 """
-plugins/grillo/grillo_tag.py
+plugins/grillo/grillo_tag/grillo_tag.py
 
 Tag Elaboration plugin for G.R.I.L.L.O.
 Provides prompt-building for the 'tag_elaboration' beat.
@@ -7,7 +7,7 @@ Provides prompt-building for the 'tag_elaboration' beat.
 
 from core.ai_plugin_base import AIPluginBase
 
-display_name = "G.R.I.L.L.O Tag Elaboration"
+display_name = "G.R.I.L.L.O. Tag Elaboration"
 BEAT_TYPE = "tag_elaboration"
 
 

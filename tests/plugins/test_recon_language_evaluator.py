@@ -2,7 +2,7 @@ from collections import deque
 
 import pytest
 
-from plugins.recon_language_evaluator import ReconLanguageEvaluatorPlugin
+from plugins.recon.recon_language_evaluator import ReconLanguageEvaluatorPlugin
 
 
 class FakeEngine:

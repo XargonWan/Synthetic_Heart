@@ -455,7 +455,7 @@ class EventPlugin(AIPluginBase):
                         "block looks. Informational only."
                     ),
                     group="calendar",
-                    component="event_plugin",
+                    component="event",
                 )
             )
             max_events = int(
@@ -469,7 +469,7 @@ class EventPlugin(AIPluginBase):
                         "prompt context. Informational only."
                     ),
                     group="calendar",
-                    component="event_plugin",
+                    component="event",
                 )
             )
         except Exception as e:
@@ -1314,7 +1314,7 @@ class EventPlugin(AIPluginBase):
                         "in seconds."
                     ),
                     group="calendar",
-                    component="event_plugin",
+                    component="event",
                     advanced=True,
                 )
             )
@@ -1330,7 +1330,7 @@ class EventPlugin(AIPluginBase):
                         "reminders). When disabled, they only enrich context."
                     ),
                     group="calendar",
-                    component="event_plugin",
+                    component="event",
                 )
             )
         except Exception as e:

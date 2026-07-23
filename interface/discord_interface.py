@@ -270,7 +270,10 @@ async def _flush_live_diary(guild_id: int, buffer: list[tuple[str, str]]) -> Non
 class DiscordInterface:
     """Discord interface mirroring Telegram bot behaviour."""
 
-    display_name = "Discord Interface"
+    # "Discord Bot" (not "Discord Interface") to mirror "Telegram Bot": a
+    # Discord Userbot variant may exist in the future, so the bot vs userbot
+    # distinction is kept explicit in the display name.
+    display_name = "Discord Bot"
 
     # Chat attention state is centralized in core.chat_attention
 

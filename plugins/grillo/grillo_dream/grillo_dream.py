@@ -1,5 +1,5 @@
 """
-plugins/grillo/grillo_dream.py
+plugins/grillo/grillo_dream/grillo_dream.py
 
 Daily "dream" beat for G.R.I.L.L.O.: every day at configurable time (default 05:00 local)
 collects recent chat fragments and memories and asks the LLM to generate a "dream".
@@ -42,6 +42,7 @@ class GrilloDreamPlugin:
             value_type=bool,
             group="grillo",
             component="grillo_dream",
+            hidden=True,
         )
         self.dream_time = config_registry.get_value(
             "GRILLO_DREAM_TIME",

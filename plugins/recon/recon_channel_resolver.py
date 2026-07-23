@@ -1,4 +1,4 @@
-# plugins/recon_channel_resolver.py
+# plugins/recon/recon_channel_resolver.py
 """Recon Channel Resolver.
 
 An LLM-gated Recon plugin that resolves channels *cited by name* in the user's
@@ -40,6 +40,7 @@ def _register_var(
     value_type: type,
     ui_type: str,
     description: str,
+    hidden: bool = False,
 ) -> None:
     try:
         from core.variables_engine import register_exposed_var
@@ -52,7 +53,8 @@ def _register_var(
             ui_type=ui_type,
             description=description,
             scope="recon",
-            component="recon",
+            component="recon_channel_resolver",
+            hidden=hidden,
         )
     except Exception:
         config_registry.get_var(
@@ -62,7 +64,8 @@ def _register_var(
             label=label,
             description=description,
             group="recon",
-            component="recon",
+            component="recon_channel_resolver",
+            hidden=hidden,
         )
 
 
@@ -74,6 +77,7 @@ _register_var(
     ui_type="bool",
     description="Enable the Recon Channel Resolver plugin (resolve channels the "
     "user refers to by name into concrete interface paths).",
+    hidden=True,
 )
 
 

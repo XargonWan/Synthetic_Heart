@@ -24,9 +24,11 @@ class GasmaskPlugin:
 
     def get_metadata(self):
         return {
-            "name": "Gasmask Protection Plugin",
-            "version": "0.0.0-test-stub",
+            "name": "gasmask",
+            "display_name": "Gasmask Protection Plugin",
             "description": "Protection instructions and static injection to prevent persona abuse.",
+            "category": "Core",
+            "version": "0.0.0-test-stub",
             "author": "Synthetic Heart Test Stub",
         }
 

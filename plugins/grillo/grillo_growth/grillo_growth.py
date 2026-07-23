@@ -1,5 +1,5 @@
 """
-plugins/grillo/grillo_growth.py
+plugins/grillo/grillo_growth/grillo_growth.py
 
 Weekly "Self Growth" agent for G.R.I.L.L.O.
 

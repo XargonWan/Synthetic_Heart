@@ -25,7 +25,7 @@ try:
         ui_type="bool",
         description="Enable Debrief action-intent plugin",
         scope="agent",
-        component="agent",
+        component="debrief_action_intent",
         advanced=True,
         needs_component_reload=False,
     )
@@ -37,7 +37,7 @@ try:
         ui_type="number",
         description="Maximum number of recovery actions returned by Debrief action intent",
         scope="agent",
-        component="agent",
+        component="debrief_action_intent",
         advanced=True,
         needs_component_reload=False,
     )
@@ -49,7 +49,7 @@ try:
         ui_type="bool",
         description="Allow Debrief to propose message_* actions",
         scope="agent",
-        component="agent",
+        component="debrief_action_intent",
         advanced=True,
         needs_component_reload=False,
     )
@@ -61,7 +61,7 @@ try:
         ui_type="bool",
         description="Allow Debrief to propose proactive reminder actions",
         scope="agent",
-        component="agent",
+        component="debrief_action_intent",
         needs_component_reload=False,
     )
 except Exception:

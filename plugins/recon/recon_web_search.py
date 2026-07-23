@@ -21,7 +21,8 @@ try:
         ui_type="bool",
         description="Enable the Recon Web Search plugin (perform web searches based on LLM-generated queries).",
         scope="recon",
-        component="recon",
+        component="recon_web_search",
+        hidden=True,
     )
 except Exception:
     from core.config_manager import config_registry
@@ -33,7 +34,8 @@ except Exception:
         label="Enable Recon Web Search",
         description="Enable the Recon Web Search plugin (perform web searches based on LLM-generated queries).",
         group="recon",
-        component="recon",
+        component="recon_web_search",
+        hidden=True,
     )
 
 

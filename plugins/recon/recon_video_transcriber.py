@@ -1,4 +1,4 @@
-# plugins/recon_video_transcriber.py
+# plugins/recon/recon_video_transcriber.py
 """Recon Video Transcriber.
 
 An LLM-gated Recon plugin that transcribes videos — local attachments and
@@ -49,6 +49,7 @@ def _register_var(
     ui_type: str,
     description: str,
     advanced: bool = False,
+    hidden: bool = False,
 ) -> None:
     try:
         from core.variables_engine import register_exposed_var
@@ -61,8 +62,9 @@ def _register_var(
             ui_type=ui_type,
             description=description,
             scope="recon",
-            component="recon",
+            component="recon_video_transcriber",
             advanced=advanced,
+            hidden=hidden,
         )
     except Exception:
         config_registry.get_var(
@@ -72,8 +74,9 @@ def _register_var(
             label=label,
             description=description,
             group="recon",
-            component="recon",
+            component="recon_video_transcriber",
             advanced=advanced,
+            hidden=hidden,
         )
 
 
@@ -85,6 +88,7 @@ _register_var(
     ui_type="bool",
     description="Enable the Recon Video Transcriber plugin (transcribe local and "
     "YouTube videos and attach the transcript to the prompt).",
+    hidden=True,
 )
 _register_var(
     "RECON_VIDEO_MAX_SECONDS",

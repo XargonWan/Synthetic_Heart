@@ -244,9 +244,12 @@ class FacialExpressionPlugin(PluginBase):
         await karada.push_face_expression(None, 0)
 
     def get_metadata(self) -> Dict[str, Any]:
+        """Return declarative plugin metadata (see PluginBase.get_metadata)."""
         return {
             "name": "facial_expression_plugin",
+            "display_name": "Facial Expressions",
             "description": "Parses [em_NAME:INTENSITY] tags in LLM output and drives VRM blendshape expressions via KaradaStateServer.",
+            "category": "Various",
             "version": "1.0.0",
         }
 

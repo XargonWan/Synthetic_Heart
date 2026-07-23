@@ -1,12 +1,12 @@
 """
-plugins/grillo/grillo_relationship.py
+plugins/grillo/grillo_relationship/grillo_relationship.py
 
 Relationship reflection prompt builder for G.R.I.L.L.O.
 """
 
 from core.ai_plugin_base import AIPluginBase
 
-display_name = "G.R.I.L.L.O Relationship Reflection"
+display_name = "G.R.I.L.L.O. Relationship Reflection"
 BEAT_TYPE = "relationship"
 
 

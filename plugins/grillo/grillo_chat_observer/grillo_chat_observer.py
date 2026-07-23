@@ -1,5 +1,5 @@
 """
-plugins/grillo/grillo_chat_observer.py
+plugins/grillo/grillo_chat_observer/grillo_chat_observer.py
 
 Periodic Chat Observer beat for G.R.I.L.L.O.: periodically sample the last N chat snippets
 and propose them to the synth for processing (propose-only by default). The LLM should
@@ -130,6 +130,7 @@ class GrilloChatObserverPlugin:
             value_type=bool,
             group="grillo",
             component="grillo_chat_observer",
+            hidden=True,
         )
 
         self.interval = int(

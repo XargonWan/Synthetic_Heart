@@ -1,15 +1,23 @@
 <section class="tab-panel" id="tab-plugins" data-tab="plugins" role="tabpanel">
     <div class="settings-grid" style="flex-direction: column;">
         <article class="card">
-            <h2>Interfaces</h2>
-            <div class="components-list" id="components-interfaces-list">
-                <div class="meta">Loading…</div>
-            </div>
-        </article>
-        <article class="card">
             <h2>Plugins</h2>
-            <div class="components-list" id="components-plugins-list">
-                <div class="meta">Loading…</div>
+            <div class="plugins-search-row">
+                <input type="search" id="plugins-search" class="plugins-search-input"
+                    placeholder="Search plugins by name or variable…"
+                    autocomplete="off" spellcheck="false" aria-label="Search plugins by name or variable" />
+            </div>
+            <div class="plugins-two-col" id="plugins-two-col">
+                <div class="plugins-col-left" id="plugins-banner-list" role="listbox" aria-label="Plugins">
+                    <div class="meta">Loading…</div>
+                </div>
+                <div class="plugins-col-resizer" id="plugins-col-resizer" role="separator" aria-orientation="vertical" title="Drag to resize"></div>
+                <div class="plugins-col-right" id="plugin-detail-pane">
+                    <div class="plugin-detail-empty meta" id="plugin-detail-empty">
+                        Select a plugin on the left to see its description, guide and settings.
+                    </div>
+                    <div class="plugin-detail-content" id="plugin-detail-content" hidden></div>
+                </div>
             </div>
         </article>
 
@@ -27,3 +35,26 @@
         </article>
     </div>
 </section>
+
+<style>
+    .plugins-search-row {
+        display: flex;
+        gap: 0.6rem;
+        align-items: center;
+        margin: 0.2rem 0 0.9rem;
+    }
+
+    .plugins-search-row .plugins-search-input {
+        flex: 1 1 auto;
+        min-width: 200px;
+        padding: 0.55rem 0.75rem;
+        border-radius: 10px;
+        border: 1px solid var(--border);
+        background: var(--background);
+        color: var(--text);
+    }
+
+    .plugins-search-row .plugins-search-input::placeholder {
+        color: var(--text-soft);
+    }
+</style>

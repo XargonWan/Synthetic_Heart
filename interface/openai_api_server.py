@@ -161,7 +161,7 @@ class OpenAIApiServer:
     @staticmethod
     def get_interface_instructions() -> str:
         return (
-            "Use interface: ollama_serve to converse with clients using the Ollama HTTP protocol. "
+            "Use interface: ollama_serve to converse with clients over the OpenAI-compatible HTTP API. "
             "The target field must contain the internal chat identifier provided by the request handler."
         )
 

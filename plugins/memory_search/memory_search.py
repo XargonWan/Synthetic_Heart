@@ -226,6 +226,7 @@ register_exposed_var(
     description="Toggle memory_search plugin behavior (when off, searches are not performed)",
     scope="core",
     component="memory_search",
+    hidden=True,
 )
 
 register_exposed_var(

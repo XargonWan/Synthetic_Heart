@@ -26,8 +26,9 @@ try:
             "router escalates the turn to the Agent lane."
         ),
         scope="recon",
-        component="recon",
+        component="recon_agent_intent",
         advanced=True,
+        hidden=True,
     )
 except Exception:
     config_registry.get_var(
@@ -37,8 +38,9 @@ except Exception:
         label="Enable Recon Agent Intent",
         description="Enable the Recon Agent Intent plugin.",
         group="recon",
-        component="recon",
+        component="recon_agent_intent",
         advanced=True,
+        hidden=True,
     )
 
 

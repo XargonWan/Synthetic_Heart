@@ -1,5 +1,5 @@
 """
-plugins/grillo/grillo_llm_failure_recovery.py
+plugins/grillo/grillo_llm_failure_recovery/grillo_llm_failure_recovery.py
 
 G.R.I.L.L.O. LLM-Failure Recovery plugin.
 

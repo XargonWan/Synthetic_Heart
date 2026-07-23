@@ -1,5 +1,5 @@
 """
-plugins/grillo/grillo_curiosity.py
+plugins/grillo/grillo_curiosity/grillo_curiosity.py
 
 Curiosity prompt builder for G.R.I.L.L.O.
 """
