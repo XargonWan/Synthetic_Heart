@@ -130,7 +130,7 @@ class SynthWebUIInterface:
     display_name = "Web UI"
 
     def __init__(self, autostart: bool = True) -> None:
-        self.app = FastAPI(title=BRAND_NAME, version="1.0")
+        self.app = FastAPI(title=BRAND_NAME, version="0.0.0-dev")
         self.start_time = datetime.now(tz=timezone.utc)
 
         # Lightweight request logger middleware to capture client static/resource requests

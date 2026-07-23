@@ -23,10 +23,10 @@
                         </div>
                     </div>
                     <div class="stat-card">
-                        <div class="stat-icon">👥</div>
+                        <div class="stat-icon">🏷️</div>
                         <div class="stat-content">
-                            <div class="stat-value" id="stats-sessions">--</div>
-                            <div class="stat-label">Active Sessions</div>
+                            <div class="stat-value" id="system-version">--</div>
+                            <div class="stat-label">Version</div>
                         </div>
                     </div>
                     <div class="stat-card">
@@ -36,61 +36,46 @@
                             <div class="stat-label">Components</div>
                         </div>
                     </div>
-                    <div class="stat-card">
-                        <div class="stat-icon">💬</div>
-                        <div class="stat-content">
-                            <div class="stat-value" id="stats-messages">--</div>
-                            <div class="stat-label">Messages Today</div>
-                        </div>
-                    </div>
                 </div>
 
                 <div class="about-sections">
                     <div class="about-section">
                         <h3>System Information</h3>
                         <dl class="info-list">
-                            <div><dt>Version</dt><dd id="system-version">Loading...</dd></div>
-                            <div><dt>Python</dt><dd id="system-python">Loading...</dd></div>
-                            <div><dt>Platform</dt><dd id="system-platform">Loading...</dd></div>
-                            <div><dt>Database</dt><dd id="system-database">Loading...</dd></div>
+                            <div><dt>Version</dt><dd id="system-version-detail">--</dd></div>
+                            <div><dt>Python</dt><dd id="system-python">--</dd></div>
+                            <div><dt>Platform</dt><dd id="system-platform">--</dd></div>
+                            <div><dt>Database</dt><dd id="system-database">--</dd></div>
                         </dl>
+                        <a class="doc-button" href="https://synthetic-heart.readthedocs.io/" target="_blank" rel="noopener noreferrer">
+                            <span aria-hidden="true">📚</span> Open documentation
+                        </a>
                     </div>
 
                     <div class="about-section">
                         <h3>Features</h3>
                         <ul class="features-list">
-                            <li><span class="feature-icon">🎭</span> VRM Avatar Integration</li>
-                            <li><span class="feature-icon">💬</span> Real-time Chat Interface</li>
-                            <li><span class="feature-icon">📋</span> Live System Logging</li>
-                            <li><span class="feature-icon">📖</span> AI Memory Diary</li>
-                            <li><span class="feature-icon">⚙️</span> Dynamic Configuration</li>
-                            <li><span class="feature-icon">🔧</span> Component Management</li>
-                            <li><span class="feature-icon">🌐</span> Multi-Interface Support</li>
-                            <li><span class="feature-icon">🎨</span> Modern Dark UI</li>
+                            <li><span class="feature-icon">🎭</span> VRM avatar with real-time animation &amp; lip-sync</li>
+                            <li><span class="feature-icon">🧠</span> Pluggable LLM cortex engines (Gemini, OpenAI-compatible, …)</li>
+                            <li><span class="feature-icon">🤖</span> Agentic runtime with tools, MCP &amp; sub-agents</li>
+                            <li><span class="feature-icon">🗣️</span> Voice: TTS (Vox), STT (Auris) &amp; vision (Iris)</li>
+                            <li><span class="feature-icon">🌐</span> Multi-interface: Telegram, Discord, Matrix, Web</li>
+                            <li><span class="feature-icon">📖</span> Inner life: diary, memory, emotions &amp; autonomy</li>
+                            <li><span class="feature-icon">⏰</span> Autonomous background beats (Grillo)</li>
+                            <li><span class="feature-icon">🧩</span> Modular plugin architecture</li>
                         </ul>
                     </div>
 
                     <div class="about-section">
-                        <h3>Credits</h3>
+                        <h3>Support the project</h3>
                         <div class="credits-content">
-                            <p>SyntH is built with modern web technologies and AI frameworks.</p>
-                            <p>Special thanks to the open-source community for the amazing tools and libraries that make this possible.</p>
-
                             <div class="kofi-embed" id="kofi-about-embed">
-                                <p class="kofi-embed-text">If you'd like to support the project, you can buy me a coffee on
-                                    <a href="https://ko-fi.com/xargon" target="_blank" rel="noopener noreferrer">Ko‑fi</a>
+                                <p class="kofi-embed-text">Synthetic Heart is free and open-source. If it brings you joy, you can support its development on
+                                    <a href="https://ko-fi.com/xargon" target="_blank" rel="noopener noreferrer">Ko‑fi</a>.
                                 </p>
-                                <a class="kofi-button" href="https://ko-fi.com/xargon" target="_blank" rel="noopener noreferrer" aria-label="Support me on Ko‑fi">
+                                <a class="kofi-button" href="https://ko-fi.com/xargon" target="_blank" rel="noopener noreferrer" aria-label="Support the project on Ko‑fi">
                                     <img src="https://ko-fi.com/img/githubbutton_sm.svg" alt="Support me on Ko‑fi"/>
                                 </a>
-                            </div>
-
-                            <div class="tech-stack">
-                                <span class="tech-badge">FastAPI</span>
-                                <span class="tech-badge">Three.js</span>
-                                <span class="tech-badge">VRM</span>
-                                <span class="tech-badge">WebSockets</span>
-                                <span class="tech-badge">Docker</span>
                             </div>
                         </div>
                     </div>
@@ -255,20 +240,26 @@
             .credits-content p {
                 margin: 0 0 1rem 0;
             }
-            .tech-stack {
-                display: flex;
-                flex-wrap: wrap;
+            .doc-button {
+                display: inline-flex;
+                align-items: center;
                 gap: 0.5rem;
-                margin-top: 1rem;
+                margin-top: 1.25rem;
+                padding: 0.6rem 1.2rem;
+                background: linear-gradient(135deg, var(--accent), var(--accent-dark, #7289da));
+                color: #fff;
+                border: none;
+                border-radius: 10px;
+                font-size: 0.95rem;
+                font-weight: 600;
+                text-decoration: none;
+                box-shadow: 0 10px 25px -18px rgba(114, 137, 218, 0.9);
+                transition: transform 0.2s ease, box-shadow 0.2s ease, opacity 0.2s ease;
             }
-            .tech-badge {
-                padding: 0.25rem 0.75rem;
-                background: var(--surface-alt);
-                border: 1px solid var(--border);
-                border-radius: 999px;
-                font-size: 0.8rem;
-                font-weight: 500;
-                color: var(--text);
+            .doc-button:hover {
+                transform: translateY(-2px);
+                box-shadow: 0 14px 30px -18px rgba(114, 137, 218, 1);
+                opacity: 0.97;
             }
 
             /* Ko‑fi inline widget in About (green theme) */

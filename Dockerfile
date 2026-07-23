@@ -21,7 +21,7 @@ RUN pnpm build
 FROM python:3.12-slim
 
 ARG TARGETARCH
-ARG GITVERSION_TAG
+ARG GITVERSION_TAG=0.0.0-dev
 ARG BUILD_DATE
 ARG VERSION
 
@@ -128,8 +128,11 @@ COPY --from=stage_builder /build/dist /app/frontend/dist
 # Cleanup & Permissions
 RUN rm -rf /app/s6-services /app/automation_tools
 ENV PYTHONPATH=/app
-ENV GITVERSION_TAG=$GITVERSION_TAG
-RUN echo "$GITVERSION_TAG" > /app/version.txt
+# Concretize the resolved version into the image so it is available at runtime
+# via os.getenv("SYNTH_VERSION") (read by core/webui.py). GITVERSION_TAG is
+# supplied by CI (GitVersion majorMinorPatch); local builds fall back to the
+# ARG default above.
+ENV SYNTH_VERSION=$GITVERSION_TAG
 
 # S6 Services Setup
 COPY container/s6-services/synth /etc/s6-overlay/s6-rc.d/synth
