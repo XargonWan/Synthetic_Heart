@@ -170,7 +170,7 @@ def classify(actions: List[Any], *, context: Dict[str, Any] | None = None) -> st
     # previously caused a plain greeting (message + diary/emotion) to be
     # misrouted to the Agent lane via the removed ``len(types) > 1`` heuristic.
     if context and context.get("agent_needed"):
-        log_debug("[agent_router] context agent_needed -> AGENT lane")
+        log_info("[agent_router] classify: context agent_needed -> AGENT lane")
         return AGENT
 
     if not actions:
@@ -185,19 +185,19 @@ def classify(actions: List[Any], *, context: Dict[str, Any] | None = None) -> st
     # agent tool loop, where they would be executed as "tools" and interfere
     # with the agent.
     if types and all(_is_pure_message(t) for t in types):
-        log_debug("[agent_router] Message-only batch -> FAST lane")
+        log_info("[agent_router] classify: message-only batch -> FAST lane")
         return FAST
 
     # Safety net: any batch containing a real tool call is agentic work, even if
     # the recon somehow missed it. This keeps tool actions out of the Fast Lane.
     if any(_is_tool_call(t) for t in types):
-        log_debug("[agent_router] Batch contains a tool call -> AGENT lane")
+        log_info("[agent_router] classify: batch contains a tool call -> AGENT lane")
         return AGENT
 
     # No agent_needed flag and no tool call: the request was not judged agentic,
     # so it stays on the classic Fast Lane regardless of how many non-tool
     # actions the model emitted.
-    log_debug("[agent_router] No agentic signal -> FAST lane")
+    log_info("[agent_router] classify: no agentic signal -> FAST lane")
     return FAST
 
 
@@ -499,6 +499,37 @@ async def _deliver_agent_reply(
             f"[agent_router] Delivering agent reply to {interface_name} "
             f"(path={interface_path})"
         )
-        await run_action(action, context, bot, message)
+        delivery_result = await run_action(action, context, bot, message)
+
+        # Check delivery success — run_action now returns {"ok": bool} for
+        # message-delivery actions dispatched through interfaces.
+        ok = isinstance(delivery_result, dict) and delivery_result.get("ok") is True
+        if not ok:
+            error_detail = (
+                delivery_result.get("error", "unknown")
+                if isinstance(delivery_result, dict)
+                else str(delivery_result)
+            )
+            log_error(
+                f"[agent_router] Agent reply delivery failed "
+                f"(interface={interface_name}, path={interface_path}): "
+                f"{error_detail}. Retrying once after 2 s delay."
+            )
+            await asyncio.sleep(2)
+            retry_result = await run_action(action, context, bot, message)
+            retry_ok = isinstance(retry_result, dict) and retry_result.get("ok") is True
+            if retry_ok:
+                log_info("[agent_router] Agent reply delivery succeeded on retry")
+            else:
+                retry_error = (
+                    retry_result.get("error", "unknown")
+                    if isinstance(retry_result, dict)
+                    else str(retry_result)
+                )
+                log_error(
+                    f"[agent_router] Agent reply delivery FAILED after retry "
+                    f"(interface={interface_name}, path={interface_path}): "
+                    f"{retry_error}. Message lost."
+                )
     except Exception as exc:
         log_error(f"[agent_router] Failed to deliver agent reply: {exc}")

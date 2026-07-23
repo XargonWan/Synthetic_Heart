@@ -92,6 +92,101 @@ except Exception:
 # the final answer, and stops. Recognised in the prompt's AVAILABLE TOOLS block.
 _COMPLETION_TOOL = "attempt_completion"
 
+# Delivery actions whose failure the loop tries to fix *programmatically* once,
+# before ever surfacing the error back to the model. Only cheap, safe repairs
+# are attempted (text sanitisation, deriving a missing target from the
+# already-present interface_path). The interface_path itself is NEVER modified —
+# doing so could deliver the message to a chat Synth never intended.
+_DELIVERY_ACTION_PREFIX = "message_"
+
+
+def _programmatic_delivery_fix(args: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+    """Attempt cheap, safe repairs to a failed delivery action's payload.
+
+    Returns ``(new_args, changed)``. ``interface_path`` is treated as
+    immutable — never rewritten — so a repaired retry can only ever reach the
+    exact same destination the model already chose.
+    """
+    if not isinstance(args, dict):
+        return args, False
+
+    fixed = dict(args)
+    changed = False
+
+    # 1) Normalise / strip the outbound text. Weak models sometimes emit text
+    #    wrapped in stray whitespace or with mojibake that the interface layer
+    #    would reject or mangle.
+    text = fixed.get("text") or fixed.get("content")
+    if isinstance(text, str):
+        stripped = text.strip()
+        if stripped and stripped != text:
+            if "text" in fixed:
+                fixed["text"] = stripped
+            else:
+                fixed["content"] = stripped
+            changed = True
+
+    # 2) Derive a missing `target` from the interface_path the model already
+    #    provided. This does NOT change the destination — it only fills in the
+    #    redundant field the action validator requires, matching what the
+    #    interface would compute itself.
+    interface_path = fixed.get("interface_path")
+    if interface_path and not fixed.get("target"):
+        parts = str(interface_path).split("/")
+        if len(parts) >= 2 and parts[1].strip():
+            fixed["target"] = parts[1].strip()
+            if len(parts) >= 3 and parts[2].strip() and not fixed.get("thread_id"):
+                fixed["thread_id"] = parts[2].strip()
+            changed = True
+
+    return fixed, changed
+
+
+def _looks_like_internal_monologue(text: str) -> list[str]:
+    """Detect STRUCTURAL signs that internal task-log/monologue leaked into a
+    user-facing message.
+
+    Language-agnostic by design (see AGENTS.md hard rules: no keyword/phrase
+    matching). It only flags machine-structural artefacts that should never
+    appear in natural conversation with a user — raw action/tool JSON, tool-log
+    prefixes emitted by the agent loop, and internal tool names used as call
+    syntax. Returns a list of matched signal names (empty ⇒ looks clean). This
+    is a NON-blocking observability aid: the caller only logs a WARNING.
+    """
+    if not isinstance(text, str) or not text.strip():
+        return []
+
+    signals: list[str] = []
+
+    # 1) Raw action/tool-call JSON structure leaking through (the shape the
+    #    model is supposed to emit as tool calls, not as prose).
+    for marker in ('"type":', '"payload":', '"actions":', '"arguments":'):
+        if marker in text:
+            signals.append(f"action_json:{marker}")
+
+    # 2) The tool-log prefix the agent loop itself writes into observations.
+    if "[tool:" in text:
+        signals.append("tool_log_prefix")
+
+    # 3) An internal tool/action name written as a call (name followed by "(" or
+    #    JSON-ish braces) — natural user replies don't invoke tools by name.
+    try:
+        from core.tool_registry import tool_registry
+
+        for tool in tool_registry.all_tools():
+            tname = tool.name
+            if not tname:
+                continue
+            if f"{tname}(" in text or f'"{tname}"' in text:
+                signals.append(f"tool_name_as_call:{tname}")
+                break
+    except Exception:
+        # Registry not available (very early / tests): skip this signal only.
+        pass
+
+    return signals
+
+
 # DB helper is imported lazily inside methods for testability/mocking
 
 
@@ -1016,6 +1111,26 @@ class AgentLoopManager:
             )
 
             if not tool_calls:
+                # Iteration-1 self-correction for router over-routing. If the
+                # VERY FIRST model turn produces only a user-facing message and
+                # NO real tool call, the request was effectively conversational
+                # and never needed the Agent Lane — the router 2.0 over-routed a
+                # simple reply. Deliver that message as the final answer and end
+                # the turn cleanly instead of nagging the model to invent tool
+                # calls it does not need. Structural only (message vs tool), no
+                # keyword/language logic.
+                if i == 1 and message_calls and final_text.strip():
+                    log_info(
+                        "[agent_core] Iteration 1 produced only a message and no "
+                        "tool calls; treating as a conversational reply "
+                        "(router over-routing) and ending the turn"
+                    )
+                    observations.append(
+                        {"iteration": i, "role": "assistant", "content": final_text}
+                    )
+                    stop_reason = "no_tools_required"
+                    break
+
                 # Only synth message actions this iteration (no real tools left).
                 if message_calls and final_text.strip():
                     if require_explicit_completion and i < max_iterations:
@@ -1163,6 +1278,61 @@ class AgentLoopManager:
                     context=context or {"from_cortex": True, "agent_tool": True},
                     original_message=original_message,
                 )
+
+                # Programmatic delivery self-repair: if a message_* action
+                # failed, try one cheap, safe fix (text sanitisation, deriving a
+                # missing target) and re-execute BEFORE bothering the model. The
+                # interface_path is never touched, so the retry can only reach
+                # the exact destination the model already chose.
+                if not exec_result.get("ok") and str(name).startswith(
+                    _DELIVERY_ACTION_PREFIX
+                ):
+                    fixed_args, changed = _programmatic_delivery_fix(args)
+                    if changed:
+                        log_info(
+                            f"[agent_core] Iteration {i}: delivery tool '{name}' "
+                            f"failed; retrying once with programmatic fix "
+                            f"(interface_path preserved)"
+                        )
+                        retry_result = await agent_tool_executor.execute(
+                            name,
+                            fixed_args,
+                            context=context
+                            or {"from_cortex": True, "agent_tool": True},
+                            original_message=original_message,
+                        )
+                        if retry_result.get("ok"):
+                            log_info(
+                                f"[agent_core] Iteration {i}: delivery tool "
+                                f"'{name}' succeeded after programmatic fix"
+                            )
+                            exec_result = retry_result
+                        else:
+                            log_warning(
+                                f"[agent_core] Iteration {i}: delivery tool "
+                                f"'{name}' still failing after programmatic fix; "
+                                f"surfacing error to model"
+                            )
+                            exec_result = retry_result
+
+                # Safety-net observability: flag when internal task-log /
+                # monologue structure leaked into a user-facing message. This is
+                # non-blocking — the message is already delivered — but a WARNING
+                # makes the leak visible in logs for later prompt tuning.
+                if str(name).startswith(_DELIVERY_ACTION_PREFIX):
+                    delivered_text = args.get("text") or args.get("content")
+                    leak_signals = _looks_like_internal_monologue(
+                        delivered_text if isinstance(delivered_text, str) else ""
+                    )
+                    if leak_signals:
+                        log_warning(
+                            f"[agent_core] Iteration {i}: delivery tool '{name}' "
+                            f"message appears to contain internal monologue / "
+                            f"task-log structure (signals={leak_signals}). It was "
+                            f"still delivered; consider using note_to_self for "
+                            f"private reasoning."
+                        )
+
                 iteration_results.append(
                     {
                         "tool": name,
@@ -1569,6 +1739,15 @@ class AgentLoopManager:
             f"next tool call until you call {_COMPLETION_TOOL}.\n"
             "Each tool observation is already in PRIOR OBSERVATIONS — build on it "
             "rather than repeating an identical call.\n"
+            "INTERNAL NOTES vs USER MESSAGES: keep your private reasoning "
+            "separate from what you say to the user. A message/delivery action "
+            "(e.g. message_telegram_bot) is a real message the user WILL read — "
+            "it must contain ONLY what you want to tell them, in natural "
+            "conversational language, never your step-by-step plan, tool logs, "
+            "raw tool output, status chatter, or thinking-out-loud. If you want "
+            "to jot down a plan, track progress, or record an intermediate "
+            "thought for yourself, use the note_to_self tool (it is private and "
+            "never shown to the user) — do NOT send it as a user message.\n"
             "Diary discipline: this is a single agentic task, not many separate "
             "moments. Do NOT write a diary entry on every iteration. At most, "
             "record one diary entry when you begin the task and one when it is "

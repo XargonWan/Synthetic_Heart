@@ -157,6 +157,7 @@ class AgentPlugin(AIPluginBase):
             "agent_run_shell",
             "spawn_drone",
             "resume_agent_task",
+            "note_to_self",
         ]
 
     def get_supported_actions(self) -> Dict[str, Any]:
@@ -259,6 +260,19 @@ class AgentPlugin(AIPluginBase):
                     "its number (e.g. 'continue task 37'). Provide the numeric 'task_id'. The "
                     "task must currently be paused/pending; you can only resume a task that "
                     "is waiting to be continued."
+                ),
+            },
+            "note_to_self": {
+                "required_fields": ["note"],
+                "optional_fields": [],
+                "description": (
+                    "Record a PRIVATE internal thought/reasoning note for yourself "
+                    "DURING an agent task. This is NEVER shown to the user — it is "
+                    "your own scratchpad for planning, tracking progress, or noting "
+                    "an intermediate observation. Use this instead of putting "
+                    "internal monologue, task-log text, or 'thinking out loud' into "
+                    "a user-facing message. To actually talk to the user, use a "
+                    "message_* action instead."
                 ),
             },
         }
@@ -808,6 +822,14 @@ class AgentPlugin(AIPluginBase):
                 "stop_reason": result.get("stop_reason"),
                 "task_id": result.get("task_id"),
             }
+
+        if action_type == "note_to_self":
+            note = str(payload.get("note") or "").strip()
+            if not note:
+                return {"status": "error", "reason": "empty note"}
+            preview = note if len(note) <= 300 else note[:300] + " ..."
+            log_info(f"[agent] note_to_self: {preview}")
+            return {"status": "ok", "recorded": True}
 
         if action_type == "resume_agent_task":
             raw_id = payload.get("task_id")
