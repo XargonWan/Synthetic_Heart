@@ -45,6 +45,23 @@ function _escapeHtml(value){
     .replace(/'/g, '&#39;');
 }
 
+// Render the task status as either an animated 3-dot "thinking" indicator
+// (while running) or a colour-coded text badge. Colours: failed=red,
+// completed=green, pending=white (see agent.html <style>).
+function _renderAgentStatus(status){
+  const s = String(status || '').toLowerCase();
+  if(s === 'running'){
+    return '<span class="agent-typing" aria-label="running">'
+      + '<span class="agent-dot"></span>'
+      + '<span class="agent-dot"></span>'
+      + '<span class="agent-dot"></span></span>';
+  }
+  const cls = (s === 'failed' || s === 'completed' || s === 'pending')
+    ? `agent-status-${s}`
+    : 'agent-status-other';
+  return `<small class="${cls}">${_escapeHtml(status || '-')}</small>`;
+}
+
 // ── Conversation stream builders ──────────────────────────────────────────
 
 function _bubble(role, text){
@@ -219,18 +236,18 @@ async function fetchAgentTasks(){
       const border = isSelected ? '2px solid var(--primary, #4f8cff)' : '1px solid var(--border)';
       const bg = isSelected ? 'var(--panel, rgba(79,140,255,0.08))' : 'var(--surface, transparent)';
       const subtitle = t.created_at ? new Date(t.created_at).toLocaleString() : '';
-      const label = t.name ? _escapeHtml(t.name) : `<small>${_escapeHtml(t.engine || 'default')}</small>`;
+      const label = t.name ? _escapeHtml(t.name) : `<small>Task</small>`;
       const nameAttr = t.name ? _escapeHtml(t.name) : '';
       return `<div style="position:relative;margin-bottom:4px;">
         <button type="button" data-agent-task-id="${idStr}" class="card" style="width:100%;text-align:left;border:${border};background:${bg};cursor:pointer;border-radius:8px;padding:6px 66px 6px 10px;box-shadow:none;gap:0;">
           <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
             <div style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"><strong>#${t.id}</strong> ${label}</div>
-            <div style="flex-shrink:0;"><small>${_escapeHtml(t.status || '-')}</small></div>
           </div>
           <div style="margin-top:2px;opacity:0.6;"><small>${_escapeHtml(subtitle)}</small></div>
         </button>
         <button type="button" class="history-delete-btn" data-agent-task-rename="${idStr}" data-agent-task-name="${nameAttr}" title="Rename this task" style="position:absolute;top:4px;right:34px;padding:0.15rem 0.35rem;">✏️</button>
         <button type="button" class="history-delete-btn" data-agent-task-delete="${idStr}" title="Delete this task" style="position:absolute;top:4px;right:4px;padding:0.15rem 0.35rem;">🗑</button>
+        <div class="agent-card-status" style="position:absolute;bottom:6px;right:8px;">${_renderAgentStatus(t.status)}</div>
       </div>`;
     }).join('');
 
@@ -317,28 +334,28 @@ async function loadAgentTask(id){
     const finalText = output.final_text || '';
     const stopReason = output.stop_reason || '-';
     const status = data.status || '-';
-    const engine = data.engine || 'default';
     const createdAt = data.created_at ? new Date(data.created_at).toLocaleString() : '-';
     const goal = (data.input && data.input.goal) || '';
 
     const actionsExecuted = Number.isFinite(output.actions_executed) ? output.actions_executed : null;
 
-    // Slim meta bar. When the task is paused (pending) because it ran out of
-    // iterations without finishing, surface a "Continue" button that grants it
-    // another batch of iterations on the same task.
+    // Slim meta bar. A ``pending`` task (ran out of iterations) gets a
+    // "Continue" button; a ``failed`` task gets a "Retry" button; a
+    // ``completed`` task gets none. Both actions relaunch the SAME task.
     if(metaBar){
-      let continueBtn = '';
+      let actionBtn = '';
       if(status === 'pending'){
         const done = actionsExecuted != null ? actionsExecuted : '?';
-        continueBtn = `<button type="button" class="agent-continue-btn" onclick="continueAgentTask(${Number(data.id)})" title="Grant another batch of iterations">▶ Continue (${_escapeHtml(String(done))} actions so far)</button>`;
+        actionBtn = `<button type="button" class="agent-continue-btn" onclick="continueAgentTask(${Number(data.id)})" title="Grant another batch of iterations">▶ Continue (${_escapeHtml(String(done))} actions so far)</button>`;
+      } else if(status === 'failed'){
+        actionBtn = `<button type="button" class="agent-retry-btn" onclick="retryAgentTask(${Number(data.id)})" title="Relaunch this task from where it failed">↻ Retry</button>`;
       }
       metaBar.innerHTML = `
         <span>Task <strong>#${_escapeHtml(String(data.id))}</strong></span>
-        <span>engine <strong>${_escapeHtml(engine)}</strong></span>
-        <span>status <strong>${_escapeHtml(status)}</strong></span>
+        <span>status ${_renderAgentStatus(status)}</span>
         <span>stop <strong>${_escapeHtml(stopReason)}</strong></span>
         <span>${_escapeHtml(createdAt)}</span>
-        ${continueBtn}`;
+        ${actionBtn}`;
     }
 
     const parts = [];
@@ -467,11 +484,37 @@ async function continueAgentTask(id){
   }
 }
 
+async function retryAgentTask(id){
+  const taskId = id != null ? id : _selectedAgentTaskId;
+  if(taskId == null) return;
+  const btn = document.querySelector('.agent-retry-btn');
+  if(btn){ btn.disabled = true; btn.textContent = '↻ Retrying…'; }
+  try{
+    const resp = await fetch(_apiBase + `/api/agent/tasks/${taskId}/retry`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({}),
+    });
+    if(!resp.ok){
+      const data = await resp.json().catch(()=>({}));
+      console.error('Retry failed', data.detail || resp.statusText);
+      if(btn){ btn.disabled = false; btn.textContent = '↻ Retry'; }
+      return;
+    }
+    await loadAgentTask(taskId);
+    await fetchAgentTasks();
+  }catch(e){
+    console.error('Retry failed', e);
+    if(btn){ btn.disabled = false; btn.textContent = '↻ Retry'; }
+  }
+}
+
 // Keep compatibility with inline onclick handlers rendered in template strings.
 window.deleteAgentTask = deleteAgentTask;
 window.renameAgentTask = renameAgentTask;
 window.sendTaskMessage = sendTaskMessage;
 window.continueAgentTask = continueAgentTask;
+window.retryAgentTask = retryAgentTask;
 
 // Expose for loader
 window.SynthWebUI = window.SynthWebUI || {};
