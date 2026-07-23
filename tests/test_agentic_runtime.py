@@ -145,6 +145,160 @@ async def test_run_agentic_turn_completed_tool_key(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_run_agentic_turn_completed_params_key(monkeypatch):
+    """Completion via the ``{"tool": ..., "params": ...}`` shape must be honoured.
+
+    Regression for agent task 62: logfare-claude emits its tool calls with the
+    arguments under a ``params`` key — e.g.
+    ``{"tool": "attempt_completion", "params": {"summary": "..."}}``. Previously
+    ``_extract_tool_calls`` only accepted ``arguments``/``payload``/``args``, so
+    every ``params``-keyed call (including attempt_completion and outbound
+    messages) was silently dropped, causing an endless "no tool calls" loop and
+    undelivered replies.
+    """
+
+    async def fake_handle(bot, message, context_memory_or_prompt):
+        return json.dumps(
+            {
+                "tool": "attempt_completion",
+                "params": {"summary": "All done via params."},
+            }
+        )
+
+    monkeypatch.setattr("core.plugin_instance.handle_incoming_message", fake_handle)
+
+    manager = AgentLoopManager()
+    out = await manager.run_agentic_turn(
+        goal="finish", max_iterations=5, timeout_seconds=30
+    )
+    assert out["stop_reason"] == "completed"
+    assert out["final_text"] == "All done via params."
+
+
+@pytest.mark.asyncio
+async def test_run_agentic_turn_message_is_actually_delivered(monkeypatch):
+    """A pure outbound message must be executed through the tool executor.
+
+    Regression for agent task 62: an outbound ``message_telegram_bot`` action was
+    only captured into ``final_text`` and NEVER passed to the tool executor, so
+    on an asynchronous interface the message was silently never delivered while
+    the turn still claimed to have replied. The message must now be executed.
+    """
+
+    executed: list[str] = []
+    calls: list[int] = []
+
+    async def fake_handle(bot, message, context_memory_or_prompt):
+        calls.append(1)
+        # Iteration 1: a real tool call plus a pure outbound message (params
+        # shape). The real tool keeps the loop alive past the iteration-1
+        # "only a message" conversational-reply short-circuit.
+        if len(calls) == 1:
+            return json.dumps(
+                {
+                    "actions": [
+                        {"tool": "mcp_fs_read", "params": {"path": "/x"}},
+                        {
+                            "tool": "message_telegram_bot",
+                            "params": {
+                                "interface_path": "telegram_bot/31321637",
+                                "text": "Hey, thinking of you.",
+                            },
+                        },
+                    ]
+                }
+            )
+        # Iteration 2: explicit completion.
+        return json.dumps(
+            {"tool": "attempt_completion", "params": {"summary": "Sent."}}
+        )
+
+    async def fake_execute(name, arguments, context=None, original_message=None):
+        executed.append(name)
+        return {"ok": True, "tool": name, "result": "delivered", "error": None}
+
+    monkeypatch.setattr("core.plugin_instance.handle_incoming_message", fake_handle)
+    monkeypatch.setattr(agent_tool_executor, "execute", fake_execute)
+
+    manager = AgentLoopManager()
+    out = await manager.run_agentic_turn(
+        goal="message Jay", max_iterations=5, timeout_seconds=30
+    )
+    assert out["stop_reason"] == "completed"
+    # The message action must have reached the executor, not just final_text.
+    assert "message_telegram_bot" in executed
+    # A tool_results observation must record the delivery.
+    delivered = [
+        o
+        for o in out["observations"]
+        if o.get("role") == "tool_results"
+        and any(
+            isinstance(r, dict) and r.get("tool") == "message_telegram_bot"
+            for r in (o.get("content") or [])
+        )
+    ]
+    assert delivered, "expected a tool_results observation for the delivered message"
+
+
+@pytest.mark.asyncio
+async def test_run_agentic_turn_failed_delivery_not_completed(monkeypatch):
+    """A turn must not report 'completed' when its only message failed to send.
+
+    Regression for agent task 62: the turn signalled completion and claimed to
+    have replied while the outbound message actually failed to reach the
+    interface. The completion-integrity gate must downgrade the status.
+    """
+
+    calls: list[int] = []
+
+    async def fake_handle(bot, message, context_memory_or_prompt):
+        calls.append(1)
+        # Iteration 1: a real tool call plus the outbound message that will fail
+        # to deliver. The real tool avoids the iteration-1 conversational-reply
+        # short-circuit so the loop reaches attempt_completion.
+        if len(calls) == 1:
+            return json.dumps(
+                {
+                    "actions": [
+                        {"tool": "mcp_fs_read", "params": {"path": "/x"}},
+                        {
+                            "tool": "message_telegram_bot",
+                            "params": {
+                                "interface_path": "telegram_bot/31321637",
+                                "text": "This will fail to send.",
+                            },
+                        },
+                    ]
+                }
+            )
+        return json.dumps(
+            {"tool": "attempt_completion", "params": {"summary": "Replied."}}
+        )
+
+    async def fake_execute(name, arguments, context=None, original_message=None):
+        # The real tool succeeds; every message delivery attempt fails.
+        if name.startswith("message_"):
+            return {"ok": False, "tool": name, "result": "", "error": "interface down"}
+        return {"ok": True, "tool": name, "result": "ok", "error": None}
+
+    monkeypatch.setattr("core.plugin_instance.handle_incoming_message", fake_handle)
+    monkeypatch.setattr(agent_tool_executor, "execute", fake_execute)
+
+    manager = AgentLoopManager()
+    out = await manager.run_agentic_turn(
+        goal="message Jay", max_iterations=5, timeout_seconds=30
+    )
+    assert out["stop_reason"] == "delivery_failed"
+    # An error observation must surface the undelivered message.
+    errors = [
+        o
+        for o in out["observations"]
+        if o.get("role") == "error" and "delivery_failed" in str(o.get("content", ""))
+    ]
+    assert errors, "expected a delivery_failed error observation"
+
+
+@pytest.mark.asyncio
 async def test_run_agentic_turn_intent_text_does_not_stop(monkeypatch):
     """Plain intent text (no tool call) must NOT end the turn prematurely.
 

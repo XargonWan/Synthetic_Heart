@@ -641,7 +641,12 @@ class AgentLoopManager:
                     )
 
             stop_reason = str(result.get("stop_reason") or "")
-            if stop_reason in {"timeout", "engine_error", "empty_response"}:
+            if stop_reason in {
+                "timeout",
+                "engine_error",
+                "empty_response",
+                "delivery_failed",
+            }:
                 status = "failed"
             elif stop_reason == "paused_max_iterations":
                 # Iteration budget exhausted without an explicit completion: the
@@ -924,6 +929,14 @@ class AgentLoopManager:
         final_text = ""
         stop_reason = "max_iterations"
 
+        # Delivery-integrity tracking (see completion-integrity gate below).
+        # ``delivered_message_ok`` becomes True as soon as any outbound message_*
+        # action is genuinely delivered; ``delivery_failures`` collects the names
+        # of outbound messages that failed so the turn never falsely claims to
+        # have replied when nothing reached the interface.
+        delivered_message_ok = False
+        delivery_failures: list[str] = []
+
         # Diary discipline: a single agentic turn is ONE moment, not many. The
         # model must not write a diary entry on every iteration — at most one at
         # the start and one at the end. We enforce this deterministically (the
@@ -1128,10 +1141,17 @@ class AgentLoopManager:
             # Synth actions vs tools. A plain outbound message action (e.g.
             # ``message_telegram_bot``) is Synth talking to the user, NOT a tool
             # the agent should feed back into its loop. Recognise those synth
-            # actions and split them out: the tool executor keeps handling real
-            # tools, while the message text becomes the turn's final reply. This
-            # stops message actions from interfering with the agent loop (being
-            # executed as "tools" and driving further iterations).
+            # actions and split them out: the message text becomes the turn's
+            # reply, while the tool executor keeps handling real tools. This
+            # stops message actions from driving further iterations.
+            #
+            # CRITICAL: a pure-message call must still be ACTUALLY DELIVERED to
+            # the originating interface via the tool executor. Historically the
+            # text was only captured into ``final_text`` and never executed, so
+            # on an asynchronous interface (Telegram/Discord) the message was
+            # silently never sent while the turn still claimed to have replied.
+            # We now execute every pure-message through ``agent_tool_executor``
+            # exactly like any other action, recording the delivery outcome.
             message_calls = [
                 c
                 for c in tool_calls
@@ -1141,13 +1161,70 @@ class AgentLoopManager:
                 tool_calls = [c for c in tool_calls if c not in message_calls]
                 collected: list[str] = []
                 for mc in message_calls:
+                    mc_name = str(mc.get("name") or mc.get("type") or "")
                     args = mc.get("arguments") or mc.get("payload") or {}
-                    if isinstance(args, dict):
-                        text = str(
-                            args.get("text") or args.get("content") or ""
-                        ).strip()
-                        if text:
-                            collected.append(text)
+                    if not isinstance(args, dict):
+                        args = {}
+                    text = str(args.get("text") or args.get("content") or "").strip()
+                    if text:
+                        collected.append(text)
+
+                    # Deliver the message to the interface. Only actual outbound
+                    # interface messages (message_* delivery actions) are routed
+                    # through the executor here; synchronous synth-side speech
+                    # actions (radio_speak/tts_speak) are handled elsewhere and
+                    # kept as captured text only.
+                    if mc_name.startswith(_DELIVERY_ACTION_PREFIX):
+                        exec_result = await agent_tool_executor.execute(
+                            mc_name,
+                            args,
+                            context=context
+                            or {"from_cortex": True, "agent_tool": True},
+                            original_message=original_message,
+                        )
+                        if not exec_result.get("ok"):
+                            fixed_args, changed = _programmatic_delivery_fix(args)
+                            if changed:
+                                log_info(
+                                    f"[agent_core] Iteration {i}: message "
+                                    f"'{mc_name}' failed; retrying once with "
+                                    f"programmatic fix (interface_path preserved)"
+                                )
+                                exec_result = await agent_tool_executor.execute(
+                                    mc_name,
+                                    fixed_args,
+                                    context=context
+                                    or {"from_cortex": True, "agent_tool": True},
+                                    original_message=original_message,
+                                )
+                        delivered_ok = bool(exec_result.get("ok"))
+                        if delivered_ok:
+                            delivered_message_ok = True
+                        else:
+                            delivery_failures.append(mc_name)
+                            log_warning(
+                                f"[agent_core] Iteration {i}: outbound message "
+                                f"'{mc_name}' FAILED to deliver: "
+                                f"{exec_result.get('error')}"
+                            )
+                        observations.append(
+                            {
+                                "iteration": i,
+                                "role": "tool_results",
+                                "content": [
+                                    {
+                                        "tool": mc_name,
+                                        "ok": delivered_ok,
+                                        "result": exec_result.get("result", ""),
+                                        "error": exec_result.get("error"),
+                                    }
+                                ],
+                            }
+                        )
+                        log_info(
+                            f"[agent_core] Iteration {i}: outbound message "
+                            f"'{mc_name}' delivered ok={delivered_ok}"
+                        )
                 if collected:
                     final_text = "\n\n".join(collected)
 
@@ -1435,6 +1512,37 @@ class AgentLoopManager:
             )
             if composed:
                 final_text = composed
+
+        # Completion-integrity gate. A turn must never report "completed" while
+        # an outbound message it claimed to send actually failed to reach the
+        # interface. If every attempted delivery failed and none succeeded,
+        # surface the discrepancy instead of faking a successful reply: record
+        # the failure as an observation and downgrade the stop reason so the
+        # persistence layer does not mark the task ``completed``.
+        if (
+            stop_reason == "completed"
+            and delivery_failures
+            and not delivered_message_ok
+        ):
+            log_warning(
+                "[agent_core] Completion-integrity gate: turn signalled "
+                f"completion but {len(delivery_failures)} outbound message(s) "
+                f"failed to deliver ({', '.join(delivery_failures)}) and none "
+                "succeeded; downgrading from 'completed' to 'delivery_failed'"
+            )
+            observations.append(
+                {
+                    "iteration": len(observations),
+                    "role": "error",
+                    "content": (
+                        "delivery_failed: the turn claimed completion but the "
+                        "outbound message(s) "
+                        f"{', '.join(delivery_failures)} never reached the "
+                        "interface. The reply was NOT delivered."
+                    ),
+                }
+            )
+            stop_reason = "delivery_failed"
 
         result: Dict[str, Any] = {
             "iterations": len(observations),
@@ -1861,11 +1969,22 @@ class AgentLoopManager:
         if isinstance(actions, list):
             calls: list[Dict[str, Any]] = []
             for a in actions:
-                if isinstance(a, dict) and a.get("type"):
+                if isinstance(a, dict) and (
+                    a.get("type") or a.get("name") or a.get("tool")
+                ):
                     calls.append(
                         {
-                            "name": a["type"],
-                            "arguments": _normalize_args(a.get("payload", {})),
+                            "name": str(
+                                a.get("type") or a.get("name") or a.get("tool")
+                            ),
+                            "arguments": _normalize_args(
+                                a.get(
+                                    "payload",
+                                    a.get(
+                                        "params", a.get("arguments", a.get("args", {}))
+                                    ),
+                                )
+                            ),
                         }
                     )
             return calls
@@ -1893,11 +2012,22 @@ class AgentLoopManager:
         if isinstance(generic_calls, list):
             calls: list[Dict[str, Any]] = []
             for c in generic_calls:
-                if isinstance(c, dict) and c.get("name"):
+                if isinstance(c, dict) and (
+                    c.get("name") or c.get("type") or c.get("tool")
+                ):
                     calls.append(
                         {
-                            "name": str(c.get("name")),
-                            "arguments": _normalize_args(c.get("arguments", {})),
+                            "name": str(
+                                c.get("name") or c.get("type") or c.get("tool")
+                            ),
+                            "arguments": _normalize_args(
+                                c.get(
+                                    "arguments",
+                                    c.get(
+                                        "params", c.get("payload", c.get("args", {}))
+                                    ),
+                                )
+                            ),
                         }
                     )
             if calls:
@@ -1905,19 +2035,30 @@ class AgentLoopManager:
 
         # Single action object. The tool/action name may be carried under any of
         # ``type`` / ``name`` / ``tool`` — different engines pick different keys
-        # (e.g. logfare-claude emits ``{"tool": "attempt_completion", "payload":
-        # {...}}``). Normalize all three the same way so the completion sentinel
-        # and single tool calls are never silently dropped.
+        # (e.g. logfare-claude emits ``{"tool": "attempt_completion", "params":
+        # {...}}``). Likewise, the arguments may live under ``arguments`` /
+        # ``payload`` / ``args`` / ``params``. Normalize all of them the same way
+        # so the completion sentinel and single tool calls are never silently
+        # dropped (a missing ``params`` key previously discarded every
+        # logfare-claude tool call, including attempt_completion and outbound
+        # messages).
         name_key = parsed.get("type") or parsed.get("name") or parsed.get("tool")
         if name_key and (
-            "arguments" in parsed or "payload" in parsed or "args" in parsed
+            "arguments" in parsed
+            or "payload" in parsed
+            or "args" in parsed
+            or "params" in parsed
         ):
             return [
                 {
                     "name": str(name_key),
                     "arguments": _normalize_args(
                         parsed.get(
-                            "arguments", parsed.get("payload", parsed.get("args", {}))
+                            "arguments",
+                            parsed.get(
+                                "payload",
+                                parsed.get("params", parsed.get("args", {})),
+                            ),
                         )
                     ),
                 }
