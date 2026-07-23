@@ -1372,18 +1372,48 @@ async def task_command(*args, interface_context=None) -> str:
         "failed": "❌",
         "cancelled": "🚫",
     }
+
+    def _truncate(text: str, limit: int = 80) -> str:
+        text = " ".join(str(text).split())
+        return text[: limit - 1] + "…" if len(text) > limit else text
+
     lines = ["🗂️ *Agent tasks* (newest first)\n"]
+    has_resumable = False
     for t in tasks:
         icon = status_icon.get(t["status"], "•")
-        goal = t.get("goal") or "(no goal)"
-        if len(goal) > 70:
-            goal = goal[:70] + "…"
-        resume_hint = "  ↩️ resumable" if t.get("resumable") else ""
-        lines.append(
-            f"`{t['task_id']}` {icon} *{t['status']}*{resume_hint}\n    {goal}"
-        )
-    lines.append("\n_Use_ `/task resume <id>` _to continue a paused task._")
-    return "\n".join(lines)
+        if t.get("resumable"):
+            has_resumable = True
+
+        # Header: id + icon + status.
+        header = f"`{t['task_id']}` {icon} *{t['status']}*"
+        lines.append(header)
+
+        # Description: best human-readable label. Fall back to a short reason
+        # for failed tasks, else a neutral placeholder.
+        label = _truncate(t.get("name") or "")
+        if not label:
+            if t["status"] == "failed" and t.get("stop_reason"):
+                label = f"_{_truncate(t['stop_reason'], 60)}_"
+            else:
+                label = "_(no description)_"
+        lines.append(f"    {label}")
+
+        # Metrics line, only when we have concrete numbers.
+        actions = t.get("actions_executed")
+        iters = t.get("iterations")
+        metrics: list[str] = []
+        if isinstance(actions, int) and actions > 0:
+            metrics.append(f"{actions} action{'s' if actions != 1 else ''}")
+        if isinstance(iters, int) and iters > 0:
+            metrics.append(f"{iters} iteration{'s' if iters != 1 else ''}")
+        if metrics:
+            lines.append(f"    _{' · '.join(metrics)}_")
+
+        lines.append("")  # blank spacer between tasks
+
+    if has_resumable:
+        lines.append("_Use_ `/task resume <id>` _to continue a paused task._")
+    return "\n".join(lines).rstrip()
 
 
 register_command("cancel", cancel_command)

@@ -483,13 +483,39 @@ class AgentLoopManager:
             log_warning(f"[agent_core] find_task_by_id failed: {e}")
             return None
 
+    @staticmethod
+    def _clean_goal_text(goal: str) -> str:
+        """Return ``goal`` unless it is a raw agent-action JSON blob.
+
+        Some tasks store the LLM's raw ``{"actions": [...]}`` payload as their
+        goal, which is meaningless to a human reading ``/task``. Detect that
+        structurally (parse + ``actions`` key) and drop it so a better display
+        text (task name / final_text) can take over. Returns ``""`` when the
+        goal is such a blob.
+        """
+        text = (goal or "").strip()
+        if not text:
+            return ""
+        if text[0] in "{[":
+            try:
+                parsed = json.loads(text)
+            except Exception:
+                return text
+            if isinstance(parsed, dict) and "actions" in parsed:
+                return ""
+            if isinstance(parsed, list):
+                return ""
+        return text
+
     async def list_recent_tasks(self, limit: int = 15) -> list[Dict[str, Any]]:
         """Return the most recent agent tasks for display (newest first).
 
-        Each entry is ``{"task_id", "status", "engine", "goal", "resumable"}``.
-        ``resumable`` mirrors :meth:`find_task_by_id` semantics — only
-        ``pending`` tasks can be resumed. Best-effort: returns ``[]`` on any DB
-        error so a display command never raises.
+        Each entry is ``{"task_id", "status", "engine", "resumable", "name",
+        "summary", "stop_reason", "actions_executed", "iterations"}``. ``name``
+        is the best human-readable label (task name → cleaned goal →
+        final_text). ``resumable`` mirrors :meth:`find_task_by_id` semantics —
+        only ``pending`` tasks can be resumed. Best-effort: returns ``[]`` on
+        any DB error so a display command never raises.
         """
         try:
             lim = int(limit)
@@ -502,7 +528,7 @@ class AgentLoopManager:
             async with conn_ctx as conn:
                 async with conn.cursor() as cur:
                     await cur.execute(
-                        "SELECT id, status, engine, input "
+                        "SELECT id, status, engine, input, metadata, output "
                         "FROM agent_tasks ORDER BY id DESC LIMIT %s",
                         (lim,),
                     )
@@ -517,17 +543,42 @@ class AgentLoopManager:
                 input_payload = json.loads(row[3]) if row[3] else {}
             except Exception:
                 input_payload = {}
-            goal = ""
-            if isinstance(input_payload, dict):
-                goal = str(input_payload.get("goal") or "").strip()
+            try:
+                metadata = json.loads(row[4]) if row[4] else {}
+            except Exception:
+                metadata = {}
+            try:
+                output_payload = json.loads(row[5]) if row[5] else {}
+            except Exception:
+                output_payload = {}
+            if not isinstance(input_payload, dict):
+                input_payload = {}
+            if not isinstance(metadata, dict):
+                metadata = {}
+            if not isinstance(output_payload, dict):
+                output_payload = {}
+
+            goal = self._clean_goal_text(str(input_payload.get("goal") or ""))
+            task_name = str(metadata.get("name") or "").strip()
+            final_text = str(output_payload.get("final_text") or "").strip()
+            stop_reason = str(output_payload.get("stop_reason") or "").strip()
+
+            # Prefer an explicit task name, then a real (non-JSON) goal, then
+            # the final reply text so the label is always meaningful.
+            name = task_name or goal or final_text
+
             status = row[1]
             tasks.append(
                 {
                     "task_id": int(row[0]),
                     "status": status,
                     "engine": row[2],
-                    "goal": goal,
                     "resumable": status == "pending",
+                    "name": name,
+                    "summary": final_text,
+                    "stop_reason": stop_reason,
+                    "actions_executed": output_payload.get("actions_executed"),
+                    "iterations": output_payload.get("iterations"),
                 }
             )
         return tasks
