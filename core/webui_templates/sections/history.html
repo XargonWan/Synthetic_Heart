@@ -27,6 +27,10 @@
               <span class="icon">💬</span>
               <span>Chat</span>
             </button>
+            <button class="sub-nav-btn" data-subtab="vessel" role="tab" aria-selected="false">
+              <span class="icon">🌀</span>
+              <span>Vessel</span>
+            </button>
             <button class="sub-nav-btn" data-subtab="agent" role="tab" aria-selected="false">
               <span class="icon">🤖</span>
               <span>Agent</span>
@@ -155,6 +159,27 @@
           </div>
         </div>
         <div id="history-chat-pagination" class="pagination-controls"></div>
+      </div>
+
+      <!-- Vessel Sub-Tab -->
+      <div class="sub-tab-panel" id="subtab-vessel" data-subtab="vessel">
+        <div class="section-controls">
+          <input type="text" id="history-vessel-search" placeholder="Search vessel activity..." class="search-input" />
+          <select id="history-vessel-environment" class="filter-select">
+            <option value="">All Environments</option>
+          </select>
+          <select id="history-vessel-sort" class="sort-select">
+            <option value="desc">Newest First</option>
+            <option value="asc">Oldest First</option>
+          </select>
+        </div>
+        <div id="history-vessel-content" class="history-container">
+          <div class="loading-state">
+            <div class="loading-spinner"></div>
+            <p>Loading vessel activity...</p>
+          </div>
+        </div>
+        <div id="history-vessel-pagination" class="pagination-controls"></div>
       </div>
 
       <!-- Agent Sub-Tab -->

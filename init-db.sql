@@ -116,6 +116,41 @@ CREATE TABLE IF NOT EXISTS agent_tasks (
     INDEX idx_agent_created (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+-- Rift Vessel Sessions: one row per embodiment session. The buffered lived
+-- experience (experience_buffer) is flushed to a single diary entry at
+-- end-of-session (explicit logout or inactivity cooldown). No diary/memory is
+-- written mid-session. NOTE: never use a bare `timestamp` column (reserved).
+CREATE TABLE IF NOT EXISTS vessel_sessions (
+    session_id VARCHAR(128) PRIMARY KEY,
+    environment VARCHAR(64) NOT NULL,
+    interface_path VARCHAR(512),
+    status ENUM('active','ended') NOT NULL DEFAULT 'active',
+    experience_buffer LONGTEXT,
+    diary_entry_id INT,
+    started_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    last_event_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    ended_at DATETIME,
+    INDEX idx_vessel_sessions_status (status),
+    INDEX idx_vessel_sessions_environment (environment),
+    INDEX idx_vessel_sessions_last_event (last_event_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Rift Vessel Activity Log: audit trail of embodiment events/actions, shown in
+-- the WebUI History > Vessel sub-tab (mirrors grillo_activity_log / radio).
+CREATE TABLE IF NOT EXISTS vessel_activity_log (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    session_id VARCHAR(128),
+    interface_path VARCHAR(512),
+    environment VARCHAR(64) NOT NULL,
+    event_type VARCHAR(50) NOT NULL,
+    summary TEXT NOT NULL,
+    metadata JSON,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_vessel_activity_created_at (created_at DESC),
+    INDEX idx_vessel_activity_environment (environment),
+    INDEX idx_vessel_activity_session (session_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 -- Web Search Tasks: decoupled background web-search jobs triggered by the
 -- recon web-search plugin. Recon fires a search and returns immediately; the
 -- orchestrator runs the searches off the message pipeline, synthesises an

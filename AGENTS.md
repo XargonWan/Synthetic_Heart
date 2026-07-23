@@ -207,6 +207,40 @@ keep the parent task clean (research, scoped lookups, multi-step file inspection
 
 ---
 
+## 5c. Rift Vessel — Multi-World Embodiment
+
+SyntH is a persistent cognitive entity; a **Vessel** is a layer of embodiment into an external world. The Rift Vessel subsystem lets SyntH inhabit game/virtual worlds (Minecraft shipped as PoC; Skyrim/VRChat/Hytale are registry-ready) through pluggable **connectors**, while identity/memory/personality persist across worlds and chat interfaces. Full reference: `docs/rift_vessel.rst`.
+
+| Concern | Location |
+|---------|----------|
+| Connector registry (Iris pattern) | `core/vessel_registry.py` (`VESSEL_REGISTRY`, `register_vessel_connector`) |
+| Connector base + schema | `plugins/vessel_base.py` (`VesselConnectorBase` ABC, `WorldState`, `PerceptionEvent`, `VesselActionResult`) |
+| Actions facade | `plugins/vessel_plugin.py` (`VesselPlugin`, `PLUGIN_CLASS`) |
+| Session lifecycle + experience buffer | `core/vessel_session_manager.py` (`vessel_session_manager`) |
+| I/O interface (duck-typed) | `interface/vessel_interface.py` (`INTERFACE_NAME = "vessel"`) |
+| Minecraft PoC connector | `plugins/vessels/minecraft_connector.py` (`CONNECTOR_CLASS`, self-registers) |
+| Mineflayer bridge (Node.js) | `interface_dev/minecraft_bridge_minimal.js` |
+| Bridge provisioner | `interface/minecraft_provisioner.py` (`BridgeProvisioner`, `get_bridge_provisioner`) |
+| DB tables | `core/db.py::init_vessel_tables` + `init-db.sql` (`vessel_sessions`, `vessel_activity_log`) |
+| WebUI Activities voice | `core/webui.py` (`/api/history/vessel`), `history.html`/`history.js` (🌀 sub-tab) |
+| CLI | `core/command_registry.py` (`/vessel status`, `/minecraft provision …`) |
+
+**Three hard constraints (all enforced):**
+
+1. **Vessel actions never create agentic tasks.** `vessel_say`/`vessel_move`/`vessel_look`/`vessel_use`/`vessel_status` declare **no** `external_effects` → they stay on the Fast Lane (`run_actions`), never the Agent Lane / Drones. (They are still passively auto-exposed as MCP tools `synth_vessel_*`.) A connector talks to its world directly; no reasoning loop is needed.
+2. **No diary during a session.** Events accumulate in an in-DB `experience_buffer` on `vessel_sessions`; a **single** autobiographical "lived experience" diary entry is written **only at end-of-session** — explicit logout OR `VESSEL_SESSION_COOLDOWN_SEC` (default 3600 s) of inactivity, detected by the interface scheduler calling `close_expired_sessions`.
+3. **Own Activities voice.** Like Radio/Grillo: `vessel_activity_log` + `/api/history/vessel` (GET history, DELETE per-item) + a dedicated History sub-tab.
+
+**Perception & salience:** the PoC filter is LLM-free — dedup (30 s) + rate-limit (2 s) in `interface/vessel_interface.py`. A richer LLM salience/attention worker (Grillo *RAW cognition* style) is a documented future phase and must also respect constraint 1. Never stream raw telemetry into cognition.
+
+**Adding a connector:** subclass `VesselConnectorBase`, set module-level `CONNECTOR_CLASS`, and call `register_vessel_connector(name, __name__, capabilities=..., label=...)` at import time. Removing any connector/plugin/interface must not break the rest of the system.
+
+**Minecraft PoC deployment:** single-container, **opt-in** via `MINECRAFT_BRIDGE_ENABLED` (default False). Node is **not** in the default image (`python:3.12-slim`) — build with `docker build --build-arg INSTALL_NODE=true …` (Dockerfile `ARG INSTALL_NODE=false` + conditional NodeSource install). The provisioner runs the bridge as a **non-root** subprocess and returns a clear error if `node`/`npm` are missing. Uses offline auth; real Microsoft/XBL auth is out of scope.
+
+**Vessel config keys:** `ACTIVE_VESSEL` (`"disabled"`), `VESSEL_SETTINGS`, `VESSEL_SESSION_COOLDOWN_SEC` (3600), `MINECRAFT_BRIDGE_ENABLED` (False), `MINECRAFT_BRIDGE_RUN_AT_START`, `MINECRAFT_BRIDGE_HOST` (127.0.0.1), `MINECRAFT_BRIDGE_PORT` (8137), `MINECRAFT_SERVER_HOST` (127.0.0.1), `MINECRAFT_SERVER_PORT` (25565), `MINECRAFT_BOT_USERNAME` (Synth).
+
+---
+
 ## 6. Interfaces
 
 - Manage I/O with external systems.
@@ -535,6 +569,8 @@ docker exec synth-dev tail -f /app/logs/synth.log | grep -E "\[grillo\]|grillo"
 | `grillo_activity_log` | `init-db.sql` | Log of executed Grillo beats with prompt/response text |
 | `grillo_action_execs` | `init-db.sql` | Individual action executions within a Grillo beat |
 | `agent_tasks` | `init-db.sql` | Agentic Runtime 2.0 task records with I/O JSON (`engine`, `status`, `input`, `output`, `iterations_meta`) |
+| `vessel_sessions` | `core/db.py` / `init-db.sql` | Rift Vessel embodiment sessions (`environment`, `status`, `experience_buffer` JSON, `started_at`/`last_event_at`/`ended_at`, `diary_entry_id`) |
+| `vessel_activity_log` | `core/db.py` / `init-db.sql` | Rift Vessel Activities-tab log (`session_id`, `environment`, `event_type`, `summary`, `metadata` JSON, `created_at`) |
 | `external_endpoints` | `init-db.sql` | LLM/API endpoint registry (name, protocol, URL, key, capabilities, model list) |
 | `scheduled_events` | `plugins/event_plugin.py` | Date/time triggered events Synth should act on |
 | `blocklist` | `plugins/blocklist.py` | Blocked users/entities |

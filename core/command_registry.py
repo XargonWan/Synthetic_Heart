@@ -1419,3 +1419,107 @@ async def task_command(*args, interface_context=None) -> str:
 register_command("cancel", cancel_command)
 register_command("logchat", logchat_command)
 register_command("task", task_command)
+
+
+async def vessel_command(*args) -> str:
+    """Inspect the Rift Vessel embodiment layer.
+
+    Usage:
+        /vessel status   Show active connector + available connectors.
+    """
+    sub = args[0].lower() if args else "status"
+
+    if sub != "status":
+        return "❌ Use: `/vessel status`"
+
+    try:
+        from core.config_manager import config_registry
+        from core.vessel_registry import VESSEL_REGISTRY
+
+        active = config_registry.get_value("ACTIVE_VESSEL", "disabled") or "disabled"
+        available = VESSEL_REGISTRY.get_available_connectors()
+
+        lines = ["🌀 *Rift Vessel*", f"Active: `{active}`"]
+        if available:
+            lines.append("Available connectors:")
+            for name in available:
+                meta = VESSEL_REGISTRY.get_connector_meta(name) or {}
+                label = meta.get("label") or name
+                lines.append(f"  • `{name}` — {label}")
+        else:
+            lines.append("_No connectors registered._")
+
+        instance = (
+            VESSEL_REGISTRY.get_instance(str(active)) if active != "disabled" else None
+        )
+        if instance is not None:
+            connected = bool(getattr(instance, "is_connected", False))
+            lines.append(f"Connection: {'🟢 connected' if connected else '⚪ idle'}")
+
+        return "\n".join(lines)
+    except Exception as e:
+        log_debug(f"[command_registry] Error in vessel_command: {e}")
+        return f"❌ Error handling vessel command: {e}"
+
+
+async def minecraft_command(*args) -> str:
+    """Control the Minecraft Vessel bridge provisioner.
+
+    Usage:
+        /minecraft provision start        Install (if needed) and start the bridge.
+        /minecraft provision stop         Stop the bridge subprocess.
+        /minecraft provision status       Show bridge status.
+        /minecraft provision logs [n]     Show the last n bridge log lines.
+    """
+    usage = "❌ Use: `/minecraft provision start|stop|status|logs [n]`"
+    if len(args) < 2 or args[0].lower() != "provision":
+        return usage
+
+    action = args[1].lower()
+
+    try:
+        from interface.minecraft_provisioner import get_bridge_provisioner
+
+        prov = get_bridge_provisioner()
+
+        if action == "start":
+            res = await prov.start()
+        elif action == "stop":
+            res = await prov.stop()
+        elif action == "status":
+            res = prov.status()
+        elif action == "logs":
+            n = 100
+            if len(args) >= 3:
+                try:
+                    n = int(args[2])
+                except ValueError:
+                    return "❌ logs count must be an integer"
+            res = prov.logs(n)
+        else:
+            return usage
+
+        if action == "status":
+            return (
+                "🟦 *Minecraft bridge*\n"
+                f"Enabled: `{res.get('enabled')}`\n"
+                f"Installed: `{res.get('installed')}`\n"
+                f"Running: `{res.get('running')}`"
+                + (f" (pid {res.get('pid')})" if res.get("running") else "")
+            )
+        if action == "logs":
+            if not res.get("ok"):
+                return f"❌ {res.get('detail')}"
+            body = "\n".join(res.get("lines", [])) or "(empty)"
+            return f"🟦 *Minecraft bridge logs*\n```\n{body}\n```"
+
+        ok = res.get("ok")
+        icon = "✅" if ok else "❌"
+        return f"{icon} Minecraft bridge {action}: {res.get('detail')}"
+    except Exception as e:
+        log_debug(f"[command_registry] Error in minecraft_command: {e}")
+        return f"❌ Error handling minecraft command: {e}"
+
+
+register_command("vessel", vessel_command)
+register_command("minecraft", minecraft_command)

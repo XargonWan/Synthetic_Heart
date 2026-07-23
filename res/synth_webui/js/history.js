@@ -9,6 +9,7 @@ const historyState = {
     grillo: { page: 1, per_page: 20, search: '', beat_type: '', sort: 'desc' },
     dreams: { page: 1, per_page: 15, search: '', sort: 'desc' },
     chat: { page: 1, per_page: 50, search: '', interface_path: '', sort: 'desc' },
+    vessel: { page: 1, per_page: 20, search: '', environment: '', sort: 'desc' },
     calendar: { year: null, month: null, events: [], loaded: false },
     growth: { current: null, entries: [], currentLikes: [], currentDislikes: [], pendingProposal: null }
 };
@@ -104,6 +105,10 @@ function initializeHistoryTab() {
     document.getElementById('history-chat-interface')?.addEventListener('change', () => { historyState.chat.interface_path = document.getElementById('history-chat-interface').value; historyState.chat.page = 1; loadHistoryChat(); });
     document.getElementById('history-chat-search')?.addEventListener('input', SynthUtils.debounce(() => { historyState.chat.search = document.getElementById('history-chat-search').value; historyState.chat.page = 1; loadHistoryChat(); }, 500));
     document.getElementById('history-chat-sort')?.addEventListener('change', () => { historyState.chat.sort = document.getElementById('history-chat-sort').value; historyState.chat.page = 1; loadHistoryChat(); });
+
+    document.getElementById('history-vessel-search')?.addEventListener('input', SynthUtils.debounce(() => { historyState.vessel.search = document.getElementById('history-vessel-search').value; historyState.vessel.page = 1; loadHistoryVessel(); }, 500));
+    document.getElementById('history-vessel-environment')?.addEventListener('change', () => { historyState.vessel.environment = document.getElementById('history-vessel-environment').value; historyState.vessel.page = 1; loadHistoryVessel(); });
+    document.getElementById('history-vessel-sort')?.addEventListener('change', () => { historyState.vessel.sort = document.getElementById('history-vessel-sort').value; historyState.vessel.page = 1; loadHistoryVessel(); });
 
     // Calendar controls
     document.getElementById('calendar-prev')?.addEventListener('click', () => shiftCalendarMonth(-1));
@@ -675,6 +680,7 @@ function loadHistoryData(subtab) {
     if (subtab === 'dreams') return loadHistoryDreams();
     if (subtab === 'growth') return loadHistoryGrowth();
     if (subtab === 'chat') return loadHistoryChat();
+    if (subtab === 'vessel') return loadHistoryVessel();
     if (subtab === 'agent') {
         try { if (window.SynthWebUI && typeof window.SynthWebUI.initAgentTab === 'function') window.SynthWebUI.initAgentTab(); } catch (e) { /* ignore */ }
         return;
@@ -1075,6 +1081,10 @@ function deleteGrowthState(id) {
     deleteHistoryItem('/api/history/growth/' + id, loadHistoryGrowth, 'Delete this self-growth history entry? This cannot be undone.');
 }
 
+function deleteVesselEntry(id) {
+    deleteHistoryItem('/api/history/vessel/' + id, loadHistoryVessel, 'Delete this vessel activity entry? This cannot be undone.');
+}
+
 async function loadHistoryChat() {
     const content = document.getElementById('history-chat-content'); if (!content) return;
     console.log('[History] loadHistoryChat called with state:', historyState.chat);
@@ -1230,6 +1240,77 @@ function renderGrilloActions(actions) {
 
 function formatJsonBlock(value) { return SynthUtils.formatJsonBlock(value); }
 
+async function loadHistoryVessel() {
+    const content = document.getElementById('history-vessel-content'); if (!content) return;
+    console.log('[History] loadHistoryVessel called with state:', historyState.vessel);
+    content.innerHTML = '<div class="loading-state"><div class="loading-spinner"></div><p>Loading vessel activity...</p></div>';
+    const params = new URLSearchParams({ page: historyState.vessel.page, per_page: historyState.vessel.per_page, search: historyState.vessel.search, environment: historyState.vessel.environment, sort: historyState.vessel.sort });
+    try {
+        const response = await fetch(`/api/history/vessel?${params}`);
+        const data = await response.json();
+        console.log('[History] vessel response:', data);
+        if (data && data.success) {
+            const envSelect = document.getElementById('history-vessel-environment');
+            if (envSelect && Array.isArray(data.environments)) {
+                const defaultOption = envSelect.options && envSelect.options[0] ? envSelect.options[0] : null;
+                envSelect.innerHTML = '';
+                if (defaultOption) envSelect.appendChild(defaultOption);
+                const existing = new Set();
+                data.environments.forEach(env => {
+                    const trimmed = String(env).trim();
+                    if (!trimmed || existing.has(trimmed)) return;
+                    const option = document.createElement('option');
+                    option.value = trimmed;
+                    option.textContent = trimmed.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
+                    envSelect.appendChild(option);
+                    existing.add(trimmed);
+                });
+            }
+            if (Array.isArray(data.entries) && data.entries.length > 0) {
+                content.innerHTML = data.entries.map(entry => renderVesselEntry(entry)).join('');
+                content.classList.add('history-populated');
+                try { content.scrollTop = 0; content.tabIndex = -1; setTimeout(() => { try { content.focus(); } catch (e) {} }, 50); } catch (e) {}
+                renderPagination('vessel', data.page, data.total_pages, data.total_count);
+            } else {
+                content.classList.remove('history-populated');
+                content.innerHTML = '<div class="empty-state"><div class="icon">🌀</div><p>No vessel activity found</p></div>';
+            }
+        } else {
+            console.warn('[History] vessel response indicates failure or unexpected shape:', data);
+            content.classList.remove('history-populated');
+            content.innerHTML = '<div class="empty-state"><div class="icon">⚠️</div><p>Failed to load vessel activity</p></div>';
+        }
+    } catch (error) {
+        console.error('Failed to load vessel history:', error);
+        content.innerHTML = '<div class="empty-state"><div class="icon">⚠️</div><p>Failed to load vessel activity</p></div>';
+    }
+}
+
+function renderVesselEntry(entry) {
+    const timestamp = formatTimestamp(entry.created_at);
+    const eventTypeLabel = escapeHtml((entry.event_type || 'event').replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase()));
+    const environment = escapeHtml(entry.environment || 'unknown');
+    const summary = escapeHtml(entry.summary || '');
+    const interfacePath = entry.interface_path ? escapeHtml(entry.interface_path) : '';
+    const metadataBlock = (entry.metadata && Object.keys(entry.metadata).length) ? formatJsonBlock(entry.metadata) : '';
+
+    return `
+        <div class="history-entry">
+            <div class="history-entry-header">
+                <div class="history-entry-meta">
+                    <div class="history-entry-date">🌀 ${timestamp}</div>
+                    <span class="history-entry-type">${environment}</span>
+                    <span class="history-entry-type">${eventTypeLabel}</span>
+                </div>
+                ${entry.id ? `<button type="button" class="history-delete-btn" title="Delete this entry" onclick="window.SynthWebUI.deleteVesselEntry(${entry.id})">🗑</button>` : ''}
+            </div>
+            <div class="grillo-response">${summary}</div>
+            ${interfacePath ? `<div class="history-entry-detail" style="margin-top: 0.5rem; opacity: 0.7;"><small>${interfacePath}</small></div>` : ''}
+            ${metadataBlock ? `<div class="grillo-action-detail" style="margin-top: 0.5rem;"><strong>Details:</strong>\n${metadataBlock}</div>` : ''}
+        </div>
+    `;
+}
+
 function renderChatMessage(msg) {
     const timestamp = formatTimestamp(msg.timestamp);
     let safeMessage = escapeHtml(msg.message_text || ''); safeMessage = safeMessage.replace(/^[\s\u00A0]+/, '').replace(/[\n\r]+$/, ''); const isLong = safeMessage.split('\n').length > 6 || safeMessage.length > 600; const longClass = isLong ? ' chat-text--limited' : '';
@@ -1289,6 +1370,7 @@ window.SynthWebUI.deleteDiaryDay = deleteDiaryDay;
 window.SynthWebUI.deleteGrilloEntry = deleteGrilloEntry;
 window.SynthWebUI.deleteDreamEntry = deleteDreamEntry;
 window.SynthWebUI.deleteGrowthState = deleteGrowthState;
+window.SynthWebUI.deleteVesselEntry = deleteVesselEntry;
 
 // Fallback: if the tab is active on DOMContentLoaded, initialize
 document.addEventListener('DOMContentLoaded', () => {

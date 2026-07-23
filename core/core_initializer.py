@@ -478,6 +478,122 @@ class CoreInitializer:
                     f"[core_initializer] Failed to eagerly register agentic config keys: {_e}"
                 )
 
+            # 4.5.2. Eagerly register Rift Vessel config keys.
+            # The Vessel plugin/interface register ACTIVE_VESSEL / VESSEL_SETTINGS
+            # at module import time, but they are loaded AFTER load_all_from_db()
+            # runs, so their DB values would never be swept in. The keys below are
+            # read on the chat path / by the session scheduler and must reflect the
+            # DB. Register them eagerly so the bulk load populates them. Same class
+            # of bug as AGENT_ENABLED above.
+            try:
+                from core.config_manager import config_registry as _cfg_reg
+
+                _cfg_reg.get_var(
+                    "ACTIVE_VESSEL",
+                    "disabled",
+                    value_type=str,
+                    label="Active Vessel Connector",
+                    description=(
+                        "Name of the active Rift Vessel world connector "
+                        "(e.g. 'minecraft'), or 'disabled'."
+                    ),
+                    group="vessel",
+                    component="vessel",
+                )
+                _cfg_reg.get_var(
+                    "VESSEL_SETTINGS",
+                    "{}",
+                    value_type=str,
+                    label="Vessel Settings (JSON)",
+                    description="JSON settings passed to the active Vessel connector.",
+                    group="vessel",
+                    component="vessel",
+                    advanced=True,
+                )
+                _cfg_reg.get_var(
+                    "VESSEL_SESSION_COOLDOWN_SEC",
+                    3600,
+                    value_type=int,
+                    label="Vessel Session Cooldown (s)",
+                    description=(
+                        "Inactivity window before a Vessel session is closed and "
+                        "its buffered experience is flushed to a single diary entry."
+                    ),
+                    group="vessel",
+                    component="vessel",
+                    advanced=True,
+                )
+                # Minecraft PoC bridge/provisioner keys.
+                _cfg_reg.get_var(
+                    "MINECRAFT_BRIDGE_ENABLED",
+                    False,
+                    value_type=bool,
+                    label="Minecraft Bridge Enabled",
+                    description=(
+                        "Opt-in: allow provisioning/starting the in-container "
+                        "Mineflayer bridge for the Minecraft Vessel connector."
+                    ),
+                    group="vessel",
+                    component="vessel",
+                )
+                _cfg_reg.get_var(
+                    "MINECRAFT_BRIDGE_RUN_AT_START",
+                    False,
+                    value_type=bool,
+                    label="Minecraft Bridge Autostart",
+                    description="Start the Minecraft bridge automatically at boot.",
+                    group="vessel",
+                    component="vessel",
+                    advanced=True,
+                )
+                _cfg_reg.get_var(
+                    "MINECRAFT_BRIDGE_HOST",
+                    "127.0.0.1",
+                    value_type=str,
+                    group="vessel",
+                    component="vessel",
+                    advanced=True,
+                )
+                _cfg_reg.get_var(
+                    "MINECRAFT_BRIDGE_PORT",
+                    8137,
+                    value_type=int,
+                    group="vessel",
+                    component="vessel",
+                    advanced=True,
+                )
+                _cfg_reg.get_var(
+                    "MINECRAFT_SERVER_HOST",
+                    "127.0.0.1",
+                    value_type=str,
+                    group="vessel",
+                    component="vessel",
+                    advanced=True,
+                )
+                _cfg_reg.get_var(
+                    "MINECRAFT_SERVER_PORT",
+                    25565,
+                    value_type=int,
+                    group="vessel",
+                    component="vessel",
+                    advanced=True,
+                )
+                _cfg_reg.get_var(
+                    "MINECRAFT_BOT_USERNAME",
+                    "Synth",
+                    value_type=str,
+                    group="vessel",
+                    component="vessel",
+                    advanced=True,
+                )
+                log_debug(
+                    "[core_initializer] Eagerly registered Rift Vessel config keys"
+                )
+            except Exception as _e:
+                log_warning(
+                    f"[core_initializer] Failed to eagerly register vessel config keys: {_e}"
+                )
+
             # 3.5. Load all configurations from DB AFTER persona manager initialization
             # This ensures SYNTH_NAME, SYNTH_PROFILE, SYNTH_ALIASES have been registered and can be loaded from DB
             log_info("[core_initializer] Loading all configurations from database...")
