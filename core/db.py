@@ -1520,6 +1520,76 @@ async def init_grillo_tables() -> None:
             await conn.commit()
 
 
+# Rift Vessel tables. Same MariaDB dialect / Postgres-translation caveat as the
+# grillo tables above — indexes are re-declared explicitly for Postgres in
+# _VESSEL_PG_INDEX_DDL. NOTE: never use a bare `timestamp` column (PostgreSQL
+# reserved word — breaks fresh installs); time columns use *_at names.
+_VESSEL_SESSIONS_DDL = """
+    CREATE TABLE IF NOT EXISTS vessel_sessions (
+        session_id VARCHAR(128) PRIMARY KEY,
+        environment VARCHAR(64) NOT NULL,
+        interface_path VARCHAR(512),
+        status ENUM('active','ended') NOT NULL DEFAULT 'active',
+        experience_buffer LONGTEXT,
+        diary_entry_id INT,
+        started_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        last_event_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        ended_at DATETIME,
+        INDEX idx_vessel_sessions_status (status),
+        INDEX idx_vessel_sessions_environment (environment),
+        INDEX idx_vessel_sessions_last_event (last_event_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+    """
+
+_VESSEL_ACTIVITY_LOG_DDL = """
+    CREATE TABLE IF NOT EXISTS vessel_activity_log (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        session_id VARCHAR(128),
+        interface_path VARCHAR(512),
+        environment VARCHAR(64) NOT NULL,
+        event_type VARCHAR(50) NOT NULL,
+        summary TEXT NOT NULL,
+        metadata JSON,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        INDEX idx_vessel_activity_created_at (created_at),
+        INDEX idx_vessel_activity_environment (environment),
+        INDEX idx_vessel_activity_session (session_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+    """
+
+_VESSEL_PG_INDEX_DDL: tuple[str, ...] = (
+    "CREATE INDEX IF NOT EXISTS idx_vessel_sessions_status"
+    " ON vessel_sessions (status)",
+    "CREATE INDEX IF NOT EXISTS idx_vessel_sessions_environment"
+    " ON vessel_sessions (environment)",
+    "CREATE INDEX IF NOT EXISTS idx_vessel_sessions_last_event"
+    " ON vessel_sessions (last_event_at)",
+    "CREATE INDEX IF NOT EXISTS idx_vessel_activity_created_at"
+    " ON vessel_activity_log (created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_vessel_activity_environment"
+    " ON vessel_activity_log (environment)",
+    "CREATE INDEX IF NOT EXISTS idx_vessel_activity_session"
+    " ON vessel_activity_log (session_id)",
+)
+
+
+async def init_vessel_tables() -> None:
+    """Create the Rift Vessel tables (idempotent, MariaDB and Postgres).
+
+    vessel_sessions tracks each embodiment session and its buffered lived
+    experience (flushed to a single diary entry at end-of-session);
+    vessel_activity_log is the audit trail shown in WebUI History > Vessel.
+    """
+    async with get_conn_ctx() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(_VESSEL_SESSIONS_DDL)
+            await cur.execute(_VESSEL_ACTIVITY_LOG_DDL)
+            if _get_db_type() == "postgres":
+                for index_sql in _VESSEL_PG_INDEX_DDL:
+                    await cur.execute(index_sql)
+            await conn.commit()
+
+
 async def ensure_plugin_tables() -> None:
     """Ensure plugin-managed tables exist (idempotent).
 
@@ -1556,6 +1626,12 @@ async def ensure_plugin_tables() -> None:
             except Exception as init_err:
                 log_warning(
                     f"[db] Postgres preflight init skipped for grillo tables: {init_err}"
+                )
+            try:
+                await init_vessel_tables()
+            except Exception as init_err:
+                log_warning(
+                    f"[db] Postgres preflight init skipped for vessel tables: {init_err}"
                 )
             # Idempotent one-shot schema migrations (backup+verify+drop of
             # legacy tables, etc.) — applied automatically on every deploy.
@@ -1712,6 +1788,10 @@ async def ensure_plugin_tables() -> None:
                 # for the Postgres preflight path above.
                 await cur.execute(_GRILLO_ACTIVITY_LOG_DDL)
                 await cur.execute(_GRILLO_ACTION_EXECS_DDL)
+
+                # Rift Vessel tables (embodiment sessions + activity audit).
+                await cur.execute(_VESSEL_SESSIONS_DDL)
+                await cur.execute(_VESSEL_ACTIVITY_LOG_DDL)
 
                 # agent task table (init-db.sql) — Agentic Runtime 2.0
                 await cur.execute(

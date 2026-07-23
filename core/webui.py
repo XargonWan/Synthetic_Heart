@@ -841,6 +841,7 @@ class SynthWebUIInterface:
         )
         self.app.get("/api/history/dreams")(self.history_dreams)
         self.app.get("/api/history/growth")(self.history_growth)
+        self.app.get("/api/history/vessel")(self.history_vessel)
         self.app.post("/api/growth/current")(self.update_growth_current)
         self.app.post("/api/growth/revert")(self.revert_growth_state)
         # Per-item delete for History sub-tabs
@@ -848,6 +849,7 @@ class SynthWebUIInterface:
         self.app.delete("/api/history/grillo/{entry_id}")(self.delete_grillo_entry)
         self.app.delete("/api/history/dreams/{entry_id}")(self.delete_grillo_entry)
         self.app.delete("/api/history/growth/{entry_id}")(self.delete_growth_state)
+        self.app.delete("/api/history/vessel/{entry_id}")(self.delete_vessel_entry)
         self.app.get("/api/history/interface-paths")(self.list_known_interface_paths)
         self.app.get("/api/history/chat")(self.history_chat)
         self.app.get("/api/log-failures")(self.list_log_failures)
@@ -7659,6 +7661,121 @@ class SynthWebUIInterface:
             log_error(f"{LOG_PREFIX} Failed to fetch grillo history: {exc}")
             return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
 
+    async def history_vessel(self, request: Request):
+        """Return the Rift Vessel activity log for the History > Vessel sub-tab."""
+        params = request.query_params
+
+        def _bounded_int(value: Any, default: int, minimum: int, maximum: int) -> int:
+            try:
+                parsed = int(value)
+            except (TypeError, ValueError):
+                return default
+            return max(minimum, min(maximum, parsed))
+
+        page = _bounded_int(params.get("page"), default=1, minimum=1, maximum=1000)
+        per_page = _bounded_int(
+            params.get("per_page"), default=20, minimum=1, maximum=100
+        )
+        search = params.get("search", "").strip()
+        environment_filter = params.get("environment", "").strip()
+        sort = params.get("sort", "desc")
+
+        try:
+            from core.db import get_conn_ctx
+
+            offset = (page - 1) * per_page
+            order = "DESC" if sort == "desc" else "ASC"
+
+            where_conditions = []
+            where_params: list[Any] = []
+            if search:
+                where_conditions.append("(summary LIKE %s OR event_type LIKE %s)")
+                where_params.extend([f"%{search}%", f"%{search}%"])
+            if environment_filter:
+                where_conditions.append("environment = %s")
+                where_params.append(environment_filter)
+            where_clause = " AND ".join(where_conditions) if where_conditions else "1=1"
+
+            entries = []
+            async with get_conn_ctx() as conn:
+                async with conn.cursor() as cur:
+                    query = f"""
+                        SELECT id, session_id, interface_path, environment,
+                               event_type, summary, metadata, created_at
+                        FROM vessel_activity_log
+                        WHERE {where_clause}
+                        ORDER BY created_at {order}
+                        LIMIT %s OFFSET %s
+                    """
+                    await cur.execute(query, where_params + [per_page + 1, offset])
+                    rows = await cur.fetchall()
+
+                    has_more = len(rows) > per_page
+                    if has_more:
+                        rows = rows[:per_page]
+
+                    for row in rows:
+                        created_at_str = self._dt_to_utc_iso(row[7])
+                        metadata_raw = row[6]
+                        metadata: Any = None
+                        if metadata_raw:
+                            if isinstance(metadata_raw, (bytes, bytearray)):
+                                metadata_raw = metadata_raw.decode(
+                                    "utf-8", errors="replace"
+                                )
+                            if isinstance(metadata_raw, str):
+                                try:
+                                    metadata = json.loads(metadata_raw)
+                                except Exception:
+                                    metadata = None
+                            else:
+                                metadata = metadata_raw
+                        entries.append(
+                            {
+                                "id": row[0],
+                                "session_id": row[1],
+                                "interface_path": row[2],
+                                "environment": row[3],
+                                "event_type": row[4],
+                                "summary": row[5],
+                                "metadata": metadata,
+                                "created_at": created_at_str,
+                            }
+                        )
+
+            environments = []
+            if page == 1 and not environment_filter:
+                async with get_conn_ctx() as conn:
+                    async with conn.cursor() as cur:
+                        await cur.execute(
+                            "SELECT DISTINCT environment FROM vessel_activity_log"
+                            " ORDER BY environment LIMIT 1000"
+                        )
+                        rows_env = await cur.fetchall()
+                        environments = [
+                            row[0].strip()
+                            for row in rows_env
+                            if row[0] and str(row[0]).strip()
+                        ]
+
+            total_count = offset + len(rows) + (per_page if has_more else 0)
+            total_pages = (total_count + per_page - 1) // per_page
+
+            return JSONResponse(
+                {
+                    "success": True,
+                    "entries": entries,
+                    "environments": environments,
+                    "page": page,
+                    "per_page": per_page,
+                    "total_count": total_count,
+                    "total_pages": total_pages,
+                }
+            )
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to fetch vessel history: {exc}")
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+
     async def _fetch_calendar_event_rows(self) -> list[dict[str, Any]]:
         """Fetch all ``scheduled_events`` rows as plain dicts for calendar use."""
         from core.db import get_conn_ctx
@@ -8172,6 +8289,30 @@ class SynthWebUIInterface:
             return JSONResponse({"success": True, "deleted_count": deleted})
         except Exception as exc:
             log_error(f"{LOG_PREFIX} Failed to delete grillo entry: {exc}")
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+
+    async def delete_vessel_entry(self, request: Request):
+        """Delete a single vessel_activity_log row by id (Vessel sub-tab)."""
+        entry_id_raw = request.path_params.get("entry_id")
+        try:
+            entry_id = int(entry_id_raw)
+        except (TypeError, ValueError):
+            return JSONResponse(
+                {"success": False, "error": "Invalid entry id"}, status_code=400
+            )
+
+        try:
+            from core.db import get_conn_ctx
+
+            async with get_conn_ctx() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "DELETE FROM vessel_activity_log WHERE id = %s", (entry_id,)
+                    )
+                    deleted = getattr(cur, "rowcount", 0) or 0
+            return JSONResponse({"success": True, "deleted_count": deleted})
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to delete vessel entry: {exc}")
             return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
 
     async def delete_growth_state(self, request: Request):
