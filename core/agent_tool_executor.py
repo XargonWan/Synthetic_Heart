@@ -119,6 +119,19 @@ class AgentToolExecutor:
                 None,
                 original_message,
             )
+            # run_action now returns {"ok": bool, ...} for message-delivery
+            # actions dispatched through interfaces.  Propagate the real
+            # outcome instead of always claiming success.
+            if isinstance(result, dict) and "ok" in result:
+                ok = bool(result["ok"])
+                error = result.get("error")
+                return {
+                    "ok": ok,
+                    "tool": tool.name,
+                    "source": tool.source,
+                    "result": self._stringify_internal_result(result),
+                    "error": error,
+                }
             return {
                 "ok": True,
                 "tool": tool.name,

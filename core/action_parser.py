@@ -1177,13 +1177,15 @@ async def _handle_plugin_action(
                         payload, original_message=original_message
                     )
                     if inspect.iscoroutine(result):
-                        await result
-                    return None
+                        result = await result
+                    # Propagate the delivery result so callers (agent router,
+                    # agent tool executor) can observe success/failure.
+                    return {"ok": bool(result), "result": result}
                 except Exception as e:
                     log_error(
                         f"[action_parser] ❌ Error executing {action_type} via interface {iface_name}: {repr(e)}"
                     )
-                return
+                    return {"ok": False, "error": str(e)}
         except Exception as e:  # pragma: no cover - defensive
             log_warning(f"[action_parser] Interface dispatch failed: {e}")
 
@@ -1358,16 +1360,27 @@ async def _handle_plugin_action(
                 )
                 result = plugin.send_message(payload, original_message=original_message)
                 if inspect.iscoroutine(result):
-                    await result
-                log_info(
-                    f"[action_parser] ✅ Successfully executed message action via {plugin_iface}"
-                )
-                return None
+                    result = await result
+                # Propagate the delivery outcome so callers (agent router,
+                # agent tool executor) can observe success/failure instead of
+                # always assuming success. This is the path actually used in
+                # production, where interfaces are registered as plugins.
+                delivered_ok = bool(result)
+                if delivered_ok:
+                    log_info(
+                        f"[action_parser] ✅ Successfully executed message action via {plugin_iface}"
+                    )
+                else:
+                    log_error(
+                        f"[action_parser] ❌ Message action via {plugin_iface} reported failure "
+                        f"(send_message returned {result!r})"
+                    )
+                return {"ok": delivered_ok, "result": result}
             except Exception as e:
                 log_error(
                     f"[action_parser] ❌ Error executing {action_type} via interface {plugin_iface}: {repr(e)}"
                 )
-                continue
+                return {"ok": False, "error": str(e)}
 
         if hasattr(plugin, "execute_action"):
             try:
