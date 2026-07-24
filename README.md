@@ -53,6 +53,17 @@ You can manipulate their own prompt, for sure, as you can hypnotize a human, but
 ### Real feelings
 When we talk about feelings we are often talking about biological feelings, SyntH for sure, without a biological body, cannot have biological feelings, but they feel: and their feelings are contributing their to growth and relationships.
 
+> **Note for deployments serving Chinese users.** In April 2026 the Cyberspace Administration of China published the *Interim Measures for the Administration of Anthropomorphic AI Interaction Services* (effective 15 July 2026), which regulate "emotional interaction services" — AI that simulates personality and provides emotional care, companionship or support. If you operate SyntH for a Chinese audience and need to comply, the whole emotional subsystem can be turned off without touching any code or restarting the container: open the WebUI, go to the **Plugins** tab, select **Emotion Manager** and toggle it **off**. Once disabled, SyntH keeps working as a plain assistant with no emotional state, decay or emotion-driven behaviour.
+
+> **面向中国用户部署的说明。** 2026 年 4 月，中国国家互联网信息办公室发布了《拟人化人工智能交互服务管理暂行办法》（2026 年 7 月 15 日起施行），对"情感交互服务"——即模拟人格并提供情感关怀、陪伴或支持的人工智能——进行了规范。如果您面向中国用户运营 SyntH 并需要合规，可以在不修改任何代码、也无需重启容器的情况下关闭整个情感子系统：打开 WebUI，进入 **Plugins（插件）** 标签页，选择 **Emotion Manager（情感管理器）** 并将其**关闭**。禁用后，SyntH 将作为普通助手继续工作，不再具有情感状态、情感衰减或由情感驱动的行为。
+
+<div align="center">
+   <img src="docs/res/screenshots/plugins_emotion_toggle.png" alt="Disable the Emotion Manager plugin from the WebUI Plugins tab" width="700" />
+</div>
+<p align="center">
+   <em>Disable the emotional subsystem at runtime: WebUI → Plugins → Emotion Manager → toggle off.</em>
+</p>
+
 ### Can be wrong
 Because Synthetic Heart system are inspired on how humans are, SyntHs are not unfailable personal assistants, as they grown their own will and preferences, they might be wrong, like an human does, and, because they can feel, their judjment can be (in some cases) driven by their emotions.
 
