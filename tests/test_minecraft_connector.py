@@ -316,6 +316,71 @@ async def test_apply_skin_file_default_template(
     )
 
 
+def test_skin_public_base_url_derives_lan_ip_when_loopback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With no explicit base URL and a loopback WebUI host, the LAN IP is used
+    so a remote MC server can actually fetch the skin file."""
+    monkeypatch.setattr(
+        "plugins.rift_vessel.minecraft.minecraft.config_registry.get_value",
+        lambda key, default=None, **kwargs: (
+            "" if key == "MINECRAFT_SKIN_PUBLIC_BASE_URL" else default
+        ),
+    )
+    monkeypatch.setattr(
+        "plugins.rift_vessel.minecraft.minecraft._detect_lan_ip",
+        lambda: "192.168.1.42",
+    )
+    monkeypatch.setenv("SYNTH_WEBUI_HOST", "0.0.0.0")
+    monkeypatch.setenv("SYNTH_WEBUI_HTTP_PORT", "9009")
+    monkeypatch.delenv("SYNTH_WEBUI_PORT", raising=False)
+    monkeypatch.delenv("PORT", raising=False)
+
+    assert MinecraftConnector._skin_public_base_url() == "http://192.168.1.42:9009"
+
+
+def test_skin_public_base_url_falls_back_to_loopback_without_lan_ip(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When no LAN IP can be detected, fall back to loopback (single-machine
+    setup) rather than emitting an empty/invalid host."""
+    monkeypatch.setattr(
+        "plugins.rift_vessel.minecraft.minecraft.config_registry.get_value",
+        lambda key, default=None, **kwargs: (
+            "" if key == "MINECRAFT_SKIN_PUBLIC_BASE_URL" else default
+        ),
+    )
+    monkeypatch.setattr(
+        "plugins.rift_vessel.minecraft.minecraft._detect_lan_ip",
+        lambda: None,
+    )
+    monkeypatch.delenv("SYNTH_WEBUI_HOST", raising=False)
+    monkeypatch.setenv("SYNTH_WEBUI_HTTP_PORT", "9009")
+    monkeypatch.delenv("SYNTH_WEBUI_PORT", raising=False)
+    monkeypatch.delenv("PORT", raising=False)
+
+    assert MinecraftConnector._skin_public_base_url() == "http://127.0.0.1:9009"
+
+
+def test_skin_public_base_url_prefers_explicit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An explicit MINECRAFT_SKIN_PUBLIC_BASE_URL always wins over derivation."""
+    monkeypatch.setattr(
+        "plugins.rift_vessel.minecraft.minecraft.config_registry.get_value",
+        lambda key, default=None, **kwargs: (
+            "http://vpn.example:8080/"
+            if key == "MINECRAFT_SKIN_PUBLIC_BASE_URL"
+            else default
+        ),
+    )
+    monkeypatch.setattr(
+        "plugins.rift_vessel.minecraft.minecraft._detect_lan_ip",
+        lambda: "192.168.1.42",
+    )
+    assert MinecraftConnector._skin_public_base_url() == "http://vpn.example:8080"
+
+
 @pytest.mark.asyncio
 async def test_apply_skin_no_file_is_noop(
     monkeypatch: pytest.MonkeyPatch,

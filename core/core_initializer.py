@@ -2367,6 +2367,62 @@ class CoreInitializer:
         """
         await self._build_actions_block()
 
+    def schedule_actions_block_refresh(self, reason: str = "") -> None:
+        """Fail-safe, loop-aware trigger to rebuild the cached actions block.
+
+        The actions block (``self.actions_block``) is a cache read on every
+        prompt build. Anything that changes which actions are exposed — a
+        config variable, a plugin being enabled/disabled, or the Rift Vessel
+        entering/leaving a world (which changes ``get_supported_actions``) —
+        must call this so the newly exposed/hidden actions are picked up
+        without a restart.
+
+        This wrapper hides all the event-loop / re-entrancy handling so any
+        caller (sync or async context) can invoke it safely. It never raises.
+
+        Args:
+            reason: Short human-readable label for logging (e.g. the caller).
+        """
+        tag = f" ({reason})" if reason else ""
+        try:
+            # During the very first initialization the block is (re)built at
+            # the end of startup; an early refresh would be wasted work.
+            if getattr(self, "_initial_initialization", False):
+                log_debug(
+                    f"[core_initializer] Skipping actions block refresh{tag}: "
+                    "initial initialization in progress"
+                )
+                return
+
+            import asyncio
+
+            async def _do_refresh() -> None:
+                # If a build is already running, wait briefly and retry so we
+                # don't clobber the in-flight build or drop this request.
+                if self._building_actions_block:
+                    await asyncio.sleep(0.1)
+                try:
+                    await self.refresh_actions_block()
+                    log_debug(f"[core_initializer] Actions block refreshed{tag}")
+                except Exception as exc:  # pragma: no cover - defensive
+                    log_warning(
+                        f"[core_initializer] Actions block refresh failed{tag}: {exc}"
+                    )
+
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+
+            if loop is not None and loop.is_running():
+                loop.create_task(_do_refresh())
+            else:
+                asyncio.run(_do_refresh())
+        except Exception as exc:  # pragma: no cover - defensive
+            log_warning(
+                f"[core_initializer] schedule_actions_block_refresh failed{tag}: {exc}"
+            )
+
     async def start_pending_async_plugins(self):
         """Start async plugins that were pending due to no event loop."""
         if hasattr(self, "_pending_async_plugins"):

@@ -280,3 +280,83 @@ async def test_connect_rejects_disabled_world(
     result = await p.connect_world(connector_name="skyrim")
     assert result.ok is False
     assert "world_unavailable" in (result.detail or "")
+
+
+# ---------------------------------------------------------------------------
+# Outbound action activity logging
+# ---------------------------------------------------------------------------
+
+
+class _FakeInterface:
+    """Captures outbound-action activity log calls (no DB)."""
+
+    def __init__(self) -> None:
+        self.logged: list[dict[str, Any]] = []
+
+    async def log_outbound_action(
+        self,
+        environment: str,
+        action: str,
+        summary: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        self.logged.append(
+            {
+                "environment": environment,
+                "action": action,
+                "summary": summary,
+                "metadata": metadata,
+            }
+        )
+
+
+@pytest.mark.asyncio
+async def test_successful_action_is_logged_to_activity(
+    connected_plugin: VesselPlugin,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    iface = _FakeInterface()
+    monkeypatch.setattr(
+        VesselPlugin, "_get_vessel_interface", staticmethod(lambda: iface)
+    )
+    result = await connected_plugin.act("say", {"text": "Ciao mondo"})
+    assert result.ok is True
+    assert len(iface.logged) == 1
+    entry = iface.logged[0]
+    assert entry["environment"] == "fake"
+    assert entry["action"] == "say"
+    # The summary is built structurally from the action + payload fields.
+    assert "say" in entry["summary"]
+    assert "Ciao mondo" in entry["summary"]
+    assert entry["metadata"] == {"text": "Ciao mondo"}
+
+
+@pytest.mark.asyncio
+async def test_failed_action_is_not_logged(
+    connected_plugin: VesselPlugin,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connector: _FakeConnector = connected_plugin._test_connector  # type: ignore[attr-defined]
+
+    async def _fail(action: str, payload: dict[str, Any]) -> VesselActionResult:
+        return VesselActionResult(ok=False, detail="boom")
+
+    monkeypatch.setattr(connector, "act", _fail)
+    iface = _FakeInterface()
+    monkeypatch.setattr(
+        VesselPlugin, "_get_vessel_interface", staticmethod(lambda: iface)
+    )
+    result = await connected_plugin.act("move", {"x": 1})
+    assert result.ok is False
+    assert iface.logged == []
+
+
+def test_describe_outbound_action_is_structural() -> None:
+    # No keyword/content inspection: it just surfaces payload fields.
+    assert VesselPlugin._describe_outbound_action("status", {}) == "status"
+    desc = VesselPlugin._describe_outbound_action("move", {"x": 1, "y": None, "z": 3})
+    assert desc.startswith("move(")
+    assert "x=1" in desc
+    assert "z=3" in desc
+    # None-valued fields are omitted.
+    assert "y=" not in desc

@@ -94,7 +94,7 @@ key. Enable/disable the whole thing from the plugin card.
 | `MINECRAFT_BOT_USERNAME_OVERRIDE` | *(empty)* | ✓ | Optional in-world bot username. Leave empty to use Synth's configured name (`SYNTH_NAME`). |
 | `MINECRAFT_SKIN_FILE` | *(empty)* | | Uploaded skin texture PNG (file upload in the plugin card). Served over HTTP and applied at spawn. Requires a server skin plugin. |
 | `MINECRAFT_SKIN_MODEL` | `classic` | | Model variant (dropdown): `classic` (Steve) or `slim` (Alex). |
-| `MINECRAFT_SKIN_PUBLIC_BASE_URL` | *(empty)* | ✓ | Public base URL the Minecraft server can reach to fetch the uploaded skin. Leave empty to auto-derive from the WebUI host/port. |
+| `MINECRAFT_SKIN_PUBLIC_BASE_URL` | *(empty)* | ✓ | Public base URL the Minecraft server can reach to fetch the uploaded skin. Leave empty to auto-derive: SyntH uses the WebUI host, and if that is a loopback it substitutes the machine's primary LAN IP so a server on the same LAN can reach it. Set explicitly for a VPN/public/reverse-proxy address. |
 | `MINECRAFT_SKIN_COMMAND_TEMPLATE` | `/skin url {url}` | ✓ | Chat command run at spawn. `{url}` / `{model}` are substituted. |
 
 ## Skin — how it works (important)
@@ -116,14 +116,50 @@ connector runs `MINECRAFT_SKIN_COMMAND_TEMPLATE` (default `/skin url {url}`),
 substituting that URL for `{url}` and `MINECRAFT_SKIN_MODEL` for `{model}`.
 
 The `<base>` is `MINECRAFT_SKIN_PUBLIC_BASE_URL` when set; otherwise it is
-auto-derived from the WebUI host/port. **The Minecraft server must be able to
-reach that URL** to fetch the texture — if the server runs on another host, set
-`MINECRAFT_SKIN_PUBLIC_BASE_URL` to a value reachable from the server.
+auto-derived from the WebUI host/port, and when that host is a loopback
+(`127.0.0.1`/`localhost`/`0.0.0.0`) SyntH substitutes the machine's primary LAN
+IP so a server on the same LAN can reach it out of the box. **The Minecraft
+server must be able to reach that URL** to fetch the texture — for a server on a
+different network (VPN, public host, behind a reverse proxy) set
+`MINECRAFT_SKIN_PUBLIC_BASE_URL` explicitly to a value reachable from the server.
 
 The command template is configurable so any skin plugin (or a non-English
 server) can be supported without changing code. If no skin plugin is present the
 command is simply ignored by the server and the bot keeps the default skin. If
 `MINECRAFT_SKIN_FILE` is empty, no skin command is sent at all.
+
+### The skin doesn't appear — checklist
+
+The connector logs `skin command sent: <command>` at spawn, so the command going
+out is **not** proof the skin was applied. Two independent conditions must both
+hold on the **server** side:
+
+1. **A server-side skin plugin must be installed.** On an offline-mode server
+   the only working path is a plugin such as
+   [SkinsRestorer](https://skinsrestorer.net/) (or another that understands a
+   `/skin`-style command). Without it the `/skin url …` command is silently
+   ignored — there is nothing SyntH can do from the client. If the plugin uses a
+   different command syntax, adapt `MINECRAFT_SKIN_COMMAND_TEMPLATE`
+   (`{url}` / `{model}` are substituted).
+
+2. **The server must be able to reach the skin URL.** The command carries
+   `<base>/api/config/MINECRAFT_SKIN_FILE/file`. When `MINECRAFT_SKIN_PUBLIC_BASE_URL`
+   is empty SyntH auto-derives the base from the WebUI host, substituting the
+   machine's LAN IP for a loopback host — this covers the common "SyntH host +
+   server on the same LAN" case automatically. It is **still unreachable** for a
+   server on a different network (a different subnet, a VPN-only peer, a public
+   host), so in that case set `MINECRAFT_SKIN_PUBLIC_BASE_URL` to an address the
+   server can actually open (the SyntH host's VPN/public IP + the WebUI HTTP
+   port), then verify from the server's network with:
+
+   ```
+   curl -I http://<synth-host-ip>:<port>/api/config/MINECRAFT_SKIN_FILE/file
+   ```
+
+   It must return `200 OK`.
+
+After fixing either, **reconnect the Vessel** (`vessel_disconnect` then
+`vessel_connect`) so `_apply_skin` runs again at spawn.
 
 ## Bridge lifecycle — on demand
 

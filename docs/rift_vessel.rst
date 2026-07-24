@@ -35,6 +35,13 @@ Three hard constraints shape the whole subsystem:
 3. **The Vessel has its own Activities voice.** Like Radio and Grillo, vessel
    events are logged to ``vessel_activity_log`` and surfaced through a dedicated
    ``/api/history/vessel`` endpoint and History sub-tab (with per-item delete).
+   Both **inbound** perceptions (``session_start``, ``spawn``, ``chat``,
+   ``proximity``, …) **and Synth's own outbound in-world actions** are logged:
+   every successful ``vessel_plugin.act()`` writes an ``action_<verb>`` row
+   (e.g. ``action_say``, ``action_move``), rendered in the History tab as
+   "Action Say", "Action Move", etc. The action summary is built structurally
+   from the payload fields — no keyword/content inspection — and this logging is
+   audit-only (it never feeds cognition, per constraint 2 above).
 
 Architecture
 ------------
@@ -226,7 +233,7 @@ Key                             Purpose
 ``MINECRAFT_BOT_USERNAME_OVERRIDE``  Optional in-world bot name (advanced); empty falls back to ``SYNTH_NAME``
 ``MINECRAFT_SKIN_FILE``         Uploaded skin texture PNG (file upload in the plugin card), served over HTTP and applied at spawn (needs a server skin plugin)
 ``MINECRAFT_SKIN_MODEL``        Skin model variant (dropdown): ``classic`` (Steve) or ``slim`` (Alex)
-``MINECRAFT_SKIN_PUBLIC_BASE_URL``  Public base URL the MC server uses to fetch the skin (advanced); empty auto-derives from the WebUI host/port
+``MINECRAFT_SKIN_PUBLIC_BASE_URL``  Public base URL the MC server uses to fetch the skin (advanced); empty auto-derives from the WebUI host, substituting the machine's LAN IP for a loopback host
 ``MINECRAFT_SKIN_COMMAND_TEMPLATE``  Chat command run at spawn (default ``/skin url {url}``; ``{url}``/``{model}`` substituted)
 ==============================  =========================================
 
@@ -286,7 +293,9 @@ calls ``bot.chat``). The skin texture is **uploaded directly** from the plugin
 card (``MINECRAFT_SKIN_FILE``, a file-upload exposed variable): SyntH stores the
 PNG and serves it at ``<base>/api/config/MINECRAFT_SKIN_FILE/file``, where
 ``<base>`` is ``MINECRAFT_SKIN_PUBLIC_BASE_URL`` if set, otherwise auto-derived
-from the WebUI host/port. At spawn the connector substitutes that URL for
+from the WebUI host — with a loopback host (``127.0.0.1``/``localhost``/``0.0.0.0``)
+replaced by the machine's primary LAN IP so a same-LAN server can reach it. At
+spawn the connector substitutes that URL for
 ``{url}`` and ``MINECRAFT_SKIN_MODEL`` for ``{model}`` in
 ``MINECRAFT_SKIN_COMMAND_TEMPLATE`` (default ``/skin url {url}``). The template
 is config-driven (no keyword logic) so any skin plugin or locale is supported.
@@ -295,6 +304,25 @@ is config-driven (no keyword logic) so any skin plugin or locale is supported.
 the skin is best-effort: if ``MINECRAFT_SKIN_FILE`` is empty no command is sent,
 and if no skin plugin is installed the command is ignored and the session is
 unaffected.
+
+.. important::
+
+   **A server-side skin plugin is required.** On an offline-mode server the only
+   working path to a custom skin is a plugin such as `SkinsRestorer
+   <https://skinsrestorer.net/>`_ (or any plugin that understands a
+   ``/skin``-style command) installed **on the Minecraft server**. Without it the
+   ``/skin url …`` command is silently ignored — the client (Mineflayer) cannot
+   set the texture. The connector logs ``skin command sent: …`` even when no
+   plugin is present, so that log line does *not* confirm the skin was applied.
+
+   Also make sure the server can actually **reach** the skin URL: when
+   ``MINECRAFT_SKIN_PUBLIC_BASE_URL`` is empty the base auto-derives from the
+   WebUI host, substituting the machine's LAN IP for a loopback host — which
+   covers a same-LAN server automatically but still cannot be opened by a server
+   on a different network (a different subnet, a VPN-only peer, a public host).
+   In that case set it to the SyntH host's VPN/public IP and verify with
+   ``curl -I http://<synth-host-ip>:<port>/api/config/MINECRAFT_SKIN_FILE/file``
+   (must return ``200``), then reconnect the Vessel to re-run the skin command.
 
 Commands
 --------

@@ -205,10 +205,59 @@ class VesselPlugin(AIPluginBase):
                     )
                 else:
                     result = VesselActionResult(ok=True)
+            if result.ok:
+                await self._log_outbound_action(name, action, payload)
             return result
         except Exception as exc:
             log_error(f"[vessel_plugin] act('{action}') error ({name}): {exc}")
             return VesselActionResult(ok=False, detail=f"act_error: {exc}")
+
+    async def _log_outbound_action(
+        self,
+        environment: str,
+        action: str,
+        payload: dict[str, Any],
+    ) -> None:
+        """Log a successful outbound in-world action to the Activities tab.
+
+        Makes Synth's own in-world responses (``say``/``move``/``look``/...)
+        visible in the WebUI Vessel Activities tab alongside the incoming
+        perceptions. The summary is built structurally from the action name and
+        payload fields — never from keyword/content matching. Fully guarded so a
+        logging failure never affects the action itself.
+        """
+        iface = self._get_vessel_interface()
+        if iface is None or not hasattr(iface, "log_outbound_action"):
+            return
+        try:
+            summary = self._describe_outbound_action(action, payload)
+            await iface.log_outbound_action(
+                environment=environment,
+                action=action,
+                summary=summary,
+                metadata={k: v for k, v in payload.items() if v is not None},
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            log_warning(f"[vessel_plugin] outbound activity log failed: {exc}")
+
+    @staticmethod
+    def _describe_outbound_action(action: str, payload: dict[str, Any]) -> str:
+        """Build a human-readable summary of an outbound action.
+
+        Structural only: it labels the action by its verb and appends the most
+        salient non-empty payload fields. It never inspects the *content* for
+        keywords — it just surfaces whatever fields the payload carries.
+        """
+        parts: list[str] = []
+        for key, value in payload.items():
+            if value in (None, "", [], {}):
+                continue
+            text = str(value)
+            if len(text) > 120:
+                text = text[:117] + "..."
+            parts.append(f"{key}={text}")
+        detail = ", ".join(parts)
+        return f"{action}({detail})" if detail else action
 
     async def get_world_state(
         self, connector_name: str | None = None
@@ -259,6 +308,25 @@ class VesselPlugin(AIPluginBase):
         except Exception as exc:  # pragma: no cover - defensive
             log_warning(f"[vessel_plugin] Vessel interface unavailable: {exc}")
             return None
+
+    @staticmethod
+    def _refresh_actions_block(reason: str) -> None:
+        """Rebuild the cached actions block after entering/leaving a world.
+
+        ``get_supported_actions`` is connection-driven: the gameplay verbs
+        (``vessel_<world>_say``/``move``/...) only appear once a world is
+        connected. Because the core caches the actions block, a connect/
+        disconnect must trigger a rebuild or the new/hidden verbs never reach
+        the prompt. Fail-safe: never raises.
+        """
+        try:
+            from core.core_initializer import core_initializer
+
+            core_initializer.schedule_actions_block_refresh(reason)
+        except Exception as exc:  # pragma: no cover - defensive
+            log_warning(
+                f"[vessel_plugin] Could not refresh actions block ({reason}): {exc}"
+            )
 
     async def connect_world(
         self,
@@ -321,6 +389,9 @@ class VesselPlugin(AIPluginBase):
 
         if getattr(connector, "is_connected", False):
             log_info(f"[vessel_plugin] connect_world: '{name}' already connected")
+            # Ensure gameplay verbs are exposed even if the block was cached
+            # while disconnected (e.g. reattach right after a restart).
+            self._refresh_actions_block(f"vessel_connect:{name}")
             return VesselActionResult(
                 ok=True, detail="already_connected", data={"environment": name}
             )
@@ -384,6 +455,10 @@ class VesselPlugin(AIPluginBase):
             )
 
         log_info(f"[vessel_plugin] Entered world '{name}' (session={session_id})")
+        # Now that a world is connected, the connection-driven gameplay verbs
+        # (vessel_<world>_say/move/...) are exposed by get_supported_actions().
+        # Rebuild the cached actions block so they reach the prompt.
+        self._refresh_actions_block(f"vessel_connect:{name}")
         return VesselActionResult(
             ok=True,
             detail="connected",
@@ -423,6 +498,9 @@ class VesselPlugin(AIPluginBase):
                 )
 
         log_info(f"[vessel_plugin] Left world '{name}'")
+        # Gameplay verbs are hidden again once disconnected; drop them from the
+        # cached actions block so the prompt only exposes vessel_connect.
+        self._refresh_actions_block(f"vessel_disconnect:{name}")
         return VesselActionResult(
             ok=True, detail="disconnected", data={"environment": name}
         )

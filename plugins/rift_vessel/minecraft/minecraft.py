@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import os
+import socket
 from typing import Any, Dict
 
 import aiohttp
@@ -80,6 +81,30 @@ def _is_in_container() -> bool:
     except Exception:
         pass
     return False
+
+
+def _detect_lan_ip() -> str | None:
+    """Best-effort discovery of the machine's primary outbound (LAN) IP.
+
+    Opens a UDP socket toward a public address and reads the local endpoint the
+    OS would use to reach it. No packet is actually sent (UDP ``connect`` only
+    selects a route), so this works offline and never blocks on the network.
+    Returns ``None`` when no non-loopback address can be determined.
+    """
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.settimeout(0.2)
+            sock.connect(("8.8.8.8", 80))
+            ip = sock.getsockname()[0]
+    except Exception:
+        try:
+            ip = socket.gethostbyname(socket.gethostname())
+        except Exception:
+            return None
+    ip = str(ip or "").strip()
+    if not ip or ip in _LOOPBACK_HOSTS or ip.startswith("127."):
+        return None
+    return ip
 
 
 class MinecraftConnector(VesselConnectorBase):
@@ -301,6 +326,16 @@ class MinecraftConnector(VesselConnectorBase):
 
         Prefers an explicit ``MINECRAFT_SKIN_PUBLIC_BASE_URL``; otherwise
         auto-derives ``http://<host>:<port>`` from the WebUI env config.
+
+        The MC server (or its skin plugin) fetches the texture over HTTP, so the
+        host must be reachable *from the server's* point of view. A loopback
+        host (``127.0.0.1``/``localhost``/``0.0.0.0``) only works when the
+        server runs on the very same machine — a remote or containerised server
+        cannot open it. When the derived host is a loopback we therefore try to
+        substitute the machine's primary LAN IP (see :func:`_detect_lan_ip`) so
+        the skin works out of the box on the common "SyntH host + server on the
+        LAN" setup. Set ``MINECRAFT_SKIN_PUBLIC_BASE_URL`` explicitly to override
+        (e.g. a VPN/public address or a reverse-proxy URL).
         """
         explicit = str(
             config_registry.get_value("MINECRAFT_SKIN_PUBLIC_BASE_URL", "") or ""
@@ -309,8 +344,9 @@ class MinecraftConnector(VesselConnectorBase):
             return explicit.rstrip("/")
 
         host = (os.environ.get("SYNTH_WEBUI_HOST") or "").strip()
-        if not host or host in ("0.0.0.0", "::"):
-            host = "127.0.0.1"
+        if not host or host.lower() in _LOOPBACK_HOSTS:
+            lan_ip = _detect_lan_ip()
+            host = lan_ip or "127.0.0.1"
         port = (
             os.environ.get("SYNTH_WEBUI_HTTP_PORT")
             or os.environ.get("SYNTH_WEBUI_PORT")

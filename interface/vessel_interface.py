@@ -594,6 +594,64 @@ class VesselInterface:
             log_debug(f"[vessel_interface] _reap_local_sessions failed: {exc}")
 
     # ------------------------------------------------------------------
+    # Outbound action logging
+    # ------------------------------------------------------------------
+
+    def _resolve_session_for_environment(
+        self, environment: str
+    ) -> tuple[str | None, str | None]:
+        """Return ``(session_id, interface_path)`` for a connected world.
+
+        Looks up the locally-tracked session whose interface path matches the
+        environment. Returns ``(None, None)`` when no session is tracked (the
+        outbound log then falls back to environment-only attribution).
+        """
+        prefix = f"{INTERFACE_NAME}/{environment}"
+        for session_id, path in self._sessions.items():
+            if path == prefix or path.startswith(f"{prefix}/"):
+                return session_id, path
+        return None, None
+
+    async def log_outbound_action(
+        self,
+        environment: str,
+        action: str,
+        summary: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """Record one outbound in-world action Synth performed.
+
+        This is the Vessel counterpart of :meth:`on_world_event` for *outgoing*
+        actions (``say``/``move``/``look``/...): it buffers the action as lived
+        experience and writes an ``action`` row to ``vessel_activity_log`` so
+        Synth's own in-world responses appear in the WebUI Activities tab
+        alongside the incoming perceptions. Fully guarded — never raises.
+        """
+        session_id, interface_path = self._resolve_session_for_environment(environment)
+        manager = get_vessel_session_manager()
+        event_type = f"action_{action}"
+        if session_id is not None:
+            try:
+                await manager.record_experience(
+                    session_id=session_id,
+                    event_type=event_type,
+                    summary=summary,
+                    data=metadata,
+                )
+            except Exception as exc:  # pragma: no cover - defensive
+                log_debug(
+                    f"[vessel_interface] record_experience (action) failed: {exc}"
+                )
+        await self._log_activity(
+            session_id=session_id,
+            interface_path=interface_path,
+            environment=environment,
+            event_type=event_type,
+            summary=summary,
+            metadata=metadata,
+        )
+
+    # ------------------------------------------------------------------
     # Activity log
     # ------------------------------------------------------------------
 
