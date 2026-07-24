@@ -275,6 +275,12 @@ class DiscordInterface:
     # distinction is kept explicit in the display name.
     display_name = "Discord Bot"
 
+    # Declarative "must-have" configuration. The loader (core_initializer) checks
+    # these config keys; if the bot token is missing the interface is not loaded
+    # (no actions registered, red LED in the WebUI). The interface itself does
+    # no gating — it only declares intent.
+    required_config_vars = ["DISCORD_BOT_TOKEN"]
+
     # Chat attention state is centralized in core.chat_attention
 
     def __init__(self, bot_token: str):

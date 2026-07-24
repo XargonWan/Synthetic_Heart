@@ -1506,6 +1506,65 @@ class CoreInitializer:
                 f"[core_initializer] Failed to register Cortex reload handlers: {e}"
             )
 
+    def _missing_required_config_vars(self, interface_instance: Any) -> List[str]:
+        """Return the list of declared-required config keys that are absent.
+
+        An interface declares its "must-have" configuration by exposing a
+        ``required_config_vars`` attribute — an iterable of config-registry keys
+        (e.g. Telegram: ``["BOTFATHER_TOKEN"]``, Discord: ``["DISCORD_BOT_TOKEN"]``).
+        Each entry may be either:
+
+        * a plain string — that key must be present (AND semantics), or
+        * a tuple/list of strings — at least ONE of them must be present
+          (OR semantics), e.g. Matrix accepts either a password or an access
+          token: ``[("MATRIX_PASSWORD", "MATRIX_ACCESS_TOKEN")]``.
+
+        The loader resolves each key through ``config_registry`` and treats a
+        value that is ``None`` or an empty/whitespace string as missing. The
+        interface itself performs no gating — it only declares intent.
+        """
+        if interface_instance is None:
+            return []
+
+        required = getattr(interface_instance, "required_config_vars", None)
+        if not required:
+            return []
+
+        try:
+            from core.config_manager import config_registry
+        except Exception as e:  # pragma: no cover - defensive
+            log_debug(
+                f"[core_initializer] Unable to access config_registry for required "
+                f"var check: {e}"
+            )
+            return []
+
+        def _present(key: str) -> bool:
+            try:
+                value = config_registry.get_value(str(key), None)
+            except Exception as e:  # pragma: no cover - defensive
+                log_debug(
+                    f"[core_initializer] Error reading required config var '{key}': {e}"
+                )
+                return False
+            if value is None:
+                return False
+            if isinstance(value, str) and not value.strip():
+                return False
+            return True
+
+        missing: List[str] = []
+        for entry in required:
+            if isinstance(entry, (list, tuple, set)):
+                # OR group: satisfied if any member is present.
+                group = [str(k) for k in entry]
+                if not any(_present(k) for k in group):
+                    missing.append(" or ".join(group))
+            else:
+                if not _present(str(entry)):
+                    missing.append(str(entry))
+        return missing
+
     def register_interface(self, interface_name: str):
         """Register an active interface."""
         log_info(
@@ -1529,11 +1588,36 @@ class CoreInitializer:
             )
             return
 
+        # Declarative "must-have" configuration gate. An interface may declare a
+        # ``required_config_vars`` attribute (list of config keys). The LOADER —
+        # not the interface — verifies they are present. If any is missing/empty,
+        # the interface is NOT loaded: it registers no actions (so its schemas do
+        # not flood the LLM prompt) and is marked FAILED (red LED) in the WebUI.
+        missing_vars = self._missing_required_config_vars(interface_instance)
+        if missing_vars:
+            reason = "Missing required configuration: " + ", ".join(missing_vars)
+            self.track_component(interface_name, "interface", ComponentStatus.LOADING)
+            self.mark_component_failed(
+                interface_name,
+                reason,
+                details=reason,
+            )
+            # Keep the component typed as an interface for the WebUI.
+            comp = self.components.get(interface_name)
+            if comp is not None:
+                comp.type = "interface"
+                comp.category = "Interfaces"
+            log_warning(
+                f"🔌 Interface not loaded: {interface_name} ({reason}) — "
+                "actions withheld from prompt"
+            )
+            return
+
         if interface_name not in self.active_interfaces:
             self.active_interfaces.append(interface_name)
 
             # Check if the interface exposes action schemas and log them
-            actions = []
+            actions: List[str] = []
 
             if interface_instance and hasattr(
                 interface_instance, "get_supported_actions"
@@ -1541,7 +1625,7 @@ class CoreInitializer:
                 try:
                     supported_actions = interface_instance.get_supported_actions()
                     if isinstance(supported_actions, dict):
-                        actions = list(supported_actions.keys())
+                        actions = [str(a) for a in supported_actions.keys()]
                 except Exception as e:
                     log_debug(
                         f"[core_initializer] Error getting actions for interface {interface_name}: {e}"
@@ -1555,6 +1639,23 @@ class CoreInitializer:
                 log_info(
                     f"🔌 Interface loaded: {interface_name} - No actions registered"
                 )
+
+            # Track the interface as a successfully loaded component so the WebUI
+            # reports it as active (green LED) rather than "inactive" (grey). An
+            # enabled interface that reaches this point is running; without this
+            # its ComponentInfo stayed absent/LOADING and the components summary
+            # fell back to an "unknown"/grey status.
+            self.track_component(
+                interface_name,
+                "interface",
+                ComponentStatus.LOADING,
+                actions=actions,
+            )
+            self.mark_component_success(
+                interface_name,
+                actions=actions,
+                category="Interfaces",
+            )
 
             # After registering, rebuild actions to expose interface capabilities
             # BUT NOT during initial initialization (to avoid triggering rebuild while already building)

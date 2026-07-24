@@ -2115,6 +2115,12 @@ class TelegramInterface:
 
     display_name = "Telegram Bot"
 
+    # Declarative "must-have" configuration. The loader (core_initializer) checks
+    # these config keys; if the bot token is missing the interface is not loaded
+    # (no actions registered, red LED in the WebUI). The interface itself does
+    # no gating — it only declares intent.
+    required_config_vars = ["BOTFATHER_TOKEN"]
+
     def __init__(self, bot: Bot = None):
         """Store the python-telegram-bot ``Bot`` instance."""
         self.bot = bot

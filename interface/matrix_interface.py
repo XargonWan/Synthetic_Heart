@@ -76,6 +76,17 @@ class MatrixInterface:
 
     display_name = "Matrix Interface"
 
+    # Declarative "must-have" configuration checked by the loader
+    # (core_initializer). A plain string entry is required outright; a
+    # tuple is an OR group (at least one member must be present). Matrix needs
+    # its MXID plus either a password or an access token to log in. If any is
+    # missing the interface is not loaded (no actions registered, red LED in the
+    # WebUI). The interface itself does no gating — it only declares intent.
+    required_config_vars = [
+        "MATRIX_USER",
+        ("MATRIX_PASSWORD", "MATRIX_ACCESS_TOKEN"),
+    ]
+
     _current_instance_enabled: bool = False
 
     def __init__(

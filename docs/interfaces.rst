@@ -215,6 +215,10 @@ Creating a new interface requires implementing the interface contract:
    from core.interfaces_registry import get_interface_registry
 
    class MyInterface(AIPluginBase):
+       # Declarative "must-have" configuration. The loader checks these keys
+       # before activating the interface (see "Required Configuration" below).
+       required_config_vars = ["MYINTERFACE_TOKEN"]
+
        @staticmethod
        def get_interface_id() -> str:
            """Return unique interface identifier."""
@@ -323,6 +327,86 @@ Creating a new interface requires implementing the interface contract:
 
    # Required: Export the interface class
    INTERFACE_CLASS = MyInterface
+
+Required Configuration (``required_config_vars``)
+-------------------------------------------------
+
+Most interfaces are useless without at least one secret (a bot token, an access
+token, credentials, …). Rather than letting an interface half-start and flood
+the LLM prompt with actions it can never actually perform, an interface simply
+**declares** which config keys are indispensable and lets the **loader** enforce
+them. The interface performs *no gating itself* — it only declares intent.
+
+**How to declare**
+
+Add a ``required_config_vars`` class attribute — an iterable of config-registry
+keys. Each entry can be one of two forms:
+
+* a **plain string** — that key must be present (AND semantics), or
+* a **tuple / list** — an *OR group*: at least one member must be present.
+
+.. code-block:: python
+
+   class MyInterface(AIPluginBase):
+       # AND: every plain-string key is mandatory.
+       # OR: the tuple is satisfied if *any* of its members is set.
+       required_config_vars = [
+           "MYINTERFACE_USER",                        # required outright
+           ("MYINTERFACE_PASSWORD", "MYINTERFACE_TOKEN"),  # need one of the two
+       ]
+
+**How the loader enforces it**
+
+At registration time ``core_initializer`` calls
+``_missing_required_config_vars(interface_instance)``, which resolves every
+declared key through ``config_registry.get_value(...)``. A value that is
+``None`` or an empty/whitespace string counts as **missing**. Then:
+
+* **All present** → the interface is loaded normally and its actions become
+  available to the LLM.
+* **Something missing** → the interface is **not loaded**: it is *not* added to
+  ``active_interfaces`` and **none of its actions are registered**, so they never
+  reach the prompt. The component is still tracked and marked ``FAILED`` with a
+  reason like ``Missing required configuration: MYINTERFACE_USER,
+  MYINTERFACE_PASSWORD or MYINTERFACE_TOKEN`` — this shows up as a **red LED** in
+  the WebUI *Interfaces* section (the interface stays visible, it is not hidden).
+
+Because the gate runs in the loader, the interface constructor is free to behave
+as usual (for example ``is_enabled`` may still default to ``True``) — the
+must-have check is orthogonal to the interface's own enable/disable logic. The
+action parser additionally filters both action-collection passes by
+``core_initializer.active_interfaces``, so an interface that failed the gate can
+never leak schemas into the prompt.
+
+**Real examples in the tree**
+
+.. list-table::
+   :header-rows: 1
+   :widths: 25 75
+
+   * - Interface
+     - ``required_config_vars``
+   * - Telegram (``interface/telegram_bot.py``)
+     - ``["BOTFATHER_TOKEN"]``
+   * - Discord (``interface/discord_interface.py``)
+     - ``["DISCORD_BOT_TOKEN"]``
+   * - Matrix (``interface/matrix_interface.py``)
+     - ``["MATRIX_USER", ("MATRIX_PASSWORD", "MATRIX_ACCESS_TOKEN")]``
+
+Matrix shows the mixed AND + OR case: it needs its MXID (``MATRIX_USER``) **and**
+either a password **or** an access token to log in. The homeserver key is *not*
+listed because it ships with a non-empty default and is therefore always
+"present".
+
+**Guidelines**
+
+* Declare only what is genuinely *indispensable* to operate — do not over-gate.
+  Keys that have a sensible non-empty default do not belong here (they always
+  resolve as present).
+* Prefer an OR group over duplicating logic when a platform accepts alternative
+  credentials (password *or* token).
+* Omit the attribute entirely (or set it to an empty list) for interfaces that
+  need no secrets — e.g. the local CLI. Such interfaces are never gated.
 
 Interface Actions
 -----------------
