@@ -29,6 +29,10 @@ _logger: Optional[logging.Logger] = None
 _DEFAULT_LOG_DIR = os.path.join(os.getcwd(), "logs")
 _LOG_DIR = os.getenv("LOG_DIR", _DEFAULT_LOG_DIR)
 _LOG_FILE = os.path.join(_LOG_DIR, "synth.log")
+# Additional ERROR-only log: a short, low-rotation companion to synth.log so a
+# quick "what broke?" scan doesn't require wading through the full runtime log.
+# This is ADDITIVE — the main synth.log still records everything.
+_ERROR_LOG_FILE = os.path.join(_LOG_DIR, "synth_errors.log")
 _LEVELS = {
     "DEBUG": logging.DEBUG,
     "INFO": logging.INFO,
@@ -377,6 +381,28 @@ def setup_logging() -> logging.Logger:
                     file=sys.stderr,
                 )
 
+        # Additional ERROR-only log file: short, low rotation, easy to scan.
+        # Additive to synth.log (which keeps everything). Best-effort — a
+        # failure here must never block startup or the main log handlers.
+        try:
+            error_fh = TimestampedRotatingFileHandler(
+                _ERROR_LOG_FILE,
+                maxBytes=1_000_000,
+                maxLines=500,
+                backupCount=5,
+                encoding="utf-8",
+            )
+            error_fh.setLevel(logging.ERROR)
+            error_fh.setFormatter(formatter)
+            logger.addHandler(error_fh)
+        except Exception as e:  # pragma: no cover - environment dependent
+            try:
+                ch.stream.write(
+                    f"[logging_utils] Could not open error log file '{_ERROR_LOG_FILE}': {e}\n"
+                )
+            except Exception:
+                pass
+
     _logger = logger
 
     # Suppress the recurring CryptoError noise from discord-ext-voice-recv.
@@ -405,7 +431,8 @@ def setup_logging() -> logging.Logger:
     try:
         logger.log(
             _LEVELS.get(_LOGGING_LEVEL, logging.INFO),
-            f"[logging_utils] Started synth logger with level={_LOGGING_LEVEL}, log_file={_LOG_FILE}",
+            f"[logging_utils] Started synth logger with level={_LOGGING_LEVEL}, "
+            f"log_file={_LOG_FILE}, error_log_file={_ERROR_LOG_FILE}",
         )
     except Exception:
         pass
