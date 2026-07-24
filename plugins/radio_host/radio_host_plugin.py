@@ -190,10 +190,36 @@ INTERNAL_CHAT_ID = -2
 
 
 class RadioHostPlugin:
-    display_name = "Radio Host"
+    display_name = "AzuraCast Radio DJ"
+
+    def get_metadata(self) -> dict:
+        """Return declarative metadata for the WebUI plugin panel and docs.
+
+        Explicitly declares the display name, description, category and the
+        conventional ``icon.png`` / ``guide.md`` assets shipped alongside this
+        plugin. The loader falls back to the SyntH logo when the icon file is
+        missing.
+        """
+        return {
+            "name": "radio_host",
+            "display_name": "AzuraCast Radio DJ",
+            "description": (
+                "Turns Synth into an AI radio DJ that announces tracks and "
+                "banters between songs on an AzuraCast station."
+            ),
+            "category": "Various",
+            "icon": "icon.png",
+            "guide": "guide.md",
+        }
 
     def __init__(self):
-        register_plugin("radio_host_plugin", self)
+        # Register under the canonical short name "radio_host" (matching this
+        # plugin's metadata `name`, its folder, and the `component="radio_host"`
+        # used by every register_exposed_var below). Registering with the
+        # `_plugin` suffix made the WebUI canonical name `radio_host_plugin`,
+        # which no longer matched the config vars' component — so the plugin's
+        # settings were invisible in the WebUI detail pane.
+        register_plugin("radio_host", self)
         log_info("[radio_host] RadioHostPlugin registered")
 
         self._client = AzuraCastClient()

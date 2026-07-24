@@ -4,7 +4,7 @@ from typing import Any
 
 import pytest
 
-from plugins.recon_web_search import ReconWebSearchPlugin
+from plugins.recon.recon_web_search import ReconWebSearchPlugin
 from plugins.web_search import search_engine, search_orchestrator
 from plugins.web_search.search_engine import FetchCache
 from plugins.web_search.search_orchestrator import SearchOrchestrator

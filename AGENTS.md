@@ -27,7 +27,7 @@
               │ actions  │  │external│   │ Telegram   │
               │ agents   │  │ live   │   │ Discord    │
               │          │  │ agent  │   │ Matrix     │
-              └──────────┘  │Gemini …│   │ Ollama API │
+              └──────────┘  │Gemini …│   │ OpenAI API │
                             └────────┘   └────────────┘
 ```
 
@@ -36,7 +36,7 @@
 | **Core** | `core/` | Message chain, validation, dispatcher, DB, notifier. Never hardcodes plugin/LLM/interface logic. |
 | **Plugins** | `plugins/` | Provide actions via `get_supported_actions()`. Subclass `PluginBase` or `AIPluginBase`. |
 | **LLM Engines** | `engines/` | Interchangeable reasoning backends (`external_engines/`, `live/`, `agent/`). Subclass `AIPluginBase`. |
-| **Interfaces** | `interface/` | I/O adapters (Telegram, Discord, Matrix, Ollama compat). Register actions via `get_supported_actions()`. |
+| **Interfaces** | `interface/` | I/O adapters (Telegram, Discord, Matrix, OpenAI-compatible API). Register actions via `get_supported_actions()`. |
 
 **Golden rule:** removing any plugin, engine, or interface must not break the rest of the system.
 
@@ -67,6 +67,64 @@ Two flavours:
 
 Optional lifecycle hooks: init, teardown, extended behaviour.
 
+**WebUI metadata / assets contract.** A plugin declares how it appears in the
+classic WebUI *Plugins* tab via `get_metadata()` (all keys optional; the loader
+derives defaults reflectively): `name`, `display_name`, `description`,
+`category` (one of `Core`/`Interfaces`/`Grillo`/`Vessels`/`Agent`/`Various` —
+explicit value wins, otherwise auto-derived from location), `icon` (relative
+`icon.<ext>`), `guide` (relative `guide.md`), `disable_allowed`, and the
+`runnable`/`run_action`/`run_label`/`run_title` "Run Now" quartet. Ship an
+`icon.<ext>` (recommended 256×256) and a `guide.md` in the plugin's folder — the
+WebUI serves the icon from `/api/plugins/<name>/icon` (falls back to the SyntH
+logo) and renders the guide in the detail pane. **The plugin/interface manager,
+not the component itself, discovers the icon.** It looks for an `icon.<ext>`
+file sitting next to the component and accepts any of `png`, `svg`, `webp`,
+`jpg`, `jpeg`, `gif` (resolved in that priority order); the MIME type is derived
+automatically. A component never declares its own icon path. **Multi-file
+plugins live in a
+sub-folder.** As soon as a plugin ships more than one file (e.g. its `.py`
+module *and* a `.guide.md`, or an `icon.<ext>`), those files must live together in
+a dedicated `plugins/<name>/` folder — never as loose sibling files directly
+under `plugins/`. The canonical layout is `plugins/<name>/<name>.py` (the
+module, kept discoverable because the loader's `rglob("*.py")` skips only
+`__init__.py`) plus `plugins/<name>/<name>.guide.md` (or a folder-owned
+`plugins/<name>/guide.md`). To keep the historical `import plugins.<name>` path
+working after the move, add a thin `plugins/<name>/__init__.py` shim that
+re-exports the submodule and rebinds the package in `sys.modules`:
+
+```python
+from plugins.<name>.<name> import *  # noqa: F401,F403
+import sys as _sys
+from plugins.<name> import <name> as _mod
+_sys.modules[__name__] = _mod
+```
+
+This preserves every symbol — public *and* private — under `plugins.<name>`
+while the loader independently imports `plugins.<name>.<name>` to find
+`PLUGIN_CLASS`. A genuine **single-file plugin** (a bare `plugins/<name>.py`
+with *no* companion files) may still ship a sibling `plugins/<name>.guide.md`;
+the WebUI's `_read_plugin_guide` falls back to that path (using the plugin's
+short name) and the Sphinx collector globs it too — but the moment a second
+file appears, promote it to a sub-folder.
+**`guide.md` is the single source of
+truth for plugin docs**: the Sphinx build collects every `plugins/*/guide.md`
+*and* every `plugins/*.guide.md` into `docs/plugins/generated/` via
+`_collect_plugin_guides` in `docs/conf.py`
+(listed under `docs/plugins/generated_index.rst`) — never duplicate it as a
+separate `.rst`. Third-party brand/trademark logos may be committed **only** if
+the owner's licence, trademark policy, or press kit explicitly permits using the
+mark to refer to that software — when allowed, the asset must be used
+unmodified, only to refer to the original project, and attributed in
+`LICENSE_EXTERNAL.md`; otherwise ship an original non-branded glyph or rely on
+the SyntH logo fallback (see `AzuraCast` in `LICENSE_EXTERNAL.md` for a worked
+example). Plugins can
+be enabled/disabled at runtime from the WebUI (`POST /api/components/toggle`,
+true unload + grey ghost record, no restart); set `disable_allowed: False` for
+message-chain-critical plugins. Full reference: `docs/plugins.rst` → "Plugin
+Layout, Metadata and WebUI Presentation". Reference implementation:
+`plugins/radio_host/` (folder + `icon.png` + `guide.md` + explicit
+`get_metadata()`).
+
 ### Background Agents (Grillo)
 
 Some plugins are long-running scheduled agents. The canonical example is **G.R.I.L.L.O.** (`plugins/grillo/`):
@@ -76,6 +134,7 @@ Some plugins are long-running scheduled agents. The canonical example is **G.R.I
 - Context keys on beats: `grillo_beat`, `beat_type`, `activity_log_id`.
 - Configurable via `GRILLO_BEAT_INTERVAL`; includes duplicate suppression and rate-limiting.
 - Extensible: discovers beat-specific plugins (tag compactor, memory compactor, curiosity) via the plugin registry.
+- **Each beat sub-plugin lives in its own sub-folder** under `plugins/grillo/<beat>/` (`<beat>.py` module + `__init__.py` `sys.modules` shim + a dedicated `guide.md`), following the standard multi-file plugin layout from §4. The shim keeps the historical `plugins.grillo.<beat>` import path working (heavily used by tests/mock patches). The core (`grillo_impl.py`, `grillo_plugin.py`) and the non-plugin helpers (`common_instructions.py`, `grillo_action_checker.py`, `grillo_response_recorder.py`) stay flat in `plugins/grillo/`. The docs collector (`docs/conf.py::_collect_plugin_guides`) globs both `plugins/*/guide.md` and `plugins/*/*/guide.md`, so these nested guides are published automatically.
 
 The **Agent plugin** (`plugins/agent_plugin.py`) exposes Synth's agentic tools (`agent_list_files`, `agent_read_file`, `agent_write_file`, `agent_edit_file`, `agent_search_files`, `agent_run_shell`, `spawn_drone`) to the Agentic Runtime 2.0. Task state is persisted in the `agent_tasks` table. Enablement is gated by `AGENT_ENABLED` (user toggle, re-read on every `is_enabled()` call); the router 2.0 additionally requires `AGENTIC_ROUTING_ENABLED`.
 
@@ -248,6 +307,61 @@ SyntH is a persistent cognitive entity; a **Vessel** is a layer of embodiment in
 - Never bypass the chain.
 - Register actions via `get_supported_actions()`.
 
+### Interface layout, icons and guides
+
+Interfaces have **no base class** (they are duck-typed) and register themselves
+at import time by calling the module-level `register_interface(name, self)`.
+
+**Multi-file interfaces live in a sub-folder**, mirroring the multi-file plugin
+convention from §4. The four bot interfaces (Telegram, Discord, Matrix, Fluxer)
+each own a self-contained folder that ships their WebUI assets alongside the
+code:
+
+```
+interface/<module>/
+    <module>.py        # the interface module (loader recurses via pkgutil into packages)
+    __init__.py        # package shim — re-exports the submodule under interface.<module>
+    icon.<ext>         # png/svg/webp/jpg/jpeg/gif, served by the WebUI Interfaces tab
+    guide.md           # setup guide rendered in the WebUI detail pane
+```
+
+The folder is named after the **module** (not the component), so the historical
+`interface.<module>` import path keeps working: `interface/telegram_bot/telegram_bot.py`
+(component `telegram_bot`), `interface/discord_interface/discord_interface.py`
+(component `discord_bot`), `interface/matrix_interface/matrix_interface.py`
+(component `matrix_chat`), `interface/fluxer_interface/fluxer_interface.py`
+(component `fluxer_bot`).
+
+The `__init__.py` shim imports the submodule as a **module** (never `from pkg
+import <mod>`, which would resolve a same-named module-level global — e.g.
+`discord_interface = DiscordInterface(...)` — instead of the module) and rebinds
+the package to it so both `import interface.<module>` and
+`from interface.<module> import Symbol` keep working:
+
+```python
+import sys as _sys
+import interface.<module>.<module> as _mod
+from interface.<module>.<module> import *  # noqa: E402,F401,F403
+
+_sys.modules[__name__] = _mod
+```
+
+Interface **discovery** (`core/core_initializer.py::_discover_interfaces`)
+imports both flat modules *and* packages (sub-folders); the instance-init loop
+dedupes by `id(mod)` so the shim's two `sys.modules` entries don't double-init.
+The WebUI resolves each interface's `icon.<ext>`/`guide.md` from its on-disk
+directory: `register_interface` derives `dir_path` from the instance's
+`__module__` file's parent, which now points at the sub-folder. The
+plugin/interface manager (`core/webui.py`) discovers the icon by scanning that
+directory for `icon.<ext>` (png/svg/webp/jpg/jpeg/gif, in that priority order)
+and derives the MIME type automatically — Fluxer, for instance, ships an
+`icon.svg`. The OpenAI API Server (component `ollama_serve`) follows the same
+sub-folder layout: `interface/openai_api_server/openai_api_server.py` +
+`icon.png` + `guide.md`. Any remaining legacy single-file interface resolves to
+`interface/` and falls back to a bundled
+`res/synth_webui/static/component_icons/<name>.png` and a sibling
+`<name>.guide.md`.
+
 ### Outbound file sending
 
 Telegram, Discord, and Matrix each expose a single generic **send-file** action so
@@ -266,9 +380,10 @@ path-safety and MIME-detection helper `core/outbound_file_utils.py`:
 |--------|-----------|----------|----------|
 | `send_file_telegram_bot` | `interface/telegram_bot.py` | `path`, `interface_path` | `chat_name`, `caption` |
 | `send_file_discord_bot` | `interface/discord_interface.py` | `path` | `interface_path`, `target`, `channel_id`, `caption` |
+| `send_file_fluxer_bot` | `interface/fluxer_interface.py` | `path`, (`channel_id` or `interface_path`) | `caption` |
 | `send_file_matrix_chat` | `interface/matrix_interface.py` | `path`, `target` | `caption`, `thread_event_id` |
 
-All three are `security_level: "medium"`, `external_effects: ["filesystem"]` — so the
+All four are `security_level: "medium"`, `external_effects: ["filesystem"]` — so the
 router 2.0 auto-routes them to the Agent Lane, and (like every action) each is
 auto-exposed as an MCP tool (`synth_send_file_*`). Captions longer than the
 interface limit are split into a follow-up text message.
@@ -469,9 +584,9 @@ If any step fails, fix it before proceeding.
 - Config: `pytest.ini` — `asyncio_mode = auto`, markers: `asyncio`, `slow`, `integration`.
 - Run: `uv run pytest`
 
-### Testing via Ollama API
+### Testing via the OpenAI-compatible API
 
-The Ollama-compatible API (port 11435) can be used for quick testing without Telegram/Discord:
+The OpenAI-compatible API (port 11435, also speaks the legacy Ollama protocol) can be used for quick testing without Telegram/Discord:
 
 ```bash
 curl -X POST http://localhost:11435/api/chat \

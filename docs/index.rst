@@ -31,6 +31,7 @@ getting started.
    interfaces
    peer_synths
    plugins
+   plugins/generated_index
    self_growth
    external_endpoints
    auris_vox

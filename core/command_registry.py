@@ -144,6 +144,8 @@ async def help_command() -> str:
         "`/splitprompt [on|off]` – Enable/disable double-prompt mode (PART1/PART2)\n"
         "`/task` – List recent agent tasks\n"
         "`/task resume <id>` – Resume a paused (pending) agent task\n"
+        "`/plugins` – List plugins and their state\n"
+        "`/plugin enable|disable <name>` – Enable or disable a plugin\n"
     )
     return help_text
 
@@ -1416,6 +1418,176 @@ async def task_command(*args, interface_context=None) -> str:
     return "\n".join(lines).rstrip()
 
 
+def _iter_plugin_components() -> list:
+    """Return the ComponentInfo records tracked as plugins.
+
+    Interfaces, cortex engines and core meta-components are excluded so the
+    listing matches the WebUI *Plugins* tab.
+    """
+    from core.core_initializer import core_initializer
+
+    plugins = []
+    for info in core_initializer.components.values():
+        if getattr(info, "type", "") == "plugin":
+            plugins.append(info)
+    return plugins
+
+
+def _plugin_display_label(short_name: str) -> str:
+    """Best-effort human-readable name for a plugin short name.
+
+    Prefers the live instance's ``display_name`` / ``get_metadata`` name, then
+    falls back to a prettified short name so listings stay readable even for
+    disabled (ghost) plugins whose instance is gone.
+    """
+    from core.core_initializer import PLUGIN_REGISTRY
+
+    instance = PLUGIN_REGISTRY.get(short_name)
+    if instance is not None:
+        getter = getattr(instance, "get_metadata", None)
+        if callable(getter):
+            try:
+                meta = getter()
+                if isinstance(meta, dict):
+                    label = meta.get("display_name")
+                    if isinstance(label, str) and label.strip():
+                        return label.strip()
+            except Exception:
+                pass
+        label = getattr(instance, "display_name", None)
+        if isinstance(label, str) and label.strip():
+            return label.strip()
+    return short_name.replace("_", " ").title()
+
+
+def _resolve_plugin_short_name(user_name: str) -> str | None:
+    """Map a user-supplied plugin name to its canonical short name.
+
+    A plugin's runtime short name is its module stem (e.g. ``radio_host_plugin``
+    for ``plugins/radio_host/radio_host_plugin.py``) — but a user may type the
+    registration alias (``radio_host``), the module stem, or the display name.
+    Resolution order (all case-insensitive): exact short name → ``<name>_plugin``
+    → registry alias whose instance matches a tracked plugin → display name.
+    Returns ``None`` if nothing matches.
+    """
+    from core.core_initializer import PLUGIN_REGISTRY
+
+    if not user_name:
+        return None
+    target = user_name.strip().lower()
+
+    tracked = {
+        info.name.lower(): info.name
+        for info in _iter_plugin_components()
+        if getattr(info, "name", "")
+    }
+
+    # 1) Exact short name.
+    if target in tracked:
+        return tracked[target]
+
+    # 2) <name>_plugin module-stem convention.
+    if f"{target}_plugin" in tracked:
+        return tracked[f"{target}_plugin"]
+
+    # 3) Registry alias → matching tracked plugin instance.
+    alias_instance = PLUGIN_REGISTRY.get(user_name.strip()) or PLUGIN_REGISTRY.get(
+        target
+    )
+    if alias_instance is not None:
+        for short_name in tracked.values():
+            if PLUGIN_REGISTRY.get(short_name) is alias_instance:
+                return short_name
+
+    # 4) Display name match.
+    for short_name in tracked.values():
+        if _plugin_display_label(short_name).lower() == target:
+            return short_name
+
+    return None
+
+
+async def plugin_command(*args, interface_context=None) -> str:
+    """List plugins or enable/disable one at runtime.
+
+    Usage:
+        /plugin                       – list all plugins with their state
+        /plugins                      – same as above (alias)
+        /plugin list                  – same as above
+        /plugin enable <name>         – enable a plugin (no restart)
+        /plugin disable <name>        – disable a plugin (no restart)
+    """
+    from core.core_initializer import core_initializer, PLUGIN_REGISTRY
+
+    sub = args[0].lower() if args else "list"
+
+    # --- List -------------------------------------------------------------
+    if sub in ("list", "ls"):
+        plugins = _iter_plugin_components()
+        if not plugins:
+            return "🧩 No plugins are currently tracked."
+
+        rows = []
+        for info in sorted(plugins, key=lambda i: getattr(i, "name", "")):
+            short_name = getattr(info, "name", "")
+            enabled = short_name in PLUGIN_REGISTRY
+            led = "✅" if enabled else "🔻"
+            core_tag = (
+                " _(core)_" if core_initializer.is_core_plugin(short_name) else ""
+            )
+            label = _plugin_display_label(short_name)
+            rows.append(f"{led} `{short_name}` – {label}{core_tag}")
+
+        enabled_count = sum(
+            1 for i in plugins if getattr(i, "name", "") in PLUGIN_REGISTRY
+        )
+        header = (
+            f"🧩 *Plugins* ({enabled_count}/{len(plugins)} enabled)\n"
+            "_Use_ `/plugin enable|disable <name>` _to manage them._\n\n"
+        )
+        return header + "\n".join(rows)
+
+    # --- Enable / Disable -------------------------------------------------
+    if sub in ("enable", "disable"):
+        if len(args) < 2:
+            return f"❌ Usage: `/plugin {sub} <name>`"
+
+        user_name = " ".join(args[1:]).strip()
+        short_name = _resolve_plugin_short_name(user_name)
+        if not short_name:
+            return (
+                f"⚠️ Unknown plugin: `{user_name}`. "
+                "Use `/plugin list` to see available plugins."
+            )
+
+        if core_initializer.is_core_plugin(short_name):
+            return f"❌ Plugin `{short_name}` is a core plugin and cannot be disabled."
+
+        try:
+            if sub == "enable":
+                result = await core_initializer.enable_plugin(short_name)
+            else:
+                result = await core_initializer.disable_plugin(short_name)
+        except Exception as exc:
+            log_debug(f"[command_registry] plugin {sub} failed for {short_name}: {exc}")
+            return f"❌ Error toggling plugin `{short_name}`: {exc}"
+
+        if not result.get("ok"):
+            reason = result.get("error", "toggle_failed")
+            return f"⚠️ Could not {sub} `{short_name}`: {reason}"
+
+        state = "enabled ✅" if result.get("enabled") else "disabled 🔻"
+        label = _plugin_display_label(short_name)
+        return f"🧩 Plugin `{short_name}` ({label}) is now {state}."
+
+    return (
+        "❌ Usage:\n"
+        "`/plugin` or `/plugin list` – list plugins\n"
+        "`/plugin enable <name>` – enable a plugin\n"
+        "`/plugin disable <name>` – disable a plugin"
+    )
+
+
 register_command("cancel", cancel_command)
 register_command("logchat", logchat_command)
 register_command("task", task_command)
@@ -1523,3 +1695,5 @@ async def minecraft_command(*args) -> str:
 
 register_command("vessel", vessel_command)
 register_command("minecraft", minecraft_command)
+register_command("plugin", plugin_command)
+register_command("plugins", plugin_command)

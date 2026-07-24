@@ -1,6 +1,6 @@
 import pytest
 
-from plugins.recon_agent_intent import ReconAgentIntentPlugin
+from plugins.recon.recon_agent_intent import ReconAgentIntentPlugin
 
 
 class Msg:

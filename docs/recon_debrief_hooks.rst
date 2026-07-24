@@ -17,11 +17,12 @@ Key concepts
 - Debrief: postflight hook for plugins (``on_debrief``) to inspect processed
   and failed actions and optionally return recovery actions.
 - Plugins: implement ``get_recon_contributions()`` and/or ``on_debrief()``.
-  Recon and Debrief plugins should each live in their own file under the
-  ``plugins/`` directory (e.g. ``recon_language_evaluator.py`` or
-  ``debrief_action_intent.py``) and register themselves via the normal plugin
-  registry. Core code only handles orchestration; individual plugin logic
-  belongs in the ``plugins/`` folder.
+  Recon and Debrief plugins each live in their own file under the dedicated
+  ``plugins/recon/`` and ``plugins/debrief/`` subpackages (e.g.
+  ``plugins/recon/recon_language_evaluator.py`` or
+  ``plugins/debrief/debrief_action_intent.py``) and register themselves via the
+  normal plugin registry. Core code only handles orchestration; individual
+  plugin logic belongs in the ``plugins/`` folder.
 - Language/Tone detectors: implemented as plugins or as Recon contributions.
   Language detector plugins should only consider the user message and recent
   history from the same ``interface_path`` when making a decision; global chat or
@@ -104,7 +105,7 @@ Examples
 
 Video transcription (Recon Video Transcriber)
 ---------------------------------------------
-The ``recon_video_transcriber`` plugin (``plugins/recon_video_transcriber.py``)
+The ``recon_video_transcriber`` plugin (``plugins/recon/recon_video_transcriber.py``)
 transcribes videos referenced in a conversation and attaches the result to the
 prompt as a ``snippet`` contribution (the only recon type surfaced by the
 prompt engine besides ``memory`` and ``instruction``).
@@ -128,7 +129,7 @@ How it works:
 
 Because URL reconstruction runs on the message *text*, the primary use case
 ("transcribe this YouTube video") works on **every** interface (Telegram,
-Discord, WebUI, Ollama API) with no interface-specific changes. Local video
+Discord, WebUI, OpenAI-compatible API) with no interface-specific changes. Local video
 visual passes require the interface to expose the downloaded file path on the
 message's ``raw_data`` and keep the file alive until Recon runs.
 
@@ -151,7 +152,7 @@ Testing & compatibility
 - Recon contributions are optional; if no recon-capable plugins are
   registered the system skips Recon automatically.
 - Debrief hooks are fail-safe: plugin exceptions are logged and ignored.
-- The action-intent Debrief plugin (see `plugins/debrief_action_intent.py`) can
+- The action-intent Debrief plugin (see `plugins/debrief/debrief_action_intent.py`) can
   propose recovery actions when the assistant implied or promised an action
   but did not execute it. Typical examples are reminders or follow-up actions
   promised in natural language but omitted from the main JSON reply.

@@ -48,7 +48,7 @@ class GrilloPlugin(AIPluginBase):
                 1800,
                 value_type=int,
                 group="grillo",
-                component="grillo",
+                component="grillo_impl",
             )
         )
         self.history_evaluator = None

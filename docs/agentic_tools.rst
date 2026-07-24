@@ -120,7 +120,7 @@ row into the ``agent_tasks`` table** via the source-agnostic
 :meth:`core.agent_core.AgentLoopManager._persist_agentic_turn` helper. This is
 the single persistence point for every entry to the agent loop, so an agentic
 turn is recorded in the WebUI Agent panel **no matter which interface or API
-call originated it** (Telegram, Discord, Matrix, the Ollama-compatible API, or
+call originated it** (Telegram, Discord, Matrix, the OpenAI-compatible API, or
 the WebUI ``POST /api/agent/run`` route). The row records the resolved engine,
 a status derived from the ``stop_reason`` (``failed`` for ``timeout`` /
 ``engine_error`` / ``empty_response``, otherwise ``completed``), the per-turn

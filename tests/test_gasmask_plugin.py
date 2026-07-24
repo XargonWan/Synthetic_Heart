@@ -66,7 +66,9 @@ class TestGasmaskPlugin(unittest.TestCase):
         metadata = plugin.get_metadata()
 
         self.assertIsInstance(metadata, dict)
-        self.assertEqual(metadata["name"], "Gasmask Protection Plugin")
+        self.assertEqual(metadata["name"], "gasmask")
+        self.assertEqual(metadata["display_name"], "Gasmask Protection Plugin")
+        self.assertIn("category", metadata)
         self.assertIn("version", metadata)
         self.assertIn("description", metadata)
         self.assertIn("author", metadata)

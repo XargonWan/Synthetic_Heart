@@ -783,6 +783,8 @@ class SynthWebUIInterface:
         self.app.get("/api/components")(self.components_summary)
         self.app.post("/api/components/reload")(self.reload_component)
         self.app.post("/api/components/dev/toggle")(self.toggle_dev_components)
+        self.app.get("/api/plugins/{name}/icon")(self.plugin_icon)
+        self.app.post("/api/components/toggle")(self.toggle_plugin)
         self.app.post("/api/system/restart")(self.restart_system)
         self.app.get("/api/config")(self.config_summary)
         # File-backed exposed variables: upload/download handlers
@@ -5824,6 +5826,16 @@ class SynthWebUIInterface:
             )
             options = exposed_def.options if exposed_def else []
 
+            # A sensitive variable (token / API key / password / secret) must be
+            # masked in the WebUI. The frontend renders a masked input purely
+            # from ``ui_type === 'password'`` and ignores the ``sensitive`` flag,
+            # so promote any sensitive var that still carries the neutral default
+            # "string" type to "password". This covers vars registered only via
+            # ``config_registry.get_var(sensitive=True)`` (e.g. engine API keys)
+            # without touching every individual registration site.
+            if entry.get("sensitive") and ui_type == "string":
+                ui_type = "password"
+
             # If no explicit options from exposed_vars, try deriving from constraints
             if not options and entry.get("constraints"):
                 constraints = entry["constraints"]
@@ -9976,14 +9988,32 @@ class SynthWebUIInterface:
         if component is None:
             return ""
         description = ""
+
+        # A plugin may declare its human-readable description in the
+        # ``get_metadata()`` dict (the documented convention in AGENTS.md §4)
+        # rather than as a bare ``description`` attribute. Honour it first so
+        # metadata-driven plugins (e.g. radio_host) surface their description
+        # instead of falling back to the "Plugin with N actions" placeholder.
         try:
-            candidate = getattr(component, "description", None)
-            if isinstance(candidate, str):
-                description = candidate
-            elif callable(candidate):
-                result = candidate()
-                if isinstance(result, str):
-                    description = result
+            getter = getattr(component, "get_metadata", None)
+            if callable(getter):
+                meta = getter()
+                if isinstance(meta, dict):
+                    meta_desc = meta.get("description")
+                    if isinstance(meta_desc, str) and meta_desc.strip():
+                        description = meta_desc
+        except Exception:  # pragma: no cover - defensive
+            description = ""
+
+        try:
+            if not description:
+                candidate = getattr(component, "description", None)
+                if isinstance(candidate, str):
+                    description = candidate
+                elif callable(candidate):
+                    result = candidate()
+                    if isinstance(result, str):
+                        description = result
         except Exception:  # pragma: no cover - defensive
             description = ""
 
@@ -10043,6 +10073,348 @@ class SynthWebUIInterface:
         elif isinstance(config, (list, tuple, set)):
             entry["required_fields"] = list(config)
         return entry
+
+    @staticmethod
+    def _component_icons_dir() -> "Path":
+        """Directory holding bundled per-component icons (``<name>.<ext>``).
+
+        Used for legacy components that do not own a dedicated folder with an
+        ``icon.<ext>`` — e.g. single-file interfaces (Ollama) that live in the
+        shared ``interface/`` directory. The
+        icons shipped here are original, non-branded glyphs. A third-party
+        brand/trademark logo may only be committed when its owner's licence or
+        press kit permits it; such assets are attributed in
+        ``LICENSE_EXTERNAL.md`` (see AGENTS.md / docs/plugins.rst).
+        """
+        from pathlib import Path
+
+        return (
+            Path(__file__).resolve().parent.parent
+            / "res"
+            / "synth_webui"
+            / "static"
+            / "component_icons"
+        )
+
+    # Supported icon extensions, in priority order, mapped to their MIME type.
+    # The component/plugin manager looks for an ``icon.<ext>`` file sitting next
+    # to the component (usually inside the plugin/interface folder) — the
+    # component itself never declares its icon path.
+    _ICON_EXTENSIONS: "tuple[tuple[str, str], ...]" = (
+        ("png", "image/png"),
+        ("svg", "image/svg+xml"),
+        ("webp", "image/webp"),
+        ("jpg", "image/jpeg"),
+        ("jpeg", "image/jpeg"),
+        ("gif", "image/gif"),
+    )
+
+    @classmethod
+    def _find_icon_in_dir(cls, base: "Path") -> "Optional[tuple[Path, str]]":
+        """Return ``(path, media_type)`` for the first ``icon.<ext>`` in ``base``.
+
+        Searches the directory for an ``icon.*`` file using the supported
+        extensions in :attr:`_ICON_EXTENSIONS` priority order. Every candidate
+        is confined to ``base`` to prevent path traversal. Returns ``None`` when
+        no supported icon exists.
+        """
+        try:
+            resolved_base = base.resolve()
+        except Exception:  # pragma: no cover - defensive
+            return None
+        for ext, media_type in cls._ICON_EXTENSIONS:
+            candidate = (resolved_base / f"icon.{ext}").resolve()
+            if candidate.parent == resolved_base and candidate.is_file():
+                return candidate, media_type
+        return None
+
+    @classmethod
+    def _bundled_component_icon(cls, name: str) -> "Optional[tuple[Path, str]]":
+        """Return ``(path, media_type)`` for a bundled component icon, if any.
+
+        Looks for ``<name>.<ext>`` under :meth:`_component_icons_dir` using the
+        supported extensions in :attr:`_ICON_EXTENSIONS` priority order. The
+        lookup is confined to that directory to prevent path traversal; returns
+        ``None`` when no bundled icon exists for ``name``.
+        """
+        base = cls._component_icons_dir().resolve()
+        for ext, media_type in cls._ICON_EXTENSIONS:
+            candidate = (base / f"{name}.{ext}").resolve()
+            if candidate.parent == base and candidate.is_file():
+                return candidate, media_type
+        return None
+
+    @staticmethod
+    def _reflect_component_dir(name: str, info: Any = None) -> "Optional[Path]":
+        """Resolve a component's on-disk folder by reflecting its instance.
+
+        The component manager owns icon/guide discovery — a plugin or interface
+        never declares where its assets live. The primary source is the tracked
+        ``ComponentInfo.dir_path``, but that field can be missing for sub-folder
+        interfaces whose package shim rebinds ``sys.modules`` (e.g. Matrix and
+        Fluxer), leaving the manager unable to find their ``icon.<ext>``.
+
+        This fallback derives the folder directly from the live registered
+        instance: it looks the component up in the interface and plugin
+        registries and resolves the concrete *class* source file via
+        :func:`inspect.getfile`. The parent of that file is the component's
+        folder — exactly where its ``icon.<ext>`` and ``guide.md`` sit — so
+        discovery works regardless of how the import machinery rebound modules.
+
+        Returns the resolved directory ``Path`` (or ``None`` when it cannot be
+        determined). No filesystem write or traversal outside the class source
+        tree is possible; the caller still confines icon lookups to the folder.
+        """
+        from pathlib import Path
+        import inspect
+
+        # 1. Trust the tracked dir_path when it is populated.
+        dir_path = getattr(info, "dir_path", "") if info else ""
+        if dir_path:
+            return Path(dir_path)
+
+        # 2. Reflect the live registered instance (interface first, then plugin)
+        #    and resolve the concrete class' source file. This is immune to the
+        #    ``sys.modules`` rebinding done by sub-folder package shims.
+        instance = None
+        try:
+            from core.core_initializer import INTERFACE_REGISTRY, PLUGIN_REGISTRY
+
+            instance = INTERFACE_REGISTRY.get(name) or PLUGIN_REGISTRY.get(name)
+            if instance is None:
+                # Tolerate the ``<name>_plugin`` component stem alias.
+                instance = PLUGIN_REGISTRY.get(f"{name}_plugin")
+        except Exception:  # pragma: no cover - defensive
+            instance = None
+
+        if instance is None:
+            return None
+
+        try:
+            source_file = inspect.getfile(type(instance))
+        except Exception:  # pragma: no cover - defensive (builtins, C-exts)
+            return None
+        if not source_file:
+            return None
+        return Path(source_file).parent
+
+    async def plugin_icon(self, name: str) -> FileResponse:
+        """Serve a component's icon.
+
+        The icon is discovered generically — the component manager looks for an
+        ``icon.<ext>`` file (``png``, ``svg``, ``webp``, ``jpg``, ``jpeg``,
+        ``gif``) sitting next to the component, so a plugin/interface never has
+        to declare its own icon path.
+
+        Resolution order:
+
+        1. The component's own on-disk directory (``<dir_path>/icon.<ext>``),
+           resolved from the tracked ``ComponentInfo`` and confined to that
+           directory to prevent path traversal.
+        2. A bundled per-component icon under
+           ``res/synth_webui/static/component_icons/<name>.<ext>`` — for
+           legacy single-file components that share a directory and therefore
+           cannot each own an ``icon.<ext>``.
+
+        Returns 404 when neither exists; the WebUI then falls back to the
+        SyntH logo.
+        """
+
+        # Reject anything that is not a plain short-name to avoid traversal.
+        if not name or "/" in name or "\\" in name or ".." in name:
+            raise HTTPException(status_code=404, detail="Icon not found")
+
+        try:
+            from core.core_initializer import PLUGIN_REGISTRY
+
+            plugin = PLUGIN_REGISTRY.get(name)
+            info = self._resolve_component_info(name, plugin)
+        except Exception:
+            info = None
+
+        # Resolve the component's on-disk folder generically: the tracked
+        # ``dir_path`` when present, otherwise reflected from the live instance
+        # (covers sub-folder interfaces whose package shim hides ``dir_path``).
+        component_dir = self._reflect_component_dir(name, info)
+        if component_dir is not None:
+            found = self._find_icon_in_dir(component_dir)
+            if found is not None:
+                icon_path, media_type = found
+                return FileResponse(str(icon_path), media_type=media_type)
+
+        # Fallback: a bundled per-component icon (legacy single-file components).
+        bundled = self._bundled_component_icon(name)
+        if bundled is not None:
+            bundled_path, bundled_media = bundled
+            return FileResponse(str(bundled_path), media_type=bundled_media)
+
+        raise HTTPException(status_code=404, detail="Icon not found")
+
+    @staticmethod
+    def _led_for_status(status: str) -> str:
+        """Map a component status to a UI LED colour.
+
+        green = loaded + active, red = loaded but broken, grey = disabled.
+        orange (degraded) is reserved for future per-plugin health checks.
+        """
+        mapping = {
+            "success": "green",
+            "failed": "red",
+            "disabled": "grey",
+            "skipped": "grey",
+            "loading": "grey",
+        }
+        return mapping.get(status, "grey")
+
+    @classmethod
+    def _plugin_has_icon(cls, info: Any, name: str = "") -> bool:
+        """Return True when the component has an icon available.
+
+        Checks the component's own ``<dir_path>/icon.<ext>`` first (any
+        supported extension), then falls back to a bundled per-component icon
+        (``component_icons/<name>.<ext>``) when ``name`` is provided — the
+        latter covers legacy single-file components that share a directory.
+        """
+        try:
+            component_dir = cls._reflect_component_dir(name, info)
+            if component_dir is not None and cls._find_icon_in_dir(component_dir):
+                return True
+            if name and cls._bundled_component_icon(name) is not None:
+                return True
+        except Exception:  # pragma: no cover - defensive
+            return False
+        return False
+
+    @staticmethod
+    def _read_plugin_guide(info: Any, name: str = "") -> str:
+        """Return the raw Markdown of a plugin's guide (empty if absent).
+
+        Two layouts are supported: folder-plugins ship ``<dir>/guide.md``,
+        while single-file plugins ship ``plugins/<name>.guide.md`` next to
+        their ``<name>.py`` module (``dir_path`` then points at ``plugins/``).
+
+        The component folder is resolved generically by
+        :meth:`_reflect_component_dir`: the tracked ``dir_path`` when present,
+        otherwise reflected from the live registered instance. This covers
+        sub-folder interfaces whose package shim rebinds ``sys.modules`` and
+        leaves ``dir_path`` empty (e.g. Matrix and Fluxer) — the manager still
+        finds their ``guide.md``.
+        """
+        base = SynthWebUIInterface._reflect_component_dir(name, info)
+        if base is None:
+            return ""
+        try:
+            # Folder-owned guide: <dir>/guide.md
+            folder_guide = base / "guide.md"
+            if folder_guide.is_file():
+                return folder_guide.read_text(encoding="utf-8")
+            # Single-file plugin guide: plugins/<name>.guide.md
+            guide_name = name or (getattr(info, "name", "") if info else "")
+            if guide_name:
+                sibling_guide = base / f"{guide_name}.guide.md"
+                if sibling_guide.is_file():
+                    return sibling_guide.read_text(encoding="utf-8")
+        except Exception:  # pragma: no cover - defensive
+            pass
+        return ""
+
+    @staticmethod
+    def _plugin_run_meta(plugin: Any) -> dict:
+        """Derive the on-demand "Run Now" button metadata for a plugin.
+
+        A plugin opts in by either declaring ``runnable`` (optionally with
+        ``run_label`` / ``run_action`` / ``run_title``) in its
+        ``get_metadata()`` dict, or simply by exposing a ``run_now`` /
+        ``run_once`` / ``execute_now`` coroutine/method. This keeps the WebUI
+        free of any hardcoded, name-keyed special cases.
+        """
+        meta: dict = {}
+        try:
+            if hasattr(plugin, "get_metadata"):
+                raw = plugin.get_metadata() or {}
+                if isinstance(raw, dict):
+                    meta = raw
+        except Exception:  # pragma: no cover - defensive
+            meta = {}
+
+        runnable = bool(meta.get("runnable"))
+        if not runnable:
+            runnable = any(
+                callable(getattr(plugin, m, None))
+                for m in ("run_now", "run_once", "execute_now")
+            )
+        if not runnable:
+            return {}
+
+        out: dict = {"runnable": True}
+        if isinstance(meta.get("run_label"), str) and meta["run_label"].strip():
+            out["run_label"] = meta["run_label"].strip()
+        if isinstance(meta.get("run_action"), str) and meta["run_action"].strip():
+            out["run_action"] = meta["run_action"].strip()
+        if isinstance(meta.get("run_title"), str) and meta["run_title"].strip():
+            out["run_title"] = meta["run_title"].strip()
+        return out
+
+    @staticmethod
+    def _plugin_capability_flags(plugin: Any) -> dict:
+        """Detect whether a plugin participates in the Recon / Debrief pipelines.
+
+        Recon capability mirrors ``core.recon.gather_recon_contributions`` — a
+        plugin is recon-capable if it exposes ``get_recon_contributions`` or the
+        combined trio ``get_recon_key`` / ``get_recon_instruction`` /
+        ``parse_recon_response``. Debrief capability mirrors
+        ``core.debrief.run_debrief`` — a plugin is debrief-capable if it exposes
+        an ``on_debrief`` hook. Both are surfaced so the WebUI can filter plugins
+        by pipeline participation.
+        """
+        has_recon = hasattr(plugin, "get_recon_contributions") or all(
+            hasattr(plugin, attr)
+            for attr in (
+                "get_recon_key",
+                "get_recon_instruction",
+                "parse_recon_response",
+            )
+        )
+        has_debrief = hasattr(plugin, "on_debrief")
+        return {"has_recon": bool(has_recon), "has_debrief": bool(has_debrief)}
+
+    @staticmethod
+    def _resolve_component_info(name: str, plugin: Any = None) -> Any:
+        """Return the ComponentInfo backing a plugin, tolerating name aliases.
+
+        The loader always tracks a plugin's ComponentInfo under its module
+        stem (e.g. ``radio_host_plugin`` for
+        ``plugins/radio_host/radio_host_plugin.py``), which is where the
+        on-disk ``dir_path`` (used for icon/guide lookup) lives. A plugin that
+        registers under a shorter canonical name via
+        ``register_plugin("radio_host", self)`` would otherwise miss its own
+        folder because ``components.get("radio_host")`` is ``None``.
+
+        Resolution order: (1) exact ``name``; (2) any registry alias pointing
+        at the same plugin instance (covers the ``<name>_plugin`` stem); (3)
+        the ``<name>_plugin`` component key as a last resort. The first match
+        that actually carries a ``dir_path`` wins so icon/guide resolve.
+        """
+        from core.core_initializer import core_initializer, PLUGIN_REGISTRY
+
+        candidates: list[str] = [name]
+        if plugin is not None:
+            for alias, reg_plugin in PLUGIN_REGISTRY.items():
+                if reg_plugin is plugin and alias not in candidates:
+                    candidates.append(alias)
+        if f"{name}_plugin" not in candidates:
+            candidates.append(f"{name}_plugin")
+
+        fallback = None
+        for candidate in candidates:
+            info = core_initializer.components.get(candidate)
+            if info is None:
+                continue
+            if fallback is None:
+                fallback = info
+            if getattr(info, "dir_path", ""):
+                return info
+        return fallback
 
     @staticmethod
     def _get_component_meta(name: str) -> dict:
@@ -10321,15 +10693,28 @@ class SynthWebUIInterface:
                     )
 
             meta = self._get_component_meta(name)
+            info = core_initializer.components.get(name)
+            iface_enabled = core_initializer._is_interface_enabled(name)
             interfaces_data.append(
                 {
                     "name": name,
                     "display_name": self._get_display_name(name, interface),
                     "description": description,
                     "actions": actions,
-                    "status": meta["status"],
+                    "status": "disabled" if not iface_enabled else meta["status"],
                     "details": meta["details"],
                     "error": meta["error"],
+                    # Fields required so interfaces render in the plugins
+                    # two-column grid under the "Interfaces" category.
+                    "category": "Interfaces",
+                    "led": "grey"
+                    if not iface_enabled
+                    else self._led_for_status(meta["status"]),
+                    "enabled": iface_enabled,
+                    "disable_allowed": not core_initializer.is_core_interface(name),
+                    "has_icon": self._plugin_has_icon(info, name),
+                    "icon_url": f"/api/plugins/{name}/icon",
+                    "guide": self._read_plugin_guide(info, name),
                 }
             )
 
@@ -10347,7 +10732,71 @@ class SynthWebUIInterface:
         interfaces_data = deduped_interfaces
 
         plugins_data: List[dict] = []
+
+        # Media-engine plugins (Vox/Auris/Iris and the Cortex/Live engines) are
+        # surfaced in the dedicated "Engines" tab — they are engines, not
+        # general-purpose plugins, so they must NOT appear in the Plugins grid.
+        _ENGINE_PLUGIN_NAMES = frozenset(
+            {
+                "vox_plugin",
+                "auris_plugin",
+                "iris_plugin",
+                "cortex_plugin",
+                "live_plugin",
+            }
+        )
+
+        # "One plugin, one entry" — collapse duplicate registrations so each
+        # plugin appears exactly ONCE in the WebUI grid.
+        #
+        # Two independent causes produce duplicates:
+        #   1. A plugin file `X_plugin.py` is tracked by the loader under its
+        #      module stem (`X_plugin`) AND calls `register_plugin("X", self)`
+        #      with a shorter canonical name — the SAME instance ends up in
+        #      PLUGIN_REGISTRY under both keys.
+        #   2. Two module files re-export the same PLUGIN_CLASS (e.g.
+        #      `grillo_impl.py` + `grillo_plugin.py`) — two DISTINCT instances
+        #      of the same class.
+        #
+        # We deduplicate by a canonical identity key derived from the plugin's
+        # fully-qualified CLASS (`module.qualname`). This collapses both cases:
+        # the same instance registered under two names (case 1) and two
+        # distinct instances of the same re-exported class (case 2, grillo).
+        # The preferred display name is the one WITHOUT the `_plugin` suffix
+        # (the explicit canonical name chosen by the plugin author); when
+        # both/neither carry the suffix, the shorter — then lexicographically
+        # first — name wins.
+        def _plugin_identity(plugin_obj: Any) -> str:
+            cls = type(plugin_obj)
+            return f"{cls.__module__}.{cls.__qualname__}"
+
+        def _canonical_score(candidate: str) -> tuple[int, int, str]:
+            # Lower tuple sorts first → preferred name.
+            has_suffix = 1 if candidate.endswith("_plugin") else 0
+            return (has_suffix, len(candidate), candidate)
+
+        canonical_names: Dict[str, str] = {}
+        for reg_name, reg_plugin in PLUGIN_REGISTRY.items():
+            key = _plugin_identity(reg_plugin)
+            current = canonical_names.get(key)
+            if current is None or _canonical_score(reg_name) < _canonical_score(
+                current
+            ):
+                canonical_names[key] = reg_name
+
+        emitted_plugin_identities: set[str] = set()
         for name, plugin in sorted(PLUGIN_REGISTRY.items()):
+            # Media-engine plugins belong to the Engines tab, not the grid.
+            if name in _ENGINE_PLUGIN_NAMES:
+                continue
+            identity = _plugin_identity(plugin)
+            # Skip if another alias of the same plugin was already emitted, or
+            # if this alias is not the canonical (preferred) name.
+            if identity in emitted_plugin_identities:
+                continue
+            if canonical_names.get(identity) != name:
+                continue
+            emitted_plugin_identities.add(identity)
             description = self._extract_description(plugin)
             actions = []
             if hasattr(plugin, "get_supported_actions"):
@@ -10366,6 +10815,10 @@ class SynthWebUIInterface:
                     )
 
             meta = self._get_component_meta(name)
+            info = self._resolve_component_info(name, plugin)
+            category = getattr(info, "category", "") or "Various"
+            run_meta = self._plugin_run_meta(plugin)
+            capability_flags = self._plugin_capability_flags(plugin)
             plugins_data.append(
                 {
                     "name": name,
@@ -10375,8 +10828,81 @@ class SynthWebUIInterface:
                     "status": meta["status"],
                     "details": meta["details"],
                     "error": meta["error"],
+                    "category": category,
+                    "led": self._led_for_status(meta["status"]),
+                    "enabled": True,
+                    "disable_allowed": not core_initializer.is_core_plugin(name),
+                    "has_icon": self._plugin_has_icon(info, name),
+                    "icon_url": f"/api/plugins/{name}/icon",
+                    "guide": self._read_plugin_guide(info, name),
+                    **capability_flags,
+                    **run_meta,
                 }
             )
+
+        # Include disabled ("ghost") plugins so the UI still lists them (grey).
+        for name, info in sorted(core_initializer.components.items()):
+            if getattr(info, "type", "") != "plugin":
+                continue
+            if name in _ENGINE_PLUGIN_NAMES:
+                continue  # engines live in the Engines tab, not the grid
+            if name in PLUGIN_REGISTRY:
+                continue  # already emitted above
+            status_value = getattr(info.status, "value", str(info.status))
+            if status_value not in ("skipped", "failed", "disabled"):
+                continue
+            led = "grey" if status_value in ("skipped", "disabled") else "red"
+            enabled = status_value not in ("skipped", "disabled")
+            plugins_data.append(
+                {
+                    "name": name,
+                    "display_name": name,
+                    "description": "",
+                    "actions": [],
+                    "status": "disabled" if status_value == "skipped" else status_value,
+                    "details": getattr(info, "details", "") or "",
+                    "error": getattr(info, "error", "") or "",
+                    "category": getattr(info, "category", "") or "Various",
+                    "led": led,
+                    "enabled": enabled,
+                    "disable_allowed": not core_initializer.is_core_plugin(name),
+                    "has_icon": self._plugin_has_icon(info, name),
+                    "icon_url": f"/api/plugins/{name}/icon",
+                    "guide": self._read_plugin_guide(info, name),
+                }
+            )
+
+        # Surface Synth-owned MCP servers under the "Agent" category as
+        # read-only banners (they are not togglable from this panel).
+        try:
+            from core.mcp_bridge.config import load_synth_mcp_servers
+
+            for mcp_name, mcp_cfg in sorted(load_synth_mcp_servers().items()):
+                plugins_data.append(
+                    {
+                        "name": f"mcp:{mcp_name}",
+                        "display_name": mcp_name,
+                        "description": getattr(mcp_cfg, "description", "") or "",
+                        "actions": [],
+                        "status": "success" if mcp_cfg.enabled else "disabled",
+                        "details": f"MCP server ({mcp_cfg.transport})",
+                        "error": "",
+                        "category": "Agent",
+                        "led": "green" if mcp_cfg.enabled else "grey",
+                        "enabled": bool(mcp_cfg.enabled),
+                        "disable_allowed": False,
+                        "has_icon": False,
+                        "icon_url": "",
+                        "guide": "",
+                        "is_mcp": True,
+                    }
+                )
+        except Exception as exc:
+            log_warning(f"{LOG_PREFIX} unable to list Synth MCP servers: {exc}")
+
+        # Interfaces are presented inside the same two-column grid as plugins,
+        # grouped under the "Interfaces" category (no separate card).
+        plugins_data.extend(interfaces_data)
 
         # Deduplicate plugins by name to avoid duplicates in the UI
         seen_p = set()
@@ -11116,6 +11642,85 @@ class SynthWebUIInterface:
         raise HTTPException(
             status_code=400, detail="Component does not support run_action or run_now"
         )
+
+    async def toggle_plugin(self, request: Request):
+        """Enable or disable a plugin at runtime (TRUE unload, no restart)."""
+        try:
+            data = await request.json()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="Invalid JSON payload") from exc
+
+        name = str(data.get("name") or "").strip()
+        enabled = data.get("enabled")
+        if not name:
+            raise HTTPException(status_code=400, detail="Missing 'name'")
+        if not isinstance(enabled, bool):
+            raise HTTPException(
+                status_code=400, detail="Missing or invalid boolean 'enabled'"
+            )
+
+        try:
+            from core.core_initializer import core_initializer, INTERFACE_REGISTRY
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} unable to import core_initializer: {exc}")
+            raise HTTPException(
+                status_code=500, detail="Unable to access core initializer"
+            ) from exc
+
+        # Route interfaces to the interface enable/disable path. An entry is an
+        # interface if it lives in INTERFACE_REGISTRY or is tracked as one.
+        tracked = core_initializer.components.get(name)
+        is_interface = name in INTERFACE_REGISTRY or (
+            tracked is not None and getattr(tracked, "type", "") == "interface"
+        )
+
+        if is_interface:
+            if core_initializer.is_core_interface(name):
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"Interface '{name}' is a core interface and cannot be disabled",
+                )
+            try:
+                if enabled:
+                    result = await core_initializer.enable_interface(name)
+                else:
+                    result = await core_initializer.disable_interface(name)
+            except Exception as exc:
+                log_error(f"{LOG_PREFIX} toggle interface failed for {name}: {exc}")
+                raise HTTPException(
+                    status_code=500, detail=f"Toggle failed: {exc}"
+                ) from exc
+
+            if not result.get("ok"):
+                raise HTTPException(
+                    status_code=400,
+                    detail=result.get("error", "toggle_failed"),
+                )
+            return JSONResponse({"status": "ok", **result})
+
+        if core_initializer.is_core_plugin(name):
+            raise HTTPException(
+                status_code=403,
+                detail=f"Plugin '{name}' is a core plugin and cannot be disabled",
+            )
+
+        try:
+            if enabled:
+                result = await core_initializer.enable_plugin(name)
+            else:
+                result = await core_initializer.disable_plugin(name)
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} toggle_plugin failed for {name}: {exc}")
+            raise HTTPException(
+                status_code=500, detail=f"Toggle failed: {exc}"
+            ) from exc
+
+        if not result.get("ok"):
+            raise HTTPException(
+                status_code=400,
+                detail=result.get("error", "toggle_failed"),
+            )
+        return JSONResponse({"status": "ok", **result})
 
     async def reload_component(self, request: Request):
         """Reload a specific component (interface or plugin)."""

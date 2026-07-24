@@ -16,7 +16,55 @@
         } catch (e) { /* ignore */ }
     };
 
+    // Wrap a masked (type="password") input in a relative container with an
+    // "eye" toggle button that reveals/hides the value in place. Returns the
+    // wrapper element to append instead of the bare input.
+    // Exposed on window so it is reachable from every IIFE scope in this file
+    // (settings, plugin-detail rendering, etc.).
+    window.wrapPasswordWithToggle = function wrapPasswordWithToggle(input) {
+        try {
+            const wrap = document.createElement('div');
+            wrap.className = 'password-field';
+            wrap.style.cssText = 'position:relative; display:inline-flex; align-items:center; width:100%; max-width:400px;';
 
+            // Ensure the input leaves room for the icon on its right edge.
+            input.style.width = '100%';
+            input.style.paddingRight = '34px';
+            input.style.boxSizing = 'border-box';
+
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'password-toggle';
+            btn.setAttribute('aria-label', 'Show value');
+            btn.title = 'Show / hide value';
+            btn.tabIndex = -1;
+            btn.style.cssText = 'position:absolute; right:6px; top:50%; transform:translateY(-50%); background:none; border:none; cursor:pointer; padding:2px; line-height:0; color:var(--text,#ccc); opacity:0.75;';
+
+            const eyeOpen = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>';
+            const eyeClosed = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>';
+            btn.innerHTML = eyeOpen;
+
+            btn.addEventListener('click', (ev) => {
+                ev.preventDefault();
+                ev.stopPropagation();
+                if (input.type === 'password') {
+                    input.type = 'text';
+                    btn.innerHTML = eyeClosed;
+                    btn.setAttribute('aria-label', 'Hide value');
+                } else {
+                    input.type = 'password';
+                    btn.innerHTML = eyeOpen;
+                    btn.setAttribute('aria-label', 'Show value');
+                }
+            });
+
+            wrap.appendChild(input);
+            wrap.appendChild(btn);
+            return wrap;
+        } catch (e) {
+            return input;
+        }
+    };
 
     // Generic section loader. Fetches /templates/<section>.html and injects into the tab panel.
     async function loadSection(section) {
@@ -2200,41 +2248,50 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                             input.autocomplete = item.ui_type === 'password' ? 'new-password' : 'off';
                             input.value = typeof value === 'string' ? value : JSON.stringify(value);
                             input.disabled = !isEditable;
-                            inputEl = input;
+                            if (item.ui_type === 'password') {
+                                inputEl = window.wrapPasswordWithToggle(input);
+                            } else {
+                                inputEl = input;
+                            }
                         }
 
                         if (inputEl) inputWrap.appendChild(inputEl);
                         if (extraEl) inputWrap.appendChild(extraEl);
 
                         // Attach save handlers for editable inputs so pressing Enter or changing
-                        // selects/checkboxes persists values via the /api/config endpoint
-                        if (isEditable && inputEl && !skipAutoSave) {
+                        // selects/checkboxes persists values via the /api/config endpoint.
+                        // Password fields are wrapped in a container with an eye toggle,
+                        // so resolve the real <input> before binding handlers.
+                        const saveTarget = (inputEl && inputEl.classList && inputEl.classList.contains('password-field'))
+                            ? inputEl.querySelector('input')
+                            : inputEl;
+                        if (isEditable && saveTarget && !skipAutoSave) {
                             // Checkbox
-                            if (inputEl.tagName && inputEl.tagName.toLowerCase() === 'input' && inputEl.type === 'checkbox') {
-                                inputEl.addEventListener('change', () => { persistValue(inputEl.checked, [inputEl]); });
-                            } else if (inputEl.tagName && inputEl.tagName.toLowerCase() === 'select') {
-                                inputEl.addEventListener('change', () => { persistValue(inputEl.value, [inputEl]); });
-                            } else if (inputEl.tagName && inputEl.tagName.toLowerCase() === 'textarea') {
+                            if (saveTarget.tagName && saveTarget.tagName.toLowerCase() === 'input' && saveTarget.type === 'checkbox') {
+                                saveTarget.addEventListener('change', () => { persistValue(saveTarget.checked, [saveTarget]); });
+                            } else if (saveTarget.tagName && saveTarget.tagName.toLowerCase() === 'select') {
+                                saveTarget.addEventListener('change', () => { persistValue(saveTarget.value, [saveTarget]); });
+                            } else if (saveTarget.tagName && saveTarget.tagName.toLowerCase() === 'textarea') {
                                 // Ctrl+Enter to submit JSON/textarea; blur to auto-save
                                 let debounced = null;
-                                inputEl.addEventListener('keydown', (ev) => {
+                                saveTarget.addEventListener('keydown', (ev) => {
                                     if (ev.key === 'Enter' && (ev.ctrlKey || ev.metaKey)) {
                                         ev.preventDefault();
-                                        persistValue(inputEl.value, [inputEl]);
+                                        persistValue(saveTarget.value, [saveTarget]);
                                     }
                                     // simple debounce to avoid excessive saves on blur
                                     if (debounced) clearTimeout(debounced);
                                 });
-                                inputEl.addEventListener('blur', () => { debounced = setTimeout(() => persistValue(inputEl.value, [inputEl]), 150); });
+                                saveTarget.addEventListener('blur', () => { debounced = setTimeout(() => persistValue(saveTarget.value, [saveTarget]), 150); });
                             } else {
                                 // Default: single-line inputs — Enter to save, blur to save
-                                inputEl.addEventListener('keydown', (ev) => {
+                                saveTarget.addEventListener('keydown', (ev) => {
                                     if (ev.key === 'Enter' && !ev.shiftKey && !ev.ctrlKey && !ev.metaKey) {
                                         ev.preventDefault();
-                                        persistValue(inputEl.value, [inputEl]);
+                                        persistValue(saveTarget.value, [saveTarget]);
                                     }
                                 });
-                                inputEl.addEventListener('blur', () => { persistValue(inputEl.value, [inputEl]); });
+                                saveTarget.addEventListener('blur', () => { persistValue(saveTarget.value, [saveTarget]); });
                             }
                         }
 
@@ -2564,12 +2621,14 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                     const componentsCortexSummaryEl = document.getElementById('components-cortex-summary');
                     const componentsCortexListEl = document.getElementById('components-cortex-list');
                     const componentsInterfacesListEl = document.getElementById('components-interfaces-list');
+                    // Classic vertical plugins list (legacy) OR the new two-column banner list.
                     const componentsPluginsListEl = document.getElementById('components-plugins-list');
+                    const pluginsBannerListEl = document.getElementById('plugins-banner-list');
                     const componentsVoxListEl = document.getElementById('components-vox-list');
                     const componentsAurisListEl = document.getElementById('components-auris-list');
                     const componentsLiveListEl = document.getElementById('components-live-list');
                     const componentsIrisListEl = document.getElementById('components-iris-list');
-                    if (!componentsCortexListEl && !componentsInterfacesListEl && !componentsPluginsListEl && !componentsVoxListEl && !componentsAurisListEl && !componentsLiveListEl && !componentsIrisListEl) return;
+                    if (!componentsCortexListEl && !componentsInterfacesListEl && !componentsPluginsListEl && !pluginsBannerListEl && !componentsVoxListEl && !componentsAurisListEl && !componentsLiveListEl && !componentsIrisListEl) return;
                     const [res, cfgRes] = await Promise.all([
                         fetch('/api/components'),
                         fetch('/api/config').catch(() => null),
@@ -3001,6 +3060,178 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                         }
                     }
 
+                    // Shared config-row builder used by both the classic details list and
+                    // the two-column plugins detail pane. `item` supplies optional context
+                    // (e.g. supported_models for combobox inputs).
+                    const makeCfgRow = (ci, item) => {
+                        item = item || {};
+                        const row = document.createElement('div');
+                        row.style.cssText = 'display:flex; flex-direction:column; gap:3px; margin-bottom:10px;';
+
+                        const lbl = document.createElement('label');
+                        lbl.style.cssText = 'font-size:0.88rem; font-weight:600; color:var(--text);';
+                        lbl.textContent = ci.label || ci.key;
+                        row.appendChild(lbl);
+
+                        if (ci.description) {
+                            const helpText = document.createElement('div');
+                            helpText.style.cssText = 'font-size:0.78rem; color:var(--muted); margin-bottom:2px;';
+                            helpText.textContent = ci.description;
+                            row.appendChild(helpText);
+                        }
+
+                        const val = ci.value === null || ci.value === undefined ? '' : ci.value;
+                        const editable = !!ci.editable && !ci.env_override;
+
+                        const saveCfg = async (newVal, el) => {
+                            try {
+                                if (el) el.disabled = true;
+                                const r = await fetch('/api/config', {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({ key: ci.key, value: newVal })
+                                });
+                                if (!r.ok) {
+                                    const t = await r.text();
+                                    window.showToast && window.showToast('Save failed: ' + t, true);
+                                } else {
+                                    const out = await r.json();
+                                    window.showToast && window.showToast('Saved', false);
+                                    if (out && out.requires_reload) {
+                                        window.showToast && window.showToast(out.message || 'Reload recommended', false);
+                                    }
+                                }
+                            } catch (e) {
+                                window.showToast && window.showToast('Save failed', true);
+                            } finally {
+                                if (el) el.disabled = !editable;
+                            }
+                        };
+
+                        let inputEl = null;
+
+                        if (ci.ui_type === 'bool' || ci.value_type === 'bool') {
+                            const wrap = document.createElement('div');
+                            wrap.style.cssText = 'display:flex; align-items:center; gap:8px;';
+                            const cb = document.createElement('input');
+                            cb.type = 'checkbox';
+                            cb.checked = val === true || val === 1 || val === '1' || val === 'true';
+                            cb.disabled = !editable;
+                            cb.id = `comp-cfg-${ci.key}`;
+                            const toggleLbl = document.createElement('label');
+                            toggleLbl.className = 'toggle-switch';
+                            toggleLbl.setAttribute('for', cb.id);
+                            const slider = document.createElement('span');
+                            slider.className = 'toggle-slider';
+                            toggleLbl.appendChild(slider);
+                            cb.addEventListener('change', () => saveCfg(cb.checked, cb));
+                            wrap.appendChild(cb);
+                            wrap.appendChild(toggleLbl);
+                            inputEl = wrap;
+                        } else if (ci.ui_type === 'select' && Array.isArray(ci.options) && ci.options.length) {
+                            const sel = document.createElement('select');
+                            sel.style.cssText = 'padding:6px 10px; background:var(--background); color:var(--text); border:1px solid var(--primary); border-radius:6px; font-size:0.88rem; max-width:400px;';
+                            ci.options.forEach(opt => {
+                                const o = document.createElement('option');
+                                o.value = opt; o.textContent = opt;
+                                if (String(val) === String(opt)) o.selected = true;
+                                sel.appendChild(o);
+                            });
+                            sel.disabled = !editable;
+                            sel.addEventListener('change', () => saveCfg(sel.value, sel));
+                            inputEl = sel;
+                        } else if (ci.ui_type === 'textarea' || (ci.value_type === 'json' && ci.ui_type !== 'tags')) {
+                            const ta = document.createElement('textarea');
+                            ta.rows = 3;
+                            ta.style.cssText = 'width:100%; max-width:500px; padding:6px 10px; background:var(--background); color:var(--text); border:1px solid var(--border,#444); border-radius:6px; font-family:monospace; font-size:0.85rem; resize:vertical;';
+                            ta.value = typeof val === 'string' ? val : JSON.stringify(val, null, 2);
+                            ta.disabled = !editable;
+                            ta.addEventListener('keydown', (ev) => {
+                                if (ev.key === 'Enter' && (ev.ctrlKey || ev.metaKey)) { ev.preventDefault(); saveCfg(ta.value, ta); }
+                            });
+                            ta.addEventListener('blur', () => saveCfg(ta.value, ta));
+                            inputEl = ta;
+                        } else if (ci.ui_type === 'combobox') {
+                            // Searchable dropdown with free-text fallback
+                            const models = (item && Array.isArray(item.supported_models)) ? item.supported_models : [];
+                            const wrap = document.createElement('div');
+                            wrap.style.cssText = 'position:relative; max-width:400px; width:100%;';
+                            const inp = document.createElement('input');
+                            inp.type = 'text';
+                            inp.autocomplete = 'off';
+                            inp.style.cssText = 'padding:6px 10px; background:var(--background); color:var(--text); border:1px solid var(--primary); border-radius:6px; font-size:0.88rem; width:100%; box-sizing:border-box;';
+                            inp.value = typeof val === 'string' ? val : JSON.stringify(val);
+                            inp.disabled = !editable;
+                            inp.placeholder = models.length ? `Search ${models.length} models…` : '';
+                            wrap.appendChild(inp);
+
+                            if (models.length) {
+                                const dd = document.createElement('div');
+                                dd.style.cssText = 'display:none; position:absolute; top:100%; left:0; right:0; max-height:220px; overflow-y:auto; border:1px solid var(--border,#444); border-radius:6px; background:var(--bg-card,#1a1a2e); z-index:999; margin-top:2px;';
+                                const MAX_SHOW = 60;
+                                const renderDd = (filter) => {
+                                    dd.innerHTML = '';
+                                    const q = (filter || '').toLowerCase();
+                                    let count = 0;
+                                    for (const m of models) {
+                                        if (q && !m.toLowerCase().includes(q)) continue;
+                                        if (++count > MAX_SHOW) {
+                                            const more = document.createElement('div');
+                                            more.style.cssText = 'padding:0.3rem 0.6rem; color:var(--muted); font-size:0.78rem;';
+                                            more.textContent = `${models.length - MAX_SHOW}+ more — refine search`;
+                                            dd.appendChild(more);
+                                            break;
+                                        }
+                                        const rowEl = document.createElement('div');
+                                        rowEl.textContent = m;
+                                        rowEl.style.cssText = 'padding:0.35rem 0.6rem; cursor:pointer; font-size:0.85rem; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;';
+                                        if (m === val) rowEl.style.fontWeight = '700';
+                                        rowEl.addEventListener('mouseenter', () => { rowEl.style.background = 'var(--accent-dim, rgba(107,254,254,0.12))'; });
+                                        rowEl.addEventListener('mouseleave', () => { rowEl.style.background = ''; });
+                                        rowEl.addEventListener('mousedown', (ev) => {
+                                            ev.preventDefault();
+                                            inp.value = m;
+                                            dd.style.display = 'none';
+                                            saveCfg(m, inp);
+                                        });
+                                        dd.appendChild(rowEl);
+                                    }
+                                    if (count === 0) {
+                                        const empty = document.createElement('div');
+                                        empty.style.cssText = 'padding:0.4rem 0.6rem; color:var(--muted); font-size:0.82rem;';
+                                        empty.textContent = 'No matching models';
+                                        dd.appendChild(empty);
+                                    }
+                                };
+                                inp.addEventListener('focus', () => { renderDd(inp.value); dd.style.display = ''; });
+                                inp.addEventListener('input', () => { renderDd(inp.value); });
+                                inp.addEventListener('blur', () => { setTimeout(() => { dd.style.display = 'none'; }, 180); });
+                                wrap.appendChild(dd);
+                            }
+                            inp.addEventListener('keydown', (ev) => {
+                                if (ev.key === 'Enter') { ev.preventDefault(); saveCfg(inp.value, inp); }
+                            });
+                            inputEl = wrap;
+                        } else {
+                            // Default: text / password / number input
+                            const inp = document.createElement('input');
+                            inp.type = ci.ui_type === 'password' ? 'password'
+                                : (ci.value_type === 'int' || ci.value_type === 'float' || ci.ui_type === 'number') ? 'number' : 'text';
+                            inp.autocomplete = ci.ui_type === 'password' ? 'new-password' : 'off';
+                            inp.style.cssText = 'padding:6px 10px; background:var(--background); color:var(--text); border:1px solid var(--border,#444); border-radius:6px; font-size:0.88rem; max-width:400px; width:100%;';
+                            inp.value = typeof val === 'string' ? val : JSON.stringify(val);
+                            inp.disabled = !editable;
+                            inp.addEventListener('keydown', (ev) => {
+                                if (ev.key === 'Enter') { ev.preventDefault(); saveCfg(inp.value, inp); }
+                            });
+                            inp.addEventListener('blur', () => saveCfg(inp.value, inp));
+                            inputEl = ci.ui_type === 'password' ? window.wrapPasswordWithToggle(inp) : inp;
+                        }
+
+                        if (inputEl) row.appendChild(inputEl);
+                        return row;
+                    };
+
                     const renderDetailsList = (items, container) => {
                         container.innerHTML = '';
                         if (!items || !items.length) {
@@ -3099,69 +3330,20 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                                 }
                             } catch (e) { /* ignore UI helper errors */ }
 
-                            // Special: "Run Now" button for the Grillo diary consolidator.
-                            // Enqueues a diary_consolidation beat immediately without
-                            // changing the day-selection logic (never today; most recent
-                            // unconsolidated day first).
+                            // Metadata-driven "Run Now" button. A component declares
+                            // `runnable: true` in its metadata (optionally with a custom
+                            // `run_label` / `run_action`) to expose an on-demand trigger.
+                            // This replaces the previous hardcoded, name-keyed buttons so
+                            // any component can opt in without touching the UI.
                             try {
-                                if (item && item.name === 'grillo_diary_consolidator') {
+                                if (item && item.runnable) {
                                     const runBtn = document.createElement('button');
                                     runBtn.className = 'pill';
-                                    runBtn.textContent = 'Run Now';
-                                    runBtn.title = 'Enqueue a diary consolidation beat now';
+                                    runBtn.textContent = item.run_label || 'Run Now';
+                                    runBtn.title = item.run_title || 'Trigger this component now';
                                     runBtn.style.marginLeft = '8px';
-                                    runBtn.addEventListener('click', async (ev) => {
-                                        ev.stopPropagation();
-                                        ev.preventDefault();
-                                        runBtn.disabled = true;
-                                        const originalText = runBtn.textContent;
-                                        runBtn.textContent = 'Scheduling…';
-                                        try {
-                                            const resp = await fetch('/api/components/run', {
-                                                method: 'POST',
-                                                headers: { 'Content-Type': 'application/json' },
-                                                body: JSON.stringify({ name: 'grillo_diary_consolidator', action: 'run_now' })
-                                            });
-                                            let body = null;
-                                            try { body = await resp.json(); } catch (e) { /* ignore */ }
-                                            const result = (body && body.result) || {};
-                                            if (resp.ok && result.status === 'scheduled') {
-                                                runBtn.textContent = `Scheduled (priority ${result.priority})`;
-                                            } else if (result.status === 'empty') {
-                                                runBtn.textContent = 'Nothing to do';
-                                            } else if (result.status === 'disabled') {
-                                                runBtn.textContent = 'Disabled';
-                                            } else {
-                                                const msg = (result && result.message) || (body && body.detail) || 'Failed';
-                                                runBtn.textContent = 'Error';
-                                                console.error('[synth_webui] Diary consolidation Run Now failed:', msg);
-                                                alert(`Diary consolidation Run Now failed: ${msg}`);
-                                            }
-                                        } catch (err) {
-                                            console.error('[synth_webui] Diary consolidation Run Now request failed', err);
-                                            runBtn.textContent = 'Error';
-                                            alert('Diary consolidation Run Now request failed.');
-                                        } finally {
-                                            setTimeout(() => {
-                                                runBtn.textContent = originalText;
-                                                runBtn.disabled = false;
-                                            }, 4000);
-                                        }
-                                    });
-                                    summaryActions.appendChild(runBtn);
-                                }
-                            } catch (e) { /* ignore UI helper errors */ }
-
-                            // Special: "Run Now" button for the Grillo self-growth agent.
-                            // Runs the weekly self-growth reflection immediately,
-                            // bypassing the schedule and the "off" mode gate.
-                            try {
-                                if (item && item.name === 'grillo_growth') {
-                                    const runBtn = document.createElement('button');
-                                    runBtn.className = 'pill';
-                                    runBtn.textContent = 'Run Now';
-                                    runBtn.title = 'Run the self-growth reflection now';
-                                    runBtn.style.marginLeft = '8px';
+                                    const runAction = item.run_action || 'run_now';
+                                    const runName = item.name || '';
                                     runBtn.addEventListener('click', async (ev) => {
                                         ev.stopPropagation();
                                         ev.preventDefault();
@@ -3172,23 +3354,30 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                                             const resp = await fetch('/api/components/run', {
                                                 method: 'POST',
                                                 headers: { 'Content-Type': 'application/json' },
-                                                body: JSON.stringify({ name: 'grillo_growth', action: 'run_now' })
+                                                body: JSON.stringify({ name: runName, action: runAction })
                                             });
                                             let body = null;
                                             try { body = await resp.json(); } catch (e) { /* ignore */ }
                                             const result = (body && body.result) || {};
-                                            if (resp.ok && result.status === 'done') {
-                                                runBtn.textContent = 'Done';
+                                            const st = result.status;
+                                            if (resp.ok && (st === 'done' || st === 'scheduled' || st === 'ok')) {
+                                                runBtn.textContent = st === 'scheduled' && result.priority != null
+                                                    ? `Scheduled (priority ${result.priority})`
+                                                    : 'Done';
+                                            } else if (st === 'empty') {
+                                                runBtn.textContent = 'Nothing to do';
+                                            } else if (st === 'disabled') {
+                                                runBtn.textContent = 'Disabled';
                                             } else {
                                                 const msg = (result && result.message) || (body && body.detail) || 'Failed';
                                                 runBtn.textContent = 'Error';
-                                                console.error('[synth_webui] Self-growth Run Now failed:', msg);
-                                                alert(`Self-growth Run Now failed: ${msg}`);
+                                                console.error('[synth_webui] Run Now failed:', msg);
+                                                if (window.showToast) window.showToast('Run Now failed: ' + msg, true);
                                             }
                                         } catch (err) {
-                                            console.error('[synth_webui] Self-growth Run Now request failed', err);
+                                            console.error('[synth_webui] Run Now request failed', err);
                                             runBtn.textContent = 'Error';
-                                            alert('Self-growth Run Now request failed.');
+                                            if (window.showToast) window.showToast('Run Now request failed', true);
                                         } finally {
                                             setTimeout(() => {
                                                 runBtn.textContent = originalText;
@@ -3281,173 +3470,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                                 const normalCfg = cfgItems.filter(ci => !ci.advanced);
                                 const advancedCfg = cfgItems.filter(ci => ci.advanced);
 
-                                const buildCfgRow = (ci) => {
-                                    const row = document.createElement('div');
-                                    row.style.cssText = 'display:flex; flex-direction:column; gap:3px; margin-bottom:10px;';
-
-                                    const lbl = document.createElement('label');
-                                    lbl.style.cssText = 'font-size:0.88rem; font-weight:600; color:var(--text);';
-                                    lbl.textContent = ci.label || ci.key;
-                                    row.appendChild(lbl);
-
-                                    if (ci.description) {
-                                        const helpText = document.createElement('div');
-                                        helpText.style.cssText = 'font-size:0.78rem; color:var(--muted); margin-bottom:2px;';
-                                        helpText.textContent = ci.description;
-                                        row.appendChild(helpText);
-                                    }
-
-                                    const val = ci.value === null || ci.value === undefined ? '' : ci.value;
-                                    const editable = !!ci.editable && !ci.env_override;
-
-                                    const saveCfg = async (newVal, el) => {
-                                        try {
-                                            if (el) el.disabled = true;
-                                            const r = await fetch('/api/config', {
-                                                method: 'POST',
-                                                headers: { 'Content-Type': 'application/json' },
-                                                body: JSON.stringify({ key: ci.key, value: newVal })
-                                            });
-                                            if (!r.ok) {
-                                                const t = await r.text();
-                                                window.showToast && window.showToast('Save failed: ' + t, true);
-                                            } else {
-                                                const out = await r.json();
-                                                window.showToast && window.showToast('Saved', false);
-                                                if (out && out.requires_reload) {
-                                                    window.showToast && window.showToast(out.message || 'Reload recommended', false);
-                                                }
-                                            }
-                                        } catch (e) {
-                                            window.showToast && window.showToast('Save failed', true);
-                                        } finally {
-                                            if (el) el.disabled = !editable;
-                                        }
-                                    };
-
-                                    let inputEl = null;
-
-                                    if (ci.ui_type === 'bool' || ci.value_type === 'bool') {
-                                        const wrap = document.createElement('div');
-                                        wrap.style.cssText = 'display:flex; align-items:center; gap:8px;';
-                                        const cb = document.createElement('input');
-                                        cb.type = 'checkbox';
-                                        cb.checked = val === true || val === 1 || val === '1' || val === 'true';
-                                        cb.disabled = !editable;
-                                        cb.id = `comp-cfg-${ci.key}`;
-                                        const toggleLbl = document.createElement('label');
-                                        toggleLbl.className = 'toggle-switch';
-                                        toggleLbl.setAttribute('for', cb.id);
-                                        const slider = document.createElement('span');
-                                        slider.className = 'toggle-slider';
-                                        toggleLbl.appendChild(slider);
-                                        cb.addEventListener('change', () => saveCfg(cb.checked, cb));
-                                        wrap.appendChild(cb);
-                                        wrap.appendChild(toggleLbl);
-                                        inputEl = wrap;
-                                    } else if (ci.ui_type === 'select' && Array.isArray(ci.options) && ci.options.length) {
-                                        const sel = document.createElement('select');
-                                        sel.style.cssText = 'padding:6px 10px; background:var(--background); color:var(--text); border:1px solid var(--primary); border-radius:6px; font-size:0.88rem; max-width:400px;';
-                                        ci.options.forEach(opt => {
-                                            const o = document.createElement('option');
-                                            o.value = opt; o.textContent = opt;
-                                            if (String(val) === String(opt)) o.selected = true;
-                                            sel.appendChild(o);
-                                        });
-                                        sel.disabled = !editable;
-                                        sel.addEventListener('change', () => saveCfg(sel.value, sel));
-                                        inputEl = sel;
-                                    } else if (ci.ui_type === 'textarea' || (ci.value_type === 'json' && ci.ui_type !== 'tags')) {
-                                        const ta = document.createElement('textarea');
-                                        ta.rows = 3;
-                                        ta.style.cssText = 'width:100%; max-width:500px; padding:6px 10px; background:var(--background); color:var(--text); border:1px solid var(--border,#444); border-radius:6px; font-family:monospace; font-size:0.85rem; resize:vertical;';
-                                        ta.value = typeof val === 'string' ? val : JSON.stringify(val, null, 2);
-                                        ta.disabled = !editable;
-                                        ta.addEventListener('keydown', (ev) => {
-                                            if (ev.key === 'Enter' && (ev.ctrlKey || ev.metaKey)) { ev.preventDefault(); saveCfg(ta.value, ta); }
-                                        });
-                                        ta.addEventListener('blur', () => saveCfg(ta.value, ta));
-                                        inputEl = ta;
-                                    } else if (ci.ui_type === 'combobox') {
-                                        // Searchable dropdown with free-text fallback
-                                        const models = (item && Array.isArray(item.supported_models)) ? item.supported_models : [];
-                                        const wrap = document.createElement('div');
-                                        wrap.style.cssText = 'position:relative; max-width:400px; width:100%;';
-                                        const inp = document.createElement('input');
-                                        inp.type = 'text';
-                                        inp.autocomplete = 'off';
-                                        inp.style.cssText = 'padding:6px 10px; background:var(--background); color:var(--text); border:1px solid var(--primary); border-radius:6px; font-size:0.88rem; width:100%; box-sizing:border-box;';
-                                        inp.value = typeof val === 'string' ? val : JSON.stringify(val);
-                                        inp.disabled = !editable;
-                                        inp.placeholder = models.length ? `Search ${models.length} models…` : '';
-                                        wrap.appendChild(inp);
-
-                                        if (models.length) {
-                                            const dd = document.createElement('div');
-                                            dd.style.cssText = 'display:none; position:absolute; top:100%; left:0; right:0; max-height:220px; overflow-y:auto; border:1px solid var(--border,#444); border-radius:6px; background:var(--bg-card,#1a1a2e); z-index:999; margin-top:2px;';
-                                            const MAX_SHOW = 60;
-                                            const renderDd = (filter) => {
-                                                dd.innerHTML = '';
-                                                const q = (filter || '').toLowerCase();
-                                                let count = 0;
-                                                for (const m of models) {
-                                                    if (q && !m.toLowerCase().includes(q)) continue;
-                                                    if (++count > MAX_SHOW) {
-                                                        const more = document.createElement('div');
-                                                        more.style.cssText = 'padding:0.3rem 0.6rem; color:var(--muted); font-size:0.78rem;';
-                                                        more.textContent = `${models.length - MAX_SHOW}+ more — refine search`;
-                                                        dd.appendChild(more);
-                                                        break;
-                                                    }
-                                                    const row = document.createElement('div');
-                                                    row.textContent = m;
-                                                    row.style.cssText = 'padding:0.35rem 0.6rem; cursor:pointer; font-size:0.85rem; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;';
-                                                    if (m === val) row.style.fontWeight = '700';
-                                                    row.addEventListener('mouseenter', () => { row.style.background = 'var(--accent-dim, rgba(107,254,254,0.12))'; });
-                                                    row.addEventListener('mouseleave', () => { row.style.background = ''; });
-                                                    row.addEventListener('mousedown', (ev) => {
-                                                        ev.preventDefault();
-                                                        inp.value = m;
-                                                        dd.style.display = 'none';
-                                                        saveCfg(m, inp);
-                                                    });
-                                                    dd.appendChild(row);
-                                                }
-                                                if (count === 0) {
-                                                    const empty = document.createElement('div');
-                                                    empty.style.cssText = 'padding:0.4rem 0.6rem; color:var(--muted); font-size:0.82rem;';
-                                                    empty.textContent = 'No matching models';
-                                                    dd.appendChild(empty);
-                                                }
-                                            };
-                                            inp.addEventListener('focus', () => { renderDd(inp.value); dd.style.display = ''; });
-                                            inp.addEventListener('input', () => { renderDd(inp.value); });
-                                            inp.addEventListener('blur', () => { setTimeout(() => { dd.style.display = 'none'; }, 180); });
-                                            wrap.appendChild(dd);
-                                        }
-                                        inp.addEventListener('keydown', (ev) => {
-                                            if (ev.key === 'Enter') { ev.preventDefault(); saveCfg(inp.value, inp); }
-                                        });
-                                        inputEl = wrap;
-                                    } else {
-                                        // Default: text / password / number input
-                                        const inp = document.createElement('input');
-                                        inp.type = ci.ui_type === 'password' ? 'password'
-                                            : (ci.value_type === 'int' || ci.value_type === 'float' || ci.ui_type === 'number') ? 'number' : 'text';
-                                        inp.autocomplete = ci.ui_type === 'password' ? 'new-password' : 'off';
-                                        inp.style.cssText = 'padding:6px 10px; background:var(--background); color:var(--text); border:1px solid var(--border,#444); border-radius:6px; font-size:0.88rem; max-width:400px; width:100%;';
-                                        inp.value = typeof val === 'string' ? val : JSON.stringify(val);
-                                        inp.disabled = !editable;
-                                        inp.addEventListener('keydown', (ev) => {
-                                            if (ev.key === 'Enter') { ev.preventDefault(); saveCfg(inp.value, inp); }
-                                        });
-                                        inp.addEventListener('blur', () => saveCfg(inp.value, inp));
-                                        inputEl = inp;
-                                    }
-
-                                    if (inputEl) row.appendChild(inputEl);
-                                    return row;
-                                };
+                                const buildCfgRow = (ci) => makeCfgRow(ci, item);
 
                                 normalCfg.forEach(ci => cfgBody.appendChild(buildCfgRow(ci)));
 
@@ -3487,14 +3510,823 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                         });
                     };
 
+                    // ── Two-column plugins renderer (banner list + detail pane) ────
+                    // Minimal, dependency-free Markdown → HTML for guide.md content.
+                    // Supports headings, bold/italic, inline code, fenced code blocks,
+                    // links, unordered lists and paragraphs. All raw HTML is escaped
+                    // first, so injected markup cannot execute.
+                    const renderGuideMarkdown = (md) => {
+                        const esc = (s) => s
+                            .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+                        const inline = (s) => esc(s)
+                            .replace(/`([^`]+)`/g, (m, c) => `<code>${c}</code>`)
+                            .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+                            .replace(/\*([^*]+)\*/g, '<em>$1</em>')
+                            .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,
+                                '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+                        // A line that is nothing but a raw HTML block (an <img> logo,
+                        // an HTML comment, a <div>/<br> etc.) is not Markdown. The mini
+                        // parser cannot safely render arbitrary HTML, and many guides
+                        // carry a decorative `<img src="X.png" align="right" />` header
+                        // that points at an asset the WebUI does not serve. Rather than
+                        // escaping it into visible tag soup, skip such stand-alone HTML
+                        // lines entirely — the plugin icon is already shown in the
+                        // detail pane header.
+                        const isRawHtmlLine = (s) => {
+                            const t = s.trim();
+                            if (!t) return false;
+                            if (t.startsWith('<!--') && t.endsWith('-->')) return true;
+                            return /^<\/?(img|div|br|p|span|hr|figure|picture|source)\b[^>]*>?$/i.test(t);
+                        };
+                        const lines = String(md || '').replace(/\r\n/g, '\n').split('\n');
+                        const out = [];
+                        let inCode = false;
+                        let codeBuf = [];
+                        let listBuf = [];
+                        let paraBuf = [];
+                        let tableBuf = [];
+                        const flushPara = () => {
+                            if (paraBuf.length) { out.push('<p>' + inline(paraBuf.join(' ')) + '</p>'); paraBuf = []; }
+                        };
+                        const flushList = () => {
+                            if (listBuf.length) {
+                                out.push('<ul>' + listBuf.map(li => '<li>' + inline(li) + '</li>').join('') + '</ul>');
+                                listBuf = [];
+                            }
+                        };
+                        // Split a GitHub-flavored table row into cell strings, honouring
+                        // leading/trailing pipes and trimming surrounding whitespace.
+                        const splitRow = (s) => s.replace(/^\s*\|/, '').replace(/\|\s*$/, '').split('|').map(c => c.trim());
+                        // A separator row is like |---|:--:|---:| (dashes with optional colons).
+                        const isSep = (s) => /^\s*\|?\s*:?-{1,}:?\s*(\|\s*:?-{1,}:?\s*)*\|?\s*$/.test(s) && s.includes('-');
+                        const flushTable = () => {
+                            if (!tableBuf.length) return;
+                            const header = splitRow(tableBuf[0]);
+                            const bodyRows = tableBuf.slice(2);
+                            let html = '<table><thead><tr>' +
+                                header.map(c => '<th>' + inline(c) + '</th>').join('') +
+                                '</tr></thead><tbody>';
+                            for (const r of bodyRows) {
+                                const cells = splitRow(r);
+                                html += '<tr>' + cells.map(c => '<td>' + inline(c) + '</td>').join('') + '</tr>';
+                            }
+                            html += '</tbody></table>';
+                            out.push(html);
+                            tableBuf = [];
+                        };
+                        const looksLikeRow = (s) => s.trim().includes('|');
+                        for (let i = 0; i < lines.length; i++) {
+                            const line = lines[i];
+                            if (line.trim().startsWith('```')) {
+                                if (inCode) { out.push('<pre><code>' + esc(codeBuf.join('\n')) + '</code></pre>'); codeBuf = []; inCode = false; }
+                                else { flushPara(); flushList(); flushTable(); inCode = true; }
+                                continue;
+                            }
+                            if (inCode) { codeBuf.push(line); continue; }
+                            // Stand-alone raw HTML line (decorative logo, comment,
+                            // block tag): drop it instead of rendering escaped tags.
+                            if (isRawHtmlLine(line)) { flushPara(); flushList(); flushTable(); continue; }
+                            // Table: a header row immediately followed by a separator row.
+                            if (looksLikeRow(line) && i + 1 < lines.length && isSep(lines[i + 1])) {
+                                flushPara(); flushList(); flushTable();
+                                tableBuf.push(line, lines[i + 1]);
+                                i += 1;
+                                while (i + 1 < lines.length && looksLikeRow(lines[i + 1]) && lines[i + 1].trim() !== '') {
+                                    tableBuf.push(lines[i + 1]);
+                                    i += 1;
+                                }
+                                flushTable();
+                                continue;
+                            }
+                            const h = line.match(/^(#{1,6})\s+(.*)$/);
+                            if (h) { flushPara(); flushList(); flushTable(); const lvl = h[1].length; out.push(`<h${lvl}>${inline(h[2])}</h${lvl}>`); continue; }
+                            const li = line.match(/^\s*[-*]\s+(.*)$/);
+                            if (li) { flushPara(); flushTable(); listBuf.push(li[1]); continue; }
+                            if (line.trim() === '') { flushPara(); flushList(); flushTable(); continue; }
+                            flushList();
+                            paraBuf.push(line.trim());
+                        }
+                        if (inCode) out.push('<pre><code>' + esc(codeBuf.join('\n')) + '</code></pre>');
+                        flushPara();
+                        flushList();
+                        flushTable();
+                        return out.join('\n');
+                    };
+
+                    const LOGO_FALLBACK = '/static/synth_logo_bg.png';
+                    // Preferred category ordering; unknown categories fall after these.
+                    const CATEGORY_ORDER = ['Core', 'Interfaces', 'Grillo', 'Vessels', 'Agent', 'Recon', 'Various'];
+
+                    // Human-readable descriptions shown in the detail pane when a
+                    // category header is selected. Keys must match plugin category names.
+                    const CATEGORY_DESCRIPTIONS = {
+                        'Core': 'Core plugins provide the essential building blocks of SyntH: the message chain, action parsing, validation, memory, emotions and other subsystems the rest of the system depends on. These are usually required and cannot be disabled.',
+                        'Interfaces': 'Interfaces connect SyntH to the outside world (Telegram, Discord, Matrix, the OpenAI-compatible API and more). They forward incoming messages into the single message chain and deliver outgoing responses back to each platform.',
+                        'Grillo': 'G.R.I.L.L.O. (Generator for Reflective Inner Loop & Logical Observation) is SyntH\u2019s autonomous "inner life". Instead of only reacting to messages, it periodically generates "beats" \u2014 self-reflection, memory consolidation, curiosity, dreams and relationship check-ins \u2014 giving the persona unprompted moments to think, remember and act on its own. The name nods to Pinocchio\u2019s talking cricket ("grillo parlante").',
+                        'Vessels': 'Vessels are embodiment and presence plugins \u2014 avatars, voice and the ways SyntH inhabits a body or space. They handle how the persona is seen and heard rather than what it thinks.',
+                        'Agent': 'Agent plugins expose SyntH\u2019s agentic tools \u2014 reading and writing files, searching, running shell commands and spawning drones \u2014 within a bounded reasoning loop. They let the persona take multi-step actions to accomplish tasks.',
+                        'Recon': 'Recon plugins gather and evaluate external information \u2014 search, lookup and debrief \u2014 so SyntH can ground its answers in current context.',
+                        'Various': 'Miscellaneous plugins that don\u2019t belong to a specific category. Small utilities and extras that extend SyntH in focused ways.',
+                    };
+
+                    const renderPluginDetail = (item, pane, onBack) => {
+                        pane.innerHTML = '';
+
+                        // Mobile-only "back to list" button (top-left, accent colour).
+                        // Hidden on desktop via CSS; on mobile it returns to the list.
+                        if (typeof onBack === 'function') {
+                            const backBtn = document.createElement('button');
+                            backBtn.type = 'button';
+                            backBtn.className = 'plugin-detail-back';
+                            const arrow = document.createElement('span');
+                            arrow.className = 'plugin-detail-back-arrow';
+                            arrow.textContent = '\u2190';
+                            backBtn.appendChild(arrow);
+                            backBtn.appendChild(document.createTextNode('Plugins'));
+                            backBtn.addEventListener('click', () => onBack());
+                            pane.appendChild(backBtn);
+                        }
+
+                        const title = document.createElement('div');
+                        title.className = 'plugin-detail-title';
+                        const img = document.createElement('img');
+                        img.src = item.icon_url || `/api/plugins/${encodeURIComponent(item.name)}/icon`;
+                        img.alt = '';
+                        img.onerror = () => { img.onerror = null; img.src = LOGO_FALLBACK; };
+                        title.appendChild(img);
+                        const h = document.createElement('h3');
+                        h.style.margin = '0';
+                        h.textContent = item.display_name || item.name || 'Plugin';
+                        title.appendChild(h);
+                        pane.appendChild(title);
+
+                        if (item.is_mcp) {
+                            const note = document.createElement('div');
+                            note.className = 'plugin-mcp-note';
+                            note.textContent = 'MCP server (read-only)';
+                            pane.appendChild(note);
+                        }
+
+                        // Prefer the human-readable description over the technical
+                        // "Loaded from: <path>" status string. The backend puts the
+                        // module path in `details` for plugins, which used to shadow the
+                        // real description here; show the description first, then the
+                        // path as a small muted metadata line when present.
+                        const descText = item.description || '';
+                        if (descText) {
+                            const desc = document.createElement('div');
+                            desc.className = 'plugin-detail-desc';
+                            desc.textContent = descText;
+                            pane.appendChild(desc);
+                        }
+                        const detailsText = item.details || '';
+                        if (detailsText && detailsText !== descText) {
+                            const meta = document.createElement('div');
+                            meta.className = 'plugin-detail-meta';
+                            meta.textContent = detailsText;
+                            pane.appendChild(meta);
+                        }
+
+                        if (item.error) {
+                            const err = document.createElement('div');
+                            err.className = 'component-error';
+                            err.textContent = item.error;
+                            pane.appendChild(err);
+                        }
+
+                        // Optional metadata-driven "Run Now" button.
+                        if (item.runnable && !item.is_mcp) {
+                            const runBtn = document.createElement('button');
+                            runBtn.className = 'pill';
+                            runBtn.textContent = item.run_label || 'Run Now';
+                            runBtn.title = item.run_title || 'Trigger this plugin now';
+                            runBtn.style.marginTop = '6px';
+                            const runAction = item.run_action || 'run_now';
+                            const runName = item.name || '';
+                            runBtn.addEventListener('click', async () => {
+                                runBtn.disabled = true;
+                                const originalText = runBtn.textContent;
+                                runBtn.textContent = 'Running…';
+                                try {
+                                    const resp = await fetch('/api/components/run', {
+                                        method: 'POST',
+                                        headers: { 'Content-Type': 'application/json' },
+                                        body: JSON.stringify({ name: runName, action: runAction })
+                                    });
+                                    let body = null;
+                                    try { body = await resp.json(); } catch (e) { /* ignore */ }
+                                    const result = (body && body.result) || {};
+                                    const st = result.status;
+                                    if (resp.ok && (st === 'done' || st === 'scheduled' || st === 'ok')) {
+                                        runBtn.textContent = st === 'scheduled' && result.priority != null
+                                            ? `Scheduled (priority ${result.priority})` : 'Done';
+                                    } else if (st === 'empty') { runBtn.textContent = 'Nothing to do'; }
+                                    else if (st === 'disabled') { runBtn.textContent = 'Disabled'; }
+                                    else {
+                                        const msg = (result && result.message) || (body && body.detail) || 'Failed';
+                                        runBtn.textContent = 'Error';
+                                        if (window.showToast) window.showToast('Run Now failed: ' + msg, true);
+                                    }
+                                } catch (err) {
+                                    runBtn.textContent = 'Error';
+                                    if (window.showToast) window.showToast('Run Now request failed', true);
+                                } finally {
+                                    setTimeout(() => { runBtn.textContent = originalText; runBtn.disabled = false; }, 4000);
+                                }
+                            });
+                            pane.appendChild(runBtn);
+                        }
+
+                        // Guide (Markdown → HTML) when provided by the plugin.
+                        // Long guides are collapsed to their first block (preview) with a
+                        // "▶ More" toggle (styled like the Advanced section) that expands
+                        // the rest inline. Short guides render in full with no toggle.
+                        if (item.guide) {
+                            const guideWrap = document.createElement('div');
+                            guideWrap.className = 'plugin-detail-guide';
+
+                            const GUIDE_COLLAPSE_THRESHOLD = 600; // chars of raw markdown
+                            const fullMd = String(item.guide || '');
+
+                            // Split the raw markdown into a short preview (up to the first
+                            // blank line after some content) and the remainder.
+                            const splitGuidePreview = (md) => {
+                                const rawLines = md.replace(/\r\n/g, '\n').split('\n');
+                                let i = 0;
+                                // skip leading blank lines
+                                while (i < rawLines.length && rawLines[i].trim() === '') i++;
+                                const previewLines = [];
+                                let inFence = false;
+                                for (; i < rawLines.length; i++) {
+                                    const ln = rawLines[i];
+                                    if (ln.trim().startsWith('```')) inFence = !inFence;
+                                    if (!inFence && ln.trim() === '' && previewLines.length) { i++; break; }
+                                    previewLines.push(ln);
+                                }
+                                const rest = rawLines.slice(i).join('\n').trim();
+                                return { preview: previewLines.join('\n').trim(), rest };
+                            };
+
+                            if (fullMd.length > GUIDE_COLLAPSE_THRESHOLD) {
+                                const { preview, rest } = splitGuidePreview(fullMd);
+                                if (rest) {
+                                    const previewEl = document.createElement('div');
+                                    previewEl.innerHTML = renderGuideMarkdown(preview);
+                                    guideWrap.appendChild(previewEl);
+
+                                    const restEl = document.createElement('div');
+                                    restEl.style.display = 'none';
+                                    restEl.innerHTML = renderGuideMarkdown(rest);
+
+                                    const moreHeader = document.createElement('div');
+                                    moreHeader.style.cssText = 'display:flex; align-items:center; gap:6px; margin-top:8px; margin-bottom:6px; cursor:pointer; user-select:none;';
+                                    const moreIcon = document.createElement('span');
+                                    moreIcon.textContent = '▶';
+                                    moreIcon.style.cssText = 'font-size:0.65rem; transition:transform 0.2s;';
+                                    const moreLabel = document.createElement('span');
+                                    moreLabel.style.cssText = 'font-size:0.8rem; font-weight:600; text-transform:uppercase; letter-spacing:0.06em; color:var(--muted);';
+                                    moreLabel.textContent = 'More';
+                                    moreHeader.appendChild(moreIcon);
+                                    moreHeader.appendChild(moreLabel);
+                                    moreHeader.addEventListener('click', () => {
+                                        const open = restEl.style.display !== 'none';
+                                        restEl.style.display = open ? 'none' : '';
+                                        moreIcon.style.transform = open ? '' : 'rotate(90deg)';
+                                        moreLabel.textContent = open ? 'More' : 'Less';
+                                    });
+                                    guideWrap.appendChild(moreHeader);
+                                    guideWrap.appendChild(restEl);
+                                } else {
+                                    guideWrap.innerHTML = renderGuideMarkdown(fullMd);
+                                }
+                            } else {
+                                guideWrap.innerHTML = renderGuideMarkdown(fullMd);
+                            }
+                            pane.appendChild(guideWrap);
+                        }
+
+                        // Exposed variables (basic + Advanced collapsible), reusing the
+                        // shared config-row builder and the same /api/config wiring.
+                        // WEBUI_ACCENT_COLOR is intentionally hidden here: it already has
+                        // a dedicated control in the Settings tab, so showing it in the
+                        // plugin detail pane would be a confusing duplicate.
+                        const cfgItems = (_componentConfigMap[item.name] || []).filter(ci =>
+                            !(ci && ((ci.key === 'WEBUI_ACCENT_COLOR') || (ci.label && /accent\s*color/i.test(ci.label))))
+                        );
+                        if (cfgItems.length) {
+                            const section = document.createElement('div');
+                            section.className = 'plugin-vars-section';
+                            const normalCfg = cfgItems.filter(ci => !ci.advanced);
+                            const advancedCfg = cfgItems.filter(ci => ci.advanced);
+
+                            if (normalCfg.length) {
+                                const hh = document.createElement('div');
+                                hh.style.cssText = 'font-size:0.8rem; font-weight:600; text-transform:uppercase; letter-spacing:0.06em; color:var(--muted); margin-bottom:8px;';
+                                hh.textContent = 'Settings';
+                                section.appendChild(hh);
+                                normalCfg.forEach(ci => section.appendChild(makeCfgRow(ci, item)));
+                            }
+
+                            if (advancedCfg.length) {
+                                const advHeader = document.createElement('div');
+                                advHeader.style.cssText = 'display:flex; align-items:center; gap:6px; margin-top:8px; margin-bottom:6px; cursor:pointer; user-select:none;';
+                                const advIcon = document.createElement('span');
+                                advIcon.textContent = '▶';
+                                advIcon.style.cssText = 'font-size:0.65rem; transition:transform 0.2s;';
+                                const advLabel = document.createElement('span');
+                                advLabel.style.cssText = 'font-size:0.8rem; font-weight:600; text-transform:uppercase; letter-spacing:0.06em; color:var(--muted);';
+                                advLabel.textContent = 'Advanced';
+                                advHeader.appendChild(advIcon);
+                                advHeader.appendChild(advLabel);
+                                const advBody = document.createElement('div');
+                                advBody.style.display = 'none';
+                                advancedCfg.forEach(ci => advBody.appendChild(makeCfgRow(ci, item)));
+                                advHeader.addEventListener('click', () => {
+                                    const open = advBody.style.display !== 'none';
+                                    advBody.style.display = open ? 'none' : '';
+                                    advIcon.style.transform = open ? '' : 'rotate(90deg)';
+                                });
+                                section.appendChild(advHeader);
+                                section.appendChild(advBody);
+                            }
+                            pane.appendChild(section);
+                        }
+
+                        // Registered actions: a separator followed by the Synth
+                        // actions this plugin registers and their auto-exposed MCP
+                        // tools (each action is exposed as `synth_<action>`).
+                        const regActions = Array.isArray(item.actions) ? item.actions : [];
+                        const hasReconHook = item.has_recon === true;
+                        const hasDebriefHook = item.has_debrief === true;
+                        if (regActions.length || hasReconHook || hasDebriefHook) {
+                            const actSection = document.createElement('div');
+                            actSection.className = 'plugin-actions-section';
+                            actSection.style.cssText = 'margin-top:14px; padding-top:12px; border-top:1px solid var(--border, #444);';
+
+                            const secTitle = document.createElement('div');
+                            secTitle.style.cssText = 'font-size:0.8rem; font-weight:600; text-transform:uppercase; letter-spacing:0.06em; color:var(--muted); margin-bottom:10px;';
+                            secTitle.textContent = 'Registered actions';
+                            actSection.appendChild(secTitle);
+
+                            const makeSubGroup = (label, names) => {
+                                const grp = document.createElement('div');
+                                grp.style.cssText = 'margin-bottom:10px;';
+                                const gl = document.createElement('div');
+                                gl.style.cssText = 'font-size:0.72rem; font-weight:600; color:var(--muted); margin-bottom:4px;';
+                                gl.textContent = label;
+                                grp.appendChild(gl);
+                                names.forEach((n) => {
+                                    const code = document.createElement('code');
+                                    code.textContent = n;
+                                    code.style.cssText = 'display:block; font-size:0.82rem; padding:2px 0;';
+                                    grp.appendChild(code);
+                                });
+                                return grp;
+                            };
+
+                            const actionNames = regActions
+                                .map(a => a.type || a.name)
+                                .filter(Boolean);
+
+                            // Synth Actions
+                            if (actionNames.length) {
+                                actSection.appendChild(makeSubGroup('Synth Actions', actionNames));
+                            }
+
+                            // MCP tools — only for real plugins. MCP servers expose
+                            // their tools remotely and are not re-wrapped as synth_*.
+                            if (!item.is_mcp && actionNames.length) {
+                                const mcpNames = actionNames.map(n => `synth_${n}`);
+                                actSection.appendChild(makeSubGroup('MCP tools', mcpNames));
+                            }
+
+                            // Recon / debrief hooks — not actions from
+                            // get_supported_actions() but structural capabilities the
+                            // plugin registers (recon = get_recon_contributions or the
+                            // get_recon_key/instruction/parse trio; debrief = on_debrief).
+                            const hookNames = [];
+                            if (hasReconHook) hookNames.push('recon (brief)');
+                            if (hasDebriefHook) hookNames.push('debrief');
+                            if (hookNames.length) {
+                                actSection.appendChild(makeSubGroup('Hooks', hookNames));
+                            }
+
+                            pane.appendChild(actSection);
+                        }
+                    };
+
+                    // Renders a category "detail" (title + description) into the detail
+                    // pane, mirroring the look of a plugin detail so the two feel unified.
+                    const renderCategoryDetail = (cat, pane, onBack) => {
+                        pane.innerHTML = '';
+
+                        if (typeof onBack === 'function') {
+                            const backBtn = document.createElement('button');
+                            backBtn.type = 'button';
+                            backBtn.className = 'plugin-detail-back';
+                            const arrow = document.createElement('span');
+                            arrow.className = 'plugin-detail-back-arrow';
+                            arrow.textContent = '\u2190';
+                            backBtn.appendChild(arrow);
+                            backBtn.appendChild(document.createTextNode('Plugins'));
+                            backBtn.addEventListener('click', () => onBack());
+                            pane.appendChild(backBtn);
+                        }
+
+                        const title = document.createElement('div');
+                        title.className = 'plugin-detail-title';
+                        const h = document.createElement('h3');
+                        h.style.margin = '0';
+                        h.textContent = cat;
+                        title.appendChild(h);
+                        pane.appendChild(title);
+
+                        const descText = CATEGORY_DESCRIPTIONS[cat]
+                            || 'A group of related plugins.';
+                        const desc = document.createElement('div');
+                        desc.className = 'plugin-detail-desc';
+                        desc.textContent = descText;
+                        pane.appendChild(desc);
+                    };
+
+                    const renderPluginsTwoCol = (plugins, listEl) => {
+                        listEl.innerHTML = '';
+                        const detailContent = document.getElementById('plugin-detail-content');
+                        const detailEmpty = document.getElementById('plugin-detail-empty');
+                        if (!plugins || !plugins.length) {
+                            const empty = document.createElement('div');
+                            empty.className = 'meta';
+                            empty.textContent = 'No plugins found.';
+                            listEl.appendChild(empty);
+                            return;
+                        }
+
+                        // Group by category, honoring the preferred ordering.
+                        const groups = {};
+                        plugins.forEach((p) => {
+                            const cat = p.category || 'Various';
+                            (groups[cat] = groups[cat] || []).push(p);
+                        });
+                        const cats = Object.keys(groups).sort((a, b) => {
+                            const ia = CATEGORY_ORDER.indexOf(a);
+                            const ib = CATEGORY_ORDER.indexOf(b);
+                            if (ia === -1 && ib === -1) return a.localeCompare(b);
+                            if (ia === -1) return 1;
+                            if (ib === -1) return -1;
+                            return ia - ib;
+                        });
+
+                        const twoColEl = document.getElementById('plugins-two-col');
+                        // On mobile the list and the detail pane never show together:
+                        // opening a plugin flips the container into "detail" mode; the
+                        // back button (rendered inside the detail pane) flips it back.
+                        const showMobileList = () => {
+                            if (twoColEl) twoColEl.classList.remove('mobile-detail-open');
+                        };
+
+                        const clearSelection = () => {
+                            listEl.querySelectorAll('.plugin-banner.selected, .plugin-category-header.selected')
+                                .forEach(el => el.classList.remove('selected'));
+                        };
+
+                        const selectPlugin = (item, bannerEl, openDetail = true) => {
+                            clearSelection();
+                            if (bannerEl) bannerEl.classList.add('selected');
+                            if (detailEmpty) detailEmpty.hidden = true;
+                            if (detailContent) {
+                                detailContent.hidden = false;
+                                renderPluginDetail(item, detailContent, showMobileList);
+                            }
+                            // Only a real user selection navigates to the detail view on
+                            // mobile; the initial auto-select must leave the list visible.
+                            if (openDetail && twoColEl) twoColEl.classList.add('mobile-detail-open');
+                        };
+
+                        // Selecting a category header shows its description in the detail
+                        // pane (same layout style as a plugin), and navigates to it on mobile.
+                        const selectCategory = (cat, headerEl) => {
+                            clearSelection();
+                            if (headerEl) headerEl.classList.add('selected');
+                            if (detailEmpty) detailEmpty.hidden = true;
+                            if (detailContent) {
+                                detailContent.hidden = false;
+                                renderCategoryDetail(cat, detailContent, showMobileList);
+                            }
+                            if (twoColEl) twoColEl.classList.add('mobile-detail-open');
+                        };
+
+                        let firstBanner = null;
+                        let firstItem = null;
+                        cats.forEach((cat) => {
+                            const header = document.createElement('div');
+                            header.className = 'plugin-category-header';
+
+                            const caret = document.createElement('span');
+                            caret.className = 'plugin-category-caret';
+                            caret.textContent = '\u25be'; // ▾ (expanded by default)
+
+                            const label = document.createElement('span');
+                            label.className = 'plugin-category-label';
+                            label.textContent = cat;
+
+                            header.appendChild(caret);
+                            header.appendChild(label);
+                            header.setAttribute('role', 'button');
+                            header.tabIndex = 0;
+                            listEl.appendChild(header);
+
+                            // Wrapper holds all banners in this category so they can be
+                            // collapsed/expanded together.
+                            const groupWrap = document.createElement('div');
+                            groupWrap.className = 'plugin-category-group';
+                            listEl.appendChild(groupWrap);
+
+                            const setCollapsed = (collapsed) => {
+                                groupWrap.style.display = collapsed ? 'none' : '';
+                                caret.textContent = collapsed ? '\u25b8' : '\u25be'; // ▸ / ▾
+                                header.classList.toggle('collapsed', collapsed);
+                            };
+
+                            // Clicking the caret only toggles collapse; clicking the label
+                            // (or elsewhere on the header) selects the category description.
+                            caret.addEventListener('click', (ev) => {
+                                ev.stopPropagation();
+                                setCollapsed(groupWrap.style.display !== 'none');
+                            });
+                            header.addEventListener('click', () => selectCategory(cat, header));
+                            header.addEventListener('keydown', (ev) => {
+                                if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); selectCategory(cat, header); }
+                            });
+
+                            groups[cat].forEach((item) => {
+                                const banner = document.createElement('div');
+                                banner.className = 'plugin-banner';
+                                banner.setAttribute('role', 'option');
+                                banner.tabIndex = 0;
+
+                                const icon = document.createElement('img');
+                                icon.className = 'plugin-banner-icon';
+                                icon.src = item.icon_url || `/api/plugins/${encodeURIComponent(item.name)}/icon`;
+                                icon.alt = '';
+                                icon.onerror = () => { icon.onerror = null; icon.src = LOGO_FALLBACK; };
+                                banner.appendChild(icon);
+
+                                const nameEl = document.createElement('span');
+                                nameEl.className = 'plugin-banner-name';
+                                nameEl.textContent = item.display_name || item.name || 'Plugin';
+                                banner.appendChild(nameEl);
+
+                                const controls = document.createElement('span');
+                                controls.className = 'plugin-banner-controls';
+
+                                // Run marker: a blue play arrow shown for plugins that can
+                                // be launched manually (runnable, non-MCP), e.g. G.R.I.L.L.O.
+                                // Diary Consolidation. Clicking it triggers the plugin's run
+                                // action directly (same endpoint as the detail-pane button)
+                                // without opening the detail pane.
+                                if (item.runnable && !item.is_mcp) {
+                                    const runBtn = document.createElement('button');
+                                    runBtn.type = 'button';
+                                    runBtn.className = 'plugin-banner-run';
+                                    runBtn.title = item.run_title || item.run_label || 'Run this plugin now';
+                                    runBtn.setAttribute('aria-label', runBtn.title);
+                                    runBtn.innerHTML = '<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M8 5v14l11-7z" fill="currentColor"/></svg>';
+                                    const runAction = item.run_action || 'run_now';
+                                    const runName = item.name || '';
+                                    runBtn.addEventListener('click', async (ev) => {
+                                        ev.stopPropagation();
+                                        runBtn.disabled = true;
+                                        runBtn.classList.add('running');
+                                        try {
+                                            const resp = await fetch('/api/components/run', {
+                                                method: 'POST',
+                                                headers: { 'Content-Type': 'application/json' },
+                                                body: JSON.stringify({ name: runName, action: runAction })
+                                            });
+                                            let body = null;
+                                            try { body = await resp.json(); } catch (e) { /* ignore */ }
+                                            const result = (body && body.result) || {};
+                                            const st = result.status;
+                                            if (resp.ok && (st === 'done' || st === 'scheduled' || st === 'ok')) {
+                                                if (window.showToast) window.showToast((item.display_name || item.name) + ': ' + (st === 'scheduled' ? 'scheduled' : 'done'));
+                                            } else if (st === 'empty') {
+                                                if (window.showToast) window.showToast((item.display_name || item.name) + ': nothing to do');
+                                            } else {
+                                                const msg = (result && result.message) || (body && body.detail) || 'Failed';
+                                                if (window.showToast) window.showToast('Run failed: ' + msg, true);
+                                            }
+                                        } catch (err) {
+                                            if (window.showToast) window.showToast('Run request failed', true);
+                                        } finally {
+                                            runBtn.classList.remove('running');
+                                            runBtn.disabled = false;
+                                        }
+                                    });
+                                    controls.appendChild(runBtn);
+                                }
+
+                                // Toggle: hidden for MCP servers and for plugins that
+                                // cannot be disabled (core). POSTs to /api/components/toggle.
+                                if (!item.is_mcp && item.disable_allowed !== false) {
+                                    const toggle = document.createElement('label');
+                                    toggle.className = 'plugin-toggle';
+                                    const cb = document.createElement('input');
+                                    cb.type = 'checkbox';
+                                    cb.checked = item.enabled !== false;
+                                    const slider = document.createElement('span');
+                                    slider.className = 'slider';
+                                    toggle.appendChild(cb);
+                                    toggle.appendChild(slider);
+                                    toggle.addEventListener('click', (ev) => ev.stopPropagation());
+                                    cb.addEventListener('change', async (ev) => {
+                                        ev.stopPropagation();
+                                        cb.disabled = true;
+                                        const desired = cb.checked;
+                                        try {
+                                            const resp = await fetch('/api/components/toggle', {
+                                                method: 'POST',
+                                                headers: { 'Content-Type': 'application/json' },
+                                                body: JSON.stringify({ name: item.name, enabled: desired })
+                                            });
+                                            if (!resp.ok) {
+                                                let detail = 'HTTP ' + resp.status;
+                                                try { const b = await resp.json(); detail = b.detail || detail; } catch (e) { /* ignore */ }
+                                                throw new Error(detail);
+                                            }
+                                            if (window.showToast) window.showToast((desired ? 'Enabled ' : 'Disabled ') + (item.display_name || item.name));
+                                            await loadComponentsSummary();
+                                        } catch (err) {
+                                            cb.checked = !desired;
+                                            if (window.showToast) window.showToast('Toggle failed: ' + err.message, true);
+                                        } finally {
+                                            cb.disabled = false;
+                                        }
+                                    });
+                                    controls.appendChild(toggle);
+                                }
+
+                                const led = document.createElement('span');
+                                const ledColor = ['green', 'red', 'orange', 'grey'].includes(item.led) ? item.led : 'grey';
+                                led.className = 'plugin-led ' + ledColor;
+                                led.title = 'Status: ' + ledColor;
+                                controls.appendChild(led);
+
+                                banner.appendChild(controls);
+
+                                banner.addEventListener('click', () => selectPlugin(item, banner));
+                                banner.addEventListener('keydown', (ev) => {
+                                    if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); selectPlugin(item, banner); }
+                                });
+
+                                groupWrap.appendChild(banner);
+                                if (!firstBanner) { firstBanner = banner; firstItem = item; }
+                            });
+                        });
+
+                        // Auto-select the first plugin so the detail pane is never blank
+                        // on desktop. Pass openDetail=false so mobile stays on the list.
+                        if (firstBanner && firstItem) selectPlugin(firstItem, firstBanner, false);
+                    };
+
                     // Render engine list for the selected cortex kind
                     const toRenderKind = initialKind || 'llm_provider';
                     const byCortex = (data.cortex && data.cortex.by_cortex) || {};
                     let toRenderEngines = byCortex[toRenderKind] || [];
                     if (toRenderKind === 'llm_provider') toRenderEngines = toRenderEngines.filter(e => e.is_external);
                     if (componentsCortexListEl) renderDetailsList(toRenderEngines, componentsCortexListEl);
-                    if (componentsInterfacesListEl) renderDetailsList(data.interfaces || [], componentsInterfacesListEl);
-                    if (componentsPluginsListEl) renderDetailsList(data.plugins || [], componentsPluginsListEl);
+                    // Interfaces are now rendered inside the plugins two-column grid
+                    // (grouped under the "Interfaces" category), so there is no
+                    // separate Interfaces card to populate here.
+                    // Plugins: prefer the new two-column banner layout; fall back to the
+                    // legacy vertical details list if the new markup is not present.
+                    if (pluginsBannerListEl) {
+                        const allPlugins = data.plugins || [];
+
+                        // Matches a plugin against the free-text query: name /
+                        // display name / any exposed config variable key or label
+                        // (NOT descriptions — too verbose to be useful search targets).
+                        const matchesQuery = (p, q) => {
+                            if (!q) return true;
+                            const name = (p.name || '').toLowerCase();
+                            const disp = (p.display_name || '').toLowerCase();
+                            if (name.includes(q) || disp.includes(q)) return true;
+                            const cfgItems = _componentConfigMap[p.name] || [];
+                            return cfgItems.some((ci) => {
+                                const key = (ci && ci.key ? String(ci.key) : '').toLowerCase();
+                                const label = (ci && ci.label ? String(ci.label) : '').toLowerCase();
+                                return key.includes(q) || label.includes(q);
+                            });
+                        };
+
+                        // Filter control elements (may be absent in the legacy layout).
+                        const enabledEl = document.getElementById('plugins-filter-enabled');
+                        const statusEl = document.getElementById('plugins-filter-status');
+                        const categoryEl = document.getElementById('plugins-filter-category');
+                        const reconEl = document.getElementById('plugins-filter-recon');
+                        const debriefEl = document.getElementById('plugins-filter-debrief');
+                        const runnableEl = document.getElementById('plugins-filter-runnable');
+                        const resetEl = document.getElementById('plugins-filter-reset');
+
+                        // Populate the category dropdown from the actual plugin data so
+                        // no category name is hardcoded. Preserve the current selection.
+                        if (categoryEl) {
+                            const prev = categoryEl.value;
+                            const seen = new Set();
+                            const cats = [];
+                            allPlugins.forEach((p) => {
+                                const c = p.category || 'Various';
+                                if (!seen.has(c)) { seen.add(c); cats.push(c); }
+                            });
+                            cats.sort((a, b) => {
+                                const ia = CATEGORY_ORDER.indexOf(a);
+                                const ib = CATEGORY_ORDER.indexOf(b);
+                                if (ia === -1 && ib === -1) return a.localeCompare(b);
+                                if (ia === -1) return 1;
+                                if (ib === -1) return -1;
+                                return ia - ib;
+                            });
+                            categoryEl.innerHTML = '<option value="">All categories</option>';
+                            cats.forEach((c) => {
+                                const opt = document.createElement('option');
+                                opt.value = c;
+                                opt.textContent = c;
+                                categoryEl.appendChild(opt);
+                            });
+                            if (prev && cats.includes(prev)) categoryEl.value = prev;
+                        }
+
+                        // Combined filter: search text AND enabled-state AND status LED
+                        // AND category AND has-recon AND has-debrief (all AND semantics).
+                        const filterPlugins = () => {
+                            const searchEl = document.getElementById('plugins-search');
+                            const q = (searchEl ? searchEl.value : '').trim().toLowerCase();
+                            const enabledMode = enabledEl ? enabledEl.value : '';
+                            const statusMode = statusEl ? statusEl.value : '';
+                            const catMode = categoryEl ? categoryEl.value : '';
+                            const reconOnly = reconEl ? reconEl.checked : false;
+                            const debriefOnly = debriefEl ? debriefEl.checked : false;
+                            const runnableOnly = runnableEl ? runnableEl.checked : false;
+
+                            return allPlugins.filter((p) => {
+                                if (!matchesQuery(p, q)) return false;
+                                const isEnabled = p.enabled !== false;
+                                if (enabledMode === 'enabled' && !isEnabled) return false;
+                                if (enabledMode === 'disabled' && isEnabled) return false;
+                                if (statusMode) {
+                                    const led = ['green', 'red', 'orange', 'grey'].includes(p.led) ? p.led : 'grey';
+                                    if (led !== statusMode) return false;
+                                }
+                                if (catMode && (p.category || 'Various') !== catMode) return false;
+                                if (reconOnly && !p.has_recon) return false;
+                                if (debriefOnly && !p.has_debrief) return false;
+                                if (runnableOnly && !p.runnable) return false;
+                                return true;
+                            });
+                        };
+
+                        const applyFilters = () => {
+                            renderPluginsTwoCol(filterPlugins(), pluginsBannerListEl);
+                        };
+
+                        renderPluginsTwoCol(allPlugins, pluginsBannerListEl);
+
+                        const searchEl = document.getElementById('plugins-search');
+                        if (searchEl && !searchEl.dataset.bound) {
+                            searchEl.dataset.bound = '1';
+                            searchEl.addEventListener('input', applyFilters);
+                        }
+                        [enabledEl, statusEl, categoryEl].forEach((el) => {
+                            if (el && !el.dataset.bound) {
+                                el.dataset.bound = '1';
+                                el.addEventListener('change', applyFilters);
+                            }
+                        });
+                        [reconEl, debriefEl, runnableEl].forEach((el) => {
+                            if (el && !el.dataset.bound) {
+                                el.dataset.bound = '1';
+                                el.addEventListener('change', applyFilters);
+                            }
+                        });
+                        if (resetEl && !resetEl.dataset.bound) {
+                            resetEl.dataset.bound = '1';
+                            resetEl.addEventListener('click', () => {
+                                if (searchEl) searchEl.value = '';
+                                if (enabledEl) enabledEl.value = '';
+                                if (statusEl) statusEl.value = '';
+                                if (categoryEl) categoryEl.value = '';
+                                if (reconEl) reconEl.checked = false;
+                                if (debriefEl) debriefEl.checked = false;
+                                if (runnableEl) runnableEl.checked = false;
+                                applyFilters();
+                            });
+                        }
+
+                        // Re-apply any active filters after a data refresh so the list
+                        // doesn't silently reset to "show all" on toggle/reload.
+                        applyFilters();
+                    } else if (componentsPluginsListEl) {
+                        renderDetailsList(data.plugins || [], componentsPluginsListEl);
+                    }
 
                     // ── Audio registry selectors (Vox / Auris / Live) ──────────────
                     const setupRegistrySelect = (selectId, infoId, labelId, descId, engines, configKey) => {
@@ -5203,8 +6035,87 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                 refreshConfig();
             }
 
+            // ── Draggable column resizer between the plugin list and detail pane ──
+            // Mirrors the Agent/Tasks page resizer (agent.js). Idempotent: safe to
+            // call on every plugins-tab (re-)init; bindings are guarded per-element.
+            function setupPluginsColResizer() {
+                const layout = document.getElementById('plugins-two-col');
+                const leftPane = document.getElementById('plugins-banner-list');
+                const resizer = document.getElementById('plugins-col-resizer');
+                if (!layout || !leftPane || !resizer) return;
+
+                const LS_KEY = 'synth.plugins.leftPaneWidth';
+                const MIN_LEFT = 200;   // px
+                const MIN_RIGHT = 320;  // px reserved for the detail pane
+                const RESIZER_W = 6;    // px, keep in sync with CSS
+
+                const isNarrow = () => window.innerWidth <= 860;
+
+                const applyLayout = () => {
+                    if (isNarrow()) {
+                        layout.style.removeProperty('--plugins-left-w');
+                        return;
+                    }
+                    const stored = parseFloat(localStorage.getItem(LS_KEY) || '');
+                    if (stored && !Number.isNaN(stored)) {
+                        const maxLeft = Math.max(MIN_LEFT, layout.clientWidth - MIN_RIGHT - RESIZER_W);
+                        const w = Math.min(Math.max(stored, MIN_LEFT), maxLeft);
+                        layout.style.setProperty('--plugins-left-w', w + 'px');
+                    } else {
+                        layout.style.removeProperty('--plugins-left-w');
+                    }
+                };
+                applyLayout();
+
+                if (!resizer.__pluginsBound) {
+                    let dragging = false;
+                    const onMove = (ev) => {
+                        if (!dragging) return;
+                        const rect = layout.getBoundingClientRect();
+                        const clientX = (ev.touches && ev.touches[0]) ? ev.touches[0].clientX : ev.clientX;
+                        let w = clientX - rect.left;
+                        const maxLeft = Math.max(MIN_LEFT, layout.clientWidth - MIN_RIGHT - RESIZER_W);
+                        w = Math.min(Math.max(w, MIN_LEFT), maxLeft);
+                        layout.style.setProperty('--plugins-left-w', w + 'px');
+                        if (ev.cancelable) ev.preventDefault();
+                    };
+                    const onUp = () => {
+                        if (!dragging) return;
+                        dragging = false;
+                        resizer.classList.remove('dragging');
+                        document.body.classList.remove('plugins-col-resizing');
+                        const cur = layout.style.getPropertyValue('--plugins-left-w');
+                        const px = parseFloat(cur);
+                        if (px && !Number.isNaN(px)) localStorage.setItem(LS_KEY, String(Math.round(px)));
+                        document.removeEventListener('mousemove', onMove);
+                        document.removeEventListener('mouseup', onUp);
+                        document.removeEventListener('touchmove', onMove);
+                        document.removeEventListener('touchend', onUp);
+                    };
+                    const onDown = (ev) => {
+                        if (isNarrow()) return;
+                        dragging = true;
+                        resizer.classList.add('dragging');
+                        document.body.classList.add('plugins-col-resizing');
+                        document.addEventListener('mousemove', onMove);
+                        document.addEventListener('mouseup', onUp);
+                        document.addEventListener('touchmove', onMove, { passive: false });
+                        document.addEventListener('touchend', onUp);
+                        if (ev.cancelable) ev.preventDefault();
+                    };
+                    resizer.addEventListener('mousedown', onDown);
+                    resizer.addEventListener('touchstart', onDown, { passive: false });
+                    if (!resizer.__pluginsResizeListener) {
+                        window.addEventListener('resize', applyLayout);
+                        resizer.__pluginsResizeListener = true;
+                    }
+                    resizer.__pluginsBound = true;
+                }
+            }
+
             function initPluginsTab() {
                 loadComponentsSummary();
+                setupPluginsColResizer();
             }
             // Also expose as initEnginesTab so that the Engines tab triggers the engine selector UI
             function initEnginesTab() {
