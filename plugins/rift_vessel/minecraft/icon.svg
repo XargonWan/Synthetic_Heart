@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" fill="none">
+  <rect width="256" height="256" rx="48" fill="#0b1020"/>
+  <g transform="translate(48 40)">
+    <!-- isometric grass/dirt cube, original non-branded glyph -->
+    <polygon points="80,0 160,40 80,80 0,40" fill="#5cb85c"/>
+    <polygon points="0,40 80,80 80,168 0,128" fill="#7a5230"/>
+    <polygon points="160,40 80,80 80,168 160,128" fill="#96693f"/>
+    <polygon points="80,0 160,40 80,80 0,40" fill="none" stroke="#0b1020" stroke-width="3"/>
+    <polygon points="0,40 80,80 80,168 0,128" fill="none" stroke="#0b1020" stroke-width="3"/>
+    <polygon points="160,40 80,80 80,168 160,128" fill="none" stroke="#0b1020" stroke-width="3"/>
+    <polygon points="80,0 122,21 80,42 38,21" fill="#4cae4c" opacity="0.7"/>
+  </g>
+</svg>

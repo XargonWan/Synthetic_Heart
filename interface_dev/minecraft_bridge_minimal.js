@@ -6,7 +6,7 @@
  * connector drive an in-world bot and receive normalized world events.
  *
  * Design (see docs/rift_vessel.rst):
- *   - The Python connector (plugins/vessels/minecraft_connector.py) talks to
+ *   - The Python connector (plugins/rift_vessel/minecraft/minecraft.py) talks to
  *     this process over plain HTTP on 127.0.0.1.
  *   - This bridge translates SyntH normalized actions -> Mineflayer commands
  *     (POST /cmd) and Mineflayer events -> normalized perception events, which

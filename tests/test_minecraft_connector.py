@@ -6,8 +6,12 @@ from typing import Any, Dict, List
 
 import pytest
 
-from plugins.vessel_base import PerceptionEvent, VesselActionResult, WorldState
-from plugins.vessels.minecraft_connector import (
+from plugins.rift_vessel.vessel_base import (
+    PerceptionEvent,
+    VesselActionResult,
+    WorldState,
+)
+from plugins.rift_vessel.minecraft.minecraft import (
     CONNECTOR_CLASS,
     ENVIRONMENT,
     MinecraftConnector,
@@ -36,8 +40,8 @@ def test_resolve_base_url_from_settings() -> None:
 def test_resolve_base_url_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     conn = MinecraftConnector()
     monkeypatch.setattr(
-        "plugins.vessels.minecraft_connector.config_registry.get_value",
-        lambda key, default=None: None,
+        "plugins.rift_vessel.minecraft.minecraft.config_registry.get_value",
+        lambda key, default=None, **kwargs: None,
     )
     url = conn._resolve_base_url({})
     assert url == "http://127.0.0.1:8137"

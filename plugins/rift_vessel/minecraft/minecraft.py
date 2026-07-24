@@ -1,4 +1,4 @@
-# plugins/vessels/minecraft_connector.py
+# plugins/rift_vessel/minecraft/minecraft.py
 """Minecraft Vessel connector (PoC).
 
 Bridges SyntH's Rift Vessel layer to a Minecraft world via the Node.js
@@ -9,7 +9,7 @@ local bridge:
 * normalized actions (``say`` / ``move`` / ``look`` / ``use`` / ``status``) →
   ``POST /cmd``
 * world events ← polled from ``GET /events`` and forwarded to the interface's
-  perception callback as :class:`plugins.vessel_base.PerceptionEvent`.
+  perception callback as :class:`plugins.rift_vessel.vessel_base.PerceptionEvent`.
 
 Design constraints (see ``docs/rift_vessel.rst``):
 
@@ -32,7 +32,7 @@ import aiohttp
 from core.config_manager import config_registry
 from core.logging_utils import log_debug, log_error, log_info, log_warning
 from core.vessel_registry import register_vessel_connector
-from plugins.vessel_base import (
+from plugins.rift_vessel.vessel_base import (
     PerceptionCallback,
     PerceptionEvent,
     VesselActionResult,
@@ -65,10 +65,16 @@ class MinecraftConnector(VesselConnectorBase):
 
     def _resolve_base_url(self, settings: Dict[str, Any]) -> str:
         host = settings.get("bridge_host") or config_registry.get_value(
-            "MINECRAFT_BRIDGE_HOST", "127.0.0.1"
+            "MINECRAFT_BRIDGE_HOST",
+            "127.0.0.1",
+            group="plugins",
+            component="vessel_plugin",
         )
         port = settings.get("bridge_port") or config_registry.get_value(
-            "MINECRAFT_BRIDGE_PORT", "8137"
+            "MINECRAFT_BRIDGE_PORT",
+            8137,
+            group="plugins",
+            component="vessel_plugin",
         )
         host = str(host or "127.0.0.1")
         port = str(port or "8137")

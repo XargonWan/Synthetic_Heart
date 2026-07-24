@@ -1,4 +1,4 @@
-# plugins/vessel_plugin.py
+# plugins/rift_vessel/vessel_plugin.py
 """Vessel — core Rift Vessel plugin.
 
 Exposes SyntH's embodiment actions (``vessel_say``, ``vessel_move``,
@@ -28,7 +28,7 @@ from core.config_manager import config_registry
 from core.core_initializer import register_plugin
 from core.logging_utils import log_error, log_info, log_warning
 from core.vessel_registry import VESSEL_REGISTRY
-from plugins.vessel_base import VesselActionResult, WorldState
+from plugins.rift_vessel.vessel_base import VesselActionResult, WorldState
 
 # ---------------------------------------------------------------------------
 # Config variables (hidden from Settings — the Vessel is configured via the
@@ -59,6 +59,26 @@ class VesselPlugin(AIPluginBase):
 
     display_name = "Vessel (Embodiment)"
 
+    def get_metadata(self) -> dict:
+        """Return declarative metadata for the WebUI plugin panel and docs.
+
+        Explicitly declares the ``Vessels`` category and the conventional
+        ``icon.svg`` / ``guide.md`` assets shipped alongside this plugin. The
+        loader falls back to the SyntH logo when the icon file is missing.
+        """
+        return {
+            "name": "vessel_plugin",
+            "display_name": "Rift Vessel",
+            "description": (
+                "Lets Synth inhabit external game/virtual worlds through "
+                "pluggable connectors (Minecraft PoC shipped) while identity, "
+                "memory, and personality persist across worlds and chats."
+            ),
+            "category": "Vessels",
+            "icon": "icon.svg",
+            "guide": "guide.md",
+        }
+
     # ------------------------------------------------------------------
     # Constructor
     # ------------------------------------------------------------------
@@ -87,7 +107,7 @@ class VesselPlugin(AIPluginBase):
         rest of the system (AGENTS.md golden rule).
         """
         builtin = [
-            "plugins.vessels.minecraft_connector",
+            "plugins.rift_vessel.minecraft.minecraft",
         ]
         for module_path in builtin:
             try:

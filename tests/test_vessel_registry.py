@@ -19,7 +19,7 @@ def test_register_and_query_connector() -> None:
     reg = VesselRegistry()
     reg.register_connector(
         "minecraft",
-        "plugins.vessels.minecraft_connector",
+        "plugins.rift_vessel.minecraft.minecraft",
         capabilities={"movement": True, "chat": True},
         label="Minecraft (PoC)",
     )

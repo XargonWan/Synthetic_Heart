@@ -49,34 +49,34 @@ Architecture
              ▼
         Connector.act → world
 
-============================  =============================================
-File                          Role
-============================  =============================================
-``core/vessel_registry.py``   Pluggable connector registry (Iris pattern):
-                              ``VESSEL_REGISTRY``,
-                              ``register_vessel_connector``. A connector module
-                              must expose module-level ``CONNECTOR_CLASS``.
-``plugins/vessel_base.py``    ``VesselConnectorBase`` (ABC) plus the normalised
-                              dataclasses ``WorldState``, ``PerceptionEvent``,
-                              ``VesselActionResult``.
-``plugins/vessel_plugin.py``  Facade ``AIPluginBase`` exposing the actions
-                              ``vessel_say``, ``vessel_move``, ``vessel_look``,
-                              ``vessel_use``, ``vessel_status`` (all
-                              ``security_level: "low"``, **no**
-                              ``external_effects``).
-``core/vessel_session_manager.py``  Session lifecycle + experience buffer +
-                              end-of-session flush to a single diary entry.
-``interface/vessel_interface.py``   Duck-typed I/O interface. Inbound world
-                              events → salience filter → ``message_queue``;
-                              outbound actions → connector. Scheduler closes
-                              idle sessions.
-``plugins/vessels/minecraft_connector.py``  Minecraft PoC connector (HTTP
-                              client to the bridge). Self-registers at import.
-``interface_dev/minecraft_bridge_minimal.js``  Node.js Mineflayer ↔ HTTP
-                              bridge.
-``interface/minecraft_provisioner.py``  ``BridgeProvisioner`` — installs and
-                              controls the bridge subprocess.
-============================  =============================================
+==============================================  =============================================
+File                                            Role
+==============================================  =============================================
+``core/vessel_registry.py``                     Pluggable connector registry (Iris pattern):
+                                                ``VESSEL_REGISTRY``,
+                                                ``register_vessel_connector``. A connector module
+                                                must expose module-level ``CONNECTOR_CLASS``.
+``plugins/rift_vessel/vessel_base.py``          ``VesselConnectorBase`` (ABC) plus the normalised
+                                                dataclasses ``WorldState``, ``PerceptionEvent``,
+                                                ``VesselActionResult``.
+``plugins/rift_vessel/vessel_plugin.py``        Facade ``AIPluginBase`` exposing the actions
+                                                ``vessel_say``, ``vessel_move``, ``vessel_look``,
+                                                ``vessel_use``, ``vessel_status`` (all
+                                                ``security_level: "low"``, **no**
+                                                ``external_effects``).
+``core/vessel_session_manager.py``              Session lifecycle + experience buffer +
+                                                end-of-session flush to a single diary entry.
+``interface/vessel_interface.py``               Duck-typed I/O interface. Inbound world
+                                                events → salience filter → ``message_queue``;
+                                                outbound actions → connector. Scheduler closes
+                                                idle sessions.
+``plugins/rift_vessel/minecraft/minecraft.py``  Minecraft PoC connector (HTTP
+                                                client to the bridge). Self-registers at import.
+``interface_dev/minecraft_bridge_minimal.js``   Node.js Mineflayer ↔ HTTP
+                                                bridge.
+``interface/minecraft_provisioner.py``          ``BridgeProvisioner`` — installs and
+                                                controls the bridge subprocess.
+==============================================  =============================================
 
 Normalised schema
 ------------------

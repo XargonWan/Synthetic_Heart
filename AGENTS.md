@@ -273,11 +273,11 @@ SyntH is a persistent cognitive entity; a **Vessel** is a layer of embodiment in
 | Concern | Location |
 |---------|----------|
 | Connector registry (Iris pattern) | `core/vessel_registry.py` (`VESSEL_REGISTRY`, `register_vessel_connector`) |
-| Connector base + schema | `plugins/vessel_base.py` (`VesselConnectorBase` ABC, `WorldState`, `PerceptionEvent`, `VesselActionResult`) |
-| Actions facade | `plugins/vessel_plugin.py` (`VesselPlugin`, `PLUGIN_CLASS`) |
+| Connector base + schema | `plugins/rift_vessel/vessel_base.py` (`VesselConnectorBase` ABC, `WorldState`, `PerceptionEvent`, `VesselActionResult`) |
+| Actions facade | `plugins/rift_vessel/vessel_plugin.py` (`VesselPlugin`, `PLUGIN_CLASS`) |
 | Session lifecycle + experience buffer | `core/vessel_session_manager.py` (`vessel_session_manager`) |
 | I/O interface (duck-typed) | `interface/vessel_interface.py` (`INTERFACE_NAME = "vessel"`) |
-| Minecraft PoC connector | `plugins/vessels/minecraft_connector.py` (`CONNECTOR_CLASS`, self-registers) |
+| Minecraft PoC connector | `plugins/rift_vessel/minecraft/minecraft.py` (`CONNECTOR_CLASS`, self-registers) |
 | Mineflayer bridge (Node.js) | `interface_dev/minecraft_bridge_minimal.js` |
 | Bridge provisioner | `interface/minecraft_provisioner.py` (`BridgeProvisioner`, `get_bridge_provisioner`) |
 | DB tables | `core/db.py::init_vessel_tables` + `init-db.sql` (`vessel_sessions`, `vessel_activity_log`) |
@@ -292,7 +292,9 @@ SyntH is a persistent cognitive entity; a **Vessel** is a layer of embodiment in
 
 **Perception & salience:** the PoC filter is LLM-free — dedup (30 s) + rate-limit (2 s) in `interface/vessel_interface.py`. A richer LLM salience/attention worker (Grillo *RAW cognition* style) is a documented future phase and must also respect constraint 1. Never stream raw telemetry into cognition.
 
-**Adding a connector:** subclass `VesselConnectorBase`, set module-level `CONNECTOR_CLASS`, and call `register_vessel_connector(name, __name__, capabilities=..., label=...)` at import time. Removing any connector/plugin/interface must not break the rest of the system.
+**Layout (folder-per-plugin, see §4).** The Rift Vessel plugin lives in its own folder `plugins/rift_vessel/` (`vessel_plugin.py` + `vessel_base.py` + `icon.svg` + `guide.md` + an empty `__init__.py`; the module `vessel_plugin` differs from the folder name so no `sys.modules` shim is needed). Each connector gets its own sub-folder `plugins/rift_vessel/<world>/` (`<world>.py` module with `CONNECTOR_CLASS` + `icon.svg` + `guide.md` + empty `__init__.py`). `derive_plugin_category` maps the `rift_vessel` path token to the **Vessels** category; `vessel_plugin.get_metadata()` also declares `category: "Vessels"` explicitly. Connectors are **not** plugins (no `PLUGIN_CLASS`) — the loader's `rglob("*.py")` still imports them so they self-register on `VESSEL_REGISTRY`, then skips them as plugins.
+
+**Adding a connector:** create `plugins/rift_vessel/<world>/<world>.py`, subclass `VesselConnectorBase`, set module-level `CONNECTOR_CLASS`, and call `register_vessel_connector(name, __name__, capabilities=..., label=...)` at import time. Removing any connector/plugin/interface must not break the rest of the system.
 
 **Minecraft PoC deployment:** single-container, **opt-in** via `MINECRAFT_BRIDGE_ENABLED` (default False). Node is **not** in the default image (`python:3.12-slim`) — build with `docker build --build-arg INSTALL_NODE=true …` (Dockerfile `ARG INSTALL_NODE=false` + conditional NodeSource install). The provisioner runs the bridge as a **non-root** subprocess and returns a clear error if `node`/`npm` are missing. Uses offline auth; real Microsoft/XBL auth is out of scope.
 

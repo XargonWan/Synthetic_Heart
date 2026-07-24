@@ -4,7 +4,7 @@
 A *Rift Vessel* lets SyntH — the persistent cognitive entity — act through and
 perceive an external interactive environment (a "world"): Minecraft, Skyrim,
 VRChat, HyTale, and future systems. Each world is provided by a pluggable
-**connector** that subclasses :class:`plugins.vessel_base.VesselConnectorBase`.
+**connector** that subclasses :class:`plugins.rift_vessel.vessel_base.VesselConnectorBase`.
 
 This registry mirrors the ``iris_registry`` / ``auris_registry`` pattern:
 connectors register themselves via :func:`register_vessel_connector` at import

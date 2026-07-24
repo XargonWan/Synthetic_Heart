@@ -1,4 +1,4 @@
-# plugins/vessel_base.py
+# plugins/rift_vessel/vessel_base.py
 """Base class and data types for Rift Vessel connectors.
 
 A Vessel connector bridges SyntH to a single game world (Minecraft, Skyrim,
@@ -12,7 +12,7 @@ All connectors must subclass :class:`VesselConnectorBase` and implement the
 abstract methods. Register a connector at module import time::
 
     from core.vessel_registry import register_vessel_connector
-    from plugins.vessel_base import VesselConnectorBase
+    from plugins.rift_vessel.vessel_base import VesselConnectorBase
 
     class MyWorldConnector(VesselConnectorBase):
         display_name = "My World"

@@ -84,7 +84,7 @@ def derive_plugin_category(
         return "Interfaces"
     if "grillo" in lowered:
         return "Grillo"
-    if "vessels" in lowered:
+    if "vessels" in lowered or "rift_vessel" in lowered:
         return "Vessels"
 
     short_name = parts[-1] if parts else ""
