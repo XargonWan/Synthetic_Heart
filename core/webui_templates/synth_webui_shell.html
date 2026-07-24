@@ -1140,6 +1140,37 @@
             align-items: center;
             gap: 0.5rem;
         }
+        .plugin-banner-run {
+            flex: 0 0 auto;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 20px;
+            height: 20px;
+            padding: 0;
+            border: none;
+            border-radius: 50%;
+            background: transparent;
+            color: #3b82f6;
+            cursor: pointer;
+            transition: color 0.15s ease, transform 0.15s ease, background 0.15s ease;
+        }
+        .plugin-banner-run:hover {
+            color: #60a5fa;
+            background: rgba(59, 130, 246, 0.15);
+            transform: scale(1.1);
+        }
+        .plugin-banner-run:disabled {
+            opacity: 0.5;
+            cursor: default;
+        }
+        .plugin-banner-run.running {
+            animation: plugin-run-pulse 0.9s ease-in-out infinite;
+        }
+        @keyframes plugin-run-pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.4; }
+        }
         .plugin-led {
             width: 11px;
             height: 11px;

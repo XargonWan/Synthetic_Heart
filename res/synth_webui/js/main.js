@@ -3799,7 +3799,9 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                         // actions this plugin registers and their auto-exposed MCP
                         // tools (each action is exposed as `synth_<action>`).
                         const regActions = Array.isArray(item.actions) ? item.actions : [];
-                        if (regActions.length) {
+                        const hasReconHook = item.has_recon === true;
+                        const hasDebriefHook = item.has_debrief === true;
+                        if (regActions.length || hasReconHook || hasDebriefHook) {
                             const actSection = document.createElement('div');
                             actSection.className = 'plugin-actions-section';
                             actSection.style.cssText = 'margin-top:14px; padding-top:12px; border-top:1px solid var(--border, #444);';
@@ -3830,13 +3832,26 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                                 .filter(Boolean);
 
                             // Synth Actions
-                            actSection.appendChild(makeSubGroup('Synth Actions', actionNames));
+                            if (actionNames.length) {
+                                actSection.appendChild(makeSubGroup('Synth Actions', actionNames));
+                            }
 
                             // MCP tools — only for real plugins. MCP servers expose
                             // their tools remotely and are not re-wrapped as synth_*.
-                            if (!item.is_mcp) {
+                            if (!item.is_mcp && actionNames.length) {
                                 const mcpNames = actionNames.map(n => `synth_${n}`);
                                 actSection.appendChild(makeSubGroup('MCP tools', mcpNames));
+                            }
+
+                            // Recon / debrief hooks — not actions from
+                            // get_supported_actions() but structural capabilities the
+                            // plugin registers (recon = get_recon_contributions or the
+                            // get_recon_key/instruction/parse trio; debrief = on_debrief).
+                            const hookNames = [];
+                            if (hasReconHook) hookNames.push('recon (brief)');
+                            if (hasDebriefHook) hookNames.push('debrief');
+                            if (hookNames.length) {
+                                actSection.appendChild(makeSubGroup('Hooks', hookNames));
                             }
 
                             pane.appendChild(actSection);
@@ -4007,6 +4022,52 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                                 const controls = document.createElement('span');
                                 controls.className = 'plugin-banner-controls';
 
+                                // Run marker: a blue play arrow shown for plugins that can
+                                // be launched manually (runnable, non-MCP), e.g. G.R.I.L.L.O.
+                                // Diary Consolidation. Clicking it triggers the plugin's run
+                                // action directly (same endpoint as the detail-pane button)
+                                // without opening the detail pane.
+                                if (item.runnable && !item.is_mcp) {
+                                    const runBtn = document.createElement('button');
+                                    runBtn.type = 'button';
+                                    runBtn.className = 'plugin-banner-run';
+                                    runBtn.title = item.run_title || item.run_label || 'Run this plugin now';
+                                    runBtn.setAttribute('aria-label', runBtn.title);
+                                    runBtn.innerHTML = '<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M8 5v14l11-7z" fill="currentColor"/></svg>';
+                                    const runAction = item.run_action || 'run_now';
+                                    const runName = item.name || '';
+                                    runBtn.addEventListener('click', async (ev) => {
+                                        ev.stopPropagation();
+                                        runBtn.disabled = true;
+                                        runBtn.classList.add('running');
+                                        try {
+                                            const resp = await fetch('/api/components/run', {
+                                                method: 'POST',
+                                                headers: { 'Content-Type': 'application/json' },
+                                                body: JSON.stringify({ name: runName, action: runAction })
+                                            });
+                                            let body = null;
+                                            try { body = await resp.json(); } catch (e) { /* ignore */ }
+                                            const result = (body && body.result) || {};
+                                            const st = result.status;
+                                            if (resp.ok && (st === 'done' || st === 'scheduled' || st === 'ok')) {
+                                                if (window.showToast) window.showToast((item.display_name || item.name) + ': ' + (st === 'scheduled' ? 'scheduled' : 'done'));
+                                            } else if (st === 'empty') {
+                                                if (window.showToast) window.showToast((item.display_name || item.name) + ': nothing to do');
+                                            } else {
+                                                const msg = (result && result.message) || (body && body.detail) || 'Failed';
+                                                if (window.showToast) window.showToast('Run failed: ' + msg, true);
+                                            }
+                                        } catch (err) {
+                                            if (window.showToast) window.showToast('Run request failed', true);
+                                        } finally {
+                                            runBtn.classList.remove('running');
+                                            runBtn.disabled = false;
+                                        }
+                                    });
+                                    controls.appendChild(runBtn);
+                                }
+
                                 // Toggle: hidden for MCP servers and for plugins that
                                 // cannot be disabled (core). POSTs to /api/components/toggle.
                                 if (!item.is_mcp && item.disable_allowed !== false) {
@@ -4084,24 +4145,90 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                     if (pluginsBannerListEl) {
                         const allPlugins = data.plugins || [];
 
-                        // Filters the plugin list by name/display name or by any of the
-                        // plugin's exposed config variable keys/labels (NOT descriptions,
-                        // which are too verbose to be useful search targets). Matching a
-                        // variable keeps the whole plugin visible.
-                        const filterPlugins = (query) => {
-                            const q = (query || '').trim().toLowerCase();
-                            if (!q) return allPlugins;
-                            return allPlugins.filter((p) => {
-                                const name = (p.name || '').toLowerCase();
-                                const disp = (p.display_name || '').toLowerCase();
-                                if (name.includes(q) || disp.includes(q)) return true;
-                                const cfgItems = _componentConfigMap[p.name] || [];
-                                return cfgItems.some((ci) => {
-                                    const key = (ci && ci.key ? String(ci.key) : '').toLowerCase();
-                                    const label = (ci && ci.label ? String(ci.label) : '').toLowerCase();
-                                    return key.includes(q) || label.includes(q);
-                                });
+                        // Matches a plugin against the free-text query: name /
+                        // display name / any exposed config variable key or label
+                        // (NOT descriptions — too verbose to be useful search targets).
+                        const matchesQuery = (p, q) => {
+                            if (!q) return true;
+                            const name = (p.name || '').toLowerCase();
+                            const disp = (p.display_name || '').toLowerCase();
+                            if (name.includes(q) || disp.includes(q)) return true;
+                            const cfgItems = _componentConfigMap[p.name] || [];
+                            return cfgItems.some((ci) => {
+                                const key = (ci && ci.key ? String(ci.key) : '').toLowerCase();
+                                const label = (ci && ci.label ? String(ci.label) : '').toLowerCase();
+                                return key.includes(q) || label.includes(q);
                             });
+                        };
+
+                        // Filter control elements (may be absent in the legacy layout).
+                        const enabledEl = document.getElementById('plugins-filter-enabled');
+                        const statusEl = document.getElementById('plugins-filter-status');
+                        const categoryEl = document.getElementById('plugins-filter-category');
+                        const reconEl = document.getElementById('plugins-filter-recon');
+                        const debriefEl = document.getElementById('plugins-filter-debrief');
+                        const runnableEl = document.getElementById('plugins-filter-runnable');
+                        const resetEl = document.getElementById('plugins-filter-reset');
+
+                        // Populate the category dropdown from the actual plugin data so
+                        // no category name is hardcoded. Preserve the current selection.
+                        if (categoryEl) {
+                            const prev = categoryEl.value;
+                            const seen = new Set();
+                            const cats = [];
+                            allPlugins.forEach((p) => {
+                                const c = p.category || 'Various';
+                                if (!seen.has(c)) { seen.add(c); cats.push(c); }
+                            });
+                            cats.sort((a, b) => {
+                                const ia = CATEGORY_ORDER.indexOf(a);
+                                const ib = CATEGORY_ORDER.indexOf(b);
+                                if (ia === -1 && ib === -1) return a.localeCompare(b);
+                                if (ia === -1) return 1;
+                                if (ib === -1) return -1;
+                                return ia - ib;
+                            });
+                            categoryEl.innerHTML = '<option value="">All categories</option>';
+                            cats.forEach((c) => {
+                                const opt = document.createElement('option');
+                                opt.value = c;
+                                opt.textContent = c;
+                                categoryEl.appendChild(opt);
+                            });
+                            if (prev && cats.includes(prev)) categoryEl.value = prev;
+                        }
+
+                        // Combined filter: search text AND enabled-state AND status LED
+                        // AND category AND has-recon AND has-debrief (all AND semantics).
+                        const filterPlugins = () => {
+                            const searchEl = document.getElementById('plugins-search');
+                            const q = (searchEl ? searchEl.value : '').trim().toLowerCase();
+                            const enabledMode = enabledEl ? enabledEl.value : '';
+                            const statusMode = statusEl ? statusEl.value : '';
+                            const catMode = categoryEl ? categoryEl.value : '';
+                            const reconOnly = reconEl ? reconEl.checked : false;
+                            const debriefOnly = debriefEl ? debriefEl.checked : false;
+                            const runnableOnly = runnableEl ? runnableEl.checked : false;
+
+                            return allPlugins.filter((p) => {
+                                if (!matchesQuery(p, q)) return false;
+                                const isEnabled = p.enabled !== false;
+                                if (enabledMode === 'enabled' && !isEnabled) return false;
+                                if (enabledMode === 'disabled' && isEnabled) return false;
+                                if (statusMode) {
+                                    const led = ['green', 'red', 'orange', 'grey'].includes(p.led) ? p.led : 'grey';
+                                    if (led !== statusMode) return false;
+                                }
+                                if (catMode && (p.category || 'Various') !== catMode) return false;
+                                if (reconOnly && !p.has_recon) return false;
+                                if (debriefOnly && !p.has_debrief) return false;
+                                if (runnableOnly && !p.runnable) return false;
+                                return true;
+                            });
+                        };
+
+                        const applyFilters = () => {
+                            renderPluginsTwoCol(filterPlugins(), pluginsBannerListEl);
                         };
 
                         renderPluginsTwoCol(allPlugins, pluginsBannerListEl);
@@ -4109,10 +4236,37 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                         const searchEl = document.getElementById('plugins-search');
                         if (searchEl && !searchEl.dataset.bound) {
                             searchEl.dataset.bound = '1';
-                            searchEl.addEventListener('input', () => {
-                                renderPluginsTwoCol(filterPlugins(searchEl.value), pluginsBannerListEl);
+                            searchEl.addEventListener('input', applyFilters);
+                        }
+                        [enabledEl, statusEl, categoryEl].forEach((el) => {
+                            if (el && !el.dataset.bound) {
+                                el.dataset.bound = '1';
+                                el.addEventListener('change', applyFilters);
+                            }
+                        });
+                        [reconEl, debriefEl, runnableEl].forEach((el) => {
+                            if (el && !el.dataset.bound) {
+                                el.dataset.bound = '1';
+                                el.addEventListener('change', applyFilters);
+                            }
+                        });
+                        if (resetEl && !resetEl.dataset.bound) {
+                            resetEl.dataset.bound = '1';
+                            resetEl.addEventListener('click', () => {
+                                if (searchEl) searchEl.value = '';
+                                if (enabledEl) enabledEl.value = '';
+                                if (statusEl) statusEl.value = '';
+                                if (categoryEl) categoryEl.value = '';
+                                if (reconEl) reconEl.checked = false;
+                                if (debriefEl) debriefEl.checked = false;
+                                if (runnableEl) runnableEl.checked = false;
+                                applyFilters();
                             });
                         }
+
+                        // Re-apply any active filters after a data refresh so the list
+                        // doesn't silently reset to "show all" on toggle/reload.
+                        applyFilters();
                     } else if (componentsPluginsListEl) {
                         renderDetailsList(data.plugins || [], componentsPluginsListEl);
                     }

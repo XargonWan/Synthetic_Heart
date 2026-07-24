@@ -10107,6 +10107,29 @@ class SynthWebUIInterface:
         return out
 
     @staticmethod
+    def _plugin_capability_flags(plugin: Any) -> dict:
+        """Detect whether a plugin participates in the Recon / Debrief pipelines.
+
+        Recon capability mirrors ``core.recon.gather_recon_contributions`` — a
+        plugin is recon-capable if it exposes ``get_recon_contributions`` or the
+        combined trio ``get_recon_key`` / ``get_recon_instruction`` /
+        ``parse_recon_response``. Debrief capability mirrors
+        ``core.debrief.run_debrief`` — a plugin is debrief-capable if it exposes
+        an ``on_debrief`` hook. Both are surfaced so the WebUI can filter plugins
+        by pipeline participation.
+        """
+        has_recon = hasattr(plugin, "get_recon_contributions") or all(
+            hasattr(plugin, attr)
+            for attr in (
+                "get_recon_key",
+                "get_recon_instruction",
+                "parse_recon_response",
+            )
+        )
+        has_debrief = hasattr(plugin, "on_debrief")
+        return {"has_recon": bool(has_recon), "has_debrief": bool(has_debrief)}
+
+    @staticmethod
     def _resolve_component_info(name: str, plugin: Any = None) -> Any:
         """Return the ComponentInfo backing a plugin, tolerating name aliases.
 
@@ -10546,6 +10569,7 @@ class SynthWebUIInterface:
             info = self._resolve_component_info(name, plugin)
             category = getattr(info, "category", "") or "Various"
             run_meta = self._plugin_run_meta(plugin)
+            capability_flags = self._plugin_capability_flags(plugin)
             plugins_data.append(
                 {
                     "name": name,
@@ -10562,6 +10586,7 @@ class SynthWebUIInterface:
                     "has_icon": self._plugin_has_icon(info, name),
                     "icon_url": f"/api/plugins/{name}/icon",
                     "guide": self._read_plugin_guide(info),
+                    **capability_flags,
                     **run_meta,
                 }
             )
