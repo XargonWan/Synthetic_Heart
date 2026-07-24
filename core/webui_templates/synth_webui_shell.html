@@ -1124,7 +1124,11 @@
             height: 32px;
             border-radius: 8px;
             object-fit: contain;
-            background: rgba(0, 0, 0, 0.2);
+            /* Solid rounded-square backdrop so icons with transparency
+               (SVG/PNG) render on a consistent surface. */
+            background: #1c1c1e;
+            padding: 3px;
+            box-sizing: border-box;
         }
         .plugin-banner-name {
             flex: 1 1 auto;
@@ -1233,7 +1237,11 @@
             height: 40px;
             border-radius: 10px;
             object-fit: contain;
-            background: rgba(0, 0, 0, 0.2);
+            /* Solid rounded-square backdrop so icons with transparency
+               (SVG/PNG) render on a consistent surface. */
+            background: #1c1c1e;
+            padding: 4px;
+            box-sizing: border-box;
         }
         .plugin-detail-desc {
             color: var(--text-soft);

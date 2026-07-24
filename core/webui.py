@@ -9935,11 +9935,11 @@ class SynthWebUIInterface:
 
     @staticmethod
     def _component_icons_dir() -> "Path":
-        """Directory holding bundled per-component icons (``<name>.png``).
+        """Directory holding bundled per-component icons (``<name>.<ext>``).
 
-        Used for components that do not own a dedicated folder with an
-        ``icon.png`` — e.g. single-file interfaces (Telegram, Discord, Matrix,
-        Ollama) that all live in the shared ``interface/`` directory. The
+        Used for legacy components that do not own a dedicated folder with an
+        ``icon.<ext>`` — e.g. single-file interfaces (Ollama) that live in the
+        shared ``interface/`` directory. The
         icons shipped here are original, non-branded glyphs. A third-party
         brand/trademark logo may only be committed when its owner's licence or
         press kit permits it; such assets are attributed in
@@ -9955,36 +9955,129 @@ class SynthWebUIInterface:
             / "component_icons"
         )
 
-    @classmethod
-    def _bundled_component_icon(cls, name: str) -> "Optional[Path]":
-        """Return the bundled icon path for a component, if one is shipped.
+    # Supported icon extensions, in priority order, mapped to their MIME type.
+    # The component/plugin manager looks for an ``icon.<ext>`` file sitting next
+    # to the component (usually inside the plugin/interface folder) — the
+    # component itself never declares its icon path.
+    _ICON_EXTENSIONS: "tuple[tuple[str, str], ...]" = (
+        ("png", "image/png"),
+        ("svg", "image/svg+xml"),
+        ("webp", "image/webp"),
+        ("jpg", "image/jpeg"),
+        ("jpeg", "image/jpeg"),
+        ("gif", "image/gif"),
+    )
 
-        The lookup is confined to :meth:`_component_icons_dir` to prevent path
-        traversal; returns ``None`` when no bundled icon exists for ``name``.
+    @classmethod
+    def _find_icon_in_dir(cls, base: "Path") -> "Optional[tuple[Path, str]]":
+        """Return ``(path, media_type)`` for the first ``icon.<ext>`` in ``base``.
+
+        Searches the directory for an ``icon.*`` file using the supported
+        extensions in :attr:`_ICON_EXTENSIONS` priority order. Every candidate
+        is confined to ``base`` to prevent path traversal. Returns ``None`` when
+        no supported icon exists.
         """
-        base = cls._component_icons_dir().resolve()
-        candidate = (base / f"{name}.png").resolve()
-        if base == candidate.parent and candidate.is_file():
-            return candidate
+        try:
+            resolved_base = base.resolve()
+        except Exception:  # pragma: no cover - defensive
+            return None
+        for ext, media_type in cls._ICON_EXTENSIONS:
+            candidate = (resolved_base / f"icon.{ext}").resolve()
+            if candidate.parent == resolved_base and candidate.is_file():
+                return candidate, media_type
         return None
 
+    @classmethod
+    def _bundled_component_icon(cls, name: str) -> "Optional[tuple[Path, str]]":
+        """Return ``(path, media_type)`` for a bundled component icon, if any.
+
+        Looks for ``<name>.<ext>`` under :meth:`_component_icons_dir` using the
+        supported extensions in :attr:`_ICON_EXTENSIONS` priority order. The
+        lookup is confined to that directory to prevent path traversal; returns
+        ``None`` when no bundled icon exists for ``name``.
+        """
+        base = cls._component_icons_dir().resolve()
+        for ext, media_type in cls._ICON_EXTENSIONS:
+            candidate = (base / f"{name}.{ext}").resolve()
+            if candidate.parent == base and candidate.is_file():
+                return candidate, media_type
+        return None
+
+    @staticmethod
+    def _reflect_component_dir(name: str, info: Any = None) -> "Optional[Path]":
+        """Resolve a component's on-disk folder by reflecting its instance.
+
+        The component manager owns icon/guide discovery — a plugin or interface
+        never declares where its assets live. The primary source is the tracked
+        ``ComponentInfo.dir_path``, but that field can be missing for sub-folder
+        interfaces whose package shim rebinds ``sys.modules`` (e.g. Matrix and
+        Fluxer), leaving the manager unable to find their ``icon.<ext>``.
+
+        This fallback derives the folder directly from the live registered
+        instance: it looks the component up in the interface and plugin
+        registries and resolves the concrete *class* source file via
+        :func:`inspect.getfile`. The parent of that file is the component's
+        folder — exactly where its ``icon.<ext>`` and ``guide.md`` sit — so
+        discovery works regardless of how the import machinery rebound modules.
+
+        Returns the resolved directory ``Path`` (or ``None`` when it cannot be
+        determined). No filesystem write or traversal outside the class source
+        tree is possible; the caller still confines icon lookups to the folder.
+        """
+        from pathlib import Path
+        import inspect
+
+        # 1. Trust the tracked dir_path when it is populated.
+        dir_path = getattr(info, "dir_path", "") if info else ""
+        if dir_path:
+            return Path(dir_path)
+
+        # 2. Reflect the live registered instance (interface first, then plugin)
+        #    and resolve the concrete class' source file. This is immune to the
+        #    ``sys.modules`` rebinding done by sub-folder package shims.
+        instance = None
+        try:
+            from core.core_initializer import INTERFACE_REGISTRY, PLUGIN_REGISTRY
+
+            instance = INTERFACE_REGISTRY.get(name) or PLUGIN_REGISTRY.get(name)
+            if instance is None:
+                # Tolerate the ``<name>_plugin`` component stem alias.
+                instance = PLUGIN_REGISTRY.get(f"{name}_plugin")
+        except Exception:  # pragma: no cover - defensive
+            instance = None
+
+        if instance is None:
+            return None
+
+        try:
+            source_file = inspect.getfile(type(instance))
+        except Exception:  # pragma: no cover - defensive (builtins, C-exts)
+            return None
+        if not source_file:
+            return None
+        return Path(source_file).parent
+
     async def plugin_icon(self, name: str) -> FileResponse:
-        """Serve a component's ``icon.png``.
+        """Serve a component's icon.
+
+        The icon is discovered generically — the component manager looks for an
+        ``icon.<ext>`` file (``png``, ``svg``, ``webp``, ``jpg``, ``jpeg``,
+        ``gif``) sitting next to the component, so a plugin/interface never has
+        to declare its own icon path.
 
         Resolution order:
 
-        1. The component's own on-disk directory (``<dir_path>/icon.png``),
+        1. The component's own on-disk directory (``<dir_path>/icon.<ext>``),
            resolved from the tracked ``ComponentInfo`` and confined to that
            directory to prevent path traversal.
         2. A bundled per-component icon under
-           ``res/synth_webui/static/component_icons/<name>.png`` — for
-           single-file components (interfaces) that share a directory and
-           therefore cannot each own an ``icon.png``.
+           ``res/synth_webui/static/component_icons/<name>.<ext>`` — for
+           legacy single-file components that share a directory and therefore
+           cannot each own an ``icon.<ext>``.
 
         Returns 404 when neither exists; the WebUI then falls back to the
         SyntH logo.
         """
-        from pathlib import Path
 
         # Reject anything that is not a plain short-name to avoid traversal.
         if not name or "/" in name or "\\" in name or ".." in name:
@@ -9998,18 +10091,21 @@ class SynthWebUIInterface:
         except Exception:
             info = None
 
-        dir_path = getattr(info, "dir_path", "") if info else ""
-        if dir_path:
-            base = Path(dir_path).resolve()
-            icon_path = (base / "icon.png").resolve()
-            # Confinement: the resolved icon must live inside the plugin dir.
-            if base in icon_path.parents and icon_path.is_file():
-                return FileResponse(str(icon_path), media_type="image/png")
+        # Resolve the component's on-disk folder generically: the tracked
+        # ``dir_path`` when present, otherwise reflected from the live instance
+        # (covers sub-folder interfaces whose package shim hides ``dir_path``).
+        component_dir = self._reflect_component_dir(name, info)
+        if component_dir is not None:
+            found = self._find_icon_in_dir(component_dir)
+            if found is not None:
+                icon_path, media_type = found
+                return FileResponse(str(icon_path), media_type=media_type)
 
-        # Fallback: a bundled per-component icon (interfaces, single-file plugins).
+        # Fallback: a bundled per-component icon (legacy single-file components).
         bundled = self._bundled_component_icon(name)
         if bundled is not None:
-            return FileResponse(str(bundled), media_type="image/png")
+            bundled_path, bundled_media = bundled
+            return FileResponse(str(bundled_path), media_type=bundled_media)
 
         raise HTTPException(status_code=404, detail="Icon not found")
 
@@ -10033,16 +10129,14 @@ class SynthWebUIInterface:
     def _plugin_has_icon(cls, info: Any, name: str = "") -> bool:
         """Return True when the component has an icon available.
 
-        Checks the component's own ``<dir_path>/icon.png`` first, then falls
-        back to a bundled per-component icon (``component_icons/<name>.png``)
-        when ``name`` is provided — the latter covers single-file interfaces
-        that share the ``interface/`` directory.
+        Checks the component's own ``<dir_path>/icon.<ext>`` first (any
+        supported extension), then falls back to a bundled per-component icon
+        (``component_icons/<name>.<ext>``) when ``name`` is provided — the
+        latter covers legacy single-file components that share a directory.
         """
-        from pathlib import Path
-
-        dir_path = getattr(info, "dir_path", "") if info else ""
         try:
-            if dir_path and (Path(dir_path) / "icon.png").is_file():
+            component_dir = cls._reflect_component_dir(name, info)
+            if component_dir is not None and cls._find_icon_in_dir(component_dir):
                 return True
             if name and cls._bundled_component_icon(name) is not None:
                 return True
@@ -10051,28 +10145,32 @@ class SynthWebUIInterface:
         return False
 
     @staticmethod
-    def _read_plugin_guide(info: Any) -> str:
+    def _read_plugin_guide(info: Any, name: str = "") -> str:
         """Return the raw Markdown of a plugin's guide (empty if absent).
 
         Two layouts are supported: folder-plugins ship ``<dir>/guide.md``,
         while single-file plugins ship ``plugins/<name>.guide.md`` next to
         their ``<name>.py`` module (``dir_path`` then points at ``plugins/``).
-        """
-        from pathlib import Path
 
-        dir_path = getattr(info, "dir_path", "") if info else ""
-        if not dir_path:
+        The component folder is resolved generically by
+        :meth:`_reflect_component_dir`: the tracked ``dir_path`` when present,
+        otherwise reflected from the live registered instance. This covers
+        sub-folder interfaces whose package shim rebinds ``sys.modules`` and
+        leaves ``dir_path`` empty (e.g. Matrix and Fluxer) — the manager still
+        finds their ``guide.md``.
+        """
+        base = SynthWebUIInterface._reflect_component_dir(name, info)
+        if base is None:
             return ""
         try:
-            base = Path(dir_path)
             # Folder-owned guide: <dir>/guide.md
             folder_guide = base / "guide.md"
             if folder_guide.is_file():
                 return folder_guide.read_text(encoding="utf-8")
             # Single-file plugin guide: plugins/<name>.guide.md
-            name = getattr(info, "name", "") if info else ""
-            if name:
-                sibling_guide = base / f"{name}.guide.md"
+            guide_name = name or (getattr(info, "name", "") if info else "")
+            if guide_name:
+                sibling_guide = base / f"{guide_name}.guide.md"
                 if sibling_guide.is_file():
                     return sibling_guide.read_text(encoding="utf-8")
         except Exception:  # pragma: no cover - defensive
@@ -10475,7 +10573,7 @@ class SynthWebUIInterface:
                     "disable_allowed": not core_initializer.is_core_interface(name),
                     "has_icon": self._plugin_has_icon(info, name),
                     "icon_url": f"/api/plugins/{name}/icon",
-                    "guide": self._read_plugin_guide(info),
+                    "guide": self._read_plugin_guide(info, name),
                 }
             )
 
@@ -10595,7 +10693,7 @@ class SynthWebUIInterface:
                     "disable_allowed": not core_initializer.is_core_plugin(name),
                     "has_icon": self._plugin_has_icon(info, name),
                     "icon_url": f"/api/plugins/{name}/icon",
-                    "guide": self._read_plugin_guide(info),
+                    "guide": self._read_plugin_guide(info, name),
                     **capability_flags,
                     **run_meta,
                 }
@@ -10629,7 +10727,7 @@ class SynthWebUIInterface:
                     "disable_allowed": not core_initializer.is_core_plugin(name),
                     "has_icon": self._plugin_has_icon(info, name),
                     "icon_url": f"/api/plugins/{name}/icon",
-                    "guide": self._read_plugin_guide(info),
+                    "guide": self._read_plugin_guide(info, name),
                 }
             )
 

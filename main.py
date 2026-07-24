@@ -54,7 +54,7 @@ _dev_components_enabled = False
 
 # Set by signal_handler, awaited by the main loop to perform an orderly shutdown.
 # Deliberately NOT handled by raising SystemExit inside the raw OS signal frame:
-# uvicorn (interface/openai_api_server.py) installs its own SIGINT/SIGTERM capture
+# uvicorn (interface/openai_api_server/openai_api_server.py) installs its own SIGINT/SIGTERM capture
 # around `await server.serve()` and re-raises the signal to whatever handler was
 # previously registered once it unwinds, so a synchronous sys.exit() here fires deep
 # inside that task's stack. SystemExit is a BaseException, so it isn't caught by

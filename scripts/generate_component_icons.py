@@ -38,6 +38,7 @@ PALETTE: dict[str, tuple[tuple[int, int, int], tuple[int, int, int]]] = {
     "discord_bot": ((88, 101, 242), (255, 255, 255)),  # indigo tile, white face
     "matrix_chat": ((30, 30, 30), (255, 255, 255)),  # dark tile, white brackets
     "ollama_serve": ((60, 60, 66), (245, 245, 245)),  # slate tile, light llama
+    "fluxer_bot": ((123, 44, 191), (255, 255, 255)),  # violet tile, white bolt
 }
 
 
@@ -96,6 +97,20 @@ def _draw_matrix(draw: ImageDraw.ImageDraw, fg: tuple[int, int, int]) -> None:
         draw.ellipse([cx - r, y - r, cx + r, y + r], fill=fg + (255,))
 
 
+def _draw_fluxer(draw: ImageDraw.ImageDraw, fg: tuple[int, int, int]) -> None:
+    """A stylised lightning bolt (generic 'flux'/flow glyph)."""
+    bolt = [
+        (150, 44),
+        (92, 140),
+        (128, 140),
+        (106, 212),
+        (176, 108),
+        (136, 108),
+    ]
+    draw.polygon(bolt, fill=fg + (255,))
+    draw.line([(150, 44), (128, 140)], fill=(0, 0, 0, 40), width=3)
+
+
 def _draw_ollama(draw: ImageDraw.ImageDraw, fg: tuple[int, int, int]) -> None:
     """A minimal llama silhouette (generic local-model glyph)."""
     # body
@@ -119,6 +134,7 @@ DRAWERS = {
     "discord_bot": _draw_discord,
     "matrix_chat": _draw_matrix,
     "ollama_serve": _draw_ollama,
+    "fluxer_bot": _draw_fluxer,
 }
 
 

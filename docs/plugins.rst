@@ -337,7 +337,7 @@ ships assets, as a self-contained package folder::
    plugins/my_plugin/
        __init__.py
        my_plugin.py        # the plugin module (exports PLUGIN_CLASS)
-       icon.png            # optional 256x256 icon for the WebUI banner
+       icon.<ext>          # optional icon (png/svg/webp/jpg/jpeg/gif) for the WebUI banner
        guide.md            # optional Markdown guide (single source of truth)
 
 The folder layout is preferred for anything that ships an icon or a guide,
@@ -357,7 +357,7 @@ the loader derives sensible defaults reflectively when a key is omitted.
            "display_name": "My Plugin",
            "description": "One-line summary shown in the detail pane.",
            "category": "Various",   # WebUI grouping (see below)
-           "icon": "icon.png",      # relative to the plugin directory
+           "icon": "icon.<ext>",    # relative to the plugin directory
            "guide": "guide.md",     # relative to the plugin directory
            # Optional "Run Now" button in the detail pane:
            "runnable": True,
@@ -381,9 +381,13 @@ matches on message content.
 
 **Icons**
 
-Place a 256×256 ``icon.png`` alongside the plugin. The WebUI serves it from
-``/api/plugins/<name>/icon`` (path-confined to the plugin directory). Plugins
-without an icon automatically fall back to the SyntH logo.
+Place an ``icon.<ext>`` (recommended 256×256) alongside the plugin. The
+plugin/interface manager — not the plugin itself — discovers the icon by
+scanning the plugin's on-disk directory for an ``icon.<ext>`` file, accepting
+any of ``png``, ``svg``, ``webp``, ``jpg``, ``jpeg``, ``gif`` (resolved in that
+priority order) and deriving the MIME type automatically. The WebUI serves it
+from ``/api/plugins/<name>/icon`` (path-confined to the plugin directory).
+Plugins without an icon automatically fall back to the SyntH logo.
 
 A third-party brand/trademark logo may be committed **only** if the owner's
 licence, trademark policy, or press kit **explicitly permits** using the mark to

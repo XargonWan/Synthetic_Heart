@@ -20,6 +20,7 @@ Available Interfaces
 **Stable Interfaces** (in ``interface/`` directory):
 
 * ``discord_interface`` – Discord bot integration. Requires ``DISCORD_BOT_TOKEN``.
+* ``fluxer_interface`` – Fluxer bot integration (self-hostable, Discord-compatible chat) via a native aiohttp REST + WebSocket gateway client. Requires ``FLUXER_TOKEN``. See :doc:`fluxer_interface`.
 * ``matrix_interface`` – Matrix chat bridge powered by ``matrix-nio``. Requires homeserver credentials and tokenizer (password or access token).
 * ``openai_api_server`` – OpenAI-compatible REST bridge that lets external clients talk to SyntH as if it were an OpenAI endpoint. It also implements the legacy ``/api/generate`` · ``/api/chat`` · ``/api/tags`` routes, so tools written for a local Ollama daemon work unchanged.
 * ``telegram_bot`` – Telegram bot interface with media support. Requires ``BOTFATHER_TOKEN`` and trainer ID.
@@ -52,6 +53,32 @@ The Discord interface provides full bot integration:
 - Media upload/download support
 - Thread and channel management
 - Role and permission integration
+
+Fluxer Interface
+----------------
+
+Fluxer is a self-hostable, Discord-compatible chat platform. The interface ships
+a native Python client (aiohttp REST + WebSocket gateway) — no .NET runtime or
+``discord.py`` dependency — so it runs inside the slim container image.
+
+**Setup Steps:**
+
+1. Create a bot account on your Fluxer server and copy its token
+2. Set ``FLUXER_TOKEN`` (the ``Bot `` prefix is added automatically if omitted)
+3. (Self-host only) override ``FLUXER_API_BASE_URL`` / ``FLUXER_GATEWAY_URL`` /
+   ``FLUXER_API_VERSION`` to point at your deployment
+4. Start synth — the interface loads automatically
+
+**Features:**
+
+- Real-time message handling over the gateway WebSocket with heartbeat,
+  automatic reconnect, and session resume
+- Text messages in/out and generic file sending
+  (``send_file_fluxer_bot``)
+- Fully configurable endpoints for self-hosted instances
+- Hot reload on token/endpoint changes (no restart)
+
+See :doc:`fluxer_interface` for the full configuration reference.
 
 Telegram Bot Interface
 ----------------------
@@ -180,7 +207,7 @@ The **OpenAI-compatible API server** exposes Synthetic Heart through a standard 
 
 **Usage**
 
-1. Start SyntH with the interface enabled (it registers automatically when ``interface/openai_api_server.py`` is present).
+1. Start SyntH with the interface enabled (it registers automatically when the ``interface/openai_api_server/`` package is present).
 2. Point an OpenAI-compatible (or Ollama) client at your synth instance:
 
    .. code-block:: bash
@@ -390,6 +417,8 @@ never leak schemas into the prompt.
      - ``["BOTFATHER_TOKEN"]``
    * - Discord (``interface/discord_interface.py``)
      - ``["DISCORD_BOT_TOKEN"]``
+   * - Fluxer (``interface/fluxer_interface.py``)
+     - ``["FLUXER_TOKEN"]``
    * - Matrix (``interface/matrix_interface.py``)
      - ``["MATRIX_USER", ("MATRIX_PASSWORD", "MATRIX_ACCESS_TOKEN")]``
 

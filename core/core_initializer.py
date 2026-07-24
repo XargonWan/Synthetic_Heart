@@ -1303,15 +1303,21 @@ class CoreInitializer:
                     f"[core_initializer] Scanning {dir_name} directory: {module_path}"
                 )
 
-                # Auto-discover all modules in package
+                # Auto-discover all modules AND packages in the directory.
+                # Flat single-file interfaces (``interface/foo.py``) and
+                # sub-folder interfaces (``interface/foo/`` with an
+                # ``__init__.py`` package shim, mirroring the multi-file
+                # plugin layout so an interface can ship its own ``icon.png``
+                # and ``guide.md``) are both imported.
                 for importer, module_name, is_pkg in pkgutil.iter_modules(
                     [module_path]
                 ):
-                    if not is_pkg and not module_name.startswith("_"):
+                    if not module_name.startswith("_"):
                         full_module_path = f"{dir_name}.{module_name}"
                         try:
+                            kind = "package" if is_pkg else "module"
                             log_debug(
-                                f"[core_initializer] Importing interface module: {module_name} from {dir_name}"
+                                f"[core_initializer] Importing interface {kind}: {module_name} from {dir_name}"
                             )
                             importlib.import_module(full_module_path)
                             log_debug(
@@ -1352,14 +1358,27 @@ class CoreInitializer:
         """
         import sys
 
-        # Get all loaded interface modules
-        interface_modules = [
-            name
-            for name in sys.modules.keys()
-            if name.startswith("interface.")
-            or name.startswith("interface_dev.")
-            or name == "core.webui"
-        ]
+        # Get all loaded interface modules. Sub-folder interfaces ship a
+        # package shim that rebinds ``sys.modules[<pkg>]`` to the inner
+        # submodule, so both ``interface.foo`` and ``interface.foo.foo`` map
+        # to the *same* module object. Deduplicate by module identity so
+        # ``initialize_interface()`` is not called twice for one interface.
+        _seen_ids: set[int] = set()
+        interface_modules = []
+        for name in list(sys.modules.keys()):
+            if not (
+                name.startswith("interface.")
+                or name.startswith("interface_dev.")
+                or name == "core.webui"
+            ):
+                continue
+            mod = sys.modules.get(name)
+            if mod is None:
+                continue
+            if id(mod) in _seen_ids:
+                continue
+            _seen_ids.add(id(mod))
+            interface_modules.append(name)
 
         import sys as _sys
 
@@ -1694,10 +1713,37 @@ class CoreInitializer:
                 ComponentStatus.LOADING,
                 actions=actions,
             )
+            # Resolve the interface module's on-disk directory so the WebUI can
+            # locate its ``icon.png`` and ``guide.md``. Sub-folder interfaces
+            # (``interface/<module>/<module>.py`` with a package shim) own their
+            # assets in that folder — the instance's ``__module__`` points at the
+            # inner submodule, so ``.parent`` resolves to the interface folder.
+            # Legacy single-file interfaces resolve to ``interface/`` and fall
+            # back to a bundled ``component_icons/<name>.png`` / sibling
+            # ``<name>.guide.md``.
+            interface_dir_path = ""
+            try:
+                import sys
+
+                module_name = (
+                    getattr(interface_instance, "__module__", None)
+                    if interface_instance
+                    else None
+                )
+                module = sys.modules.get(module_name) if module_name else None
+                module_file = getattr(module, "__file__", None) if module else None
+                if module_file:
+                    interface_dir_path = str(Path(module_file).parent)
+            except Exception as exc:  # pragma: no cover - defensive
+                log_debug(
+                    f"[core_initializer] Could not resolve dir_path for interface "
+                    f"{interface_name}: {exc}"
+                )
             self.mark_component_success(
                 interface_name,
                 actions=actions,
                 category="Interfaces",
+                dir_path=interface_dir_path,
             )
 
             # After registering, rebuild actions to expose interface capabilities
