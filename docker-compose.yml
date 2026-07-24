@@ -43,6 +43,12 @@ services:
     restart: unless-stopped
     stdin_open: true
     tty: true
+    # Allow the container to reach services running on the Docker host (e.g. a
+    # Minecraft "Open to LAN" server) via the stable name host.docker.internal.
+    # Required on a custom bridge network, where this name is not resolved by
+    # default. Set MINECRAFT_SERVER_HOST=host.docker.internal to use it (for example in the web UI).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       - synth-db
     networks:

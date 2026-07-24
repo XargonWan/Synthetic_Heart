@@ -572,6 +572,49 @@ async def enqueue(
 
     global _counter
     priority_val = HIGH_PRIORITY if priority else NORMAL_PRIORITY
+
+    # === RIFT VESSEL FOCUS: the game takes top priority while embodied ===
+    # When SyntH is actively embodied in a world (an active Vessel session), it
+    # is "concentrating there like a real person": in-world perceptions get the
+    # HIGHEST priority so gameplay stays responsive, and ordinary chat traffic
+    # from other interfaces yields to it. This decision is based purely on the
+    # message's *origin interface* and the active-session flag — never on
+    # message text (project rule: no keyword/trigger-word logic). Two effects:
+    #   * the Vessel's own perceptions (interface == "vessel") are RAISED to
+    #     HIGH_PRIORITY — the game is the most urgent thing right now;
+    #   * ordinary chat is LOWERED to AGENT_PRIORITY (below NORMAL) so the queue
+    #     drains Vessel perceptions first.
+    # Exemptions: urgent/HIGH messages (priority=True) always pass untouched;
+    # the trainer (TRAINER_CHAT_ID) must always reach SyntH promptly and is
+    # never deprioritised. Fully guarded + lazily imported so removing the
+    # Vessel plugin, or any failure, leaves enqueue behaviour unchanged.
+    if not priority:
+        try:
+            from core.config import config_registry
+            from core.vessel_session_manager import vessel_session_manager
+
+            if vessel_session_manager.has_active_session():
+                if interface == "vessel":
+                    priority_val = HIGH_PRIORITY
+                    log_debug(
+                        "[QUEUE] Vessel session active — raising in-world "
+                        "perception to HIGH_PRIORITY"
+                    )
+                else:
+                    trainer_path = str(
+                        config_registry.get_value("TRAINER_CHAT_ID", "") or ""
+                    ).strip()
+                    msg_path = getattr(message, "interface_path", None) or ""
+                    is_trainer = bool(trainer_path) and str(msg_path) == trainer_path
+                    if not is_trainer:
+                        priority_val = AGENT_PRIORITY
+                        log_debug(
+                            "[QUEUE] Vessel session active — deprioritising chat "
+                            f"message from '{interface}' to AGENT_PRIORITY"
+                        )
+        except Exception as exc:
+            log_debug(f"[QUEUE] Vessel priority adjustment skipped: {exc}")
+
     _counter += 1
     await _get_queue().put((priority_val, _counter, item))
     log_debug(f"[QUEUE] Message successfully put in queue with priority {priority_val}")

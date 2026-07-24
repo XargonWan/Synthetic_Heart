@@ -21,11 +21,11 @@ def test_register_and_query_connector() -> None:
         "minecraft",
         "plugins.rift_vessel.minecraft.minecraft",
         capabilities={"movement": True, "chat": True},
-        label="Minecraft (PoC)",
+        label="Minecraft (Mineflayer)",
     )
     assert "minecraft" in reg.get_available_connectors()
     meta = reg.get_connector_meta("minecraft")
-    assert meta["label"] == "Minecraft (PoC)"
+    assert meta["label"] == "Minecraft (Mineflayer)"
     assert meta["capabilities"]["movement"] is True
 
 

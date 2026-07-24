@@ -1,5 +1,5 @@
 # interface/minecraft_provisioner.py
-"""Provisioner for the Minecraft Vessel PoC bridge.
+"""Provisioner for the Minecraft Vessel bridge.
 
 Manages the lifecycle of the Node.js Mineflayer bridge
 (:mod:`interface_dev/minecraft_bridge_minimal.js`) as a child subprocess:
@@ -11,8 +11,10 @@ Manages the lifecycle of the Node.js Mineflayer bridge
 
 Design constraints (see ``docs/rift_vessel.rst`` and issue #60):
 
-* **Opt-in.** All actions are gated by the ``MINECRAFT_BRIDGE_ENABLED`` config
-  key; when disabled the provisioner refuses to install or start.
+* **Opt-in.** All actions are gated by whether the ``minecraft_vessel`` plugin
+  is enabled (its WebUI card toggle, persisted as
+  ``PLUGIN_ENABLED__minecraft_vessel``); when the plugin is disabled the
+  provisioner refuses to install or start.
 * **Non-root.** The subprocess inherits the current (non-root) user; we never
   escalate privileges.
 * **Single-container PoC.** The bridge runs inside the same container as SyntH.
@@ -51,8 +53,10 @@ _DEFAULT_BRIDGE_ROOT = "/opt/minecraft_bridge"
 # Source of the bridge script inside the repo.
 _BRIDGE_SRC_RELATIVE = Path("interface_dev") / "minecraft_bridge_minimal.js"
 
-# npm dependency required by the bridge.
-_BRIDGE_NPM_DEPS = ["mineflayer"]
+# npm dependencies required by the bridge. ``mineflayer-pathfinder`` powers the
+# entity-following / navigation verbs (``follow``/``move``); without it the bot
+# connects but stays immobile ("follow unavailable (pathfinder not loaded)").
+_BRIDGE_NPM_DEPS = ["mineflayer", "mineflayer-pathfinder"]
 
 
 class BridgeProvisioner:
@@ -79,10 +83,26 @@ class BridgeProvisioner:
         return self._repo_root() / _BRIDGE_SRC_RELATIVE
 
     def _is_enabled(self) -> bool:
+        """Return whether the ``minecraft_vessel`` plugin is enabled.
+
+        The bridge lifecycle is gated by the plugin's own WebUI card toggle
+        (``PLUGIN_ENABLED__minecraft_vessel``) rather than a dedicated key, so a
+        single switch controls both the plugin and its bridge. Defaults to
+        ``True`` (the plugin card toggle defaults to enabled).
+        """
         try:
-            return bool(config_registry.get_value("MINECRAFT_BRIDGE_ENABLED", False))
+            return bool(
+                config_registry.get_value(
+                    "PLUGIN_ENABLED__minecraft_vessel",
+                    True,
+                    value_type=bool,
+                    component="minecraft_vessel",
+                    group="plugins",
+                    hidden=True,
+                )
+            )
         except Exception:
-            return False
+            return True
 
     def _bridge_env(self) -> Dict[str, str]:
         env = dict(os.environ)
@@ -94,14 +114,23 @@ class BridgeProvisioner:
                 val = None
             return str(val) if val is not None else default
 
+        # The bot's in-world username defaults to Synth's configured name; an
+        # explicit MINECRAFT_BOT_USERNAME_OVERRIDE (when non-empty) wins.
+        username_override = _cfg("MINECRAFT_BOT_USERNAME_OVERRIDE", "").strip()
+        bot_username = username_override or _cfg("SYNTH_NAME", "Synth")
+
         env.update(
             {
                 "BRIDGE_HOST": _cfg("MINECRAFT_BRIDGE_HOST", "127.0.0.1"),
                 "BRIDGE_PORT": _cfg("MINECRAFT_BRIDGE_PORT", "8137"),
                 "MC_SERVER_HOST": _cfg("MINECRAFT_SERVER_HOST", "127.0.0.1"),
-                "MC_SERVER_PORT": _cfg("MINECRAFT_SERVER_PORT", "25565"),
-                "MC_BOT_USERNAME": _cfg("MINECRAFT_BOT_USERNAME", "Synth"),
+                "MC_SERVER_PORT": _cfg("MINECRAFT_SERVER_PORT", "44383"),
+                "MC_BOT_USERNAME": bot_username,
                 "MC_AUTH": "offline",
+                # Optional protocol-version pin (empty = Mineflayer auto-detect).
+                # Set MINECRAFT_SERVER_VERSION when the server announces a
+                # version the bundled minecraft-data doesn't know.
+                "MC_VERSION": _cfg("MINECRAFT_SERVER_VERSION", ""),
             }
         )
         return env
@@ -154,7 +183,7 @@ class BridgeProvisioner:
         if not self._is_enabled():
             return {
                 "ok": False,
-                "detail": "MINECRAFT_BRIDGE_ENABLED is off (opt-in required)",
+                "detail": "minecraft_vessel plugin is disabled (enable it in the WebUI)",
             }
 
         npm = shutil.which("npm")
@@ -164,7 +193,7 @@ class BridgeProvisioner:
                 "ok": False,
                 "detail": (
                     "node/npm not found in PATH — the runtime image needs the "
-                    "conditional Node stage enabled for the Minecraft PoC"
+                    "conditional Node stage enabled for the Minecraft Vessel"
                 ),
             }
 
@@ -188,7 +217,7 @@ class BridgeProvisioner:
                             "name": "synth-minecraft-bridge",
                             "version": "0.1.0",
                             "private": True,
-                            "description": "SyntH Rift Vessel Minecraft PoC bridge",
+                            "description": "SyntH Rift Vessel Minecraft bridge",
                             "main": "minecraft_bridge_minimal.js",
                         },
                         indent=2,
@@ -201,8 +230,16 @@ class BridgeProvisioner:
                     "detail": f"failed to write package.json: {exc}",
                 }
 
-        node_modules = self._bridge_root / "node_modules" / "mineflayer"
-        if node_modules.exists():
+        # Reinstall unless *every* required dependency is already present.
+        # Checking only ``mineflayer`` would leave older bridge installs (which
+        # predate ``mineflayer-pathfinder``) permanently without navigation, so
+        # the bot would connect but never move/follow.
+        missing = [
+            dep
+            for dep in _BRIDGE_NPM_DEPS
+            if not (self._bridge_root / "node_modules" / dep).exists()
+        ]
+        if not missing:
             return {
                 "ok": True,
                 "detail": "already installed",
@@ -251,7 +288,7 @@ class BridgeProvisioner:
         if not self._is_enabled():
             return {
                 "ok": False,
-                "detail": "MINECRAFT_BRIDGE_ENABLED is off (opt-in required)",
+                "detail": "minecraft_vessel plugin is disabled (enable it in the WebUI)",
             }
 
         pid = self._running_pid()
@@ -351,7 +388,10 @@ class BridgeProvisioner:
             "bridge_root": str(self._bridge_root),
             "started_at": state.get("started_at"),
             "installed": self._bridge_script.exists()
-            and (self._bridge_root / "node_modules" / "mineflayer").exists(),
+            and all(
+                (self._bridge_root / "node_modules" / dep).exists()
+                for dep in _BRIDGE_NPM_DEPS
+            ),
         }
 
     def logs(self, lines: int = 100) -> Dict[str, Any]:

@@ -541,6 +541,7 @@ class CoreInitializer:
             try:
                 from core.config_manager import config_registry as _cfg_reg
 
+                # Global Rift Vessel keys (owned by the vessel_plugin core).
                 _cfg_reg.get_var(
                     "ACTIVE_VESSEL",
                     "disabled",
@@ -550,8 +551,9 @@ class CoreInitializer:
                         "Name of the active Rift Vessel world connector "
                         "(e.g. 'minecraft'), or 'disabled'."
                     ),
-                    group="vessel",
-                    component="vessel",
+                    group="plugins",
+                    component="vessel_plugin",
+                    hidden=True,
                 )
                 _cfg_reg.get_var(
                     "VESSEL_SETTINGS",
@@ -559,9 +561,9 @@ class CoreInitializer:
                     value_type=str,
                     label="Vessel Settings (JSON)",
                     description="JSON settings passed to the active Vessel connector.",
-                    group="vessel",
-                    component="vessel",
-                    advanced=True,
+                    group="plugins",
+                    component="vessel_plugin",
+                    hidden=True,
                 )
                 _cfg_reg.get_var(
                     "VESSEL_SESSION_COOLDOWN_SEC",
@@ -572,71 +574,84 @@ class CoreInitializer:
                         "Inactivity window before a Vessel session is closed and "
                         "its buffered experience is flushed to a single diary entry."
                     ),
-                    group="vessel",
-                    component="vessel",
+                    group="plugins",
+                    component="vessel_plugin",
                     advanced=True,
                 )
-                # Minecraft PoC bridge/provisioner keys.
+                # Minecraft-specific keys (owned by the attachable minecraft_vessel
+                # sub-plugin). Registered under its own component so the WebUI shows
+                # them as a distinct entity from the global Rift Vessel.
                 _cfg_reg.get_var(
-                    "MINECRAFT_BRIDGE_ENABLED",
-                    False,
-                    value_type=bool,
-                    label="Minecraft Bridge Enabled",
-                    description=(
-                        "Opt-in: allow provisioning/starting the in-container "
-                        "Mineflayer bridge for the Minecraft Vessel connector."
-                    ),
-                    group="vessel",
-                    component="vessel",
-                )
-                _cfg_reg.get_var(
-                    "MINECRAFT_BRIDGE_RUN_AT_START",
+                    "MINECRAFT_BRIDGE_RUN_AT_START",  # opt-in boot override
                     False,
                     value_type=bool,
                     label="Minecraft Bridge Autostart",
-                    description="Start the Minecraft bridge automatically at boot.",
-                    group="vessel",
-                    component="vessel",
+                    description=(
+                        "Optional: start the Minecraft bridge at boot. By "
+                        "default the bridge is started on demand, only when "
+                        "Synth actually enters the world."
+                    ),
+                    group="plugins",
+                    component="minecraft_vessel",
                     advanced=True,
                 )
                 _cfg_reg.get_var(
                     "MINECRAFT_BRIDGE_HOST",
                     "127.0.0.1",
                     value_type=str,
-                    group="vessel",
-                    component="vessel",
+                    label="Minecraft Bridge Host",
+                    description=(
+                        "Host the local Mineflayer bridge listens on for HTTP commands."
+                    ),
+                    group="plugins",
+                    component="minecraft_vessel",
                     advanced=True,
                 )
                 _cfg_reg.get_var(
                     "MINECRAFT_BRIDGE_PORT",
                     8137,
                     value_type=int,
-                    group="vessel",
-                    component="vessel",
+                    label="Minecraft Bridge Port",
+                    description=(
+                        "TCP port the local Mineflayer bridge listens on for "
+                        "HTTP commands."
+                    ),
+                    group="plugins",
+                    component="minecraft_vessel",
                     advanced=True,
                 )
                 _cfg_reg.get_var(
                     "MINECRAFT_SERVER_HOST",
                     "127.0.0.1",
                     value_type=str,
-                    group="vessel",
-                    component="vessel",
-                    advanced=True,
+                    label="Minecraft Server Host",
+                    description=(
+                        "Hostname or IP of the Minecraft server the bot connects to."
+                    ),
+                    group="plugins",
+                    component="minecraft_vessel",
                 )
                 _cfg_reg.get_var(
                     "MINECRAFT_SERVER_PORT",
-                    25565,
+                    44383,
                     value_type=int,
-                    group="vessel",
-                    component="vessel",
-                    advanced=True,
+                    label="Minecraft Server Port",
+                    description="TCP port of the Minecraft server the bot connects to.",
+                    group="plugins",
+                    component="minecraft_vessel",
                 )
                 _cfg_reg.get_var(
-                    "MINECRAFT_BOT_USERNAME",
-                    "Synth",
+                    "MINECRAFT_BOT_USERNAME_OVERRIDE",
+                    "",
                     value_type=str,
-                    group="vessel",
-                    component="vessel",
+                    label="Minecraft Bot Username Override",
+                    description=(
+                        "Optional in-world username for the Minecraft bot. "
+                        "Leave empty to use Synth's configured name "
+                        "(SYNTH_NAME)."
+                    ),
+                    group="plugins",
+                    component="minecraft_vessel",
                     advanced=True,
                 )
                 log_debug(

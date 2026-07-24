@@ -448,7 +448,7 @@
         padding: 0.2rem 0.5rem;
         border-radius: 4px;
         background: var(--accent);
-        color: white;
+        color: var(--bg);
         font-size: 0.7rem;
         font-weight: 600;
         text-transform: uppercase;
@@ -488,6 +488,87 @@
 
       .history-entry-detail strong {
         color: var(--text);
+      }
+
+      /* Vessel session block: one card per embodiment session (login->logout),
+         grouping every activity of that session so we don't get an infinite
+         list of single-event blocks. */
+      .vessel-session {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-left: 4px solid var(--accent);
+        border-radius: 12px;
+        padding: 1.25rem 1.5rem;
+        margin-bottom: 1.25rem;
+      }
+
+      .vessel-session-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 0.75rem;
+        border-bottom: 1px solid var(--border);
+        padding-bottom: 0.75rem;
+        margin-bottom: 0.75rem;
+      }
+
+      .vessel-session-title {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        font-size: 1rem;
+        font-weight: 600;
+        color: var(--text);
+      }
+
+      .vessel-env-icon {
+        width: 22px;
+        height: 22px;
+        object-fit: contain;
+        border-radius: 4px;
+        flex-shrink: 0;
+      }
+
+      .vessel-session-time {
+        font-size: 0.8rem;
+        color: var(--text-soft);
+        font-weight: 500;
+      }
+
+      .vessel-session-activities {
+        display: flex;
+        flex-direction: column;
+        gap: 0.5rem;
+      }
+
+      .vessel-activity {
+        display: flex;
+        align-items: baseline;
+        gap: 0.6rem;
+        padding: 0.4rem 0.5rem;
+        border-radius: 6px;
+        background: rgba(255, 255, 255, 0.02);
+      }
+
+      .vessel-activity-time {
+        font-size: 0.72rem;
+        color: var(--text-soft);
+        white-space: nowrap;
+        flex-shrink: 0;
+      }
+
+      .vessel-activity-summary {
+        font-size: 0.9rem;
+        color: var(--text);
+        word-break: break-word;
+        flex: 1;
+      }
+
+      .vessel-activity-empty {
+        font-size: 0.85rem;
+        color: var(--text-soft);
+        font-style: italic;
+        padding: 0.4rem 0.5rem;
       }
 
       /* Diary day-entry card */

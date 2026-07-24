@@ -122,6 +122,13 @@ class VesselConnectorBase(ABC):
 
     display_name: str = "Unnamed Vessel"
 
+    # Human-readable reason for the most recent failed :meth:`connect`. A
+    # connector should set this (and clear it on success / at the start of a
+    # new attempt) so the core plugin can tell Synth — and the requester —
+    # WHY entering the world failed, instead of a generic error. ``None`` when
+    # there is no failure to report.
+    last_error: str | None = None
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
@@ -143,6 +150,8 @@ class VesselConnectorBase(ABC):
 
         Returns:
             ``True`` if the connection succeeded and the vessel is embodied.
+            On failure return ``False`` **and** set :attr:`last_error` to a
+            human-readable reason so the caller can surface it.
         """
 
     @abstractmethod
@@ -182,6 +191,28 @@ class VesselConnectorBase(ABC):
         """Return capability flags / metadata for the WebUI and prompt context.
 
         Optional override. Defaults to an empty dict.
+        """
+        return {}
+
+    def get_world_actions(self) -> Dict[str, Dict[str, Any]]:
+        """Return **world-specific** embodiment actions this connector adds.
+
+        The core Vessel plugin already exposes the world-agnostic *core set*
+        (``connect``, ``disconnect``, ``say``, ``move``, ``look``, ``use``,
+        ``status``) that every embodied world shares. A connector may override
+        this hook to declare **extra** verbs that only make sense in its world
+        (e.g. Minecraft ``craft`` / ``mine``, Skyrim ``cast_spell`` / ``sneak``).
+
+        The returned mapping uses the same schema shape as a plugin's
+        ``get_supported_actions`` — keyed by the **bare verb** (no prefix), each
+        value a dict with ``description`` / ``required_fields`` /
+        ``optional_fields`` / ``security_level``. The core Vessel plugin
+        namespaces the key as ``vessel_<world>_<verb>`` when exposing it and
+        dispatches the verb back to :meth:`act`. Do **not** declare
+        ``external_effects`` here — Vessel actions must stay on the normal
+        (Fast-Lane) action path.
+
+        Optional override. Defaults to an empty dict (core set only).
         """
         return {}
 

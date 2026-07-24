@@ -53,7 +53,13 @@ class VesselInterface:
     """Embodied game-world interface. Forwards perception into the message
     chain and dispatches outbound actions through the Vessel plugin."""
 
-    display_name = "Vessel (Embodiment)"
+    display_name = "Rift Vessel"
+
+    # Internal I/O adapter for embodiment — not a user-configurable chat
+    # interface. Hidden from the WebUI Interfaces list to avoid a duplicate
+    # banner: the user-facing entry is the "Rift Vessel" plugin (Vessels
+    # category). See core/webui.py interfaces_data loop.
+    hidden_from_ui = True
 
     def __init__(self) -> None:
         """Create the interface in a stopped, un-connected state."""
@@ -78,21 +84,22 @@ class VesselInterface:
 
     @staticmethod
     def get_supported_actions() -> dict:
-        """Delegate the action schema to the Vessel plugin.
+        """The Vessel interface declares no actions of its own.
 
-        The embodiment actions live on the plugin; the interface only forwards
-        them so they appear in the action parser when the interface is loaded.
+        The embodiment actions (``vessel_connect``, the per-world gameplay
+        verbs, ``vessel_disconnect``) live exclusively on the ``vessel_plugin``,
+        which is always loaded. The interface is purely an I/O channel that
+        forwards world perception events into the message chain.
+
+        Crucially the interface must **not** re-declare the plugin's actions:
+        doing so made the core merge the interface name (``vessel``) into each
+        action's ``source``, which then caused
+        :func:`core.prompt_engine._derive_default_prompt_action_types` to treat
+        ``vessel_connect`` as *interface-scoped* and hide it from the prompt on
+        every other interface (Telegram, WebUI, …) — the exact interfaces from
+        which Synth actually decides to enter a world. Returning an empty set
+        keeps the action a plain plugin action, visible everywhere.
         """
-        try:
-            from core.core_initializer import PLUGIN_REGISTRY
-
-            plugin = PLUGIN_REGISTRY.get("vessel_plugin")
-            if plugin and hasattr(plugin, "get_supported_actions"):
-                return plugin.get_supported_actions()
-        except Exception as exc:  # pragma: no cover - defensive
-            log_debug(
-                f"[vessel_interface] get_supported_actions delegate failed: {exc}"
-            )
         return {}
 
     async def start(self) -> None:
@@ -102,10 +109,180 @@ class VesselInterface:
         self.disabled_reason = None
         if self._scheduler_task is None or self._scheduler_task.done():
             self._scheduler_task = asyncio.create_task(self._scheduler_loop())
+        await self._maybe_autostart_bridge()
+        await self._reattach_active_sessions()
         log_info("[vessel_interface] Vessel interface started")
 
+    async def _maybe_autostart_bridge(self) -> None:
+        """Optionally start the Minecraft bridge at boot.
+
+        By default the bridge is started on demand (when Synth actually enters
+        the world, via the connector's ``connect()``). This honours the opt-in
+        ``MINECRAFT_BRIDGE_RUN_AT_START`` override for deployments that want the
+        bridge running before the first session.
+        """
+        try:
+            run_at_start = bool(
+                config_registry.get_value("MINECRAFT_BRIDGE_RUN_AT_START", False)
+            )
+        except Exception:
+            run_at_start = False
+        if not run_at_start:
+            return
+        try:
+            from interface.minecraft_provisioner import get_bridge_provisioner
+
+            res = await get_bridge_provisioner().start()
+            if res.get("ok"):
+                log_info("[vessel_interface] Minecraft bridge autostarted at boot")
+            else:
+                log_info(
+                    "[vessel_interface] Minecraft bridge autostart skipped: "
+                    f"{res.get('detail')}"
+                )
+        except Exception as exc:  # pragma: no cover - defensive
+            log_warning(f"[vessel_interface] bridge autostart error: {exc}")
+
+    async def _reattach_active_sessions(self) -> None:
+        """Re-embody worlds whose sessions survived a process restart.
+
+        A container/process restart destroys every in-memory connector (and its
+        perception poll loop) while leaving the ``vessel_sessions`` row marked
+        ``active`` and the world bridge (e.g. the Minecraft Mineflayer bridge)
+        still logged into the world. Without this step Synth appears in-world
+        but is inert: nothing drains the connector's event stream, so chat and
+        world events never reach the message chain.
+
+        For **every** environment with an ``active`` session, ask the Vessel
+        plugin to reconnect its connector — regardless of the inactivity
+        cooldown. The cooldown governs when an *idle* session is **closed**
+        (:meth:`~core.vessel_session_manager.VesselSessionManager.close_expired_sessions`),
+        not whether a bot that may still be physically in-world is reattached.
+        Filtering the reattach by the cooldown would abandon a bot that is still
+        logged into the world after a long downtime, leaving Synth inert (an
+        ``active`` DB row with no connector draining its event stream).
+
+        ``connect_world`` is reattach-safe: the freshly-loaded connector reports
+        ``is_connected == False``, so it re-runs ``connect()`` (idempotent
+        against an already-connected bridge) and restarts the poll loop, while
+        :meth:`begin_session` reuses the existing active DB session (so the
+        lived experience is continued, not fragmented). If the reattach fails
+        (bridge dead, world server unreachable), the stale ``active`` row is
+        **closed** so it can never become a ghost that confuses the
+        connection-driven action exposure.
+
+        Best-effort and fully guarded: any failure (no plugin, connector load
+        error, world disabled) is logged and skipped so it can never break
+        interface startup.
+        """
+        environments: list[str] = []
+        try:
+            async with get_conn_ctx() as conn:
+                async with conn.cursor(aiomysql.DictCursor) as cur:
+                    await cur.execute(
+                        "SELECT DISTINCT environment FROM vessel_sessions"
+                        " WHERE status = 'active'"
+                    )
+                    rows = await cur.fetchall()
+            environments = [
+                str(r["environment"]) for r in (rows or []) if r.get("environment")
+            ]
+        except Exception as exc:
+            log_debug(f"[vessel_interface] reattach lookup failed: {exc}")
+            return
+
+        if not environments:
+            return
+
+        try:
+            from core.core_initializer import PLUGIN_REGISTRY
+
+            plugin = PLUGIN_REGISTRY.get("vessel_plugin")
+        except Exception as exc:
+            log_debug(f"[vessel_interface] reattach: plugin lookup failed: {exc}")
+            plugin = None
+        if plugin is None or not hasattr(plugin, "connect_world"):
+            log_debug("[vessel_interface] reattach: vessel_plugin unavailable")
+            return
+
+        for environment in environments:
+            try:
+                result = await plugin.connect_world(connector_name=environment)
+                if getattr(result, "ok", False):
+                    log_info(
+                        f"[vessel_interface] Reattached active session in "
+                        f"'{environment}' after restart"
+                    )
+                else:
+                    # The bot could not be brought back in-world (bridge dead or
+                    # world server unreachable). Close the stale active row so it
+                    # does not linger as a ghost that keeps gameplay verbs hidden
+                    # while looking connected in the DB.
+                    detail = getattr(result, "detail", "unknown")
+                    log_info(
+                        f"[vessel_interface] Reattach failed for '{environment}' "
+                        f"({detail}); closing stale session"
+                    )
+                    await self._close_stale_sessions(environment)
+            except Exception as exc:
+                log_warning(
+                    f"[vessel_interface] reattach failed for '{environment}': {exc}"
+                )
+                await self._close_stale_sessions(environment)
+
+    async def _close_stale_sessions(self, environment: str) -> None:
+        """End every active session for ``environment`` that could not reattach.
+
+        Called when :meth:`_reattach_active_sessions` fails to bring the bot
+        back in-world. Marks the lingering ``active`` row(s) ``ended`` (via the
+        normal end-of-session flush) so the connection-driven action exposure no
+        longer sees a phantom session — otherwise gameplay verbs would stay
+        hidden while the DB claims Synth is embodied. Best-effort and fully
+        guarded: a failure here must never break interface startup.
+        """
+        manager = get_vessel_session_manager()
+        try:
+            async with get_conn_ctx() as conn:
+                async with conn.cursor(aiomysql.DictCursor) as cur:
+                    await cur.execute(
+                        "SELECT session_id FROM vessel_sessions"
+                        " WHERE environment = %s AND status = 'active'",
+                        (environment,),
+                    )
+                    rows = await cur.fetchall()
+            session_ids = [
+                str(r["session_id"]) for r in (rows or []) if r.get("session_id")
+            ]
+        except Exception as exc:
+            log_debug(
+                f"[vessel_interface] stale-session lookup failed for "
+                f"'{environment}': {exc}"
+            )
+            return
+
+        for session_id in session_ids:
+            try:
+                await manager.end_session(session_id, reason="reattach_failed")
+            except Exception as exc:
+                log_warning(
+                    f"[vessel_interface] closing stale session {session_id} "
+                    f"failed: {exc}"
+                )
+
     async def stop(self) -> None:
-        """Stop the scheduler and end all active sessions (flush experience)."""
+        """Stop the scheduler and suspend active sessions across the restart.
+
+        A process/container stop is **not** a world logout: the world persists
+        and Synth re-embodies on the next boot via
+        :meth:`_reattach_active_sessions`. So instead of ending sessions here —
+        which would mark them ``ended`` (making reattach impossible) and flush a
+        premature diary entry, leaving the in-world bot inert until the world
+        server times it out — each session is *suspended*: kept ``active`` in
+        the DB with a refreshed ``last_event_at`` so reattach picks it up. The
+        experience buffer is preserved and continues in the same session after
+        the restart. Genuine logouts and the inactivity cooldown still end
+        sessions normally elsewhere.
+        """
         log_info("[vessel_interface] Stopping Vessel interface...")
         if self._scheduler_task is not None:
             self._scheduler_task.cancel()
@@ -118,9 +295,9 @@ class VesselInterface:
         manager = get_vessel_session_manager()
         for session_id in list(self._sessions.keys()):
             try:
-                await manager.end_session(session_id, reason="shutdown")
+                await manager.suspend_session(session_id)
             except Exception as exc:
-                log_warning(f"[vessel_interface] end_session on stop failed: {exc}")
+                log_warning(f"[vessel_interface] suspend_session on stop failed: {exc}")
         self._sessions.clear()
         self.is_enabled = False
 
@@ -159,6 +336,31 @@ class VesselInterface:
             summary=f"Left {environment} ({reason})",
         )
         self._sessions.pop(session_id, None)
+
+    async def end_sessions_for_environment(
+        self, environment: str, reason: str = "logout"
+    ) -> int:
+        """End all locally-tracked sessions for ``environment``.
+
+        Called by the Vessel plugin when Synth leaves a world so every buffered
+        session is flushed to its single autobiographical diary entry. Returns
+        the number of sessions closed.
+        """
+        prefix = f"{INTERFACE_NAME}/{environment}"
+        targets = [
+            session_id
+            for session_id, path in self._sessions.items()
+            if path == prefix or path.startswith(f"{prefix}/")
+        ]
+        for session_id in targets:
+            try:
+                await self.end_session(session_id, reason=reason)
+            except Exception as exc:
+                log_warning(
+                    f"[vessel_interface] end_sessions_for_environment "
+                    f"({environment}) failed for {session_id}: {exc}"
+                )
+        return len(targets)
 
     # ------------------------------------------------------------------
     # Inbound perception

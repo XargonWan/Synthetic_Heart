@@ -3212,6 +3212,105 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                                 if (ev.key === 'Enter') { ev.preventDefault(); saveCfg(inp.value, inp); }
                             });
                             inputEl = wrap;
+                        } else if (ci.ui_type === 'file') {
+                            // File upload control for exposed file variables.
+                            // Files are uploaded automatically on selection (no explicit
+                            // Upload button). Image files get a scaled-up preview and a
+                            // Clear button removes the stored file.
+                            const fileWrap = document.createElement('div');
+                            fileWrap.style.cssText = 'display:flex; flex-direction:column; gap:8px; max-width:400px;';
+
+                            const fileUrl = `/api/config/${encodeURIComponent(ci.key)}/file`;
+                            const fileName = (typeof val === 'string' && val) ? val.split('/').pop() : '';
+                            const isImage = /\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(fileName);
+
+                            const current = document.createElement('div');
+                            current.style.cssText = 'font-size:0.82rem; color:var(--text-soft);';
+                            if (val) {
+                                const link = document.createElement('a');
+                                link.textContent = fileName || 'file';
+                                link.href = fileUrl;
+                                link.target = '_blank';
+                                link.style.color = 'var(--accent)';
+                                current.appendChild(link);
+                            } else {
+                                current.textContent = 'No file uploaded.';
+                            }
+
+                            // Scaled-up image preview (min 5x for tiny textures like
+                            // Minecraft skins). Uses pixelated rendering + a cache-buster.
+                            const previewWrap = document.createElement('div');
+                            if (val && isImage) {
+                                const img = document.createElement('img');
+                                img.src = `${fileUrl}?t=${Date.now()}`;
+                                img.alt = fileName;
+                                img.style.cssText = 'image-rendering:pixelated; border:1px solid var(--border); border-radius:6px; background:var(--surface-alt); display:block;';
+                                img.onload = () => {
+                                    const scale = Math.max(5, Math.ceil(160 / Math.max(1, img.naturalWidth)));
+                                    img.style.width = (img.naturalWidth * scale) + 'px';
+                                    img.style.height = (img.naturalHeight * scale) + 'px';
+                                };
+                                previewWrap.appendChild(img);
+                            }
+
+                            const uploadRow = document.createElement('div');
+                            uploadRow.style.cssText = 'display:flex; align-items:center; gap:8px; flex-wrap:wrap;';
+
+                            const inputFile = document.createElement('input');
+                            inputFile.type = 'file';
+                            inputFile.disabled = !editable;
+                            inputFile.style.cssText = 'font-size:0.82rem; color:var(--text); flex:1 1 auto; min-width:0;';
+                            // Auto-upload as soon as a file is selected.
+                            inputFile.addEventListener('change', async () => {
+                                const f = inputFile.files && inputFile.files[0];
+                                if (!f) { return; }
+                                try {
+                                    const fd = new FormData();
+                                    fd.append('file', f);
+                                    inputFile.disabled = true;
+                                    if (clearBtn) clearBtn.disabled = true;
+                                    const res = await fetch(`/api/config/${encodeURIComponent(ci.key)}/upload`, { method: 'POST', body: fd });
+                                    if (!res.ok) {
+                                        const t = await res.text();
+                                        window.showToast && window.showToast('Upload failed: ' + t, true);
+                                    } else {
+                                        window.showToast && window.showToast('Uploaded', false);
+                                        await loadComponentsSummary();
+                                    }
+                                } catch (e) {
+                                    console.error('[synth_webui] File upload failed', e);
+                                    window.showToast && window.showToast('File upload failed', true);
+                                } finally {
+                                    inputFile.disabled = !editable;
+                                    if (clearBtn) clearBtn.disabled = !editable;
+                                }
+                            });
+
+                            const clearBtn = document.createElement('button');
+                            clearBtn.textContent = 'Clear';
+                            clearBtn.disabled = !editable || !val;
+                            clearBtn.style.cssText = 'padding:5px 12px; background:var(--accent); color:var(--accent-contrast); border:none; border-radius:6px; font-size:0.82rem; cursor:pointer;';
+                            clearBtn.addEventListener('click', async () => {
+                                try {
+                                    clearBtn.disabled = true;
+                                    inputFile.disabled = true;
+                                    await saveCfg('', clearBtn);
+                                    await loadComponentsSummary();
+                                } catch (e) {
+                                    console.error('[synth_webui] File clear failed', e);
+                                    window.showToast && window.showToast('Clear failed', true);
+                                } finally {
+                                    inputFile.disabled = !editable;
+                                    clearBtn.disabled = !editable || !val;
+                                }
+                            });
+
+                            uploadRow.appendChild(inputFile);
+                            uploadRow.appendChild(clearBtn);
+                            fileWrap.appendChild(current);
+                            if (val && isImage) fileWrap.appendChild(previewWrap);
+                            fileWrap.appendChild(uploadRow);
+                            inputEl = fileWrap;
                         } else {
                             // Default: text / password / number input
                             const inp = document.createElement('input');
@@ -3439,8 +3538,24 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                                 details.appendChild(actionsWrap);
                             }
                             // ── Inline config editing for cortex engines ──────────
+                            // Union the config items of every registration alias so a
+                            // component whose config lives under a non-canonical name
+                            // still shows its Configuration/Advanced section.
                             const compName = item.name || '';
-                            const cfgItems = _componentConfigMap[compName] || [];
+                            const _cfgComponentNames = (Array.isArray(item.config_components) && item.config_components.length)
+                                ? item.config_components
+                                : [compName];
+                            const _seenCfgKeys = new Set();
+                            const cfgItems = [];
+                            _cfgComponentNames.forEach(cn => {
+                                (_componentConfigMap[cn] || []).forEach(ci => {
+                                    if (!ci) return;
+                                    const dedupeKey = ci.key || JSON.stringify(ci);
+                                    if (_seenCfgKeys.has(dedupeKey)) return;
+                                    _seenCfgKeys.add(dedupeKey);
+                                    cfgItems.push(ci);
+                                });
+                            });
                             if (cfgItems.length) {
                                 const cfgSection = document.createElement('div');
                                 cfgSection.className = 'component-config-section';
@@ -3810,9 +3925,27 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                         // WEBUI_ACCENT_COLOR is intentionally hidden here: it already has
                         // a dedicated control in the Settings tab, so showing it in the
                         // plugin detail pane would be a confusing duplicate.
-                        const cfgItems = (_componentConfigMap[item.name] || []).filter(ci =>
-                            !(ci && ((ci.key === 'WEBUI_ACCENT_COLOR') || (ci.label && /accent\s*color/i.test(ci.label))))
-                        );
+                        // A plugin may be registered under several component names
+                        // (canonical card name + explicit names used for its config).
+                        // Union the config items of every declared config_component so
+                        // the exposed variables and the Advanced section always appear,
+                        // even when the config lives under a non-canonical name.
+                        const _cfgComponentNames = (Array.isArray(item.config_components) && item.config_components.length)
+                            ? item.config_components
+                            : [item.name];
+                        const _seenCfgKeys = new Set();
+                        const cfgItems = [];
+                        _cfgComponentNames.forEach(cn => {
+                            (_componentConfigMap[cn] || []).forEach(ci => {
+                                if (!ci) return;
+                                if (ci.key === 'WEBUI_ACCENT_COLOR') return;
+                                if (ci.label && /accent\s*color/i.test(ci.label)) return;
+                                const dedupeKey = ci.key || JSON.stringify(ci);
+                                if (_seenCfgKeys.has(dedupeKey)) return;
+                                _seenCfgKeys.add(dedupeKey);
+                                cfgItems.push(ci);
+                            });
+                        });
                         if (cfgItems.length) {
                             const section = document.createElement('div');
                             section.className = 'plugin-vars-section';

@@ -1266,8 +1266,8 @@ async function loadHistoryVessel() {
                     existing.add(trimmed);
                 });
             }
-            if (Array.isArray(data.entries) && data.entries.length > 0) {
-                content.innerHTML = data.entries.map(entry => renderVesselEntry(entry)).join('');
+            if (Array.isArray(data.sessions) && data.sessions.length > 0) {
+                content.innerHTML = data.sessions.map(session => renderVesselSession(session)).join('');
                 content.classList.add('history-populated');
                 try { content.scrollTop = 0; content.tabIndex = -1; setTimeout(() => { try { content.focus(); } catch (e) {} }, 50); } catch (e) {}
                 renderPagination('vessel', data.page, data.total_pages, data.total_count);
@@ -1286,27 +1286,60 @@ async function loadHistoryVessel() {
     }
 }
 
-function renderVesselEntry(entry) {
-    const timestamp = formatTimestamp(entry.created_at);
-    const eventTypeLabel = escapeHtml((entry.event_type || 'event').replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase()));
-    const environment = escapeHtml(entry.environment || 'unknown');
-    const summary = escapeHtml(entry.summary || '');
-    const interfacePath = entry.interface_path ? escapeHtml(entry.interface_path) : '';
-    const metadataBlock = (entry.metadata && Object.keys(entry.metadata).length) ? formatJsonBlock(entry.metadata) : '';
+// Map a vessel environment (e.g. "minecraft") to its world sub-plugin icon.
+// World sub-plugins are named "<environment>_vessel" and serve their icon at
+// /api/plugins/<name>/icon (falls back to the SyntH logo server-side).
+function vesselEnvIconUrl(environment) {
+    const env = String(environment || '').trim();
+    if (!env || env === 'unknown') return '';
+    return `/api/plugins/${encodeURIComponent(env + '_vessel')}/icon`;
+}
+
+// Render ONE embodiment session (login -> logout) as a single block containing
+// every activity of that session, so we never produce an infinite list of
+// one-event-per-block cards.
+function renderVesselSession(session) {
+    const environment = String(session.environment || 'unknown');
+    const envLabel = escapeHtml(environment.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase()));
+    const startTs = formatTimestamp(session.started_at);
+    const endTs = formatTimestamp(session.last_at);
+    const timeRange = (startTs === endTs) ? startTs : `${startTs} → ${endTs}`;
+    const iconUrl = vesselEnvIconUrl(environment);
+    const iconHtml = iconUrl
+        ? `<img class="vessel-env-icon" src="${iconUrl}" alt="" onerror="this.style.display='none'">`
+        : '';
+
+    const activities = Array.isArray(session.activities) ? session.activities : [];
+    const activitiesHtml = activities.length
+        ? activities.map(a => {
+            const at = formatTimestamp(a.created_at);
+            const summary = escapeHtml(a.summary || '');
+            const eventTypeLabel = escapeHtml((a.event_type || 'event').replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase()));
+            const del = a.id ? `<button type="button" class="history-delete-btn" title="Delete this activity" onclick="window.SynthWebUI.deleteVesselEntry(${a.id})">🗑</button>` : '';
+            return `
+                <div class="vessel-activity">
+                    <span class="vessel-activity-time">${at}</span>
+                    <span class="history-entry-type">${eventTypeLabel}</span>
+                    <span class="vessel-activity-summary">${summary}</span>
+                    ${del}
+                </div>
+            `;
+        }).join('')
+        : '<div class="vessel-activity-empty">No activity recorded for this session.</div>';
 
     return `
-        <div class="history-entry">
-            <div class="history-entry-header">
-                <div class="history-entry-meta">
-                    <div class="history-entry-date">🌀 ${timestamp}</div>
-                    <span class="history-entry-type">${environment}</span>
-                    <span class="history-entry-type">${eventTypeLabel}</span>
+        <div class="vessel-session">
+            <div class="vessel-session-header">
+                <div class="vessel-session-title">
+                    ${iconHtml}
+                    <span>${iconUrl ? '' : '🌀 '}${envLabel}</span>
+                    <span class="history-entry-type">${activities.length} ${activities.length === 1 ? 'activity' : 'activities'}</span>
                 </div>
-                ${entry.id ? `<button type="button" class="history-delete-btn" title="Delete this entry" onclick="window.SynthWebUI.deleteVesselEntry(${entry.id})">🗑</button>` : ''}
+                <span class="vessel-session-time">${timeRange}</span>
             </div>
-            <div class="grillo-response">${summary}</div>
-            ${interfacePath ? `<div class="history-entry-detail" style="margin-top: 0.5rem; opacity: 0.7;"><small>${interfacePath}</small></div>` : ''}
-            ${metadataBlock ? `<div class="grillo-action-detail" style="margin-top: 0.5rem;"><strong>Details:</strong>\n${metadataBlock}</div>` : ''}
+            <div class="vessel-session-activities">
+                ${activitiesHtml}
+            </div>
         </div>
     `;
 }

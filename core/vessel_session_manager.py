@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import time
 import uuid
+from datetime import datetime, timedelta
 from typing import Any
 
 import aiomysql
@@ -47,6 +48,26 @@ class VesselSessionManager:
         """Initialise an empty, un-started session manager."""
         self._current_session_id: str | None = None
         self._last_event_at: float = 0.0
+        # In-memory set of currently-active session ids. Kept in sync by
+        # start/end/close_expired so ``has_active_session()`` is a cheap,
+        # DB-free check callable on the hot path (e.g. the message queue on
+        # every enqueue). It is only an optimisation: the DB remains the source
+        # of truth and ``has_active_session()`` falls back to it when the set is
+        # empty (e.g. right after a process restart).
+        self._active_session_ids: set[str] = set()
+
+    def has_active_session(self) -> bool:
+        """Return True if at least one embodiment session is currently active.
+
+        Cheap and synchronous: reads the in-memory active-session set only, so
+        it is safe to call on hot paths (e.g. the message queue). After a
+        process restart the set may be empty even though the DB has active
+        rows; callers that need certainty should reconcile via
+        :meth:`close_expired_sessions` (the interface scheduler does this
+        periodically). This is deliberately best-effort — it must never block
+        or hit the DB.
+        """
+        return bool(self._active_session_ids)
 
     # ------------------------------------------------------------------
     # Session lifecycle
@@ -66,6 +87,7 @@ class VesselSessionManager:
         if existing:
             self._current_session_id = existing
             self._last_event_at = _now()
+            self._active_session_ids.add(existing)
             log_debug(
                 f"[vessel_session] Reusing active session {existing} for '{environment}'"
             )
@@ -93,6 +115,7 @@ class VesselSessionManager:
 
         self._current_session_id = session_id
         self._last_event_at = started
+        self._active_session_ids.add(session_id)
         log_info(f"[vessel_session] Started session {session_id} in '{environment}'")
         return session_id
 
@@ -217,6 +240,7 @@ class VesselSessionManager:
 
         if self._current_session_id == session_id:
             self._current_session_id = None
+        self._active_session_ids.discard(session_id)
 
         log_info(
             f"[vessel_session] Ended session {session_id} ({reason}); "
@@ -224,6 +248,41 @@ class VesselSessionManager:
             + (f" to diary #{diary_entry_id}" if diary_entry_id else "")
         )
         return diary_entry_id
+
+    async def suspend_session(self, session_id: str) -> None:
+        """Suspend a session across a process restart without ending it.
+
+        A container/process restart is **not** a logout: the world is still
+        there and Synth re-enters it on the next boot. Unlike
+        :meth:`end_session`, this keeps the DB row ``active`` (so
+        :meth:`~interface.vessel_interface.VesselInterface._reattach_active_sessions`
+        finds and re-embodies it) and does **not** flush the experience buffer
+        to a diary entry — the lived experience continues, unfragmented, in the
+        same session after the restart. It only refreshes ``last_event_at`` so
+        the session is still within the inactivity cooldown window when the
+        interface comes back up, and drops the in-memory bookkeeping for the
+        now-destroyed connector. Best-effort and fully guarded.
+        """
+        try:
+            async with get_conn_ctx() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "UPDATE vessel_sessions"
+                        " SET last_event_at = CURRENT_TIMESTAMP"
+                        " WHERE session_id = %s AND status = 'active'",
+                        (session_id,),
+                    )
+                await conn.commit()
+        except Exception as exc:
+            log_warning(f"[vessel_session] suspend_session failed: {exc}")
+
+        if self._current_session_id == session_id:
+            self._current_session_id = None
+        self._active_session_ids.discard(session_id)
+        log_info(
+            f"[vessel_session] Suspended session {session_id} for restart "
+            "(kept active for reattach)"
+        )
 
     # ------------------------------------------------------------------
     # Cooldown scheduler
@@ -235,14 +294,19 @@ class VesselSessionManager:
         periodically by the interface's scheduler tick.
         """
         expired: list[str] = []
+        # Compute the cutoff in Python and compare against a plain timestamp
+        # parameter. This avoids the ``INTERVAL %s SECOND`` SQL syntax, which is
+        # MariaDB-only and is not valid on PostgreSQL (a parameter cannot appear
+        # inside an INTERVAL literal), keeping the query backend-agnostic.
+        cutoff = datetime.now() - timedelta(seconds=int(cooldown_sec))
         try:
             async with get_conn_ctx() as conn:
                 async with conn.cursor(aiomysql.DictCursor) as cur:
                     await cur.execute(
                         "SELECT session_id FROM vessel_sessions"
                         " WHERE status = 'active'"
-                        " AND last_event_at < (NOW() - INTERVAL %s SECOND)",
-                        (int(cooldown_sec),),
+                        " AND last_event_at < %s",
+                        (cutoff,),
                     )
                     rows = await cur.fetchall()
                     expired = [r["session_id"] for r in rows or []]

@@ -7708,50 +7708,101 @@ class SynthWebUIInterface:
                 where_params.append(environment_filter)
             where_clause = " AND ".join(where_conditions) if where_conditions else "1=1"
 
-            entries = []
+            # Each rendered block must be one embodiment session (login->logout),
+            # not one block per event. We therefore paginate over *sessions*
+            # (grouped by session_id) and load every activity of the sessions on
+            # the current page. Rows without a session_id are grouped under a
+            # synthetic per-row bucket so they still show up.
+            def _decode_metadata(metadata_raw: Any) -> Any:
+                if not metadata_raw:
+                    return None
+                if isinstance(metadata_raw, (bytes, bytearray)):
+                    metadata_raw = metadata_raw.decode("utf-8", errors="replace")
+                if isinstance(metadata_raw, str):
+                    try:
+                        return json.loads(metadata_raw)
+                    except Exception:
+                        return None
+                return metadata_raw
+
+            sessions: list[dict[str, Any]] = []
             async with get_conn_ctx() as conn:
                 async with conn.cursor() as cur:
-                    query = f"""
-                        SELECT id, session_id, interface_path, environment,
-                               event_type, summary, metadata, created_at
+                    # Step 1: pick the sessions for this page. A session's sort
+                    # key is the most recent activity it contains.
+                    group_key = "COALESCE(session_id, CONCAT('row-', id))"
+                    session_query = f"""
+                        SELECT {group_key} AS grp,
+                               MIN(created_at) AS started_at,
+                               MAX(created_at) AS last_at,
+                               COUNT(*) AS activity_count
                         FROM vessel_activity_log
                         WHERE {where_clause}
-                        ORDER BY created_at {order}
+                        GROUP BY grp
+                        ORDER BY last_at {order}
                         LIMIT %s OFFSET %s
                     """
-                    await cur.execute(query, where_params + [per_page + 1, offset])
-                    rows = await cur.fetchall()
+                    await cur.execute(
+                        session_query, where_params + [per_page + 1, offset]
+                    )
+                    session_rows = await cur.fetchall()
 
-                    has_more = len(rows) > per_page
+                    has_more = len(session_rows) > per_page
                     if has_more:
-                        rows = rows[:per_page]
+                        session_rows = session_rows[:per_page]
 
-                    for row in rows:
-                        created_at_str = self._dt_to_utc_iso(row[7])
-                        metadata_raw = row[6]
-                        metadata: Any = None
-                        if metadata_raw:
-                            if isinstance(metadata_raw, (bytes, bytearray)):
-                                metadata_raw = metadata_raw.decode(
-                                    "utf-8", errors="replace"
-                                )
-                            if isinstance(metadata_raw, str):
-                                try:
-                                    metadata = json.loads(metadata_raw)
-                                except Exception:
-                                    metadata = None
-                            else:
-                                metadata = metadata_raw
-                        entries.append(
+                    group_keys = [row[0] for row in session_rows]
+
+                    # Step 2: load every activity of the selected sessions.
+                    activities_by_group: dict[str, list[dict[str, Any]]] = {
+                        gk: [] for gk in group_keys
+                    }
+                    if group_keys:
+                        placeholders = ", ".join(["%s"] * len(group_keys))
+                        activity_query = f"""
+                            SELECT id, session_id, interface_path, environment,
+                                   event_type, summary, metadata, created_at,
+                                   {group_key} AS grp
+                            FROM vessel_activity_log
+                            WHERE {group_key} IN ({placeholders})
+                            ORDER BY created_at ASC
+                        """
+                        await cur.execute(activity_query, group_keys)
+                        for row in await cur.fetchall():
+                            grp = row[8]
+                            if grp not in activities_by_group:
+                                continue
+                            activities_by_group[grp].append(
+                                {
+                                    "id": row[0],
+                                    "session_id": row[1],
+                                    "interface_path": row[2],
+                                    "environment": row[3],
+                                    "event_type": row[4],
+                                    "summary": row[5],
+                                    "metadata": _decode_metadata(row[6]),
+                                    "created_at": self._dt_to_utc_iso(row[7]),
+                                }
+                            )
+
+                    for row in session_rows:
+                        grp = row[0]
+                        activities = activities_by_group.get(grp, [])
+                        environment = (
+                            activities[0]["environment"] if activities else "unknown"
+                        )
+                        interface_path = (
+                            activities[0]["interface_path"] if activities else ""
+                        )
+                        sessions.append(
                             {
-                                "id": row[0],
-                                "session_id": row[1],
-                                "interface_path": row[2],
-                                "environment": row[3],
-                                "event_type": row[4],
-                                "summary": row[5],
-                                "metadata": metadata,
-                                "created_at": created_at_str,
+                                "session_id": grp,
+                                "environment": environment,
+                                "interface_path": interface_path,
+                                "started_at": self._dt_to_utc_iso(row[1]),
+                                "last_at": self._dt_to_utc_iso(row[2]),
+                                "activity_count": int(row[3]),
+                                "activities": activities,
                             }
                         )
 
@@ -7770,13 +7821,15 @@ class SynthWebUIInterface:
                             if row[0] and str(row[0]).strip()
                         ]
 
-            total_count = offset + len(rows) + (per_page if has_more else 0)
+            # total_count / total_pages are counted in *sessions* now (one block
+            # per session), matching the session-grouped pagination above.
+            total_count = offset + len(sessions) + (per_page if has_more else 0)
             total_pages = (total_count + per_page - 1) // per_page
 
             return JSONResponse(
                 {
                     "success": True,
-                    "entries": entries,
+                    "sessions": sessions,
                     "environments": environments,
                     "page": page,
                     "per_page": per_page,
@@ -10663,6 +10716,13 @@ class SynthWebUIInterface:
             )
         interfaces_data: List[dict] = []
         for name, interface in sorted(INTERFACE_REGISTRY.items()):
+            # Some interfaces are internal I/O adapters, not user-configurable
+            # chat interfaces. They opt out of the WebUI list by declaring
+            # ``hidden_from_ui = True`` (e.g. the Vessel embodiment interface,
+            # which is surfaced instead as the "Rift Vessel" plugin under the
+            # Vessels category — avoids a confusing duplicate banner).
+            if getattr(interface, "hidden_from_ui", False):
+                continue
             description = ""
             if hasattr(interface, "get_interface_instructions"):
                 try:
@@ -10776,13 +10836,30 @@ class SynthWebUIInterface:
             return (has_suffix, len(candidate), candidate)
 
         canonical_names: Dict[str, str] = {}
+        # Every registration alias for a given plugin identity. A plugin can be
+        # registered under more than one name (see case 1 above): the core loader
+        # registers it under its module short-name (e.g. ``minecraft``) while the
+        # plugin author may also call ``register_plugin`` with an explicit name
+        # (e.g. ``minecraft_vessel``). The config registry is keyed on the
+        # explicit component name, so the WebUI must know EVERY alias to gather
+        # this plugin's exposed variables regardless of which alias became the
+        # canonical display name.
+        identity_aliases: Dict[str, list[str]] = {}
         for reg_name, reg_plugin in PLUGIN_REGISTRY.items():
             key = _plugin_identity(reg_plugin)
+            identity_aliases.setdefault(key, []).append(reg_name)
             current = canonical_names.get(key)
             if current is None or _canonical_score(reg_name) < _canonical_score(
                 current
             ):
                 canonical_names[key] = reg_name
+
+        # Rift Vessel coherence: a *world* sub-plugin (category "Vessels", any
+        # name other than the core "vessel_plugin") can be enabled while the
+        # Vessel core is disabled — in which case that world cannot actually be
+        # entered. Compute the core's presence once so the loop can flag such
+        # incoherent worlds with an orange LED.
+        vessel_core_enabled = "vessel_plugin" in PLUGIN_REGISTRY
 
         emitted_plugin_identities: set[str] = set()
         for name, plugin in sorted(PLUGIN_REGISTRY.items()):
@@ -10819,6 +10896,40 @@ class SynthWebUIInterface:
             category = getattr(info, "category", "") or "Various"
             run_meta = self._plugin_run_meta(plugin)
             capability_flags = self._plugin_capability_flags(plugin)
+            # All registration aliases (canonical + any explicit names). The
+            # frontend unions the config items of every alias so a plugin whose
+            # config lives under a non-canonical component name (e.g.
+            # ``minecraft_vessel`` while the card is named ``minecraft``) still
+            # shows its exposed variables and the Advanced section.
+            config_components = sorted(set(identity_aliases.get(identity, [name])))
+
+            led = self._led_for_status(meta["status"])
+            led_details = meta["details"]
+            led_error = meta["error"]
+            # Coherence warning ("chicca"): an enabled Vessel *world* whose core
+            # Vessel plugin is disabled cannot connect — flag it orange so the
+            # operator notices the dependency without hunting through logs.
+            try:
+                if (
+                    category == "Vessels"
+                    and name != "vessel_plugin"
+                    and not vessel_core_enabled
+                    and led == "green"
+                ):
+                    led = "orange"
+                    warn = (
+                        "Vessel core is disabled — this world cannot connect "
+                        "until the Rift Vessel plugin is enabled."
+                    )
+                    led_details = (
+                        f"{led_details} {warn}".strip() if led_details else warn
+                    )
+                    led_error = led_error or warn
+            except Exception as exc:  # pragma: no cover - defensive
+                log_warning(
+                    f"{LOG_PREFIX} vessel coherence LED check failed for {name}: {exc}"
+                )
+
             plugins_data.append(
                 {
                     "name": name,
@@ -10826,15 +10937,16 @@ class SynthWebUIInterface:
                     "description": description,
                     "actions": actions,
                     "status": meta["status"],
-                    "details": meta["details"],
-                    "error": meta["error"],
+                    "details": led_details,
+                    "error": led_error,
                     "category": category,
-                    "led": self._led_for_status(meta["status"]),
+                    "led": led,
                     "enabled": True,
                     "disable_allowed": not core_initializer.is_core_plugin(name),
                     "has_icon": self._plugin_has_icon(info, name),
                     "icon_url": f"/api/plugins/{name}/icon",
                     "guide": self._read_plugin_guide(info, name),
+                    "config_components": config_components,
                     **capability_flags,
                     **run_meta,
                 }

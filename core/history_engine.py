@@ -420,6 +420,40 @@ class HistoryEngine:
             except Exception:
                 interface_path = None
 
+        # === RIFT VESSEL FOCUS: scope context to the world during embodiment ===
+        # When the current turn originates from a Vessel embodiment (SyntH is
+        # "in the world"), it concentrates there like a real person: it must NOT
+        # pull in the whole cross-interface history / global diary / global
+        # memory. We detect vessel focus purely from routing metadata — the
+        # source interface_path (``vessel/...``), the message's chat type
+        # (``vessel``) or an explicit ``vessel_focus`` context flag — never from
+        # message text (project rule: no keyword logic). On focus we force
+        # ``unified_mode = False`` so only the local vessel history is kept, and
+        # we suppress the global diary/memory blocks below. Fully guarded: any
+        # failure leaves the normal context path untouched.
+        vessel_focus = False
+        try:
+            if isinstance(interface_path, str) and interface_path.startswith("vessel"):
+                vessel_focus = True
+            elif isinstance(context_memory, dict) and context_memory.get(
+                "vessel_focus"
+            ):
+                vessel_focus = True
+            else:
+                chat_obj = getattr(message, "chat", None)
+                if chat_obj is not None and getattr(chat_obj, "type", None) == "vessel":
+                    vessel_focus = True
+        except Exception:
+            vessel_focus = False
+        if vessel_focus:
+            unified_mode = False
+            enable_diary = False
+            enable_memories = False
+            log_debug(
+                "[history_engine] Vessel focus active — scoping context to the "
+                "world (unified history + global diary/memory suppressed)"
+            )
+
         # `context_memory` can be either:
         # - the centralized chat map: { interface_path: deque([...]) }
         # - an interface/user context dict (e.g. Telegram user_data)

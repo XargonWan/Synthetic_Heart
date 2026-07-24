@@ -31,7 +31,7 @@ async def test_vessel_status_default(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     monkeypatch.setattr(
         "core.vessel_registry.VESSEL_REGISTRY.get_connector_meta",
-        lambda name: {"label": "Minecraft (PoC)"},
+        lambda name: {"label": "Minecraft (Mineflayer)"},
     )
     out = await execute_command("vessel")
     assert "Rift Vessel" in out
