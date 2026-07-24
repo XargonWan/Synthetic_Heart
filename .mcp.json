@@ -48,6 +48,15 @@
         "mcp_servers/synth_db.py"
       ]
     },
+    "synth-llm-failures": {
+      "type": "stdio",
+      "command": "uv",
+      "args": [
+        "run",
+        "python",
+        "mcp_servers/synth_llm_failures.py"
+      ]
+    },
     "synth-cortex": {
       "type": "stdio",
       "command": "uv",
