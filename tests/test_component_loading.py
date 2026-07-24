@@ -200,5 +200,73 @@ class TestComponentLoading(unittest.TestCase):
             self.assertNotIn("invalid_plugin", core_initializer.loaded_plugins)
 
 
+class TestRequiredConfigVars(unittest.TestCase):
+    """Test the loader-side must-have config gating for interfaces."""
+
+    def _check(self, required, config_map):
+        """Run ``_missing_required_config_vars`` against a fake interface.
+
+        ``config_map`` maps config keys to their stored value; any key not in
+        the map resolves to ``None`` (i.e. missing).
+        """
+        from core.core_initializer import core_initializer
+
+        iface = MagicMock()
+        iface.required_config_vars = required
+
+        def _fake_get_value(key, default=None):
+            return config_map.get(key, default)
+
+        with patch(
+            "core.config_manager.config_registry.get_value",
+            side_effect=_fake_get_value,
+        ):
+            return core_initializer._missing_required_config_vars(iface)
+
+    def test_no_required_vars_means_nothing_missing(self):
+        self.assertEqual(self._check([], {}), [])
+        self.assertEqual(self._check(None, {}), [])
+
+    def test_missing_interface_instance(self):
+        from core.core_initializer import core_initializer
+
+        self.assertEqual(core_initializer._missing_required_config_vars(None), [])
+
+    def test_and_semantics_present(self):
+        # Telegram-style: single required key present.
+        missing = self._check(["BOTFATHER_TOKEN"], {"BOTFATHER_TOKEN": "abc"})
+        self.assertEqual(missing, [])
+
+    def test_and_semantics_missing(self):
+        missing = self._check(["BOTFATHER_TOKEN"], {})
+        self.assertEqual(missing, ["BOTFATHER_TOKEN"])
+
+    def test_empty_string_counts_as_missing(self):
+        missing = self._check(["DISCORD_BOT_TOKEN"], {"DISCORD_BOT_TOKEN": "   "})
+        self.assertEqual(missing, ["DISCORD_BOT_TOKEN"])
+
+    def test_or_group_satisfied_by_one_member(self):
+        # Matrix-style: password OR access token; only the token is set.
+        required = ["MATRIX_USER", ("MATRIX_PASSWORD", "MATRIX_ACCESS_TOKEN")]
+        missing = self._check(
+            required,
+            {"MATRIX_USER": "@bot:matrix.org", "MATRIX_ACCESS_TOKEN": "tok"},
+        )
+        self.assertEqual(missing, [])
+
+    def test_or_group_missing_when_no_member_present(self):
+        required = ["MATRIX_USER", ("MATRIX_PASSWORD", "MATRIX_ACCESS_TOKEN")]
+        missing = self._check(required, {"MATRIX_USER": "@bot:matrix.org"})
+        self.assertEqual(missing, ["MATRIX_PASSWORD or MATRIX_ACCESS_TOKEN"])
+
+    def test_and_plus_or_both_missing(self):
+        required = ["MATRIX_USER", ("MATRIX_PASSWORD", "MATRIX_ACCESS_TOKEN")]
+        missing = self._check(required, {})
+        self.assertEqual(
+            missing,
+            ["MATRIX_USER", "MATRIX_PASSWORD or MATRIX_ACCESS_TOKEN"],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -70,6 +70,7 @@ db_check.txt
 git_*.txt
 .ruff_cache
 _[Bb]uild
+docs/plugins/generated/
 .gitnexus
 .gitnexus-home
 opencode.json

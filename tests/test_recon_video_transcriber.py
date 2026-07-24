@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from plugins.recon_video_transcriber import ReconVideoTranscriberPlugin
+from plugins.recon.recon_video_transcriber import ReconVideoTranscriberPlugin
 
 
 class _Msg:
@@ -151,7 +151,7 @@ async def test_no_source_returns_empty(enable_plugin: None) -> None:
 async def test_youtube_subtitle_fast_path(
     enable_plugin: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import plugins.recon_video_transcriber as mod
+    import plugins.recon.recon_video_transcriber as mod
 
     class _Fetched:
         title = "Test Video"
@@ -183,7 +183,7 @@ async def test_youtube_subtitle_fast_path(
 async def test_youtube_audio_stt_fallback(
     enable_plugin: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import plugins.recon_video_transcriber as mod
+    import plugins.recon.recon_video_transcriber as mod
 
     class _Fetched:
         title = "Audio Only"
@@ -208,7 +208,7 @@ async def test_youtube_audio_stt_fallback(
 async def test_youtube_fetch_none_returns_empty(
     enable_plugin: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import plugins.recon_video_transcriber as mod
+    import plugins.recon.recon_video_transcriber as mod
 
     monkeypatch.setattr(mod, "fetch_youtube", lambda *a, **k: None)
     plugin = ReconVideoTranscriberPlugin()
@@ -226,7 +226,7 @@ async def test_youtube_fetch_none_returns_empty(
 async def test_local_video_audio_and_vision(
     enable_plugin: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
 ) -> None:
-    import plugins.recon_video_transcriber as mod
+    import plugins.recon.recon_video_transcriber as mod
 
     video = tmp_path / "clip.mp4"
     video.write_bytes(b"fake video")

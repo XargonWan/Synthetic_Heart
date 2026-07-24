@@ -270,7 +270,16 @@ async def _flush_live_diary(guild_id: int, buffer: list[tuple[str, str]]) -> Non
 class DiscordInterface:
     """Discord interface mirroring Telegram bot behaviour."""
 
-    display_name = "Discord Interface"
+    # "Discord Bot" (not "Discord Interface") to mirror "Telegram Bot": a
+    # Discord Userbot variant may exist in the future, so the bot vs userbot
+    # distinction is kept explicit in the display name.
+    display_name = "Discord Bot"
+
+    # Declarative "must-have" configuration. The loader (core_initializer) checks
+    # these config keys; if the bot token is missing the interface is not loaded
+    # (no actions registered, red LED in the WebUI). The interface itself does
+    # no gating — it only declares intent.
+    required_config_vars = ["DISCORD_BOT_TOKEN"]
 
     # Chat attention state is centralized in core.chat_attention
 
@@ -3871,7 +3880,7 @@ register_exposed_var(
     label="Discord Bot Token",
     default="",
     value_type=str,
-    ui_type="string",
+    ui_type="password",
     description="Bot token provided by the Discord developer portal.",
     scope="interface",
     tags=["sensitive"],

@@ -992,6 +992,345 @@
             flex-direction: column;
             gap: 0.75rem;
         }
+        /* Two-column plugins layout: left banner list, right detail pane.
+           Both columns share the same height and extend to the bottom of the
+           viewport; each column scrolls internally so the page itself does not
+           scroll. */
+        .plugins-two-col {
+            display: flex;
+            gap: 1rem;
+            align-items: stretch;
+            height: calc(100vh - var(--plugins-two-col-offset, 220px));
+            min-height: 320px;
+        }
+        .plugins-col-left {
+            flex: 0 0 var(--plugins-left-w, 320px);
+            width: var(--plugins-left-w, 320px);
+            min-width: 200px;
+            display: flex;
+            flex-direction: column;
+            gap: 0.75rem;
+            height: 100%;
+            overflow-y: auto;
+        }
+        /* Draggable column resizer between the plugin list and the detail pane. */
+        .plugins-col-resizer {
+            flex: 0 0 auto;
+            align-self: stretch;
+            width: 6px;
+            cursor: col-resize;
+            background: var(--border, rgba(255, 255, 255, 0.12));
+            border-radius: 3px;
+            transition: background 0.15s ease;
+            position: relative;
+            user-select: none;
+        }
+        .plugins-col-resizer:hover,
+        .plugins-col-resizer.dragging {
+            background: var(--accent, #5aa9ff);
+        }
+        /* Widen the invisible hit area without changing the visual width. */
+        .plugins-col-resizer::before {
+            content: "";
+            position: absolute;
+            top: 0;
+            bottom: 0;
+            left: -5px;
+            right: -5px;
+        }
+        body.plugins-col-resizing {
+            cursor: col-resize;
+            user-select: none;
+        }
+        .plugins-col-right {
+            flex: 1 1 auto;
+            min-width: 0;
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            padding: 1rem 1.25rem;
+            background: rgba(255, 255, 255, 0.03);
+            height: 100%;
+            overflow-y: auto;
+        }
+        .plugin-category-header {
+            display: flex;
+            align-items: center;
+            gap: 0.4rem;
+            font-size: 0.72rem;
+            text-transform: uppercase;
+            letter-spacing: 0.12em;
+            color: var(--text-soft);
+            margin: 0.5rem 0 0.15rem;
+            padding: 0.25rem 0.35rem;
+            border-radius: 8px;
+            cursor: pointer;
+            user-select: none;
+            transition: background 0.15s ease, color 0.15s ease;
+        }
+        .plugin-category-header:first-child {
+            margin-top: 0;
+        }
+        .plugin-category-header:hover {
+            background: rgba(255, 255, 255, 0.05);
+            color: var(--text);
+        }
+        .plugin-category-header.selected {
+            background: rgba(90, 169, 255, 0.12);
+            color: var(--accent, #5aa9ff);
+        }
+        .plugin-category-caret {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 1rem;
+            font-size: 0.7rem;
+            line-height: 1;
+            opacity: 0.75;
+            cursor: pointer;
+            transition: opacity 0.15s ease;
+        }
+        .plugin-category-caret:hover {
+            opacity: 1;
+        }
+        .plugin-category-label {
+            flex: 1;
+        }
+        .plugin-category-group {
+            display: flex;
+            flex-direction: column;
+            gap: 0.4rem;
+        }
+        .plugin-banner {
+            display: flex;
+            align-items: center;
+            gap: 0.7rem;
+            background: rgba(255, 255, 255, 0.04);
+            border: 1px solid var(--border);
+            border-radius: 14px;
+            padding: 0.55rem 0.7rem;
+            cursor: pointer;
+            transition: background 0.15s ease, border 0.15s ease;
+        }
+        .plugin-banner:hover {
+            background: rgba(255, 255, 255, 0.07);
+        }
+        .plugin-banner.selected {
+            border-color: var(--accent, #5aa9ff);
+            background: rgba(90, 169, 255, 0.12);
+        }
+        .plugin-banner-icon {
+            flex: 0 0 auto;
+            width: 32px;
+            height: 32px;
+            border-radius: 8px;
+            object-fit: contain;
+            background: rgba(0, 0, 0, 0.2);
+        }
+        .plugin-banner-name {
+            flex: 1 1 auto;
+            min-width: 0;
+            font-weight: 600;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .plugin-banner-controls {
+            flex: 0 0 auto;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        .plugin-banner-run {
+            flex: 0 0 auto;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 20px;
+            height: 20px;
+            padding: 0;
+            border: none;
+            border-radius: 50%;
+            background: transparent;
+            color: var(--accent);
+            cursor: pointer;
+            transition: color 0.15s ease, transform 0.15s ease, background 0.15s ease;
+        }
+        .plugin-banner-run:hover {
+            color: var(--accent);
+            background: var(--accent-soft);
+            transform: scale(1.1);
+        }
+        .plugin-banner-run:disabled {
+            opacity: 0.5;
+            cursor: default;
+        }
+        .plugin-banner-run.running {
+            animation: plugin-run-pulse 0.9s ease-in-out infinite;
+        }
+        @keyframes plugin-run-pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.4; }
+        }
+        .plugin-led {
+            width: 11px;
+            height: 11px;
+            border-radius: 50%;
+            flex: 0 0 auto;
+            box-shadow: 0 0 4px rgba(0, 0, 0, 0.4);
+        }
+        .plugin-led.green { background: #18c98c; box-shadow: 0 0 6px rgba(24, 201, 140, 0.7); }
+        .plugin-led.red { background: #ff5a6e; box-shadow: 0 0 6px rgba(255, 90, 110, 0.7); }
+        .plugin-led.orange { background: #ffb347; box-shadow: 0 0 6px rgba(255, 179, 71, 0.7); }
+        .plugin-led.grey { background: #6b7280; }
+        .plugin-toggle {
+            position: relative;
+            width: 34px;
+            height: 18px;
+            flex: 0 0 auto;
+            cursor: pointer;
+        }
+        .plugin-toggle input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+        .plugin-toggle .slider {
+            position: absolute;
+            inset: 0;
+            background: #6b7280;
+            border-radius: 999px;
+            transition: background 0.2s ease;
+        }
+        .plugin-toggle .slider::before {
+            content: "";
+            position: absolute;
+            width: 14px;
+            height: 14px;
+            left: 2px;
+            top: 2px;
+            background: #fff;
+            border-radius: 50%;
+            transition: transform 0.2s ease;
+        }
+        .plugin-toggle input:checked + .slider {
+            background: var(--accent, #5aa9ff);
+        }
+        .plugin-toggle input:checked + .slider::before {
+            transform: translateX(16px);
+        }
+        .plugin-toggle input:disabled + .slider {
+            opacity: 0.4;
+            cursor: not-allowed;
+        }
+        .plugin-detail-title {
+            display: flex;
+            align-items: center;
+            gap: 0.7rem;
+            margin: 0 0 0.5rem;
+        }
+        .plugin-detail-title img {
+            width: 40px;
+            height: 40px;
+            border-radius: 10px;
+            object-fit: contain;
+            background: rgba(0, 0, 0, 0.2);
+        }
+        .plugin-detail-desc {
+            color: var(--text-soft);
+            margin-bottom: 0.75rem;
+            white-space: pre-wrap;
+            line-height: 1.5;
+        }
+        .plugin-detail-meta {
+            color: var(--muted);
+            font-size: 0.78rem;
+            margin-bottom: 0.75rem;
+            word-break: break-all;
+        }
+        .plugin-detail-guide {
+            border-top: 1px solid var(--border);
+            padding-top: 0.75rem;
+            margin-top: 0.5rem;
+        }
+        .plugin-detail-guide h1,
+        .plugin-detail-guide h2,
+        .plugin-detail-guide h3 { margin: 0.6rem 0 0.3rem; }
+        .plugin-detail-guide code {
+            background: rgba(255, 255, 255, 0.08);
+            padding: 0.1rem 0.3rem;
+            border-radius: 4px;
+        }
+        .plugin-detail-guide pre {
+            background: rgba(0, 0, 0, 0.3);
+            padding: 0.6rem;
+            border-radius: 8px;
+            overflow-x: auto;
+        }
+        .plugin-detail-guide table {
+            border-collapse: collapse;
+            width: 100%;
+            margin: 0.6rem 0;
+            font-size: 0.9rem;
+        }
+        .plugin-detail-guide th,
+        .plugin-detail-guide td {
+            border: 1px solid var(--border);
+            padding: 0.4rem 0.6rem;
+            text-align: left;
+            vertical-align: top;
+        }
+        .plugin-detail-guide th {
+            background: rgba(255, 255, 255, 0.05);
+            font-weight: 600;
+        }
+        .plugin-detail-guide tr:nth-child(even) td {
+            background: rgba(255, 255, 255, 0.02);
+        }
+        .plugin-vars-section {
+            border-top: 1px solid var(--border);
+            padding-top: 0.75rem;
+            margin-top: 0.75rem;
+        }
+        .plugin-mcp-note {
+            font-size: 0.75rem;
+            color: var(--text-soft);
+            font-style: italic;
+        }
+        /* Mobile "back to list" button shown at the top-left of the detail pane.
+           Hidden on desktop (two-column layout is always visible there). */
+        .plugin-detail-back {
+            display: none;
+            align-items: center;
+            gap: 0.4rem;
+            margin: 0 0 0.75rem;
+            padding: 0.4rem 0.85rem 0.4rem 0.6rem;
+            border: none;
+            border-radius: 999px;
+            background: var(--accent, #5aa9ff);
+            color: var(--accent-contrast, #fff);
+            font-weight: 600;
+            font-size: 0.9rem;
+            cursor: pointer;
+            -webkit-appearance: none;
+            appearance: none;
+        }
+        .plugin-detail-back:hover { filter: brightness(1.08); }
+        .plugin-detail-back .plugin-detail-back-arrow {
+            font-size: 1.05rem;
+            line-height: 1;
+        }
+        @media (max-width: 860px) {
+            .plugins-two-col { flex-direction: column; height: auto; min-height: 0; }
+            .plugins-col-left { flex: 1 1 auto; width: auto; max-width: none; max-height: none; height: auto; overflow-y: visible; }
+            .plugins-col-right { height: auto; overflow-y: visible; }
+            .plugins-col-resizer { display: none; }
+            /* Single-column navigation: list by default, detail once a plugin
+               is opened. The list and the detail pane never show together. */
+            .plugins-two-col .plugins-col-right { display: none; }
+            .plugins-two-col.mobile-detail-open .plugins-col-left { display: none; }
+            .plugins-two-col.mobile-detail-open .plugins-col-right { display: block; }
+            .plugin-detail-back { display: inline-flex; }
+        }
         details.component-item {
             background: rgba(255, 255, 255, 0.04);
             border: 1px solid var(--border);
@@ -1184,6 +1523,18 @@
             color: var(--accent-contrast);
         }
 
+        /* Hide the native checkbox that drives a .toggle-switch: the styled
+           slider is the visible control. The checkbox stays in the DOM (as the
+           adjacent sibling that the `:checked + label` rules rely on) but is
+           visually removed so it doesn't appear next to the toggle. */
+        input[type="checkbox"]:has(+ .toggle-switch) {
+            position: absolute;
+            width: 1px;
+            height: 1px;
+            opacity: 0;
+            margin: 0;
+            pointer-events: none;
+        }
         .toggle-switch {
             position: relative;
             display: inline-block;

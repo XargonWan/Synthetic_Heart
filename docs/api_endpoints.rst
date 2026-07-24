@@ -193,11 +193,12 @@ Config & Miscellaneous
   populate dropdowns and support skin uploads).
 - **POST** `/api/vrm` – upload a new VRM file for the active persona (WebUI only).
 
-Ollama‑Compatibility Server
----------------------------
+OpenAI-Compatible Server
+------------------------
 
-When the ``openai_api_server`` interface is enabled, SyntH speaks the same
-HTTP protocol as an Ollama daemon.  The following endpoints are implemented
+When the ``openai_api_server`` interface is enabled, SyntH exposes an
+OpenAI-compatible HTTP surface (and, for backward compatibility, the legacy
+Ollama REST protocol).  The following endpoints are implemented
 (usually on port ``11435`` by default):
 
 - **GET** `/api/tags` – list available models (returns `models` array).
@@ -208,8 +209,9 @@ HTTP protocol as an Ollama daemon.  The following endpoints are implemented
 - **GET** `/v1/models` – OpenAI‑style model list (returns ``object=list``).
 - **GET** `/api/models/{name}` – retrieve a single model descriptor by name or ID.
 
-Clients familiar with the Ollama/StableLM ecosystem can point to the compat
-server and immediately begin issuing requests without any code changes.
+Clients familiar with the OpenAI API (or the legacy Ollama ecosystem) can point
+to the compat server and immediately begin issuing requests without any code
+changes.
 
 Further Reading
 ---------------

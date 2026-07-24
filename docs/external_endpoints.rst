@@ -23,7 +23,7 @@ Supported endpoint types include:
 - Anthropic
 - OpenRouter
 - GitHub Models / Copilot
-- Ollama local hosts
+- OpenAI-compatible local hosts (e.g. Ollama, LM Studio)
 - Selenium LLM Engine
 - Generic OpenAI-compatible services
 - Legacy HTTP TTS services via ``custom`` mode

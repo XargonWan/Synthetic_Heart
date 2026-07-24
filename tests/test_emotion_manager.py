@@ -178,7 +178,8 @@ class TestEmotionManager:
         meta = mgr.get_metadata()
 
         assert meta["name"] == "emotion_manager"
-        assert meta["type"] == "core"
+        assert meta["category"] == "Core"
+        assert "display_name" in meta
         assert "description" in meta
         assert "version" in meta
 

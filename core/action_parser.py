@@ -358,13 +358,22 @@ def _load_interface_actions() -> Dict[str, str]:
         return _INTERFACE_ACTIONS
 
     try:
-        from core.core_initializer import INTERFACE_REGISTRY
+        from core.core_initializer import INTERFACE_REGISTRY, core_initializer
+
+        active_interfaces = set(core_initializer.active_interfaces)
     except Exception as e:  # pragma: no cover - registry unavailable
         log_warning(f"[action_parser] Unable to access INTERFACE_REGISTRY: {e}")
         INTERFACE_REGISTRY = {}
+        active_interfaces = set()
 
     actions: Dict[str, str] = {}
     for name, iface in INTERFACE_REGISTRY.items():
+        # Only interfaces the loader actually activated contribute actions to the
+        # prompt. An interface missing its required config (see
+        # ``core_initializer._missing_required_config_vars``) is never added to
+        # ``active_interfaces``, so its schemas stay out of the LLM prompt.
+        if name not in active_interfaces:
+            continue
         try:
             if hasattr(iface, "get_supported_actions"):
                 supported = iface.get_supported_actions()
@@ -963,12 +972,20 @@ def _plugins_for(action_type: str) -> List[Any]:
                 break
 
     try:
-        from core.core_initializer import INTERFACE_REGISTRY
+        from core.core_initializer import INTERFACE_REGISTRY, core_initializer
+
+        _active_interfaces = set(core_initializer.active_interfaces)
     except Exception as e:  # pragma: no cover - defensive
         log_error(f"[action_parser] Error loading INTERFACE_REGISTRY: {e}")
         INTERFACE_REGISTRY = {}
+        _active_interfaces = set()
 
     for name, iface in INTERFACE_REGISTRY.items():
+        # Skip interfaces the loader never activated (e.g. missing required
+        # config). Their actions were withheld from the prompt, so they must not
+        # be dispatchable either.
+        if name not in _active_interfaces:
+            continue
         try:
             if hasattr(iface, "get_supported_action_types"):
                 action_types = iface.get_supported_action_types()

@@ -134,7 +134,7 @@ register_exposed_var(
     label="Telegram Bot Token",
     default=None,
     value_type=str,
-    ui_type="string",
+    ui_type="password",
     description="Bot token provided by BotFather on Telegram.",
     scope="interface",
     tags=["sensitive"],
@@ -2114,6 +2114,12 @@ class TelegramInterface:
     """Interface wrapper providing a standard send_message method for Telegram."""
 
     display_name = "Telegram Bot"
+
+    # Declarative "must-have" configuration. The loader (core_initializer) checks
+    # these config keys; if the bot token is missing the interface is not loaded
+    # (no actions registered, red LED in the WebUI). The interface itself does
+    # no gating — it only declares intent.
+    required_config_vars = ["BOTFATHER_TOKEN"]
 
     def __init__(self, bot: Bot = None):
         """Store the python-telegram-bot ``Bot`` instance."""

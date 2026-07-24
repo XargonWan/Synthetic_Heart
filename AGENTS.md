@@ -27,7 +27,7 @@
               │ actions  │  │external│   │ Telegram   │
               │ agents   │  │ live   │   │ Discord    │
               │          │  │ agent  │   │ Matrix     │
-              └──────────┘  │Gemini …│   │ Ollama API │
+              └──────────┘  │Gemini …│   │ OpenAI API │
                             └────────┘   └────────────┘
 ```
 
@@ -36,7 +36,7 @@
 | **Core** | `core/` | Message chain, validation, dispatcher, DB, notifier. Never hardcodes plugin/LLM/interface logic. |
 | **Plugins** | `plugins/` | Provide actions via `get_supported_actions()`. Subclass `PluginBase` or `AIPluginBase`. |
 | **LLM Engines** | `engines/` | Interchangeable reasoning backends (`external_engines/`, `live/`, `agent/`). Subclass `AIPluginBase`. |
-| **Interfaces** | `interface/` | I/O adapters (Telegram, Discord, Matrix, Ollama compat). Register actions via `get_supported_actions()`. |
+| **Interfaces** | `interface/` | I/O adapters (Telegram, Discord, Matrix, OpenAI-compatible API). Register actions via `get_supported_actions()`. |
 
 **Golden rule:** removing any plugin, engine, or interface must not break the rest of the system.
 
@@ -67,6 +67,59 @@ Two flavours:
 
 Optional lifecycle hooks: init, teardown, extended behaviour.
 
+**WebUI metadata / assets contract.** A plugin declares how it appears in the
+classic WebUI *Plugins* tab via `get_metadata()` (all keys optional; the loader
+derives defaults reflectively): `name`, `display_name`, `description`,
+`category` (one of `Core`/`Interfaces`/`Grillo`/`Vessels`/`Agent`/`Various` —
+explicit value wins, otherwise auto-derived from location), `icon` (relative
+`icon.png`), `guide` (relative `guide.md`), `disable_allowed`, and the
+`runnable`/`run_action`/`run_label`/`run_title` "Run Now" quartet. Ship a
+256×256 `icon.png` and a `guide.md` in the plugin's folder — the WebUI serves
+the icon from `/api/plugins/<name>/icon` (falls back to the SyntH logo) and
+renders the guide in the detail pane. **Multi-file plugins live in a
+sub-folder.** As soon as a plugin ships more than one file (e.g. its `.py`
+module *and* a `.guide.md`, or an `icon.png`), those files must live together in
+a dedicated `plugins/<name>/` folder — never as loose sibling files directly
+under `plugins/`. The canonical layout is `plugins/<name>/<name>.py` (the
+module, kept discoverable because the loader's `rglob("*.py")` skips only
+`__init__.py`) plus `plugins/<name>/<name>.guide.md` (or a folder-owned
+`plugins/<name>/guide.md`). To keep the historical `import plugins.<name>` path
+working after the move, add a thin `plugins/<name>/__init__.py` shim that
+re-exports the submodule and rebinds the package in `sys.modules`:
+
+```python
+from plugins.<name>.<name> import *  # noqa: F401,F403
+import sys as _sys
+from plugins.<name> import <name> as _mod
+_sys.modules[__name__] = _mod
+```
+
+This preserves every symbol — public *and* private — under `plugins.<name>`
+while the loader independently imports `plugins.<name>.<name>` to find
+`PLUGIN_CLASS`. A genuine **single-file plugin** (a bare `plugins/<name>.py`
+with *no* companion files) may still ship a sibling `plugins/<name>.guide.md`;
+the WebUI's `_read_plugin_guide` falls back to that path (using the plugin's
+short name) and the Sphinx collector globs it too — but the moment a second
+file appears, promote it to a sub-folder.
+**`guide.md` is the single source of
+truth for plugin docs**: the Sphinx build collects every `plugins/*/guide.md`
+*and* every `plugins/*.guide.md` into `docs/plugins/generated/` via
+`_collect_plugin_guides` in `docs/conf.py`
+(listed under `docs/plugins/generated_index.rst`) — never duplicate it as a
+separate `.rst`. Third-party brand/trademark logos may be committed **only** if
+the owner's licence, trademark policy, or press kit explicitly permits using the
+mark to refer to that software — when allowed, the asset must be used
+unmodified, only to refer to the original project, and attributed in
+`LICENSE_EXTERNAL.md`; otherwise ship an original non-branded glyph or rely on
+the SyntH logo fallback (see `AzuraCast` in `LICENSE_EXTERNAL.md` for a worked
+example). Plugins can
+be enabled/disabled at runtime from the WebUI (`POST /api/components/toggle`,
+true unload + grey ghost record, no restart); set `disable_allowed: False` for
+message-chain-critical plugins. Full reference: `docs/plugins.rst` → "Plugin
+Layout, Metadata and WebUI Presentation". Reference implementation:
+`plugins/radio_host/` (folder + `icon.png` + `guide.md` + explicit
+`get_metadata()`).
+
 ### Background Agents (Grillo)
 
 Some plugins are long-running scheduled agents. The canonical example is **G.R.I.L.L.O.** (`plugins/grillo/`):
@@ -76,6 +129,7 @@ Some plugins are long-running scheduled agents. The canonical example is **G.R.I
 - Context keys on beats: `grillo_beat`, `beat_type`, `activity_log_id`.
 - Configurable via `GRILLO_BEAT_INTERVAL`; includes duplicate suppression and rate-limiting.
 - Extensible: discovers beat-specific plugins (tag compactor, memory compactor, curiosity) via the plugin registry.
+- **Each beat sub-plugin lives in its own sub-folder** under `plugins/grillo/<beat>/` (`<beat>.py` module + `__init__.py` `sys.modules` shim + a dedicated `guide.md`), following the standard multi-file plugin layout from §4. The shim keeps the historical `plugins.grillo.<beat>` import path working (heavily used by tests/mock patches). The core (`grillo_impl.py`, `grillo_plugin.py`) and the non-plugin helpers (`common_instructions.py`, `grillo_action_checker.py`, `grillo_response_recorder.py`) stay flat in `plugins/grillo/`. The docs collector (`docs/conf.py::_collect_plugin_guides`) globs both `plugins/*/guide.md` and `plugins/*/*/guide.md`, so these nested guides are published automatically.
 
 The **Agent plugin** (`plugins/agent_plugin.py`) exposes Synth's agentic tools (`agent_list_files`, `agent_read_file`, `agent_write_file`, `agent_edit_file`, `agent_search_files`, `agent_run_shell`, `spawn_drone`) to the Agentic Runtime 2.0. Task state is persisted in the `agent_tasks` table. Enablement is gated by `AGENT_ENABLED` (user toggle, re-read on every `is_enabled()` call); the router 2.0 additionally requires `AGENTIC_ROUTING_ENABLED`.
 
@@ -435,9 +489,9 @@ If any step fails, fix it before proceeding.
 - Config: `pytest.ini` — `asyncio_mode = auto`, markers: `asyncio`, `slow`, `integration`.
 - Run: `uv run pytest`
 
-### Testing via Ollama API
+### Testing via the OpenAI-compatible API
 
-The Ollama-compatible API (port 11435) can be used for quick testing without Telegram/Discord:
+The OpenAI-compatible API (port 11435, also speaks the legacy Ollama protocol) can be used for quick testing without Telegram/Discord:
 
 ```bash
 curl -X POST http://localhost:11435/api/chat \

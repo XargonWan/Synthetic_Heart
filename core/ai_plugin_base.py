@@ -52,6 +52,37 @@ class AIPluginBase:
         """Return True when this plugin should expose actions in the prompt."""
         return True
 
+    def get_metadata(self) -> dict:
+        """Return declarative plugin metadata for the WebUI and docs pipeline.
+
+        See :meth:`core.plugin_base.PluginBase.get_metadata` for the full list
+        of supported keys. The default implementation derives values
+        reflectively so existing engines keep working without changes.
+        """
+        return {
+            "name": self.get_display_name(),
+            "display_name": self.get_display_name(),
+            "description": self._reflective_description(),
+        }
+
+    def get_display_name(self) -> str:
+        """Return a human-friendly name for this plugin."""
+        for attr in ("display_name", "friendly_name", "name"):
+            value = getattr(self, attr, None)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return self.__class__.__name__
+
+    def _reflective_description(self) -> str:
+        """Best-effort description derived from attributes/docstring."""
+        candidate = getattr(self, "description", None)
+        if isinstance(candidate, str) and candidate.strip():
+            return " ".join(candidate.split())
+        doc = (self.__class__.__doc__ or "").strip()
+        if doc:
+            return " ".join(doc.split())
+        return ""
+
     async def handle_custom_action(self, action_type: str, payload: dict):
         """Handle a plugin-defined custom action."""
         raise NotImplementedError("handle_custom_action not implemented")
