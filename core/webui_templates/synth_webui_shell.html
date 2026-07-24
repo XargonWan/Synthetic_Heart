@@ -1151,13 +1151,13 @@
             border: none;
             border-radius: 50%;
             background: transparent;
-            color: #3b82f6;
+            color: var(--accent);
             cursor: pointer;
             transition: color 0.15s ease, transform 0.15s ease, background 0.15s ease;
         }
         .plugin-banner-run:hover {
-            color: #60a5fa;
-            background: rgba(59, 130, 246, 0.15);
+            color: var(--accent);
+            background: var(--accent-soft);
             transform: scale(1.1);
         }
         .plugin-banner-run:disabled {
@@ -1238,6 +1238,8 @@
         .plugin-detail-desc {
             color: var(--text-soft);
             margin-bottom: 0.75rem;
+            white-space: pre-wrap;
+            line-height: 1.5;
         }
         .plugin-detail-meta {
             color: var(--muted);

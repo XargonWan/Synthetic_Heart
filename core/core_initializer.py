@@ -1539,6 +1539,44 @@ class CoreInitializer:
             )
             return []
 
+        def _read_persisted_from_db(key: str) -> Any:
+            """Read the DB-persisted value even inside a running event loop.
+
+            ``config_registry.get_value`` (and its ``_load_from_db_sync``) skip
+            the DB read when an event loop is already running — which is exactly
+            the case during interface registration at startup. That makes a
+            value saved through the WebUI look "missing" (false negative). To get
+            the truth we run the async DB read in a dedicated thread that owns
+            its own event loop, blocking only this loader gate.
+            """
+            import asyncio
+            import concurrent.futures
+
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                # No running loop — the plain sync path already reads the DB.
+                return None
+
+            def _runner() -> Any:
+                return asyncio.run(config_registry.get_persisted_value(str(key), None))
+
+            try:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                    return pool.submit(_runner).result(timeout=10)
+            except Exception as e:  # pragma: no cover - defensive
+                log_debug(
+                    f"[core_initializer] DB read fallback failed for '{key}': {e}"
+                )
+                return None
+
+        def _is_empty(value: Any) -> bool:
+            if value is None:
+                return True
+            if isinstance(value, str) and not value.strip():
+                return True
+            return False
+
         def _present(key: str) -> bool:
             try:
                 value = config_registry.get_value(str(key), None)
@@ -1546,12 +1584,13 @@ class CoreInitializer:
                 log_debug(
                     f"[core_initializer] Error reading required config var '{key}': {e}"
                 )
-                return False
-            if value is None:
-                return False
-            if isinstance(value, str) and not value.strip():
-                return False
-            return True
+                value = None
+            if _is_empty(value):
+                # Fall back to a direct DB read: get_value skips the DB while an
+                # event loop is running, so a WebUI-saved value would otherwise
+                # be reported as missing (false negative).
+                value = _read_persisted_from_db(str(key))
+            return not _is_empty(value)
 
         missing: List[str] = []
         for entry in required:
@@ -1597,10 +1636,14 @@ class CoreInitializer:
         if missing_vars:
             reason = "Missing required configuration: " + ", ".join(missing_vars)
             self.track_component(interface_name, "interface", ComponentStatus.LOADING)
+            # Pass the reason ONLY as the error (red line in the WebUI). Do NOT
+            # also set it as ``details`` — the WebUI renders both ``details`` and
+            # ``error``, so duplicating the text there shows the same message
+            # twice (once black, once red). Leaving details empty lets the black
+            # line fall back to the interface's own description.
             self.mark_component_failed(
                 interface_name,
                 reason,
-                details=reason,
             )
             # Keep the component typed as an interface for the WebUI.
             comp = self.components.get(interface_name)

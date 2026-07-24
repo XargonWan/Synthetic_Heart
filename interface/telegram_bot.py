@@ -134,7 +134,7 @@ register_exposed_var(
     label="Telegram Bot Token",
     default=None,
     value_type=str,
-    ui_type="string",
+    ui_type="password",
     description="Bot token provided by BotFather on Telegram.",
     scope="interface",
     tags=["sensitive"],

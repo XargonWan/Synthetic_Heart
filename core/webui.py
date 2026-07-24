@@ -5824,6 +5824,16 @@ class SynthWebUIInterface:
             )
             options = exposed_def.options if exposed_def else []
 
+            # A sensitive variable (token / API key / password / secret) must be
+            # masked in the WebUI. The frontend renders a masked input purely
+            # from ``ui_type === 'password'`` and ignores the ``sensitive`` flag,
+            # so promote any sensitive var that still carries the neutral default
+            # "string" type to "password". This covers vars registered only via
+            # ``config_registry.get_var(sensitive=True)`` (e.g. engine API keys)
+            # without touching every individual registration site.
+            if entry.get("sensitive") and ui_type == "string":
+                ui_type = "password"
+
             # If no explicit options from exposed_vars, try deriving from constraints
             if not options and entry.get("constraints"):
                 constraints = entry["constraints"]

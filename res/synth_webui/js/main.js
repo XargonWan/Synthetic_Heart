@@ -16,7 +16,55 @@
         } catch (e) { /* ignore */ }
     };
 
+    // Wrap a masked (type="password") input in a relative container with an
+    // "eye" toggle button that reveals/hides the value in place. Returns the
+    // wrapper element to append instead of the bare input.
+    // Exposed on window so it is reachable from every IIFE scope in this file
+    // (settings, plugin-detail rendering, etc.).
+    window.wrapPasswordWithToggle = function wrapPasswordWithToggle(input) {
+        try {
+            const wrap = document.createElement('div');
+            wrap.className = 'password-field';
+            wrap.style.cssText = 'position:relative; display:inline-flex; align-items:center; width:100%; max-width:400px;';
 
+            // Ensure the input leaves room for the icon on its right edge.
+            input.style.width = '100%';
+            input.style.paddingRight = '34px';
+            input.style.boxSizing = 'border-box';
+
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'password-toggle';
+            btn.setAttribute('aria-label', 'Show value');
+            btn.title = 'Show / hide value';
+            btn.tabIndex = -1;
+            btn.style.cssText = 'position:absolute; right:6px; top:50%; transform:translateY(-50%); background:none; border:none; cursor:pointer; padding:2px; line-height:0; color:var(--text,#ccc); opacity:0.75;';
+
+            const eyeOpen = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>';
+            const eyeClosed = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>';
+            btn.innerHTML = eyeOpen;
+
+            btn.addEventListener('click', (ev) => {
+                ev.preventDefault();
+                ev.stopPropagation();
+                if (input.type === 'password') {
+                    input.type = 'text';
+                    btn.innerHTML = eyeClosed;
+                    btn.setAttribute('aria-label', 'Hide value');
+                } else {
+                    input.type = 'password';
+                    btn.innerHTML = eyeOpen;
+                    btn.setAttribute('aria-label', 'Show value');
+                }
+            });
+
+            wrap.appendChild(input);
+            wrap.appendChild(btn);
+            return wrap;
+        } catch (e) {
+            return input;
+        }
+    };
 
     // Generic section loader. Fetches /templates/<section>.html and injects into the tab panel.
     async function loadSection(section) {
@@ -2200,41 +2248,50 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                             input.autocomplete = item.ui_type === 'password' ? 'new-password' : 'off';
                             input.value = typeof value === 'string' ? value : JSON.stringify(value);
                             input.disabled = !isEditable;
-                            inputEl = input;
+                            if (item.ui_type === 'password') {
+                                inputEl = window.wrapPasswordWithToggle(input);
+                            } else {
+                                inputEl = input;
+                            }
                         }
 
                         if (inputEl) inputWrap.appendChild(inputEl);
                         if (extraEl) inputWrap.appendChild(extraEl);
 
                         // Attach save handlers for editable inputs so pressing Enter or changing
-                        // selects/checkboxes persists values via the /api/config endpoint
-                        if (isEditable && inputEl && !skipAutoSave) {
+                        // selects/checkboxes persists values via the /api/config endpoint.
+                        // Password fields are wrapped in a container with an eye toggle,
+                        // so resolve the real <input> before binding handlers.
+                        const saveTarget = (inputEl && inputEl.classList && inputEl.classList.contains('password-field'))
+                            ? inputEl.querySelector('input')
+                            : inputEl;
+                        if (isEditable && saveTarget && !skipAutoSave) {
                             // Checkbox
-                            if (inputEl.tagName && inputEl.tagName.toLowerCase() === 'input' && inputEl.type === 'checkbox') {
-                                inputEl.addEventListener('change', () => { persistValue(inputEl.checked, [inputEl]); });
-                            } else if (inputEl.tagName && inputEl.tagName.toLowerCase() === 'select') {
-                                inputEl.addEventListener('change', () => { persistValue(inputEl.value, [inputEl]); });
-                            } else if (inputEl.tagName && inputEl.tagName.toLowerCase() === 'textarea') {
+                            if (saveTarget.tagName && saveTarget.tagName.toLowerCase() === 'input' && saveTarget.type === 'checkbox') {
+                                saveTarget.addEventListener('change', () => { persistValue(saveTarget.checked, [saveTarget]); });
+                            } else if (saveTarget.tagName && saveTarget.tagName.toLowerCase() === 'select') {
+                                saveTarget.addEventListener('change', () => { persistValue(saveTarget.value, [saveTarget]); });
+                            } else if (saveTarget.tagName && saveTarget.tagName.toLowerCase() === 'textarea') {
                                 // Ctrl+Enter to submit JSON/textarea; blur to auto-save
                                 let debounced = null;
-                                inputEl.addEventListener('keydown', (ev) => {
+                                saveTarget.addEventListener('keydown', (ev) => {
                                     if (ev.key === 'Enter' && (ev.ctrlKey || ev.metaKey)) {
                                         ev.preventDefault();
-                                        persistValue(inputEl.value, [inputEl]);
+                                        persistValue(saveTarget.value, [saveTarget]);
                                     }
                                     // simple debounce to avoid excessive saves on blur
                                     if (debounced) clearTimeout(debounced);
                                 });
-                                inputEl.addEventListener('blur', () => { debounced = setTimeout(() => persistValue(inputEl.value, [inputEl]), 150); });
+                                saveTarget.addEventListener('blur', () => { debounced = setTimeout(() => persistValue(saveTarget.value, [saveTarget]), 150); });
                             } else {
                                 // Default: single-line inputs — Enter to save, blur to save
-                                inputEl.addEventListener('keydown', (ev) => {
+                                saveTarget.addEventListener('keydown', (ev) => {
                                     if (ev.key === 'Enter' && !ev.shiftKey && !ev.ctrlKey && !ev.metaKey) {
                                         ev.preventDefault();
-                                        persistValue(inputEl.value, [inputEl]);
+                                        persistValue(saveTarget.value, [saveTarget]);
                                     }
                                 });
-                                inputEl.addEventListener('blur', () => { persistValue(inputEl.value, [inputEl]); });
+                                saveTarget.addEventListener('blur', () => { persistValue(saveTarget.value, [saveTarget]); });
                             }
                         }
 
@@ -3168,7 +3225,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                                 if (ev.key === 'Enter') { ev.preventDefault(); saveCfg(inp.value, inp); }
                             });
                             inp.addEventListener('blur', () => saveCfg(inp.value, inp));
-                            inputEl = inp;
+                            inputEl = ci.ui_type === 'password' ? window.wrapPasswordWithToggle(inp) : inp;
                         }
 
                         if (inputEl) row.appendChild(inputEl);

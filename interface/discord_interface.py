@@ -3880,7 +3880,7 @@ register_exposed_var(
     label="Discord Bot Token",
     default="",
     value_type=str,
-    ui_type="string",
+    ui_type="password",
     description="Bot token provided by the Discord developer portal.",
     scope="interface",
     tags=["sensitive"],
