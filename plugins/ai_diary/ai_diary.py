@@ -1712,6 +1712,27 @@ class DiaryPlugin:
         payload = action.get("payload", {})
 
         if action_type == "create_personal_diary_entry":
+            # AGENTS.md §5c: during a Rift Vessel embodiment session there must be
+            # NO diary written mid-session — a single autobiographical "lived
+            # experience" entry is produced only at end-of-session from the
+            # session experience buffer. If the will-beat cognition emits a diary
+            # action while embodied, skip it here (structural, routing-metadata
+            # only — never message text). Fully guarded.
+            try:
+                from core.interface_path_utils import is_vessel_embodiment_context
+
+                if is_vessel_embodiment_context(context):
+                    log_debug(
+                        "[ai_diary] Skipping create_personal_diary_entry during "
+                        "Vessel embodiment (§5c: single end-of-session diary)"
+                    )
+                    return {
+                        "success": True,
+                        "skipped": True,
+                        "reason": "vessel_embodiment_no_mid_session_diary",
+                    }
+            except Exception:
+                pass
             try:
                 # Extract information from context and payload
                 interface_name = context.get("interface", "unknown")

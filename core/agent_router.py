@@ -138,6 +138,26 @@ def _is_pure_message(action_type: str) -> bool:
     )
 
 
+def _is_vessel_embodiment_turn(context: Dict[str, Any] | None) -> bool:
+    """True when the current turn originates from a Rift Vessel embodiment.
+
+    A Vessel turn (SyntH acting "in the world") must NEVER leave the Fast Lane:
+    per AGENTS.md §5c the embodiment verbs declare no ``external_effects`` and
+    must stay on the classic ``run_actions`` path — they must never spawn an
+    agentic task / Drone. Thin wrapper over the single canonical structural
+    detector :func:`core.interface_path_utils.is_vessel_embodiment_context`
+    (routing metadata only, never message text — project rule: no keyword
+    logic), which mirrors ``core.history_engine.build_context``. Fully guarded:
+    any failure degrades to ``False`` so the normal routing path is untouched.
+    """
+    try:
+        from core.interface_path_utils import is_vessel_embodiment_context
+
+        return is_vessel_embodiment_context(context)
+    except Exception:
+        return False
+
+
 def classify(actions: List[Any], *, context: Dict[str, Any] | None = None) -> str:
     """Classify a parsed action batch into FAST or AGENT lane.
 
@@ -162,6 +182,17 @@ def classify(actions: List[Any], *, context: Dict[str, Any] | None = None) -> st
         return FAST
     if not config_registry.get_var("AGENT_ENABLED", True, value_type=bool):
         log_debug("[agent_router] AGENT_ENABLED off -> FAST lane (classic behaviour)")
+        return FAST
+
+    # Rift Vessel embodiment turns must ALWAYS stay on the Fast Lane (AGENTS.md
+    # §5c): the ``vessel_*`` verbs carry no external effects and must be executed
+    # directly by ``run_actions``, never handed to the agent loop / Drones. This
+    # gate wins over ``agent_needed`` because the recon plugin judges the *user's
+    # request* and can flag an embodiment "moment of will" beat as agentic work,
+    # which would misroute the turn to the Agent Lane and leave the vessel
+    # actions unexecuted (0 processed).
+    if _is_vessel_embodiment_turn(context):
+        log_info("[agent_router] classify: vessel embodiment turn -> FAST lane")
         return FAST
 
     # Authoritative, pre-LLM decision: the recon plugin evaluated the user's

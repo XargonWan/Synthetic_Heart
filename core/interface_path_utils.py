@@ -192,3 +192,36 @@ def is_valid_interface_path(interface_path: str) -> bool:
             return False
 
     return True
+
+
+def is_vessel_embodiment_context(context: Optional[Dict[str, Any]]) -> bool:
+    """Return True when a turn originates from a Rift Vessel embodiment.
+
+    This is the single, canonical structural detector for "SyntH is in the
+    world" turns. Detection is purely from routing metadata — never from
+    message text (project rule: no keyword logic) — mirroring
+    ``core.history_engine.build_context``:
+
+    * an explicit ``vessel_focus`` context flag, or
+    * ``context['interface'] == 'vessel'``, or
+    * ``context['interface_path']`` / ``context['chat_id']`` being ``vessel``
+      or a ``vessel/...`` path.
+
+    Fully guarded: any failure degrades to ``False`` so the caller's normal
+    path is untouched.
+    """
+    if not isinstance(context, dict):
+        return False
+    try:
+        if context.get("vessel_focus"):
+            return True
+        iface = context.get("interface")
+        if isinstance(iface, str) and iface == "vessel":
+            return True
+        for key in ("interface_path", "chat_id"):
+            val = context.get(key)
+            if isinstance(val, str) and val.startswith("vessel"):
+                return True
+    except Exception:
+        return False
+    return False

@@ -807,6 +807,39 @@ def test_router_context_agent_needed_forces_agent(monkeypatch):
     assert lane == "agent"
 
 
+def test_router_vessel_embodiment_stays_fast_even_when_agent_needed(monkeypatch):
+    """A Rift Vessel embodiment turn must ALWAYS stay on the Fast Lane.
+
+    Regression guard (AGENTS.md §5c): the will-beat "moment of will" prompt can
+    be flagged ``agent_needed`` by the recon plugin, which previously misrouted
+    the turn to the Agent Lane and left the emitted ``vessel_*`` actions
+    unexecuted (0 processed) — so autonomous goal-authoring never persisted and
+    the body froze. The vessel gate must win over ``agent_needed``. Detection is
+    purely structural (routing metadata), never message text.
+    """
+    monkeypatch.setattr(
+        "core.agent_router.config_registry",
+        type("C", (), {"get_var": lambda *a, **k: True})(),
+    )
+    # Even with agent_needed set AND a namespaced vessel action, embodiment
+    # turns stay Fast Lane. Any of interface / interface_path / chat_id /
+    # vessel_focus is a sufficient structural signal.
+    for ctx in (
+        {"agent_needed": True, "interface": "vessel"},
+        {"agent_needed": True, "interface_path": "vessel/minecraft"},
+        {"agent_needed": True, "chat_id": "vessel/minecraft"},
+        {"agent_needed": True, "vessel_focus": True},
+    ):
+        lane = classify(
+            [
+                {"type": "vessel_minecraft_set_goal", "payload": {"description": "go"}},
+                {"type": "create_personal_diary_entry", "payload": {"content": "x"}},
+            ],
+            context=ctx,
+        )
+        assert lane == "fast", ctx
+
+
 def test_router_mixed_non_tool_stays_fast(monkeypatch):
     """A multi-action batch with no tool call and no ``agent_needed`` flag stays
     on the Fast Lane.

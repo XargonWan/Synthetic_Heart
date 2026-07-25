@@ -1804,8 +1804,6 @@ async def handle_incoming_message(
                     # Determine current set of message action types from config (dynamic)
                     current_message_action_types = []
                     try:
-                        from core.config_manager import config_registry
-
                         MESSAGE_ACTION_TYPES = config_registry.get_var(
                             "MESSAGE_ACTION_TYPES",
                             [],
@@ -1853,8 +1851,6 @@ async def handle_incoming_message(
                     # NOT be listed.
                     current_user_output_action_types = []
                     try:
-                        from core.config_manager import config_registry
-
                         USER_OUTPUT_ACTION_TYPES = config_registry.get_var(
                             "USER_OUTPUT_ACTION_TYPES",
                             ["get_recent_chats"],
@@ -2186,8 +2182,6 @@ async def handle_incoming_message(
                         # flags/endpoints, but they no longer drive the feature state.
                         tts_raw = ""
                         try:
-                            from core.config_manager import config_registry
-
                             active = str(
                                 config_registry.get_value(
                                     "ACTIVE_VOX_ENGINE",
@@ -2252,8 +2246,6 @@ async def handle_incoming_message(
                         ) or _is_voice_input
                         _speak_text_replies = False
                         try:
-                            from core.config_manager import config_registry
-
                             _speak_text_replies = bool(
                                 config_registry.get_value(
                                     "VOX_SPEAK_TEXT_REPLIES",
@@ -2395,6 +2387,8 @@ async def handle_incoming_message(
                         is_grillo_internal = False
                     if "is_internal_chat" not in locals():
                         is_internal_chat = False
+                    if "has_user_response" not in locals():
+                        has_user_response = False
 
                     if not has_user_response:
                         if (
@@ -2502,6 +2496,15 @@ async def handle_incoming_message(
 
                 # Execute actions regardless of whether response is included
                 if parsed is not None:
+                    # has_user_response / has_user_output_action are only
+                    # initialised in the source=="llm" branch above; on a
+                    # corrector retry we re-enter this block with parsed
+                    # re-populated but without passing through that init, so
+                    # ensure they exist before the reads below.
+                    if "has_user_response" not in locals():
+                        has_user_response = False
+                    if "has_user_output_action" not in locals():
+                        has_user_output_action = False
                     try:
                         log_debug(
                             f"[message_chain] EXECUTING ACTIONS: count={len(actions) if actions else 0}, interface_path={ctx.get('interface_path')}, chat_id={ctx.get('chat_id')}, action_types={[a.get('type') or a.get('action') for a in (actions or []) if isinstance(a, dict)]}"
@@ -2753,14 +2756,23 @@ async def handle_incoming_message(
                                 return ACTIONS_EXECUTED
 
                     except Exception as e:
-                        log_warning(f"[message_chain] Failed to run actions: {e}")
+                        # Log with the full traceback so the crash site is
+                        # visible in the logs (a bare str(e) hides WHERE the
+                        # exception was raised, which made UnboundLocalErrors in
+                        # this block very hard to locate).
+                        log_error(
+                            f"[message_chain] Failed to run actions: {type(e).__name__}: {e}",
+                            e,
+                        )
                         # On a hard exception during action execution we treat it as a
                         # technical failure. If nothing has run yet, propagate an LLM
                         # failure so the interface can show a fallback message. If some
                         # actions already succeeded we simply report ACTIONS_EXECUTED so
                         # the user isn't spammed with unrelated error texts.
                         if not actions_executed_during_loop:
-                            failure_reason = f"Action execution exception: {e}"
+                            failure_reason = (
+                                f"Action execution exception: {type(e).__name__}: {e}"
+                            )
                             try:
                                 await send_llm_fallback_message(
                                     bot, message, failure_reason, context=ctx

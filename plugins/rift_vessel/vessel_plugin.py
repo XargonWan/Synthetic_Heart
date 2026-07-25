@@ -77,6 +77,35 @@ config_registry.get_value(
     component="vessel_plugin",
     advanced=True,
 )
+config_registry.get_value(
+    "VESSEL_AUTONOMY_ENABLED",
+    False,
+    value_type=bool,
+    label="Autonomous In-World Play",
+    description=(
+        "When enabled, Synth plays on its own while embodied: a periodic "
+        "decision beat lets it wander, set and pursue goals, and interact with "
+        "the world without waiting for a chat prompt. The beat runs a normal "
+        "Fast-Lane cognition turn — never the Agent Lane, and no diary is "
+        "written mid-session."
+    ),
+    group="plugins",
+    component="vessel_plugin",
+)
+config_registry.get_value(
+    "VESSEL_BEAT_INTERVAL_SEC",
+    45,
+    value_type=int,
+    label="Autonomous Play Beat Interval (s)",
+    description=(
+        "Seconds between autonomous decision beats while a session is active "
+        "(clamped to 10–3600). Lower is more active but costs more cognition "
+        "turns. Only used when Autonomous In-World Play is enabled."
+    ),
+    group="plugins",
+    component="vessel_plugin",
+    advanced=True,
+)
 
 
 class VesselPlugin(AIPluginBase):
@@ -631,6 +660,20 @@ class VesselPlugin(AIPluginBase):
             "optional_fields": [],
             "security_level": "low",
         },
+        "observe": {
+            "description": (
+                "Look around you in the {world} world and take stock of your "
+                "surroundings: what and who is near you, and — crucially — what "
+                "you could interact with and how. Returns the things around you "
+                "together with the interaction each one affords, so you can "
+                "decide what to do next. Use this to explore and to evaluate "
+                "whether to approach, use, or engage an object or presence "
+                "before acting. Purely perceptual — it changes nothing."
+            ),
+            "required_fields": [],
+            "optional_fields": [],
+            "security_level": "low",
+        },
     }
 
     def _action_world(self) -> str:
@@ -826,6 +869,45 @@ class VesselPlugin(AIPluginBase):
         actions["vessel_disconnect"] = disconnect_entry
         return actions
 
+    async def _observe_surroundings(self) -> dict[str, Any]:
+        """Generic "look around and evaluate" — the world-agnostic observe verb.
+
+        Reads the current :class:`WorldState` (which the active connector
+        enriches) and surfaces the surroundings together with the *affordances*
+        each one offers — the ``{kind, target, verb, distance}`` records telling
+        Synth what it could interact with and how. The core owns no world
+        knowledge: it never inspects names or types for meaning; it only relays
+        the structured affordance contract the connector populated in
+        ``WorldState.extra``. A world that provides no such data still yields a
+        valid (possibly empty) observation.
+        """
+        state = await self.get_world_state(connector_name=self._connected_world())
+        if state is None:
+            return {"status": "error", "message": "no_world_state"}
+        extra = state.extra if isinstance(state.extra, dict) else {}
+        affordances = extra.get("affordances") or []
+        entities = extra.get("entities") or []
+        blocks = extra.get("blocks") or []
+        return {
+            "status": "ok",
+            "data": {
+                "environment": state.environment,
+                "position": state.position,
+                "health": state.health,
+                "flags": state.flags,
+                # The core relays these verbatim — it does not interpret them.
+                "affordances": affordances,
+                "entities": entities,
+                "blocks": blocks,
+                "possible_actions": state.possible_actions,
+                "summary": (
+                    f"{len(entities)} presence(s) and {len(blocks)} notable "
+                    f"thing(s) around you; {len(affordances)} possible "
+                    "interaction(s)."
+                ),
+            },
+        }
+
     def _parse_action_verb(self, action_type: str) -> str | None:
         """Extract the world-agnostic verb from a namespaced action name.
 
@@ -918,6 +1000,8 @@ class VesselPlugin(AIPluginBase):
                     "flags": state.flags,
                 },
             }
+        if verb == "observe":
+            return await self._observe_surroundings()
         if verb is not None:
             # World-specific verb declared by the connected connector's
             # get_world_actions() — dispatch it straight to the connector.

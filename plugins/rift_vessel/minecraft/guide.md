@@ -95,7 +95,8 @@ key. Enable/disable the whole thing from the plugin card.
 | `MINECRAFT_SKIN_FILE` | *(empty)* | | Uploaded skin texture PNG (file upload in the plugin card). Served over HTTP and applied at spawn. Requires a server skin plugin. |
 | `MINECRAFT_SKIN_MODEL` | `classic` | | Model variant (dropdown): `classic` (Steve) or `slim` (Alex). |
 | `MINECRAFT_SKIN_PUBLIC_BASE_URL` | *(empty)* | ✓ | Public base URL the Minecraft server can reach to fetch the uploaded skin. Leave empty to auto-derive: SyntH uses the WebUI host, and if that is a loopback it substitutes the machine's primary LAN IP so a server on the same LAN can reach it. Set explicitly for a VPN/public/reverse-proxy address. |
-| `MINECRAFT_SKIN_COMMAND_TEMPLATE` | `/skin url {url}` | ✓ | Chat command run at spawn. `{url}` / `{model}` are substituted. |
+| `MINECRAFT_SKIN_COMMAND_TEMPLATES` | *(empty)* | ✓ | Newline-separated list of chat commands tried in order at spawn. `{url}` / `{model}` are substituted. Empty tries both built-in provider syntaxes. |
+| `MINECRAFT_SKIN_COMMAND_TEMPLATE` | *(empty)* | ✓ | Legacy single-command override, kept for backward compatibility. Empty by default. |
 
 ## Skin — how it works (important)
 
@@ -105,15 +106,24 @@ server (by username/UUID or a skin-management plugin). Mineflayer exposes only
 read-only skin data and cape/sleeve *visibility* toggles, not the texture.
 
 The **only** functional way to give Synth's bot a custom skin on an offline
-server is a **server-side skin plugin** such as
-[SkinsRestorer](https://skinsrestorer.net/). When one is installed, the
+server is a **server-side skin provider**. Two are supported out of the box:
+the classic [SkinsRestorer](https://skinsrestorer.net/) Bukkit/Spigot plugin
+(`/skin url <url>`) and the [SkinRestorer](https://modrinth.com/mod/skinrestorer)
+Fabric/Forge/NeoForge/Quilt mod by Lionarius (`/skin set web <model> "<url>"` —
+the URL **must** be wrapped in double quotes). When one is installed, the
 connector applies the skin automatically at spawn.
 
 **Uploading a PNG:** upload the skin texture directly from the plugin card — the
 `Minecraft Skin File` field is a file upload. SyntH stores the file and serves
-it over HTTP at `<base>/api/config/MINECRAFT_SKIN_FILE/file`. At spawn the
-connector runs `MINECRAFT_SKIN_COMMAND_TEMPLATE` (default `/skin url {url}`),
-substituting that URL for `{url}` and `MINECRAFT_SKIN_MODEL` for `{model}`.
+it over HTTP at `<base>/api/config/MINECRAFT_SKIN_FILE/file`. Because different
+providers use different command syntaxes, at spawn the connector **runs every
+configured command in turn** — the server accepts the one it understands and
+ignores the rest, so both providers work without any keyword logic. By default
+it tries both built-in syntaxes (`/skin set web {model} "{url}"` then
+`/skin url {url}`); `{url}` is the served URL and `{model}` is
+`MINECRAFT_SKIN_MODEL`. To customise, set `MINECRAFT_SKIN_COMMAND_TEMPLATES` (a
+newline-separated list, tried in order) or the legacy single
+`MINECRAFT_SKIN_COMMAND_TEMPLATE`.
 
 The `<base>` is `MINECRAFT_SKIN_PUBLIC_BASE_URL` when set; otherwise it is
 auto-derived from the WebUI host/port, and when that host is a loopback
@@ -130,17 +140,19 @@ command is simply ignored by the server and the bot keeps the default skin. If
 
 ### The skin doesn't appear — checklist
 
-The connector logs `skin command sent: <command>` at spawn, so the command going
-out is **not** proof the skin was applied. Two independent conditions must both
-hold on the **server** side:
+The connector logs `skin command sent: <command>` for each attempt at spawn, so
+those lines going out are **not** proof the skin was applied. Two independent
+conditions must both hold on the **server** side:
 
-1. **A server-side skin plugin must be installed.** On an offline-mode server
-   the only working path is a plugin such as
-   [SkinsRestorer](https://skinsrestorer.net/) (or another that understands a
-   `/skin`-style command). Without it the `/skin url …` command is silently
-   ignored — there is nothing SyntH can do from the client. If the plugin uses a
-   different command syntax, adapt `MINECRAFT_SKIN_COMMAND_TEMPLATE`
-   (`{url}` / `{model}` are substituted).
+1. **A server-side skin provider must be installed.** On an offline-mode server
+   the only working path is a plugin/mod such as
+   [SkinsRestorer](https://skinsrestorer.net/) or the
+   [SkinRestorer](https://modrinth.com/mod/skinrestorer) mod (or another that
+   understands a `/skin`-style command). Without it every `/skin …` command is
+   silently ignored — there is nothing SyntH can do from the client. The
+   connector already tries both known syntaxes by default; for an exotic
+   provider add its command to `MINECRAFT_SKIN_COMMAND_TEMPLATES` (`{url}` /
+   `{model}` are substituted).
 
 2. **The server must be able to reach the skin URL.** The command carries
    `<base>/api/config/MINECRAFT_SKIN_FILE/file`. When `MINECRAFT_SKIN_PUBLIC_BASE_URL`

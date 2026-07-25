@@ -151,6 +151,24 @@ CREATE TABLE IF NOT EXISTS vessel_activity_log (
     INDEX idx_vessel_activity_session (session_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+-- Minecraft Goals: Synth's self-authored, free-text in-world objectives for the
+-- Minecraft Vessel (world-specific; owned by the Minecraft goal store,
+-- plugins/rift_vessel/minecraft/goals.py). There is NO catalogue of predefined
+-- objectives: `description` is whatever Synth decided to do, in its own words,
+-- and `note` is its own progress reflection. One active goal at a time; Synth
+-- judges its own progress. Never a bare `timestamp` column.
+CREATE TABLE IF NOT EXISTS minecraft_goals (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    session_id VARCHAR(128),
+    description TEXT NOT NULL,
+    note TEXT,
+    status VARCHAR(32) DEFAULT 'active',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    INDEX idx_minecraft_goals_status (status),
+    INDEX idx_minecraft_goals_session (session_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 -- Web Search Tasks: decoupled background web-search jobs triggered by the
 -- recon web-search plugin. Recon fires a search and returns immediately; the
 -- orchestrator runs the searches off the message pipeline, synthesises an

@@ -73,9 +73,9 @@ File                                            Role
                                                 lists every enabled world (plus optional
                                                 ``host``/``port`` overrides). Once connected to
                                                 world *W* the world-agnostic **core set** —
-                                                ``say``, ``move``, ``look``, ``use``, ``attack``,
-                                                ``follow``, ``unfollow``, ``respawn``, ``status``
-                                                (``say`` takes
+                                                ``say``, ``move``, ``look``, ``observe``, ``use``,
+                                                ``attack``, ``follow``, ``unfollow``, ``respawn``,
+                                                ``status`` (``say`` takes
                                                 an optional ``audio`` flag; all
                                                 ``security_level: "low"``, **no**
                                                 ``external_effects``) plus each connector's own
@@ -88,13 +88,21 @@ File                                            Role
                                                 the world; ``vessel_disconnect`` leaves it.
 ``core/vessel_session_manager.py``              Session lifecycle + experience buffer +
                                                 end-of-session flush to a single diary entry.
+``core/vessel_beat.py``                         World-agnostic **autonomous volition** —
+                                                pure, keyword-free will-prompt builder + interval
+                                                helpers that let Synth play on its own (see
+                                                *Autonomous play* below).
 ``interface/vessel_interface.py``               Duck-typed I/O interface. Inbound world
                                                 events → salience filter → ``message_queue``;
                                                 outbound actions → connector. Scheduler closes
-                                                idle sessions.
+                                                idle sessions **and** fires the slow will beat +
+                                                the fast motor tick.
 ``plugins/rift_vessel/minecraft/minecraft.py``  Minecraft connector (HTTP
                                                 client to the bridge). Self-registers at import.
-``interface_dev/minecraft_bridge_minimal.js``   Node.js Mineflayer ↔ HTTP
+``plugins/rift_vessel/minecraft/goals.py``      Minecraft **goal store** — persists and recalls
+                                                Synth's own free-text goals (no catalogue; see
+                                                *Autonomous play* below).
+``plugins/rift_vessel/minecraft/minecraft_bridge_minimal.js``  Node.js Mineflayer ↔ HTTP
                                                 bridge.
 ``interface/minecraft_provisioner.py``          ``BridgeProvisioner`` — installs and
                                                 controls the bridge subprocess.
@@ -111,9 +119,21 @@ Normalised schema
         environment="minecraft",
         health=18.0,
         position={"x": 1, "y": 64, "z": -3},
-        possible_actions=["say", "move", "look", "use", "attack", "follow", "unfollow", "respawn", "status"],
-        flags={"connected": True},
-        extra={"username": "Synth"},
+        possible_actions=["say", "move", "look", "observe", "use", "attack", "follow", "unfollow", "respawn", "status"],
+        flags={"connected": True, "is_day": True},
+        extra={
+            "username": "Synth",
+            # Rich perception + progression, filled by the connector for the
+            # autonomous will beat + motor tick (all optional, structural, keyword-free):
+            "entities": [{"name": "Steve", "type": "player", "distance": 4.2}],
+            "blocks": [{"name": "oak_log", "distance": 3.0}],
+            "inventory": [{"name": "oak_log", "count": 5}],
+            "affordances": [{"kind": "block", "target": "oak_log", "verb": "mine", "distance": 3.0}],
+            # Self-authored goal (free text Synth wrote itself), plus its own recent goals.
+            "current_goal": {"id": 3, "description": "explore the caves", "note": "digging down", "status": "active"},
+            "recent_goals": [{"description": "build a house by the lake"}],
+            "time_of_day": 18000,
+        },
     )
 
 ``PerceptionEvent`` — a condensed cognitive event (never raw telemetry):
@@ -212,6 +232,11 @@ the reserved word ``timestamp``.
 * ``vessel_activity_log`` — ``id``, ``session_id``, ``interface_path``,
   ``environment``, ``event_type``, ``summary``, ``metadata`` (JSON),
   ``created_at``.
+* ``minecraft_goals`` — ``id``, ``session_id``, ``description`` (free text Synth
+  authored itself), ``note`` (Synth's own progress reflection), ``status``
+  (``active``/``done``/``abandoned``), ``created_at``, ``updated_at``.
+  Minecraft-specific (goal store, **no** predefined catalogue); created in
+  ``plugins/rift_vessel/minecraft/goals.py`` and seeded in ``init-db.sql``.
 
 Configuration keys
 -------------------
@@ -225,6 +250,10 @@ Key                             Purpose
 ``ACTIVE_VESSEL``               Selected connector (``"disabled"`` default)
 ``VESSEL_SETTINGS``             JSON connector settings blob
 ``VESSEL_SESSION_COOLDOWN_SEC`` Idle seconds before a session flushes (3600)
+``VESSEL_AUTONOMY_ENABLED``     Enable autonomous play — both layers (``False`` default)
+``VESSEL_WILL_INTERVAL_SEC``    Seconds between slow volition/will beats (45, clamped 10–3600; falls back to legacy ``VESSEL_BEAT_INTERVAL_SEC``)
+``VESSEL_MOTOR_ENABLED``        Enable the fast motorics reflex (``True`` default)
+``VESSEL_MOTOR_INTERVAL_SEC``   Seconds between fast motor ticks — no LLM (3, clamped 1–60)
 ``MINECRAFT_BRIDGE_RUN_AT_START``  Optional boot pre-warm (False). The bridge starts **on demand** by default, only when Synth enters the world.
 ``MINECRAFT_BRIDGE_HOST``       Bridge bind host (``127.0.0.1``)
 ``MINECRAFT_BRIDGE_PORT``       Bridge HTTP port (``8137``)
@@ -234,7 +263,8 @@ Key                             Purpose
 ``MINECRAFT_SKIN_FILE``         Uploaded skin texture PNG (file upload in the plugin card), served over HTTP and applied at spawn (needs a server skin plugin)
 ``MINECRAFT_SKIN_MODEL``        Skin model variant (dropdown): ``classic`` (Steve) or ``slim`` (Alex)
 ``MINECRAFT_SKIN_PUBLIC_BASE_URL``  Public base URL the MC server uses to fetch the skin (advanced); empty auto-derives from the WebUI host, substituting the machine's LAN IP for a loopback host
-``MINECRAFT_SKIN_COMMAND_TEMPLATE``  Chat command run at spawn (default ``/skin url {url}``; ``{url}``/``{model}`` substituted)
+``MINECRAFT_SKIN_COMMAND_TEMPLATES``  Newline-separated list of chat commands tried at spawn (advanced); empty tries both built-in provider syntaxes
+``MINECRAFT_SKIN_COMMAND_TEMPLATE``  Legacy single-command override (advanced); empty by default
 ==============================  =========================================
 
 .. note::
@@ -259,7 +289,7 @@ The bridge is a small Node.js process (Mineflayer) exposing a local HTTP API:
 
 * ``GET /health`` → ``{ok, connected, username, environment, mineflayer}``
 * ``GET /events`` → ``{events}`` (drains the event buffer)
-* ``POST /cmd`` ``{action, payload}`` — ``say``/``move``/``look``/``use``/``attack``/``follow``/``unfollow``/``respawn``/``status``/``skin`` (``follow`` needs ``mineflayer-pathfinder``; without it the action fails gracefully; ``respawn`` calls Mineflayer ``bot.respawn()`` and is guarded to no-op when the bot is already alive)
+* ``POST /cmd`` ``{action, payload}`` — ``say``/``move``/``look``/``use``/``attack``/``follow``/``unfollow``/``respawn``/``status``/``skin`` plus the autonomous-play verbs ``goto``/``scan``/``mine``/``place``/``inventory``/``wander`` (``follow``/``goto``/``mine`` need ``mineflayer-pathfinder`` and ``minecraft-data``; without them the action fails gracefully; ``respawn`` calls Mineflayer ``bot.respawn()`` and is guarded to no-op when the bot is already alive). The ``worldSnapshot`` helper feeds ``get_world_state`` (entities, blocks, inventory, time).
 * ``POST /connect`` / ``POST /disconnect``
 
 ``BridgeProvisioner`` manages its lifecycle as a **non-root** subprocess inside
@@ -285,35 +315,45 @@ Mineflayer bot: the skin is not carried by the client, it is decided by the
 server (by username/UUID or a skin-management plugin). Mineflayer exposes only
 read-only skin data and cape/sleeve *visibility* toggles — never the texture.
 
-The supported path is a **server-side skin plugin** (e.g. `SkinsRestorer
-<https://skinsrestorer.net/>`_). When one is present, the connector applies the
-skin automatically at spawn by running a configurable chat command
-(``_apply_skin`` in the connector, forwarded to the bridge ``skin`` action which
-calls ``bot.chat``). The skin texture is **uploaded directly** from the plugin
-card (``MINECRAFT_SKIN_FILE``, a file-upload exposed variable): SyntH stores the
-PNG and serves it at ``<base>/api/config/MINECRAFT_SKIN_FILE/file``, where
-``<base>`` is ``MINECRAFT_SKIN_PUBLIC_BASE_URL`` if set, otherwise auto-derived
-from the WebUI host — with a loopback host (``127.0.0.1``/``localhost``/``0.0.0.0``)
-replaced by the machine's primary LAN IP so a same-LAN server can reach it. At
-spawn the connector substitutes that URL for
-``{url}`` and ``MINECRAFT_SKIN_MODEL`` for ``{model}`` in
-``MINECRAFT_SKIN_COMMAND_TEMPLATE`` (default ``/skin url {url}``). The template
-is config-driven (no keyword logic) so any skin plugin or locale is supported.
-**The MC server must be able to reach that URL** to fetch the texture — set
-``MINECRAFT_SKIN_PUBLIC_BASE_URL`` when the server runs on another host. Applying
-the skin is best-effort: if ``MINECRAFT_SKIN_FILE`` is empty no command is sent,
-and if no skin plugin is installed the command is ignored and the session is
-unaffected.
+The supported path is a **server-side skin provider**. Two are supported out of
+the box: the classic `SkinsRestorer <https://skinsrestorer.net/>`_ Bukkit/Spigot
+plugin (``/skin url <url>``) and the `SkinRestorer
+<https://modrinth.com/mod/skinrestorer>`_ Fabric/Forge/NeoForge/Quilt mod by
+Lionarius (``/skin set web <model> "<url>"`` — the URL **must** be wrapped in
+double quotes). When one is present, the connector applies the skin
+automatically at spawn by running the relevant chat command (``_apply_skin`` in
+the connector, forwarded to the bridge ``skin`` action which calls ``bot.chat``).
+The skin texture is **uploaded directly** from the plugin card
+(``MINECRAFT_SKIN_FILE``, a file-upload exposed variable): SyntH stores the PNG
+and serves it at ``<base>/api/config/MINECRAFT_SKIN_FILE/file``, where ``<base>``
+is ``MINECRAFT_SKIN_PUBLIC_BASE_URL`` if set, otherwise auto-derived from the
+WebUI host — with a loopback host (``127.0.0.1``/``localhost``/``0.0.0.0``)
+replaced by the machine's primary LAN IP so a same-LAN server can reach it.
+
+Because different providers use different command syntaxes, the connector
+**tries every configured command in turn** at spawn — the server accepts the one
+it understands and silently ignores the rest, so it works without any keyword
+logic. Resolution order (first non-empty wins): the newline-separated list
+``MINECRAFT_SKIN_COMMAND_TEMPLATES`` → the legacy single key
+``MINECRAFT_SKIN_COMMAND_TEMPLATE`` → the built-in defaults, which cover **both**
+providers (``/skin set web {model} "{url}"`` then ``/skin url {url}``). Each
+template substitutes the served URL for ``{url}`` and ``MINECRAFT_SKIN_MODEL``
+for ``{model}``. **The MC server must be able to reach that URL** to fetch the
+texture — set ``MINECRAFT_SKIN_PUBLIC_BASE_URL`` when the server runs on another
+host. Applying the skin is best-effort: if ``MINECRAFT_SKIN_FILE`` is empty no
+command is sent, and a failed/ignored command never breaks the session.
 
 .. important::
 
-   **A server-side skin plugin is required.** On an offline-mode server the only
-   working path to a custom skin is a plugin such as `SkinsRestorer
-   <https://skinsrestorer.net/>`_ (or any plugin that understands a
-   ``/skin``-style command) installed **on the Minecraft server**. Without it the
-   ``/skin url …`` command is silently ignored — the client (Mineflayer) cannot
-   set the texture. The connector logs ``skin command sent: …`` even when no
-   plugin is present, so that log line does *not* confirm the skin was applied.
+   **A server-side skin provider is required.** On an offline-mode server the
+   only working path to a custom skin is a plugin/mod such as `SkinsRestorer
+   <https://skinsrestorer.net/>`_ or the `SkinRestorer
+   <https://modrinth.com/mod/skinrestorer>`_ mod (or any provider that
+   understands a ``/skin``-style command) installed **on the Minecraft server**.
+   Without it every ``/skin …`` command is silently ignored — the client
+   (Mineflayer) cannot set the texture. The connector logs ``skin command sent:
+   …`` for each attempt even when no provider is present, so those log lines do
+   *not* confirm the skin was applied.
 
    Also make sure the server can actually **reach** the skin URL: when
    ``MINECRAFT_SKIN_PUBLIC_BASE_URL`` is empty the base auto-derives from the
@@ -333,6 +373,102 @@ Two slash commands (trainer-only) drive the subsystem:
 
     /vessel status
     /minecraft provision start|stop|status|logs [n]
+
+Autonomous play
+---------------
+
+By default a Vessel session is *reactive*: Synth responds to perceptions
+(chat, proximity, damage…) but only acts when something reaches it. When
+``VESSEL_AUTONOMY_ENABLED`` is on, Synth *plays on its own* — wander, look
+around, set and pursue its own goals, gather, build, and interact — while still
+obeying the Vessel's hard constraints (Fast Lane only, no Agent Lane/Drones, a
+single diary at end-of-session).
+
+**Two speeds: volition (slow, LLM) + motorics (fast, reflex).** Autonomy is
+split into two independently-paced layers so that *deciding what to want*
+(slow, deliberate, personality-driven) never bottlenecks *moving the body*
+(fast, reactive). Both are driven by the interface scheduler's fine 10 s tick
+while a session is active.
+
+**Will beat — volition (slow, LLM), like G.R.I.L.L.O.** Every
+``VESSEL_WILL_INTERVAL_SEC`` seconds (default 45, falling back to the legacy
+``VESSEL_BEAT_INTERVAL_SEC``, clamped ``[10, 3600]``) the scheduler
+(``interface/vessel_interface.py::_maybe_run_will_beat``) fires a will beat. It:
+
+#. reads the connected world's current ``WorldState`` from the live connector;
+#. builds a **structural, keyword-free** volition prompt via
+   :mod:`core.vessel_beat` (``build_will_prompt``) — surfacing position,
+   health, time, nearby entities/blocks, inventory, affordances, and the
+   current/recent goals straight from the ``WorldState`` contract, and framing
+   the turn as *will, not motion* (*"your body will move toward it on its
+   own"*);
+#. enqueues it as a **normal** ``vessel`` message (``chat.type == "vessel"``,
+   ``interface_path`` starting with ``vessel/``), so ``build_context`` applies
+   the world-scoped context and the core runs one ordinary **Fast-Lane**
+   cognition turn in which Synth writes/keeps/updates a free-text goal via
+   ``vessel_<world>_set_goal`` / ``vessel_<world>_update_goal``.
+
+This is where Synth's **will and memories** live — the goal is authored from
+personality, not a script. No new lane, no Drones, no mid-session diary — the
+beat is just another perception-shaped message. ``build_decision_prompt``
+remains a backward-compat alias of ``build_will_prompt``.
+
+**Motor tick — motorics (fast, no LLM).** A separate, much faster loop moves
+the body toward the current goal with **no prompt, no cognition turn, no
+diary**. Every ``VESSEL_MOTOR_INTERVAL_SEC`` seconds (default 3, clamped
+``[1, 60]``, gated by ``VESSEL_MOTOR_ENABLED``, default True) the scheduler
+(``interface/vessel_interface.py::_maybe_run_motor_tick``) fetches the active
+connector and current goal and calls ``await connector.motor_step(goal)``
+**directly** — never enqueuing a message. ``motor_step`` is a pure reflex over
+the **structural affordance contract only** (``{kind, target, verb, distance}``,
+distance-sorted): it picks the nearest benign affordance (verb ``use`` /
+``mine``, hostile ``attack`` skipped), then ``mine`` s a block or ``use`` s an
+entity within ``_MOTOR_REACH`` (3.0 m), else ``goto`` s it, else ``wander`` s.
+It **never reads the goal's free text** — the goal only gates whether to move at
+all. The base ``VesselConnectorBase.motor_step`` is a no-op returning
+``{"acted": False, "reason": "no_motorics"}``, so a world without motorics
+degrades gracefully.
+
+``core/vessel_beat.py`` is pure and side-effect-free (dataclass **or** dict
+input, fail-safe autonomy gating, interval clamp/failsafe on both
+``resolve_will_interval`` and ``resolve_motor_interval``, ``is_motor_enabled``)
+so it is fully unit-tested without a DB, bridge, or LLM
+(``tests/test_vessel_beat.py``); ``MinecraftConnector.motor_step``'s structural
+rules are unit-tested in ``tests/test_vessel_minecraft_motor.py``.
+
+**Generic self-awareness — the ``observe`` verb.** The world-agnostic core set
+gains an ``observe`` verb: a Fast-Lane, ``external_effects``-free action that
+reads the current ``WorldState`` and reports what is around (affordances,
+entities, blocks) in character. Because it is generic, every world inherits it
+as ``vessel_<world>_observe``. Affordances follow a generic structural contract
+— ``{kind, target, verb, distance}`` — built by the connector from the raw
+world snapshot, never from keyword matching, so the decision engine stays
+world-agnostic.
+
+**Self-authored goals — no catalogue.** *What to play* is entirely Synth's own
+call: there is **no** predefined quest list, no goal templates, no
+inventory-count progression. If goals were a fixed menu, every Synth would play
+Minecraft identically, like a scripted bot — which is exactly what SyntH is not.
+Instead ``plugins/rift_vessel/minecraft/goals.py`` is a thin **goal store**: it
+only *persists* and *recalls* the free-text goals Synth writes for itself. During
+a will beat Synth reads its situation (``observe`` / inventory / world state)
+and authors a goal in its own words via ``vessel_minecraft_set_goal`` (required
+``description``, optional ``note``) — e.g. *"build a cozy shelter before it gets
+dark"* or *"go spelunking and see what I find"*. ``vessel_minecraft_goals``
+returns its ``current_goal`` plus ``recent_goals``; ``vessel_minecraft_update_goal``
+lets Synth record its own progress ``note`` or mark the goal ``done`` /
+``abandoned``. Setting a new goal automatically abandons the previous active one.
+Progress is judged by Synth itself from what it perceives — never by an item
+counter. The connector still exposes the bridge-backed verbs ``goto``, ``scan``,
+``mine``, ``place``, ``inventory``, ``wander`` through ``get_world_actions()`` and
+enriches ``WorldState.extra`` with ``current_goal`` / ``recent_goals``. Goals are
+persisted in the ``minecraft_goals`` table so a goal survives across beats within
+a session. *"Do I go looking for diamonds or build a chest first?"* is Synth's
+decision, driven by its personality and wants — not a hardcoded script.
+
+Removing autonomy support (the beat module, the goal store, the motor tick, or
+disabling the config flags) must never break the reactive Vessel — all wiring is
+lazily imported and fully guarded.
 
 Core + attachable sub-plugins (Grillo-style)
 --------------------------------------------
@@ -402,8 +538,9 @@ config namespace — a thin attachable sub-plugin:
     PLUGIN_CLASS = MyWorldVesselPlugin
 
 The connector automatically inherits the Vessel's world-agnostic **core set**
-of verbs (``say``, ``move``, ``look``, ``use``, ``attack``, ``follow``,
-``unfollow``, ``respawn``, ``status``), exposed namespaced as ``vessel_<world>_<verb>`` **only
+of verbs (``say``, ``move``, ``look``, ``observe``, ``use``, ``attack``,
+``follow``, ``unfollow``, ``respawn``, ``status``), exposed namespaced as
+``vessel_<world>_<verb>`` **only
 while Synth is connected to that world** (see *Connection-driven action
 exposure* below). To add **world-specific** verbs (e.g. Minecraft
 ``craft``/``mine``, Skyrim ``cast_spell``/``sneak``), override

@@ -290,14 +290,79 @@ async def test_apply_skin_file_builds_command_with_explicit_base(
 
 
 @pytest.mark.asyncio
-async def test_apply_skin_file_default_template(
+async def test_apply_skin_file_default_tries_all_providers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """With no template override, both built-in provider syntaxes are tried at
+    spawn (SkinRestorer mod + SkinsRestorer plugin)."""
     conn = MinecraftConnector()
-    captured: Dict[str, Any] = {}
+    commands: list[str] = []
 
     async def _fake_post(path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-        captured["payload"] = payload
+        commands.append(payload["payload"]["command"])
+        return {"ok": True, "detail": "skin command sent", "data": {}}
+
+    _mock_skin_config(
+        monkeypatch,
+        {
+            "MINECRAFT_SKIN_FILE": "/config/storage/MINECRAFT_SKIN_FILE/skin.png",
+            "MINECRAFT_SKIN_MODEL": "slim",
+            "MINECRAFT_SKIN_PUBLIC_BASE_URL": "http://192.168.1.42:8080/",
+        },
+    )
+    monkeypatch.setattr(conn, "_post", _fake_post)
+    await conn._apply_skin()
+    url = "http://192.168.1.42:8080/api/config/MINECRAFT_SKIN_FILE/file"
+    assert commands == [
+        f'/skin set web slim "{url}"',
+        f"/skin url {url}",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_apply_skin_templates_list_overrides_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A newline-separated MINECRAFT_SKIN_COMMAND_TEMPLATES list is honoured
+    verbatim (order preserved, blanks/dupes dropped)."""
+    conn = MinecraftConnector()
+    commands: list[str] = []
+
+    async def _fake_post(path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        commands.append(payload["payload"]["command"])
+        return {"ok": True, "detail": "skin command sent", "data": {}}
+
+    _mock_skin_config(
+        monkeypatch,
+        {
+            "MINECRAFT_SKIN_FILE": "/config/storage/MINECRAFT_SKIN_FILE/skin.png",
+            "MINECRAFT_SKIN_MODEL": "classic",
+            "MINECRAFT_SKIN_PUBLIC_BASE_URL": "http://host:8080",
+            "MINECRAFT_SKIN_COMMAND_TEMPLATES": (
+                '/skin set web {model} "{url}"\n\n/skin url {url}\n'
+            ),
+        },
+    )
+    monkeypatch.setattr(conn, "_post", _fake_post)
+    await conn._apply_skin()
+    url = "http://host:8080/api/config/MINECRAFT_SKIN_FILE/file"
+    assert commands == [
+        f'/skin set web classic "{url}"',
+        f"/skin url {url}",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_apply_skin_legacy_single_template_still_works(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The legacy MINECRAFT_SKIN_COMMAND_TEMPLATE single-key override sends
+    exactly one command (backward compatibility)."""
+    conn = MinecraftConnector()
+    commands: list[str] = []
+
+    async def _fake_post(path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        commands.append(payload["payload"]["command"])
         return {"ok": True, "detail": "skin command sent", "data": {}}
 
     _mock_skin_config(
@@ -305,15 +370,14 @@ async def test_apply_skin_file_default_template(
         {
             "MINECRAFT_SKIN_FILE": "/config/storage/MINECRAFT_SKIN_FILE/skin.png",
             "MINECRAFT_SKIN_PUBLIC_BASE_URL": "http://synth.local:8080/",
+            "MINECRAFT_SKIN_COMMAND_TEMPLATE": "/skin url {url}",
         },
     )
     monkeypatch.setattr(conn, "_post", _fake_post)
     await conn._apply_skin()
-    assert captured["payload"]["action"] == "skin"
-    assert (
-        captured["payload"]["payload"]["command"]
-        == "/skin url http://synth.local:8080/api/config/MINECRAFT_SKIN_FILE/file"
-    )
+    assert commands == [
+        "/skin url http://synth.local:8080/api/config/MINECRAFT_SKIN_FILE/file"
+    ]
 
 
 def test_skin_public_base_url_derives_lan_ip_when_loopback(

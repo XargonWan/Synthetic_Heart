@@ -216,6 +216,34 @@ class VesselConnectorBase(ABC):
         """
         return {}
 
+    async def motor_step(self, goal: Dict[str, Any] | None) -> Dict[str, Any]:
+        """Take **one** fast, reflexive step of the body toward ``goal``.
+
+        This is the *motorics* half of autonomy (see ``core.vessel_beat`` and
+        AGENTS.md §5c): it is called on a short timer by the interface
+        scheduler and must run with **no prompt and no cognition turn** — it
+        just picks the single most sensible in-world move toward the active
+        goal from the current :class:`WorldState` (using purely structural
+        rules over affordances, never keyword/text matching) and performs it
+        directly via :meth:`act`.
+
+        The volition layer (the "will beat") decides *what* the goal is; this
+        hook only decides *how* to inch toward it between will beats, so
+        embodiment stays snappy and responsive. It must **never** create an
+        Agent Lane task, a Drone, or a diary entry.
+
+        Args:
+            goal: The current active goal dict (``{"description", "note", ...}``)
+                  or ``None`` when Synth has not set one yet.
+
+        Returns:
+            A small status dict, e.g. ``{"acted": True, "action": "wander"}`` or
+            ``{"acted": False, "reason": "no_goal"}``. Optional override;
+            defaults to a no-op so a connector without motorics never breaks the
+            scheduler.
+        """
+        return {"acted": False, "reason": "no_motorics"}
+
     @property
     def is_connected(self) -> bool:
         """Whether the connector currently holds a live world connection."""

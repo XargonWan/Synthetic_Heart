@@ -2,7 +2,8 @@
 """Provisioner for the Minecraft Vessel bridge.
 
 Manages the lifecycle of the Node.js Mineflayer bridge
-(:mod:`interface_dev/minecraft_bridge_minimal.js`) as a child subprocess:
+(:mod:`plugins/rift_vessel/minecraft/minecraft_bridge_minimal.js`) as a child
+subprocess:
 
 * :meth:`BridgeProvisioner.install` — ensure the bridge deps (``mineflayer``)
   are present in the bridge working directory (``npm install`` if missing).
@@ -50,13 +51,19 @@ LOG_PREFIX = "[minecraft_provisioner]"
 # and non-container hosts can point it at a writable location.
 _DEFAULT_BRIDGE_ROOT = "/opt/minecraft_bridge"
 
-# Source of the bridge script inside the repo.
-_BRIDGE_SRC_RELATIVE = Path("interface_dev") / "minecraft_bridge_minimal.js"
+# Source of the bridge script inside the repo. It lives next to the Minecraft
+# connector (``plugins/rift_vessel/minecraft/``) so all Minecraft Vessel assets
+# stay together; the provisioner copies it into the bridge working directory.
+_BRIDGE_SRC_RELATIVE = (
+    Path("plugins") / "rift_vessel" / "minecraft" / "minecraft_bridge_minimal.js"
+)
 
 # npm dependencies required by the bridge. ``mineflayer-pathfinder`` powers the
-# entity-following / navigation verbs (``follow``/``move``); without it the bot
-# connects but stays immobile ("follow unavailable (pathfinder not loaded)").
-_BRIDGE_NPM_DEPS = ["mineflayer", "mineflayer-pathfinder"]
+# navigation verbs (``follow``/``goto``/``wander``); without it the bot connects
+# but cannot pathfind ("navigation unavailable"). ``minecraft-data`` powers the
+# pathfinder Movements block/tool costs (it is normally a transitive dependency
+# of mineflayer, but the bridge ``require``s it directly, so pin it explicitly).
+_BRIDGE_NPM_DEPS = ["mineflayer", "mineflayer-pathfinder", "minecraft-data"]
 
 
 class BridgeProvisioner:

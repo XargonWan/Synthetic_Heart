@@ -219,17 +219,43 @@ async def _call_interface_send(interface_send_func, *args, **kwargs):
             return await result
         return result
     except TypeError as exc:
-        if "message_thread_id" not in kwargs or "message_thread_id" not in str(exc):
-            raise
-        retry_kwargs = dict(kwargs)
-        retry_kwargs.pop("message_thread_id", None)
-        log_debug(
-            "[transport] Retrying send without message_thread_id after unsupported kwarg"
-        )
-        result = interface_send_func(*args, **retry_kwargs)
-        if isawaitable(result):
-            return await result
-        return result
+        # Retry 1: some bots (or test fakes) don't accept 'message_thread_id'.
+        if "message_thread_id" in kwargs and "message_thread_id" in str(exc):
+            retry_kwargs = dict(kwargs)
+            retry_kwargs.pop("message_thread_id", None)
+            log_debug(
+                "[transport] Retrying send without message_thread_id after unsupported kwarg"
+            )
+            result = interface_send_func(*args, **retry_kwargs)
+            if isawaitable(result):
+                return await result
+            return result
+        # Retry 2: payload-style interfaces (e.g. Telegram/Discord/Matrix) expose
+        # ``send_message(payload: dict, original_message=None)`` and do NOT accept a
+        # ``text=`` keyword. universal_send/_send_text forward ``text=`` directly,
+        # which the normal action path never does (it passes a payload dict
+        # positionally — see action_parser._handle_plugin_action). When the callee
+        # rejects ``text`` (or another payload key) as an unexpected keyword, rebuild
+        # the call as a single positional payload dict mirroring the action path.
+        if "text" in kwargs and "text" in str(exc) and "unexpected keyword" in str(exc):
+            payload: dict = {}
+            # Leading positional arg (if any) is the chat/target id used by callers
+            # such as send_llm_fallback_message(universal_send(bot.send_message, chat_id, ...)).
+            if args:
+                payload["target"] = args[0]
+            # Map known payload keys; unknown kwargs are ignored to avoid another
+            # unexpected-keyword mismatch against the payload-dict signature.
+            for key in ("text", "interface_path", "thread_id", "chat_name", "caption"):
+                if key in kwargs and kwargs[key] is not None:
+                    payload[key] = kwargs[key]
+            log_debug(
+                "[transport] Retrying send as positional payload dict after unsupported 'text' kwarg"
+            )
+            result = interface_send_func(payload)
+            if isawaitable(result):
+                return await result
+            return result
+        raise
 
 
 def _get_system_reply_timeout():

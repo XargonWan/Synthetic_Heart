@@ -62,9 +62,15 @@ class TimeZoneFormatter(logging.Formatter):
     def formatTime(self, record, datefmt=None):
         dt = datetime.fromtimestamp(record.created, timezone.utc)
         dt_local = dt.astimezone(self.tz)
+        # Always include the UTC offset (e.g. "+0900") so every log line is
+        # self-describing and directly comparable with UTC sources such as
+        # Docker's `inspect .State.StartedAt`. If the caller-provided datefmt
+        # already carries the offset (%z), respect it and don't double it.
         if datefmt:
-            return dt_local.strftime(datefmt)
-        return dt_local.strftime("%Y-%m-%d %H:%M:%S")
+            if "%z" in datefmt:
+                return dt_local.strftime(datefmt)
+            return dt_local.strftime(datefmt) + dt_local.strftime(" %z")
+        return dt_local.strftime("%Y-%m-%d %H:%M:%S %z")
 
 
 def _register_logging_config():

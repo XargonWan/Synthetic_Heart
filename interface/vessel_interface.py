@@ -71,6 +71,12 @@ class VesselInterface:
         self._last_enqueue_at: float = 0.0
         # active session bookkeeping (session_id -> interface_path)
         self._sessions: dict[str, str] = {}
+        # Autonomy pacing (monotonic clocks). Volition (the slow "will beat",
+        # an LLM cognition turn that sets/updates the goal) and motorics (the
+        # fast, prompt-less "motor tick" that steps the body toward the goal)
+        # are paced independently — see core.vessel_beat and AGENTS.md §5c.
+        self._last_will_beat_at: float = 0.0
+        self._last_motor_tick_at: float = 0.0
         log_debug("[vessel_interface] Instance initialized")
 
     # ------------------------------------------------------------------
@@ -545,31 +551,260 @@ class VesselInterface:
             log_error(f"[vessel_interface] Failed to enqueue perception: {exc}")
 
     # ------------------------------------------------------------------
-    # Cooldown scheduler
+    # Cooldown scheduler + autonomous decision beat
     # ------------------------------------------------------------------
 
+    # Fine-grained scheduler tick. The cooldown sweep runs at most once a
+    # minute (via ``_last_cooldown_sweep_at``) while the autonomous decision
+    # beat is paced by ``VESSEL_BEAT_INTERVAL_SEC`` (see vessel_beat.py).
+    _TICK_SEC = 10.0
+
     async def _scheduler_loop(self) -> None:
-        """Periodically close idle sessions past the inactivity cooldown."""
+        """Drive the cooldown sweep and the two autonomy layers.
+
+        The loop ticks every :data:`_TICK_SEC` seconds. It orchestrates three
+        independently-paced concerns:
+
+        * the inactivity-cooldown sweep, throttled to roughly once a minute;
+        * the **will beat** (volition) — a slow LLM cognition turn, paced by
+          ``VESSEL_WILL_INTERVAL_SEC``, that lets Synth set/keep/change its
+          free-text goal from its own persona and memories;
+        * the **motor tick** (motorics) — a fast, prompt-less body step toward
+          the active goal, paced by ``VESSEL_MOTOR_INTERVAL_SEC``.
+
+        Splitting the two keeps volition thoughtful and rare while motion stays
+        cheap and reactive (see AGENTS.md §5c).
+        """
+        last_cooldown_sweep = 0.0
         while True:
+            now = asyncio.get_event_loop().time()
             try:
-                cooldown = int(
-                    config_registry.get_value(
-                        "VESSEL_SESSION_COOLDOWN_SEC",
-                        3600,
-                        value_type=int,
-                        group="vessel",
-                        component="vessel",
+                if now - last_cooldown_sweep >= 60.0:
+                    last_cooldown_sweep = now
+                    cooldown = int(
+                        config_registry.get_value(
+                            "VESSEL_SESSION_COOLDOWN_SEC",
+                            3600,
+                            value_type=int,
+                            group="vessel",
+                            component="vessel",
+                        )
                     )
-                )
-                manager = get_vessel_session_manager()
-                await manager.close_expired_sessions(cooldown)
-                # Drop local bookkeeping for sessions no longer active.
-                await self._reap_local_sessions()
+                    manager = get_vessel_session_manager()
+                    await manager.close_expired_sessions(cooldown)
+                    # Drop local bookkeeping for sessions no longer active.
+                    await self._reap_local_sessions()
+                # Autonomous play: only while a session is active and enabled.
+                # Volition first (may set a fresh goal), then motorics acts on it.
+                await self._maybe_run_will_beat()
+                await self._maybe_run_motor_tick()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 log_warning(f"[vessel_interface] scheduler tick failed: {exc}")
-            await asyncio.sleep(60)
+            await asyncio.sleep(self._TICK_SEC)
+
+    async def _maybe_run_will_beat(self) -> None:
+        """Enqueue a **volition** cognition turn when it is due (slow layer).
+
+        Fully guarded so a failure here never breaks the scheduler. Gated three
+        ways: (1) ``VESSEL_AUTONOMY_ENABLED`` must be on; (2) a Vessel session
+        must be active (cheap in-memory check); (3) at least
+        ``VESSEL_WILL_INTERVAL_SEC`` (falling back to the legacy
+        ``VESSEL_BEAT_INTERVAL_SEC``) must have elapsed since the last beat.
+
+        The beat reads the connected world's :class:`WorldState`, builds a
+        structural (keyword-free) *volition* prompt via :mod:`core.vessel_beat`,
+        and enqueues it as a normal ``vessel`` message. The core then runs a
+        single ordinary Fast-Lane cognition turn in which Synth decides what it
+        *wants* — setting or updating its free-text goal — without planning
+        every physical step (the motor tick handles motion). No Agent Lane, no
+        diary.
+        """
+        try:
+            from core import vessel_beat
+        except Exception:
+            return
+
+        def _cfg(key: str, default: Any) -> Any:
+            return config_registry.get_value(
+                key, default, group="vessel", component="vessel"
+            )
+
+        if not vessel_beat.is_autonomy_enabled(_cfg):
+            return
+
+        manager = get_vessel_session_manager()
+        if not manager.has_active_session():
+            return
+
+        interval = vessel_beat.resolve_will_interval(_cfg)
+        now = asyncio.get_event_loop().time()
+        if now - self._last_will_beat_at < interval:
+            return
+
+        world, world_state = await self._read_active_world_state()
+        if world is None or world_state is None:
+            return
+
+        interface_path = self._decision_interface_path(world)
+        if interface_path is None:
+            return
+
+        prompt = vessel_beat.build_will_prompt(world_state, world)
+        self._last_will_beat_at = now
+        log_debug(
+            f"[vessel_interface] Autonomous will beat for '{world}' "
+            f"(interval={interval}s)"
+        )
+        await self._enqueue_perception(
+            interface_path=interface_path,
+            summary=prompt,
+            environment=world,
+            event_type="will_beat",
+        )
+
+    async def _maybe_run_motor_tick(self) -> None:
+        """Step the body toward the active goal when due (fast layer, no LLM).
+
+        This is the *motorics* half of autonomy. Unlike the will beat it does
+        **not** build a prompt, enqueue a message or run a cognition turn — it
+        reads the active goal and calls the connected connector's
+        :meth:`~plugins.rift_vessel.vessel_base.VesselConnectorBase.motor_step`
+        directly, which picks one structural in-world move and performs it.
+
+        Fully guarded. Gated four ways: (1) ``VESSEL_AUTONOMY_ENABLED`` and
+        (2) ``VESSEL_MOTOR_ENABLED`` must be on; (3) a Vessel session must be
+        active; (4) at least ``VESSEL_MOTOR_INTERVAL_SEC`` must have elapsed.
+        Never creates an Agent Lane task, Drone or diary entry.
+        """
+        try:
+            from core import vessel_beat
+        except Exception:
+            return
+
+        def _cfg(key: str, default: Any) -> Any:
+            return config_registry.get_value(
+                key, default, group="vessel", component="vessel"
+            )
+
+        if not vessel_beat.is_autonomy_enabled(_cfg):
+            return
+        if not vessel_beat.is_motor_enabled(_cfg):
+            return
+
+        manager = get_vessel_session_manager()
+        if not manager.has_active_session():
+            return
+
+        interval = vessel_beat.resolve_motor_interval(_cfg)
+        now = asyncio.get_event_loop().time()
+        if now - self._last_motor_tick_at < interval:
+            return
+        self._last_motor_tick_at = now
+
+        connector = await self._active_connector()
+        if connector is None or not hasattr(connector, "motor_step"):
+            return
+
+        goal = await self._active_goal(connector)
+        try:
+            result = await connector.motor_step(goal)
+        except Exception as exc:
+            log_debug(f"[vessel_interface] motor_step failed: {exc}")
+            return
+        if isinstance(result, dict) and result.get("acted"):
+            log_debug(
+                f"[vessel_interface] motor tick: {result.get('action')} "
+                f"(interval={interval}s)"
+            )
+
+    async def _active_connector(self) -> Any | None:
+        """Return the live, connected connector instance, or ``None``.
+
+        Mirrors :meth:`_read_active_world_state`'s registry lookup but hands
+        back the connector itself so the motor tick can call ``motor_step``
+        without re-reading the whole world state. Fully guarded.
+        """
+        try:
+            from core.vessel_registry import VESSEL_REGISTRY
+
+            instances = getattr(VESSEL_REGISTRY, "_instances", {}) or {}
+            for connector in instances.values():
+                try:
+                    if getattr(connector, "is_connected", False):
+                        return connector
+                except Exception:
+                    continue
+        except Exception as exc:
+            log_debug(f"[vessel_interface] active connector lookup failed: {exc}")
+        return None
+
+    @staticmethod
+    async def _active_goal(connector: Any) -> dict[str, Any] | None:
+        """Best-effort read of the connector's active free-text goal.
+
+        Reads it from the connector's own :meth:`get_world_state` extra payload
+        (where each world publishes ``current_goal``) so the interface stays
+        world-agnostic and never touches a world-specific goal store. Fully
+        guarded — any error degrades to ``None`` (motor tick idles).
+        """
+        try:
+            if not hasattr(connector, "get_world_state"):
+                return None
+            state = await connector.get_world_state()
+            if state is None:
+                return None
+            extra = getattr(state, "extra", None) or {}
+            goal = extra.get("current_goal")
+            return goal if isinstance(goal, dict) else None
+        except Exception:
+            return None
+
+    async def _read_active_world_state(self) -> tuple[str | None, Any | None]:
+        """Return ``(world, WorldState)`` for the connected world, or Nones.
+
+        Resolves the live connector instance the same way the Vessel plugin
+        does (iterate the registry's built instances and pick the connected
+        one), then reads its :meth:`get_world_state`. Fully guarded.
+        """
+        try:
+            from core.vessel_registry import VESSEL_REGISTRY
+
+            instances = getattr(VESSEL_REGISTRY, "_instances", {}) or {}
+            for name, connector in instances.items():
+                try:
+                    if not getattr(connector, "is_connected", False):
+                        continue
+                    if not hasattr(connector, "get_world_state"):
+                        continue
+                    world_state = await connector.get_world_state()
+                    if world_state is not None:
+                        return name, world_state
+                except Exception as exc:
+                    log_debug(
+                        f"[vessel_interface] world-state read failed for "
+                        f"'{name}': {exc}"
+                    )
+        except Exception as exc:
+            log_debug(f"[vessel_interface] active world lookup failed: {exc}")
+        return None, None
+
+    def _decision_interface_path(self, world: str) -> str | None:
+        """Return the ``vessel/…`` path to attribute the beat to.
+
+        Prefers a locally-tracked session path for the world (so the cognition
+        turn lands in the same world-scoped history the perceptions use); falls
+        back to the environment prefix so the beat still fires right after a
+        connect before the local session map is populated.
+        """
+        prefix = f"{INTERFACE_NAME}/{world}"
+        for path in self._sessions.values():
+            if path == prefix or path.startswith(f"{prefix}/"):
+                return path
+        # Fall back to the environment prefix; build_context still routes it as
+        # a world-scoped vessel turn (interface_path starts with "vessel").
+        return prefix
 
     async def _reap_local_sessions(self) -> None:
         """Forget locally-tracked sessions that the DB reports as ended."""
