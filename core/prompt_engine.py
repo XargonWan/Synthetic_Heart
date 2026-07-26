@@ -1262,6 +1262,14 @@ def _apply_lite_context_stripping(prompt: dict) -> dict:
     ctx.pop("emotion_state", None)
     ctx.pop("available_emotions", None)
 
+    # Additional out-of-world / global sections that are pure noise while
+    # embodied in a Vessel (and generally low-value in lite mode). Stripping
+    # them keeps the vessel prompt small enough to avoid the multi-part split.
+    ctx.pop("upcoming_events", None)
+    ctx.pop("weather", None)
+    ctx.pop("persona_preferences", None)
+    ctx.pop("self_growth", None)
+
     return prompt
 
 
@@ -1879,6 +1887,17 @@ async def build_prompt_request(
         from core.config_manager import config_registry as _cfg
 
         is_lite = bool(_cfg.get_value("PROMPT_LITE_MODE", 0, value_type=int))
+    except Exception:
+        pass
+
+    # A Vessel embodiment turn is always built in lite mode: SyntH concentrates
+    # on the world, so the global/out-of-world context is noise and the prompt
+    # must stay small enough to avoid the engine's multi-part split.
+    try:
+        from core.vessel_focus import is_vessel_turn
+
+        if is_vessel_turn(message, context_memory, interface_name):
+            is_lite = True
     except Exception:
         pass
 
