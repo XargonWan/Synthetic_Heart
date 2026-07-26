@@ -304,3 +304,100 @@ async def test_stop_prevents_consumer_restart(monkeypatch):
 
     # Clean up for other tests: allow the queue to run again.
     message_queue._shutdown_requested = False
+
+
+@pytest.mark.asyncio
+async def test_drop_stale_vessel_perceptions_prunes_only_autonomous(monkeypatch):
+    """Only autonomous vessel perceptions for the same world scope are pruned.
+
+    A real player chat (``vessel_player_chat``), a perception for another world,
+    and non-vessel traffic must all survive; the Queue's unfinished-task
+    accounting stays consistent with the number pruned.
+    """
+    import heapq
+
+    # Fresh, running-loop-bound queue for this test.
+    q = message_queue._get_queue()
+    # Drain anything left over from other tests.
+    q._queue.clear()
+    q._unfinished_tasks = 0
+    q._finished.set()
+
+    def _put(priority: int, counter: int, item: dict) -> None:
+        heapq.heappush(q._queue, (priority, counter, item))
+        q._unfinished_tasks += 1
+        q._finished.clear()
+
+    scope = "vessel/minecraft"
+    _put(1, 1, {"interface": "vessel", "chat_id": scope})  # autonomous → prune
+    _put(1, 2, {"interface": "vessel", "chat_id": scope})  # autonomous → prune
+    _put(0, 3, {"interface": "vessel", "chat_id": scope, "vessel_player_chat": True})
+    _put(1, 4, {"interface": "vessel", "chat_id": "vessel/other"})  # other world
+    _put(2, 5, {"interface": "telegram_bot", "chat_id": scope})  # non-vessel
+
+    message_queue._drop_stale_vessel_perceptions(scope)
+
+    remaining = [entry[2] for entry in q._queue]
+    # The two same-world autonomous perceptions are gone.
+    assert len(remaining) == 3
+    assert {"interface": "vessel", "chat_id": scope} not in remaining
+    # The player chat, the other-world perception, and non-vessel chat survive.
+    assert any(i.get("vessel_player_chat") for i in remaining)
+    assert any(i.get("chat_id") == "vessel/other" for i in remaining)
+    assert any(i.get("interface") == "telegram_bot" for i in remaining)
+    # Unfinished-task counter decremented by exactly the number pruned.
+    assert q._unfinished_tasks == 3
+
+    # Cleanup.
+    q._queue.clear()
+    q._unfinished_tasks = 0
+    q._finished.set()
+
+
+@pytest.mark.asyncio
+async def test_supersede_pending_vessel_beats_keeps_only_fresh_autonomous(monkeypatch):
+    """Older autonomous beats for one world are superseded; the rest survive.
+
+    A fresh will beat makes queued older autonomous beats for the SAME world
+    stale — leaving them in the queue lets ``compact_similar_messages`` coalesce
+    them into one turn with N identical prompts (the repeated-line bug). A player
+    chat, a ``no_compact`` beat, another world's beat, and non-vessel traffic
+    must all survive; unfinished-task accounting stays consistent.
+    """
+    import heapq
+
+    q = message_queue._get_queue()
+    q._queue.clear()
+    q._unfinished_tasks = 0
+    q._finished.set()
+
+    def _put(priority: int, counter: int, item: dict) -> None:
+        heapq.heappush(q._queue, (priority, counter, item))
+        q._unfinished_tasks += 1
+        q._finished.clear()
+
+    scope = "vessel/minecraft"
+    _put(1, 1, {"interface": "vessel", "chat_id": scope})  # older beat → drop
+    _put(1, 2, {"interface": "vessel", "chat_id": scope})  # older beat → drop
+    _put(0, 3, {"interface": "vessel", "chat_id": scope, "vessel_player_chat": True})
+    _put(1, 4, {"interface": "vessel", "chat_id": scope, "no_compact": True})
+    _put(1, 5, {"interface": "vessel", "chat_id": "vessel/other"})  # other world
+    _put(2, 6, {"interface": "telegram_bot", "chat_id": scope})  # non-vessel
+
+    message_queue._supersede_pending_vessel_beats(scope)
+
+    remaining = [entry[2] for entry in q._queue]
+    # The two plain same-world autonomous beats are gone.
+    assert len(remaining) == 4
+    assert {"interface": "vessel", "chat_id": scope} not in remaining
+    # Player chat, no_compact beat, other world, and non-vessel all survive.
+    assert any(i.get("vessel_player_chat") for i in remaining)
+    assert any(i.get("no_compact") for i in remaining)
+    assert any(i.get("chat_id") == "vessel/other" for i in remaining)
+    assert any(i.get("interface") == "telegram_bot" for i in remaining)
+    assert q._unfinished_tasks == 4
+
+    # Cleanup.
+    q._queue.clear()
+    q._unfinished_tasks = 0
+    q._finished.set()

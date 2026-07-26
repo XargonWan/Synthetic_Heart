@@ -121,6 +121,138 @@ def _get_queue() -> asyncio.PriorityQueue:
     return _queue
 
 
+def _drop_stale_vessel_perceptions(world_chat_id: str) -> None:
+    """Remove queued autonomous vessel perceptions for one world scope.
+
+    Synth's own in-world perceptions (will beats, sightings) are produced on a
+    fast timer but consumed slowly on a heavy engine, so they accumulate. When a
+    real player speaks to Synth in-world, those pending autonomous beats are
+    stale — a will beat is only meaningful *now* — and would otherwise force the
+    player chat to wait one full slow turn per queued beat. We drop them so the
+    player is answered promptly. Never touches the player chat itself (kept by
+    the ``vessel_player_chat`` flag) nor any non-vessel traffic. Best-effort and
+    fully guarded; a failure leaves the queue untouched.
+    """
+    if _queue is None:
+        return
+    heap = _queue._queue
+    if not heap:
+        return
+
+    kept: list = []
+    dropped = 0
+    for entry in heap:
+        try:
+            _prio, _counter_val, entry_item = entry
+        except (TypeError, ValueError):
+            kept.append(entry)
+            continue
+        is_vessel = (
+            isinstance(entry_item, dict) and entry_item.get("interface") == "vessel"
+        )
+        same_world = (
+            isinstance(entry_item, dict) and entry_item.get("chat_id") == world_chat_id
+        )
+        is_player = isinstance(entry_item, dict) and entry_item.get(
+            "vessel_player_chat"
+        )
+        # Drop only Synth's own autonomous perceptions for THIS world.
+        if is_vessel and same_world and not is_player:
+            dropped += 1
+            continue
+        kept.append(entry)
+
+    if dropped:
+        heap[:] = kept
+        heapq.heapify(heap)
+        # Keep the Queue's unfinished-task accounting consistent: each pruned
+        # item was ``put`` (incrementing the counter) but will never be
+        # ``get``/``task_done``. Guarded — internal attr may vary across
+        # Python versions.
+        try:
+            for _ in range(dropped):
+                if getattr(_queue, "_unfinished_tasks", 0) > 0:
+                    _queue._unfinished_tasks -= 1
+            if getattr(_queue, "_unfinished_tasks", 1) == 0:
+                _queue._finished.set()
+        except Exception:  # pragma: no cover - defensive
+            pass
+        log_debug(
+            f"[QUEUE] Pruned {dropped} stale autonomous vessel perception(s) "
+            f"for '{world_chat_id}' ahead of an in-world player chat"
+        )
+
+
+def _supersede_pending_vessel_beats(world_chat_id: str) -> None:
+    """Drop older autonomous vessel perceptions superseded by a fresh one.
+
+    Synth's own in-world will beats/perceptions are produced on a fast timer
+    (``VESSEL_WILL_INTERVAL_SEC``) but each turn can take far longer to consume
+    on a heavy engine (e.g. Selenium), so successive beats pile up behind the
+    turn in flight. A will beat only means anything *now*: once a newer one is
+    ready, the queued older ones are stale snapshots of a world that has since
+    moved on. Left in the queue they would be coalesced together by
+    :func:`compact_similar_messages` (same ``chat_id``) into a single turn
+    carrying N identical "quiet moment to reflect" prompts, which makes the
+    engine emit the *same* line N times in a row.
+
+    So, right before a new autonomous perception for a world is enqueued, we
+    drop the ones already queued for that same world. At most one autonomous
+    beat is ever pending, so nothing gets coalesced and nothing is repeated.
+    Purely structural (interface + world scope + the ``vessel_player_chat``
+    flag) — never message text. Player chats and non-vessel traffic are never
+    touched. Best-effort and fully guarded.
+    """
+    if _queue is None:
+        return
+    heap = _queue._queue
+    if not heap:
+        return
+
+    kept: list = []
+    dropped = 0
+    for entry in heap:
+        try:
+            _prio, _counter_val, entry_item = entry
+        except (TypeError, ValueError):
+            kept.append(entry)
+            continue
+        is_vessel = (
+            isinstance(entry_item, dict) and entry_item.get("interface") == "vessel"
+        )
+        same_world = (
+            isinstance(entry_item, dict) and entry_item.get("chat_id") == world_chat_id
+        )
+        is_player = isinstance(entry_item, dict) and entry_item.get(
+            "vessel_player_chat"
+        )
+        # Supersede only Synth's own autonomous perceptions for THIS world; a
+        # ``no_compact`` beat is intentionally standalone and is left alone.
+        is_no_compact = isinstance(entry_item, dict) and entry_item.get("no_compact")
+        if is_vessel and same_world and not is_player and not is_no_compact:
+            dropped += 1
+            continue
+        kept.append(entry)
+
+    if dropped:
+        heap[:] = kept
+        heapq.heapify(heap)
+        # Keep the Queue's unfinished-task accounting consistent (see
+        # _drop_stale_vessel_perceptions). Guarded — internal attr may vary.
+        try:
+            for _ in range(dropped):
+                if getattr(_queue, "_unfinished_tasks", 0) > 0:
+                    _queue._unfinished_tasks -= 1
+            if getattr(_queue, "_unfinished_tasks", 1) == 0:
+                _queue._finished.set()
+        except Exception:  # pragma: no cover - defensive
+            pass
+        log_debug(
+            f"[QUEUE] Superseded {dropped} older autonomous vessel beat(s) for "
+            f"'{world_chat_id}' with a fresher one"
+        )
+
+
 def _get_lock() -> asyncio.Lock:
     global _lock, _lock_loop
     try:
@@ -568,6 +700,17 @@ async def enqueue(
         "history_scope": history_scope,
         "response_future": response_future,
         "media_future": media_future,
+        # Opt-out of queue coalescing. A message flagged ``_no_compact`` (e.g. a
+        # salient in-world player chat directly addressing Synth) must run as its
+        # own turn — never merged with autonomous perceptions/will-beat prompts
+        # that share the same ``chat_id`` — so its text stays the primary
+        # ``original_user_message`` and gets a direct reply. Structural flag set
+        # by the originating interface; defaults to False for every other path.
+        "no_compact": bool(getattr(message, "_no_compact", False)),
+        # Structural marker: a real in-world player chat directly addressing
+        # Synth (set by the vessel interface). Used below to rank it above
+        # Synth's own autonomous vessel perceptions and to prune stale ones.
+        "vessel_player_chat": bool(getattr(message, "_vessel_player_chat", False)),
     }
 
     global _counter
@@ -595,11 +738,52 @@ async def enqueue(
 
             if vessel_session_manager.has_active_session():
                 if interface == "vessel":
-                    priority_val = HIGH_PRIORITY
-                    log_debug(
-                        "[QUEUE] Vessel session active — raising in-world "
-                        "perception to HIGH_PRIORITY"
-                    )
+                    # A real player speaking to Synth in-world is the most
+                    # urgent thing and must jump ahead of Synth's OWN autonomous
+                    # perceptions (will beats / sightings). Those are produced on
+                    # a fast timer (VESSEL_WILL_INTERVAL_SEC) but each turn can
+                    # take far longer to consume on a slow engine (e.g.
+                    # Selenium), so they pile up an ever-growing backlog. If both
+                    # sat at HIGH_PRIORITY the player chat would starve behind
+                    # that backlog and never get answered. Ranking is purely
+                    # structural (the ``vessel_player_chat`` flag the interface
+                    # set from event kind + actor presence), never keyword text.
+                    if item.get("vessel_player_chat"):
+                        priority_val = HIGH_PRIORITY
+                        log_debug(
+                            "[QUEUE] Vessel session active — in-world PLAYER "
+                            "chat raised to HIGH_PRIORITY"
+                        )
+                        # Prune any still-queued autonomous vessel perceptions
+                        # for the SAME world scope: they are ephemeral, safe to
+                        # drop, and would otherwise force the player chat to wait
+                        # a full slow turn per stale beat. Structural, guarded.
+                        try:
+                            _drop_stale_vessel_perceptions(chat_id)
+                        except Exception as _prune_exc:  # pragma: no cover
+                            log_debug(
+                                f"[QUEUE] Vessel perception prune skipped: {_prune_exc}"
+                            )
+                    else:
+                        # Synth's own autonomous perception: still ahead of
+                        # deprioritised cross-interface chat, but below a real
+                        # player chat so the game stays responsive to humans.
+                        priority_val = NORMAL_PRIORITY
+                        log_debug(
+                            "[QUEUE] Vessel session active — autonomous in-world "
+                            "perception set to NORMAL_PRIORITY"
+                        )
+                        # A fresh autonomous beat supersedes older queued ones
+                        # for the same world: keeping only the newest prevents
+                        # them being coalesced into a single turn with N
+                        # identical "quiet moment" prompts (which made the
+                        # engine repeat the same line). Structural + guarded.
+                        try:
+                            _supersede_pending_vessel_beats(chat_id)
+                        except Exception as _sup_exc:  # pragma: no cover
+                            log_debug(
+                                f"[QUEUE] Vessel beat supersede skipped: {_sup_exc}"
+                            )
                 else:
                     trainer_path = str(
                         config_registry.get_value("TRAINER_CHAT_ID", "") or ""
@@ -754,6 +938,14 @@ async def compact_similar_messages(first: dict, limit: int = 5) -> list:
     interface = first.get("interface")
     ts = first["timestamp"]
 
+    # A ``no_compact`` base must never absorb other queued messages: it is a
+    # direct address (e.g. an in-world player chat mentioning Synth) that has to
+    # run as its own turn so its text remains the primary user message and earns
+    # a reply — instead of being blended into a pile of autonomous perceptions
+    # (sightings / will-beat prompts) that share the same ``chat_id``.
+    if first.get("no_compact"):
+        return batch
+
     seen_ids = set()
     first_msg = first.get("message")
     if first_msg:
@@ -770,6 +962,10 @@ async def compact_similar_messages(first: dict, limit: int = 5) -> list:
             prio, counter, item = item_tuple
         else:
             prio, item = item_tuple
+        # Never absorb a ``no_compact`` item into another base — it must run as
+        # its own standalone turn (a direct address that needs its own reply).
+        if item.get("no_compact"):
+            continue
         if (
             item["chat_id"] == chat_id
             and item.get("thread_id") == thread_id
