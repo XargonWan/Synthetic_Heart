@@ -78,6 +78,22 @@ config_registry.get_value(
     advanced=True,
 )
 config_registry.get_value(
+    "VESSEL_DISCONNECT_GRACE_SEC",
+    30,
+    value_type=int,
+    label="Vessel Disconnect Grace (s)",
+    description=(
+        "Short grace period after the world client/bridge drops before a still-"
+        "'active' Vessel session is force-closed. Distinct from the (much "
+        "longer) inactivity cooldown: this unblocks the message flow quickly "
+        "when the client simply disconnects, so autonomous beats stop "
+        "accumulating. Clamped to 5–3600."
+    ),
+    group="plugins",
+    component="vessel_plugin",
+    advanced=True,
+)
+config_registry.get_value(
     "VESSEL_AUTONOMY_ENABLED",
     False,
     value_type=bool,
@@ -98,9 +114,94 @@ config_registry.get_value(
     value_type=int,
     label="Autonomous Play Beat Interval (s)",
     description=(
-        "Seconds between autonomous decision beats while a session is active "
-        "(clamped to 10–3600). Lower is more active but costs more cognition "
-        "turns. Only used when Autonomous In-World Play is enabled."
+        "Legacy fallback for the will-beat interval. Seconds between autonomous "
+        "will beats while a session is active (clamped to 10–3600). Superseded "
+        "by 'Autonomous Will Beat Interval'; only used if that is unset. Only "
+        "used when Autonomous In-World Play is enabled."
+    ),
+    group="plugins",
+    component="vessel_plugin",
+    advanced=True,
+)
+config_registry.get_value(
+    "VESSEL_WILL_INTERVAL_SEC",
+    45,
+    value_type=int,
+    label="Autonomous Will Beat Interval (s)",
+    description=(
+        "Seconds between slow 'will beats' — the LLM turn where Synth reflects "
+        "and decides/updates its own free-text goal and plan (clamped to "
+        "10–3600). This is the deliberate 'what do I want' half of autonomy; "
+        "lower is more reflective but costs more cognition turns. Falls back to "
+        "the legacy 'Autonomous Play Beat Interval' when unset. Only used when "
+        "Autonomous In-World Play is enabled."
+    ),
+    group="plugins",
+    component="vessel_plugin",
+    advanced=True,
+)
+config_registry.get_value(
+    "VESSEL_WILL_QUIET_SEC",
+    60,
+    value_type=int,
+    label="Will Beat Quiet Window (s)",
+    description=(
+        "Seconds of quiet required before an autonomous will beat may fire "
+        "after a player interacts with Synth in-world (clamped to 0–3600). The "
+        "will beat is framed as 'a quiet moment to reflect on your own', so it "
+        "is deferred while a player is actively present/talking — otherwise a "
+        "direct address gets swallowed by the 'you are alone' prompt and Synth "
+        "seems to ignore the player. Set to 0 to disable the deferral. Only "
+        "used when Autonomous In-World Play is enabled."
+    ),
+    group="plugins",
+    component="vessel_plugin",
+    advanced=True,
+)
+config_registry.get_value(
+    "VESSEL_MOTOR_ENABLED",
+    True,
+    value_type=bool,
+    label="Autonomous Motorics (fast reflex)",
+    description=(
+        "When enabled, a fast reflex loop moves Synth's body toward its current "
+        "goal with no LLM between will beats, so embodiment stays snappy and "
+        "responsive. Disable to make Synth only move when a will beat runs. "
+        "Only used when Autonomous In-World Play is enabled."
+    ),
+    group="plugins",
+    component="vessel_plugin",
+    advanced=True,
+)
+config_registry.get_value(
+    "VESSEL_MOTOR_INTERVAL_SEC",
+    3,
+    value_type=int,
+    label="Autonomous Motor Tick Interval (s)",
+    description=(
+        "Seconds between fast motor ticks that move the body toward the current "
+        "goal with no LLM (clamped to 1–60). Lower is more responsive; this is "
+        "cheap because it runs no cognition. Only used when Autonomous In-World "
+        "Play and Autonomous Motorics are both enabled."
+    ),
+    group="plugins",
+    component="vessel_plugin",
+    advanced=True,
+)
+config_registry.get_value(
+    "VESSEL_DRONE_PLAN_INTERVAL_SEC",
+    120,
+    value_type=int,
+    label="Directionless-Goal Planner Interval (s)",
+    description=(
+        "Per-world cooldown between out-of-band Drone dispatches that translate "
+        "a directionless goal into a concrete, reachable target/destination "
+        "(clamped to 30–3600). When a will beat authors a goal but names no "
+        "block/entity target and no coordinates, the body can only march in a "
+        "straight line (looks like circling); a short-lived Drone then looks "
+        "around and commits one waypoint via the world's set_goal/update_goal. "
+        "Runs off the scheduler, never inside an embodiment turn. Only used "
+        "when Autonomous In-World Play is enabled."
     ),
     group="plugins",
     component="vessel_plugin",
@@ -201,6 +302,23 @@ class VesselPlugin(AIPluginBase):
         if name == "disabled":
             return VesselActionResult(ok=False, detail="vessel_disabled")
 
+        # Suppress a verbatim self-repeat of the last thing Synth already said
+        # in this world. Slow reasoning turns (and especially the autonomous
+        # will beat, which fires on its own timer) re-read the scrollback and
+        # frequently re-emit the *exact* same ``say`` line, so the world sees
+        # the identical sentence over and over. This is a structural identity
+        # check against Synth's OWN most recent self-line (not keyword/content
+        # matching): if the text is byte-for-byte equal (after trimming) to what
+        # it just said, we skip the dispatch and report success so the rest of
+        # the turn proceeds normally. Only ``say`` is gated; physical verbs are
+        # never deduplicated.
+        if action == "say" and self._is_repeat_of_last_self_say(name, payload):
+            log_info(
+                f"[vessel_plugin] Suppressed verbatim self-repeat 'say' in "
+                f"'{name}' (identical to last self line)"
+            )
+            return VesselActionResult(ok=True, detail="suppressed_self_repeat")
+
         try:
             connector = VESSEL_REGISTRY.load_connector(name)
         except ValueError as exc:
@@ -236,10 +354,85 @@ class VesselPlugin(AIPluginBase):
                     result = VesselActionResult(ok=True)
             if result.ok:
                 await self._log_outbound_action(name, action, payload)
+                await self._persist_self_speech(name, action, payload)
             return result
         except Exception as exc:
             log_error(f"[vessel_plugin] act('{action}') error ({name}): {exc}")
             return VesselActionResult(ok=False, detail=f"act_error: {exc}")
+
+    @staticmethod
+    def _is_repeat_of_last_self_say(environment: str, payload: dict[str, Any]) -> bool:
+        """Return ``True`` when this ``say`` repeats Synth's own last line.
+
+        Reads the in-memory world chat context (the same deque
+        :meth:`_persist_self_speech` writes to) and compares the pending text
+        against the most recent ``self``-authored line. The comparison is a
+        trimmed exact-string identity check on Synth's OWN output — never a
+        keyword or semantic match — so it only ever suppresses a byte-for-byte
+        self-repeat and never a genuinely new sentence or a reply to someone
+        else. Fully guarded: any lookup failure returns ``False`` (never blocks
+        a real action).
+        """
+        text = str(payload.get("text") or "").strip()
+        if not text:
+            return False
+        try:
+            from core.chat_context_manager import get_or_create_chat_context
+            from core.interface_path_utils import build_interface_path
+
+            interface_path = build_interface_path("vessel", environment, None)
+            context = get_or_create_chat_context(interface_path)
+            for msg in reversed(context):
+                if not isinstance(msg, dict):
+                    continue
+                if str(msg.get("username")) != "self":
+                    continue
+                return str(msg.get("text") or "").strip() == text
+        except Exception as exc:  # pragma: no cover - defensive
+            log_warning(f"[vessel_plugin] self-repeat check failed: {exc}")
+        return False
+
+    async def _persist_self_speech(
+        self,
+        environment: str,
+        action: str,
+        payload: dict[str, Any],
+    ) -> None:
+        """Echo Synth's own in-world *speech* into the world chat history.
+
+        When Synth speaks in a world (the ``say`` verb) its line must appear in
+        the shared world conversation just like on Telegram/Discord, attributed
+        to itself. We persist it with the canonical ``sender_name="self"``
+        convention (the same one every chat interface uses for Synth's own
+        turns), so the history/prompt layer renders it as a ``Self:`` line and
+        the will beat sees what Synth already said instead of repeating itself.
+
+        Only ``say`` is echoed — other verbs (``move``/``look``/…) are physical
+        acts, already surfaced in the Activities tab, and would only add noise
+        to the conversation. This is a structural gate on the verb name, never
+        on the message content. Fully guarded: a persistence failure never
+        affects the action itself, and it deliberately does **not** re-enqueue
+        the line into cognition (that would be a self-reply loop) — it only
+        writes to history.
+        """
+        if action != "say":
+            return
+        text = str(payload.get("text") or "").strip()
+        if not text:
+            return
+        try:
+            from core.chat_context_manager import add_message_to_context
+            from core.interface_path_utils import build_interface_path
+
+            interface_path = build_interface_path("vessel", environment, None)
+            await add_message_to_context(
+                interface_path=interface_path,
+                message_text=text,
+                sender_name="self",
+                sender_id="self",
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            log_warning(f"[vessel_plugin] self-speech persist failed: {exc}")
 
     async def _log_outbound_action(
         self,
@@ -533,6 +726,43 @@ class VesselPlugin(AIPluginBase):
         return VesselActionResult(
             ok=True, detail="disconnected", data={"environment": name}
         )
+
+    async def teardown(self) -> None:
+        """Shut down any active embodiment when the core plugin is disabled.
+
+        Called by the runtime plugin toggle (``POST /api/components/toggle`` →
+        :meth:`core_initializer.disable_plugin`, which invokes the first of
+        ``stop``/``teardown``/``shutdown`` it finds). Disabling the Rift Vessel
+        core while a world is connected must not leave a phantom session alive
+        (it would keep deprioritising ordinary chat and running will/motor
+        beats until the cooldown). This ends every locally-tracked session so
+        the lived experience is flushed to a single diary entry, then drops the
+        connection. Fully fail-safe: teardown must never raise.
+        """
+        iface = self._get_vessel_interface()
+        environments: set[str] = set()
+        if iface is not None and hasattr(iface, "_active_session_environments"):
+            try:
+                environments = iface._active_session_environments()
+            except Exception as exc:  # pragma: no cover - defensive
+                log_warning(
+                    f"[vessel_plugin] teardown: enumerate sessions failed: {exc}"
+                )
+
+        # Also cover a live connection with no locally-tracked session.
+        connected = self._connected_world()
+        if connected:
+            environments.add(connected)
+
+        for name in environments:
+            try:
+                await self.disconnect_world(connector_name=name)
+            except Exception as exc:  # pragma: no cover - defensive
+                log_warning(
+                    f"[vessel_plugin] teardown: disconnect '{name}' failed: {exc}"
+                )
+
+        log_info("[vessel_plugin] teardown complete (sessions closed on disable)")
 
     # ------------------------------------------------------------------
     # Actions

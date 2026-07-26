@@ -84,6 +84,9 @@ class _FakeStore:
             row["session_id"],
             row["description"],
             row["note"],
+            row.get("destination"),
+            row.get("steps"),
+            row.get("current_step", 0),
             row["status"],
         )
 
@@ -95,36 +98,45 @@ class _FakeStore:
             s.startswith("UPDATE minecraft_goals SET status = %s")
             and "WHERE status" in s
         ):
+            # Bulk demote: "SET status = %s, updated_at = ... WHERE status = %s"
             new_status, old_status = params[0], params[1]
             for row in self.rows:
                 if row["status"] == old_status:
                     row["status"] = new_status
             return
         if s.startswith("INSERT INTO minecraft_goals"):
-            session_id, description, note, status = params
+            # Columns: session_id, description, note, destination,
+            #          steps, current_step, status
+            session_id, description, note, destination, steps, current_step, status = (
+                params
+            )
             self.rows.append(
                 {
                     "id": self._next_id,
                     "session_id": session_id,
                     "description": description,
                     "note": note,
+                    "destination": destination,
+                    "steps": steps,
+                    "current_step": current_step,
                     "status": status,
                 }
             )
             self._next_id += 1
             return
-        if s.startswith("UPDATE minecraft_goals SET note = %s"):
-            note, status, goal_id = params
+        if s.startswith("UPDATE minecraft_goals SET") and "WHERE id = %s" in s:
+            # Dynamic SET clause from update_active_goal -- parse column order
+            # from the SQL text so it is robust to which fields were supplied.
+            set_clause = s[len("UPDATE minecraft_goals SET ") : s.index(" WHERE id")]
+            cols = [c.strip().split(" = ")[0] for c in set_clause.split(",")]
+            placeholder_cols = [c for c in cols if c != "updated_at"]
+            goal_id = params[-1]
+            values = params[:-1]
+            mapping = dict(zip(placeholder_cols, values))
             for row in self.rows:
                 if row["id"] == goal_id:
-                    row["note"] = note
-                    row["status"] = status
-            return
-        if s.startswith("UPDATE minecraft_goals SET status = %s") and "WHERE id" in s:
-            status, goal_id = params
-            for row in self.rows:
-                if row["id"] == goal_id:
-                    row["status"] = status
+                    for col, val in mapping.items():
+                        row[col] = val
             return
         if s.startswith("SELECT") and "WHERE status = %s" in s:
             status = params[0]
@@ -164,13 +176,20 @@ def test_clip_trims_and_caps() -> None:
 
 def test_row_to_goal_tuple_and_dict() -> None:
     assert goals._row_to_goal(None) is None
-    tup = (7, "sess", "build a house", "started", "active")
+    # Row columns: id, session_id, description, note, destination,
+    #              steps, current_step, status
+    tup = (7, "sess", "build a house", "started", None, None, 0, "active")
     g = goals._row_to_goal(tup)
     assert g == {
         "id": 7,
         "session_id": "sess",
         "description": "build a house",
         "note": "started",
+        "destination": None,
+        "steps": [],
+        "current_step": 0,
+        "current_step_text": None,
+        "steps_total": 0,
         "status": "active",
     }
     d = goals._row_to_goal(
@@ -179,6 +198,9 @@ def test_row_to_goal_tuple_and_dict() -> None:
             "session_id": None,
             "description": "x",
             "note": None,
+            "destination": None,
+            "steps": None,
+            "current_step": 0,
             "status": "done",
         }
     )

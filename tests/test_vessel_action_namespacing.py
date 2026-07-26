@@ -360,3 +360,101 @@ def test_describe_outbound_action_is_structural() -> None:
     assert "z=3" in desc
     # None-valued fields are omitted.
     assert "y=" not in desc
+
+
+# ---------------------------------------------------------------------------
+# Verbatim self-repeat suppression
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_verbatim_self_repeat_say_is_suppressed(
+    connected_plugin: VesselPlugin,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``say`` identical to Synth's last self-line never reaches the world.
+
+    Slow/will-beat turns re-emit the same sentence; the structural identity
+    gate against Synth's OWN last line drops the duplicate before dispatch.
+    """
+    from core import chat_context_manager as ccm
+
+    context = ccm.get_or_create_chat_context("vessel/fake")
+    context.clear()
+    context.append({"username": "self", "text": "Sto camminando verso l'interno."})
+
+    connector: _FakeConnector = connected_plugin._test_connector  # type: ignore[attr-defined]
+    iface = _FakeInterface()
+    monkeypatch.setattr(
+        VesselPlugin, "_get_vessel_interface", staticmethod(lambda: iface)
+    )
+
+    result = await connected_plugin.act(
+        "say", {"text": "  Sto camminando verso l'interno.  "}
+    )
+
+    assert result.ok is True
+    assert result.detail == "suppressed_self_repeat"
+    # The connector was never called and nothing was logged to the activity tab.
+    assert connector.calls == []
+    assert iface.logged == []
+
+    context.clear()
+
+
+@pytest.mark.asyncio
+async def test_new_say_after_self_line_is_dispatched(
+    connected_plugin: VesselPlugin,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A genuinely new ``say`` is dispatched even right after a self-line."""
+    from core import chat_context_manager as ccm
+
+    context = ccm.get_or_create_chat_context("vessel/fake")
+    context.clear()
+    context.append({"username": "self", "text": "Prima frase."})
+
+    connector: _FakeConnector = connected_plugin._test_connector  # type: ignore[attr-defined]
+    iface = _FakeInterface()
+    monkeypatch.setattr(
+        VesselPlugin, "_get_vessel_interface", staticmethod(lambda: iface)
+    )
+
+    result = await connected_plugin.act("say", {"text": "Una frase diversa."})
+
+    assert result.ok is True
+    assert result.detail != "suppressed_self_repeat"
+    assert connector.calls == [("say", {"text": "Una frase diversa."})]
+
+    context.clear()
+
+
+@pytest.mark.asyncio
+async def test_self_repeat_gate_ignores_non_self_lines(
+    connected_plugin: VesselPlugin,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Repeating a PLAYER's line (not Synth's own) is still dispatched.
+
+    The gate only compares against the most recent ``self`` line, so echoing
+    what someone else said is a legitimate action, never suppressed.
+    """
+    from core import chat_context_manager as ccm
+
+    context = ccm.get_or_create_chat_context("vessel/fake")
+    context.clear()
+    context.append({"username": "XargonWan", "text": "Ehi Rekku!"})
+
+    connector: _FakeConnector = connected_plugin._test_connector  # type: ignore[attr-defined]
+    iface = _FakeInterface()
+    monkeypatch.setattr(
+        VesselPlugin, "_get_vessel_interface", staticmethod(lambda: iface)
+    )
+
+    result = await connected_plugin.act("say", {"text": "Ehi Rekku!"})
+
+    assert result.ok is True
+    assert result.detail != "suppressed_self_repeat"
+    assert connector.calls == [("say", {"text": "Ehi Rekku!"})]
+
+    context.clear()

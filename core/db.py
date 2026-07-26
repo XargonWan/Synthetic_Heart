@@ -1558,8 +1558,7 @@ _VESSEL_ACTIVITY_LOG_DDL = """
     """
 
 _VESSEL_PG_INDEX_DDL: tuple[str, ...] = (
-    "CREATE INDEX IF NOT EXISTS idx_vessel_sessions_status"
-    " ON vessel_sessions (status)",
+    "CREATE INDEX IF NOT EXISTS idx_vessel_sessions_status ON vessel_sessions (status)",
     "CREATE INDEX IF NOT EXISTS idx_vessel_sessions_environment"
     " ON vessel_sessions (environment)",
     "CREATE INDEX IF NOT EXISTS idx_vessel_sessions_last_event"
