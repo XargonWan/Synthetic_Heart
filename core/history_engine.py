@@ -82,6 +82,23 @@ register_exposed_var(
 )
 
 register_exposed_var(
+    "VESSEL_PERCEPTION_CONTEXT_CAP",
+    label="Vessel Perception Context Cap",
+    default=3,
+    value_type=int,
+    description=(
+        "During Rift Vessel embodiment, the max number of Synth's own recent "
+        "autonomous perceptions (sightings/movement/will beats) kept in the "
+        "current-chat context. Conversational lines (player chats + Synth's "
+        "replies) are always kept. Prevents the perception stream from drowning "
+        "a reactive player turn."
+    ),
+    scope="core",
+    component="history_engine",
+    advanced=True,
+)
+
+register_exposed_var(
     "ENABLE_AI_DIARY",
     label="Enable AI Diary",
     default=1,
@@ -297,6 +314,24 @@ def _dedup_key(text: str) -> str:
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
+def _is_vessel_autonomous_perception(entry: HistoryEntry) -> bool:
+    """Return True for one of Synth's *own* synthetic vessel perceptions.
+
+    A game world streams autonomous perceptions (sightings, movement, will
+    beats, …) far faster than a slow LLM consumes them, so an unbounded stream
+    of them floods the current-chat history and frames every reactive turn as
+    solitary wandering — burying a player's actual question. Those perceptions
+    are tagged at persistence time (``interface/vessel_interface.py``) with
+    ``metadata.vessel_perception``. A real in-world player chat is deliberately
+    left untagged. Detection is purely structural (a persisted flag), never
+    keyword matching (project rule: multi-language safe).
+    """
+    if not isinstance(entry, dict):
+        return False
+    metadata = entry.get("metadata")
+    return bool(isinstance(metadata, dict) and metadata.get("vessel_perception"))
+
+
 def _is_ignored_prompt_history_entry(entry: HistoryEntry) -> bool:
     if not isinstance(entry, dict):
         return False
@@ -431,27 +466,21 @@ class HistoryEngine:
         # ``unified_mode = False`` so only the local vessel history is kept, and
         # we suppress the global diary/memory blocks below. Fully guarded: any
         # failure leaves the normal context path untouched.
-        vessel_focus = False
-        try:
-            if isinstance(interface_path, str) and interface_path.startswith("vessel"):
-                vessel_focus = True
-            elif isinstance(context_memory, dict) and context_memory.get(
-                "vessel_focus"
-            ):
-                vessel_focus = True
-            else:
-                chat_obj = getattr(message, "chat", None)
-                if chat_obj is not None and getattr(chat_obj, "type", None) == "vessel":
-                    vessel_focus = True
-        except Exception:
-            vessel_focus = False
+        from core.vessel_focus import is_vessel_turn
+
+        vessel_focus = is_vessel_turn(message, context_memory, interface_path)
         if vessel_focus:
             unified_mode = False
             enable_diary = False
             enable_memories = False
+            # The rolling cross-interface "recent chats" block is global noise
+            # during embodiment: SyntH concentrates on the world, so we also
+            # suppress it here (Bug B — it otherwise polluted the vessel prompt
+            # via the enable_recent path below).
+            enable_recent = False
             log_debug(
                 "[history_engine] Vessel focus active — scoping context to the "
-                "world (unified history + global diary/memory suppressed)"
+                "world (unified history + global diary/memory/recent suppressed)"
             )
 
         # `context_memory` can be either:
@@ -558,7 +587,63 @@ class HistoryEngine:
                     except Exception as _e:
                         log_debug(f"[history_engine] live merge skipped: {_e}")
 
-                for m in msgs[-verbosity:] if verbosity > 0 else []:
+                window = msgs[-verbosity:] if verbosity > 0 else []
+
+                # Vessel focus: merge conversation with a *bounded* number of
+                # Synth's own autonomous perceptions. Perceptions live in a
+                # SEPARATE in-memory ring buffer (see chat_context_manager) so a
+                # burst of world perceptions (e.g. repeated environmental damage
+                # while drowning) can never evict a player's chat from the
+                # bounded conversational deque. A world emits
+                # sightings/movement/will-beats far faster than a slow LLM
+                # consumes them; left unbounded they dominate the current-chat
+                # context and frame every turn as solitary wandering, so the
+                # model ignores the player's actual question and re-emits a stock
+                # reflective line. We keep ALL conversational lines (player chats
+                # + Synth's own replies) and only the most recent
+                # ``VESSEL_PERCEPTION_CONTEXT_CAP`` perceptions for ambient
+                # grounding. Structural (persisted metadata flag), never keyword.
+                if vessel_focus:
+                    # Drop any stray perceptions still in the conversational
+                    # window (older messages persisted before the split) so they
+                    # do not double-count against the conversational budget.
+                    window = [
+                        m for m in window if not _is_vessel_autonomous_perception(m)
+                    ]
+                    perception_budget = max(
+                        0, _get_int("VESSEL_PERCEPTION_CONTEXT_CAP", 3)
+                    )
+                    recent_perceptions: List[dict] = []
+                    if perception_budget > 0:
+                        try:
+                            from core.chat_context_manager import (
+                                get_perception_memory as _get_perception_memory,
+                            )
+
+                            pmap = _get_perception_memory()
+                            pbuf = (
+                                pmap.get(interface_path)
+                                if isinstance(pmap, dict)
+                                else None
+                            )
+                            if pbuf:
+                                recent_perceptions = list(pbuf)[-perception_budget:]
+                        except Exception as _pe:
+                            log_debug(
+                                f"[history_engine] Could not read vessel perceptions: {_pe}"
+                            )
+                    # Merge conversation + recent perceptions, chronologically.
+                    merged = list(window) + list(recent_perceptions)
+
+                    def _ts_key(m: Any) -> str:
+                        return (
+                            str(m.get("timestamp", "")) if isinstance(m, dict) else ""
+                        )
+
+                    merged.sort(key=_ts_key)
+                    window = merged
+
+                for m in window:
                     if _is_ignored_prompt_history_entry(m):
                         continue
                     line = _entry_to_text_with_source(
