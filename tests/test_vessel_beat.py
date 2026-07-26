@@ -24,6 +24,7 @@ from core.vessel_beat import (
     resolve_beat_interval,
     resolve_motor_interval,
     resolve_will_interval,
+    resolve_will_quiet_sec,
     world_state_to_dict,
 )
 
@@ -213,7 +214,75 @@ def test_build_will_prompt_is_volition_focused() -> None:
     # will move on its own once the goal is clear (motorics is separate).
     lowered = prompt.lower()
     assert "will, not motion" in lowered
-    assert "move toward it on its own" in lowered
+    assert "move toward what you need on its own" in lowered
+
+
+def test_build_will_prompt_lists_scan_targets_and_requests_structured_target() -> None:
+    # The anti-circling fix: the will beat must enumerate the *exact* block and
+    # entity ids present on the live scan and imperatively ask Synth to name
+    # one as a structural target (target_kind/target_name). This is what lets
+    # the motor tick route straight to it instead of drifting in circles.
+    prompt = build_will_prompt(_rich_world_state(), "minecraft")
+    # Exact scan ids surfaced verbatim (blocks by name, entities by type).
+    assert "oak_log" in prompt
+    assert "stone" in prompt
+    assert "player" in prompt
+    assert "mob" in prompt
+    # Imperative request for a structural target (kind + exact id).
+    assert "target_kind='block'" in prompt
+    assert "target_kind='entity'" in prompt
+    assert "target_name" in prompt
+    # Must insist the id is copied verbatim, never invented (no keyword logic).
+    assert "verbatim" in prompt.lower()
+
+
+def test_build_will_prompt_no_target_cue_when_scan_empty() -> None:
+    # With nothing on the scan there is nothing to name → the target cue is
+    # omitted (the destination guidance still stands).
+    prompt = build_will_prompt({"extra": {}}, "minecraft")
+    assert "target_kind='block'" not in prompt
+    assert "target_kind='entity'" not in prompt
+
+
+def test_build_will_prompt_surfaces_not_found_feedback() -> None:
+    # When the motor tick recorded a 'not_found' outcome for the last named
+    # target, the will beat tells Synth it wasn't here and to re-plan.
+    prompt = build_will_prompt(
+        {
+            "extra": {
+                "last_target_result": "not_found",
+                "last_target_name": "diamond_ore",
+            }
+        },
+        "minecraft",
+    )
+    assert "diamond_ore" in prompt
+    assert "not here" in prompt.lower()
+
+
+def test_build_will_prompt_surfaces_unreachable_feedback() -> None:
+    prompt = build_will_prompt(
+        {
+            "extra": {
+                "last_target_result": "unreachable",
+                "last_target_name": "oak_log",
+            }
+        },
+        "minecraft",
+    )
+    assert "oak_log" in prompt
+    assert "could not get" in prompt.lower()
+
+
+def test_build_will_prompt_no_feedback_line_on_arrived_or_missing() -> None:
+    # 'arrived' and absent feedback add no heads-up line.
+    arrived = build_will_prompt(
+        {"extra": {"last_target_result": "arrived", "last_target_name": "oak_log"}},
+        "minecraft",
+    )
+    assert "heads up" not in arrived.lower()
+    none_prompt = build_will_prompt({"extra": {}}, "minecraft")
+    assert "heads up" not in none_prompt.lower()
 
 
 def test_build_decision_prompt_is_alias_of_will_prompt() -> None:
@@ -273,3 +342,19 @@ def test_is_motor_enabled_failsafe_on_error() -> None:
         raise RuntimeError("config down")
 
     assert is_motor_enabled(_boom) is False
+
+
+def test_resolve_will_quiet_sec_default_and_clamp() -> None:
+    assert resolve_will_quiet_sec(lambda k, d: d, default=60) == 60
+    # Clamped to [0, 3600]; 0 is allowed (disables the deferral).
+    assert resolve_will_quiet_sec(lambda k, d: -5) == 0
+    assert resolve_will_quiet_sec(lambda k, d: 0) == 0
+    assert resolve_will_quiet_sec(lambda k, d: 999999) == 3600
+    assert resolve_will_quiet_sec(lambda k, d: 30) == 30
+
+
+def test_resolve_will_quiet_sec_failsafe_on_error() -> None:
+    def _boom(key: str, default: Any) -> Any:
+        raise RuntimeError("config down")
+
+    assert resolve_will_quiet_sec(_boom, default=60) == 60

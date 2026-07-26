@@ -103,6 +103,33 @@ def _fmt_items(items: list[Any], key: str | None = None) -> str:
     return ", ".join(rendered) + suffix
 
 
+def _distinct_names(items: list[Any], key: str = "name") -> list[str]:
+    """Return the distinct structural ids present in a scan list.
+
+    Pulls the ``key`` field (``name`` for blocks, ``type``/``name`` for
+    entities) from each dict entry, de-duplicating while preserving order and
+    capping at :data:`_MAX_LIST_ITEMS`. Purely structural — these are the exact
+    ids the will beat may hand back as a ``target_name`` so the motor tick can
+    resolve them by id (never a keyword/text match). Empty on non-lists.
+    """
+    if not isinstance(items, list) or not items:
+        return []
+    seen: list[str] = []
+    for entry in items:
+        if isinstance(entry, dict):
+            val = entry.get(key) or entry.get("type") or entry.get("name")
+        else:
+            val = entry
+        if val in (None, ""):
+            continue
+        name = str(val)
+        if name not in seen:
+            seen.append(name)
+        if len(seen) >= _MAX_LIST_ITEMS:
+            break
+    return seen
+
+
 def _fmt_affordances(affordances: list[Any]) -> str:
     """Render the generic affordance contract as ``verb→target (Nm)`` lines."""
     if not isinstance(affordances, list) or not affordances:
@@ -124,14 +151,40 @@ def _fmt_affordances(affordances: list[Any]) -> str:
 
 
 def _fmt_goal(goal: dict[str, Any] | None) -> str:
-    """Render Synth's self-authored current goal (free text), or ``none``."""
+    """Render Synth's self-authored current goal (free text), or ``none``.
+
+    When the goal carries a multi-step plan (``steps`` + ``current_step``),
+    the current step and the ordered plan are appended so the will beat can see
+    exactly where it is in a longer project (e.g. building an iron armor set).
+    The plan is free text Synth authored itself; this only renders it.
+    """
     if not isinstance(goal, dict):
         return "none"
     desc = str(goal.get("description") or "").strip()
     if not desc:
         return "none"
     note = str(goal.get("note") or "").strip()
-    return f"{desc} — {note}" if note else desc
+    head = f"{desc} — {note}" if note else desc
+
+    steps = goal.get("steps")
+    if isinstance(steps, list) and steps:
+        try:
+            current = int(goal.get("current_step") or 0)
+        except (TypeError, ValueError):
+            current = 0
+        current = max(0, min(current, len(steps)))
+        parts: list[str] = [head]
+        if current < len(steps):
+            parts.append(f"current step ({current + 1}/{len(steps)}): {steps[current]}")
+        else:
+            parts.append(f"all {len(steps)} steps done")
+        plan = "; ".join(
+            f"{'>' if i == current else '-'} {i + 1}. {s}"
+            for i, s in enumerate(steps[:_MAX_LIST_ITEMS])
+        )
+        parts.append(f"plan: {plan}")
+        return " | ".join(parts)
+    return head
 
 
 def world_state_to_dict(world_state: Any) -> dict[str, Any]:
@@ -204,6 +257,8 @@ def build_will_prompt(world_state: Any, world: str) -> str:
 
     entities_txt = _fmt_items(extra.get("entities") or [])
     blocks_txt = _fmt_items(extra.get("blocks") or [], key="name")
+    block_names = _distinct_names(extra.get("blocks") or [], key="name")
+    entity_names = _distinct_names(extra.get("entities") or [], key="type")
     inventory_txt = _fmt_items(extra.get("inventory") or [])
     affordances_txt = _fmt_affordances(extra.get("affordances") or [])
     goal_txt = _fmt_goal(extra.get("current_goal"))
@@ -236,10 +291,33 @@ def build_will_prompt(world_state: Any, world: str) -> str:
             "current goal and the things you set out to do before: does your "
             "current goal still feel right? If you have no goal, or you feel "
             "like doing something different now, decide in your own words what "
-            f"you want and set it with `{prefix}set_goal`. If you are making "
-            f"progress, note it or mark it done with `{prefix}update_goal`. You "
-            "do not need to plan every step — once your goal is clear your body "
-            "will move toward it on its own.",
+            f"you want and set it with `{prefix}set_goal`.",
+            "",
+            "This is a *private* moment with no one addressing you right now. "
+            "Any conversation you can see above already happened and, if it "
+            "needed a reply, you already gave one in your own turn — treat it "
+            "as memory of what was said, not as something waiting for an "
+            "answer. Do NOT speak, greet, or repeat a message here; you are "
+            "reflecting, not talking. When someone actually speaks to you again "
+            "you will get a separate turn to reply to them. For now, only "
+            "shape your own intent (set or update your goal); return no `say` "
+            "action.",
+            "",
+            "If what you want is a bigger project that takes several stages "
+            "(for example a full iron armor set, or building a house), break it "
+            "down YOURSELF into an ordered list of concrete sub-steps and pass "
+            f"them as 'steps' to `{prefix}set_goal`. Use your own Minecraft "
+            "knowledge to work out the order (gather → craft tools → mine → "
+            "smelt → craft → wear, and so on) — there is no template and no one "
+            "checks it for you. Look at your inventory above to judge what you "
+            "already have and where you actually are in the plan. When you "
+            f"finish the current step, call `{prefix}update_goal` with "
+            "'advance' set to true to move to the next one; note progress, "
+            "mark the whole goal 'done' when you have truly achieved it, or "
+            "'abandoned' if you change your mind. You are the judge of your own "
+            "progress. You do not need to plan every single movement — once "
+            "your goal and current step are clear your body will move toward "
+            "what you need on its own.",
             "",
             "One thing to be honest with yourself about: if what you want is "
             "*not here* — you see no trees but you want wood, no animals to "
@@ -254,6 +332,65 @@ def build_will_prompt(world_state: Any, world: str) -> str:
             "coordinates out only when what you need is already right here.",
         ]
     )
+
+    # Structural target-outcome feedback. When the motor tick tried to reach a
+    # named target since the last beat, it recorded a 3-state outcome (see the
+    # connector's ``_record_target_outcome``). Surface it here — purely from the
+    # structured fields, never by parsing text — so Synth can re-plan instead of
+    # re-issuing a target that will fail again. ``arrived`` needs no note (the
+    # body simply reached it); only the two failure states are actionable.
+    last_result = extra.get("last_target_result")
+    last_name = extra.get("last_target_name")
+    if last_result == "not_found" and isinstance(last_name, str) and last_name:
+        lines.extend(
+            [
+                "",
+                f"Heads up: the last thing you aimed for ('{last_name}') is not "
+                "here right now — your body could not find it nearby. Do not "
+                "just aim for it again; either pick a different target you can "
+                "actually see above, or set 'destination_x'/'destination_z' to "
+                "travel somewhere it is more likely to be, then look again.",
+            ]
+        )
+    elif last_result == "unreachable" and isinstance(last_name, str) and last_name:
+        lines.extend(
+            [
+                "",
+                f"Heads up: '{last_name}' is nearby but your body could not get "
+                "to it (it may be buried, across water, or up a cliff). Aiming "
+                "for it again will likely stall the same way. Try a different "
+                "target you can reach, or set 'destination_x'/'destination_z' "
+                "to approach it from another side first.",
+            ]
+        )
+
+    # Structural target cue. The single biggest reason the body drifts in
+    # circles is that the *direction* lived only in the goal's free text, which
+    # the motor tick must never read (keyword matching). So, when a goal is
+    # about reaching or gathering a concrete thing that is actually on the
+    # scan, ask Synth to name it structurally (kind + exact id) — the motor
+    # tick then routes straight to it. We surface the exact ids present so the
+    # choice is verbatim, never invented.
+    if block_names or entity_names:
+        lines.extend(["", "To steer your body precisely (so it walks to what you"])
+        if block_names:
+            lines.append(
+                "  actually want instead of drifting): if your goal is about a "
+                "block you can see, set target_kind='block' and target_name to "
+                "one of these exact ids: " + ", ".join(block_names) + "."
+            )
+        if entity_names:
+            lines.append(
+                "  If it is about a creature/NPC you can see, set "
+                "target_kind='entity' and target_name to one of these exact "
+                "ids: " + ", ".join(entity_names) + "."
+            )
+        lines.append(
+            "  Copy the id verbatim — do not invent one. Give a target when it "
+            "fits, otherwise use the destination coordinates above; either one "
+            "keeps your body moving with purpose instead of in circles."
+        )
+
     return "\n".join(lines)
 
 
@@ -298,6 +435,28 @@ def resolve_will_interval(config_get: Any, default: int = 45) -> int:
 def resolve_beat_interval(config_get: Any, default: int = 45) -> int:
     """Deprecated alias for :func:`resolve_will_interval`."""
     return resolve_will_interval(config_get, default)
+
+
+def resolve_will_quiet_sec(config_get: Any, default: int = 60) -> int:
+    """Return the **will-beat quiet window** in seconds, clamped.
+
+    The will beat frames the moment as *"a quiet moment to reflect… on your
+    own"* — it must therefore only fire when the world genuinely is quiet, i.e.
+    no *player* has interacted with Synth recently. If a player has spoken to
+    or acted toward Synth within this window, the autonomous volition turn is
+    deferred so the player's message is handled as an ordinary reactive chat
+    turn instead of being swallowed by a "you are alone" prompt.
+
+    This is a structural, actor-based deferral (who acted recently), never
+    keyword/intent matching. Reads ``VESSEL_WILL_QUIET_SEC``. Clamped to
+    ``[0, 3600]`` — ``0`` disables the deferral entirely. Fail-safe: any error
+    → ``default``.
+    """
+    try:
+        value = int(config_get("VESSEL_WILL_QUIET_SEC", default))
+    except Exception:
+        return default
+    return max(0, min(3600, value))
 
 
 def resolve_motor_interval(config_get: Any, default: int = 3) -> int:

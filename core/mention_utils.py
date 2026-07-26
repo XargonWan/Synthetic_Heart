@@ -55,7 +55,30 @@ def get_current_aliases() -> list[str]:
     except Exception as config_e:
         log_debug(f"[mention] Error reading aliases from config registry: {config_e}")
 
-    # 3) Always include hardcoded fallback aliases (e.g. 'synth')
+    # 3) In-world nickname of the active Rift Vessel (if any). When Synth is
+    # embodied in a game world she may carry a different name there (e.g. the
+    # Minecraft bot username); players address her by *that* name in-world, so
+    # it must count as an activation alias. Fully fail-safe and generic — the
+    # Vessel is optional and this never raises if the plugin is absent.
+    try:
+        from core.config_manager import config_registry
+
+        active_vessel = str(
+            config_registry.get_value("ACTIVE_VESSEL", "disabled") or "disabled"
+        ).strip()
+        if active_vessel and active_vessel != "disabled":
+            from core.vessel_registry import VESSEL_REGISTRY
+
+            connector = VESSEL_REGISTRY.load_connector(active_vessel)
+            get_name = getattr(connector, "get_in_world_name", None)
+            in_world_name = get_name() if callable(get_name) else None
+            if in_world_name:
+                log_debug(f"[mention] Loaded in-world vessel name: {in_world_name}")
+                aliases.append(str(in_world_name))
+    except Exception as vessel_e:  # pragma: no cover - defensive
+        log_debug(f"[mention] Error reading vessel in-world name: {vessel_e}")
+
+    # 4) Always include hardcoded fallback aliases (e.g. 'synth')
     aliases.extend(synth_ALIASES)
 
     # De-duplicate while preserving order.

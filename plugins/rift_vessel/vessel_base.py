@@ -249,6 +249,21 @@ class VesselConnectorBase(ABC):
         """Whether the connector currently holds a live world connection."""
         return False
 
+    def get_in_world_name(self) -> str | None:
+        """Return the name Synth's body carries **inside this world**.
+
+        This is the in-world nickname other players use to address her (e.g.
+        the Minecraft bot username). It is used purely so that direct-address
+        detection (:func:`core.mention_utils.is_synth_mentioned`) can recognise
+        an in-world chat line that names her by her world nickname — the same
+        activation mechanism the chat interfaces use, driven by a name rather
+        than by keyword/intent matching, so it works in any language.
+
+        Optional override. Defaults to ``None`` (no world-specific name, so
+        only the persona name/aliases apply).
+        """
+        return None
+
     # ------------------------------------------------------------------
     # Setup hooks (optional)
     # ------------------------------------------------------------------
