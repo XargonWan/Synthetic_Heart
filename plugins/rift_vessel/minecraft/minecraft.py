@@ -26,7 +26,9 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import math
 import os
+import random
 import socket
 from typing import Any, Dict
 
@@ -51,6 +53,13 @@ LOG_PREFIX = "[minecraft_connector]"
 ENVIRONMENT = "minecraft"
 _POLL_INTERVAL_SEC = 1.0
 _HTTP_TIMEOUT_SEC = 10.0
+# Consecutive failed ``/events`` polls after which the connector considers the
+# bridge/world client gone and flips ``is_connected`` to False. Without this the
+# poll loop would spin forever on a dead bridge, leaving ``is_connected`` stuck
+# True — which keeps the Vessel session "active" and lets autonomous beats pile
+# up and block the message flow. At ``_POLL_INTERVAL_SEC`` (1s) this is a ~5s
+# liveness window, well under the interface disconnect-grace sweep.
+_MAX_POLL_FAILURES = 5
 
 # Loopback host names that mean "this same machine". When Synth runs inside a
 # container these do NOT point at the Docker host (where a "Open to LAN" world
@@ -126,6 +135,99 @@ class MinecraftConnector(VesselConnectorBase):
         # version mismatch, ...). Read by connect_world so Synth can tell the
         # requester WHY entering the world failed.
         self.last_error: str | None = None
+        # --- Anti-stall reflex state (in-memory, no DB) -------------------
+        # When the body has reached its self-chosen destination but cognition
+        # (the slow will beat) has not yet handed it a fresh objective, the
+        # motor must not freeze in place waiting: the world is live and Synth's
+        # plans can change. We count how many consecutive motor ticks have
+        # observed "arrived on the same goal with nothing new to do"; past a
+        # threshold the reflex reprojects the destination forward so the body
+        # keeps exploring on its own instead of circling the arrival tile.
+        self._arrival_goal_key: str | None = None
+        self._arrival_stall_ticks = 0
+        # Rolling heading (radians) used to steer autonomous exploration when
+        # reprojecting a stale destination, so successive reprojections fan out
+        # instead of retracing the same line.
+        self._explore_heading = 0.0
+        # Structural id (``kind:name``) of the benign affordance the reflex most
+        # recently interacted with while standing still. Once we have ``use``/
+        # ``mine``d something in reach, repeating the exact same interaction on
+        # the next tick is pointless and pins the body on the spot forever (the
+        # user-reported "freezes inert at one point" bug): a live scan keeps
+        # re-surfacing the same adjacent block/entity, so without this the reflex
+        # would ``use`` it every 3 s and never fall through to travel/march. We
+        # remember the last one and skip it so the body moves on. Purely
+        # structural (kind + exact id) — never keyword matching.
+        self._last_reflex_interaction: str | None = None
+        # ``_goal_key`` of a numeric destination we have already **reached**.
+        # A goal's numeric destination is chosen *once* by the slow will beat
+        # and stays static until the next beat (which, on the slow Selenium
+        # engine, can be minutes away). Without marking it consumed the motor
+        # would: reach it → ``wander`` on arrival → the wander drifts a few
+        # metres past ``_ARRIVAL_RADIUS`` → the same static destination reads as
+        # "pending" again → ``goto`` back to it → repeat, pacing the *same path
+        # back and forth* forever. Once reached we record the key here so later
+        # ticks fall through to the directional march (explore *beyond* the
+        # point) instead of oscillating around it; a fresh goal (new key) makes
+        # its destination live again. Purely structural (goal key) — no keywords.
+        self._consumed_destination_key: str | None = None
+        # Progress watchdog for an *unreachable* numeric destination. The
+        # arrival/consume logic above only fires when the body gets within
+        # ``_ARRIVAL_RADIUS`` of the waypoint. But a will-beat coordinate can be
+        # physically unreachable (in water, across a ravine, on a cliff): the
+        # pathfinder keeps closing to ~7 m, fails, resets, and re-approaches —
+        # so ``remaining`` oscillates (7 → 46 → 9 → 41 …) and ``travel_pending``
+        # never clears, pacing the *same path back and forth* forever without
+        # ever "arriving". We track the best (smallest) horizontal distance seen
+        # toward the current destination key and how many consecutive ticks have
+        # failed to improve on it; once that stall count crosses
+        # ``_STALE_TRAVEL_TICKS`` we consume the destination anyway so the body
+        # gives up on the unreachable point and marches on. Purely numeric —
+        # no keywords, no goal-text parsing.
+        self._travel_dest_key: str | None = None
+        self._travel_best_remaining: float | None = None
+        self._travel_stall_ticks = 0
+        # Physical-motion watchdog for a *stuck body*. The ``remaining``-based
+        # watchdog above catches a destination whose distance oscillates but is
+        # blind to the case the user hit: the pathfinder gives up on an
+        # unwalkable coordinate (water edge, cliff, 1-block ledge) and the body
+        # simply **stops moving** while the motor keeps re-issuing the same
+        # ``goto`` every tick — the "synth stuck, same spot forever" report. The
+        # ``remaining`` oscillation can even reset the stall counter, so it
+        # never consumes the point. Here we watch the body's *actual* position:
+        # if it fails to move at least ``_STUCK_MOVE_EPS`` blocks for
+        # ``_STUCK_POSITION_TICKS`` consecutive ticks *while the motor is
+        # emitting a travel action*, the target is unreachable regardless of any
+        # distance number — give up on it and force the directional march.
+        # Purely numeric (measured motion), no keywords, robust to skipped/laggy
+        # ticks. This is watched **globally**, not per-branch: the stall can hit
+        # a numeric waypoint, a named block/entity ``target`` (goal_target /
+        # in-reach affordance goto) or any other ``goto`` — measuring the body's
+        # own displacement covers every one of them uniformly.
+        self._last_body_position: Dict[str, float] | None = None
+        self._stuck_position_ticks = 0
+        # Structural 3-state feedback for the *last named target* the motor
+        # tried to reach (``goal_target``: a block/entity id cognition chose
+        # from the live scan). A named target can fail two very different ways
+        # and the slow will beat must be able to tell them apart to re-plan:
+        #   * ``not_found``   — the type is not visible/loaded (it was not in the
+        #                       live scan when the goto failed) → pick another
+        #                       target or set a destination to go look for it.
+        #   * ``unreachable`` — it *was* in the scan but the pathfinder could not
+        #                       reach it (buried, across water/a ravine) → aim
+        #                       for an intermediate destination or a different
+        #                       target.
+        #   * ``arrived``     — reached it.
+        # The classification is purely structural: ``ok`` from the bridge plus
+        # whether ``target_name`` is present in the live scan's block/entity ids.
+        # It is **never** derived by parsing the bridge's ``detail`` text (that
+        # would be keyword matching). Surfaced verbatim in ``WorldState.extra``
+        # (``last_target_result`` / ``last_target_name`` / ``last_target_kind``)
+        # for the next will beat to read. All ``None`` until a named target is
+        # attempted.
+        self._last_target_result: str | None = None
+        self._last_target_name: str | None = None
+        self._last_target_kind: str | None = None
 
     # ------------------------------------------------------------------
     # Helpers
@@ -425,7 +527,11 @@ class MinecraftConnector(VesselConnectorBase):
         if not skin_file:
             return
 
-        skin_url = f"{self._skin_public_base_url()}/api/config/MINECRAFT_SKIN_FILE/file"
+        # Dedicated endpoint serves the uploaded skin as a real image/png inline
+        # on a .png path — required for server-side skin providers to accept it.
+        skin_url = (
+            f"{self._skin_public_base_url()}/api/plugins/minecraft_vessel/skin.png"
+        )
         model = str(
             config_registry.get_value("MINECRAFT_SKIN_MODEL", "classic") or "classic"
         ).strip()
@@ -479,17 +585,59 @@ class MinecraftConnector(VesselConnectorBase):
     # ------------------------------------------------------------------
 
     async def _poll_loop(self) -> None:
+        # Track consecutive poll failures so a dead bridge/world client is
+        # detected instead of spinning forever with ``is_connected`` stuck True.
+        consecutive_failures = 0
         while self._connected:
             try:
                 res = await self._get("/events")
+                # A successful poll clears the failure streak.
+                consecutive_failures = 0
                 events = res.get("events") if isinstance(res, dict) else None
                 if events:
                     for raw in events:
+                        if isinstance(raw, dict):
+                            log_debug(
+                                f"{LOG_PREFIX} polled event: "
+                                f"type={raw.get('event_type')!r} "
+                                f"actor={raw.get('actor')!r} "
+                                f"summary={str(raw.get('summary'))[:80]!r}"
+                            )
+                            # Re-apply the skin on every (re)spawn — respawn
+                            # after death or a reconnect drops the previous
+                            # skin. Best-effort and idempotent.
+                            if str(raw.get("event_type")) == "spawn":
+                                try:
+                                    await self._apply_skin()
+                                except Exception as exc:
+                                    log_debug(
+                                        f"{LOG_PREFIX} skin re-apply on spawn "
+                                        f"skipped: {exc}"
+                                    )
                         await self._dispatch_event(raw)
             except asyncio.CancelledError:
                 break
             except Exception as exc:
-                log_debug(f"{LOG_PREFIX} poll error: {exc}")
+                consecutive_failures += 1
+                log_debug(
+                    f"{LOG_PREFIX} poll error "
+                    f"({consecutive_failures}/{_MAX_POLL_FAILURES}): {exc}"
+                )
+                if consecutive_failures >= _MAX_POLL_FAILURES:
+                    # The bridge/world client is unreachable. Flip the liveness
+                    # flag so the interface's disconnect-grace sweep can close
+                    # the stale session and autonomous beats stop firing.
+                    self._connected = False
+                    self.last_error = (
+                        f"lost contact with the Minecraft bridge after "
+                        f"{consecutive_failures} failed polls: {exc}"
+                    )
+                    log_warning(
+                        f"{LOG_PREFIX} bridge unreachable after "
+                        f"{consecutive_failures} failed polls — marking "
+                        "disconnected"
+                    )
+                    break
             await asyncio.sleep(_POLL_INTERVAL_SEC)
 
     async def _dispatch_event(self, raw: Dict[str, Any]) -> None:
@@ -594,7 +742,12 @@ class MinecraftConnector(VesselConnectorBase):
                 result = await mc_goals.update_active_goal(
                     note=payload.get("note"),
                     status=payload.get("status"),
-                    destination=self._extract_destination(payload),
+                    destination=await self._resolve_travel_destination(payload),
+                    steps=payload.get("steps"),
+                    current_step=payload.get("current_step"),
+                    advance=bool(payload.get("advance")),
+                    target_kind=payload.get("target_kind"),
+                    target_name=payload.get("target_name"),
                 )
                 ok = result.get("status") == "ok"
                 return VesselActionResult(
@@ -612,7 +765,10 @@ class MinecraftConnector(VesselConnectorBase):
                 description,
                 self._session_id,
                 note=payload.get("note"),
-                destination=self._extract_destination(payload),
+                destination=await self._resolve_travel_destination(payload),
+                steps=payload.get("steps"),
+                target_kind=payload.get("target_kind"),
+                target_name=payload.get("target_name"),
             )
             ok = result.get("status") == "ok"
             return VesselActionResult(
@@ -623,6 +779,33 @@ class MinecraftConnector(VesselConnectorBase):
         except Exception as exc:  # pragma: no cover - defensive
             log_warning(f"{LOG_PREFIX} goal verb '{action}' failed: {exc}")
             return VesselActionResult(ok=False, detail=str(exc))
+
+    async def _resolve_travel_destination(
+        self,
+        payload: Dict[str, Any],
+    ) -> Dict[str, float] | None:
+        """Extract the payload destination and reproject it to a real distance.
+
+        Combines :meth:`_extract_destination` (numeric-only, no free text) with
+        :meth:`_reproject_destination` so a too-close coordinate the will beat
+        chose is pushed out along the same heading to ``_MIN_TRAVEL_DISTANCE``.
+        This is the fix that makes the body actually walk when cognition sets an
+        ambitious goal but a near destination: storage keeps the *direction*
+        Synth chose, the reflex gets a genuinely distant target. Fail-safe — a
+        missing/unreadable live position leaves the destination untouched.
+        """
+        dest = self._extract_destination(payload)
+        if dest is None:
+            return None
+        position: Any = None
+        try:
+            res = await self._post("/cmd", {"action": "status", "payload": {}})
+            if res.get("ok"):
+                position = (res.get("data") or {}).get("position")
+        except Exception as exc:  # pragma: no cover - defensive
+            log_debug(f"{LOG_PREFIX} could not read position for reprojection: {exc}")
+            return dest
+        return self._reproject_destination(position, dest)
 
     async def get_world_state(self) -> WorldState | None:
         if not self._connected:
@@ -683,6 +866,15 @@ class MinecraftConnector(VesselConnectorBase):
                 # auto-computed progress; Synth judges its own progress.
                 "current_goal": current_goal,
                 "recent_goals": recent_goals,
+                # Structural 3-state feedback on the last named target the motor
+                # tried to reach (arrived / not_found / unreachable). Lets the
+                # slow will beat see *why* a target failed and re-plan (pick
+                # another target, or set a destination to go look for it). All
+                # None until a named target is attempted. See motor_step /
+                # _record_target_outcome — classification is keyword-free.
+                "last_target_result": self._last_target_result,
+                "last_target_name": self._last_target_name,
+                "last_target_kind": self._last_target_kind,
             },
         )
 
@@ -734,6 +926,10 @@ class MinecraftConnector(VesselConnectorBase):
                     "target": name,
                     "verb": verb,
                     "distance": ent.get("distance"),
+                    # Absolute world position, carried through so the Vessel
+                    # core can derive a cardinal bearing (N/E/S/W) for the
+                    # sighting view. Purely geometric — never inspected here.
+                    "position": ent.get("position"),
                 }
             )
         for blk in blocks:
@@ -748,6 +944,7 @@ class MinecraftConnector(VesselConnectorBase):
                     "target": name,
                     "verb": "use",
                     "distance": blk.get("distance"),
+                    "position": blk.get("position"),
                 }
             )
         out.sort(key=lambda a: (a.get("distance") is None, a.get("distance") or 0))
@@ -760,6 +957,158 @@ class MinecraftConnector(VesselConnectorBase):
     # How close (blocks, horizontal) the body must get to a self-chosen travel
     # destination before it counts as "arrived" and stops steering toward it.
     _ARRIVAL_RADIUS = 4.0
+
+    # Minimum genuine travel distance (blocks, horizontal) a self-chosen
+    # destination must sit at for the body to actually walk. The will beat (a
+    # slow LLM) often picks a coordinate only a couple of blocks away — well
+    # inside ``_ARRIVAL_RADIUS`` — so the motor reflex treats it as "already
+    # arrived" and never moves. When that happens we *reproject* the target
+    # along the very same direction cognition chose, out to this distance, so
+    # the body receives a genuinely distant goal without overriding *where*
+    # Synth wants to go. It is ``_ARRIVAL_RADIUS`` plus a margin so the target
+    # is unambiguously outside the arrival ring.
+    _MIN_TRAVEL_DISTANCE = 16.0
+
+    # Self-directed exploration legs must be genuinely long, not short and
+    # segmented (TODO): when the body invents its own next waypoint it walks a
+    # distance of ``_MIN_TRAVEL_DISTANCE`` times a factor drawn uniformly from
+    # ``[_EXPLORE_LEG_MIN_FACTOR, _EXPLORE_LEG_MAX_FACTOR]`` — i.e. roughly
+    # 3–4× longer than the bare minimum, randomised each time so successive
+    # legs are never identical. The randomness keeps autonomous movement from
+    # looking mechanical, and the length means the body commits to a real trek
+    # (it can still be interrupted mid-leg by an en-route sighting or a benign
+    # affordance in reach — the motor tick re-decides every interval).
+    _EXPLORE_LEG_MIN_FACTOR = 3.0
+    _EXPLORE_LEG_MAX_FACTOR = 4.0
+
+    # How many consecutive motor ticks the body may sit "arrived at the
+    # destination with nothing new to do" before the reflex stops waiting for
+    # cognition and reprojects the destination forward on its own. This is the
+    # concrete guarantee that Synth "does not stay blocked until it reaches the
+    # destination" (TODO): the world is live, plans can change, so the body
+    # keeps exploring instead of circling the arrival tile while the slow will
+    # beat catches up. Purely a tick counter — no timers, no keywords.
+    _STALE_ARRIVAL_TICKS = 3
+
+    # How many consecutive motor ticks the body may pursue a numeric
+    # destination *without meaningfully closing the gap* before the reflex
+    # gives up on it as unreachable. A will-beat coordinate can be physically
+    # unreachable (in water, across a ravine, on a cliff): the pathfinder keeps
+    # closing to a few metres, fails, resets and re-approaches, so ``remaining``
+    # oscillates and the body never gets inside ``_ARRIVAL_RADIUS`` to "arrive"
+    # — pacing the same path back and forth forever. When the best distance we
+    # have managed toward the current destination fails to improve by at least
+    # ``_TRAVEL_PROGRESS_EPS`` for this many ticks, we consume the destination
+    # so the body marches on. Purely numeric — no timers, no keywords.
+    _STALE_TRAVEL_TICKS = 6
+
+    # Minimum improvement (blocks, horizontal) in the best distance toward the
+    # current destination that counts as "still making progress". Smaller
+    # oscillations are treated as being stuck.
+    _TRAVEL_PROGRESS_EPS = 1.0
+
+    # Physical-motion watchdog thresholds (see ``_last_body_position``). If the
+    # body moves less than ``_STUCK_MOVE_EPS`` blocks (horizontal) between two
+    # consecutive motor ticks while a destination is still pending, that tick
+    # counts as "not moving"; after ``_STUCK_POSITION_TICKS`` such ticks the
+    # destination is treated as unreachable and consumed. This measures the
+    # *body*, not the distance number, so it fires even when ``remaining``
+    # oscillates or ticks are skipped during blocking pathfinding.
+    _STUCK_MOVE_EPS = 0.75
+    _STUCK_POSITION_TICKS = 4
+
+    # Turn applied to the exploration heading each time a stale destination is
+    # reprojected, so successive self-directed reprojections fan out across the
+    # world instead of retracing the same straight line. ~2.4 rad ≈ 137° (a
+    # golden-angle-ish step) spreads directions well without ever repeating.
+    _EXPLORE_TURN_RAD = 2.399963
+
+    @staticmethod
+    def _explore_leg_distance() -> float:
+        """Randomised length (blocks) of a self-directed exploration leg.
+
+        Returns ``_MIN_TRAVEL_DISTANCE`` scaled by a uniform factor in
+        ``[_EXPLORE_LEG_MIN_FACTOR, _EXPLORE_LEG_MAX_FACTOR]`` — i.e. legs are
+        ~3–4× longer than the bare minimum and vary each call, so autonomous
+        travel is neither short/segmented nor mechanically repetitive.
+        """
+        factor = random.uniform(
+            MinecraftConnector._EXPLORE_LEG_MIN_FACTOR,
+            MinecraftConnector._EXPLORE_LEG_MAX_FACTOR,
+        )
+        return MinecraftConnector._MIN_TRAVEL_DISTANCE * factor
+
+    @staticmethod
+    def _reproject_forward(
+        position: Any,
+        heading: float,
+    ) -> Dict[str, float] | None:
+        """Pick a fresh, distant travel target from ``position`` along ``heading``.
+
+        Purely geometric self-directed exploration: project a point a
+        randomised long distance (see :meth:`_explore_leg_distance`, ~3–4×
+        ``_MIN_TRAVEL_DISTANCE``) away from the current position along the given
+        planar ``heading`` (radians). Used by the anti-stall reflex when a
+        self-chosen destination has been reached but cognition has not yet
+        supplied a new one — the body invents its own next waypoint so it keeps
+        moving, over a genuinely long, non-repetitive leg. Returns ``None`` when
+        there is no usable position.
+        """
+        if not isinstance(position, dict):
+            return None
+        try:
+            px = float(position["x"])
+            pz = float(position["z"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        leg = MinecraftConnector._explore_leg_distance()
+        dx = math.cos(heading) * leg
+        dz = math.sin(heading) * leg
+        return {"x": px + dx, "z": pz + dz}
+
+    @staticmethod
+    def _reproject_destination(
+        position: Any,
+        dest: Dict[str, float] | None,
+    ) -> Dict[str, float] | None:
+        """Push a too-close destination out to a real travel distance.
+
+        Purely geometric, no keywords: if ``dest`` sits closer than
+        ``_MIN_TRAVEL_DISTANCE`` to ``position`` (but is not the current tile),
+        move it *along the same heading* out to ``_MIN_TRAVEL_DISTANCE`` so the
+        motor reflex actually traverses toward the direction cognition chose,
+        instead of treating a 2-block offset as "arrived". Returns ``dest``
+        unchanged when it is already far enough, and ``None`` / the original
+        when there is nothing usable to reproject (e.g. no position, or the
+        target coincides with the current position — no meaningful heading).
+        """
+        if not isinstance(dest, dict) or "x" not in dest or "z" not in dest:
+            return dest
+        if not isinstance(position, dict):
+            return dest
+        try:
+            px = float(position["x"])
+            pz = float(position["z"])
+        except (KeyError, TypeError, ValueError):
+            return dest
+        dx = dest["x"] - px
+        dz = dest["z"] - pz
+        distance = (dx * dx + dz * dz) ** 0.5
+        if distance >= MinecraftConnector._MIN_TRAVEL_DISTANCE:
+            return dest
+        if distance <= 1e-6:
+            # Destination coincides with the current position: no heading to
+            # extend along, leave it untouched so the reflex falls back to
+            # local wandering rather than an arbitrary direction.
+            return dest
+        scale = MinecraftConnector._MIN_TRAVEL_DISTANCE / distance
+        reprojected: Dict[str, float] = {
+            "x": px + dx * scale,
+            "z": pz + dz * scale,
+        }
+        if "y" in dest:
+            reprojected["y"] = dest["y"]
+        return reprojected
 
     @staticmethod
     def _goal_destination(goal: Dict[str, Any] | None) -> Dict[str, float] | None:
@@ -791,6 +1140,48 @@ class MinecraftConnector(VesselConnectorBase):
         return out
 
     @staticmethod
+    def _goal_target(goal: Dict[str, Any] | None) -> Dict[str, str] | None:
+        """Extract the structural ``{kind, name}`` target from the active goal.
+
+        The *what to head for* (a specific block/entity type Synth chose from
+        the live scan, or a bare ``coordinate`` marker) is decided by cognition
+        — the will beat or the out-of-band drone planner — and stored on the
+        goal (see ``goals._coerce_target``). This reflex only reads those
+        already-validated fields; it never inspects the goal's free text nor
+        matches names against keywords. Returns ``None`` when the goal carries
+        no usable block/entity target (a bare ``coordinate`` target is handled
+        by :meth:`_goal_destination`, so it is treated as "no reflex target"
+        here). The bridge resolves ``name`` structurally by exact id.
+        """
+        if not isinstance(goal, dict):
+            return None
+        kind = goal.get("target_kind")
+        name = goal.get("target_name")
+        if kind not in ("block", "entity"):
+            return None
+        if not isinstance(name, str) or not name.strip():
+            return None
+        return {"kind": kind, "name": name.strip().lower()}
+
+    @staticmethod
+    def _goal_key(goal: Dict[str, Any] | None) -> str | None:
+        """Stable identity for the active goal + its destination.
+
+        Used by the anti-stall reflex to tell "still the same objective" from
+        "cognition gave me a new one": the stall counter resets whenever this
+        key changes. Combines the goal id (if any) with its numeric destination
+        so that a re-aimed destination on the same goal id also counts as new.
+        Purely structural — never reads the goal's free text.
+        """
+        if not isinstance(goal, dict):
+            return None
+        gid = goal.get("id")
+        dest = MinecraftConnector._goal_destination(goal)
+        if dest is None:
+            return f"{gid}:none" if gid is not None else None
+        return f"{gid}:{dest.get('x')}:{dest.get('z')}"
+
+    @staticmethod
     def _horizontal_distance(position: Any, dest: Dict[str, float]) -> float | None:
         """Planar (x/z) distance from ``position`` to ``dest``, or ``None``."""
         if not isinstance(position, dict):
@@ -801,6 +1192,69 @@ class MinecraftConnector(VesselConnectorBase):
         except (KeyError, TypeError, ValueError):
             return None
         return (dx * dx + dz * dz) ** 0.5
+
+    @staticmethod
+    def _scan_has_target(state: Any, target: Dict[str, str]) -> bool:
+        """Whether the named target's exact id is present in the live scan.
+
+        Structural, keyword-free: it compares the goal's already-validated
+        ``target_name`` (lowercased exact id) against the block/entity ids the
+        world snapshot actually enumerated (``extra['blocks']`` /
+        ``extra['entities']``), matching by the same field the will beat picked
+        the id from (``name`` for blocks, ``type`` then ``name`` for entities).
+        Never parses free text. Used only to tell ``not_found`` (type not in the
+        scan) from ``unreachable`` (in the scan but pathfinder failed).
+        """
+        try:
+            extra = getattr(state, "extra", None) or {}
+        except Exception:  # pragma: no cover - defensive
+            return False
+        name = target.get("name")
+        kind = target.get("kind")
+        if not name:
+            return False
+        if kind == "block":
+            items = extra.get("blocks") or []
+            keys = ("name",)
+        else:
+            items = extra.get("entities") or []
+            keys = ("type", "name")
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            for k in keys:
+                val = item.get(k)
+                if isinstance(val, str) and val.strip().lower() == name:
+                    return True
+        return False
+
+    def _record_target_outcome(
+        self,
+        state: Any,
+        target: Dict[str, str],
+        result: VesselActionResult,
+    ) -> None:
+        """Store the structural 3-state outcome of a named-target ``goto``.
+
+        Purely structural classification (see ``__init__`` note): ``ok`` maps to
+        ``arrived``; a failure is ``unreachable`` when the target id was in the
+        live scan, else ``not_found``. Never inspects the bridge ``detail`` text.
+        The result is surfaced in the next ``WorldState.extra`` so the slow will
+        beat can re-plan. Fail-safe: any error leaves the previous feedback
+        untouched.
+        """
+        try:
+            if getattr(result, "ok", False):
+                outcome = "arrived"
+            elif self._scan_has_target(state, target):
+                outcome = "unreachable"
+            else:
+                outcome = "not_found"
+            self._last_target_result = outcome
+            self._last_target_name = target.get("name")
+            self._last_target_kind = target.get("kind")
+        except Exception as exc:  # pragma: no cover - defensive
+            log_debug(f"{LOG_PREFIX} target outcome record failed: {exc}")
 
     async def motor_step(self, goal: Dict[str, Any] | None) -> Dict[str, Any]:
         """Fast reflexive step toward the active goal — **no LLM, no cognition**.
@@ -834,8 +1288,15 @@ class MinecraftConnector(VesselConnectorBase):
             (sand, stone) and freezing in place.
           * A benign affordance farther away **and no pending destination** →
             ``goto`` it (walk closer).
-          * Nothing around and no destination → ``wander`` as a last resort so
-            the body still explores instead of freezing.
+          * No numeric destination but the goal names a structural block/entity
+            **target** (chosen by cognition from the live scan) → ``goto`` that
+            named thing so the bridge resolves it by exact id and pathfinds to
+            it. This is the "idea → technical action" translation that stops the
+            body from circling when the direction lived only in the goal text.
+          * Nothing to interact with, no destination and no target → march
+            along a **persistent heading** (a directed exploration line that
+            only rotates on arrival/stall), never a random ``wander`` that
+            drifts in tight loops resembling circling.
 
         Fail-safe: any error degrades to ``{"acted": False, ...}`` and never
         raises into the scheduler.
@@ -864,6 +1325,15 @@ class MinecraftConnector(VesselConnectorBase):
             # signal that "what I'm looking for is *not* here" — so it must win
             # over merely *walking toward* incidental far-off scenery.
             dest = self._goal_destination(goal)
+            # A numeric destination we have already reached for *this* goal is
+            # "spent": ignore it so the body explores beyond the point instead
+            # of pacing back and forth to a static waypoint the slow will beat
+            # has not yet refreshed. A new goal (new key) revives its dest.
+            if (
+                dest is not None
+                and self._goal_key(goal) == self._consumed_destination_key
+            ):
+                dest = None
             travel_pending = False
             travel_remaining: float | None = None
             if dest is not None:
@@ -871,31 +1341,147 @@ class MinecraftConnector(VesselConnectorBase):
                 travel_pending = (
                     travel_remaining is None or travel_remaining > self._ARRIVAL_RADIUS
                 )
+                # Progress watchdog for an unreachable waypoint. Track the best
+                # (smallest) distance we have managed toward *this* destination
+                # key; if it stops improving for a while the point is
+                # effectively unreachable (pathfinder oscillates without ever
+                # entering the arrival ring) — consume it so the body stops
+                # pacing back and forth and marches on. Purely numeric.
+                dest_key = self._goal_key(goal)
+                if dest_key != self._travel_dest_key:
+                    self._travel_dest_key = dest_key
+                    self._travel_best_remaining = travel_remaining
+                    self._travel_stall_ticks = 0
+                elif travel_remaining is not None:
+                    if (
+                        self._travel_best_remaining is None
+                        or travel_remaining
+                        <= self._travel_best_remaining - self._TRAVEL_PROGRESS_EPS
+                    ):
+                        self._travel_best_remaining = travel_remaining
+                        self._travel_stall_ticks = 0
+                    else:
+                        self._travel_stall_ticks += 1
+                if self._travel_stall_ticks >= self._STALE_TRAVEL_TICKS:
+                    self._consumed_destination_key = dest_key
+                    self._travel_stall_ticks = 0
+                    dest = None
+                    travel_pending = False
+                    travel_remaining = None
 
-            if benign:
-                # Affordances arrive distance-sorted (nearest first); take head.
-                target = benign[0]
-                distance = target.get("distance")
-                name = target.get("target")
+            # Physical-motion watchdog — **global**, not per-branch. The
+            # distance-based watchdog above only sees a *numeric* waypoint whose
+            # ``remaining`` oscillates; it is blind to the far more general case
+            # the user hit: the body simply **stops moving** while the motor
+            # keeps re-issuing a ``goto`` every tick. That ``goto`` may be
+            # steering to a numeric coordinate, but it may equally be walking
+            # toward a named block/entity ``target`` (the goal_target branch or
+            # an out-of-reach affordance) that the pathfinder can never actually
+            # reach (across water, up a cliff, inside a dug pit at y=60) — the
+            # observed "goto reason=None dest=None, body pinned at one spot
+            # forever" report. None of those branches carry a distance number,
+            # so the only reliable signal is the body's *own* displacement.
+            #
+            # Measure the horizontal distance the body actually covered since the
+            # previous tick; a tick that moved it less than ``_STUCK_MOVE_EPS``
+            # blocks counts as "not moving". After ``_STUCK_POSITION_TICKS`` such
+            # ticks the body is wedged regardless of what it is aiming at, so we
+            # (a) consume any numeric destination, and (b) raise ``force_march``
+            # to suppress the named-target / affordance-goto branches below and
+            # fall straight through to the directional march, which reprojects a
+            # fresh forward waypoint *and rotates the heading* — the one action
+            # guaranteed to break free of a wedge. Purely numeric (measured
+            # motion), no keywords, robust to skipped/laggy ticks.
+            force_march = False
+            cur_pos = state.position if isinstance(state.position, dict) else None
+            moved: float | None = None
+            if cur_pos is not None and self._last_body_position is not None:
+                moved = self._horizontal_distance(cur_pos, self._last_body_position)
+            if cur_pos is not None:
+                try:
+                    self._last_body_position = {
+                        "x": float(cur_pos["x"]),
+                        "z": float(cur_pos["z"]),
+                    }
+                except (KeyError, TypeError, ValueError):
+                    self._last_body_position = None
+            if moved is not None and moved < self._STUCK_MOVE_EPS:
+                self._stuck_position_ticks += 1
+            else:
+                self._stuck_position_ticks = 0
+            if self._stuck_position_ticks >= self._STUCK_POSITION_TICKS:
+                self._stuck_position_ticks = 0
+                force_march = True
+                # Rotate the exploration heading so the forced march breaks out
+                # in a *new* direction rather than re-aiming at the same wedge.
+                self._explore_heading += self._EXPLORE_TURN_RAD
+                if dest is not None:
+                    self._consumed_destination_key = self._goal_key(goal)
+                    self._travel_dest_key = None
+                    self._travel_best_remaining = None
+                    self._travel_stall_ticks = 0
+                    dest = None
+                    travel_pending = False
+                    travel_remaining = None
+
+            # The structural target cognition chose (a specific block/entity id
+            # from the live scan). This is the "idea → technical action"
+            # translation: instead of the body wandering in circles because the
+            # *direction* lived only in the goal's free text, cognition names a
+            # concrete thing to walk to and the bridge resolves it by exact id.
+            goal_target = self._goal_target(goal)
+
+            # A benign affordance in reach is only worth stopping for when we
+            # are NOT mid-journey. If cognition chose a destination we have not
+            # reached yet (``travel_pending``), travelling wins over grabbing
+            # incidental scenery — otherwise, in a desert (sand/sandstone are
+            # *always* within reach) the body would ``use``/``mine`` the ground
+            # under its feet every tick and never actually walk to the goal,
+            # exactly the "wandering in circles" trap the will beat warns about.
+            if benign and not travel_pending and not force_march:
+                # Affordances arrive distance-sorted (nearest first). Skip any
+                # in-reach one we already interacted with on the previous tick:
+                # a live scan keeps re-surfacing the same adjacent block/entity,
+                # so re-``use``/``mine``ing it every 3 s would pin the body on
+                # the spot forever (the "freezes inert at one point" bug). By
+                # dropping it we fall through to the travel/march branches and
+                # keep moving. Structural (kind + exact id) — never keyword-based.
+                fresh: list[Dict[str, Any]] = []
+                for a in benign:
+                    a_name = a.get("target")
+                    a_key = f"{a.get('kind')}:{a_name}" if a_name else None
+                    if a_key is not None and a_key == self._last_reflex_interaction:
+                        continue
+                    fresh.append(a)
+                target = fresh[0] if fresh else None
+                distance = target.get("distance") if target else None
+                name = target.get("target") if target else None
 
                 within_reach = isinstance(distance, (int, float)) and (
                     distance <= self._MOTOR_REACH
                 )
-                if within_reach and name:
-                    # Something is literally in front of us — grab/use it first,
-                    # regardless of any distant destination.
+                if within_reach and name and target is not None:
+                    # Something new is literally in front of us and we have
+                    # nowhere to be — grab/use it, then remember it so the next
+                    # tick moves on instead of repeating the same interaction.
+                    self._last_reflex_interaction = f"{target.get('kind')}:{name}"
                     if target.get("kind") == "block":
                         await self.act("mine", {"target": name})
                         return {"acted": True, "action": "mine", "target": name}
                     await self.act("use", {"target": name})
                     return {"acted": True, "action": "use", "target": name}
 
-                # Out of reach. Only chase this affordance if we have *nowhere
-                # chosen to go*; otherwise heading toward random far scenery
-                # (e.g. ubiquitous sand in a desert) would trap the body in
-                # place and never reach the goal. When a travel destination is
-                # still pending, fall through to it below.
-                if name and not travel_pending:
+                # Out of reach. Only chase this affordance if we have *no
+                # chosen destination at all*; otherwise heading toward random
+                # far scenery (e.g. ubiquitous sand in a desert) would trap the
+                # body in place and never reach the goal. Crucially, this must
+                # also step aside once a destination has been *reached* (not
+                # just while still travelling): if we kept chasing incidental
+                # affordances after arrival, the body would never fall into the
+                # arrival/anti-stall block below and would freeze on the spot.
+                # So gate on ``dest is None`` (no destination) rather than
+                # ``not travel_pending`` (which is also true once arrived).
+                if name and dest is None:
                     await self.act("goto", {"target": name})
                     return {"acted": True, "action": "goto", "target": name}
 
@@ -903,6 +1489,12 @@ class MinecraftConnector(VesselConnectorBase):
             # to the goal even when incidental affordances litter the path.
             if dest is not None:
                 if travel_pending:
+                    # Still en route: steer toward the goal, but do NOT lock the
+                    # body to it until arrival — the loops above already let a
+                    # benign affordance in reach interrupt the trip, so plans
+                    # can change mid-travel if something turns up.
+                    self._arrival_goal_key = None
+                    self._arrival_stall_ticks = 0
                     payload: Dict[str, Any] = {"x": dest["x"], "z": dest["z"]}
                     if "y" in dest:
                         payload["y"] = dest["y"]
@@ -913,12 +1505,102 @@ class MinecraftConnector(VesselConnectorBase):
                         "destination": dest,
                         "remaining": travel_remaining,
                     }
-                # Arrived at the destination but nothing useful is here yet;
-                # roam locally so the body keeps searching around the target.
+
+                # Arrived at the destination. Mark it *consumed* for this goal
+                # so subsequent ticks stop steering back to the same static
+                # waypoint (which caused the "same path back and forth" pacing):
+                # from now on the body explores beyond the point via the
+                # directional march, until a fresh goal supplies a new dest.
+                self._consumed_destination_key = self._goal_key(goal)
+                # Reset the unreachable-waypoint watchdog: we arrived cleanly.
+                self._travel_dest_key = None
+                self._travel_best_remaining = None
+                self._travel_stall_ticks = 0
+                # The will beat (a slow LLM) may not have handed the body a
+                # fresh objective yet — but the world is live and Synth must not
+                # freeze here waiting: count how long we have been idling on this
+                # same goal, and once it goes stale invent our own next waypoint
+                # so the body keeps exploring and its plans can change on their
+                # own.
+                key = self._goal_key(goal)
+                if key != self._arrival_goal_key:
+                    self._arrival_goal_key = key
+                    self._arrival_stall_ticks = 1
+                else:
+                    self._arrival_stall_ticks += 1
+
+                if self._arrival_stall_ticks >= self._STALE_ARRIVAL_TICKS:
+                    forward = self._reproject_forward(
+                        state.position, self._explore_heading
+                    )
+                    # Fan the heading out for the next reprojection so repeated
+                    # stalls explore new directions instead of one line.
+                    self._explore_heading += self._EXPLORE_TURN_RAD
+                    self._arrival_stall_ticks = 0
+                    if forward is not None:
+                        await self.act("goto", {"x": forward["x"], "z": forward["z"]})
+                        return {
+                            "acted": True,
+                            "action": "goto",
+                            "destination": forward,
+                            "reason": "stale_arrival_reproject",
+                        }
+
+                # Not stale yet: roam locally so the body keeps searching around
+                # the target while giving cognition a brief chance to re-aim.
                 await self.act("wander", {})
                 return {"acted": True, "action": "wander", "reason": "arrived"}
 
-            # Nothing to work with and nowhere chosen to go — roam to explore.
+            # No numeric destination, but cognition named a concrete block/
+            # entity to reach. Let the bridge resolve it structurally by exact
+            # id (``resolveTargetBlock``) and pathfind to it — this is the whole
+            # point of the fix: the body walks *toward the named thing* instead
+            # of wandering in circles because the direction was only in words.
+            if goal_target is not None and not force_march:
+                self._arrival_goal_key = None
+                self._arrival_stall_ticks = 0
+                result = await self.act("goto", {"target": goal_target["name"]})
+                # Record the structural 3-state outcome (arrived / not_found /
+                # unreachable) so the next will beat can re-plan when the named
+                # target can't be reached. Keyword-free — see
+                # ``_record_target_outcome``.
+                self._record_target_outcome(state, goal_target, result)
+                return {
+                    "acted": True,
+                    "action": "goto",
+                    "target": goal_target["name"],
+                    "target_kind": goal_target["kind"],
+                    "target_result": self._last_target_result,
+                }
+
+            # Nothing to work with and nowhere chosen to go. Rather than a random
+            # ``wander`` (which drifts in tight loops and looks like circling),
+            # keep marching along a *persistent* heading so the body covers real
+            # ground while the slow will beat decides on a concrete target. The
+            # heading only rotates when a leg is reached or the walk stalls, so
+            # exploration is a directed line, not a spin in place.
+            forward = self._reproject_forward(state.position, self._explore_heading)
+            march_key = self._goal_key(goal)
+            if march_key != self._arrival_goal_key:
+                self._arrival_goal_key = march_key
+                self._arrival_stall_ticks = 1
+            else:
+                self._arrival_stall_ticks += 1
+            if self._arrival_stall_ticks >= self._STALE_ARRIVAL_TICKS:
+                # Reached (or stuck near) the current leg — turn and lay the
+                # next one so the march sweeps new ground instead of one line.
+                self._explore_heading += self._EXPLORE_TURN_RAD
+                self._arrival_stall_ticks = 0
+            if forward is not None:
+                await self.act("goto", {"x": forward["x"], "z": forward["z"]})
+                return {
+                    "acted": True,
+                    "action": "goto",
+                    "destination": forward,
+                    "reason": "directional_march",
+                }
+
+            # Reprojection failed (no position) — last-resort roam.
             await self.act("wander", {})
             return {"acted": True, "action": "wander"}
         except Exception as exc:  # pragma: no cover - defensive
@@ -995,6 +1677,39 @@ class MinecraftConnector(VesselConnectorBase):
                 "optional_fields": ["count", "search_radius", "timeout_ms"],
                 "security_level": "low",
             },
+            "smelt": {
+                "description": (
+                    "Cook or smelt something in a nearby furnace, given by its "
+                    "exact input name (item), e.g. turn raw_iron into "
+                    "iron_ingot or cook food. Optionally smelt several (count) "
+                    "and name the 'fuel' you want to use (coal by default). You "
+                    "walk to a nearby furnace on your own. Smelting takes time "
+                    "in-world, so check your inventory again on a later moment "
+                    "to see the results. This is how you refine ores into "
+                    "usable metal."
+                ),
+                "required_fields": ["item"],
+                "optional_fields": [
+                    "count",
+                    "fuel",
+                    "search_radius",
+                    "timeout_ms",
+                ],
+                "security_level": "low",
+            },
+            "equip": {
+                "description": (
+                    "Wear or hold one of the things you are carrying, given by "
+                    "its exact name (item), e.g. put on an iron_chestplate or "
+                    "iron_helmet, hold a sword, or raise a shield. The right "
+                    "body slot is chosen for you (armor goes where it belongs); "
+                    "pass 'slot' only if you want to override it. This is how "
+                    "you actually protect yourself with the armor you made."
+                ),
+                "required_fields": ["item"],
+                "optional_fields": ["slot"],
+                "security_level": "low",
+            },
             "inventory": {
                 "description": (
                     "Check what you are currently carrying. Purely "
@@ -1046,17 +1761,44 @@ class MinecraftConnector(VesselConnectorBase):
                     "just relax by the water…). Put it in 'description'. This "
                     "becomes your single active goal and guides how you play "
                     "until you finish or change your mind. This is how you play "
-                    "your own game, not a script. If what you want is NOT in "
-                    "this area (for example there are no trees here and you "
-                    "want wood, or you want to reach a different biome), pick a "
+                    "your own game, not a script. If your goal is a bigger "
+                    "project that takes several stages (for example crafting a "
+                    "full iron armor set, or building a house), break it down "
+                    "YOURSELF into an ordered list of concrete sub-steps and "
+                    "pass them in 'steps' (e.g. [\"get wood and make a "
+                    'crafting table", "craft a wooden then stone pickaxe", '
+                    '"mine iron ore", "smelt the iron", "craft the armor '
+                    'pieces", "wear the armor"]). Use your own Minecraft '
+                    "knowledge — there is no template. You will work through "
+                    "the steps one at a time and mark each done with "
+                    "'update_goal' (advance). If what you want is NOT in this "
+                    "area (for example there are no trees here and you want "
+                    "wood, or you want to reach a different biome), pick a "
                     "place to head toward and give its coordinates in "
                     "'destination_x' and 'destination_z' (from your position "
                     "and what you can see): your body will then walk that way on "
                     "its own while you play. Leave them out if you are happy "
-                    "where you are."
+                    "where you are. IMPORTANT — so your body actually walks to "
+                    "what you want instead of drifting in circles, whenever your "
+                    "goal is about reaching or gathering a specific thing you "
+                    "can see, name that thing structurally: set 'target_kind' to "
+                    "'block' or 'entity' and 'target_name' to its EXACT id from "
+                    "what you observed (e.g. target_kind='block', "
+                    "target_name='oak_log'; or target_kind='entity', "
+                    "target_name='cow'). Pick the name verbatim from your scan — "
+                    "do not invent one. Your body will then head straight to the "
+                    "nearest one. Use 'coordinate' only when you mean a bare "
+                    "spot with the destination fields."
                 ),
                 "required_fields": ["description"],
-                "optional_fields": ["note", "destination_x", "destination_z"],
+                "optional_fields": [
+                    "note",
+                    "steps",
+                    "destination_x",
+                    "destination_z",
+                    "target_kind",
+                    "target_name",
+                ],
                 "security_level": "low",
             },
             "update_goal": {
@@ -1065,18 +1807,33 @@ class MinecraftConnector(VesselConnectorBase):
                     "how it is going in your own words, or set 'status' to "
                     "'done' when you feel you have achieved it or 'abandoned' "
                     "if you have changed your mind. You are the judge of your "
-                    "own progress — nothing counts it for you. If you realise "
-                    "you need to travel somewhere else to make progress, set a "
-                    "new 'destination_x'/'destination_z' and your body will head "
+                    "own progress — nothing counts it for you. If your goal has "
+                    "an ordered plan of sub-steps and you have just finished "
+                    "the current one, set 'advance' to true to move on to the "
+                    "next step. You can also rewrite the whole plan by passing "
+                    "a new 'steps' list, or jump to a specific step with "
+                    "'current_step' (0-based). If you realise you need to travel "
+                    "somewhere else to make progress, set a new "
+                    "'destination_x'/'destination_z' and your body will head "
                     "there; you do not have to touch it if the direction still "
-                    "feels right."
+                    "feels right. If you now want to head for a specific thing "
+                    "you can see, re-aim your body by setting 'target_kind' "
+                    "('block' or 'entity') and 'target_name' to its EXACT id "
+                    "from what you observed (verbatim from your scan) — your "
+                    "body will then walk to the nearest one instead of "
+                    "wandering."
                 ),
                 "required_fields": [],
                 "optional_fields": [
                     "note",
                     "status",
+                    "advance",
+                    "steps",
+                    "current_step",
                     "destination_x",
                     "destination_z",
+                    "target_kind",
+                    "target_name",
                 ],
                 "security_level": "low",
             },
@@ -1094,6 +1851,36 @@ class MinecraftConnector(VesselConnectorBase):
     @property
     def is_connected(self) -> bool:
         return self._connected
+
+    def get_in_world_name(self) -> str | None:
+        """Return the in-world Minecraft username other players use to address
+        the bot.
+
+        Mirrors the resolution the provisioner applies when launching the
+        bridge (``interface/minecraft_provisioner.py``): an explicit
+        ``MINECRAFT_BOT_USERNAME_OVERRIDE`` wins, otherwise ``SYNTH_NAME``. This
+        lets direct-address detection recognise an in-world chat line that names
+        the bot by its Minecraft nickname even when it differs from Synth's
+        persona name.
+        """
+        try:
+            from core.config_manager import config_registry
+
+            override = str(
+                config_registry.get_value(
+                    "MINECRAFT_BOT_USERNAME_OVERRIDE",
+                    "",
+                    group="plugins",
+                    component="minecraft_vessel",
+                )
+                or ""
+            ).strip()
+            if override:
+                return override
+            name = str(config_registry.get_value("SYNTH_NAME", "") or "").strip()
+            return name or None
+        except Exception:  # pragma: no cover - defensive
+            return None
 
 
 # Module-level connector class + self-registration (registry contract).
@@ -1265,7 +2052,7 @@ class MinecraftVesselPlugin(PluginBase):
                 "Base URL the Minecraft server can reach to fetch the uploaded "
                 "skin file (e.g. 'http://192.168.1.42:9009'). Leave empty to "
                 "auto-derive from the WebUI host/port. The final texture URL is "
-                "'<base>/api/config/MINECRAFT_SKIN_FILE/file'."
+                "'<base>/api/plugins/minecraft_vessel/skin.png'."
             ),
             group="plugins",
             component="minecraft_vessel",
@@ -1328,6 +2115,45 @@ class MinecraftVesselPlugin(PluginBase):
         # Minecraft exposes no actions of its own; the generic ``vessel_*``
         # actions are owned by the Rift Vessel core plugin.
         return {}
+
+    async def teardown(self) -> None:
+        """End the Minecraft embodiment when this sub-plugin is disabled.
+
+        Called by the runtime plugin toggle (``POST /api/components/toggle`` →
+        :meth:`core_initializer.disable_plugin`). Disabling the Minecraft world
+        while connected must close its session so the lived experience is
+        flushed and the connection is dropped — otherwise a phantom session
+        would keep deprioritising chat and running beats until the cooldown.
+        Fully fail-safe: teardown must never raise.
+        """
+        try:
+            from core.core_initializer import INTERFACE_REGISTRY
+
+            iface = INTERFACE_REGISTRY.get("vessel")
+        except Exception as exc:  # pragma: no cover - defensive
+            log_warning(f"[minecraft_vessel] teardown: interface unavailable: {exc}")
+            iface = None
+
+        try:
+            from core.vessel_registry import VESSEL_REGISTRY
+
+            connector = (getattr(VESSEL_REGISTRY, "_instances", {}) or {}).get(
+                "minecraft"
+            )
+            if connector is not None:
+                await connector.disconnect()
+        except Exception as exc:  # pragma: no cover - defensive
+            log_warning(f"[minecraft_vessel] teardown: disconnect failed: {exc}")
+
+        if iface is not None and hasattr(iface, "end_sessions_for_environment"):
+            try:
+                await iface.end_sessions_for_environment("minecraft", reason="logout")
+            except Exception as exc:  # pragma: no cover - defensive
+                log_warning(
+                    f"[minecraft_vessel] teardown: end_sessions_for_environment failed: {exc}"
+                )
+
+        log_info("[minecraft_vessel] teardown complete (session closed on disable)")
 
 
 PLUGIN_CLASS = MinecraftVesselPlugin

@@ -285,7 +285,7 @@ async def test_apply_skin_file_builds_command_with_explicit_base(
     assert captured["payload"]["action"] == "skin"
     assert (
         captured["payload"]["payload"]["command"]
-        == "/skin url http://synth.local:8080/api/config/MINECRAFT_SKIN_FILE/file slim"
+        == "/skin url http://synth.local:8080/api/plugins/minecraft_vessel/skin.png slim"
     )
 
 
@@ -312,7 +312,7 @@ async def test_apply_skin_file_default_tries_all_providers(
     )
     monkeypatch.setattr(conn, "_post", _fake_post)
     await conn._apply_skin()
-    url = "http://192.168.1.42:8080/api/config/MINECRAFT_SKIN_FILE/file"
+    url = "http://192.168.1.42:8080/api/plugins/minecraft_vessel/skin.png"
     assert commands == [
         f'/skin set web slim "{url}"',
         f"/skin url {url}",
@@ -345,7 +345,7 @@ async def test_apply_skin_templates_list_overrides_default(
     )
     monkeypatch.setattr(conn, "_post", _fake_post)
     await conn._apply_skin()
-    url = "http://host:8080/api/config/MINECRAFT_SKIN_FILE/file"
+    url = "http://host:8080/api/plugins/minecraft_vessel/skin.png"
     assert commands == [
         f'/skin set web classic "{url}"',
         f"/skin url {url}",
@@ -376,7 +376,7 @@ async def test_apply_skin_legacy_single_template_still_works(
     monkeypatch.setattr(conn, "_post", _fake_post)
     await conn._apply_skin()
     assert commands == [
-        "/skin url http://synth.local:8080/api/config/MINECRAFT_SKIN_FILE/file"
+        "/skin url http://synth.local:8080/api/plugins/minecraft_vessel/skin.png"
     ]
 
 
