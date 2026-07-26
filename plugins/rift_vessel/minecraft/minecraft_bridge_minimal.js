@@ -87,6 +87,13 @@ try {
 // login. Kept module-level so goto/wander reuse it.
 let botMovements = null;
 
+// Persistent wander heading (radians). Free exploration keeps a broadly
+// consistent bearing across legs so the bot treks *away* rather than circling
+// back on itself ("si muove circolarmente"). Each leg only nudges the heading
+// by a small random drift; it is reset to a fresh random bearing on each new
+// login so a new session doesn't inherit the previous direction.
+let wanderHeading = null;
+
 const CFG = {
   bridgeHost: process.env.BRIDGE_HOST || '127.0.0.1',
   bridgePort: parseInt(process.env.BRIDGE_PORT || '8137', 10),
@@ -129,6 +136,57 @@ let connectResolver = null;
 // walk continue. A different destination cleanly supersedes the old one.
 /** @type {{ key: string, promise: Promise<any> } | null} */
 let activeNav = null;
+
+// Tracks the most recent melee swing near the bot so a `damage` event can be
+// attributed to an attacker. Mineflayer's high-level `entityHurt` only reports
+// WHICH entity was hurt, never WHO hit it — so we correlate the hurt with the
+// closest entity that recently swung its arm (structural, no keyword logic).
+/** @type {{ id: number, at: number } | null} */
+let lastSwing = null;
+const SWING_ATTRIBUTION_WINDOW_MS = 1500;
+const ATTACKER_MAX_DISTANCE = 6;
+
+// Classify an entity as an attacker source without keyword matching: a mob is
+// hostile game logic, a real player is a person. Falls back to a neutral
+// "entity" when the structural type is unknown.
+function classifyAttacker(entity) {
+  if (!entity) return 'entity';
+  if (entity.type === 'player' || entity.username) return 'player';
+  if (entity.type === 'mob') return 'mob';
+  return String(entity.type || 'entity');
+}
+
+// Resolve who most likely dealt the damage: prefer the entity that swung its
+// arm within the attribution window (and is still within melee range), else
+// the nearest hostile mob or player. Returns null when no plausible source is
+// found (e.g. fall/environmental damage).
+function resolveAttacker() {
+  if (!bot || !bot.entity || !bot.entities) return null;
+  const self = bot.entity;
+  const now = Date.now();
+  // 1) A recent swinger, if it is still close.
+  if (lastSwing && now - lastSwing.at <= SWING_ATTRIBUTION_WINDOW_MS) {
+    const swinger = bot.entities[lastSwing.id];
+    if (swinger && swinger !== self && swinger.position) {
+      const dist = self.position.distanceTo(swinger.position);
+      if (dist <= ATTACKER_MAX_DISTANCE) {
+        return { entity: swinger, distance: Math.round(dist * 10) / 10 };
+      }
+    }
+  }
+  // 2) Fallback: the nearest mob or player within melee range.
+  let best = null;
+  for (const e of Object.values(bot.entities)) {
+    if (!e || e === self || !e.position) continue;
+    if (e.type !== 'mob' && e.type !== 'player' && !e.username) continue;
+    const dist = self.position.distanceTo(e.position);
+    if (dist > ATTACKER_MAX_DISTANCE) continue;
+    if (!best || dist < best.distance) {
+      best = { entity: e, distance: Math.round(dist * 10) / 10 };
+    }
+  }
+  return best;
+}
 
 function settleConnect(result) {
   if (connectResolver) {
@@ -357,13 +415,10 @@ async function navigateToGoal(goal, timeoutMs, navKey) {
         bot.pathfinder.goto(goal),
         new Promise((_, reject) => setTimeout(() => reject(new Error('navigation timed out')), budget)),
       ]);
-      pushEvent({
-        environment: ENVIRONMENT,
-        event_type: 'arrival',
-        summary: 'Arrived at destination',
-        actor: bot.username,
-        data: { position: botPosition() },
-      });
+      // No 'arrival' perception event is emitted: the autonomy motor tick
+      // re-issues the same goto every few seconds, so an arrival event floods
+      // the Rift Vessel activity log / WebUI. Arrival is still returned to the
+      // caller for control flow, just not surfaced as a logged perception.
       return { ok: true, detail: 'arrived', data: { position: botPosition() } };
     } catch (err) {
       try {
@@ -400,6 +455,8 @@ function wireBotEvents(b) {
     // 'spawn' is the authoritative "we are actually in the world" signal.
     connected = true;
     lastError = null;
+    // Fresh session → fresh exploration bearing (see the wander case).
+    wanderHeading = null;
     settleConnect({ ok: true, detail: 'spawned' });
   });
 
@@ -439,6 +496,7 @@ function wireBotEvents(b) {
   });
 
   b.on('chat', (username, message) => {
+    log('chat event:', JSON.stringify({ username, message }));
     if (username === b.username) return;
     pushEvent({
       environment: ENVIRONMENT,
@@ -447,6 +505,15 @@ function wireBotEvents(b) {
       actor: username,
       data: { message },
     });
+  });
+
+  // Diagnostic catch-all: some servers deliver player chat through a custom
+  // formatted system message (chat plugins, LuckPerms prefixes, etc.) that the
+  // high-level 'chat' event does not decode into (username, message). Log the
+  // raw rendered text of every incoming message so we can see WHY 'chat' is not
+  // firing. This is a structural probe (no keyword logic), diagnostic only.
+  b.on('messagestr', (message, position) => {
+    log('messagestr:', JSON.stringify({ position, message: String(message).slice(0, 200) }));
   });
 
   b.on('playerJoined', (player) => {
@@ -460,14 +527,43 @@ function wireBotEvents(b) {
     });
   });
 
+  // Record every melee swing so `entityHurt` can attribute the hit to a
+  // source. Mineflayer fires this for any entity that swings its arm.
+  b.on('entitySwingArm', (entity) => {
+    if (!entity || (bot && entity === bot.entity)) return;
+    lastSwing = { id: entity.id, at: Date.now() };
+  });
+
   b.on('entityHurt', (entity) => {
     if (!bot || !entity || entity !== bot.entity) return;
+    const attacker = resolveAttacker();
+    const data = { health: bot.health };
+    let summary = 'Took damage';
+    let actor = b.username;
+    if (attacker && attacker.entity) {
+      const src = classifyAttacker(attacker.entity);
+      const name =
+        attacker.entity.username ||
+        attacker.entity.name ||
+        attacker.entity.displayName ||
+        src;
+      data.attacker = {
+        name,
+        source: src,
+        distance: attacker.distance,
+        position: roundVec(attacker.entity.position),
+      };
+      actor = name;
+      summary = `Took damage from ${name}`;
+    }
+    // Clear the swing so a later unrelated hurt is not mis-attributed.
+    lastSwing = null;
     pushEvent({
       environment: ENVIRONMENT,
       event_type: 'damage',
-      summary: 'Took damage',
-      actor: b.username,
-      data: { health: bot.health },
+      summary,
+      actor,
+      data,
     });
   });
 
@@ -912,21 +1008,59 @@ async function runAction(action, payload) {
       };
     }
     case 'wander': {
-      // Roam to a random nearby reachable point — free, self-directed
-      // exploration. Radius is tunable; kept modest so it stays responsive.
+      // Roam to a random reachable point — free, self-directed exploration.
+      // Legs are deliberately long and randomised (TODO: paths were "troppo
+      // corti e segmentati"): default radius 48 (~3x the old 16) and a minimum
+      // leg of half the radius, so a wander is a real trek rather than a couple
+      // of blocks. It stays interruptible: the motor tick re-decides every
+      // interval, so an en-route sighting or a benign affordance in reach can
+      // redirect before arrival.
+      //
+      // Directional persistence: the bot keeps a broadly consistent heading
+      // across legs instead of picking a fresh random angle each time (which
+      // made it "si muove circolarmente" — wander back and forth). We seed a
+      // random bearing once, then each leg only drifts it by a small amount so
+      // the bot commits to a direction and treks that way. A caller may force a
+      // heading via payload.heading (radians) — e.g. to turn around when there
+      // *is* a reason to; otherwise the persistent heading is used and updated.
       if (!pathfinder || !bot.pathfinder) {
         return { ok: false, detail: 'wander unavailable (pathfinder not loaded)', data: {} };
       }
-      const radius = Math.min(Math.max(parseInt(payload.radius || '16', 10) || 16, 4), 64);
-      const angle = Math.random() * Math.PI * 2;
-      const dist = 4 + Math.random() * (radius - 4);
+      const radius = Math.min(Math.max(parseInt(payload.radius || '48', 10) || 48, 8), 128);
+      // Small per-leg drift (±~26°) keeps the path natural without reversing it.
+      const MAX_DRIFT = Math.PI / 7;
+      let heading;
+      if (payload.heading !== undefined && payload.heading !== null && payload.heading !== '') {
+        // Explicit heading requested (a real reason to change direction).
+        heading = parseFloat(payload.heading);
+        if (!Number.isFinite(heading)) heading = null;
+      }
+      if (heading === null || heading === undefined) {
+        if (wanderHeading === null) {
+          // First leg of exploration: pick an initial bearing at random.
+          wanderHeading = Math.random() * Math.PI * 2;
+        } else {
+          // Continue broadly the same way, drifting only a little.
+          wanderHeading += (Math.random() * 2 - 1) * MAX_DRIFT;
+        }
+        heading = wanderHeading;
+      } else {
+        // Adopt the forced heading as the new persistent bearing.
+        wanderHeading = heading;
+      }
+      const minLeg = radius / 2;
+      const dist = minLeg + Math.random() * (radius - minLeg);
       const p = bot.entity.position;
-      const tx = Math.floor(p.x + Math.cos(angle) * dist);
-      const tz = Math.floor(p.z + Math.sin(angle) * dist);
+      const tx = Math.floor(p.x + Math.cos(heading) * dist);
+      const tz = Math.floor(p.z + Math.sin(heading) * dist);
       const goal = new pathfinder.goals.GoalNear(tx, Math.floor(p.y), tz, 2);
       const nav = await navigateToGoal(goal, payload.timeout_ms);
       if (nav.ok) {
         nav.detail = 'wandered';
+      } else {
+        // Blocked this way — rotate the heading substantially so the next leg
+        // tries a genuinely different direction instead of hammering the wall.
+        wanderHeading = (wanderHeading + Math.PI / 2 + Math.random() * (Math.PI / 2)) % (Math.PI * 2);
       }
       return nav;
     }
@@ -991,6 +1125,118 @@ async function runAction(action, payload) {
           detail: `crafted ${count}x ${itemName}`,
           data: { item: itemName, count, used_table: Boolean(craftingTable) },
         };
+      } catch (err) {
+        return { ok: false, detail: String(err && err.message ? err.message : err), data: {} };
+      }
+    }
+    case 'smelt': {
+      // Smelt an input item in a nearby furnace (e.g. raw_iron -> iron_ingot).
+      // Purely structural: the caller supplies the exact input (and optional
+      // fuel) item names; the bridge never interprets what a name means. Auto-
+      // locates the nearest furnace and walks to it when out of reach.
+      const inputName = String(payload.item || payload.input || '').trim().toLowerCase();
+      if (!inputName) return { ok: false, detail: 'input item name required', data: {} };
+      const count = Math.min(Math.max(parseInt(payload.count || '1', 10) || 1, 1), 64);
+      const fuelName = String(payload.fuel || 'coal').trim().toLowerCase();
+      const version = bot.version;
+      const mcData = minecraftData && version ? minecraftData(version) : null;
+      if (!mcData || !mcData.itemsByName) {
+        return { ok: false, detail: 'smelting unavailable (minecraft-data not loaded)', data: {} };
+      }
+      const inputDef = mcData.itemsByName[inputName];
+      if (!inputDef) return { ok: false, detail: `unknown item '${inputName}'`, data: {} };
+      // A furnace or blast_furnace is required and must be reachable.
+      let furnaceBlock =
+        resolveTargetBlock('furnace', payload.search_radius) ||
+        resolveTargetBlock('blast_furnace', payload.search_radius);
+      if (!furnaceBlock) {
+        return { ok: false, detail: 'no reachable furnace nearby', data: {} };
+      }
+      try {
+        if (
+          bot.entity.position.distanceTo(furnaceBlock.position) > 3.5 &&
+          pathfinder &&
+          bot.pathfinder
+        ) {
+          const p = furnaceBlock.position;
+          await navigateToGoal(new pathfinder.goals.GoalNear(p.x, p.y, p.z, 2), payload.timeout_ms);
+        }
+        const furnace = await bot.openFurnace(furnaceBlock);
+        try {
+          const fuelDef = mcData.itemsByName[fuelName];
+          if (fuelDef) {
+            const haveFuel = bot.inventory
+              .items()
+              .some((it) => it.type === fuelDef.id);
+            if (haveFuel) {
+              try {
+                await furnace.putFuel(fuelDef.id, null, 1);
+              } catch (fuelErr) {
+                /* fuel may already be present; continue */
+              }
+            }
+          }
+          await furnace.putInput(inputDef.id, null, count);
+        } finally {
+          // Give the furnace a moment; the caller re-checks via inventory on a
+          // later beat (progress is Synth's own judgement, not counted here).
+          try {
+            furnace.close();
+          } catch (e) {
+            /* ignore */
+          }
+        }
+        pushEvent({
+          environment: ENVIRONMENT,
+          event_type: 'smelt',
+          summary: `Smelting ${count}x ${inputName}`,
+          actor: bot.username,
+          data: { item: inputName, count, fuel: fuelName },
+        });
+        return {
+          ok: true,
+          detail: `smelting ${count}x ${inputName}`,
+          data: { item: inputName, count, fuel: fuelName },
+        };
+      } catch (err) {
+        return { ok: false, detail: String(err && err.message ? err.message : err), data: {} };
+      }
+    }
+    case 'equip': {
+      // Wear/hold an item the bot is carrying (e.g. iron_helmet, iron_chestplate,
+      // a shield or a tool). 'destination' defaults to the correct armor slot
+      // inferred by mineflayer; pass an explicit 'slot' to override
+      // (head/torso/legs/feet/hand/off-hand). Purely structural.
+      const itemName = String(payload.item || '').trim().toLowerCase();
+      if (!itemName) return { ok: false, detail: 'item name required', data: {} };
+      try {
+        const item = bot.inventory
+          .items()
+          .find((it) => it.name && it.name.toLowerCase() === itemName);
+        if (!item) {
+          return { ok: false, detail: `not carrying '${itemName}'`, data: {} };
+        }
+        const rawSlot = String(payload.slot || '').trim().toLowerCase();
+        const allowedSlots = ['head', 'torso', 'legs', 'feet', 'hand', 'off-hand'];
+        let dest = allowedSlots.includes(rawSlot) ? rawSlot : null;
+        if (!dest) {
+          // Infer the armor slot from the item name suffix; fall back to hand.
+          if (itemName.endsWith('helmet')) dest = 'head';
+          else if (itemName.endsWith('chestplate')) dest = 'torso';
+          else if (itemName.endsWith('leggings')) dest = 'legs';
+          else if (itemName.endsWith('boots')) dest = 'feet';
+          else if (itemName === 'shield') dest = 'off-hand';
+          else dest = 'hand';
+        }
+        await bot.equip(item, dest);
+        pushEvent({
+          environment: ENVIRONMENT,
+          event_type: 'equip',
+          summary: `Equipped ${itemName} (${dest})`,
+          actor: bot.username,
+          data: { item: itemName, slot: dest },
+        });
+        return { ok: true, detail: `equipped ${itemName}`, data: { item: itemName, slot: dest } };
       } catch (err) {
         return { ok: false, detail: String(err && err.message ? err.message : err), data: {} };
       }

@@ -1,0 +1,12 @@
+{
+  "name": "synth-minecraft-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "description": "SyntH Rift Vessel Minecraft bridge — self-contained Node runtime shipped inside the plugin package.",
+  "main": "minecraft_bridge_minimal.js",
+  "dependencies": {
+    "mineflayer": "^4.20.0",
+    "mineflayer-pathfinder": "^2.4.5",
+    "minecraft-data": "^3.78.0"
+  }
+}

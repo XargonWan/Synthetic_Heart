@@ -47,16 +47,30 @@ from core.logging_utils import log_error, log_info, log_warning
 
 LOG_PREFIX = "[minecraft_provisioner]"
 
-# Default install root for the bridge inside the container. Overridable so tests
-# and non-container hosts can point it at a writable location.
-_DEFAULT_BRIDGE_ROOT = "/opt/minecraft_bridge"
+# The Minecraft Vessel folder inside the repo. Every Minecraft-specific asset
+# (the bridge script *and*, now, its Node runtime) lives here so the plugin is
+# self-contained: a future plugin store can ship/remove the whole folder as one
+# unit without touching a shared system path (see TODO — "il binario mineflayer
+# deve essere nella cartella del plugin e chiamato da li").
+_MINECRAFT_PLUGIN_DIR = Path("plugins") / "rift_vessel" / "minecraft"
+
+# Name of the bridge script within the plugin folder.
+_BRIDGE_SCRIPT_NAME = "minecraft_bridge_minimal.js"
+
+# The bridge's Node runtime lives in a ``mineflayer`` sub-folder *inside the
+# plugin folder* (``plugins/rift_vessel/minecraft/mineflayer/``) so the plugin
+# is a self-contained, distributable package: a plugin store can ship the whole
+# ``plugins/rift_vessel/minecraft/`` tree (e.g. as a zip) with its Node runtime
+# already inside, and the bridge is always "called from there" — never a shared
+# ``/opt`` path that is lost on container recreate. The folder's ``package.json``
+# is committed as source (part of the package); only its ``node_modules`` are a
+# build artefact (covered by the global ``node_modules/`` gitignore rule).
+_BRIDGE_RUNTIME_SUBDIR = "mineflayer"
 
 # Source of the bridge script inside the repo. It lives next to the Minecraft
 # connector (``plugins/rift_vessel/minecraft/``) so all Minecraft Vessel assets
-# stay together; the provisioner copies it into the bridge working directory.
-_BRIDGE_SRC_RELATIVE = (
-    Path("plugins") / "rift_vessel" / "minecraft" / "minecraft_bridge_minimal.js"
-)
+# stay together.
+_BRIDGE_SRC_RELATIVE = _MINECRAFT_PLUGIN_DIR / _BRIDGE_SCRIPT_NAME
 
 # npm dependencies required by the bridge. ``mineflayer-pathfinder`` powers the
 # navigation verbs (``follow``/``goto``/``wander``); without it the bot connects
@@ -70,12 +84,34 @@ class BridgeProvisioner:
     """Install and control the Minecraft Vessel bridge subprocess."""
 
     def __init__(self, bridge_root: str | None = None) -> None:
-        self._bridge_root = Path(
-            bridge_root or os.environ.get("MINECRAFT_BRIDGE_ROOT", _DEFAULT_BRIDGE_ROOT)
-        )
+        # Default bridge root = the plugin's own ``mineflayer`` folder, so the
+        # Node runtime is self-contained within the plugin package. Overridable
+        # via ``MINECRAFT_BRIDGE_ROOT`` (tests / non-container hosts) for a
+        # writable location.
+        env_override = os.environ.get("MINECRAFT_BRIDGE_ROOT")
+        # ``_explicit_root`` marks tests / hosts that pin their own writable
+        # location; in that mode we preserve the historical contract where the
+        # bridge script is *copied* into the root and executed from there.
+        self._explicit_root = bool(bridge_root or env_override)
+        if bridge_root:
+            self._bridge_root = Path(bridge_root)
+        elif env_override:
+            self._bridge_root = Path(env_override)
+        else:
+            self._bridge_root = (
+                Path(__file__).resolve().parent.parent
+                / _MINECRAFT_PLUGIN_DIR
+                / _BRIDGE_RUNTIME_SUBDIR
+            )
         self._state_file = self._bridge_root / "bridge.json"
         self._log_file = self._bridge_root / "bridge.log"
-        self._bridge_script = self._bridge_root / "minecraft_bridge_minimal.js"
+        # Default mode: run the bridge script *in place* from the plugin folder
+        # (the runtime dir only holds Node deps). Explicit-root mode: the script
+        # lives inside the root, copied there by :meth:`install` (historical).
+        if self._explicit_root:
+            self._bridge_script = self._bridge_root / _BRIDGE_SCRIPT_NAME
+        else:
+            self._bridge_script = self._bridge_src()
         self._proc: asyncio.subprocess.Process | None = None
 
     # ------------------------------------------------------------------
@@ -140,6 +176,19 @@ class BridgeProvisioner:
                 "MC_VERSION": _cfg("MINECRAFT_SERVER_VERSION", ""),
             }
         )
+
+        # The bridge script lives in the plugin folder while its node_modules
+        # live in the ``mineflayer`` sub-folder, so Node's default require
+        # resolution (which walks up from the *script's* directory) would miss
+        # them. Point NODE_PATH at the runtime's node_modules so ``require`` of
+        # mineflayer & friends resolves regardless of where the script sits.
+        node_modules = self._bridge_root / "node_modules"
+        existing_node_path = env.get("NODE_PATH", "")
+        env["NODE_PATH"] = (
+            f"{node_modules}{os.pathsep}{existing_node_path}"
+            if existing_node_path
+            else str(node_modules)
+        )
         return env
 
     def _read_state(self) -> Dict[str, Any]:
@@ -172,14 +221,149 @@ class BridgeProvisioner:
         except OSError:
             return False
 
+    @staticmethod
+    def _pid_is_bridge(pid: int) -> bool:
+        """Return whether ``pid`` is actually *our* Mineflayer bridge process.
+
+        A bare :meth:`_pid_alive` check is not enough: after the container is
+        recreated (``docker compose up -d --build``) the old bridge PID recorded
+        in ``bridge.json`` no longer belongs to the bridge, yet the same numeric
+        PID is almost always reassigned to an unrelated init/system process in
+        the fresh container — so ``os.kill(pid, 0)`` succeeds and ``start()``
+        wrongly reports "already running", never launching the bridge (the exact
+        `Cannot connect to host 127.0.0.1:8137` failure). We therefore confirm
+        the process command line references the bridge script via
+        ``/proc/<pid>/cmdline`` (Linux). On platforms without ``/proc`` we
+        conservatively fall back to bare liveness so behaviour is unchanged.
+        """
+        if pid <= 0:
+            return False
+        cmdline_path = Path("/proc") / str(pid) / "cmdline"
+        if not cmdline_path.exists():
+            # No /proc (non-Linux) — cannot inspect; fall back to liveness.
+            return BridgeProvisioner._pid_alive(pid)
+        try:
+            raw = cmdline_path.read_bytes()
+        except (ProcessLookupError, FileNotFoundError):
+            return False
+        except Exception:
+            # Unreadable (e.g. owned by another user) — fall back to liveness.
+            return BridgeProvisioner._pid_alive(pid)
+        cmdline = raw.replace(b"\x00", b" ").decode("utf-8", errors="replace")
+        return "minecraft_bridge_minimal.js" in cmdline
+
     def _running_pid(self) -> int | None:
         if self._proc is not None and self._proc.returncode is None:
             return self._proc.pid
         state = self._read_state()
         pid = int(state.get("pid", 0) or 0)
-        if pid and self._pid_alive(pid):
+        if pid and self._pid_is_bridge(pid):
             return pid
         return None
+
+    def _deps_present(self) -> bool:
+        """Return whether every required npm dep is installed in the runtime."""
+        return all(
+            (self._bridge_root / "node_modules" / dep).exists()
+            for dep in _BRIDGE_NPM_DEPS
+        )
+
+    def _bridge_port(self) -> int:
+        try:
+            return int(self._bridge_env().get("BRIDGE_PORT", "8137"))
+        except (TypeError, ValueError):
+            return 8137
+
+    def _bridge_host(self) -> str:
+        return self._bridge_env().get("BRIDGE_HOST", "127.0.0.1") or "127.0.0.1"
+
+    async def _probe_health(self) -> Dict[str, Any] | None:
+        """GET ``/health`` from a bridge already listening on our port.
+
+        Returns the parsed JSON dict, or ``None`` if nothing answers (no live
+        bridge on the port). Best-effort — any error yields ``None``.
+        """
+        host = self._bridge_host()
+        port = self._bridge_port()
+        try:
+            import aiohttp
+
+            timeout = aiohttp.ClientTimeout(total=2)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(f"http://{host}:{port}/health") as resp:
+                    return await resp.json()
+        except Exception:
+            return None
+
+    async def _reap_orphan_bridge(self) -> bool:
+        """Kill any orphan/unhealthy bridge holding our port, so we can restart.
+
+        The recurring "missing the 'mineflayer' Node module" failure that forced
+        a container restart is caused by a *stale* bridge process: an earlier
+        bridge started before ``npm install`` finished (or before the deps
+        existed), so its one-shot ``require('mineflayer')`` failed permanently.
+        That process keeps ``/health`` answering ``mineflayer:false`` and holds
+        the port, while our recorded PID in ``bridge.json`` points elsewhere —
+        so :meth:`start` never recognises it, launches a fresh process that dies
+        with ``EADDRINUSE``, and the connector keeps reading the sick bridge.
+
+        This reaper detects that situation structurally (a live ``/health`` that
+        reports ``mineflayer:false``, or a process bound to the port that is not
+        the PID we track) and terminates it via ``fuser``/PID so a clean bridge
+        can bind. Returns ``True`` if something was reaped.
+        """
+        health = await self._probe_health()
+        if health is None:
+            return False  # nothing answering — port is free for a fresh start.
+
+        tracked = self._running_pid()
+        if tracked and health.get("mineflayer", False):
+            # Our tracked, healthy bridge already owns the port — leave it.
+            return False
+
+        # Either the bridge is sick (mineflayer:false) or it is an orphan we do
+        # not track. Kill whatever holds the port so start() can bind cleanly.
+        port = self._bridge_port()
+        killed = False
+
+        fuser = shutil.which("fuser")
+        if fuser is not None:
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    fuser,
+                    "-k",
+                    f"{port}/tcp",
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                await asyncio.wait_for(proc.wait(), timeout=10)
+                killed = True
+            except Exception as exc:
+                log_warning(f"{LOG_PREFIX} fuser reap failed: {exc}")
+
+        if not killed:
+            # Fallback: kill the PID we track, if any (best-effort).
+            if tracked:
+                try:
+                    os.kill(tracked, signal.SIGTERM)
+                    killed = True
+                except Exception:
+                    pass
+
+        # Give the OS a moment to release the socket.
+        for _ in range(20):
+            if await self._probe_health() is None:
+                break
+            await asyncio.sleep(0.25)
+
+        if killed:
+            log_info(
+                f"{LOG_PREFIX} reaped stale/unhealthy bridge on port {port} "
+                "(mineflayer not loaded)"
+            )
+            self._proc = None
+            self._write_state({})
+        return killed
 
     # ------------------------------------------------------------------
     # install
@@ -210,11 +394,19 @@ class BridgeProvisioner:
 
         try:
             self._bridge_root.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(src, self._bridge_script)
+            # In default (self-contained) mode the script is executed in place
+            # from the plugin folder, so no copy is needed. In explicit-root
+            # mode (tests / pinned host path) copy it into the root, preserving
+            # the historical contract.
+            if self._explicit_root:
+                shutil.copyfile(src, self._bridge_script)
         except Exception as exc:
             return {"ok": False, "detail": f"failed to copy bridge script: {exc}"}
 
-        # Ensure a package.json exists so npm install is well-behaved.
+        # The ``mineflayer`` package folder ships a committed ``package.json``
+        # (part of the distributable plugin package), so npm install is
+        # well-behaved and reproducible. Only write one as a defensive fallback
+        # if it is somehow absent (e.g. explicit-root mode / a partial copy).
         pkg = self._bridge_root / "package.json"
         if not pkg.exists():
             try:
@@ -300,16 +492,32 @@ class BridgeProvisioner:
 
         pid = self._running_pid()
         if pid:
-            return {"ok": True, "detail": "already running", "pid": pid}
+            # A bridge we track is running — but if it came up sick (its
+            # one-shot require('mineflayer') failed), it will answer /health with
+            # mineflayer:false forever. Reap it so we relaunch a healthy one
+            # instead of returning "already running" onto a broken bridge.
+            health = await self._probe_health()
+            if health is not None and health.get("mineflayer", False):
+                return {"ok": True, "detail": "already running", "pid": pid}
+            await self._reap_orphan_bridge()
 
         node = shutil.which("node")
         if not node:
             return {"ok": False, "detail": "node not found in PATH"}
 
-        if not self._bridge_script.exists():
+        # Ensure the bridge is fully provisioned before launch. Previously
+        # install() ran only when the *script* was missing, so a runtime with
+        # the script present but missing/incomplete node_modules would launch a
+        # bridge whose require('mineflayer') fails — the exact recurring error.
+        # We now (re)install whenever the script OR any npm dep is missing.
+        if not self._bridge_script.exists() or not self._deps_present():
             install_res = await self.install()
             if not install_res.get("ok"):
                 return install_res
+
+        # Reap any stale/unhealthy bridge still holding the port before we bind,
+        # so a fresh launch never dies with EADDRINUSE onto a sick predecessor.
+        await self._reap_orphan_bridge()
 
         try:
             self._bridge_root.mkdir(parents=True, exist_ok=True)
@@ -394,11 +602,7 @@ class BridgeProvisioner:
             "pid": pid,
             "bridge_root": str(self._bridge_root),
             "started_at": state.get("started_at"),
-            "installed": self._bridge_script.exists()
-            and all(
-                (self._bridge_root / "node_modules" / dep).exists()
-                for dep in _BRIDGE_NPM_DEPS
-            ),
+            "installed": self._bridge_script.exists() and self._deps_present(),
         }
 
     def logs(self, lines: int = 100) -> Dict[str, Any]:
