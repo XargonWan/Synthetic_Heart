@@ -1469,6 +1469,48 @@ async def universal_send(interface_send_func, *args, text: str | None = None, **
                 ):
                     actions = [json_data]
 
+            # Drop leaked Recon-schema entries. A state-retaining browser engine
+            # (e.g. selenium-llm-engine) can echo the separate Recon call's JSON
+            # keys (tone_hint, agent_intent, language_hint, ...) back into the
+            # main-pass ``actions`` array. Those keys are preflight metadata, not
+            # executable actions; validating them yields "Unsupported type"
+            # errors that starve the turn and dead-end in the correction/fallback
+            # loop. The drop-set is derived reflectively from registered recon
+            # plugins (no keyword list), so it stays correct as plugins change.
+            if isinstance(actions, list) and actions:
+                try:
+                    from core.recon import get_registered_recon_keys
+
+                    _recon_keys = get_registered_recon_keys()
+                except Exception:
+                    _recon_keys = set()
+                if _recon_keys:
+
+                    def _leaked_recon_type(candidate: Any) -> str | None:
+                        if not isinstance(candidate, dict):
+                            return None
+                        atype = (
+                            candidate.get("type")
+                            or candidate.get("function")
+                            or candidate.get("name")
+                            or candidate.get("plugin")
+                            or candidate.get("action")
+                            or candidate.get("command")
+                        )
+                        if isinstance(atype, str) and atype.strip() in _recon_keys:
+                            return atype.strip()
+                        return None
+
+                    _kept = [a for a in actions if _leaked_recon_type(a) is None]
+                    _dropped = len(actions) - len(_kept)
+                    if _dropped:
+                        log_warning(
+                            f"[transport] Dropped {_dropped} leaked Recon-schema "
+                            f"action(s) from main-pass response (engine state "
+                            f"contamination); {len(_kept)} deliverable action(s) remain"
+                        )
+                        actions = _kept
+
             if not actions:
                 log_debug(f"[transport] No actions found in JSON: {json_data}")
                 return await _send_text(text)

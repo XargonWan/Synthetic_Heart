@@ -457,6 +457,68 @@ def _drop_misrouted_beat_actions(actions: list, ctx: Optional[dict]) -> list:
     return kept
 
 
+def _drop_leaked_recon_actions(actions: list) -> list:
+    """Drop actions whose type is a Recon-schema key leaked into the main pass.
+
+    The Recon pass ("prompt 0") runs its own LLM call on the *same* engine
+    immediately before the main pass. State-retaining external engines (e.g. the
+    browser-driven selenium endpoint, which cannot be reset from our side) can
+    carry that priming forward, so the main pass sometimes echoes Recon-schema
+    keys (``tone_hint``, ``agent_intent``, ``memory_search`` …) back inside its
+    ``actions`` array. Those keys are *never* real actions — validation would
+    reject every one of them, starving the turn of any deliverable action and
+    driving the corrector into an exhausting loop that ends in the ``😵``
+    fallback.
+
+    This filter removes any action whose ``type`` matches a currently-registered
+    Recon key *before* action-type validation runs, so a real deliverable action
+    (e.g. ``vessel_minecraft_say``) present in the same array can still succeed.
+    The key set is collected reflectively from the plugin registry — there is no
+    hardcoded keyword list, so it stays correct in every language and as plugins
+    change. Fully guarded: any failure leaves ``actions`` untouched.
+
+    Args:
+        actions: List of action dicts to filter.
+
+    Returns:
+        The filtered list of actions (leaked Recon-schema actions removed).
+    """
+    if not isinstance(actions, list) or not actions:
+        return actions
+
+    try:
+        from core.recon import get_registered_recon_keys
+
+        recon_keys = get_registered_recon_keys()
+    except Exception as e:
+        log_debug(f"[message_chain] Could not load Recon keys for drop-filter: {e}")
+        return actions
+
+    if not recon_keys:
+        return actions
+
+    kept: list = []
+    dropped: list = []
+    for action in actions:
+        if not isinstance(action, dict):
+            kept.append(action)
+            continue
+        atype = action.get("type") or action.get("action")
+        if isinstance(atype, str) and atype.strip() in recon_keys:
+            dropped.append(atype.strip())
+        else:
+            kept.append(action)
+
+    if dropped:
+        log_warning(
+            f"[message_chain] Dropped {len(dropped)} leaked Recon-schema "
+            f"action(s) before validation (engine state contamination): "
+            f"{dropped}; {len(kept)} action(s) remain"
+        )
+
+    return kept
+
+
 def _normalize_message_unknown(actions: list, interface_path: Optional[str]) -> list:
     """Normalize 'message_unknown' action types to the correct interface-specific type.
 
@@ -1602,6 +1664,12 @@ async def handle_incoming_message(
                 # the beat never offered (snippet origin or eligible target). This
                 # prevents an observer reply from landing in the wrong chat.
                 actions = _drop_misrouted_beat_actions(actions, ctx)
+                # Drop Recon-schema keys that a state-retaining engine leaked into
+                # the main pass (see _drop_leaked_recon_actions). Doing this here —
+                # before action-type validation — stops the leaked keys from
+                # starving the turn and triggering the corrector's 😵 loop, while
+                # preserving any real deliverable action in the same array.
+                actions = _drop_leaked_recon_actions(actions)
 
                 # --- New: Validate action types early and trigger corrector for unsupported types ---
                 try:

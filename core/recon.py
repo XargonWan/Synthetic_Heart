@@ -456,6 +456,47 @@ async def _normalize_keywords_list(raw_keywords: List[str] | None) -> List[str]:
     return out
 
 
+def get_registered_recon_keys() -> set[str]:
+    """Return the set of recon keys declared by currently registered plugins.
+
+    Recon plugins are preflight-only: they return ``{}`` from
+    ``get_supported_actions()`` and instead expose a single recon key via
+    ``get_recon_key()`` (e.g. ``tone_hint``, ``agent_intent``, ``language_hint``).
+    These keys are the schema of the *separate* Recon LLM call — they are never
+    valid main-pass actions.
+
+    State-retaining browser engines (e.g. ``selenium-llm-engine``) can leak the
+    Recon call's JSON schema into the immediately following main-pass response,
+    so the main pass emits an ``actions`` array made entirely of these recon
+    keys. Callers use this set to structurally drop such leaked entries before
+    validation, so a contaminated turn is not starved of deliverable actions.
+
+    The set is derived reflectively from ``PLUGIN_REGISTRY`` — no hardcoded
+    keyword list — so it stays correct as recon plugins are added or removed.
+    Fully guarded: any failure returns an empty set (drop nothing).
+    """
+    keys: set[str] = set()
+    try:
+        from core.core_initializer import PLUGIN_REGISTRY
+
+        plugins = list(PLUGIN_REGISTRY.values())
+    except Exception as e:  # pragma: no cover - defensive
+        log_warning(f"[recon] get_registered_recon_keys: registry unavailable: {e}")
+        return keys
+
+    for plugin in plugins:
+        get_key = getattr(plugin, "get_recon_key", None)
+        if not callable(get_key):
+            continue
+        try:
+            key = get_key()
+        except Exception:
+            continue
+        if isinstance(key, str) and key.strip():
+            keys.add(key.strip())
+    return keys
+
+
 async def gather_recon_contributions(
     message=None,
     context_memory=None,
@@ -516,6 +557,25 @@ async def gather_recon_contributions(
         if (has_combined or hasattr(p, "get_recon_contributions")) and _plugin_enabled(
             p, "RECON"
         ):
+            # Optional per-turn eligibility hook. A recon plugin may declare
+            # ``is_recon_eligible(message, context_memory) -> bool`` to opt out
+            # of a given turn *before* its key is baked into the combined recon
+            # prompt (returning [] from parse_recon_response is too late — the
+            # key is already in the single LLM call). Guarded and backward
+            # compatible: any error or a missing hook defaults to eligible.
+            if hasattr(p, "is_recon_eligible"):
+                try:
+                    if not p.is_recon_eligible(message, context_memory):
+                        log_debug(
+                            f"[recon] Plugin {p.__class__.__name__} opted out of "
+                            "this turn via is_recon_eligible; skipping"
+                        )
+                        continue
+                except Exception as exc:
+                    log_warning(
+                        f"[recon] is_recon_eligible failed for "
+                        f"{p.__class__.__name__}: {exc}; treating as eligible"
+                    )
             eligible.append(p)
 
     if not eligible:

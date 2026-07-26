@@ -1743,6 +1743,38 @@ async def run_actions(actions: Any, context: Dict[str, Any], bot, original_messa
         log_error(error_msg)
         return {"processed": [], "errors": [error_msg], "failed_actions": []}
 
+    # Drop leaked Recon-schema entries before validation. A state-retaining
+    # browser engine (e.g. selenium-llm-engine) can echo the separate Recon
+    # call's JSON keys (tone_hint, agent_intent, language_hint, ...) back into
+    # the main-pass ``actions`` array. Those keys are preflight metadata, not
+    # executable actions; validating them yields "Unsupported type" errors that
+    # can constitute the entire turn and dead-end in the correction/fallback
+    # loop (the "😵" bug). The drop-set is derived reflectively from registered
+    # recon plugins (no keyword list), so it stays correct as plugins change.
+    # Fully guarded: any failure drops nothing.
+    if actions:
+        try:
+            from core.recon import get_registered_recon_keys
+
+            _recon_keys = get_registered_recon_keys()
+        except Exception:
+            _recon_keys = set()
+        if _recon_keys:
+            _kept = []
+            for _a in actions:
+                _atype = _a.get("type") if isinstance(_a, dict) else None
+                if isinstance(_atype, str) and _atype.strip() in _recon_keys:
+                    continue
+                _kept.append(_a)
+            _dropped = len(actions) - len(_kept)
+            if _dropped:
+                log_warning(
+                    f"[action_parser] Dropped {_dropped} leaked Recon-schema "
+                    f"action(s) before validation (engine state contamination); "
+                    f"{len(_kept)} action(s) remain"
+                )
+                actions = _kept
+
     log_debug(f"[action_parser] run_actions called with {len(actions)} actions")
     log_debug(f"[action_parser] Actions: {actions}")
 
