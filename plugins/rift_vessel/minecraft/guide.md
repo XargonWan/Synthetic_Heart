@@ -203,7 +203,8 @@ box): `1.7`, `1.8.8`, `1.9.4`, `1.10.2`, `1.11.2`, `1.12.2`, `1.13.2`, `1.14.4`,
 
 If the bot reaches the server but disconnects with an error like
 `No data available for version 26.2` (visible in
-`/opt/minecraft_bridge/bridge.log`), the server announced a protocol version
+`plugins/rift_vessel/minecraft/mineflayer/bridge.log`), the server announced a
+protocol version
 that the bundled Mineflayer data doesn't recognise — this happens with very new
 releases, snapshots, or some proxies/mods. Mineflayer's auto-detection then
 fails.
