@@ -364,6 +364,34 @@ def build_will_prompt(world_state: Any, world: str) -> str:
             ]
         )
 
+    # Structural survival cue. When the self-preservation reflex recently acted
+    # on a danger (drowning, fire/lava, a hostile mob, or death), the connector
+    # records the threat name in ``extra["threat"]`` — a fixed structural token,
+    # never parsed from free text. Surface it so Synth is aware of the danger
+    # in-character and can factor it into what it decides to do next. The reflex
+    # already handled the *reaction*; this is only self-awareness for the slow
+    # will. Absent (None) when the body is safe.
+    threat = extra.get("threat")
+    if isinstance(threat, str) and threat:
+        threat_lines = {
+            "drowning": "you were running out of air underwater and had to swim "
+            "for the surface",
+            "burning": "you were standing in fire or lava and had to get out",
+            "defend": "a hostile creature attacked you and you fought back",
+            "flee": "a hostile creature was too dangerous and you had to run",
+            "dead": "you died and just respawned",
+        }
+        note = threat_lines.get(threat, f"something dangerous happened ({threat})")
+        lines.extend(
+            [
+                "",
+                f"Heads up: a moment ago {note}. Your instincts already reacted "
+                "to it — this is just so you know. Take it into account: maybe "
+                "steer clear of that spot, or let it change what you feel like "
+                "doing next.",
+            ]
+        )
+
     # Structural target cue. The single biggest reason the body drifts in
     # circles is that the *direction* lived only in the goal's free text, which
     # the motor tick must never read (keyword matching). So, when a goal is

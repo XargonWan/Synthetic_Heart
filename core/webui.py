@@ -5869,6 +5869,7 @@ class SynthWebUIInterface:
                 "TRAINER_CORTEX",
                 "LIVE_CORTEX",
                 "AGENT_CORTEX",
+                "VESSEL_CORTEX",
             ):
                 ui_type = "select"
                 if entry.get("key") == "LIVE_CORTEX":
@@ -5886,6 +5887,7 @@ class SynthWebUIInterface:
                     "GRILLO_CORTEX",
                     "TRAINER_CORTEX",
                     "AGENT_CORTEX",
+                    "VESSEL_CORTEX",
                 ):
                     options = ["Default"] + available_cortex_engines
                 else:
@@ -9507,6 +9509,7 @@ class SynthWebUIInterface:
             "TRAINER_CORTEX",
             "AGENT_CORTEX",
             "LIVE_CORTEX",
+            "VESSEL_CORTEX",
         }
         if key in _CORTEX_SCOPE_KEYS and isinstance(value, dict):
             try:

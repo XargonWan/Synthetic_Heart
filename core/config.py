@@ -175,6 +175,17 @@ AGENT_CORTEX = config_registry.get_var(
     allow_env_override=False,
 )
 
+VESSEL_CORTEX = config_registry.get_var(
+    "VESSEL_CORTEX",
+    "Default",
+    label="Rift Vessel (Will) Cortex",
+    description="Cortex engine used for Rift Vessel will beats — the slow volition turn where Synth authors its in-world goals (Default means Base Cortex).",
+    group="core",
+    component="cortex",
+    hidden=True,  # Managed via the Cortex Engines scope selectors
+    allow_env_override=False,
+)
+
 # LLM generation request timeout. Caps how long the synth waits for a single
 # cortex generation before aborting. On slow hardware a long reply can exceed a
 # short timeout, which aborts the HTTP request and makes llama.cpp cancel the
@@ -423,7 +434,7 @@ _register_exposed_var(
 # Cortex scope value (engine + optional model) storage helpers
 # ---------------------------------------------------------------------------
 # Each scope config key (BASE_CORTEX, AGENT_CORTEX, GRILLO_CORTEX,
-# TRAINER_CORTEX, LIVE_CORTEX) stores either:
+# TRAINER_CORTEX, LIVE_CORTEX, VESSEL_CORTEX) stores either:
 #   - a bare engine name string (legacy): the endpoint's default_model is used;
 #   - a JSON object {"engine": "...", "model": "..."}: the model overrides the
 #     endpoint default for that scope only.
@@ -485,6 +496,8 @@ async def get_active_cortex_engine(scope: str | None = None) -> str:
             override_key = "LIVE_CORTEX"
         elif scope == "agent":
             override_key = "AGENT_CORTEX"
+        elif scope == "vessel":
+            override_key = "VESSEL_CORTEX"
         else:
             override_key = None
 
@@ -700,7 +713,7 @@ def derive_cortex_scope(context: dict | None) -> str | None:
     keys to scope strings.
 
     Scope values mirror those accepted by :func:`get_active_cortex_engine`:
-    ``"trainer"``, ``"grillo"``, or ``None`` (base engine).
+    ``"trainer"``, ``"grillo"``, ``"vessel"``, or ``None`` (base engine).
     """
     if not isinstance(context, dict):
         return None
@@ -714,6 +727,17 @@ def derive_cortex_scope(context: dict | None) -> str | None:
     # failure for end users.
     if context.get("grillo_beat") or context.get("diary_merge_beat"):
         return "grillo"
+    # Rift Vessel embodiment turns (the slow will beat where Synth authors its
+    # in-world goals) route to VESSEL_CORTEX. Detection is purely structural
+    # routing metadata (never message text), reusing the single canonical
+    # detector shared with history_engine/agent_router.
+    try:
+        from core.interface_path_utils import is_vessel_embodiment_context
+
+        if is_vessel_embodiment_context(context):
+            return "vessel"
+    except Exception:
+        pass
     return None
 
 
@@ -736,6 +760,8 @@ async def set_scope_cortex(scope: str, name: str, model: str | None = None) -> N
         key = "LIVE_CORTEX"
     elif scope == "agent":
         key = "AGENT_CORTEX"
+    elif scope == "vessel":
+        key = "VESSEL_CORTEX"
     else:
         key = "TRAINER_CORTEX"
     value = serialize_cortex_scope_value(name, model)

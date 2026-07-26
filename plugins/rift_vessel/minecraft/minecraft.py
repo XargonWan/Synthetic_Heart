@@ -30,6 +30,7 @@ import math
 import os
 import random
 import socket
+from urllib.parse import urlparse
 from typing import Any, Dict
 
 import aiohttp
@@ -68,6 +69,46 @@ _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "0.0.0.0"})
 # Stable name for the Docker host, provided by ``extra_hosts:
 # host.docker.internal:host-gateway`` in docker-compose.yml.
 _HOST_GATEWAY_NAME = "host.docker.internal"
+
+# --- Self-preservation: canonical game block ids (NOT keyword scans) ---------
+# These are exact Minecraft block enum ids reported by the bridge — matching on
+# them is game-logic classification, not natural-language keyword detection.
+_LIQUID_BLOCK_IDS = frozenset({"water", "flowing_water", "bubble_column"})
+_HOT_BLOCK_IDS = frozenset({"lava", "flowing_lava", "fire", "soul_fire", "magma_block"})
+# How many blocks straight up the drowning reflex aims for to reach the surface.
+_SURFACE_CLIMB_BLOCKS = 8
+
+
+def _is_liquid_block(block_id: object) -> bool:
+    """True when the given block id is a water/liquid the body can drown in.
+
+    Structural game-id membership test — never a keyword scan of free text.
+    """
+    return isinstance(block_id, str) and block_id in _LIQUID_BLOCK_IDS
+
+
+def _is_hot_block(block_id: object) -> bool:
+    """True when the given block id is lava/fire that damages the body.
+
+    Structural game-id membership test — never a keyword scan of free text.
+    """
+    return isinstance(block_id, str) and block_id in _HOT_BLOCK_IDS
+
+
+def _result_acted(result: object) -> bool:
+    """Normalise a survival dispatch outcome to a plain ``acted`` bool.
+
+    The dispatch helpers return either a ``VesselActionResult`` (from ``act``)
+    or a plain ``{"acted": bool}`` dict (on an early guard fail), so read
+    whichever shape is present.
+    """
+    ok = getattr(result, "ok", None)
+    if ok is not None:
+        return bool(ok)
+    if isinstance(result, dict):
+        items = dict(result)
+        return bool(items.get("acted") or items.get("ok"))
+    return False
 
 
 def _is_in_container() -> bool:
@@ -228,6 +269,65 @@ class MinecraftConnector(VesselConnectorBase):
         self._last_target_result: str | None = None
         self._last_target_name: str | None = None
         self._last_target_kind: str | None = None
+        # --- Self-preservation reflex state (in-memory, no DB) ------------
+        # The survival guard runs at the very top of every motor tick and
+        # pre-empts normal movement when the body is in danger (drowning, in
+        # lava/fire, dead, or a hostile mob is near). See ``_survival_guard``
+        # and AGENTS.md §5c / self-preservation. All state is structural
+        # (numeric thresholds + game enum ids) — never keyword matching.
+        #
+        # Combat escalation: while defending against a hostile mob we count how
+        # many consecutive attack ticks failed to shake it. Once the count
+        # crosses ``_FIGHT_MAX_FAILS`` (or health drops below the flee
+        # threshold, or fighting back is disabled) the reflex escalates from
+        # DEFEND to FLEE and runs away instead. ``_fight_target`` remembers the
+        # id of the mob currently being fought so the fail counter resets when
+        # the threat changes or clears.
+        self._fight_fail_count = 0
+        self._fight_target: str | None = None
+        # Structural snapshot of the most recent survival threat the reflex
+        # acted on (threat kind + the numeric readings that triggered it), plus
+        # a "just recovered" flag. Surfaced to the slow will beat via
+        # ``WorldState.extra["threat"]`` so it can re-plan after safety (e.g.
+        # "you nearly drowned mining underwater — mine from the surface next
+        # time"). Purely structural — no goal-text parsing.
+        self._last_survival_threat: str | None = None
+        self._last_survival_reason: dict[str, Any] | None = None
+        # One-tick cooldown so the reflex does not immediately re-fire the same
+        # corrective action before the world state reflects it (anti-flap): e.g.
+        # after issuing a respawn or a surface goto we let the next tick observe
+        # the result before acting again.
+        self._survival_cooldown_ticks = 0
+        # Per-session resolved self-preservation settings (loaded on connect
+        # from the VESSEL_SP_* config keys; default to the class constants).
+        self._sp_enabled = True
+        self._sp_low_oxygen: float = float(self._LOW_OXYGEN)
+        self._sp_low_health: float = float(self._LOW_HEALTH_FLEE)
+        self._sp_hostile_dist: float = float(self._HOSTILE_NEAR_DIST)
+        self._sp_fight_back = True
+        self._sp_fight_max_fails: int = int(self._FIGHT_MAX_FAILS)
+
+    # Self-preservation thresholds (defaults; overridable per-connect via the
+    # ``VESSEL_SP_*`` config keys resolved in ``connect``). All structural:
+    # numeric readings on health/oxygen/distance, never keyword matching.
+    #
+    # Air below which the body heads for the surface. NOTE: mineflayer's
+    # ``bot.oxygenLevel`` is expressed in *air ticks* (vanilla max ~300, i.e.
+    # ~15s of breath), NOT on the 0..20 hearts/hunger scale. The threshold is
+    # therefore kept high (in ticks) so surfacing starts with several seconds of
+    # air to spare — otherwise, with the motor reflex only ticking every ~3s,
+    # the body would react too late and drown (the original reported bug).
+    _LOW_OXYGEN = 200
+    # Health (0..20) below which the reflex flees a fight instead of trading
+    # blows. Roughly three hearts — enough to survive the run to safety.
+    _LOW_HEALTH_FLEE = 6.0
+    # How close (blocks) a hostile mob must be for the reflex to engage it
+    # (defend or flee). Beyond this it is left to the slow will beat.
+    _HOSTILE_NEAR_DIST = 8.0
+    # How far (blocks) to run when fleeing a threat.
+    _FLEE_DISTANCE = 16.0
+    # Consecutive failed defend ticks before escalating DEFEND → FLEE.
+    _FIGHT_MAX_FAILS = 3
 
     # ------------------------------------------------------------------
     # Helpers
@@ -416,6 +516,10 @@ class MinecraftConnector(VesselConnectorBase):
         self._poll_task = asyncio.create_task(self._poll_loop())
         log_info(f"{LOG_PREFIX} connected via {self._base_url}")
 
+        # Resolve the self-preservation thresholds for this session (fail-safe;
+        # falls back to the class defaults on any read error).
+        self._load_self_preservation_config()
+
         # Ensure the goal/progression table exists (idempotent, fail-safe). This
         # covers non-fresh installs where init-db.sql was not re-run.
         try:
@@ -432,40 +536,45 @@ class MinecraftConnector(VesselConnectorBase):
 
         return True
 
-    @staticmethod
-    def _skin_public_base_url() -> str:
-        """Return the base URL the Minecraft server uses to fetch the skin file.
-
-        Prefers an explicit ``MINECRAFT_SKIN_PUBLIC_BASE_URL``; otherwise
-        auto-derives ``http://<host>:<port>`` from the WebUI env config.
-
-        The MC server (or its skin plugin) fetches the texture over HTTP, so the
-        host must be reachable *from the server's* point of view. A loopback
-        host (``127.0.0.1``/``localhost``/``0.0.0.0``) only works when the
-        server runs on the very same machine — a remote or containerised server
-        cannot open it. When the derived host is a loopback we therefore try to
-        substitute the machine's primary LAN IP (see :func:`_detect_lan_ip`) so
-        the skin works out of the box on the common "SyntH host + server on the
-        LAN" setup. Set ``MINECRAFT_SKIN_PUBLIC_BASE_URL`` explicitly to override
-        (e.g. a VPN/public address or a reverse-proxy URL).
-        """
-        explicit = str(
-            config_registry.get_value("MINECRAFT_SKIN_PUBLIC_BASE_URL", "") or ""
-        ).strip()
-        if explicit:
-            return explicit.rstrip("/")
-
-        host = (os.environ.get("SYNTH_WEBUI_HOST") or "").strip()
-        if not host or host.lower() in _LOOPBACK_HOSTS:
-            lan_ip = _detect_lan_ip()
-            host = lan_ip or "127.0.0.1"
-        port = (
-            os.environ.get("SYNTH_WEBUI_HTTP_PORT")
-            or os.environ.get("SYNTH_WEBUI_PORT")
-            or os.environ.get("PORT")
-            or "8080"
-        ).strip()
-        return f"http://{host}:{port}"
+    # TODO: remove once the skin-file upload path is confirmed obsolete. This
+    # helper served the uploaded ``MINECRAFT_SKIN_FILE`` over HTTP; the WebUI
+    # now takes a direct skin web URL (``MINECRAFT_SKIN_URL``), so it is no
+    # longer called. Kept commented in case the upload flow is restored.
+    # @staticmethod
+    # def _skin_public_base_url() -> str:
+    #     """Return the base URL the Minecraft server uses to fetch the skin file.
+    #
+    #     Prefers an explicit ``MINECRAFT_SKIN_PUBLIC_BASE_URL``; otherwise
+    #     auto-derives ``http://<host>:<port>`` from the WebUI env config.
+    #
+    #     The MC server (or its skin plugin) fetches the texture over HTTP, so
+    #     the host must be reachable *from the server's* point of view. A
+    #     loopback host (``127.0.0.1``/``localhost``/``0.0.0.0``) only works
+    #     when the server runs on the very same machine — a remote or
+    #     containerised server cannot open it. When the derived host is a
+    #     loopback we therefore try to substitute the machine's primary LAN IP
+    #     (see :func:`_detect_lan_ip`) so the skin works out of the box on the
+    #     common "SyntH host + server on the LAN" setup. Set
+    #     ``MINECRAFT_SKIN_PUBLIC_BASE_URL`` explicitly to override (e.g. a
+    #     VPN/public address or a reverse-proxy URL).
+    #     """
+    #     explicit = str(
+    #         config_registry.get_value("MINECRAFT_SKIN_PUBLIC_BASE_URL", "") or ""
+    #     ).strip()
+    #     if explicit:
+    #         return explicit.rstrip("/")
+    #
+    #     host = (os.environ.get("SYNTH_WEBUI_HOST") or "").strip()
+    #     if not host or host.lower() in _LOOPBACK_HOSTS:
+    #         lan_ip = _detect_lan_ip()
+    #         host = lan_ip or "127.0.0.1"
+    #     port = (
+    #         os.environ.get("SYNTH_WEBUI_HTTP_PORT")
+    #         or os.environ.get("SYNTH_WEBUI_PORT")
+    #         or os.environ.get("PORT")
+    #         or "8080"
+    #     ).strip()
+    #     return f"http://{host}:{port}"
 
     @staticmethod
     def _skin_command_templates() -> list[str]:
@@ -509,29 +618,62 @@ class MinecraftConnector(VesselConnectorBase):
             "/skin url {url}",  # SkinsRestorer plugin
         ]
 
+    @staticmethod
+    def _validate_skin_url(url: str) -> str | None:
+        """Return a human warning if ``url`` is unlikely to be a direct PNG.
+
+        Server-side skin plugins fetch the texture over HTTP and expect a
+        **direct link to a ``.png`` file**, not a web page (e.g. a
+        minecraftskins.com skin page returns HTML and is silently rejected by
+        the plugin). This is a best-effort, non-blocking sanity check: the URL
+        is always saved/used regardless, but a clear warning is logged when it
+        looks wrong so the operator knows why the skin didn't apply.
+
+        Returns ``None`` when the URL looks valid, otherwise a short reason.
+        """
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https"):
+            return (
+                "URL scheme is not http/https — the skin plugin needs a direct "
+                "web link to a PNG file"
+            )
+        if not parsed.netloc:
+            return "URL has no host — provide a full direct link to a PNG file"
+        # Compare against the path only, ignoring any ?query / #fragment so a
+        # link like '.../skin.png?v=2' still counts as valid.
+        if not parsed.path.lower().endswith(".png"):
+            return (
+                "URL does not point to a .png file — many skin sites give a page "
+                "link, not the direct texture; use the direct '.png' image URL"
+            )
+        return None
+
     async def _apply_skin(self) -> None:
-        """Request the uploaded skin from a server-side skin plugin.
+        """Request the skin from a server-side skin plugin using a web URL.
 
         Offline-mode Mineflayer bots cannot set their own texture client-side;
-        the skin is applied by the server. The user uploads a skin PNG in the
-        WebUI (``MINECRAFT_SKIN_FILE``); it is served over HTTP and its public
-        URL is fed to one or more configurable chat commands (see
+        the skin is applied by the server. The operator provides a direct web
+        URL to a skin PNG in the WebUI (``MINECRAFT_SKIN_URL``); the URL is fed
+        to one or more configurable chat commands (see
         :meth:`_skin_command_templates`) so it works across skin plugins/mods
         and locales without any keyword logic. Every configured template is run
         at spawn — the server accepts the one it understands and ignores the
-        rest. If no skin file is uploaded, nothing happens.
+        rest. If no skin URL is set, nothing happens.
         """
-        skin_file = str(
-            config_registry.get_value("MINECRAFT_SKIN_FILE", "") or ""
+        skin_url = str(
+            config_registry.get_value("MINECRAFT_SKIN_URL", "") or ""
         ).strip()
-        if not skin_file:
+        if not skin_url:
             return
 
-        # Dedicated endpoint serves the uploaded skin as a real image/png inline
-        # on a .png path — required for server-side skin providers to accept it.
-        skin_url = (
-            f"{self._skin_public_base_url()}/api/plugins/minecraft_vessel/skin.png"
-        )
+        # Non-blocking validation: the URL is still used even if it looks wrong,
+        # but we warn so the operator understands why the skin may not apply.
+        skin_warning = self._validate_skin_url(skin_url)
+        if skin_warning:
+            log_warning(
+                f"{LOG_PREFIX} skin URL may be invalid ({skin_warning}): {skin_url}"
+            )
+
         model = str(
             config_registry.get_value("MINECRAFT_SKIN_MODEL", "classic") or "classic"
         ).strip()
@@ -860,6 +1002,21 @@ class MinecraftConnector(VesselConnectorBase):
                 "blocks": blocks,
                 "inventory": inventory,
                 "affordances": affordances,
+                # Self-preservation telemetry (structural numeric/game-id fields
+                # from the bridge status snapshot). Feed the survival reflex and
+                # the will-beat "heads up" cue. Null-safe: absent on an older
+                # bridge that predates the telemetry, in which case the reflex
+                # simply degrades to inaction for that danger.
+                "oxygen": data.get("oxygen"),
+                "is_in_water": data.get("is_in_water"),
+                "is_alive": data.get("is_alive"),
+                "block_feet": data.get("block_feet"),
+                "block_head": data.get("block_head"),
+                # The most recent survival threat the reflex acted on (or the
+                # currently-active one). Lets the slow will beat acknowledge the
+                # danger in-character. None when the body is safe.
+                "threat": self._last_survival_threat,
+                "threat_reason": self._last_survival_reason,
                 # Self-directed play: the free-text objective Synth set for
                 # itself and its own recent goal history. Populated from the
                 # minecraft_goals table (see goals.py) — no catalogue, no
@@ -1256,6 +1413,324 @@ class MinecraftConnector(VesselConnectorBase):
         except Exception as exc:  # pragma: no cover - defensive
             log_debug(f"{LOG_PREFIX} target outcome record failed: {exc}")
 
+    # ------------------------------------------------------------------
+    # Self-preservation reflex
+    # ------------------------------------------------------------------
+
+    def _load_self_preservation_config(self) -> None:
+        """Resolve the ``VESSEL_SP_*`` self-preservation settings for this
+        session, falling back to the class-constant defaults on any read error.
+
+        Structural numeric thresholds only — never keyword matching. Called once
+        on connect; the resolved values live on the connector for the session.
+        """
+
+        def _flt(key: str, default: float) -> float:
+            try:
+                raw = config_registry.get_value(
+                    key, default, group="plugins", component="vessel_plugin"
+                )
+                return float(raw)
+            except (TypeError, ValueError):
+                return default
+
+        def _boolv(key: str, default: bool) -> bool:
+            try:
+                raw = config_registry.get_value(
+                    key, default, group="plugins", component="vessel_plugin"
+                )
+                if isinstance(raw, bool):
+                    return raw
+                return str(raw).strip().lower() in ("1", "true", "yes", "on")
+            except Exception:
+                return default
+
+        def _intv(key: str, default: int) -> int:
+            try:
+                raw = config_registry.get_value(
+                    key, default, group="plugins", component="vessel_plugin"
+                )
+                return int(raw)
+            except (TypeError, ValueError):
+                return default
+
+        try:
+            self._sp_enabled = _boolv("VESSEL_SELF_PRESERVATION_ENABLED", True)
+            self._sp_low_oxygen = _flt("VESSEL_SP_LOW_OXYGEN", float(self._LOW_OXYGEN))
+            self._sp_low_health = _flt(
+                "VESSEL_SP_LOW_HEALTH", float(self._LOW_HEALTH_FLEE)
+            )
+            self._sp_hostile_dist = _flt(
+                "VESSEL_SP_HOSTILE_DIST", float(self._HOSTILE_NEAR_DIST)
+            )
+            self._sp_fight_back = _boolv("VESSEL_SP_FIGHT_BACK", True)
+            self._sp_fight_max_fails = _intv(
+                "VESSEL_SP_FIGHT_MAX_FAILS", int(self._FIGHT_MAX_FAILS)
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            log_debug(f"{LOG_PREFIX} self-preservation config load failed: {exc}")
+
+    @staticmethod
+    def _nearest_hostile(state: "WorldState") -> dict[str, Any] | None:
+        """Return the nearest hostile entity dict from the world state, or None.
+
+        Structural only: relies on the bridge's per-entity ``hostile`` flag
+        (game-logic mob classification) and numeric ``distance`` — never a
+        keyword scan of entity names. Falls back to the structural
+        ``kind == "mob"`` classification when the flag is absent (older bridge).
+        """
+        try:
+            entities = (state.extra or {}).get("entities") or []
+        except Exception:
+            return None
+        best: dict[str, Any] | None = None
+        best_dist: float | None = None
+        for ent in entities:
+            if not isinstance(ent, dict):
+                continue
+            hostile = ent.get("hostile")
+            if hostile is None:
+                # Older bridge without the flag: fall back to structural kind.
+                hostile = ent.get("kind") == "mob"
+            if not hostile:
+                continue
+            try:
+                dist = float(ent.get("distance"))
+            except (TypeError, ValueError):
+                continue
+            if best_dist is None or dist < best_dist:
+                best = ent
+                best_dist = dist
+        return best
+
+    def _survival_threat(self, state: "WorldState") -> dict[str, Any] | None:
+        """Assess the highest-priority survival threat from the world state.
+
+        Pure/structural: reads numeric health/oxygen/distance and canonical
+        game block/entity ids from ``state`` — no goal text, no keyword scan.
+        Returns a plan dict ``{"threat", "verb", "payload", "reason"}`` for the
+        most urgent danger, or ``None`` when the body is safe. Priority order
+        (highest first):
+
+          1. dead → respawn
+          2. drowning (head underwater / in water & low oxygen) → surface
+          3. standing in lava/fire → move to safety
+          4. hostile near & healthy & fight-back on → defend (attack), with
+             escalation to flee after repeated failures / low health
+          5. hostile near & (low health | fight-back off | escalated) → flee
+        """
+        extra = state.extra or {}
+
+        # 1. Dead → come back to life.
+        is_alive = extra.get("is_alive")
+        if is_alive is False:
+            return {
+                "threat": "dead",
+                "verb": "respawn",
+                "payload": {},
+                "reason": {"is_alive": False},
+            }
+
+        # 2. Drowning — head submerged and air running low. Structural: the
+        # bridge tells us the block at the head is a water/liquid id and the
+        # numeric oxygen level. Head for the surface before air hits 0.
+        oxygen = extra.get("oxygen")
+        block_head = extra.get("block_head")
+        is_in_water = extra.get("is_in_water")
+        head_submerged = _is_liquid_block(block_head) or bool(is_in_water)
+        if (
+            head_submerged
+            and isinstance(oxygen, (int, float))
+            and oxygen <= self._sp_low_oxygen
+        ):
+            return {
+                "threat": "drowning",
+                "verb": "goto_surface",
+                "payload": {},
+                "reason": {"oxygen": oxygen, "block_head": block_head},
+            }
+
+        # 3. Standing in lava or fire → run to the nearest safe ground.
+        block_feet = extra.get("block_feet")
+        if _is_hot_block(block_feet) or _is_hot_block(block_head):
+            return {
+                "threat": "burning",
+                "verb": "flee",
+                "payload": {},
+                "reason": {"block_feet": block_feet, "block_head": block_head},
+            }
+
+        # 4/5. Hostile mob nearby → defend or flee.
+        hostile = self._nearest_hostile(state)
+        if hostile is not None:
+            try:
+                raw_dist = hostile.get("distance")
+                dist = float(raw_dist) if raw_dist is not None else None
+            except (TypeError, ValueError):
+                dist = None
+            if dist is not None and dist <= self._sp_hostile_dist:
+                health = extra.get("health")
+                low_health = (
+                    isinstance(health, (int, float)) and health <= self._sp_low_health
+                )
+                target_id = str(hostile.get("name") or "")
+                # Track the fail counter against the specific mob being fought;
+                # a new/changed threat resets it.
+                if self._fight_target != target_id:
+                    self._fight_target = target_id
+                    self._fight_fail_count = 0
+                escalated = self._fight_fail_count >= self._sp_fight_max_fails
+                if self._sp_fight_back and not low_health and not escalated:
+                    return {
+                        "threat": "defend",
+                        "verb": "attack",
+                        "payload": {"target": target_id} if target_id else {},
+                        "reason": {
+                            "distance": dist,
+                            "health": health,
+                            "fails": self._fight_fail_count,
+                        },
+                    }
+                # Escalate to flight.
+                return {
+                    "threat": "flee",
+                    "verb": "flee",
+                    "payload": {},
+                    "reason": {
+                        "distance": dist,
+                        "health": health,
+                        "low_health": low_health,
+                        "fight_back": self._sp_fight_back,
+                        "escalated": escalated,
+                    },
+                }
+
+        # Safe — clear any lingering fight state.
+        if self._fight_target is not None:
+            self._fight_target = None
+            self._fight_fail_count = 0
+        return None
+
+    async def _run_survival_guard(self, state: "WorldState") -> dict[str, Any] | None:
+        """Execute the highest-priority survival reflex, if any.
+
+        Returns a completed ``motor_step`` result dict when it acted (so the
+        caller returns immediately), or ``None`` to let normal movement run.
+        Fail-safe: any error degrades to ``None``. All decisions are structural
+        (see :meth:`_survival_threat`).
+        """
+        if not self._sp_enabled:
+            return None
+
+        # Anti-flap: after issuing a corrective action, skip one tick so the
+        # world state can reflect it before we react again.
+        if self._survival_cooldown_ticks > 0:
+            self._survival_cooldown_ticks -= 1
+            return None
+
+        try:
+            plan = self._survival_threat(state)
+        except Exception as exc:  # pragma: no cover - defensive
+            log_debug(f"{LOG_PREFIX} survival threat assessment failed: {exc}")
+            return None
+        if plan is None:
+            self._last_survival_threat = None
+            self._last_survival_reason = None
+            return None
+
+        threat = plan["threat"]
+        verb = plan["verb"]
+        payload = plan.get("payload") or {}
+
+        # Translate the reflex verb into a concrete connector action.
+        try:
+            if verb == "respawn":
+                result = await self.act("respawn", {})
+            elif verb == "goto_surface":
+                result = await self._act_goto_surface(state)
+            elif verb == "flee":
+                result = await self._act_flee(state)
+            elif verb == "attack":
+                result = await self.act("attack", payload)
+                # Count this defend tick; escalate on repeated engagement.
+                self._fight_fail_count += 1
+            else:  # pragma: no cover - defensive
+                return None
+        except Exception as exc:  # pragma: no cover - defensive
+            log_debug(f"{LOG_PREFIX} survival action '{verb}' failed: {exc}")
+            return None
+
+        self._last_survival_threat = threat
+        self._last_survival_reason = plan.get("reason")
+        # Respawn / surface take a moment; give the world a tick to update.
+        if verb in ("respawn", "goto_surface"):
+            self._survival_cooldown_ticks = 1
+        acted = _result_acted(result)
+        log_info(
+            f"{LOG_PREFIX} survival reflex: {threat} -> {verb} "
+            f"(reason={plan.get('reason')})"
+        )
+        return {"acted": acted, "reason": f"survival:{threat}"}
+
+    async def _act_goto_surface(self, state: "WorldState") -> Any:
+        """Swim/climb straight up toward the water surface (mindcraft style).
+
+        Steers to the highest air/non-liquid block directly above the current
+        x,z column via the bridge ``goto`` verb (structural coordinate move — no
+        keyword logic). Fail-safe: returns a plain dict on any error.
+        """
+        try:
+            pos = state.position if isinstance(state.position, dict) else None
+            if pos is None:
+                return {"acted": False, "reason": "no_position"}
+            x = int(float(pos["x"]))
+            z = int(float(pos["z"]))
+            y = int(float(pos["y"]))
+        except (KeyError, TypeError, ValueError):
+            return {"acted": False, "reason": "bad_position"}
+        # Target several blocks up; the bridge pathfinder will surface the body.
+        return await self.act("goto", {"x": x, "y": y + _SURFACE_CLIMB_BLOCKS, "z": z})
+
+    async def _act_flee(self, state: "WorldState") -> Any:
+        """Run away from the nearest threat (mindcraft moveAway style).
+
+        Picks a destination ``_FLEE_DISTANCE`` blocks in the direction opposite
+        the nearest hostile (or, when fleeing fire, simply forward) and gotos
+        it. Purely numeric vector math — no keyword logic. Fail-safe.
+        """
+        try:
+            pos = state.position if isinstance(state.position, dict) else None
+            if pos is None:
+                return {"acted": False, "reason": "no_position"}
+            px = float(pos["x"])
+            pz = float(pos["z"])
+            py = float(pos["y"])
+        except (KeyError, TypeError, ValueError):
+            return {"acted": False, "reason": "bad_position"}
+
+        hostile = self._nearest_hostile(state)
+        dx, dz = 0.0, 0.0
+        hp = hostile.get("position") if isinstance(hostile, dict) else None
+        if isinstance(hp, dict):
+            try:
+                hx = float(hp["x"])
+                hz = float(hp["z"])
+                # Vector pointing away from the hostile.
+                dx = px - hx
+                dz = pz - hz
+            except (KeyError, TypeError, ValueError):
+                dx, dz = 0.0, 0.0
+        norm = (dx * dx + dz * dz) ** 0.5
+        if norm < 1e-3:
+            # No usable direction (fire, or hostile on top of us): reuse the
+            # persistent exploration heading to pick a consistent escape line.
+            dx = float(math.cos(self._explore_heading))
+            dz = float(math.sin(self._explore_heading))
+            norm = 1.0
+        tx = int(px + (dx / norm) * self._FLEE_DISTANCE)
+        tz = int(pz + (dz / norm) * self._FLEE_DISTANCE)
+        return await self.act("goto", {"x": tx, "y": int(py), "z": tz})
+
     async def motor_step(self, goal: Dict[str, Any] | None) -> Dict[str, Any]:
         """Fast reflexive step toward the active goal — **no LLM, no cognition**.
 
@@ -1304,12 +1779,26 @@ class MinecraftConnector(VesselConnectorBase):
         try:
             if not self._connected:
                 return {"acted": False, "reason": "not_connected"}
-            if not goal:
-                return {"acted": False, "reason": "no_goal"}
 
+            # Fetch the world state FIRST — before honouring a missing goal — so
+            # the self-preservation reflex can save the body even when it has no
+            # goal to pursue (e.g. idle underwater). Danger does not wait for a
+            # will beat.
             state = await self.get_world_state()
             if state is None:
                 return {"acted": False, "reason": "no_world_state"}
+
+            # Highest-priority reflex: survive. Runs every tick, pre-empting all
+            # normal movement, and is the only branch allowed to act with no
+            # goal. Structural only (numeric health/oxygen/distance + game enum
+            # block/entity ids) — never keyword matching. Returns a completed
+            # result dict when it acted, else None to fall through.
+            survival = await self._run_survival_guard(state)
+            if survival is not None:
+                return survival
+
+            if not goal:
+                return {"acted": False, "reason": "no_goal"}
 
             affordances = (state.extra or {}).get("affordances") or []
             # Reflexes stay peaceful: skip hostile targets, act only on benign
@@ -1919,7 +2408,63 @@ class MinecraftVesselPlugin(PluginBase):
         super().__init__()
         self._register_config()
         register_plugin("minecraft_vessel", self)
+        self._register_skin_listeners()
         log_info("[minecraft_vessel] Registered MinecraftVesselPlugin")
+
+    @staticmethod
+    def _register_skin_listeners() -> None:
+        """Re-apply the skin live when its config changes during an active session.
+
+        When the operator edits ``MINECRAFT_SKIN_URL`` (or the model) in the
+        WebUI while Synth is already in the world, we push the skin command to
+        the server immediately so the change is visible in-game without
+        reconnecting. Fully fail-safe: registration or dispatch failures never
+        break the save.
+        """
+        for key in ("MINECRAFT_SKIN_URL", "MINECRAFT_SKIN_MODEL"):
+            try:
+                config_registry.add_listener(
+                    key, MinecraftVesselPlugin._on_skin_config_changed
+                )
+            except Exception as exc:  # pragma: no cover - defensive
+                log_warning(
+                    f"[minecraft_vessel] could not register skin listener for "
+                    f"{key}: {exc}"
+                )
+
+    @staticmethod
+    def _on_skin_config_changed(_value: Any) -> None:
+        """Config-change callback: re-apply the skin if a session is connected.
+
+        The config listener is synchronous, so we schedule the async re-apply
+        on the running event loop. If there is no active/connected Minecraft
+        connector, this is a no-op.
+        """
+        try:
+            from core.vessel_registry import VESSEL_REGISTRY
+
+            connector = (getattr(VESSEL_REGISTRY, "_instances", {}) or {}).get(
+                "minecraft"
+            )
+            if connector is None or not getattr(connector, "is_connected", False):
+                return
+
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+
+            if loop is not None:
+                loop.create_task(connector._apply_skin())
+            else:  # pragma: no cover - no running loop (unlikely at save time)
+                asyncio.run(connector._apply_skin())
+
+            log_info(
+                "[minecraft_vessel] skin config changed — re-applying skin live "
+                "(active session)"
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            log_warning(f"[minecraft_vessel] live skin re-apply failed: {exc}")
 
     @staticmethod
     def _register_config() -> None:
@@ -2009,22 +2554,44 @@ class MinecraftVesselPlugin(PluginBase):
         # In offline-mode a Mineflayer bot cannot set its own texture from the
         # client; the skin is applied server-side. The bot therefore requests
         # its skin by running a chat command against a server-side skin plugin
-        # (e.g. SkinsRestorer: ``/skin url <url>``). Upload a PNG skin file in
-        # the WebUI: it is served back over HTTP and its URL is fed to the skin
-        # command template at spawn. Registered as an exposed ``file`` variable
-        # so the WebUI plugin card renders a native file-upload control.
+        # (e.g. SkinsRestorer: ``/skin url <url>``). The operator provides a
+        # direct web URL to the skin PNG in the WebUI: the URL is fed to the
+        # skin command template at spawn. Registered as a plain text variable so
+        # the WebUI plugin card renders a native text-input control.
         from core.variables_engine import register_exposed_var
 
+        # NOTE: Skin file upload disabled in favour of a direct web URL. The
+        # original ``file`` upload control is commented out below; it served the
+        # uploaded PNG over HTTP, which required the MC server to be able to
+        # reach the SyntH host. Providing a public skin URL directly is simpler
+        # and works with any reachable host.
+        # register_exposed_var(
+        #     "MINECRAFT_SKIN_FILE",
+        #     label="Minecraft Skin File",
+        #     default="",
+        #     value_type=str,
+        #     ui_type="file",
+        #     description=(
+        #         "Upload a Minecraft skin texture PNG. It is served over HTTP "
+        #         "and applied at spawn via the server-side skin command. "
+        #         "Requires a server skin plugin such as SkinsRestorer."
+        #     ),
+        #     scope="plugins",
+        #     component="minecraft_vessel",
+        # )
         register_exposed_var(
-            "MINECRAFT_SKIN_FILE",
-            label="Minecraft Skin File",
+            "MINECRAFT_SKIN_URL",
+            label="Minecraft Skin URL",
             default="",
             value_type=str,
-            ui_type="file",
             description=(
-                "Upload a Minecraft skin texture PNG. It is served over HTTP "
-                "and applied at spawn via the server-side skin command. "
-                "Requires a server skin plugin such as SkinsRestorer."
+                "Direct web URL to a Minecraft skin texture PNG (e.g. "
+                "'https://example.com/skin.png'). It MUST be a direct link to "
+                "the .png image, NOT a skin-site page (e.g. a "
+                "minecraftskins.com skin page returns HTML and is rejected). "
+                "Applied at spawn via the server-side skin command; the URL "
+                "must be reachable from the Minecraft server. Requires a server "
+                "skin plugin such as SkinsRestorer."
             ),
             scope="plugins",
             component="minecraft_vessel",
@@ -2043,21 +2610,24 @@ class MinecraftVesselPlugin(PluginBase):
             scope="plugins",
             component="minecraft_vessel",
         )
-        config_registry.get_value(
-            "MINECRAFT_SKIN_PUBLIC_BASE_URL",
-            "",
-            value_type=str,
-            label="Minecraft Skin Public Base URL",
-            description=(
-                "Base URL the Minecraft server can reach to fetch the uploaded "
-                "skin file (e.g. 'http://192.168.1.42:9009'). Leave empty to "
-                "auto-derive from the WebUI host/port. The final texture URL is "
-                "'<base>/api/plugins/minecraft_vessel/skin.png'."
-            ),
-            group="plugins",
-            component="minecraft_vessel",
-            advanced=True,
-        )
+        # TODO: remove once the skin-file upload path is confirmed obsolete.
+        # Only relevant to the (now disabled) file-upload flow that served the
+        # skin over HTTP; the direct ``MINECRAFT_SKIN_URL`` needs no base URL.
+        # config_registry.get_value(
+        #     "MINECRAFT_SKIN_PUBLIC_BASE_URL",
+        #     "",
+        #     value_type=str,
+        #     label="Minecraft Skin Public Base URL",
+        #     description=(
+        #         "Base URL the Minecraft server can reach to fetch the uploaded "
+        #         "skin file (e.g. 'http://192.168.1.42:9009'). Leave empty to "
+        #         "auto-derive from the WebUI host/port. The final texture URL is "
+        #         "'<base>/api/plugins/minecraft_vessel/skin.png'."
+        #     ),
+        #     group="plugins",
+        #     component="minecraft_vessel",
+        #     advanced=True,
+        # )
         config_registry.get_value(
             "MINECRAFT_SKIN_COMMAND_TEMPLATES",
             "",

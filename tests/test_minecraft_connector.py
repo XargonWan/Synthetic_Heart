@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any, Dict, List
 
 import pytest
@@ -259,7 +260,7 @@ def _mock_skin_config(monkeypatch: pytest.MonkeyPatch, values: Dict[str, Any]) -
 
 
 @pytest.mark.asyncio
-async def test_apply_skin_file_builds_command_with_explicit_base(
+async def test_apply_skin_url_builds_command_with_legacy_template(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     conn = MinecraftConnector()
@@ -273,9 +274,8 @@ async def test_apply_skin_file_builds_command_with_explicit_base(
     _mock_skin_config(
         monkeypatch,
         {
-            "MINECRAFT_SKIN_FILE": "/config/storage/MINECRAFT_SKIN_FILE/skin.png",
+            "MINECRAFT_SKIN_URL": "https://synth.local/skin.png",
             "MINECRAFT_SKIN_MODEL": "slim",
-            "MINECRAFT_SKIN_PUBLIC_BASE_URL": "http://synth.local:8080",
             "MINECRAFT_SKIN_COMMAND_TEMPLATE": "/skin url {url} {model}",
         },
     )
@@ -285,12 +285,12 @@ async def test_apply_skin_file_builds_command_with_explicit_base(
     assert captured["payload"]["action"] == "skin"
     assert (
         captured["payload"]["payload"]["command"]
-        == "/skin url http://synth.local:8080/api/plugins/minecraft_vessel/skin.png slim"
+        == "/skin url https://synth.local/skin.png slim"
     )
 
 
 @pytest.mark.asyncio
-async def test_apply_skin_file_default_tries_all_providers(
+async def test_apply_skin_url_default_tries_all_providers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """With no template override, both built-in provider syntaxes are tried at
@@ -305,14 +305,13 @@ async def test_apply_skin_file_default_tries_all_providers(
     _mock_skin_config(
         monkeypatch,
         {
-            "MINECRAFT_SKIN_FILE": "/config/storage/MINECRAFT_SKIN_FILE/skin.png",
+            "MINECRAFT_SKIN_URL": "https://example.com/skin.png",
             "MINECRAFT_SKIN_MODEL": "slim",
-            "MINECRAFT_SKIN_PUBLIC_BASE_URL": "http://192.168.1.42:8080/",
         },
     )
     monkeypatch.setattr(conn, "_post", _fake_post)
     await conn._apply_skin()
-    url = "http://192.168.1.42:8080/api/plugins/minecraft_vessel/skin.png"
+    url = "https://example.com/skin.png"
     assert commands == [
         f'/skin set web slim "{url}"',
         f"/skin url {url}",
@@ -335,9 +334,8 @@ async def test_apply_skin_templates_list_overrides_default(
     _mock_skin_config(
         monkeypatch,
         {
-            "MINECRAFT_SKIN_FILE": "/config/storage/MINECRAFT_SKIN_FILE/skin.png",
+            "MINECRAFT_SKIN_URL": "https://host/skin.png",
             "MINECRAFT_SKIN_MODEL": "classic",
-            "MINECRAFT_SKIN_PUBLIC_BASE_URL": "http://host:8080",
             "MINECRAFT_SKIN_COMMAND_TEMPLATES": (
                 '/skin set web {model} "{url}"\n\n/skin url {url}\n'
             ),
@@ -345,7 +343,7 @@ async def test_apply_skin_templates_list_overrides_default(
     )
     monkeypatch.setattr(conn, "_post", _fake_post)
     await conn._apply_skin()
-    url = "http://host:8080/api/plugins/minecraft_vessel/skin.png"
+    url = "https://host/skin.png"
     assert commands == [
         f'/skin set web classic "{url}"',
         f"/skin url {url}",
@@ -368,85 +366,17 @@ async def test_apply_skin_legacy_single_template_still_works(
     _mock_skin_config(
         monkeypatch,
         {
-            "MINECRAFT_SKIN_FILE": "/config/storage/MINECRAFT_SKIN_FILE/skin.png",
-            "MINECRAFT_SKIN_PUBLIC_BASE_URL": "http://synth.local:8080/",
+            "MINECRAFT_SKIN_URL": "https://synth.local/skin.png",
             "MINECRAFT_SKIN_COMMAND_TEMPLATE": "/skin url {url}",
         },
     )
     monkeypatch.setattr(conn, "_post", _fake_post)
     await conn._apply_skin()
-    assert commands == [
-        "/skin url http://synth.local:8080/api/plugins/minecraft_vessel/skin.png"
-    ]
-
-
-def test_skin_public_base_url_derives_lan_ip_when_loopback(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """With no explicit base URL and a loopback WebUI host, the LAN IP is used
-    so a remote MC server can actually fetch the skin file."""
-    monkeypatch.setattr(
-        "plugins.rift_vessel.minecraft.minecraft.config_registry.get_value",
-        lambda key, default=None, **kwargs: (
-            "" if key == "MINECRAFT_SKIN_PUBLIC_BASE_URL" else default
-        ),
-    )
-    monkeypatch.setattr(
-        "plugins.rift_vessel.minecraft.minecraft._detect_lan_ip",
-        lambda: "192.168.1.42",
-    )
-    monkeypatch.setenv("SYNTH_WEBUI_HOST", "0.0.0.0")
-    monkeypatch.setenv("SYNTH_WEBUI_HTTP_PORT", "9009")
-    monkeypatch.delenv("SYNTH_WEBUI_PORT", raising=False)
-    monkeypatch.delenv("PORT", raising=False)
-
-    assert MinecraftConnector._skin_public_base_url() == "http://192.168.1.42:9009"
-
-
-def test_skin_public_base_url_falls_back_to_loopback_without_lan_ip(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """When no LAN IP can be detected, fall back to loopback (single-machine
-    setup) rather than emitting an empty/invalid host."""
-    monkeypatch.setattr(
-        "plugins.rift_vessel.minecraft.minecraft.config_registry.get_value",
-        lambda key, default=None, **kwargs: (
-            "" if key == "MINECRAFT_SKIN_PUBLIC_BASE_URL" else default
-        ),
-    )
-    monkeypatch.setattr(
-        "plugins.rift_vessel.minecraft.minecraft._detect_lan_ip",
-        lambda: None,
-    )
-    monkeypatch.delenv("SYNTH_WEBUI_HOST", raising=False)
-    monkeypatch.setenv("SYNTH_WEBUI_HTTP_PORT", "9009")
-    monkeypatch.delenv("SYNTH_WEBUI_PORT", raising=False)
-    monkeypatch.delenv("PORT", raising=False)
-
-    assert MinecraftConnector._skin_public_base_url() == "http://127.0.0.1:9009"
-
-
-def test_skin_public_base_url_prefers_explicit(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """An explicit MINECRAFT_SKIN_PUBLIC_BASE_URL always wins over derivation."""
-    monkeypatch.setattr(
-        "plugins.rift_vessel.minecraft.minecraft.config_registry.get_value",
-        lambda key, default=None, **kwargs: (
-            "http://vpn.example:8080/"
-            if key == "MINECRAFT_SKIN_PUBLIC_BASE_URL"
-            else default
-        ),
-    )
-    monkeypatch.setattr(
-        "plugins.rift_vessel.minecraft.minecraft._detect_lan_ip",
-        lambda: "192.168.1.42",
-    )
-    assert MinecraftConnector._skin_public_base_url() == "http://vpn.example:8080"
+    assert commands == ["/skin url https://synth.local/skin.png"]
 
 
 @pytest.mark.asyncio
-async def test_apply_skin_no_file_is_noop(
+async def test_apply_skin_no_url_is_noop(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     conn = MinecraftConnector()
@@ -457,7 +387,7 @@ async def test_apply_skin_no_file_is_noop(
         called = True
         return {"ok": True}
 
-    _mock_skin_config(monkeypatch, {"MINECRAFT_SKIN_FILE": ""})
+    _mock_skin_config(monkeypatch, {"MINECRAFT_SKIN_URL": ""})
     monkeypatch.setattr(conn, "_post", _fake_post)
     await conn._apply_skin()
     assert called is False
@@ -589,3 +519,92 @@ def test_minecraft_vessel_plugin_registers_no_actions() -> None:
     plugin = MinecraftVesselPlugin()
     assert plugin.get_supported_actions() == {}
     assert plugin.get_supported_action_types() == []
+
+
+# ---------------------------------------------------------------------------
+# Skin URL validation (non-blocking sanity check).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://example.com/skin.png",
+        "http://192.168.1.42:9009/skin.png",
+        "https://example.com/path/to/skin.PNG",
+        "https://example.com/skin.png?v=2",
+    ],
+)
+def test_validate_skin_url_accepts_direct_png(url: str) -> None:
+    assert MinecraftConnector._validate_skin_url(url) is None
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://www.minecraftskins.com/skin/24225307/rekku/",  # page, not PNG
+        "ftp://example.com/skin.png",  # wrong scheme
+        "example.com/skin.png",  # no scheme
+        "https://",  # no host
+        "not a url",
+    ],
+)
+def test_validate_skin_url_warns_on_invalid(url: str) -> None:
+    assert MinecraftConnector._validate_skin_url(url) is not None
+
+
+# ---------------------------------------------------------------------------
+# Live skin re-apply on config change during an active session.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_skin_config_change_reapplies_when_connected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Editing the skin config while connected re-applies the skin live."""
+    conn = MinecraftConnector()
+    conn._connected = True
+    applied: List[bool] = []
+
+    async def _fake_apply() -> None:
+        applied.append(True)
+
+    monkeypatch.setattr(conn, "_apply_skin", _fake_apply)
+    monkeypatch.setattr(VESSEL_REGISTRY, "_instances", {"minecraft": conn})
+
+    MinecraftVesselPlugin._on_skin_config_changed("https://example.com/skin.png")
+    # The callback schedules the re-apply as a task; yield to let it run.
+    await asyncio.sleep(0)
+    assert applied == [True]
+
+
+@pytest.mark.asyncio
+async def test_skin_config_change_noop_when_not_connected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Editing the skin config with no active session does nothing."""
+    conn = MinecraftConnector()
+    conn._connected = False
+    applied: List[bool] = []
+
+    async def _fake_apply() -> None:
+        applied.append(True)
+
+    monkeypatch.setattr(conn, "_apply_skin", _fake_apply)
+    monkeypatch.setattr(VESSEL_REGISTRY, "_instances", {"minecraft": conn})
+
+    MinecraftVesselPlugin._on_skin_config_changed("https://example.com/skin.png")
+    await asyncio.sleep(0)
+    assert applied == []
+
+
+@pytest.mark.asyncio
+async def test_skin_config_change_noop_when_no_connector(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No registered Minecraft connector → the callback is a safe no-op."""
+    monkeypatch.setattr(VESSEL_REGISTRY, "_instances", {})
+    # Must not raise.
+    MinecraftVesselPlugin._on_skin_config_changed("https://example.com/skin.png")
+    await asyncio.sleep(0)

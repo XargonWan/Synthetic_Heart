@@ -83,6 +83,20 @@ try {
   minecraftData = null;
 }
 
+// Optional: mineflayer-auto-eat handles hunger *reflexively* — the bot eats a
+// food item on its own when its food level drops, with no manual verb and no
+// LLM turn. This is the self-preservation answer to starvation (see AGENTS.md
+// §5c / self-preservation): purely structural, driven by the bot's numeric
+// food level. Absent => the bot simply won't auto-eat (it never starves faster,
+// it just won't top up on its own). Loaded per-bot on login.
+let autoEat = null;
+try {
+  // eslint-disable-next-line global-require
+  autoEat = require('mineflayer-auto-eat');
+} catch (err) {
+  autoEat = null;
+}
+
 // The pathfinder Movements instance configured for the connected world, set on
 // login. Kept module-level so goto/wander reuse it.
 let botMovements = null;
@@ -154,6 +168,40 @@ function classifyAttacker(entity) {
   if (entity.type === 'player' || entity.username) return 'player';
   if (entity.type === 'mob') return 'mob';
   return String(entity.type || 'entity');
+}
+
+// Passive/tameable mobs whose structural type is "mob" but which are NOT a
+// self-preservation threat. These are game-mechanic categories (kind/category
+// exposed by mineflayer's entity metadata), not user-facing words, so this is
+// structural game logic — not keyword matching on human language.
+const _NON_HOSTILE_MOB_CATEGORIES = new Set([
+  'Passive mobs',
+  'Tameable mobs',
+  'Water animals',
+  'NPCs',
+]);
+
+// Golems the bot spawned/owns are allies, not threats. These are canonical
+// Minecraft entity ids (game enum), not human language.
+const _FRIENDLY_MOB_NAMES = new Set(['iron_golem', 'snow_golem']);
+
+// Structural hostility flag for the self-preservation reflex. A creature is a
+// threat when its game-logic type is "mob" AND it is not a passive/tameable
+// category and not a friendly golem. Purely structural (entity.type /
+// entity.kind / canonical id) — never a keyword scan of display text, so it
+// works regardless of client language.
+function isHostileEntity(entity) {
+  if (!entity) return false;
+  if (entity.type !== 'mob') return false;
+  const id = entity.name ? String(entity.name).toLowerCase() : '';
+  if (_FRIENDLY_MOB_NAMES.has(id)) return false;
+  // mineflayer exposes a coarse category on `kind` / `entityType` metadata for
+  // many mobs; when present, exclude the passive/tameable buckets.
+  const category = entity.kind || (entity.metadata && entity.metadata.category);
+  if (category && _NON_HOSTILE_MOB_CATEGORIES.has(String(category))) {
+    return false;
+  }
+  return true;
 }
 
 // Resolve who most likely dealt the damage: prefer the entity that swung its
@@ -245,6 +293,10 @@ function nearbyEntities(maxCount, maxDistance) {
       // mob | player | object | ... (mineflayer entity.type)
       distance: Math.round(dist * 10) / 10,
       position: roundVec(e.position),
+      // Structural self-preservation flag (see isHostileEntity): true for a
+      // threatening mob, false for players/passive creatures/friendly golems.
+      // Purely game-logic based, no keyword scan of display names.
+      hostile: isHostileEntity(e),
     });
   }
   out.sort((a, b) => a.distance - b.distance);
@@ -313,6 +365,21 @@ function timeOfDay() {
   return { time_of_day: t, is_day: isDay };
 }
 
+// Name of the block at a given offset from the bot's feet. Guarded — returns
+// null when there is no bot/block. Used for the self-preservation reflex
+// (drowning / standing in lava or fire). Structural: it reads canonical block
+// ids (game enum), never human text.
+function blockNameAt(dx, dy, dz) {
+  if (!bot || !bot.entity || typeof bot.blockAt !== 'function') return null;
+  try {
+    const pos = bot.entity.position.floored().offset(dx, dy, dz);
+    const block = bot.blockAt(pos);
+    return block && block.name ? block.name : null;
+  } catch (e) {
+    return null;
+  }
+}
+
 // Build the full world snapshot shared by 'status' and 'scan'. Every field is
 // guarded so a partial read still returns a useful object.
 function worldSnapshot(opts) {
@@ -334,6 +401,24 @@ function worldSnapshot(opts) {
     entities: nearbyEntities(maxEntities, radius),
     blocks: nearbyBlocks(radius, maxBlocks),
     inventory: botInventory(),
+    // --- Self-preservation telemetry (all guarded, null when unavailable) ---
+    // Remaining air ticks (0..20 on vanilla). Drops while submerged; the motor
+    // reflex surfaces the bot before it hits 0 and starts drowning.
+    oxygen:
+      bot && typeof bot.oxygenLevel === 'number' ? bot.oxygenLevel : null,
+    // Whether the bot's body is currently in water (structural physics flag).
+    is_in_water:
+      bot && bot.entity && typeof bot.entity.isInWater === 'boolean'
+        ? bot.entity.isInWater
+        : null,
+    // Whether the bot is alive. Mineflayer sets health to 0 and fires 'death'
+    // on death; expose a simple structural flag for the reflex.
+    is_alive:
+      bot && typeof bot.health === 'number' ? bot.health > 0 : null,
+    // Canonical block ids at the bot's feet and head — lets the reflex detect
+    // standing in lava/fire or having its head underwater (drowning).
+    block_feet: blockNameAt(0, 0, 0),
+    block_head: blockNameAt(0, 1, 0),
   };
 }
 
@@ -484,6 +569,43 @@ function wireBotEvents(b) {
         }
       } catch (e) {
         log('pathfinder load failed:', e && e.message ? e.message : e);
+      }
+    }
+    // Reflexive hunger handling: load mineflayer-auto-eat so the bot tops up
+    // on its own when its food level drops. Best-effort — a missing dep or a
+    // load failure simply means no auto-eat; it never breaks the session.
+    if (autoEat) {
+      try {
+        // The plugin exports either the loader directly or as `.plugin`
+        // (package layout varies across versions); pick whichever is callable.
+        const autoEatPlugin =
+          typeof autoEat === 'function'
+            ? autoEat
+            : autoEat && typeof autoEat.plugin === 'function'
+              ? autoEat.plugin
+              : autoEat && typeof autoEat.loader === 'function'
+                ? autoEat.loader
+                : null;
+        if (autoEatPlugin) {
+          b.loadPlugin(autoEatPlugin);
+          // Configure sensible defaults if the plugin exposes options. Eat
+          // before starvation bites; never interrupt combat/movement mid-swing.
+          if (b.autoEat && typeof b.autoEat === 'object') {
+            try {
+              b.autoEat.enableAuto = true;
+              if (b.autoEat.options && typeof b.autoEat.options === 'object') {
+                b.autoEat.options.priority = 'foodPoints';
+                b.autoEat.options.startAt = 16;
+                b.autoEat.options.bannedFood = [];
+              }
+            } catch (e3) {
+              log('auto-eat options setup skipped:', e3 && e3.message ? e3.message : e3);
+            }
+          }
+          log('auto-eat loaded');
+        }
+      } catch (e) {
+        log('auto-eat load failed:', e && e.message ? e.message : e);
       }
     }
     pushEvent({

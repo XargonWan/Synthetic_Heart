@@ -207,6 +207,90 @@ config_registry.get_value(
     component="vessel_plugin",
     advanced=True,
 )
+config_registry.get_value(
+    "VESSEL_SELF_PRESERVATION_ENABLED",
+    True,
+    value_type=bool,
+    label="Self-Preservation Reflex",
+    description=(
+        "When enabled, a fast structural reflex protects Synth's body between "
+        "cognition turns: it swims to the surface when running out of air, "
+        "steps out of fire/lava, fights back or flees from a hostile creature, "
+        "and respawns after death. This runs at the top of every motor tick "
+        "with no LLM (the slow will beat cannot react in time), stays on the "
+        "Fast Lane, and never writes a diary entry mid-session."
+    ),
+    group="plugins",
+    component="vessel_plugin",
+)
+config_registry.get_value(
+    "VESSEL_SP_LOW_OXYGEN",
+    200,
+    value_type=int,
+    label="Self-Preservation: Low Oxygen Threshold",
+    description=(
+        "Air-tick level at or below which the reflex swims to the surface. "
+        "Mineflayer reports oxygen in air ticks (vanilla max ~300, ~15s of "
+        "breath), not on the 0..20 scale — the default 200 leaves several "
+        "seconds of air to surface before drowning. Higher reacts earlier."
+    ),
+    group="plugins",
+    component="vessel_plugin",
+    advanced=True,
+)
+config_registry.get_value(
+    "VESSEL_SP_LOW_HEALTH",
+    6,
+    value_type=int,
+    label="Self-Preservation: Flee Health Threshold",
+    description=(
+        "Health at or below which the reflex stops fighting a hostile creature "
+        "and flees instead. Higher makes Synth more cautious."
+    ),
+    group="plugins",
+    component="vessel_plugin",
+    advanced=True,
+)
+config_registry.get_value(
+    "VESSEL_SP_HOSTILE_DIST",
+    8,
+    value_type=int,
+    label="Self-Preservation: Hostile Detection Range (blocks)",
+    description=(
+        "Distance in blocks within which a hostile creature triggers the "
+        "defend/flee reflex."
+    ),
+    group="plugins",
+    component="vessel_plugin",
+    advanced=True,
+)
+config_registry.get_value(
+    "VESSEL_SP_FIGHT_BACK",
+    True,
+    value_type=bool,
+    label="Self-Preservation: Fight Back",
+    description=(
+        "When enabled, Synth fights a nearby hostile creature (while health is "
+        "above the flee threshold) instead of always fleeing. Disable to make "
+        "Synth always run from danger."
+    ),
+    group="plugins",
+    component="vessel_plugin",
+    advanced=True,
+)
+config_registry.get_value(
+    "VESSEL_SP_FIGHT_MAX_FAILS",
+    3,
+    value_type=int,
+    label="Self-Preservation: Max Fight Attempts",
+    description=(
+        "How many failed attack attempts against the same hostile before the "
+        "reflex escalates from fighting to fleeing."
+    ),
+    group="plugins",
+    component="vessel_plugin",
+    advanced=True,
+)
 
 
 class VesselPlugin(AIPluginBase):
