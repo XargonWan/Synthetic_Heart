@@ -10,6 +10,7 @@ const historyState = {
     dreams: { page: 1, per_page: 15, search: '', sort: 'desc' },
     chat: { page: 1, per_page: 50, search: '', interface_path: '', sort: 'desc' },
     vessel: { page: 1, per_page: 20, search: '', environment: '', sort: 'desc' },
+    goals: { loaded: false },
     calendar: { year: null, month: null, events: [], loaded: false },
     growth: { current: null, entries: [], currentLikes: [], currentDislikes: [], pendingProposal: null }
 };
@@ -681,6 +682,7 @@ function loadHistoryData(subtab) {
     if (subtab === 'growth') return loadHistoryGrowth();
     if (subtab === 'chat') return loadHistoryChat();
     if (subtab === 'vessel') return loadHistoryVessel();
+    if (subtab === 'goals') return loadHistoryGoals();
     if (subtab === 'agent') {
         try { if (window.SynthWebUI && typeof window.SynthWebUI.initAgentTab === 'function') window.SynthWebUI.initAgentTab(); } catch (e) { /* ignore */ }
         return;
@@ -1342,6 +1344,139 @@ function renderVesselSession(session) {
             </div>
         </div>
     `;
+}
+
+// Goals sub-tab: one group per enabled world, each a set of goal cards showing
+// the current objective (first) and recent goals, with their free-text steps.
+async function loadHistoryGoals() {
+    const content = document.getElementById('history-goals-content'); if (!content) return;
+    content.innerHTML = '<div class="loading-state"><div class="loading-spinner"></div><p>Loading goals...</p></div>';
+    try {
+        const response = await fetch('/api/history/vessel/goals');
+        const data = await response.json();
+        if (data && data.success && Array.isArray(data.worlds)) {
+            const worldsWithGoals = data.worlds.filter(w => Array.isArray(w.goals) && w.goals.length > 0);
+            if (worldsWithGoals.length > 0) {
+                content.innerHTML = worldsWithGoals.map(w => renderGoalsWorld(w)).join('');
+                content.classList.add('history-populated');
+            } else {
+                content.classList.remove('history-populated');
+                content.innerHTML = '<div class="empty-state"><div class="icon">🎯</div><p>No goals yet</p></div>';
+            }
+        } else {
+            content.classList.remove('history-populated');
+            content.innerHTML = '<div class="empty-state"><div class="icon">⚠️</div><p>Failed to load goals</p></div>';
+        }
+    } catch (error) {
+        console.error('Failed to load goals:', error);
+        content.innerHTML = '<div class="empty-state"><div class="icon">⚠️</div><p>Failed to load goals</p></div>';
+    }
+}
+
+// Render one world group: header (icon + name) + a grid of goal cards.
+function renderGoalsWorld(world) {
+    const name = String(world.world || 'unknown');
+    const label = escapeHtml(name.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase()));
+    const iconUrl = vesselEnvIconUrl(name);
+    const iconHtml = iconUrl
+        ? `<img class="vessel-env-icon" src="${iconUrl}" alt="" onerror="this.style.display='none'">`
+        : '';
+    const goals = Array.isArray(world.goals) ? world.goals : [];
+    const cardsHtml = goals.map(g => renderGoalCard(g, name)).join('');
+    const abandonedCount = goals.filter(g => String(g.status || '') === 'abandoned').length;
+    const clearBtn = abandonedCount > 0
+        ? `<button class="goals-clear-abandoned-btn" onclick="clearVesselAbandonedGoals('${encodeURIComponent(name)}')" title="Delete all abandoned goals">🗑️ Clear abandoned (${abandonedCount})</button>`
+        : '';
+    return `
+        <div class="goals-world">
+            <div class="goals-world-header">
+                ${iconHtml}
+                <span class="goals-world-title">${iconUrl ? '' : '🌀 '}${label}</span>
+                <span class="history-entry-type">${goals.length} ${goals.length === 1 ? 'goal' : 'goals'}</span>
+                ${clearBtn}
+            </div>
+            <div class="goals-cards">
+                ${cardsHtml}
+            </div>
+        </div>
+    `;
+}
+
+// Render ONE goal card: description, optional note, status badge, and its steps
+// with the current step highlighted. Steps are free-text authored by Synth; we
+// render whatever is stored (no fixed schema).
+function renderGoalCard(goal, world) {
+    const status = String(goal.status || 'active');
+    const isActive = status === 'active';
+    const statusLabel = escapeHtml(status.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase()));
+    const description = escapeHtml(goal.description || '(no description)');
+    const note = goal.note ? `<div class="goal-note">${escapeHtml(goal.note)}</div>` : '';
+    const updated = formatTimestamp(goal.updated_at || goal.created_at);
+
+    const steps = Array.isArray(goal.steps) ? goal.steps : [];
+    const currentStep = Number.isInteger(goal.current_step) ? goal.current_step : -1;
+    let stepsHtml;
+    if (steps.length > 0) {
+        stepsHtml = '<ul class="goal-steps">' + steps.map((step, idx) => {
+            let cls = 'goal-step';
+            let marker = '○';
+            if (idx < currentStep) { cls += ' goal-step-done'; marker = '✓'; }
+            else if (idx === currentStep) { cls += ' goal-step-current'; marker = '▶'; }
+            return `<li class="${cls}"><span class="goal-step-marker">${marker}</span><span class="goal-step-text">${escapeHtml(step)}</span></li>`;
+        }).join('') + '</ul>';
+    } else {
+        stepsHtml = '<div class="goal-no-steps">No steps recorded.</div>';
+    }
+
+    const goalId = goal.id;
+    const deleteBtn = (!isActive && goalId != null && world)
+        ? `<button class="goal-delete-btn" onclick="deleteVesselGoal('${encodeURIComponent(String(world))}', ${goalId})" title="Delete this goal">🗑️</button>`
+        : '';
+
+    return `
+        <div class="goal-card ${isActive ? 'goal-active' : ''}">
+            <div class="goal-card-header">
+                <span class="goal-status ${isActive ? 'goal-status-active' : ''}">${statusLabel}</span>
+                <span class="goal-card-time">${updated}</span>
+                ${deleteBtn}
+            </div>
+            <div class="goal-description">${description}</div>
+            ${note}
+            ${stepsHtml}
+        </div>
+    `;
+}
+
+// Delete a single non-active goal, then refresh the Goals sub-tab.
+async function deleteVesselGoal(world, goalId) {
+    if (!confirm('Delete this goal?')) return;
+    try {
+        const response = await fetch(`/api/history/vessel/goals/${world}/${goalId}`, { method: 'DELETE' });
+        const data = await response.json();
+        if (!data || !data.success) {
+            alert('Failed to delete goal: ' + ((data && data.error) || 'unknown error'));
+        }
+    } catch (error) {
+        console.error('Failed to delete goal:', error);
+        alert('Failed to delete goal.');
+    }
+    loadHistoryGoals();
+}
+
+// Delete every abandoned goal for a world, then refresh the Goals sub-tab.
+async function clearVesselAbandonedGoals(world) {
+    if (!confirm('Delete all abandoned goals for this world?')) return;
+    try {
+        const response = await fetch(`/api/history/vessel/goals/${world}/clear-abandoned`, { method: 'POST' });
+        const data = await response.json();
+        if (!data || !data.success) {
+            alert('Failed to clear abandoned goals: ' + ((data && data.error) || 'unknown error'));
+        }
+    } catch (error) {
+        console.error('Failed to clear abandoned goals:', error);
+        alert('Failed to clear abandoned goals.');
+    }
+    loadHistoryGoals();
 }
 
 function renderChatMessage(msg) {

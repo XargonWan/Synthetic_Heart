@@ -31,6 +31,10 @@
               <span class="icon">🌀</span>
               <span>Vessel</span>
             </button>
+            <button class="sub-nav-btn" data-subtab="goals" role="tab" aria-selected="false">
+              <span class="icon">🎯</span>
+              <span>Goals</span>
+            </button>
             <button class="sub-nav-btn" data-subtab="agent" role="tab" aria-selected="false">
               <span class="icon">🤖</span>
               <span>Agent</span>
@@ -180,6 +184,21 @@
           </div>
         </div>
         <div id="history-vessel-pagination" class="pagination-controls"></div>
+      </div>
+
+      <!-- Goals Sub-Tab -->
+      <div class="sub-tab-panel" id="subtab-goals" data-subtab="goals">
+        <div class="section-controls">
+          <div style="color: var(--text-soft); font-size: 0.9rem;">
+            Self-directed goals per world — current objective and its steps.
+          </div>
+        </div>
+        <div id="history-goals-content" class="history-container">
+          <div class="loading-state">
+            <div class="loading-spinner"></div>
+            <p>Loading goals...</p>
+          </div>
+        </div>
       </div>
 
       <!-- Agent Sub-Tab -->
@@ -569,6 +588,168 @@
         color: var(--text-soft);
         font-style: italic;
         padding: 0.4rem 0.5rem;
+      }
+
+      /* Goals sub-tab: per-world groups, each a set of goal cards. */
+      .goals-world {
+        margin-bottom: 1.75rem;
+      }
+
+      .goals-world-header {
+        display: flex;
+        align-items: center;
+        gap: 0.6rem;
+        margin-bottom: 0.9rem;
+      }
+
+      .goals-world-title {
+        font-size: 1.05rem;
+        font-weight: 600;
+        color: var(--text);
+      }
+
+      .goals-cards {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+        gap: 1rem;
+      }
+
+      .goal-card {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-left: 4px solid var(--border);
+        border-radius: 12px;
+        padding: 1.1rem 1.25rem;
+        display: flex;
+        flex-direction: column;
+        gap: 0.7rem;
+      }
+
+      .goal-card.goal-active {
+        border-left-color: var(--accent);
+      }
+
+      .goal-card-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 0.6rem;
+      }
+
+      .goal-status {
+        font-size: 0.68rem;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        font-weight: 700;
+        padding: 0.15rem 0.5rem;
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.06);
+        color: var(--text-soft);
+        white-space: nowrap;
+      }
+
+      .goal-status.goal-status-active {
+        background: color-mix(in srgb, var(--accent) 22%, transparent);
+        color: var(--accent);
+      }
+
+      .goal-card-time {
+        font-size: 0.72rem;
+        color: var(--text-soft);
+      }
+
+      .goals-clear-abandoned-btn {
+        margin-left: auto;
+        background: rgba(255, 255, 255, 0.05);
+        border: 1px solid var(--border);
+        color: var(--text-soft);
+        font-size: 0.78rem;
+        padding: 0.3rem 0.7rem;
+        border-radius: 8px;
+        cursor: pointer;
+        white-space: nowrap;
+        transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+      }
+
+      .goals-clear-abandoned-btn:hover {
+        background: color-mix(in srgb, #e5484d 18%, transparent);
+        border-color: #e5484d;
+        color: #e5484d;
+      }
+
+      .goal-delete-btn {
+        background: transparent;
+        border: none;
+        color: var(--text-soft);
+        font-size: 0.85rem;
+        line-height: 1;
+        padding: 0.2rem 0.3rem;
+        border-radius: 6px;
+        cursor: pointer;
+        opacity: 0.6;
+        transition: opacity 0.15s ease, background 0.15s ease;
+      }
+
+      .goal-delete-btn:hover {
+        opacity: 1;
+        background: color-mix(in srgb, #e5484d 18%, transparent);
+      }
+
+      .goal-description {
+        font-size: 0.95rem;
+        font-weight: 600;
+        color: var(--text);
+        word-break: break-word;
+      }
+
+      .goal-note {
+        font-size: 0.85rem;
+        color: var(--text-soft);
+        font-style: italic;
+        word-break: break-word;
+      }
+
+      .goal-steps {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 0.35rem;
+      }
+
+      .goal-step {
+        display: flex;
+        align-items: baseline;
+        gap: 0.5rem;
+        font-size: 0.85rem;
+        color: var(--text-soft);
+      }
+
+      .goal-step-marker {
+        flex-shrink: 0;
+        width: 1.2rem;
+        text-align: center;
+      }
+
+      .goal-step.goal-step-done .goal-step-text {
+        text-decoration: line-through;
+        opacity: 0.7;
+      }
+
+      .goal-step.goal-step-current {
+        color: var(--text);
+        font-weight: 600;
+      }
+
+      .goal-step-text {
+        word-break: break-word;
+      }
+
+      .goal-no-steps {
+        font-size: 0.8rem;
+        color: var(--text-soft);
+        font-style: italic;
       }
 
       /* Diary day-entry card */

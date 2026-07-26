@@ -6249,6 +6249,35 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
             function initPluginsTab() {
                 loadComponentsSummary();
                 setupPluginsColResizer();
+                setupPluginsSubnav();
+            }
+
+            // Installed / Store sub-tab switcher for the Plugins section.
+            // The section HTML is re-injected on each navigation, so bind
+            // per-element via dataset.bound to keep this idempotent.
+            function setupPluginsSubnav() {
+                const buttons = document.querySelectorAll('.plugins-subnav-btn[data-plugins-subtab]');
+                const panels = document.querySelectorAll('.plugins-subpanel[data-plugins-subtab]');
+                if (!buttons.length || !panels.length) return;
+
+                const switchTo = (next) => {
+                    buttons.forEach((btn) => {
+                        const active = btn.dataset.pluginsSubtab === next;
+                        btn.classList.toggle('active', active);
+                        btn.setAttribute('aria-selected', active ? 'true' : 'false');
+                    });
+                    panels.forEach((panel) => {
+                        panel.classList.toggle('active', panel.dataset.pluginsSubtab === next);
+                    });
+                };
+
+                buttons.forEach((btn) => {
+                    if (btn.dataset.bound) return;
+                    btn.addEventListener('click', () => {
+                        switchTo(btn.dataset.pluginsSubtab || 'installed');
+                    });
+                    btn.dataset.bound = '1';
+                });
             }
             // Also expose as initEnginesTab so that the Engines tab triggers the engine selector UI
             function initEnginesTab() {

@@ -784,6 +784,9 @@ class SynthWebUIInterface:
         self.app.post("/api/components/reload")(self.reload_component)
         self.app.post("/api/components/dev/toggle")(self.toggle_dev_components)
         self.app.get("/api/plugins/{name}/icon")(self.plugin_icon)
+        # Minecraft Vessel skin: served as a real image/png (inline, .png path)
+        # so server-side skin providers (SkinRestorer / SkinsRestorer) accept it.
+        self.app.get("/api/plugins/minecraft_vessel/skin.png")(self.minecraft_skin_png)
         self.app.post("/api/components/toggle")(self.toggle_plugin)
         self.app.post("/api/system/restart")(self.restart_system)
         self.app.get("/api/config")(self.config_summary)
@@ -844,6 +847,13 @@ class SynthWebUIInterface:
         self.app.get("/api/history/dreams")(self.history_dreams)
         self.app.get("/api/history/growth")(self.history_growth)
         self.app.get("/api/history/vessel")(self.history_vessel)
+        self.app.get("/api/history/vessel/goals")(self.history_vessel_goals)
+        self.app.delete("/api/history/vessel/goals/{world}/{goal_id}")(
+            self.delete_vessel_goal
+        )
+        self.app.post("/api/history/vessel/goals/{world}/clear-abandoned")(
+            self.clear_vessel_abandoned_goals
+        )
         self.app.post("/api/growth/current")(self.update_growth_current)
         self.app.post("/api/growth/revert")(self.revert_growth_state)
         # Per-item delete for History sub-tabs
@@ -7759,13 +7769,16 @@ class SynthWebUIInterface:
                     }
                     if group_keys:
                         placeholders = ", ".join(["%s"] * len(group_keys))
+                        # Newest activity first within each session block so the
+                        # most recent event of the current Rift session shows at
+                        # the top (mirrors the session-level DESC ordering).
                         activity_query = f"""
                             SELECT id, session_id, interface_path, environment,
                                    event_type, summary, metadata, created_at,
                                    {group_key} AS grp
                             FROM vessel_activity_log
                             WHERE {group_key} IN ({placeholders})
-                            ORDER BY created_at ASC
+                            ORDER BY created_at DESC
                         """
                         await cur.execute(activity_query, group_keys)
                         for row in await cur.fetchall():
@@ -7840,6 +7853,165 @@ class SynthWebUIInterface:
         except Exception as exc:
             log_error(f"{LOG_PREFIX} Failed to fetch vessel history: {exc}")
             return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+
+    async def history_vessel_goals(self, request: Request):
+        """Return self-authored goals grouped per game/world for the Goals sub-tab.
+
+        Mirrors the per-voice History pattern but keyed on the Rift Vessel's
+        enabled worlds instead of a flat activity log. Each enabled world that
+        has a goal store contributes a group of goal cards (current goal first,
+        then recent history, each with its free-text steps and progress).
+
+        Fully fail-safe and lazily wired: if the Rift Vessel plugin or a world's
+        goal store is missing/disabled, that world is simply skipped so removing
+        the subsystem never breaks the WebUI.
+        """
+        del request  # no query params needed; goals are global per world
+        worlds_payload: list[dict[str, Any]] = []
+        try:
+            enabled_worlds = self._enabled_vessel_worlds()
+        except Exception as exc:  # pragma: no cover - defensive
+            log_debug(f"{LOG_PREFIX} history_vessel_goals: world enum failed: {exc}")
+            enabled_worlds = []
+
+        for world in enabled_worlds:
+            reader = self._resolve_world_goal_reader(world)
+            if reader is None:
+                continue
+            try:
+                goals = await reader(50)
+            except Exception as exc:  # pragma: no cover - defensive
+                log_debug(
+                    f"{LOG_PREFIX} history_vessel_goals: {world} reader failed: {exc}"
+                )
+                goals = []
+            worlds_payload.append({"world": world, "goals": goals or []})
+
+        return JSONResponse({"success": True, "worlds": worlds_payload})
+
+    def _enabled_vessel_worlds(self) -> list[str]:
+        """Return the Rift Vessel's enabled worlds, or ``[]`` if unavailable."""
+        vessel_plugin = None
+        try:
+            from core.core_initializer import PLUGIN_REGISTRY
+
+            if isinstance(PLUGIN_REGISTRY, dict):
+                vessel_plugin = PLUGIN_REGISTRY.get("vessel_plugin")
+        except Exception:
+            vessel_plugin = None
+        if vessel_plugin is None or not hasattr(vessel_plugin, "_enabled_worlds"):
+            return []
+        try:
+            return list(vessel_plugin._enabled_worlds())
+        except Exception:  # pragma: no cover - defensive
+            return []
+
+    @staticmethod
+    def _resolve_world_goal_reader(world: str):
+        """Return an ``async (limit) -> list[dict]`` goal reader for ``world``.
+
+        Only worlds that ship a goal store are supported; today that is
+        Minecraft. Returns ``None`` for worlds with no goal store so the caller
+        skips them. Structural dispatch — no keyword/trigger logic.
+        """
+        if world == "minecraft":
+            try:
+                from plugins.rift_vessel.minecraft import goals as mc_goals
+
+                return mc_goals.list_all_goals
+            except Exception:
+                return None
+        return None
+
+    @staticmethod
+    def _resolve_world_goal_deleter(world: str):
+        """Return an ``async (goal_id) -> dict`` goal deleter for ``world``.
+
+        Mirrors :meth:`_resolve_world_goal_reader`. Only worlds with a goal
+        store are supported (today: Minecraft). Returns ``None`` otherwise so
+        the caller can respond with a clean error. Structural dispatch — no
+        keyword/trigger logic.
+        """
+        if world == "minecraft":
+            try:
+                from plugins.rift_vessel.minecraft import goals as mc_goals
+
+                return mc_goals.delete_goal
+            except Exception:
+                return None
+        return None
+
+    @staticmethod
+    def _resolve_world_goal_clearer(world: str):
+        """Return an ``async () -> dict`` abandoned-goal clearer for ``world``.
+
+        Mirrors :meth:`_resolve_world_goal_reader`. Only worlds with a goal
+        store are supported (today: Minecraft). Returns ``None`` otherwise.
+        """
+        if world == "minecraft":
+            try:
+                from plugins.rift_vessel.minecraft import goals as mc_goals
+
+                return mc_goals.clear_abandoned_goals
+            except Exception:
+                return None
+        return None
+
+    async def delete_vessel_goal(self, request: Request):
+        """Delete a single non-active goal for a world (Goals sub-tab)."""
+        world = str(request.path_params.get("world") or "").strip()
+        goal_id_raw = request.path_params.get("goal_id")
+        try:
+            goal_id = int(goal_id_raw)
+        except (TypeError, ValueError):
+            return JSONResponse(
+                {"success": False, "error": "Invalid goal id"}, status_code=400
+            )
+
+        deleter = self._resolve_world_goal_deleter(world)
+        if deleter is None:
+            return JSONResponse(
+                {"success": False, "error": "No goal store for this world"},
+                status_code=404,
+            )
+        try:
+            result = await deleter(goal_id)
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} delete_vessel_goal failed: {exc}")
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+
+        status = (result or {}).get("status")
+        if status != "ok":
+            message = (result or {}).get("message", "delete_failed")
+            code = 400 if message == "cannot_delete_active" else 404
+            return JSONResponse({"success": False, "error": message}, status_code=code)
+        return JSONResponse(
+            {"success": True, "deleted_count": result.get("deleted_count", 0)}
+        )
+
+    async def clear_vessel_abandoned_goals(self, request: Request):
+        """Delete every abandoned goal for a world (Goals sub-tab)."""
+        world = str(request.path_params.get("world") or "").strip()
+        clearer = self._resolve_world_goal_clearer(world)
+        if clearer is None:
+            return JSONResponse(
+                {"success": False, "error": "No goal store for this world"},
+                status_code=404,
+            )
+        try:
+            result = await clearer()
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} clear_vessel_abandoned_goals failed: {exc}")
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+
+        if (result or {}).get("status") != "ok":
+            return JSONResponse(
+                {"success": False, "error": (result or {}).get("message", "failed")},
+                status_code=500,
+            )
+        return JSONResponse(
+            {"success": True, "deleted_count": result.get("deleted_count", 0)}
+        )
 
     async def _fetch_calendar_event_rows(self) -> list[dict[str, Any]]:
         """Fetch all ``scheduled_events`` rows as plain dicts for calendar use."""
@@ -9745,6 +9917,48 @@ class SynthWebUIInterface:
             raise
         except Exception as exc:
             log_error(f"{LOG_PREFIX} Unexpected error in upload_exposed_file: {exc}")
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    async def minecraft_skin_png(self) -> FileResponse:
+        """Serve the uploaded Minecraft skin as a real ``image/png`` (inline).
+
+        Server-side skin providers (SkinRestorer mod, SkinsRestorer plugin)
+        fetch the URL and validate the response as a PNG image. The generic
+        exposed-file endpoint serves ``application/octet-stream`` as an
+        attachment on an extension-less URL, which those providers reject. This
+        dedicated endpoint serves the same uploaded ``MINECRAFT_SKIN_FILE`` with
+        ``Content-Type: image/png`` inline on a ``.png`` path so the skin is
+        accepted out of the box.
+        """
+        try:
+            from core.variables_engine import exposed_vars
+
+            stored = exposed_vars.get_value("MINECRAFT_SKIN_FILE")
+            if not stored:
+                raise HTTPException(status_code=404, detail="No skin uploaded")
+
+            file_path = Path(str(stored))
+            if not file_path.exists() or not file_path.is_file():
+                raise HTTPException(status_code=404, detail="Skin file not found")
+
+            storage_root = Path(
+                os.getenv("SYNTH_EXPOSED_STORAGE_ROOT", "/config/storage")
+            ).resolve()
+            file_path_resolved = file_path.resolve()
+            try:
+                file_path_resolved.relative_to(storage_root)
+            except Exception:
+                raise HTTPException(status_code=403, detail="Access denied")
+
+            return FileResponse(
+                str(file_path_resolved),
+                media_type="image/png",
+                headers={"Content-Disposition": 'inline; filename="skin.png"'},
+            )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Unexpected error in minecraft_skin_png: {exc}")
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     async def get_exposed_file(self, key: str):
