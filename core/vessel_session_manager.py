@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import time
 import uuid
+from collections.abc import Callable
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -55,19 +56,62 @@ class VesselSessionManager:
         # of truth and ``has_active_session()`` falls back to it when the set is
         # empty (e.g. right after a process restart).
         self._active_session_ids: set[str] = set()
+        # Optional connection-liveness probe, registered by the I/O layer (the
+        # Vessel interface) via :meth:`set_liveness_probe`. It answers a single
+        # structural question — "is at least one tracked session backed by a
+        # *really connected* connector right now?" — without this module ever
+        # importing the interface or the connector registry (keeps ``core`` free
+        # of interface deps). It powers the connection-driven 3-state model of
+        # :meth:`has_active_session` (see that docstring). ``None`` until the
+        # interface starts; the probe must be cheap, synchronous and never raise.
+        self._liveness_probe: Callable[[], bool] | None = None
+
+    def set_liveness_probe(self, probe: Callable[[], bool] | None) -> None:
+        """Register (or clear) the connector-liveness probe.
+
+        Called once by the Vessel interface on startup. Passing ``None`` clears
+        it (e.g. on interface teardown), reverting ``has_active_session`` to the
+        bookkeeping-only behaviour.
+        """
+        self._liveness_probe = probe
 
     def has_active_session(self) -> bool:
-        """Return True if at least one embodiment session is currently active.
+        """Return True only while embodiment is in the **CONNECTED** state.
 
-        Cheap and synchronous: reads the in-memory active-session set only, so
-        it is safe to call on hot paths (e.g. the message queue). After a
-        process restart the set may be empty even though the DB has active
-        rows; callers that need certainty should reconcile via
-        :meth:`close_expired_sessions` (the interface scheduler does this
-        periodically). This is deliberately best-effort — it must never block
-        or hit the DB.
+        The Vessel has a three-state lifecycle driven by the *real* connection
+        to the world, not by bookkeeping alone:
+
+        * **CONNECTED** — a session exists *and* its connector is really
+          connected. This is the only state that returns ``True`` here, so it is
+          the only state in which autonomous perceptions/will-beats are produced
+          and the message queue ranks in-world traffic as an active embodiment.
+        * **RECONNECTING** — a session exists but its connector has dropped
+          (e.g. a container restart or a transient bridge blip). Returns
+          ``False`` so beat/perception production is *frozen* and message
+          priorities are left untouched while the interface retries the
+          connection in the background (within the disconnect-grace window).
+        * **ENDED** — the reconnection failed past the grace window; the session
+          is closed and its ids removed, so this returns ``False``.
+
+        Implementation: cheap and synchronous (safe on the hot path). With no
+        tracked session ids it is trivially ``False``. When a liveness probe has
+        been registered by the interface (:meth:`set_liveness_probe`) the probe
+        decides CONNECTED vs RECONNECTING from the connector's real
+        ``is_connected`` state. Before the probe is registered (very early boot)
+        it falls back to the bookkeeping set so behaviour is unchanged. The
+        probe must never block or raise; any failure is treated as "not
+        connected" (RECONNECTING), which is the safe default — it only pauses
+        autonomy, never dispatches into a dead world.
         """
-        return bool(self._active_session_ids)
+        if not self._active_session_ids:
+            return False
+        probe = self._liveness_probe
+        if probe is None:
+            return True
+        try:
+            return bool(probe())
+        except Exception:  # pragma: no cover - defensive
+            return False
 
     # ------------------------------------------------------------------
     # Session lifecycle
@@ -241,6 +285,23 @@ class VesselSessionManager:
         if self._current_session_id == session_id:
             self._current_session_id = None
         self._active_session_ids.discard(session_id)
+
+        # The session is over: drop everything still queued for this world scope
+        # (autonomous will/action beats, sightings, and any pending player chat).
+        # Once the embodiment is gone that traffic is stale — dispatching it into
+        # a dead world or coalescing it into the next session is wrong. This is
+        # the canonical purge point covering every close path (logout, cooldown,
+        # disconnect). Purely structural (the session's ``interface_path`` world
+        # scope), never message text; fully guarded.
+        if interface_path:
+            try:
+                from core import message_queue
+
+                message_queue.drop_vessel_queue_for_world(interface_path)
+            except Exception as exc:
+                log_warning(
+                    f"[vessel_session] queue purge failed for {session_id}: {exc}"
+                )
 
         log_info(
             f"[vessel_session] Ended session {session_id} ({reason}); "

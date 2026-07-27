@@ -428,6 +428,116 @@ def build_decision_prompt(world_state: Any, world: str) -> str:
     return build_will_prompt(world_state, world)
 
 
+def build_action_prompt(world_state: Any, world: str) -> str:
+    """Build the **action beat** prompt from a ``WorldState``.
+
+    This is the *concrete-doing* counterpart to :func:`build_will_prompt`. The
+    will beat decides **what** Synth wants (its free-text goal); the action beat
+    asks Synth to take a **real step toward the current goal right now** —
+    walking to, gathering, crafting or placing the concrete things it needs.
+    This is what closes the gap between "authored a goal" and "actually
+    accomplished something": the motor tick moves the body reflexively, but only
+    a cognition turn can decide *which* concrete verb (collect_block, craft,
+    place, …) advances the plan, because the goal's meaning lives in free text
+    the reflex must never read (keyword rule).
+
+    Like the will beat this runs on the **Fast Lane** (a single ordinary
+    cognition turn, no Agent Lane / Drone / mid-session diary). It is paced
+    faster than the will beat (``VESSEL_ACTION_INTERVAL_SEC``) so play stays
+    productive between the slow volition beats.
+
+    Pure and keyword-free: it only surfaces the structured world snapshot (goal,
+    current step, inventory, affordances, reachable block/entity ids) and asks
+    Synth to pick the fitting verb. The verbs (``vessel_<world>_*``) themselves
+    are injected by the normal prompt/action machinery.
+
+    Args:
+        world_state: A ``WorldState`` dataclass or an equivalent dict.
+        world:       The connected world name (e.g. ``"minecraft"``).
+
+    Returns:
+        A ready-to-enqueue prompt string, or ``""`` when there is no active
+        goal (nothing concrete to act on — the will beat runs first to author
+        one).
+    """
+    ws = world_state_to_dict(world_state)
+    extra = ws["extra"]
+
+    goal = extra.get("current_goal")
+    goal_txt = _fmt_goal(goal)
+    if goal_txt == "none":
+        # No goal to act on yet — the will beat authors intent first. Returning
+        # an empty prompt lets the caller skip enqueuing this beat entirely.
+        return ""
+
+    health = ws["health"]
+    health_txt = f"{float(health):.0f}" if isinstance(health, (int, float)) else "?"
+    position_txt = _fmt_position(ws["position"])
+
+    entities_txt = _fmt_items(extra.get("entities") or [])
+    blocks_txt = _fmt_items(extra.get("blocks") or [], key="name")
+    block_names = _distinct_names(extra.get("blocks") or [], key="name")
+    entity_names = _distinct_names(extra.get("entities") or [], key="type")
+    inventory_txt = _fmt_items(extra.get("inventory") or [])
+    affordances_txt = _fmt_affordances(extra.get("affordances") or [])
+
+    prefix = f"vessel_{world}_"
+
+    lines = [
+        f"[Embodiment — a moment to actually do something toward your goal in "
+        f"the {world} world.]",
+        "",
+        "Where you are right now:",
+        f"- Health: {health_txt}",
+        f"- Position: {position_txt}",
+        f"- Nearby entities/NPCs: {entities_txt}",
+        f"- Nearby blocks of interest: {blocks_txt}",
+        f"- Inventory: {inventory_txt}",
+        f"- Things you could interact with: {affordances_txt}",
+        f"- Your current goal: {goal_txt}",
+        "",
+        "This is a moment of action, not reflection. You already decided what "
+        "you want — now take ONE concrete step toward the current step of your "
+        "goal, using what is actually around you above. Do not just think or "
+        "restate the plan: pick the verb that moves the plan forward and use "
+        "it now. Depending on what your current step needs, that might be:",
+        f"- `{prefix}collect_block` to gather several of a block you can see "
+        "(give its exact id as 'name' and how many as 'count') — this is the "
+        "reliable way to stock up on a material;",
+        f"- `{prefix}mine` to break one specific block you can see (by 'target');",
+        f"- `{prefix}craft` to turn materials you already hold into something "
+        "(by exact item id), or `{prefix}smelt` to cook/refine;",
+        f"- `{prefix}place` to put a block down when you are building;",
+        f"- `{prefix}goto` to walk to a spot or a thing you named, when the "
+        "thing you need is out of reach;",
+        f"- `{prefix}say` ONLY if a nearby player is clearly involved in what "
+        "you are doing — otherwise stay quiet and just act.",
+        "",
+        "Use the exact block/item/entity ids shown above — copy them verbatim, "
+        "never invent one. Look at your inventory to judge what you still need "
+        f"versus what you already have. When you have finished the current "
+        f"step, call `{prefix}update_goal` with 'advance' set to true to move "
+        "on; mark the whole goal 'done' when you have truly achieved it. You "
+        "are the judge of your own progress.",
+    ]
+
+    # Surface the exact reachable ids so the chosen 'name'/'target' is verbatim.
+    if block_names:
+        lines.append(
+            "Blocks you can act on right now (exact ids): "
+            + ", ".join(block_names)
+            + "."
+        )
+    if entity_names:
+        lines.append(
+            "Creatures/NPCs you can act on right now (exact ids): "
+            + ", ".join(entity_names)
+            + "."
+        )
+
+    return "\n".join(lines)
+
+
 def is_autonomy_enabled(config_get: Any) -> bool:
     """Return whether autonomous play is enabled.
 
@@ -485,6 +595,39 @@ def resolve_will_quiet_sec(config_get: Any, default: int = 60) -> int:
     except Exception:
         return default
     return max(0, min(3600, value))
+
+
+def is_action_beat_enabled(config_get: Any) -> bool:
+    """Return whether the **action beat** (concrete-doing cognition) is enabled.
+
+    The action beat is the middle layer between the slow will beat (volition)
+    and the fast motor tick (reflex): a periodic Fast-Lane cognition turn that
+    asks Synth to take one concrete verb toward its current goal (gather,
+    craft, place, …). It is what turns an authored goal into accomplished work,
+    since only cognition can map the goal's free-text meaning onto the right
+    verb (the reflex must never read that text). Fail-safe: any error →
+    ``False``.
+    """
+    try:
+        return bool(config_get("VESSEL_ACTION_BEAT_ENABLED", True))
+    except Exception:
+        return False
+
+
+def resolve_action_interval(config_get: Any, default: int = 20) -> int:
+    """Return the **action beat** interval in seconds, clamped.
+
+    Paced faster than the will beat (which authors intent) but slower than the
+    motor tick (which just moves the body), so play stays productive without
+    spamming cognition. Reads ``VESSEL_ACTION_INTERVAL_SEC``. Clamped to
+    ``[3, 300]``. Fail-safe: any error → ``default``.
+    """
+    try:
+        raw = config_get("VESSEL_ACTION_INTERVAL_SEC", default)
+        value = int(raw)
+    except Exception:
+        return default
+    return max(3, min(300, value))
 
 
 def resolve_motor_interval(config_get: Any, default: int = 3) -> int:

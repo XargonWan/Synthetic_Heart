@@ -102,6 +102,11 @@ class VesselInterface:
         # are paced independently — see core.vessel_beat and AGENTS.md §5c.
         self._last_will_beat_at: float = 0.0
         self._last_motor_tick_at: float = 0.0
+        # Action beat (the middle "concrete-doing" cognition turn that maps the
+        # free-text goal onto a real verb — gather/craft/place — since the
+        # reflex must never read the goal text). Paced faster than volition,
+        # slower than motorics; see core.vessel_beat and AGENTS.md §5c.
+        self._last_action_beat_at: float = 0.0
         # Last time a *player* interacted with Synth in-world (monotonic clock).
         # Updated whenever a salient player-originated perception is enqueued
         # (an in-world ``chat`` line carrying an actor). Used by
@@ -164,11 +169,47 @@ class VesselInterface:
         log_info("[vessel_interface] Starting Vessel interface...")
         self.is_enabled = True
         self.disabled_reason = None
+        # Wire the connection-liveness probe into the session manager so
+        # ``has_active_session()`` reflects the real 3-state connection model
+        # (CONNECTED only when a tracked session's connector is really
+        # connected; RECONNECTING/ENDED both read as inactive). Keeps ``core``
+        # free of interface deps — the manager only holds an opaque callable.
+        try:
+            get_vessel_session_manager().set_liveness_probe(self._any_connector_live)
+        except Exception as exc:  # pragma: no cover - defensive
+            log_debug(f"[vessel_interface] liveness probe registration failed: {exc}")
         if self._scheduler_task is None or self._scheduler_task.done():
             self._scheduler_task = asyncio.create_task(self._scheduler_loop())
         await self._maybe_autostart_bridge()
         await self._reattach_active_sessions()
         log_info("[vessel_interface] Vessel interface started")
+
+    def _any_connector_live(self) -> bool:
+        """Return True if any tracked session's connector is really connected.
+
+        The connection-liveness probe backing
+        :meth:`~core.vessel_session_manager.VesselSessionManager.has_active_session`.
+        Purely structural (matches each locally-tracked session's world scope to
+        a registered connector and reads its ``is_connected`` flag) and fully
+        guarded — a lookup failure or absent connector counts as *not* live, so
+        the session is treated as RECONNECTING rather than CONNECTED (autonomy
+        paused, never dispatched into a dead world). Cheap and synchronous:
+        safe to call on the message-queue hot path.
+        """
+        environments = self._active_session_environments()
+        if not environments:
+            return False
+        connectors = self._connector_environments()
+        for environment in environments:
+            connector = connectors.get(environment)
+            if connector is None:
+                continue
+            try:
+                if bool(getattr(connector, "is_connected", False)):
+                    return True
+            except Exception:  # pragma: no cover - defensive
+                continue
+        return False
 
     async def _maybe_autostart_bridge(self) -> None:
         """Optionally start the Minecraft bridge at boot.
@@ -455,6 +496,19 @@ class VesselInterface:
                     f"[vessel_interface] end_sessions_for_environment "
                     f"({environment}) failed for {session_id}: {exc}"
                 )
+        # Belt-and-braces: also purge the bare world scope in case a perception
+        # was queued under ``vessel/<world>`` without a matching tracked session
+        # (each ``end_session`` above already purges its own scope). Purely
+        # structural (world scope), never message text; fully guarded.
+        try:
+            from core import message_queue
+
+            message_queue.drop_vessel_queue_for_world(prefix)
+        except Exception as exc:
+            log_warning(
+                f"[vessel_interface] end_sessions_for_environment "
+                f"({environment}) queue purge failed: {exc}"
+            )
         # Forget the world's en-route sighting registry so the next session
         # starts fresh and rediscovers its surroundings (see
         # :meth:`_collect_en_route_sightings`).
@@ -893,6 +947,9 @@ class VesselInterface:
                 # If volition left the goal without a reachable target/destination,
                 # translate the idea into a concrete waypoint out of band (Drone).
                 await self._maybe_run_drone_planner()
+                # Concrete-doing cognition: map the free-text goal onto a real
+                # verb (gather/craft/place) — what actually accomplishes work.
+                await self._maybe_run_action_beat()
                 await self._maybe_run_motor_tick()
             except asyncio.CancelledError:
                 raise
@@ -998,6 +1055,81 @@ class VesselInterface:
             summary=prompt,
             environment=world,
             event_type="will_beat",
+        )
+
+    async def _maybe_run_action_beat(self) -> None:
+        """Enqueue a **concrete-doing** cognition turn when due (middle layer).
+
+        This is the beat that turns an authored goal into accomplished work.
+        The will beat decides *what* Synth wants; the motor tick moves the body
+        reflexively; but only a cognition turn can map the goal's free-text
+        meaning onto the *right verb* (gather the wood, craft the pickaxe, place
+        the block) — because the reflex must never read that text (keyword
+        rule). Without this middle beat Synth "walks but accomplishes nothing".
+
+        Fully guarded so a failure never breaks the scheduler. Gated: (1)
+        ``VESSEL_AUTONOMY_ENABLED`` on; (2) ``VESSEL_ACTION_BEAT_ENABLED`` on;
+        (3) a session active; (4) ``VESSEL_ACTION_INTERVAL_SEC`` elapsed since
+        the last action beat; (5) the same player-quiet deferral as the will
+        beat (a present player is answered reactively, not overridden by an
+        autonomous turn); (6) an active goal exists (``build_action_prompt``
+        returns ``""`` otherwise, and we skip). Runs on the Fast Lane — no Agent
+        Lane, no Drone, no diary.
+        """
+        try:
+            from core import vessel_beat
+        except Exception:
+            return
+
+        def _cfg(key: str, default: Any) -> Any:
+            return config_registry.get_value(
+                key, default, group="vessel", component="vessel"
+            )
+
+        if not vessel_beat.is_autonomy_enabled(_cfg):
+            return
+        if not vessel_beat.is_action_beat_enabled(_cfg):
+            return
+
+        manager = get_vessel_session_manager()
+        if not manager.has_active_session():
+            return
+
+        interval = vessel_beat.resolve_action_interval(_cfg)
+        now = asyncio.get_event_loop().time()
+        if now - self._last_action_beat_at < interval:
+            return
+
+        # Same player-quiet deferral as the will beat: while a player is
+        # actively present, let their message be handled as an ordinary reactive
+        # turn instead of firing an autonomous "act on your goal" turn.
+        quiet_sec = vessel_beat.resolve_will_quiet_sec(_cfg)
+        if quiet_sec > 0 and now - self._last_player_activity_at < quiet_sec:
+            return
+
+        world, world_state = await self._read_active_world_state()
+        if world is None or world_state is None:
+            return
+
+        interface_path = self._decision_interface_path(world)
+        if interface_path is None:
+            return
+
+        prompt = vessel_beat.build_action_prompt(world_state, world)
+        if not prompt:
+            # No active goal yet — the will beat authors one first.
+            return
+
+        self._last_action_beat_at = now
+        log_debug(
+            f"[vessel_interface] Autonomous action beat for '{world}' "
+            f"(interval={interval}s)"
+        )
+        await self._enqueue_perception(
+            interface_path=interface_path,
+            summary=prompt,
+            environment=world,
+            event_type="action_beat",
         )
 
     @staticmethod
@@ -1537,21 +1669,29 @@ class VesselInterface:
             return {}
 
     async def _close_disconnected_sessions(self) -> None:
-        """Force-close active sessions whose connector has dropped.
+        """Drive the RECONNECTING → CONNECTED / ENDED transitions.
 
-        Distinct from the (much longer) inactivity cooldown: this is the safety
-        net for a *hung* client/bridge. When a world's connector reports
-        ``is_connected == False`` while its session is still ``active`` in the
-        DB, ``has_active_session()`` would otherwise stay true for the whole
-        cooldown window (default 1h) — during which the scheduler keeps firing
-        will beats that accumulate and starve the message flow.
+        This is the sweep that advances the connection-driven 3-state model
+        (see :meth:`~core.vessel_session_manager.VesselSessionManager.has_active_session`).
+        For each locally-tracked session it probes the matching connector's
+        ``is_connected`` flag (structural, keyword-free):
 
-        For each active session we probe the matching connector's ``is_connected``
-        flag (structural, keyword-free). A connector must stay disconnected for
-        ``VESSEL_DISCONNECT_GRACE_SEC`` (default 30s, clamped 5–3600) — absorbing
-        transient blips — before its sessions are ended (reason ``disconnected``),
-        which flushes the diary and flips ``has_active_session()`` false so the
-        beats stop. Fully guarded: any failure leaves the session untouched.
+        * **connector live** → CONNECTED: clear any grace timer and leave the
+          session running.
+        * **connector dropped** → RECONNECTING: record the drop time, freeze new
+          vessel elements (the liveness probe now makes ``has_active_session()``
+          read false, so beats/perceptions stop and priorities are untouched),
+          and retry the connection (:meth:`_attempt_reconnect`) on each sweep
+          within the grace window. A reconnection that succeeds flips
+          ``is_connected`` back true on the next sweep, restoring CONNECTED.
+        * **still dropped past grace** → ENDED: end the session(s) (reason
+          ``disconnected``), which flushes the diary *and* purges all queued
+          vessel traffic for the world (via ``drop_vessel_queue_for_world`` in
+          ``end_session``).
+
+        The grace window is ``VESSEL_DISCONNECT_GRACE_SEC`` (default 30s, clamped
+        5–3600) — long enough to absorb transient blips and retry. Fully
+        guarded: any failure leaves the session untouched.
         """
         environments = self._active_session_environments()
         if not environments:
@@ -1595,11 +1735,18 @@ class VesselInterface:
                 self._disconnected_since[environment] = now
                 log_debug(
                     f"[vessel_interface] '{environment}' connector reported "
-                    f"disconnected — starting {grace}s grace"
+                    f"disconnected — entering RECONNECTING (freeze), {grace}s grace"
                 )
+                # RECONNECTING state: the session is frozen (has_active_session()
+                # now reads false via the liveness probe, so beats/perceptions
+                # stop and priorities are untouched) while we try to bring the
+                # connector back before the grace elapses.
+                await self._attempt_reconnect(environment)
                 continue
 
             if now - first_seen < grace:
+                # Still within the reconnection window — keep retrying.
+                await self._attempt_reconnect(environment)
                 continue
 
             # Grace elapsed and still disconnected: close the stale session(s).
@@ -1617,6 +1764,36 @@ class VesselInterface:
                     f"'{environment}': {exc}"
                 )
             self._disconnected_since.pop(environment, None)
+
+    async def _attempt_reconnect(self, environment: str) -> None:
+        """Try to bring a dropped connector back during the RECONNECTING window.
+
+        Best-effort reconnection attempt fired by the disconnect sweep while a
+        world is in the RECONNECTING (frozen) state — the session is still known
+        but ``has_active_session()`` reads false, so no new vessel elements are
+        produced. Asks the Vessel plugin to reconnect; ``connect_world`` is
+        idempotent and reattach-safe (reuses the existing active session). If it
+        succeeds the connector's ``is_connected`` flips true on the next sweep,
+        which clears the grace timer and restores the CONNECTED state
+        automatically — no extra bookkeeping here. Fully guarded: any failure is
+        logged and left for the grace window to time out into ENDED.
+        """
+        try:
+            from core.core_initializer import PLUGIN_REGISTRY
+
+            plugin = PLUGIN_REGISTRY.get("vessel_plugin")
+        except Exception as exc:  # pragma: no cover - defensive
+            log_debug(f"[vessel_interface] reconnect: plugin lookup failed: {exc}")
+            return
+        if plugin is None or not hasattr(plugin, "connect_world"):
+            return
+        try:
+            await plugin.connect_world(connector_name=environment)
+        except Exception as exc:  # pragma: no cover - defensive
+            log_debug(
+                f"[vessel_interface] reconnect attempt for '{environment}' "
+                f"failed: {exc}"
+            )
 
     def _active_session_environments(self) -> set[str]:
         """Return the set of environments with a locally-tracked session.

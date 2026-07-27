@@ -17,10 +17,13 @@ from __future__ import annotations
 from typing import Any
 
 from core.vessel_beat import (
+    build_action_prompt,
     build_decision_prompt,
     build_will_prompt,
+    is_action_beat_enabled,
     is_autonomy_enabled,
     is_motor_enabled,
+    resolve_action_interval,
     resolve_beat_interval,
     resolve_motor_interval,
     resolve_will_interval,
@@ -358,3 +361,57 @@ def test_resolve_will_quiet_sec_failsafe_on_error() -> None:
         raise RuntimeError("config down")
 
     assert resolve_will_quiet_sec(_boom, default=60) == 60
+
+
+# ---------------------------------------------------------------------------
+# Action beat — concrete-doing cognition (middle layer)
+# ---------------------------------------------------------------------------
+
+
+def test_is_action_beat_enabled_defaults_true_and_reads_flag() -> None:
+    # Missing → default True; explicit values honoured.
+    assert is_action_beat_enabled(lambda k, d: d) is True
+    assert is_action_beat_enabled(lambda k, d: False) is False
+    assert is_action_beat_enabled(lambda k, d: True) is True
+
+
+def test_is_action_beat_enabled_failsafe_on_error() -> None:
+    def _boom(key: str, default: Any) -> Any:
+        raise RuntimeError("config down")
+
+    assert is_action_beat_enabled(_boom) is False
+
+
+def test_resolve_action_interval_default_and_clamp() -> None:
+    assert resolve_action_interval(lambda k, d: d, default=20) == 20
+    # Clamped to [3, 300].
+    assert resolve_action_interval(lambda k, d: 0) == 3
+    assert resolve_action_interval(lambda k, d: 999) == 300
+    assert resolve_action_interval(lambda k, d: 15) == 15
+
+
+def test_resolve_action_interval_failsafe_on_error() -> None:
+    def _boom(key: str, default: Any) -> Any:
+        raise RuntimeError("config down")
+
+    assert resolve_action_interval(_boom, default=20) == 20
+
+
+def test_build_action_prompt_empty_when_no_goal() -> None:
+    # No active goal → empty string so the caller skips enqueuing.
+    assert build_action_prompt({"extra": {}}, "minecraft") == ""
+
+
+def test_build_action_prompt_is_action_focused_and_lists_verbs() -> None:
+    prompt = build_action_prompt(_rich_world_state(), "minecraft")
+    assert prompt != ""
+    # World-namespaced verbs are surfaced so cognition uses the real actions.
+    assert "vessel_minecraft_" in prompt
+    # The current goal free text is surfaced verbatim.
+    assert "explore the caves" in prompt
+
+
+def test_build_action_prompt_surfaces_reachable_ids() -> None:
+    prompt = build_action_prompt(_rich_world_state(), "minecraft")
+    # Exact block/entity ids must appear verbatim so the LLM targets real names.
+    assert "oak_log" in prompt

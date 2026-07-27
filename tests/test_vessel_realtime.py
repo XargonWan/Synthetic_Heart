@@ -2,16 +2,26 @@
 
 Covers two enforced behaviours (see AGENTS.md §5c, docs/rift_vessel.rst):
 
-1. **Priority — the game takes top priority while embodied.** When a Vessel
-   session is active, ``core.message_queue.enqueue`` raises the Vessel's own
-   in-world perceptions to ``HIGH_PRIORITY`` and lowers ordinary chat from
-   other interfaces to ``AGENT_PRIORITY`` (trainer and urgent messages exempt).
+1. **Priority — a pure 0–10 numeric ranking (higher = more urgent), with NO
+   de-prioritisation.** ``core.message_queue.enqueue`` ranks each message only
+   by its structural origin, unconditionally — never conditional on whether a
+   Vessel session is active:
+
+     * a real in-world PLAYER chat → ``PRIORITY_HIGH`` (a human speaking
+       directly, above Synth's own autonomous perceptions);
+     * Synth's OWN autonomous in-world perception/will-beat → ``PRIORITY_AMBIENT``
+       (below every human);
+     * the trainer → ``PRIORITY_TRAINER``; ordinary chat → ``PRIORITY_GENERAL``;
+     * ``priority=True`` (urgent) → ``PRIORITY_URGENT``.
+
+   Ordinary chat is *never* demoted because Synth happens to be embodied in a
+   world, so a person is always answered promptly.
 2. **Context — SyntH is not omniscient while playing.** When a turn originates
    from a Vessel embodiment, ``HistoryEngine.build_context`` forces
    ``unified_mode = False`` and suppresses the global diary/memory injections.
 
-The decision is taken purely from routing metadata (origin interface + the
-active-session flag / interface_path) — never from message text.
+The decision is taken purely from routing metadata (origin interface +
+interface_path) — never from message text.
 """
 
 from __future__ import annotations
@@ -28,7 +38,7 @@ import pytest
 
 
 def test_has_active_session_toggles() -> None:
-    """The in-memory active-session flag flips with add/discard."""
+    """With no liveness probe the flag falls back to the in-memory set."""
     from core.vessel_session_manager import VesselSessionManager
 
     mgr = VesselSessionManager()
@@ -45,6 +55,56 @@ def test_has_active_session_toggles() -> None:
 
     mgr._active_session_ids.discard("sess-2")
     assert mgr.has_active_session() is False
+
+
+def test_has_active_session_reflects_connection_states() -> None:
+    """The 3-state model: CONNECTED true, RECONNECTING/ENDED false.
+
+    Once the interface registers a connection-liveness probe,
+    ``has_active_session()`` returns True only while the connector is really
+    connected (CONNECTED). A session that exists but whose connector has dropped
+    (RECONNECTING) reads false so autonomy freezes; an ended session (no ids at
+    all) is also false.
+    """
+    from core.vessel_session_manager import VesselSessionManager
+
+    mgr = VesselSessionManager()
+    live = {"connected": False}
+    mgr.set_liveness_probe(lambda: live["connected"])
+
+    # ENDED — no tracked session ids: trivially inactive regardless of probe.
+    live["connected"] = True
+    assert mgr.has_active_session() is False
+
+    # A session now exists.
+    mgr._active_session_ids.add("sess-1")
+
+    # CONNECTED — connector really connected.
+    live["connected"] = True
+    assert mgr.has_active_session() is True
+
+    # RECONNECTING — session still tracked but connector dropped: frozen.
+    live["connected"] = False
+    assert mgr.has_active_session() is False
+
+
+def test_has_active_session_probe_failure_is_safe() -> None:
+    """A raising probe is treated as not-connected (RECONNECTING), never blows up."""
+    from core.vessel_session_manager import VesselSessionManager
+
+    mgr = VesselSessionManager()
+
+    def _boom() -> bool:
+        raise RuntimeError("connector lookup failed")
+
+    mgr.set_liveness_probe(_boom)
+    mgr._active_session_ids.add("sess-1")
+    # Guarded: a failing probe means "not connected" → inactive, no exception.
+    assert mgr.has_active_session() is False
+
+    # Clearing the probe reverts to bookkeeping-only behaviour.
+    mgr.set_liveness_probe(None)
+    assert mgr.has_active_session() is True
 
 
 # ---------------------------------------------------------------------------
@@ -133,14 +193,24 @@ def _patch_enqueue_hot_path(
     return put_items
 
 
+def _semantic_priority(put_items: list[tuple[Any, Any, Any]]) -> int:
+    """Recover the semantic (higher = more urgent) priority of the last put.
+
+    ``enqueue`` pushes the NEGATED priority as the min-heap key via
+    ``_heap_key``, so the tuple's first element is ``-priority``. Un-negate it.
+    """
+    assert put_items, "expected the message to be enqueued"
+    return -int(put_items[-1][0])
+
+
 @pytest.mark.asyncio
 async def test_vessel_player_chat_raised_to_high_priority(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A real in-world PLAYER chat during a session gets HIGH_PRIORITY.
+    """A real in-world PLAYER chat gets PRIORITY_HIGH.
 
     Only a chat tagged ``_vessel_player_chat`` (set structurally by the vessel
-    interface from event kind + actor presence) is treated as urgent — so a
+    interface from event kind + actor presence) is treated as high — so a
     human speaking to Synth jumps ahead of Synth's own autonomous perceptions.
     """
     import core.message_queue as mq
@@ -157,20 +227,18 @@ async def test_vessel_player_chat_raised_to_high_priority(
         skip_mention_check=True,
     )
 
-    assert put_items, "expected the message to be enqueued"
-    priority_val = put_items[-1][0]
-    assert priority_val == mq.HIGH_PRIORITY
+    assert _semantic_priority(put_items) == mq.PRIORITY_HIGH
 
 
 @pytest.mark.asyncio
-async def test_autonomous_vessel_perception_set_to_normal_priority(
+async def test_autonomous_vessel_perception_set_to_ambient_priority(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Synth's OWN autonomous in-world perception gets NORMAL_PRIORITY.
+    """Synth's OWN autonomous in-world perception gets PRIORITY_AMBIENT.
 
     Will beats / sightings are produced on a fast timer but consumed slowly, so
-    they must sit below a real player chat (HIGH) to avoid starving it — while
-    staying above deprioritised cross-interface chat (AGENT_PRIORITY).
+    they must sit below a real player chat (HIGH) — and below ordinary chat
+    (GENERAL) — so a human is always answered before background play.
     """
     import core.message_queue as mq
 
@@ -185,17 +253,22 @@ async def test_autonomous_vessel_perception_set_to_normal_priority(
         skip_mention_check=True,
     )
 
-    assert put_items, "expected the message to be enqueued"
-    priority_val = put_items[-1][0]
-    assert priority_val == mq.NORMAL_PRIORITY
-    assert mq.HIGH_PRIORITY < mq.NORMAL_PRIORITY < mq.AGENT_PRIORITY
+    assert _semantic_priority(put_items) == mq.PRIORITY_AMBIENT
+    # Higher = more urgent: a player chat outranks an ambient perception, which
+    # in turn sits below ordinary human chat.
+    assert mq.PRIORITY_HIGH > mq.PRIORITY_AMBIENT
+    assert mq.PRIORITY_GENERAL > mq.PRIORITY_AMBIENT
 
 
 @pytest.mark.asyncio
-async def test_ordinary_chat_deprioritised_during_session(
+async def test_ordinary_chat_not_demoted_during_session(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Ordinary (non-trainer) chat is lowered to AGENT_PRIORITY while embodied."""
+    """Ordinary chat stays PRIORITY_GENERAL even while Synth is embodied.
+
+    There is NO de-prioritisation: a Vessel session must never lower ordinary
+    cross-interface chat, so a person is always answered promptly.
+    """
     import core.message_queue as mq
 
     put_items = _patch_enqueue_hot_path(monkeypatch, session_active=True)
@@ -208,15 +281,14 @@ async def test_ordinary_chat_deprioritised_during_session(
         skip_mention_check=True,
     )
 
-    assert put_items, "expected the message to be enqueued"
-    assert put_items[-1][0] == mq.AGENT_PRIORITY
+    assert _semantic_priority(put_items) == mq.PRIORITY_GENERAL
 
 
 @pytest.mark.asyncio
-async def test_trainer_chat_not_deprioritised_during_session(
+async def test_trainer_chat_ranked_above_general(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The trainer stays at NORMAL_PRIORITY even while a session is active."""
+    """The trainer is ranked at PRIORITY_TRAINER (above ordinary chat)."""
     import core.message_queue as mq
 
     put_items = _patch_enqueue_hot_path(
@@ -231,15 +303,15 @@ async def test_trainer_chat_not_deprioritised_during_session(
         skip_mention_check=True,
     )
 
-    assert put_items, "expected the message to be enqueued"
-    assert put_items[-1][0] == mq.NORMAL_PRIORITY
+    assert _semantic_priority(put_items) == mq.PRIORITY_TRAINER
+    assert mq.PRIORITY_TRAINER > mq.PRIORITY_GENERAL
 
 
 @pytest.mark.asyncio
 async def test_no_session_leaves_priority_unchanged(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """With no active session, ordinary chat keeps NORMAL_PRIORITY."""
+    """With no active session, ordinary chat keeps PRIORITY_GENERAL."""
     import core.message_queue as mq
 
     put_items = _patch_enqueue_hot_path(monkeypatch, session_active=False)
@@ -252,15 +324,14 @@ async def test_no_session_leaves_priority_unchanged(
         skip_mention_check=True,
     )
 
-    assert put_items, "expected the message to be enqueued"
-    assert put_items[-1][0] == mq.NORMAL_PRIORITY
+    assert _semantic_priority(put_items) == mq.PRIORITY_GENERAL
 
 
 @pytest.mark.asyncio
 async def test_urgent_message_stays_high_regardless(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """priority=True (urgent) always maps to HIGH_PRIORITY, untouched."""
+    """priority=True (urgent) always maps to PRIORITY_URGENT, untouched."""
     import core.message_queue as mq
 
     put_items = _patch_enqueue_hot_path(monkeypatch, session_active=True)
@@ -274,8 +345,7 @@ async def test_urgent_message_stays_high_regardless(
         priority=True,
     )
 
-    assert put_items, "expected the message to be enqueued"
-    assert put_items[-1][0] == mq.HIGH_PRIORITY
+    assert _semantic_priority(put_items) == mq.PRIORITY_URGENT
 
 
 # ---------------------------------------------------------------------------

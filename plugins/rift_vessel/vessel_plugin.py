@@ -159,6 +159,41 @@ config_registry.get_value(
     advanced=True,
 )
 config_registry.get_value(
+    "VESSEL_ACTION_BEAT_ENABLED",
+    True,
+    value_type=bool,
+    label="Autonomous Action Beat (concrete doing)",
+    description=(
+        "When enabled, a periodic cognition turn asks Synth to take one "
+        "concrete step toward its current goal (gather, craft, place, …). This "
+        "is the layer that turns an authored goal into accomplished work: only "
+        "cognition can map the goal's free-text meaning onto the right verb, "
+        "since the fast reflex must never read that text. Disable to keep only "
+        "the slow will beat (volition) and the fast motor tick (motion). Only "
+        "used when Autonomous In-World Play is enabled."
+    ),
+    group="plugins",
+    component="vessel_plugin",
+    advanced=True,
+)
+config_registry.get_value(
+    "VESSEL_ACTION_INTERVAL_SEC",
+    20,
+    value_type=int,
+    label="Autonomous Action Beat Interval (s)",
+    description=(
+        "Seconds between action beats — the concrete-doing cognition turns that "
+        "advance the current goal (clamped to 3–300). Paced faster than the "
+        "will beat (which authors intent) but slower than the motor tick (which "
+        "just moves the body), so play stays productive without spamming "
+        "cognition. Only used when Autonomous In-World Play and the Autonomous "
+        "Action Beat are both enabled."
+    ),
+    group="plugins",
+    component="vessel_plugin",
+    advanced=True,
+)
+config_registry.get_value(
     "VESSEL_MOTOR_ENABLED",
     True,
     value_type=bool,
