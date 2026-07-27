@@ -5797,7 +5797,7 @@ class SynthWebUIInterface:
             "message_send": "Outbound message delivery tuning.",
             "action_safety": "Action execution safety policy settings.",
             "weather_plugin": "Weather plugin scheduling and delivery settings.",
-            "cortex": "Cortex engine selection for base, trainer, agent, Grillo and live scopes.",
+            "cortex": "Cortex engine selection for base, trainer, agent, Grillo and Rift Vessel scopes.",
         }
 
         try:
@@ -11570,20 +11570,6 @@ class SynthWebUIInterface:
                 for e in by_cortex.get("llm_provider", [])
                 if e.get("is_external")
             )
-            # Live scope: LIVE_REGISTRY is the authoritative source for streaming
-            # engines; fall back to CortexRegistry if the registry is unavailable.
-            live_engine_names: list[str] = ["disabled"]
-            try:
-                from core.live_registry import LIVE_REGISTRY as _LIVE_REG
-
-                live_engine_names += sorted(_LIVE_REG.get_available_engines())
-            except Exception:
-                try:
-                    live_engine_names += sorted(
-                        cortex_reg.get_engines_by_cortex("live")
-                    )
-                except Exception:
-                    pass
             # Map engine name -> its selectable models, so the UI can render a
             # single "engine / model" combo per scope. Derived from the same
             # cortex_engines list built above (supported_models per engine).
@@ -11621,7 +11607,7 @@ class SynthWebUIInterface:
                     "AGENT_CORTEX", "Agent", ["Default"] + llm_engines_sorted
                 ),
                 _build_scope_entry(
-                    "LIVE_CORTEX", "Live", ["Default"] + live_engine_names
+                    "VESSEL_CORTEX", "Rift Vessel", ["Default"] + llm_engines_sorted
                 ),
             ]
         except Exception as exc:

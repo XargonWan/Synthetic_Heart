@@ -5637,7 +5637,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                     if (componentsLiveListEl)  renderDetailsList(data.live  || [], componentsLiveListEl);
                     if (componentsIrisListEl)   renderDetailsList(data.iris  || [], componentsIrisListEl);
 
-                    // Render cortex scope selectors (Grillo / Trainer / Live)
+                    // Render cortex scope selectors (Grillo / Trainer / Agent / Rift Vessel)
                     try {
                         const cortexScopesEl = document.getElementById('cortex-scopes');
                         if (cortexScopesEl && data.cortex && Array.isArray(data.cortex.scopes) && data.cortex.scopes.length) {
