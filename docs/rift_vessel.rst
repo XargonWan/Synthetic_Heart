@@ -102,7 +102,7 @@ File                                            Role
 ``plugins/rift_vessel/minecraft/goals.py``      Minecraft **goal store** — persists and recalls
                                                 Synth's own free-text goals (no catalogue; see
                                                 *Autonomous play* below).
-``plugins/rift_vessel/minecraft/minecraft_bridge_minimal.js``  Node.js Mineflayer ↔ HTTP
+``plugins/rift_vessel/minecraft/minecraft_bridge.js``  Node.js Mineflayer ↔ HTTP
                                                 bridge.
 ``interface/minecraft_provisioner.py``          ``BridgeProvisioner`` — installs and
                                                 controls the bridge subprocess.
@@ -166,21 +166,39 @@ The Rift Vessel is primarily used in interactive game worlds, where
 responsiveness matters. Two behaviours make embodiment feel like a person who
 is *concentrating on the game* rather than multitasking every chat:
 
-**Priority — the game takes top priority.** While at least one embodiment
-session is active
-(:meth:`core.vessel_session_manager.VesselSessionManager.has_active_session`),
-the game is the most urgent thing right now, so
-:func:`core.message_queue.enqueue` **raises the Vessel's own in-world
-perceptions to** ``HIGH_PRIORITY`` and **deprioritises ordinary chat** from
-other interfaces from ``NORMAL_PRIORITY`` down to ``AGENT_PRIORITY``. In-world
-perceptions therefore drain first while chat waits. The decision is made
-**purely from the message's origin interface and the active-session flag —
-never from message text** (project rule: no keyword logic). Two exemptions keep
-it safe: urgent/HIGH messages (events) always pass untouched, and the trainer
-(``TRAINER_CHAT_ID``) is never deprioritised. When no session is active, queue
-behaviour is unchanged. The check is a cheap, DB-free, in-memory flag, so it is
-safe to run on every enqueue; the whole block is lazily imported and fully
-guarded, so removing the Vessel plugin leaves queueing untouched.
+**Priority — a pure 0–10 numeric ranking (higher = more urgent), with NO
+de-prioritisation.** Each message is assigned an absolute urgency from its
+**structural origin only** (never from message text, never conditional on
+whether a session is active): a real in-world **player** chat →
+``PRIORITY_HIGH``; Synth's **own** autonomous perception/will-beat →
+``PRIORITY_AMBIENT`` (below every human); the trainer → ``PRIORITY_TRAINER``;
+ordinary chat → ``PRIORITY_GENERAL``; an urgent (``priority=True``) message →
+``PRIORITY_URGENT``. Ordinary chat is **never demoted** because Synth happens to
+be embodied — a person addressing Synth is always answered promptly, and the
+game's own perceptions simply sit at a lower rung so they yield to humans. The
+whole block is lazily imported and fully guarded, so removing the Vessel plugin
+leaves queueing untouched.
+
+**Connection-driven session lifecycle (3 states).** Whether the game generates
+work is tied to the **real** connection, tracked by
+:meth:`core.vessel_session_manager.VesselSessionManager.has_active_session`.
+The interface registers a *liveness probe* into the session manager (keeping
+``core/`` free of interface imports) so the flag reflects the connector's actual
+``is_connected`` state, not just a DB row:
+
+* **CONNECTED** — a session exists *and* its connector is really connected.
+  ``has_active_session()`` is true; will/action/motor beats and perception
+  intake run normally.
+* **RECONNECTING** — the session still exists but the connector has dropped.
+  ``has_active_session()`` reads **false**, so vessel elements are *frozen*
+  (no new beats or perceptions enqueued; existing priorities untouched). The
+  disconnect sweep retries the connection every tick for
+  ``VESSEL_DISCONNECT_GRACE_SEC`` seconds (default 30, clamped 5–3600). A
+  successful reconnection flips the connector live again → back to CONNECTED.
+* **ENDED** — the connection could not be restored within the grace window.
+  The session is closed, flushed to a single diary entry, and **all queued
+  vessel traffic for that world is purged** (``drop_vessel_queue_for_world``),
+  so nothing stale is dispatched into a dead world.
 
 **Context — SyntH isn't omniscient while playing.** A turn that originates from
 an embodiment (detected from routing metadata: an ``vessel/...`` interface path,
@@ -250,8 +268,10 @@ Key                             Purpose
 ``ACTIVE_VESSEL``               Selected connector (``"disabled"`` default)
 ``VESSEL_SETTINGS``             JSON connector settings blob
 ``VESSEL_SESSION_COOLDOWN_SEC`` Idle seconds before a session flushes (3600)
-``VESSEL_AUTONOMY_ENABLED``     Enable autonomous play — both layers (``False`` default)
+``VESSEL_AUTONOMY_ENABLED``     Enable autonomous play — all three beats (``False`` default)
 ``VESSEL_WILL_INTERVAL_SEC``    Seconds between slow volition/will beats (45, clamped 10–3600; falls back to legacy ``VESSEL_BEAT_INTERVAL_SEC``)
+``VESSEL_ACTION_BEAT_ENABLED``  Enable the middle "idea → concrete step" action beat (``True`` default)
+``VESSEL_ACTION_INTERVAL_SEC``  Seconds between action beats — LLM Fast-Lane turn (20, clamped 3–300)
 ``VESSEL_MOTOR_ENABLED``        Enable the fast motorics reflex (``True`` default)
 ``VESSEL_MOTOR_INTERVAL_SEC``   Seconds between fast motor ticks — no LLM (3, clamped 1–60)
 ``MINECRAFT_BRIDGE_RUN_AT_START``  Optional boot pre-warm (False). The bridge starts **on demand** by default, only when Synth enters the world.
@@ -384,11 +404,17 @@ around, set and pursue its own goals, gather, build, and interact — while stil
 obeying the Vessel's hard constraints (Fast Lane only, no Agent Lane/Drones, a
 single diary at end-of-session).
 
-**Two speeds: volition (slow, LLM) + motorics (fast, reflex).** Autonomy is
-split into two independently-paced layers so that *deciding what to want*
-(slow, deliberate, personality-driven) never bottlenecks *moving the body*
-(fast, reactive). Both are driven by the interface scheduler's fine 10 s tick
-while a session is active.
+**Three speeds: volition (slow, LLM) + action (middle, LLM) + motorics (fast,
+reflex).** Autonomy is split into three independently-paced layers so that
+*deciding what to want* (slow, deliberate, personality-driven) never bottlenecks
+*deciding the next concrete step* (middle), which in turn never bottlenecks
+*moving the body* (fast, reactive). All three are driven by the interface
+scheduler's fine 10 s tick while a session is active. The middle **action beat**
+exists to close the "walks around but never accomplishes anything" gap: the will
+beat authors a free-text goal but is forbidden to move or act, while the motor
+tick can move but never reads the goal's words — so nothing translated *"gather
+wood"* into the concrete verb ``vessel_minecraft_collect_block`` / ``mine`` /
+``craft``. The action beat is that translator.
 
 **Will beat — volition (slow, LLM), like G.R.I.L.L.O.** Every
 ``VESSEL_WILL_INTERVAL_SEC`` seconds (default 45, falling back to the legacy
@@ -413,6 +439,27 @@ personality, not a script. No new lane, no Drones, no mid-session diary — the
 beat is just another perception-shaped message. ``build_decision_prompt``
 remains a backward-compat alias of ``build_will_prompt``.
 
+**Action beat — the "idea → concrete step" translator (middle, LLM).** Every
+``VESSEL_ACTION_INTERVAL_SEC`` seconds (default 20, clamped ``[3, 300]``, gated
+by ``VESSEL_ACTION_BEAT_ENABLED``, default True) the scheduler
+(``interface/vessel_interface.py::_maybe_run_action_beat``) fires a second,
+faster LLM beat. Unlike the will beat — which reflects and *authors* the goal
+but is explicitly forbidden to move or act — the action beat frames the turn as
+*"a moment to actually do something toward your goal"* and asks Synth for exactly
+**one** concrete step. It is built by :mod:`core.vessel_beat`
+(``build_action_prompt``), returns an empty string (no beat) when there is no
+active goal, and — like every autonomy beat — is enqueued as an ordinary
+Fast-Lane ``vessel`` message. In that turn Synth picks a concrete world verb
+(``vessel_<world>_collect_block`` / ``mine`` / ``craft`` / ``smelt`` / ``place``
+/ ``goto`` / ``say``) and may record progress via
+``vessel_<world>_update_goal`` with ``advance=true``. This is the layer that
+turns a free-text goal into technical actions without any keyword logic (the
+mapping is cognition's, not the code's). It respects all three Vessel
+constraints: still Fast Lane, still no Agent Lane/Drones, still no mid-session
+diary. The player-quiet deferral (``VESSEL_WILL_QUIET_SEC``) applies here too, so
+a player addressing Synth in-world is answered reactively instead of being
+overridden by an autonomy beat.
+
 **Motor tick — motorics (fast, no LLM).** A separate, much faster loop moves
 the body toward the current goal with **no prompt, no cognition turn, no
 diary**. Every ``VESSEL_MOTOR_INTERVAL_SEC`` seconds (default 3, clamped
@@ -424,10 +471,23 @@ the **structural affordance contract only** (``{kind, target, verb, distance}``,
 distance-sorted): it picks the nearest benign affordance (verb ``use`` /
 ``mine``, hostile ``attack`` skipped), then ``mine`` s a block or ``use`` s an
 entity within ``_MOTOR_REACH`` (3.0 m), else ``goto`` s it, else ``wander`` s.
-It **never reads the goal's free text** — the goal only gates whether to move at
-all. The base ``VesselConnectorBase.motor_step`` is a no-op returning
-``{"acted": False, "reason": "no_motorics"}``, so a world without motorics
-degrades gracefully.
+The goal's **already-validated structural fields** (``target_kind`` /
+``target_name``, populated by cognition — never free text) may steer *where* the
+body walks: when the goal names a block target and that exact block is a live
+affordance within reach, the reflex ``mine`` s it (returning
+``{"action": "mine", "target": …, "target_kind": "block"}``) instead of standing
+next to it re-issuing ``goto`` — the "walks up but never picks anything up" gap.
+Entities are never mined (mining is block-only). The reflex still **never reads
+the goal's free text**. The base ``VesselConnectorBase.motor_step`` is a no-op
+returning ``{"acted": False, "reason": "no_motorics"}``, so a world without
+motorics degrades gracefully.
+
+**Structured inventory.** So cognition can judge *how many* of a thing it still
+needs without rescanning, ``get_world_state`` aggregates the raw inventory (a
+flat list of stacks, where the same id can appear in several stacks) into an
+id→total map exposed as ``WorldState.extra["inventory_counts"]`` (via the
+``MinecraftConnector._inventory_counts`` helper — plain, fail-safe aggregation,
+no keyword logic). The raw ``inventory`` list is still available alongside it.
 
 ``core/vessel_beat.py`` is pure and side-effect-free (dataclass **or** dict
 input, fail-safe autonomy gating, interval clamp/failsafe on both
