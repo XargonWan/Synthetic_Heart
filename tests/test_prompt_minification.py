@@ -218,6 +218,77 @@ class TestReducePromptForLLMLimit:
         assert "instructions_verbose" in reduced
         assert "THIS TEXT MUST NOT BE MINIFIED" in reduced["instructions_verbose"]
 
+    def test_actions_block_examples_slimmed_when_over_budget(self):
+        """When still over budget, per-action `examples` should be dropped."""
+        # A minimal prompt whose bulk lives entirely in the actions block's
+        # redundant `examples` objects (mirrors the real overflow: a full
+        # catalog with per-action guidance that reduce_prompt used to ignore).
+        big_examples = {
+            "description": "d" * 400,
+            "instructions": {"description": "i" * 400, "example": "e" * 400},
+            "examples": [],
+        }
+        prompt = {
+            "context": {"date": "2025-01-01"},
+            "input": {"type": "message", "payload": {"text": "hi"}},
+            "instructions": "Reply with JSON.",
+            "actions": {
+                f"action_{i}": {
+                    "schema": {"type": "object", "properties": {}},
+                    "brief": f"Action {i} brief",
+                    "source": "test",
+                    "examples": copy.deepcopy(big_examples),
+                }
+                for i in range(20)
+            },
+        }
+        original_size = len(json_dumps(prompt))
+
+        # Force reduction: a limit the context/instructions alone easily meet,
+        # only reachable by trimming the actions block.
+        reduced = reduce_prompt_for_llm_limit(prompt, 3000)
+        reduced_size = len(json_dumps(reduced))
+
+        assert reduced_size < original_size, "Actions block should be slimmed"
+        # Every action must still be present with its brief (selection intact).
+        assert set(reduced["actions"].keys()) == set(prompt["actions"].keys())
+        for action_def in reduced["actions"].values():
+            assert "examples" not in action_def, "examples must be dropped"
+            assert action_def.get("brief"), "brief must be retained"
+
+    def test_actions_block_stripped_to_brief_only_at_extreme_limit(self):
+        """At an extreme limit, actions collapse to brief-only (no schema)."""
+        prompt = {
+            "context": {"date": "2025-01-01"},
+            "input": {"type": "message", "payload": {"text": "hi"}},
+            "instructions": "Reply with JSON.",
+            "actions": {
+                f"action_{i}": {
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            f"field_{j}": {"type": "string"} for j in range(20)
+                        },
+                    },
+                    "brief": f"Action {i}",
+                    "source": "test",
+                }
+                for i in range(30)
+            },
+        }
+        original_size = len(json_dumps(prompt))
+
+        reduced = reduce_prompt_for_llm_limit(prompt, 1500)
+        reduced_size = len(json_dumps(reduced))
+
+        assert reduced_size < original_size
+        # All actions still discoverable, but schema/source gone.
+        assert set(reduced["actions"].keys()) == set(prompt["actions"].keys())
+        for action_def in reduced["actions"].values():
+            assert "schema" not in action_def
+            assert "source" not in action_def
+            assert "brief" in action_def
+
 
 class TestIntegrationMinificationWithReduction:
     """Integration tests for the full flow."""

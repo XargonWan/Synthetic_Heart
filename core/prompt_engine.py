@@ -2750,6 +2750,61 @@ def reduce_prompt_for_llm_limit(prompt: dict, max_chars: int) -> dict:
                 current_size = len(json_dumps(reduced_prompt)) - attachment_data_offset
                 log_debug(f"[reduce_prompt] After removing {key}: {current_size} chars")
 
+    # === STEP 4.5: Slim the actions block (drop per-action `examples`) ===
+    # The `actions` block carries, for every available action, a redundant
+    # `examples`/`instructions` object that duplicates guidance already implied
+    # by the schema + brief. It is NOT required for the model to *choose* an
+    # action, and the corrector re-supplies the full detail on demand
+    # (extract_for_corrector). With the full catalog this block alone can push
+    # a prompt tens of thousands of chars over a browser-driven engine's hard
+    # limit (e.g. selenium-llm-engine at 32000), causing the engine's multi-part
+    # split to garble the request and the model to return empty actions.
+    # Trimming it here keeps action *selection* intact while dropping the bulk.
+    if current_size > max_chars:
+        actions = reduced_prompt.get("actions")
+        if isinstance(actions, dict) and actions:
+            trimmed = False
+            for _action_name, action_def in actions.items():
+                if isinstance(action_def, dict) and "examples" in action_def:
+                    del action_def["examples"]
+                    trimmed = True
+            if trimmed:
+                log_warning(
+                    "[reduce_prompt] Slimming actions block: removed per-action "
+                    "`examples` guidance (schema + brief retained)"
+                )
+                current_size = len(json_dumps(reduced_prompt)) - attachment_data_offset
+                log_debug(
+                    f"[reduce_prompt] After slimming actions block: {current_size} chars"
+                )
+
+    # === STEP 4.6: Aggressively strip the actions block to brief-only ===
+    # If dropping `examples` was not enough, reduce each action to just its
+    # `brief` (no `schema`/`source`), mirroring Prompt Lite Mode. The model can
+    # still see *which* actions exist and what they do; the corrector re-adds
+    # the full schema when a malformed action needs fixing.
+    if current_size > max_chars:
+        actions = reduced_prompt.get("actions")
+        if isinstance(actions, dict) and actions:
+            stripped = False
+            for action_name, action_def in list(actions.items()):
+                if isinstance(action_def, dict) and (
+                    "schema" in action_def or "source" in action_def
+                ):
+                    action_map = cast(dict[str, Any], action_def)
+                    brief = action_map.get("brief") or ""
+                    actions[action_name] = {"brief": brief}
+                    stripped = True
+            if stripped:
+                log_warning(
+                    "[reduce_prompt] Stripping actions block to brief-only "
+                    "(schema/source removed; corrector re-supplies on demand)"
+                )
+                current_size = len(json_dumps(reduced_prompt)) - attachment_data_offset
+                log_debug(
+                    f"[reduce_prompt] After stripping actions block: {current_size} chars"
+                )
+
     # === STEP 5: Emergency - remove entire context (instructions are preserved at top-level) ===
     if current_size > max_chars and "context" in reduced_prompt:
         log_error("[reduce_prompt] 🚨 Emergency: removing entire context")
