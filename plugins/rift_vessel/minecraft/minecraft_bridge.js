@@ -184,6 +184,122 @@ const POST_SPAWN_RECONNECT_DELAY_MS = 3000;
 /** @type {ReturnType<typeof setInterval> | null} */
 let presencePollTimer = null;
 
+// Mineflayer caches every chunk column the server streams and never evicts it,
+// so on a busy world the Node heap climbs unbounded and the process
+// OOM-crashes a couple of minutes after spawn (observed: heap saturates the
+// --max-old-space-size cap while GC thrashes at ~1% mu, then "Ineffective
+// mark-compacts near heap limit"). `viewDistance: 'tiny'` is only a *request*
+// — a server that ignores it keeps streaming a wide radius. The real fix is to
+// actively evict columns outside a small radius around the bot and force a GC
+// pass on a timer. This caps the working set instead of merely delaying the
+// OOM by raising the heap ceiling. Structural (distance-based, no keyword
+// logic); best-effort — a failure never disrupts the session.
+/** @type {ReturnType<typeof setInterval> | null} */
+let chunkPruneTimer = null;
+// How often to evict distant chunk columns and force a GC pass.
+const CHUNK_PRUNE_INTERVAL_MS = 5000;
+// Keep only columns within this Chebyshev radius (in chunk columns, i.e. 16
+// blocks each) of the bot. The bot plays locally, so a tight radius is ample
+// and keeps the resident chunk set — and thus the heap — bounded. A tighter
+// radius plus a shorter interval lowers the steady-state working set: on a
+// large server-authoritative world the server streams columns faster than a
+// 10s/radius-4 sweep can reclaim them, so the heap plateaus high enough to
+// clip the cap during the spawn-time burst.
+const CHUNK_KEEP_RADIUS = 3;
+
+// Evict chunk columns outside CHUNK_KEEP_RADIUS around the bot and force a GC
+// pass. Best-effort: every operation is guarded so a mineflayer/prismarine API
+// shape difference across versions can never throw into the timer.
+function pruneDistantChunks() {
+  try {
+    if (!bot || !bot.entity || !bot.entity.position || !bot.world) return;
+    const world = bot.world;
+    // mineflayer's bot.world is a prismarine-world WorldSync whose real column
+    // store lives at world.async.columns (a plain object keyed "x,z"). WorldSync
+    // itself does NOT expose a `columns` property, but it proxies getColumns()
+    // and unloadColumn() to the async world. Enumerate via the keyed map when we
+    // can reach it (fast, exact keys); otherwise fall back to getColumns(), which
+    // returns [{chunkX, chunkZ, column}, ...] with string coords.
+    let coords = null; // array of [x, z] integer pairs
+    const colMap =
+      world.async && world.async.columns && typeof world.async.columns === 'object'
+        ? world.async.columns
+        : world.columns && typeof world.columns === 'object'
+          ? world.columns
+          : null;
+    if (colMap) {
+      coords = [];
+      for (const key of Object.keys(colMap)) {
+        const parts = String(key).split(',');
+        if (parts.length < 2) continue;
+        const x = parseInt(parts[0], 10);
+        const z = parseInt(parts[1], 10);
+        if (Number.isFinite(x) && Number.isFinite(z)) coords.push([x, z]);
+      }
+    } else if (typeof world.getColumns === 'function') {
+      const cols = world.getColumns();
+      if (Array.isArray(cols)) {
+        coords = [];
+        for (const c of cols) {
+          if (!c) continue;
+          const x = parseInt(c.chunkX, 10);
+          const z = parseInt(c.chunkZ, 10);
+          if (Number.isFinite(x) && Number.isFinite(z)) coords.push([x, z]);
+        }
+      }
+    }
+    if (!coords || !coords.length) return;
+    const cx = Math.floor(bot.entity.position.x / 16);
+    const cz = Math.floor(bot.entity.position.z / 16);
+    let removed = 0;
+    for (const [x, z] of coords) {
+      if (Math.abs(x - cx) <= CHUNK_KEEP_RADIUS && Math.abs(z - cz) <= CHUNK_KEEP_RADIUS) {
+        continue;
+      }
+      try {
+        if (typeof world.unloadColumn === 'function') {
+          world.unloadColumn(x, z);
+          removed += 1;
+        } else if (world.async && typeof world.async.unloadColumn === 'function') {
+          world.async.unloadColumn(x, z);
+          removed += 1;
+        } else if (colMap) {
+          delete colMap[`${x},${z}`];
+          removed += 1;
+        }
+      } catch (e) {
+        /* ignore a single column that won't evict */
+      }
+    }
+    if (removed > 0) {
+      log(`chunk prune: evicted ${removed} distant column(s) (kept <=${CHUNK_KEEP_RADIUS})`);
+    }
+  } catch (e) {
+    /* the pruner must never throw into the interval */
+  }
+  // Force a GC pass so the just-freed columns are actually reclaimed and the
+  // heap does not creep toward the cap. Only available when Node is launched
+  // with --expose-gc (see the provisioner NODE_OPTIONS); a no-op otherwise.
+  try {
+    if (typeof global.gc === 'function') global.gc();
+  } catch (e) {
+    /* ignore */
+  }
+}
+
+function startChunkPruner() {
+  if (chunkPruneTimer) return;
+  chunkPruneTimer = setInterval(pruneDistantChunks, CHUNK_PRUNE_INTERVAL_MS);
+  if (typeof chunkPruneTimer.unref === 'function') chunkPruneTimer.unref();
+}
+
+function stopChunkPruner() {
+  if (chunkPruneTimer) {
+    clearInterval(chunkPruneTimer);
+    chunkPruneTimer = null;
+  }
+}
+
 // Tracks the pathfinding navigation currently in flight so repeated `goto`
 // commands toward the SAME destination are idempotent. Without this, the
 // autonomy motor tick (which re-issues `goto` every few seconds) would reset
@@ -673,6 +789,9 @@ function wireBotEvents(b) {
       clearInterval(presencePollTimer);
       presencePollTimer = null;
     }
+    // Start capping the chunk cache now that world columns are streaming in —
+    // this is what keeps the Node heap bounded and prevents the post-spawn OOM.
+    startChunkPruner();
     log(`in the world (${source})`);
     settleConnect({ ok: true, detail: 'spawned' });
   };
@@ -1153,6 +1272,7 @@ function disconnectBot() {
     clearInterval(presencePollTimer);
     presencePollTimer = null;
   }
+  stopChunkPruner();
   if (bot) {
     try {
       bot.quit();
@@ -1385,13 +1505,36 @@ async function runAction(action, payload) {
         return await navigateToGoal(goal, payload.timeout_ms, navKey);
       }
       const block = resolveTargetBlock(payload.target, payload.search_radius);
-      if (!block) {
-        return { ok: false, detail: 'no destination (need x/y/z or a reachable target block)', data: {} };
+      if (block) {
+        const p = block.position;
+        const range = Math.min(Math.max(parseInt(payload.range || '2', 10) || 2, 0), 8);
+        const goal = new pathfinder.goals.GoalNear(p.x, p.y, p.z, range);
+        return await navigateToGoal(goal, payload.timeout_ms);
       }
-      const p = block.position;
-      const range = Math.min(Math.max(parseInt(payload.range || '2', 10) || 2, 0), 8);
-      const goal = new pathfinder.goals.GoalNear(p.x, p.y, p.z, range);
-      return await navigateToGoal(goal, payload.timeout_ms);
+      // No matching block — the target may be an ENTITY (a player, NPC or
+      // creature). Fall back to resolving it as an entity and walk toward its
+      // live position. This is what lets Synth `goto` a player who called it
+      // over in-world chat. GoalFollow keeps re-pathing as the entity moves;
+      // it is not a permanent lock — the very next motor tick / action can
+      // override the goal, so this behaves as a "come here toward you" step,
+      // not a leash. Structural (username/entity match), no keyword logic.
+      const entity = resolveTargetEntity(payload.target);
+      if (entity) {
+        const range = Math.min(Math.max(parseInt(payload.range || '2', 10) || 2, 1), 16);
+        const name = entity.username || entity.name || 'entity';
+        try {
+          if (pathfinder.goals.GoalFollow) {
+            bot.pathfinder.setGoal(new pathfinder.goals.GoalFollow(entity, range), true);
+            return { ok: true, detail: `heading toward ${name}`, data: { target: name, range } };
+          }
+          const ep = entity.position;
+          const goal = new pathfinder.goals.GoalNear(ep.x, ep.y, ep.z, range);
+          return await navigateToGoal(goal, payload.timeout_ms);
+        } catch (err) {
+          return { ok: false, detail: String(err && err.message ? err.message : err), data: {} };
+        }
+      }
+      return { ok: false, detail: 'no destination (need x/y/z, a reachable target block, or a known entity)', data: {} };
     }
     case 'mine': {
       // Dig the nearest block whose name matches 'target', walking to it first

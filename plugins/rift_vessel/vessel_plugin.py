@@ -260,14 +260,17 @@ config_registry.get_value(
 )
 config_registry.get_value(
     "VESSEL_SP_LOW_OXYGEN",
-    200,
+    6,
     value_type=int,
     label="Self-Preservation: Low Oxygen Threshold",
     description=(
-        "Air-tick level at or below which the reflex swims to the surface. "
-        "Mineflayer reports oxygen in air ticks (vanilla max ~300, ~15s of "
-        "breath), not on the 0..20 scale — the default 200 leaves several "
-        "seconds of air to surface before drowning. Higher reacts earlier."
+        "Air-bubble level at or below which the reflex swims to the surface. "
+        "Mineflayer's bot.oxygenLevel is the 0..20 air-bubble scale (20 = full "
+        "lungs), NOT the raw 0..300 air-tick counter, so this threshold must be "
+        "on 0..20. The default 6 leaves a few bubbles of margin to reach the "
+        "surface before drowning; a too-high value (e.g. the old 200) makes "
+        "oxygen <= threshold always true and fires the reflex on every tick the "
+        "head merely touches water. Higher reacts earlier."
     ),
     group="plugins",
     component="vessel_plugin",
@@ -594,8 +597,13 @@ class VesselPlugin(AIPluginBase):
             if value in (None, "", [], {}):
                 continue
             text = str(value)
-            if len(text) > 120:
-                text = text[:117] + "..."
+            # Guard only against pathological payloads. A ``say`` reply is the
+            # whole point of the Vessel log entry, so a 120-char clip mangled
+            # every real in-world sentence — keep the full text up to a generous
+            # ceiling (well above any interface message limit) and only trim
+            # runaway blobs. Structural, no content inspection.
+            if len(text) > 2000:
+                text = text[:1997] + "..."
             parts.append(f"{key}={text}")
         detail = ", ".join(parts)
         return f"{action}({detail})" if detail else action

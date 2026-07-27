@@ -77,7 +77,21 @@ _BRIDGE_SRC_RELATIVE = _MINECRAFT_PLUGIN_DIR / _BRIDGE_SCRIPT_NAME
 # but cannot pathfind ("navigation unavailable"). ``minecraft-data`` powers the
 # pathfinder Movements block/tool costs (it is normally a transitive dependency
 # of mineflayer, but the bridge ``require``s it directly, so pin it explicitly).
-_BRIDGE_NPM_DEPS = ["mineflayer", "mineflayer-pathfinder", "minecraft-data"]
+# ``mineflayer-collectblock`` composes navigate → dig → pick-up so ``mine`` and
+# ``collect_block`` reliably land the drop in the inventory (without it the raw
+# dig fallback often "mines" a block but collects nothing). ``mineflayer-auto-
+# eat`` is the reflexive hunger handler that keeps the body from starving. Both
+# are loaded best-effort by the bridge, so they MUST be in this install list —
+# the provisioner installs exactly this explicit set (not a bare ``npm install``
+# from package.json), and the missing-check below only re-installs when one of
+# these is absent, so a dep omitted here is never installed on a fresh deploy.
+_BRIDGE_NPM_DEPS = [
+    "mineflayer",
+    "mineflayer-pathfinder",
+    "minecraft-data",
+    "mineflayer-collectblock",
+    "mineflayer-auto-eat",
+]
 
 
 class BridgeProvisioner:
@@ -189,14 +203,35 @@ class BridgeProvisioner:
             if existing_node_path
             else str(node_modules)
         )
-        # Cap the Node heap as a safety belt against the mineflayer chunk-cache
-        # memory growth (see the viewDistance note in the bridge script). Without
-        # a cap V8 lets the old-space climb toward the ~4 GB default limit where
-        # mark-compact becomes ineffective and the process OOM-crashes; a tight
-        # cap forces aggressive GC well before that. Preserve any caller-provided
-        # NODE_OPTIONS.
+        # Bound the Node heap against the mineflayer chunk-cache memory growth
+        # (see the viewDistance / chunk-prune notes in the bridge script).
+        # Mineflayer caches every chunk column the server streams and never
+        # evicts it, so on a busy world V8's old-space climbs toward the ~4 GB
+        # default limit where mark-compact becomes ineffective and the process
+        # OOM-crashes. Two knobs work together here:
+        #   * --expose-gc lets the bridge's periodic chunk pruner call
+        #     global.gc() to actually reclaim evicted columns (without it the
+        #     prune only drops references and V8 reclaims them lazily, letting
+        #     the heap creep toward the cap between GCs). This is the enabler
+        #     for the real fix (active chunk eviction), not just a delay tactic.
+        #   * --max-old-space-size caps the ceiling as a safety belt. It must
+        #     leave headroom for the INITIAL world-load transient: on a
+        #     chunk-dense world (e.g. an ocean spawn) the first seconds after
+        #     spawn spike well past the steady-state while the initial chunk
+        #     burst decodes and BEFORE the pruner's first pass runs. Observed:
+        #     512 MB OOM'd at ~500 MB pre-spawn; 1024 MB OOM'd at ~990 MB just
+        #     after spawn while the chunk burst was still growing. 1536 MB
+        #     STILL OOM'd at ~1490 MB after spawn even with active pruning: on a
+        #     large server-authoritative world the retained working set (entity
+        #     tracking + block/physics caches that outlive an evicted column)
+        #     plateaus near 1.5 GB, so the cap must sit clearly above that
+        #     plateau. 3072 MB gives ~2x headroom over the observed 1490 MB
+        #     plateau; the container cgroup is effectively unlimited and the
+        #     host has ample RAM+swap, so this is a safe belt while the tighter
+        #     pruner (radius 3, every 5s) holds the steady-state down.
+        # Preserve any caller-provided NODE_OPTIONS.
         existing_node_options = env.get("NODE_OPTIONS", "").strip()
-        heap_opt = "--max-old-space-size=512"
+        heap_opt = "--max-old-space-size=3072 --expose-gc"
         env["NODE_OPTIONS"] = (
             f"{existing_node_options} {heap_opt}".strip()
             if existing_node_options
@@ -306,11 +341,70 @@ class BridgeProvisioner:
         return None
 
     def _deps_present(self) -> bool:
-        """Return whether every required npm dep is installed in the runtime."""
-        return all(
+        """Return whether every required npm dep is installed AND intact.
+
+        A bare top-level-folder check is not enough: an interrupted or partial
+        ``npm install`` can leave ``node_modules/mineflayer`` present while a
+        critical transitive dependency (e.g. ``protodef``) is truncated — its
+        datatypes directory ends up with a single stub file instead of the full
+        set. The bridge then loads but throws "mineflayer not installed" at
+        connect time, and the presence-only check would never trigger a repair.
+        We therefore also verify the integrity of the deep dependency that has
+        been observed to corrupt (see :meth:`_deps_intact`).
+        """
+        top_level_present = all(
             (self._bridge_root / "node_modules" / dep).exists()
             for dep in _BRIDGE_NPM_DEPS
         )
+        return top_level_present and self._deps_intact()
+
+    def _deps_intact(self) -> bool:
+        """Best-effort integrity probe for the mineflayer dependency tree.
+
+        Returns ``False`` when a required package is present-but-incomplete so
+        the caller can force a clean reinstall. Purely structural (file
+        existence / directory population) — no version or content parsing, and
+        never raises.
+
+        Two corruption classes have been seen in the field, both from an
+        interrupted ``npm install`` (e.g. the container being recreated
+        mid-install):
+
+        * A declared top-level dependency folder exists but is missing its
+          ``package.json``/entry point — npm extracted a few files (LICENSE,
+          docs/, examples/) then was killed before writing the manifest. Node
+          then cannot resolve the module at all ("Cannot find module
+          'mineflayer'"), yet the folder-presence check passes.
+        * A deep transitive package (``protodef``) has a truncated datatypes
+          directory (a lone stub instead of the full codec set), which surfaces
+          as "mineflayer not installed" at connect time.
+        """
+        try:
+            nm = self._bridge_root / "node_modules"
+            # (1) Every declared dep must have a readable package.json — the
+            # definitive marker that npm finished extracting that package.
+            for dep in _BRIDGE_NPM_DEPS:
+                pkg = nm / dep / "package.json"
+                if not pkg.is_file():
+                    return False
+            # (2) protodef ships mineflayer's binary datatype codecs; a partial
+            # install leaves its datatypes dir with a lone stub. mineflayer
+            # cannot decode a single packet without the full set.
+            protodef = nm / "protodef"
+            if not protodef.exists():
+                return False
+            datatypes = protodef / "src" / "datatypes"
+            if datatypes.is_dir():
+                # A healthy protodef ships several codec modules here; a
+                # truncated install leaves only one. Require a plausible set.
+                files = [p for p in datatypes.iterdir() if p.suffix == ".js"]
+                if len(files) < 3:
+                    return False
+            return True
+        except Exception:
+            # If we cannot even probe, assume intact and let the normal
+            # connect-time error surface rather than looping on reinstall.
+            return True
 
     def _bridge_port(self) -> int:
         try:
@@ -504,12 +598,31 @@ class BridgeProvisioner:
             for dep in _BRIDGE_NPM_DEPS
             if not (self._bridge_root / "node_modules" / dep).exists()
         ]
-        if not missing:
+        # Even when every top-level dep folder exists, a partial/interrupted
+        # install can leave a fragile transitive dep (protodef) truncated,
+        # producing the "mineflayer not installed" failure at connect time. A
+        # bare ``npm install`` will NOT repair an already-present-but-corrupt
+        # tree, so when we detect corruption we wipe node_modules + lockfile and
+        # do a clean install instead of trusting npm's incremental resolution.
+        corrupt = not missing and not self._deps_intact()
+        if not missing and not corrupt:
             return {
                 "ok": True,
                 "detail": "already installed",
                 "bridge_root": str(self._bridge_root),
             }
+        if corrupt:
+            log_warning(
+                f"{LOG_PREFIX} bridge node_modules corrupt (incomplete "
+                f"protodef) — wiping and reinstalling clean"
+            )
+            try:
+                shutil.rmtree(self._bridge_root / "node_modules", ignore_errors=True)
+                lockfile = self._bridge_root / "package-lock.json"
+                if lockfile.exists():
+                    lockfile.unlink()
+            except Exception as exc:
+                log_warning(f"{LOG_PREFIX} failed to wipe corrupt node_modules: {exc}")
 
         proc = await asyncio.create_subprocess_exec(
             npm,

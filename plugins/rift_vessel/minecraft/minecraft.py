@@ -72,6 +72,16 @@ _CONNECT_HTTP_TIMEOUT_SEC = 100.0
 # up and block the message flow. At ``_POLL_INTERVAL_SEC`` (1s) this is a ~5s
 # liveness window, well under the interface disconnect-grace sweep.
 _MAX_POLL_FAILURES = 5
+# Consecutive ``/health`` reads reporting ``connected: false`` (while the bridge
+# HTTP server itself is still answering ``ok: true``) after which the connector
+# considers the world embodiment lost and flips ``is_connected`` to False. This
+# closes the gap where the Node bridge process stays alive (so ``/events`` keeps
+# succeeding and the poll-failure streak above never fires) but its mineflayer
+# bot was dropped by the server — leaving ``is_connected`` stuck True and Synth
+# believing it is in-world when it is not. The small threshold absorbs the
+# transient login→spawn window where the bridge briefly reports not-yet-embodied
+# before ``markSpawned`` sets it live. Structural boolean check, no keyword logic.
+_MAX_HEALTH_FALSE_STREAK = 3
 
 # Loopback host names that mean "this same machine". When Synth runs inside a
 # container these do NOT point at the Docker host (where a "Open to LAN" world
@@ -342,6 +352,12 @@ class MinecraftConnector(VesselConnectorBase):
     _FLEE_DISTANCE = 16.0
     # Consecutive failed defend ticks before escalating DEFEND → FLEE.
     _FIGHT_MAX_FAILS = 3
+    # Max characters per in-world chat line. Minecraft vanilla chat rejects or
+    # truncates anything past ~256 characters, so a long ``say`` is split on
+    # word boundaries into multiple ≤256-char lines rather than hard-cut
+    # mid-word. World-specific (Minecraft) — lives on the connector, not the
+    # rift-vessel core.
+    _CHAT_CHAR_LIMIT = 256
 
     # ------------------------------------------------------------------
     # Helpers
@@ -802,11 +818,51 @@ class MinecraftConnector(VesselConnectorBase):
         # Track consecutive poll failures so a dead bridge/world client is
         # detected instead of spinning forever with ``is_connected`` stuck True.
         consecutive_failures = 0
+        # Track consecutive ``/health`` reads that say the bridge is alive but
+        # its mineflayer bot is NOT embodied. The ``/events`` poll above hits the
+        # Node bridge process, which survives a server-side bot drop (the bridge
+        # auto-reconnects in-process), so a dropped bot never registers as a poll
+        # failure — ``/events`` keeps returning ``{"events": []}`` happily. Probing
+        # ``/health.connected`` each tick is the only reliable liveness signal for
+        # "actually in the world", closing the gap where Synth believes it is
+        # online after the bot silently fell out of the server.
+        health_false_streak = 0
         while self._connected:
             try:
                 res = await self._get("/events")
                 # A successful poll clears the failure streak.
                 consecutive_failures = 0
+                # Probe embodiment liveness via /health (structural boolean, no
+                # keyword logic). A live bridge (ok:true) whose bot is no longer
+                # in the world (connected:false) must eventually flip us
+                # disconnected so the interface's grace sweep can close the stale
+                # session — the /events poll alone can never detect this.
+                try:
+                    health = await self._get("/health")
+                except Exception:
+                    health = None
+                if isinstance(health, dict) and health.get("ok"):
+                    if bool(health.get("connected")):
+                        health_false_streak = 0
+                    else:
+                        health_false_streak += 1
+                        log_debug(
+                            f"{LOG_PREFIX} bridge reports not embodied "
+                            f"({health_false_streak}/{_MAX_HEALTH_FALSE_STREAK})"
+                        )
+                        if health_false_streak >= _MAX_HEALTH_FALSE_STREAK:
+                            self._connected = False
+                            self.last_error = (
+                                "the Minecraft bridge is alive but its bot is no "
+                                f"longer in the world after {health_false_streak} "
+                                "checks"
+                            )
+                            log_warning(
+                                f"{LOG_PREFIX} bot no longer embodied after "
+                                f"{health_false_streak} health checks — marking "
+                                "disconnected"
+                            )
+                            break
                 events = res.get("events") if isinstance(res, dict) else None
                 if events:
                     for raw in events:
@@ -894,11 +950,84 @@ class MinecraftConnector(VesselConnectorBase):
             return VesselActionResult(ok=False, detail="not connected to a world")
         if action in self._GOAL_VERBS:
             return await self._act_goal(action, payload or {})
+        if action == "say":
+            return await self._act_say(payload or {})
         res = await self._post("/cmd", {"action": action, "payload": payload or {}})
         return VesselActionResult(
             ok=bool(res.get("ok")),
             detail=res.get("detail"),
             data=res.get("data") or {},
+        )
+
+    @staticmethod
+    def _split_chat_text(text: str, limit: int) -> list[str]:
+        """Split ``text`` into chunks no longer than ``limit`` characters.
+
+        Minecraft vanilla chat rejects/truncates anything past ~256 characters,
+        which produced ugly mid-word cut-offs (a long ``say`` was hard-sliced by
+        the bridge). This splits on whitespace boundaries so each chunk is a
+        clean, readable line; a single word longer than ``limit`` is hard-split
+        as a last resort. Purely structural — never inspects word meaning.
+        """
+        text = text.strip()
+        if not text:
+            return []
+        if len(text) <= limit:
+            return [text]
+        chunks: list[str] = []
+        current = ""
+        for word in text.split():
+            # A single oversized word: flush, then hard-split it.
+            if len(word) > limit:
+                if current:
+                    chunks.append(current)
+                    current = ""
+                for i in range(0, len(word), limit):
+                    chunks.append(word[i : i + limit])
+                continue
+            candidate = f"{current} {word}".strip() if current else word
+            if len(candidate) <= limit:
+                current = candidate
+            else:
+                if current:
+                    chunks.append(current)
+                current = word
+        if current:
+            chunks.append(current)
+        return chunks
+
+    async def _act_say(self, payload: Dict[str, Any]) -> VesselActionResult:
+        """Send in-world chat, splitting long text into clean ≤256-char lines.
+
+        A chat char limit is a world-specific concern (Minecraft's vanilla cap is
+        256), so it lives on the connector rather than the rift-vessel core. The
+        text is split on word boundaries and each chunk is sent as its own chat
+        line, so a long message is delivered in full instead of being hard-cut
+        mid-word by the bridge.
+        """
+        text = str(payload.get("text") or "").strip()
+        if not text:
+            return VesselActionResult(ok=False, detail="empty text")
+        chunks = self._split_chat_text(text, self._CHAT_CHAR_LIMIT)
+        last: Dict[str, Any] = {}
+        sent: list[str] = []
+        for chunk in chunks:
+            line_payload = dict(payload)
+            line_payload["text"] = chunk
+            res = await self._post("/cmd", {"action": "say", "payload": line_payload})
+            last = res
+            if res.get("ok"):
+                sent.append(chunk)
+            else:
+                return VesselActionResult(
+                    ok=False,
+                    detail=res.get("detail") or "say failed",
+                    data={"sent": sent, "text": text},
+                )
+        return VesselActionResult(
+            ok=bool(last.get("ok", True)),
+            detail=last.get("detail") or "said",
+            data={"sent": sent, "chunks": len(sent), "text": text},
         )
 
     @staticmethod
