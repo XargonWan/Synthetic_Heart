@@ -514,6 +514,12 @@ def _log(
                             message_data = {
                                 "text": notification_message,
                                 "target": log_chat_id,
+                                # LogChat notifications are diagnostic output, not
+                                # Synth utterances: they must NEVER be stored in
+                                # chat history, or every ERROR/WARNING pollutes the
+                                # LLM context of that interface_path and degrades
+                                # (dumbs down) every subsequent turn there.
+                                "skip_history": True,
                             }
                             thread_id = get_log_chat_thread_id_sync()
                             if thread_id:
