@@ -127,6 +127,17 @@ class BridgeProvisioner:
         else:
             self._bridge_script = self._bridge_src()
         self._proc: asyncio.subprocess.Process | None = None
+        # Serialise :meth:`start` against itself. At boot the reattach flow and
+        # the first ``connect_world`` can both call ``start()`` before the very
+        # first bridge has bound ``/health`` with mineflayer:true (login+spawn
+        # takes several seconds). Without a lock the second caller sees no
+        # healthy bridge and launches a DUPLICATE process; the two bridges then
+        # both stream the spawn chunk burst and one balloons off-heap (worker
+        # native chunk memory) to ~3.2GB and OOMs, while the other stays a
+        # healthy ~149MB. The lock makes concurrent callers await the first
+        # launch so they observe mineflayer:true and adopt it instead. Created
+        # lazily so the provisioner can be constructed off the event loop.
+        self._start_lock: asyncio.Lock | None = None
 
     # ------------------------------------------------------------------
     # Helpers
@@ -225,10 +236,58 @@ class BridgeProvisioner:
         #     large server-authoritative world the retained working set (entity
         #     tracking + block/physics caches that outlive an evicted column)
         #     plateaus near 1.5 GB, so the cap must sit clearly above that
-        #     plateau. 3072 MB gives ~2x headroom over the observed 1490 MB
-        #     plateau; the container cgroup is effectively unlimited and the
-        #     host has ample RAM+swap, so this is a safe belt while the tighter
-        #     pruner (radius 3, every 5s) holds the steady-state down.
+        #     plateau. 3072 MB STILL OOM'd at ~2955 MB during the very FIRST
+        #     prune pass ("evicted 164 distant column(s)") right after spawn on
+        #     the target server: the server ignores viewDistance:'tiny' and
+        #     streams ~164 columns at once, and their synchronous decode burst
+        #     (prismarine-chunk BitArray + block-state palettes for the whole
+        #     wide radius) peaks past 2.9 GB BEFORE the pruner's first eviction
+        #     can free anything. Escalating the cap alone repeatedly failed
+        #     (512 → 1024 → 1536 → 3072 → 6144 MB each OOM'd) because a slow
+        #     timer sweep cannot keep up once GC thrashing starves setInterval:
+        #     observed the timer pruner firing only ~7 times in ~80 s of life.
+        #   * THE REAL FIX now lives in the bridge: an EVENT-DRIVEN eviction
+        #     hooked to the bot's `chunkColumnLoad` event drops every distant
+        #     column the instant the server streams it in, so the resident set
+        #     is capped to ~(2*radius+1)^2 (49 at radius 3) at ALL times,
+        #     independent of the timer and unaffected by GC pressure. CRUCIAL
+        #     TIMING FIX: this listener is now wired in wireBotEvents the moment
+        #     createBot returns (BEFORE 'login'/'spawn'), not at markSpawned().
+        #     Previously it attached only at spawn — AFTER the spawn-time column
+        #     burst had already been decompressed and made resident — so the
+        #     eviction never ran during the burst and every cap OOM'd at spawn
+        #     regardless of size. With early wiring the out-of-radius columns are
+        #     freed as they arrive, capping the resident working set.
+        #   * --max-old-space-size headroom: even with early eviction, when the
+        #     server floods ~164 columns in a single burst prismarine-chunk
+        #     decodes them synchronously (BitArray + palettes) before the event
+        #     loop can process the eviction callbacks, so a transient decode peak
+        #     is unavoidable. Observed ~1.6 GB resident at the moment of the 2048
+        #     MB crash, i.e. the transient peak overshoots 2048. 3072 MB leaves
+        #     clear headroom above that transient decode spike while the early
+        #     event-driven eviction keeps the steady-state resident set small
+        #     (the timer sweep — radius 3, every 1s, CHUNK_PRUNE_INTERVAL_MS —
+        #     plus forced global.gc() reclaim the rest between bursts).
+        #     RE-OBSERVED (live, 2026-07-27): raising the cap does NOT help and
+        #     is the WRONG lever. Both 3072 MB (OOM at ~2955 MB) and 6144 MB
+        #     (OOM at ~5850 MB) crashed at spawn on the target server. Growth is
+        #     UNBOUNDED — it fills whatever cap is given — so headroom can never
+        #     be enough. Diagnostics: across every crashed run the timer pruner
+        #     logged ZERO "evicted N distant column(s)" lines and mineflayer
+        #     logged exactly ~164 "Ignoring block entities as chunk failed to
+        #     load" per connect attempt. So the resident growth is NOT the
+        #     decoded chunk columns (those fail to load / are evicted) — it is
+        #     the raw protocol/block-entity packet backlog that piles up because
+        #     the synchronous spawn-burst decode saturates the event loop and
+        #     the socket read queue drains slower than the server floods it. The
+        #     event-driven eviction cannot help because the pressure is upstream
+        #     of the world column store. A cap of 3072 MB is kept as the sane
+        #     default (no point burning 6 GB to still OOM); the real fix must
+        #     bound the INBOUND packet flood (packet-layer filter of distant
+        #     map_chunk / block_entity data before prismarine-chunk decodes it,
+        #     or a correct pinned protocol version — the server is joined with
+        #     "auto version" and no MC_VERSION is configured, so a version
+        #     mismatch could be corrupting the decode).
         # Preserve any caller-provided NODE_OPTIONS.
         existing_node_options = env.get("NODE_OPTIONS", "").strip()
         heap_opt = "--max-old-space-size=3072 --expose-gc"
@@ -662,7 +721,23 @@ class BridgeProvisioner:
     # ------------------------------------------------------------------
 
     async def start(self) -> Dict[str, Any]:
-        """Start the bridge subprocess if not already running."""
+        """Start the bridge subprocess if not already running.
+
+        Serialised via :attr:`_start_lock` so concurrent callers (boot reattach
+        + first ``connect_world``) can never spawn duplicate bridges — the
+        second caller awaits the first launch and then adopts the now-healthy
+        bridge (``already running``) instead of racing a second process onto the
+        port. See the lock's construction comment for the OOM/duplicate history.
+        """
+        if self._start_lock is None:
+            # Lazily create the lock bound to the running loop (the provisioner
+            # is constructed off the event loop).
+            self._start_lock = asyncio.Lock()
+        async with self._start_lock:
+            return await self._start_locked()
+
+    async def _start_locked(self) -> Dict[str, Any]:
+        """Start the bridge subprocess if not already running (lock held)."""
         if not self._is_enabled():
             return {
                 "ok": False,

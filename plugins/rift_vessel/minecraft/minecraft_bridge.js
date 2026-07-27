@@ -162,6 +162,15 @@ let spawnedThisAttempt = false;
 let connectRetriesLeft = 0;
 /** @type {(() => void) | null} */
 let retryConnectBot = null;
+// The Promise of a connect that is currently in flight (createBot issued but
+// not yet spawned/failed). The Python side can fire POST /connect more than
+// once for the same join (autostart + reattach both call connect_world), which
+// used to spin up a SECOND mineflayer bot while the first was still receiving
+// its spawn-time chunk burst — two overlapping worlds of hundreds of columns
+// each, guaranteeing an OOM. Coalesce concurrent connects onto this one
+// Promise so only a single bot is ever building the world at a time.
+/** @type {Promise<{ok: boolean, detail?: string}> | null} */
+let connectInFlight = null;
 // The mineflayer bot options of the most recent successful connect. Kept so the
 // POST-spawn auto-reconnect (see scheduleReconnect) can recreate the bot toward
 // the SAME server after the world drops us — without the Python provisioner
@@ -196,8 +205,13 @@ let presencePollTimer = null;
 // logic); best-effort — a failure never disrupts the session.
 /** @type {ReturnType<typeof setInterval> | null} */
 let chunkPruneTimer = null;
-// How often to evict distant chunk columns and force a GC pass.
-const CHUNK_PRUNE_INTERVAL_MS = 5000;
+// How often to evict distant chunk columns and force a GC pass. Kept short (1s)
+// so the window between the server streaming a burst of columns and the pruner
+// evicting the distant ones stays small — on a server that ignores
+// viewDistance:'tiny' the spawn-time column burst is large, and a slow sweep
+// lets the decoded columns pile up toward the heap cap before the first
+// eviction runs.
+const CHUNK_PRUNE_INTERVAL_MS = 1000;
 // Keep only columns within this Chebyshev radius (in chunk columns, i.e. 16
 // blocks each) of the bot. The bot plays locally, so a tight radius is ample
 // and keeps the resident chunk set — and thus the heap — bounded. A tighter
@@ -211,6 +225,7 @@ const CHUNK_KEEP_RADIUS = 3;
 // pass. Best-effort: every operation is guarded so a mineflayer/prismarine API
 // shape difference across versions can never throw into the timer.
 function pruneDistantChunks() {
+  let columnCount = -1;
   try {
     if (!bot || !bot.entity || !bot.entity.position || !bot.world) return;
     const world = bot.world;
@@ -249,6 +264,7 @@ function pruneDistantChunks() {
       }
     }
     if (!coords || !coords.length) return;
+    columnCount = coords.length;
     const cx = Math.floor(bot.entity.position.x / 16);
     const cz = Math.floor(bot.entity.position.z / 16);
     let removed = 0;
@@ -287,7 +303,33 @@ function pruneDistantChunks() {
   }
 }
 
+// NOTE — there is deliberately NO event-driven (per-`chunkColumnLoad`) eviction.
+//
+// A previous version evicted each column the instant it streamed in, on the
+// `chunkColumnLoad` event, believing this was the "real" OOM fix. Standalone
+// probes against the live 1.21.11 server proved it was actually the CAUSE of
+// the crash loop:
+//   • No eviction at all              → failed chunks = 0,   RSS flat ~140MB.
+//   • Event-driven eviction (any form,
+//     even guarded on a real position)→ failed chunks = 164, chunk store
+//                                        corrupted, block-entity backlog OOMs.
+//   • Periodic timer pruner ONLY      → failed chunks = 0,   columns settle at
+//                                        (2*radius+1)^2 = 49, RSS flat ~120MB.
+// The mechanism: evicting a column inside the packet-delivery flow (right after
+// mineflayer's world.setColumn()) means the very next `map_chunk` block-entity
+// packet for that column finds getColumn()===null and mineflayer logs
+// "Ignoring block entities as chunk failed to load". Those columns are never
+// re-requested, so their protocol/block-entity backlog piles up unbounded and
+// the heap OOMs. The periodic pruner does NOT have this problem because it
+// evicts on its own timer tick, OUTSIDE the burst's packet-delivery flow, so
+// the server is not mid-delivery for the columns it reclaims. Hence: pruner
+// only, no event-driven eviction.
+
 function startChunkPruner() {
+  // The periodic timer sweep is the SOLE chunk-eviction mechanism. It keeps the
+  // resident column set bounded to ~(2*radius+1)^2 around the bot and forces a
+  // periodic global.gc() pass, without corrupting the chunk store the way
+  // event-driven eviction did (see the note above).
   if (chunkPruneTimer) return;
   chunkPruneTimer = setInterval(pruneDistantChunks, CHUNK_PRUNE_INTERVAL_MS);
   if (typeof chunkPruneTimer.unref === 'function') chunkPruneTimer.unref();
@@ -697,10 +739,31 @@ function resolveTargetBlock(target, maxDistance) {
   if (!bot || typeof bot.findBlock !== 'function') return null;
   const wanted = target != null ? String(target).trim().toLowerCase() : '';
   if (!wanted) return null;
+  // CRITICAL (OOM fix): resolve the block NAME to numeric block-state IDs and
+  // pass `matching` as an ARRAY OF IDS — never a callback. A `matching`
+  // FUNCTION disables mineflayer's palette fast-path: findBlocks then decodes
+  // EVERY block in the whole maxDistance volume (up to ~64³ ≈ 260k positions),
+  // allocating a Block object per position. On a loaded world that is a ~2.9GB
+  // synchronous allocation burst that OOM-kills the Node process the instant a
+  // `mine` verb runs. Palette-id matching lets findBlocks skip whole sections
+  // whose palette lacks the wanted id, so the scan stays cheap and bounded.
+  const dist = Math.min(Math.max(parseInt(maxDistance || '32', 10) || 32, 1), 48);
   try {
+    let matchIds = null;
+    const version = bot.version;
+    const mcData = minecraftData && version ? minecraftData(version) : null;
+    if (mcData && mcData.blocksByName) {
+      const def = mcData.blocksByName[wanted];
+      if (def && typeof def.id === 'number') {
+        matchIds = [def.id];
+      }
+    }
+    // Without a numeric id we cannot safely scan (a name callback is the OOM
+    // trap). Bail cleanly instead of risking the heap burst.
+    if (!matchIds) return null;
     const blocks = bot.findBlocks({
-      matching: (blk) => blk && blk.name && blk.name.toLowerCase() === wanted,
-      maxDistance: Math.min(Math.max(parseInt(maxDistance || '32', 10) || 32, 1), 64),
+      matching: matchIds,
+      maxDistance: dist,
       count: 1,
     });
     if (blocks && blocks.length) {
@@ -773,6 +836,11 @@ async function navigateToGoal(goal, timeoutMs, navKey) {
 }
 
 function wireBotEvents(b) {
+  // This is a freshly created bot: any previous wiring is gone
+  // (removeAllListeners on the old instance). Chunk eviction is handled solely
+  // by the periodic pruner started at markSpawned — there is intentionally NO
+  // event-driven per-column eviction (it corrupted the chunk store and OOM'd;
+  // see the note above startChunkPruner).
   // Shared "we are truly in the world" settlement. Called from both the
   // canonical 'spawn' event AND the post-login presence poller below, because
   // some servers/proxies (Velocity/BungeeCord and heavily-plugged Spigot setups)
@@ -789,8 +857,12 @@ function wireBotEvents(b) {
       clearInterval(presencePollTimer);
       presencePollTimer = null;
     }
-    // Start capping the chunk cache now that world columns are streaming in —
-    // this is what keeps the Node heap bounded and prevents the post-spawn OOM.
+    // Start the periodic chunk pruner now that the bot has a real position.
+    // This is the SOLE eviction mechanism: it bounds the resident column set
+    // to ~(2*radius+1)^2 around the bot and forces periodic GC, without the
+    // chunk-store corruption that event-driven eviction caused (see the note
+    // above startChunkPruner). The spawn-time column burst decodes fine on its
+    // own (~140MB RSS) and the pruner trims it down within a couple of ticks.
     startChunkPruner();
     log(`in the world (${source})`);
     settleConnect({ ok: true, detail: 'spawned' });
@@ -802,7 +874,14 @@ function wireBotEvents(b) {
   });
 
   b.on('login', () => {
-    connected = true;
+    // NOTE: do NOT set `connected = true` here. 'login' is only the TCP/auth
+    // handshake — the bot is NOT yet embodied in the world. Marking connected
+    // at login makes /health.connected a false positive during a retry that
+    // logs in but never spawns (e.g. the server keeps dropping us after login),
+    // which the Python connector now reads as liveness. Only markSpawned()
+    // (below, via the authoritative 'spawn' event or the presence poller once
+    // the bot has a real entity+position) sets connected = true. This keeps
+    // /health.connected meaning "actually in the world".
     log('logged in as', b.username);
     // Presence fallback: poll for a valid entity position. Once the bot has an
     // entity with coordinates it IS embodied in the world, regardless of whether
@@ -843,6 +922,24 @@ function wireBotEvents(b) {
             botMovements = new pathfinder.Movements(b, mcData);
             if (b.pathfinder && typeof b.pathfinder.setMovements === 'function') {
               b.pathfinder.setMovements(botMovements);
+            }
+          }
+          // Bound the A* search so an unreachable goal cannot explode the open
+          // set into a multi-GB allocation (the confirmed OOM root cause: the
+          // 'mine' verb's collectBlock.collect() runs an unbounded pathfind on
+          // an out-of-reach block, allocating ~2.9GB synchronously before the
+          // GC or any timer can react). thinkTimeout caps wall time; the node
+          // caps bound the graph size directly. All best-effort — a missing
+          // field simply leaves the mineflayer default in place.
+          if (b.pathfinder) {
+            if (typeof b.pathfinder.thinkTimeout !== 'undefined') {
+              b.pathfinder.thinkTimeout = 5000;
+            }
+            if (typeof b.pathfinder.tickTimeout !== 'undefined') {
+              b.pathfinder.tickTimeout = 40;
+            }
+            if (typeof b.pathfinder.searchRadius !== 'undefined') {
+              b.pathfinder.searchRadius = 64;
             }
           }
         } catch (e2) {
@@ -1144,17 +1241,54 @@ function scheduleReconnect(reason) {
 }
 
 function connectBot(overrides) {
+  // Coalesce overlapping connects: if a bot is already building its world,
+  // return the same in-flight Promise instead of tearing it down and starting
+  // a second overlapping world (the OOM cause). A fresh connect only proceeds
+  // once the previous one has settled.
+  if (connectInFlight) {
+    return connectInFlight;
+  }
+  const p = connectBotInner(overrides);
+  connectInFlight = p;
+  p.then(
+    () => {
+      if (connectInFlight === p) connectInFlight = null;
+    },
+    () => {
+      if (connectInFlight === p) connectInFlight = null;
+    }
+  );
+  return p;
+}
+
+function connectBotInner(overrides) {
   if (!mineflayer) {
     return Promise.resolve({ ok: false, detail: 'mineflayer module not installed' });
   }
   if (bot) {
+    // Fully tear down the previous bot. `bot.quit()` alone closes the socket
+    // but leaves ALL of the old bot's event listeners attached — and those
+    // closures keep the old bot (and its prismarine world, holding the entire
+    // spawn-time chunk burst of hundreds of columns) reachable, so it is never
+    // garbage-collected. When connectBot() is called again before the first
+    // bot spawned (observed: two back-to-back "connecting" lines with no
+    // teardown in between), each orphaned world stacks up and the heap OOMs
+    // even though chunk decode now succeeds. removeAllListeners() drops those
+    // references so the old world can be reclaimed; stop the pruner too so its
+    // timer does not keep a stale `bot` alive.
     try {
+      bot.removeAllListeners();
       bot.quit();
     } catch (e) {
       /* ignore */
     }
     bot = null;
     connected = false;
+  }
+  stopChunkPruner();
+  if (presencePollTimer) {
+    clearInterval(presencePollTimer);
+    presencePollTimer = null;
   }
   lastError = null;
   connectRetriesLeft = CONNECT_MAX_RETRIES;
@@ -1552,46 +1686,59 @@ async function runAction(action, payload) {
       try {
         const blockName = block.name;
         // Anticipate the drop id so we can measure the right inventory delta.
-        // collectBlock also picks up the drop, so counting the block id alone
-        // would miss cases where the drop differs (e.g. stone → cobblestone).
         // We snapshot the whole inventory before and diff after.
         const before = inventoryTotals();
-        let usedCollect = false;
-        if (
-          collectBlock &&
-          bot.collectBlock &&
-          typeof bot.collectBlock.collect === 'function'
-        ) {
-          usedCollect = true;
-          await bot.collectBlock.collect(block, { ignoreNoPath: false });
-        } else {
-          const reach = bot.entity.position.distanceTo(block.position);
-          if (reach > 4 && pathfinder && bot.pathfinder) {
-            const p = block.position;
-            const nav = await navigateToGoal(
-              new pathfinder.goals.GoalNear(p.x, p.y, p.z, 2),
-              payload.timeout_ms,
-            );
-            if (!nav.ok) return nav;
-          }
-          if (
-            typeof bot.tool === 'object' &&
-            bot.tool &&
-            typeof bot.tool.equipForBlock === 'function'
-          ) {
-            try {
-              await bot.tool.equipForBlock(block, {});
-            } catch (e) {
-              /* best-effort tool select */
-            }
-          }
-          if (typeof bot.canDigBlock === 'function' && !bot.canDigBlock(block)) {
-            return { ok: false, detail: `cannot dig ${blockName}`, data: {} };
-          }
-          await bot.dig(block);
-          // Give the physics/pickup a brief moment so the drop delta is visible.
-          await sleep(400);
+        const usedCollect = false;
+        // OOM ROOT CAUSE (confirmed via live DIAG: a `mine iron_ore` command
+        // took RSS from 150MB straight to a 2.9GB heap-OOM inside a single
+        // synchronous tick, with cols/entities flat — so it is NOT chunk
+        // growth). The trigger is `bot.collectBlock.collect()`: even with
+        // ignoreNoPath:true it runs an INTERNAL digging pathfind that, for a
+        // BURIED ore block (iron/coal are underground, behind solid stone),
+        // expands the A* open set unbounded and allocates ~2.9GB at once —
+        // the thinkTimeout/tickTimeout caps do not bound that allocation
+        // burst. We therefore NEVER call collectBlock.collect here anymore.
+        //
+        // Instead: (1) bounded surface navigation toward the block; (2) a
+        // STRICT reach gate — if we cannot get within actual dig range
+        // (~4.5 blocks) we bail cleanly rather than trying to tunnel; (3) a
+        // single direct `bot.dig`, which never runs a pathfind. This trades
+        // the ability to auto-tunnel to buried ore for a bridge that never
+        // OOMs. Reachable/exposed blocks still mine + drop normally.
+        const reach0 = bot.entity.position.distanceTo(block.position);
+        if (reach0 > 4 && pathfinder && bot.pathfinder) {
+          const p = block.position;
+          const nav = await navigateToGoal(
+            new pathfinder.goals.GoalNear(p.x, p.y, p.z, 2),
+            payload.timeout_ms,
+          );
+          if (!nav.ok) return nav;
         }
+        const reach = bot.entity.position.distanceTo(block.position);
+        if (reach > 4.5) {
+          return {
+            ok: false,
+            detail: `block unreachable (${Math.round(reach)} blocks away; buried/blocked)`,
+            data: { block: blockName },
+          };
+        }
+        if (
+          typeof bot.tool === 'object' &&
+          bot.tool &&
+          typeof bot.tool.equipForBlock === 'function'
+        ) {
+          try {
+            await bot.tool.equipForBlock(block, {});
+          } catch (e) {
+            /* best-effort tool select */
+          }
+        }
+        if (typeof bot.canDigBlock === 'function' && !bot.canDigBlock(block)) {
+          return { ok: false, detail: `cannot dig ${blockName}`, data: {} };
+        }
+        await bot.dig(block);
+        // Give the physics/pickup a brief moment so the drop delta is visible.
+        await sleep(400);
         const gained = inventoryDelta(before, inventoryTotals());
         const collected = Object.values(gained).reduce((a, b) => a + b, 0);
         pushEvent({
@@ -1646,43 +1793,45 @@ async function runAction(action, payload) {
         }
         const before = inventoryTotals();
         try {
-          if (
-            collectBlock &&
-            bot.collectBlock &&
-            typeof bot.collectBlock.collect === 'function'
-          ) {
-            await bot.collectBlock.collect(block, { ignoreNoPath: false });
-          } else {
-            const reach = bot.entity.position.distanceTo(block.position);
-            if (reach > 4 && pathfinder && bot.pathfinder) {
-              const p = block.position;
-              const nav = await navigateToGoal(
-                new pathfinder.goals.GoalNear(p.x, p.y, p.z, 2),
-                Math.max(deadline - Date.now(), 1000),
-              );
-              if (!nav.ok) {
-                lastDetail = nav.detail || 'could not reach block';
-                break;
-              }
-            }
-            if (
-              typeof bot.tool === 'object' &&
-              bot.tool &&
-              typeof bot.tool.equipForBlock === 'function'
-            ) {
-              try {
-                await bot.tool.equipForBlock(block, {});
-              } catch (e) {
-                /* best-effort */
-              }
-            }
-            if (typeof bot.canDigBlock === 'function' && !bot.canDigBlock(block)) {
-              lastDetail = `cannot dig ${block.name}`;
+          // OOM-safe path (see the 'mine' verb for the full root-cause note):
+          // NEVER call bot.collectBlock.collect() — its internal digging
+          // pathfind explodes the A* open set to ~2.9GB on a buried block and
+          // OOM-kills the process. Always use bounded surface navigation + a
+          // strict reach gate + a single direct bot.dig (no internal pathfind).
+          const reach0 = bot.entity.position.distanceTo(block.position);
+          if (reach0 > 4 && pathfinder && bot.pathfinder) {
+            const p = block.position;
+            const nav = await navigateToGoal(
+              new pathfinder.goals.GoalNear(p.x, p.y, p.z, 2),
+              Math.max(deadline - Date.now(), 1000),
+            );
+            if (!nav.ok) {
+              lastDetail = nav.detail || 'could not reach block';
               break;
             }
-            await bot.dig(block);
-            await sleep(400);
           }
+          const reach = bot.entity.position.distanceTo(block.position);
+          if (reach > 4.5) {
+            lastDetail = `block unreachable (${Math.round(reach)} blocks away; buried/blocked)`;
+            break;
+          }
+          if (
+            typeof bot.tool === 'object' &&
+            bot.tool &&
+            typeof bot.tool.equipForBlock === 'function'
+          ) {
+            try {
+              await bot.tool.equipForBlock(block, {});
+            } catch (e) {
+              /* best-effort */
+            }
+          }
+          if (typeof bot.canDigBlock === 'function' && !bot.canDigBlock(block)) {
+            lastDetail = `cannot dig ${block.name}`;
+            break;
+          }
+          await bot.dig(block);
+          await sleep(400);
         } catch (err) {
           lastDetail = String(err && err.message ? err.message : err);
           break;

@@ -415,3 +415,54 @@ def test_build_action_prompt_surfaces_reachable_ids() -> None:
     prompt = build_action_prompt(_rich_world_state(), "minecraft")
     # Exact block/entity ids must appear verbatim so the LLM targets real names.
     assert "oak_log" in prompt
+
+
+# ---------------------------------------------------------------------------
+# Game-knowledge block — reference facts, rendered structurally when present
+# ---------------------------------------------------------------------------
+
+
+def _state_with_knowledge() -> dict[str, Any]:
+    state = _rich_world_state()
+    state["extra"]["knowledge"] = [
+        {
+            "title": "Mining tiers",
+            "text": "Iron ore needs at least a stone pickaxe or it drops nothing.",
+            "url": "https://example/w/Pickaxe",
+        },
+        {
+            "title": "Wood bootstrap",
+            "text": "Everything starts with wood: logs -> planks -> sticks.",
+            "url": "https://example/w/Wood",
+        },
+    ]
+    return state
+
+
+def test_build_will_prompt_renders_knowledge_block() -> None:
+    prompt = build_will_prompt(_state_with_knowledge(), "minecraft")
+    # The header frames the facts as reference, never as a script.
+    assert "Game knowledge" in prompt
+    # Curated facts are surfaced verbatim as bullets with their titles.
+    assert "Mining tiers:" in prompt
+    assert "stone pickaxe" in prompt
+
+
+def test_build_action_prompt_renders_knowledge_block() -> None:
+    prompt = build_action_prompt(_state_with_knowledge(), "minecraft")
+    assert "Game knowledge" in prompt
+    assert "Wood bootstrap:" in prompt
+
+
+def test_knowledge_block_absent_when_no_knowledge() -> None:
+    # No extra["knowledge"] → the whole block is skipped, keeping the beat lean.
+    prompt = build_will_prompt(_rich_world_state(), "minecraft")
+    assert "Game knowledge" not in prompt
+
+
+def test_knowledge_block_skipped_when_entries_have_no_text() -> None:
+    state = _rich_world_state()
+    state["extra"]["knowledge"] = [{"title": "empty", "text": ""}]
+    prompt = build_will_prompt(state, "minecraft")
+    # Header is dropped when nothing renderable survives.
+    assert "Game knowledge" not in prompt

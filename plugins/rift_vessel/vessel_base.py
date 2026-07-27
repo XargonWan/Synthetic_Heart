@@ -216,6 +216,66 @@ class VesselConnectorBase(ABC):
         """
         return {}
 
+    def get_knowledge_sources(self) -> List[Dict[str, Any]]:
+        """Return this world's curated **knowledge base** entries.
+
+        A world's *knowledge base* is a small curated set of reference facts
+        about how that game/world works (e.g. Minecraft "iron ore must be mined
+        with a stone pickaxe or better"). It exists so Synth can reason about a
+        goal using real game rules instead of hallucinating them, and it is
+        deliberately **reference material, never a script** — it informs
+        cognition but never dictates the actions Synth takes (see the
+        spontaneity rule in AGENTS.md §5c).
+
+        Each entry is a plain dict with at least a ``title`` and ``text`` and an
+        optional structural ``tags`` list (lowercase game ids / concepts) used
+        for keyword-free matching against a goal's structural fields — the match
+        is on the goal's own ``target_name`` / id tokens, never on free-text
+        natural-language keywords, so it works across languages. An optional
+        ``url`` may point at the upstream wiki page the entry was distilled
+        from.
+
+        Optional override. Defaults to an empty list (no knowledge base).
+        """
+        return []
+
+    async def lookup_knowledge(
+        self, query: str, limit: int = 5
+    ) -> List[Dict[str, Any]]:
+        """Return knowledge-base entries relevant to ``query``.
+
+        ``query`` is a structural token (a goal ``target_name``, an item/block
+        id, or a whitespace-joined set of such ids) — **not** a natural-language
+        sentence — so matching stays keyword-free and language-agnostic. The
+        default implementation filters :meth:`get_knowledge_sources` by simple
+        structural overlap between the query tokens and each entry's ``tags``
+        (falling back to a substring test on the entry ``title``), and returns
+        at most ``limit`` entries. A connector may override this to consult a
+        live wiki with a local fallback.
+
+        Optional override. Defaults to a structural filter over
+        :meth:`get_knowledge_sources`.
+        """
+        try:
+            sources = self.get_knowledge_sources()
+        except Exception:
+            return []
+        if not sources:
+            return []
+        tokens = {tok for tok in str(query or "").lower().split() if tok}
+        if not tokens:
+            return list(sources)[: max(0, int(limit))]
+        matched: List[Dict[str, Any]] = []
+        for entry in sources:
+            if not isinstance(entry, dict):
+                continue
+            tags = entry.get("tags") or []
+            tag_set = {str(t).lower() for t in tags if t}
+            title = str(entry.get("title") or "").lower()
+            if tokens & tag_set or any(tok in title for tok in tokens):
+                matched.append(entry)
+        return matched[: max(0, int(limit))]
+
     async def motor_step(self, goal: Dict[str, Any] | None) -> Dict[str, Any]:
         """Take **one** fast, reflexive step of the body toward ``goal``.
 

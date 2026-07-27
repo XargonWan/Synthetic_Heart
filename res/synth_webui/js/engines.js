@@ -377,6 +377,11 @@
             }
             // Re-render so the change is visible without a page refresh.
             renderList();
+            // A subsystem-mapping change alters which engines the Cortex/Vox/
+            // Auris/Iris registries expose, so refresh the Engines summary too
+            // (this repopulates the Scope Override selectors and model lists
+            // without requiring a manual page reload).
+            window.SynthWebUI?.loadEnginesSummary?.();
             setStatus('Saved ✓', 'var(--success,#27ae60)');
             setTimeout(() => setStatus(''), 1500);
         } catch (e) {

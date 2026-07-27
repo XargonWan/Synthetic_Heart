@@ -526,9 +526,55 @@ persisted in the ``minecraft_goals`` table so a goal survives across beats withi
 a session. *"Do I go looking for diamonds or build a chest first?"* is Synth's
 decision, driven by its personality and wants — not a hardcoded script.
 
-Removing autonomy support (the beat module, the goal store, the motor tick, or
-disabling the config flags) must never break the reactive Vessel — all wiring is
-lazily imported and fully guarded.
+**Game knowledge base — reference facts, never a script.** A Synth that does not
+know a world's *rules* plays badly — e.g. it tries to mine iron ore bare-handed
+and gets nothing, because it never learned that iron needs at least a stone
+pickaxe. To close this gap without turning autonomy into a scripted quest list,
+each world may ship a small **knowledge base (KB)** of curated facts. The
+*mechanism* is world-agnostic (the Vessel core renders whatever facts a world
+supplies); the *content* is world-specific (the Minecraft adapter owns its own
+facts). The KB is strictly **reference**: it states how the world works, it never
+tells Synth what to do — the spontaneity rule (self-authored goals, no catalogue)
+is fully preserved.
+
+* **Storage (Minecraft).** Facts live in
+  ``plugins/rift_vessel/minecraft/wiki/knowledge.json`` — a plain
+  ``{"entries": [ {title, tags, text, url, fallback}, … ]}`` file next to the
+  connector. ``title``/``text`` are the human-readable fact; ``tags`` are the
+  lowercase block/item/verb ids the fact is about (e.g. ``iron_ore``,
+  ``stone_pickaxe``, ``oak_log``); ``url`` links the source wiki page; the
+  optional ``fallback`` flags a static entry usable when no live wiki is
+  reachable.
+* **Lookup verb.** The connector exposes a Fast-Lane, ``external_effects``-free
+  ``lookup_knowledge`` verb (namespaced ``vessel_minecraft_lookup_knowledge``,
+  ``required_fields: ["query"]``, ``optional_fields: ["limit"]``,
+  ``security_level: "low"``). ``MinecraftConnector.lookup_knowledge(query,
+  limit=5)`` tokenises the query, ranks entries by tag-overlap (with a
+  title-substring fallback), and returns the top ``limit`` notes as
+  ``{title, text, url}``. It touches no bridge, DB, network, or LLM, so it is
+  fully offline-testable (``tests/test_vessel_knowledge.py``).
+* **Prompt injection.** When a beat's ``WorldState.extra["knowledge"]`` is
+  populated, ``core/vessel_beat.py::_fmt_knowledge`` renders it into both the
+  will and the action prompts as a bulleted **"Game knowledge"** block, headed
+  by an explicit *reference, not a script* framing. The renderer is purely
+  structural — it never inspects the fact text for keywords — and it drops the
+  whole block when nothing renderable survives, keeping empty-KB beats lean.
+* **Drone goal expansion.** When Synth authors a *new* goal, a Drone (the
+  single-level ephemeral sub-agent, see AGENTS.md §5b) can expand it into an
+  ordered list of concrete sub-steps by consulting the KB via
+  ``lookup_knowledge`` — turning *"get some iron"* into *"craft a wooden
+  pickaxe → mine stone → craft a stone pickaxe → mine iron ore"*. The mapping is
+  the Drone's own reasoning over the reference facts; there is no fixed
+  expansion table and no keyword routing. **After the goal is updated with its
+  sub-steps, it is re-notified to Synth via a will beat**, so the next volition
+  turn sees (and can act on) the freshly-expanded plan. The WebUI Goals sub-tab
+  renders these sub-steps **collapsed by default** (a ``<details>`` disclosure
+  labelled ``Plan · done/total steps``) so a goal card stays compact until the
+  user expands it.
+
+Removing autonomy support (the beat module, the goal store, the motor tick, the
+knowledge base, or disabling the config flags) must never break the reactive
+Vessel — all wiring is lazily imported and fully guarded.
 
 Core + attachable sub-plugins (Grillo-style)
 --------------------------------------------

@@ -1417,13 +1417,17 @@ function renderGoalCard(goal, world) {
     const currentStep = Number.isInteger(goal.current_step) ? goal.current_step : -1;
     let stepsHtml;
     if (steps.length > 0) {
-        stepsHtml = '<ul class="goal-steps">' + steps.map((step, idx) => {
+        const stepsList = '<ul class="goal-steps">' + steps.map((step, idx) => {
             let cls = 'goal-step';
             let marker = '○';
             if (idx < currentStep) { cls += ' goal-step-done'; marker = '✓'; }
             else if (idx === currentStep) { cls += ' goal-step-current'; marker = '▶'; }
             return `<li class="${cls}"><span class="goal-step-marker">${marker}</span><span class="goal-step-text">${escapeHtml(step)}</span></li>`;
         }).join('') + '</ul>';
+        const doneCount = currentStep >= 0 ? Math.min(currentStep, steps.length) : 0;
+        const summaryLabel = `Plan · ${doneCount}/${steps.length} steps`;
+        // Collapsed by default so a card stays compact; expand to inspect the plan.
+        stepsHtml = `<details class="goal-steps-details"><summary class="goal-steps-summary">${summaryLabel}</summary>${stepsList}</details>`;
     } else {
         stepsHtml = '<div class="goal-no-steps">No steps recorded.</div>';
     }

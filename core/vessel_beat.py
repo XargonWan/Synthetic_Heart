@@ -187,6 +187,41 @@ def _fmt_goal(goal: dict[str, Any] | None) -> str:
     return head
 
 
+def _fmt_knowledge(knowledge: Any) -> list[str]:
+    """Render curated game-rule facts as prompt lines (reference, not a script).
+
+    ``knowledge`` is the opaque structured list the connector placed in
+    ``extra["knowledge"]`` — each entry a dict with a ``title`` and a distilled
+    ``text`` fact. Returns an empty list when there is nothing to show, so the
+    caller can skip the block entirely. Purely structural rendering; it never
+    inspects the text for keywords.
+    """
+    if not isinstance(knowledge, list) or not knowledge:
+        return []
+    lines: list[str] = [
+        "",
+        "Game knowledge (reference, not a script — real rules of this world, "
+        "use them to plan; they are facts, not instructions to obey blindly):",
+    ]
+    for entry in knowledge[:_MAX_LIST_ITEMS]:
+        if not isinstance(entry, dict):
+            continue
+        title = str(entry.get("title") or "").strip()
+        text = str(entry.get("text") or "").strip()
+        if not text:
+            continue
+        # Collapse the fact onto one bullet so the block stays compact.
+        text_oneline = " ".join(text.split())
+        if title:
+            lines.append(f"- {title}: {text_oneline}")
+        else:
+            lines.append(f"- {text_oneline}")
+    # If nothing renderable survived, drop the header too.
+    if len(lines) <= 2:
+        return []
+    return lines
+
+
 def world_state_to_dict(world_state: Any) -> dict[str, Any]:
     """Normalize a ``WorldState`` (dataclass or dict) to a plain dict.
 
@@ -332,6 +367,11 @@ def build_will_prompt(world_state: Any, world: str) -> str:
             "coordinates out only when what you need is already right here.",
         ]
     )
+
+    # Curated game-rule facts relevant to the goal/surroundings (reference
+    # only). The connector selected these structurally into extra["knowledge"];
+    # rendering here is keyword-free.
+    lines.extend(_fmt_knowledge(extra.get("knowledge")))
 
     # Structural target-outcome feedback. When the motor tick tried to reach a
     # named target since the last beat, it recorded a 3-state outcome (see the
@@ -520,6 +560,12 @@ def build_action_prompt(world_state: Any, world: str) -> str:
         "on; mark the whole goal 'done' when you have truly achieved it. You "
         "are the judge of your own progress.",
     ]
+
+    # Curated game-rule facts relevant to the goal/surroundings (reference
+    # only). The connector selected these structurally into extra["knowledge"];
+    # rendering here is keyword-free. Helps pick the correct verb (e.g. that
+    # iron ore needs a stone pickaxe first).
+    lines.extend(_fmt_knowledge(extra.get("knowledge")))
 
     # Surface the exact reachable ids so the chosen 'name'/'target' is verbatim.
     if block_names:

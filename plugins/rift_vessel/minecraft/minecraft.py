@@ -948,6 +948,8 @@ class MinecraftConnector(VesselConnectorBase):
     ) -> VesselActionResult:
         if not self._connected:
             return VesselActionResult(ok=False, detail="not connected to a world")
+        if action == "lookup_knowledge":
+            return await self._act_lookup_knowledge(payload or {})
         if action in self._GOAL_VERBS:
             return await self._act_goal(action, payload or {})
         if action == "say":
@@ -1163,6 +1165,7 @@ class MinecraftConnector(VesselConnectorBase):
         inventory_counts = self._inventory_counts(inventory)
         affordances = self._build_affordances(entities, blocks)
         current_goal, recent_goals = await self._resolve_goals()
+        knowledge = await self._resolve_knowledge(current_goal, affordances)
         return WorldState(
             environment=ENVIRONMENT,
             health=data.get("health"),
@@ -1240,8 +1243,72 @@ class MinecraftConnector(VesselConnectorBase):
                 "last_target_result": self._last_target_result,
                 "last_target_name": self._last_target_name,
                 "last_target_kind": self._last_target_kind,
+                # Curated game-rule facts relevant to the current goal /
+                # surroundings (reference only, never a script). Surfaced into
+                # the will/action beats so Synth reasons with real Minecraft
+                # rules. Empty when the knowledge base is disabled or nothing
+                # matches. Keyed on structural ids, keyword-free.
+                "knowledge": knowledge,
             },
         )
+
+    async def _resolve_knowledge(
+        self,
+        current_goal: Dict[str, Any] | None,
+        affordances: list[dict[str, Any]],
+    ) -> list[Dict[str, Any]]:
+        """Pick knowledge-base facts relevant to the goal and surroundings.
+
+        Builds a **structural** query — the goal's ``target_name`` plus any
+        block/entity ids Synth is standing among (from the affordance contract)
+        — and looks them up in the connector's knowledge base. Never inspects
+        free-text goal descriptions for keywords, so it stays language-agnostic.
+        Gated by ``VESSEL_KNOWLEDGE_ENABLED`` and capped by
+        ``VESSEL_KNOWLEDGE_MAX_SNIPPETS``. Fail-safe: any error degrades to no
+        knowledge rather than breaking the world snapshot.
+        """
+        try:
+            enabled = bool(
+                config_registry.get_value(
+                    "VESSEL_KNOWLEDGE_ENABLED",
+                    True,
+                    group="plugins",
+                    component="vessel_plugin",
+                )
+            )
+            if not enabled:
+                return []
+            try:
+                cap = int(
+                    config_registry.get_value(
+                        "VESSEL_KNOWLEDGE_MAX_SNIPPETS",
+                        5,
+                        group="plugins",
+                        component="vessel_plugin",
+                    )
+                )
+            except (TypeError, ValueError):
+                cap = 5
+            cap = max(1, min(20, cap))
+
+            tokens: list[str] = []
+            if isinstance(current_goal, dict):
+                tname = current_goal.get("target_name")
+                if tname:
+                    tokens.append(str(tname).lower())
+            for aff in affordances or []:
+                if not isinstance(aff, dict):
+                    continue
+                target = aff.get("target")
+                if target:
+                    tokens.append(str(target).lower())
+            if not tokens:
+                return []
+            query = " ".join(dict.fromkeys(tokens))  # de-dup, preserve order
+            return await self.lookup_knowledge(query, limit=cap)
+        except Exception as exc:  # pragma: no cover - defensive
+            log_debug(f"{LOG_PREFIX} knowledge resolution failed: {exc}")
+            return []
 
     async def _resolve_goals(
         self,
@@ -1340,6 +1407,39 @@ class MinecraftConnector(VesselConnectorBase):
     # Motorics: how close (blocks) an affordance must be for the body to act on
     # it directly (mine/use) rather than first walking toward it.
     _MOTOR_REACH = 3.0
+
+    # Utility / light-source block ids the fast motor reflex must NEVER mine on
+    # its own. These are player- (or self-) placed functional blocks — chiefly
+    # **torches**, the primary way an underground path is kept lit. Reflexively
+    # mining a torch it walks past would strip the light Synth (or a player)
+    # just placed, plunging the tunnel back into darkness (the reported "Rekku
+    # steals torches" bug). This is a structural guard on **game block-state
+    # ids**, not natural-language keywords, so it is multi-language-safe: the
+    # motor never destroys these by reflex. A *deliberate* will-beat goal that
+    # names one of these as its target is still honoured (cognition may have a
+    # reason) — only the incidental "grab whatever benign block is in reach"
+    # reflex is suppressed. The set is intentionally small and light-focused.
+    _REFLEX_NO_MINE_BLOCKS = frozenset(
+        {
+            "torch",
+            "wall_torch",
+            "soul_torch",
+            "soul_wall_torch",
+            "redstone_torch",
+            "redstone_wall_torch",
+            "lantern",
+            "soul_lantern",
+            "sea_lantern",
+            "jack_o_lantern",
+            "glowstone",
+            "shroomlight",
+            "campfire",
+            "soul_campfire",
+            "beacon",
+            "end_rod",
+            "candle",
+        }
+    )
 
     # How close (blocks, horizontal) the body must get to a self-chosen travel
     # destination before it counts as "arrived" and stops steering toward it.
@@ -2614,7 +2714,64 @@ class MinecraftConnector(VesselConnectorBase):
                 ],
                 "security_level": "low",
             },
+            "lookup_knowledge": {
+                "description": (
+                    "Look up how this world works before you commit to a plan: "
+                    "search the game's rules and knowledge base for what a goal "
+                    "actually needs. Give a short 'query' of the things you want "
+                    "to understand (for example the exact block or item id, or "
+                    "what tool a resource requires). You get back a few short, "
+                    "factual notes — e.g. that a certain ore can only be mined "
+                    "with a specific tool you must craft first, or what a recipe "
+                    "needs. Purely informational; it changes nothing in the "
+                    "world. Use it to order your sub-steps correctly (gather the "
+                    "prerequisite before the thing that needs it) instead of, "
+                    "say, trying to mine ore bare-handed."
+                ),
+                "required_fields": ["query"],
+                "optional_fields": ["limit"],
+                "security_level": "low",
+            },
         }
+
+    async def _act_lookup_knowledge(
+        self, payload: Dict[str, Any]
+    ) -> VesselActionResult:
+        """Handle the ``lookup_knowledge`` verb locally (no bridge round-trip).
+
+        Reads the curated knowledge base via :meth:`lookup_knowledge` and
+        returns the matched entries so the goal-expansion Drone (and cognition)
+        can consult the game's rules before ordering sub-steps. Fail-safe — a
+        missing/empty KB degrades to an ``ok=True`` empty result rather than
+        raising into the chain.
+        """
+        try:
+            query = str(payload.get("query") or "").strip()
+            raw_limit = payload.get("limit")
+            try:
+                limit = int(raw_limit) if raw_limit is not None else 5
+            except (TypeError, ValueError):
+                limit = 5
+            entries = await self.lookup_knowledge(query, limit=limit)
+            notes = [
+                {
+                    "title": e.get("title"),
+                    "text": e.get("text"),
+                    "url": e.get("url"),
+                }
+                for e in entries
+                if isinstance(e, dict)
+            ]
+            return VesselActionResult(
+                ok=True,
+                detail=f"found {len(notes)} knowledge note(s)",
+                data={"query": query, "notes": notes},
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            log_warning(f"{LOG_PREFIX} lookup_knowledge failed: {exc}")
+            return VesselActionResult(
+                ok=False, detail="knowledge lookup failed", data={}
+            )
 
     def describe_capabilities(self) -> Dict[str, Any]:
         return {
@@ -2624,6 +2781,77 @@ class MinecraftConnector(VesselConnectorBase):
             "interaction": True,
             "local": True,
         }
+
+    # ------------------------------------------------------------------
+    # Knowledge base (curated game rules — reference only, never a script)
+    # ------------------------------------------------------------------
+
+    def get_knowledge_sources(self) -> list[dict[str, Any]]:
+        """Return the curated Minecraft knowledge-base entries.
+
+        Loaded once (cached) from ``wiki/knowledge.json`` next to this module.
+        Each entry is reference material about how the world works (mining
+        tiers, crafting, smelting, etc.) with structural ``tags`` (lowercase
+        game ids) used for keyword-free matching. Fail-safe: a missing or
+        malformed file yields an empty list so the rest of the Vessel keeps
+        working.
+        """
+        cached = getattr(self, "_knowledge_cache", None)
+        if cached is not None:
+            return cached
+        entries: list[dict[str, Any]] = []
+        try:
+            import json
+            from pathlib import Path
+
+            manifest = Path(__file__).resolve().parent / "wiki" / "knowledge.json"
+            if manifest.is_file():
+                data = json.loads(manifest.read_text(encoding="utf-8"))
+                raw = data.get("entries") if isinstance(data, dict) else None
+                if isinstance(raw, list):
+                    entries = [e for e in raw if isinstance(e, dict)]
+        except Exception as exc:  # pragma: no cover - defensive
+            log_warning(f"{LOG_PREFIX} knowledge base load failed: {exc}")
+            entries = []
+        self._knowledge_cache = entries
+        return entries
+
+    async def lookup_knowledge(
+        self, query: str, limit: int = 5
+    ) -> list[dict[str, Any]]:
+        """Return knowledge entries relevant to ``query`` (a structural token).
+
+        ``query`` is expected to be structural game tokens (a goal
+        ``target_name``, item/block ids, whitespace-joined) — never a
+        natural-language sentence — so matching stays keyword-free and
+        language-agnostic. Entries are ranked by how many query tokens overlap
+        their ``tags``; a curated ``text`` field is returned verbatim (already a
+        distilled fact). Best-effort live enrichment from the entry ``url`` is
+        intentionally deferred to keep the beat fast and offline-safe — the
+        curated text is authoritative.
+        """
+        sources = self.get_knowledge_sources()
+        if not sources:
+            return []
+        try:
+            lim = max(0, int(limit))
+        except Exception:
+            lim = 5
+        tokens = {tok for tok in str(query or "").lower().split() if tok}
+        if not tokens:
+            return sources[:lim]
+        scored: list[tuple[int, dict[str, Any]]] = []
+        for entry in sources:
+            tags = entry.get("tags") or []
+            tag_set = {str(t).lower() for t in tags if t}
+            title = str(entry.get("title") or "").lower()
+            score = len(tokens & tag_set)
+            if score == 0 and any(tok in title for tok in tokens):
+                score = 1
+            if score > 0:
+                scored.append((score, entry))
+        scored.sort(key=lambda pair: pair[0], reverse=True)
+        return [entry for _score, entry in scored[:lim]]
 
     @property
     def is_connected(self) -> bool:

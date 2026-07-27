@@ -243,6 +243,54 @@ config_registry.get_value(
     advanced=True,
 )
 config_registry.get_value(
+    "VESSEL_KNOWLEDGE_ENABLED",
+    True,
+    value_type=bool,
+    label="Game Knowledge Base",
+    description=(
+        "When enabled, Synth can consult a small curated knowledge base of "
+        "real game rules for the world it is in (e.g. Minecraft 'iron ore needs "
+        "a stone pickaxe'). Relevant facts are surfaced into the will/action "
+        "beats and a short-lived Drone uses them to expand a fresh goal into an "
+        "ordered plan of sub-steps. This is reference material only — it informs "
+        "Synth's reasoning but never scripts its actions."
+    ),
+    group="plugins",
+    component="vessel_plugin",
+)
+config_registry.get_value(
+    "VESSEL_KNOWLEDGE_MAX_SNIPPETS",
+    5,
+    value_type=int,
+    label="Game Knowledge: Max Snippets",
+    description=(
+        "Maximum number of knowledge-base facts surfaced into a single "
+        "will/action beat (clamped to 1–20). Higher gives more context at the "
+        "cost of a longer prompt. Only used when the Game Knowledge Base is "
+        "enabled."
+    ),
+    group="plugins",
+    component="vessel_plugin",
+    advanced=True,
+)
+config_registry.get_value(
+    "VESSEL_GOAL_EXPAND_ENABLED",
+    True,
+    value_type=bool,
+    label="Goal Plan Expansion (Drone)",
+    description=(
+        "When enabled, each time Synth authors a fresh goal a short-lived Drone "
+        "runs out of band to expand it into an ordered plan of concrete "
+        "sub-steps, consulting the game knowledge base for real rules. The plan "
+        "is written back onto the goal and re-sent to Synth via a will beat so "
+        "it can act on it. Never runs inside an embodiment turn (Fast Lane "
+        "only). Only used when Autonomous In-World Play is enabled."
+    ),
+    group="plugins",
+    component="vessel_plugin",
+    advanced=True,
+)
+config_registry.get_value(
     "VESSEL_SELF_PRESERVATION_ENABLED",
     True,
     value_type=bool,
@@ -741,8 +789,34 @@ class VesselPlugin(AIPluginBase):
             # Ensure gameplay verbs are exposed even if the block was cached
             # while disconnected (e.g. reattach right after a restart).
             self._refresh_actions_block(f"vessel_connect:{name}")
+            # Reconcile a live connector whose DB session has since ended (the
+            # inactivity cooldown, or a disconnect-grace close while the Node
+            # bridge stayed embodied): without a tracked session all three
+            # autonomy beats gate off (has_active_session() is false) and the
+            # bot sits inert forever. If nothing is tracked for this world,
+            # re-open a session so volition/motorics resume on the live body.
+            iface = self._get_vessel_interface()
+            reopened_id: str | None = None
+            if (
+                iface is not None
+                and hasattr(iface, "has_local_session")
+                and hasattr(iface, "begin_session")
+                and not iface.has_local_session(name)
+            ):
+                try:
+                    reopened_id = await iface.begin_session(name)
+                    log_info(
+                        f"[vessel_plugin] connect_world: reopened session for "
+                        f"already-connected '{name}' (session={reopened_id})"
+                    )
+                except Exception as exc:
+                    log_warning(
+                        f"[vessel_plugin] session reopen failed for '{name}': {exc}"
+                    )
             return VesselActionResult(
-                ok=True, detail="already_connected", data={"environment": name}
+                ok=True,
+                detail="already_connected",
+                data={"environment": name, "session_id": reopened_id},
             )
 
         iface = self._get_vessel_interface()

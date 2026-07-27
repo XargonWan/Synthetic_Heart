@@ -709,9 +709,37 @@
         word-break: break-word;
       }
 
+      .goal-steps-details {
+        margin: 0;
+      }
+
+      .goal-steps-summary {
+        cursor: pointer;
+        font-size: 0.8rem;
+        color: var(--text-soft);
+        list-style: none;
+        user-select: none;
+        padding: 0.15rem 0;
+      }
+
+      .goal-steps-summary::-webkit-details-marker {
+        display: none;
+      }
+
+      .goal-steps-summary::before {
+        content: '▸';
+        display: inline-block;
+        margin-right: 0.35rem;
+        transition: transform 0.15s ease;
+      }
+
+      .goal-steps-details[open] > .goal-steps-summary::before {
+        transform: rotate(90deg);
+      }
+
       .goal-steps {
         list-style: none;
-        margin: 0;
+        margin: 0.35rem 0 0;
         padding: 0;
         display: flex;
         flex-direction: column;

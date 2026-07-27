@@ -133,6 +133,19 @@ class VesselInterface:
         # scheduler, not inside cognition. One planner per world at a time.
         self._drone_plan_tasks: dict[str, asyncio.Task[Any]] = {}
         self._last_drone_plan_at: dict[str, float] = {}
+        # Out-of-band goal-*expansion* drone bookkeeping (distinct from the
+        # anti-circling planner above). When a *new* active goal appears — one
+        # this world has not expanded yet — a short-lived Drone is dispatched
+        # *out of band* (a plain asyncio task, NEVER an in-turn vessel action,
+        # so the vessel chain stays Fast-Lane only, AGENTS.md §5c) to consult
+        # the per-world knowledge base and flesh the goal out into an ordered
+        # ``steps`` plan via the world's ``update_goal`` verb. After it commits
+        # the plan we re-notify Synth with a fresh will beat (by resetting
+        # ``_last_will_beat_at``) so the newly detailed goal re-enters volition.
+        # De-duplicated per world by the last expanded goal id so a goal is
+        # expanded exactly once. One expansion task per world at a time.
+        self._goal_expand_tasks: dict[str, asyncio.Task[Any]] = {}
+        self._expanded_goal_ids: dict[str, int] = {}
         log_debug("[vessel_interface] Instance initialized")
 
     # ------------------------------------------------------------------
@@ -947,6 +960,10 @@ class VesselInterface:
                 # If volition left the goal without a reachable target/destination,
                 # translate the idea into a concrete waypoint out of band (Drone).
                 await self._maybe_run_drone_planner()
+                # When a fresh goal appears, expand it into an ordered ``steps``
+                # plan out of band (Drone consulting the knowledge base), then
+                # re-notify Synth with a will beat. Runs once per new goal id.
+                await self._maybe_run_goal_expander()
                 # Concrete-doing cognition: map the free-text goal onto a real
                 # verb (gather/craft/place) — what actually accomplishes work.
                 await self._maybe_run_action_beat()
@@ -1302,6 +1319,185 @@ class VesselInterface:
             existing = self._drone_plan_tasks.get(world)
             if existing is not None and existing.done():
                 self._drone_plan_tasks.pop(world, None)
+
+    @staticmethod
+    def _goal_needs_expansion(goal: dict[str, Any] | None) -> bool:
+        """True when a goal has no ordered ``steps`` plan yet (structural only).
+
+        A goal authored by the slow will beat is free text with no breakdown —
+        the ``steps`` list is empty. That is exactly the goal a knowledge-base
+        Drone should expand into concrete sub-steps (gather wood → craft axe →
+        …). Purely structural: it inspects the ``steps`` field only, never the
+        free-text description. Fully guarded.
+        """
+        if not isinstance(goal, dict):
+            return False
+        try:
+            steps = goal.get("steps")
+            if isinstance(steps, (list, tuple)) and len(steps) > 0:
+                return False
+        except Exception:
+            return False
+        return True
+
+    async def _maybe_run_goal_expander(self) -> None:
+        """Expand a freshly-authored goal into an ordered ``steps`` plan (out of band).
+
+        The knowledge half of goal pursuit. When the slow will beat authors a
+        new goal it is just free text (e.g. *"build a wooden house"*) with no
+        breakdown — so the action beat and motor tick have nothing concrete to
+        chase. This dispatches a short-lived **Drone** *out of band* (a plain
+        background :class:`asyncio.Task`, NEVER an in-turn vessel action, so the
+        vessel chain stays Fast-Lane only, AGENTS.md §5c) that consults the
+        per-world knowledge base and writes an ordered ``steps`` plan back via
+        the world's ``update_goal`` verb. When the plan is committed we re-notify
+        Synth by resetting the will-beat clock so volition re-enters with the
+        now-detailed goal (the user's explicit requirement: the updated goal
+        must go back to Synth via will).
+
+        Gated: (1) ``VESSEL_AUTONOMY_ENABLED`` on; (2) ``VESSEL_KNOWLEDGE_ENABLED``
+        on; (3) a session active; (4) the will beat has run at least once;
+        (5) an active goal exists that still has no ``steps``; (6) that goal id
+        has not already been expanded for this world; (7) no expansion already
+        running for this world. Fully guarded — any failure degrades to a no-op
+        and never breaks the scheduler.
+        """
+        try:
+            from core import vessel_beat
+        except Exception:
+            return
+
+        def _cfg(key: str, default: Any) -> Any:
+            return config_registry.get_value(
+                key, default, group="vessel", component="vessel"
+            )
+
+        if not vessel_beat.is_autonomy_enabled(_cfg):
+            return
+        # Goal expansion is the knowledge-base feature: honour its master switch.
+        try:
+            if not bool(_cfg("VESSEL_KNOWLEDGE_ENABLED", True)):
+                return
+        except Exception:
+            pass
+
+        manager = get_vessel_session_manager()
+        if not manager.has_active_session():
+            return
+        if self._last_will_beat_at <= 0.0:
+            return
+
+        world, world_state = await self._read_active_world_state()
+        if world is None or world_state is None:
+            return
+
+        existing = self._goal_expand_tasks.get(world)
+        if existing is not None and existing.done():
+            self._goal_expand_tasks.pop(world, None)
+            existing = None
+        if existing is not None:
+            return  # an expansion is already working on this world
+
+        goal = self._goal_from_world_state(world_state)
+        if goal is None:
+            return
+        if not self._goal_needs_expansion(goal):
+            return  # already has a steps plan
+
+        goal_id = goal.get("id")
+        try:
+            goal_id_int = int(goal_id) if goal_id is not None else None
+        except (TypeError, ValueError):
+            goal_id_int = None
+        if goal_id_int is None:
+            return  # cannot de-dup without a stable id — skip
+        if self._expanded_goal_ids.get(world) == goal_id_int:
+            return  # already expanded this exact goal
+
+        self._expanded_goal_ids[world] = goal_id_int
+        task = asyncio.create_task(self._run_goal_expander(world, goal))
+        self._goal_expand_tasks[world] = task
+        log_debug(
+            f"[vessel_interface] Goal expander dispatched for '{world}' "
+            f"(goal id={goal_id_int})"
+        )
+
+    async def _run_goal_expander(self, world: str, goal: dict[str, Any]) -> None:
+        """Body of the out-of-band goal-expansion drone (runs in its own task).
+
+        Builds a free-text objective asking a Drone to consult the world's
+        knowledge base (via ``vessel_<world>_lookup_knowledge``) and break the
+        goal into an ordered list of concrete sub-steps, committed through
+        ``vessel_<world>_update_goal`` (``steps=[...]``). The Drone context
+        carries **no** vessel ``interface_path`` so its agentic task is never
+        attributed to the embodiment turn (Fast-Lane invariant, AGENTS.md §5c).
+
+        On success it re-notifies Synth: resetting ``_last_will_beat_at`` to 0
+        forces the next scheduler tick to run a fresh will beat, so volition
+        re-enters with the now-detailed goal (the user's requirement that the
+        updated goal go back to Synth via will). Fully guarded.
+        """
+        committed = False
+        try:
+            from core.agent_core import get_agent_loop_manager
+
+            description = ""
+            if isinstance(goal, dict):
+                raw = goal.get("description")
+                if isinstance(raw, str):
+                    description = raw.strip()
+
+            drone_goal = (
+                f"You are embodied in the '{world}' world and have just set "
+                f'yourself this goal: "{description}". Break it down into a '
+                "concrete, ordered plan of sub-steps a player would actually "
+                "follow. First consult the game's rules and knowledge base by "
+                f"calling vessel_{world}_lookup_knowledge with short queries "
+                "about what this goal needs (e.g. required tools, materials, "
+                "where things are found, prerequisite crafting). Use what you "
+                "learn — for example, that a resource must be mined with a "
+                "specific tool you must craft first — to order the steps "
+                "correctly (gather the prerequisite before the thing that "
+                "needs it). Then commit the plan by calling "
+                f"vessel_{world}_update_goal with 'steps' set to your ordered "
+                "list of short sub-step strings (each one a single concrete "
+                "action). Keep it to a handful of steps, grounded in the "
+                "knowledge you looked up — do NOT invent facts. Commit once, "
+                "then stop."
+            )
+
+            manager = get_agent_loop_manager()
+            result = await manager.run_drone(goal=drone_goal)
+            if isinstance(result, dict):
+                log_debug(
+                    f"[vessel_interface] Goal expander for '{world}' finished: "
+                    f"stop_reason={result.get('stop_reason')} "
+                    f"iterations={result.get('iterations')}"
+                )
+
+            # Verify the drone actually wrote a steps plan before re-notifying.
+            _, refreshed = await self._read_active_world_state()
+            refreshed_goal = self._goal_from_world_state(refreshed)
+            if refreshed_goal is not None and not self._goal_needs_expansion(
+                refreshed_goal
+            ):
+                committed = True
+        except Exception as exc:
+            log_debug(f"[vessel_interface] Goal expander for '{world}' failed: {exc}")
+        finally:
+            existing = self._goal_expand_tasks.get(world)
+            if existing is not None and existing.done():
+                self._goal_expand_tasks.pop(world, None)
+            # Re-notify Synth via will: force the next tick to run a fresh will
+            # beat so volition re-enters with the now-detailed (steps-filled)
+            # goal. Only when the plan was actually committed, so a failed
+            # expansion does not spuriously reset the will-beat cadence.
+            if committed:
+                self._last_will_beat_at = 0.0
+                log_debug(
+                    f"[vessel_interface] Goal expanded for '{world}' — "
+                    "re-notifying Synth via will beat."
+                )
 
     async def _maybe_run_motor_tick(self) -> None:
         """Step the body toward the active goal when due (fast layer, no LLM).
@@ -1829,6 +2025,18 @@ class VesselInterface:
             if path == prefix or path.startswith(f"{prefix}/"):
                 return session_id, path
         return None, None
+
+    def has_local_session(self, environment: str) -> bool:
+        """Return whether a live session is locally tracked for ``environment``.
+
+        The vessel plugin uses this to reconcile a live connector whose DB
+        session has since ended (inactivity cooldown or a disconnect-grace
+        close while the Node bridge stayed embodied): if the connector reports
+        connected but no session is tracked here, autonomy is inert until a new
+        session is opened. Fully guarded; purely structural (matches the
+        ``vessel/<world>`` interface-path prefix).
+        """
+        return self._resolve_session_for_environment(environment)[0] is not None
 
     async def log_outbound_action(
         self,
