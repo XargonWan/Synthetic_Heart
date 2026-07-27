@@ -401,3 +401,54 @@ async def test_supersede_pending_vessel_beats_keeps_only_fresh_autonomous(monkey
     q._queue.clear()
     q._unfinished_tasks = 0
     q._finished.set()
+
+
+@pytest.mark.asyncio
+async def test_drop_vessel_queue_for_world_removes_all_scope_items(monkeypatch):
+    """At session teardown, EVERY queued item for the world scope is dropped.
+
+    Unlike the two prune helpers above, a closed session must also remove the
+    pending player chat (there is no live embodiment left to answer it). Only
+    the closing world scope is touched: another world's vessel traffic and
+    non-vessel chats survive, and unfinished-task accounting stays consistent.
+    """
+    import heapq
+
+    q = message_queue._get_queue()
+    q._queue.clear()
+    q._unfinished_tasks = 0
+    q._finished.set()
+
+    def _put(priority: int, counter: int, item: dict) -> None:
+        heapq.heappush(q._queue, (priority, counter, item))
+        q._unfinished_tasks += 1
+        q._finished.clear()
+
+    scope = "vessel/minecraft"
+    _put(1, 1, {"interface": "vessel", "chat_id": scope})  # will beat → drop
+    _put(1, 2, {"interface": "vessel", "chat_id": scope, "no_compact": True})  # drop
+    _put(0, 3, {"interface": "vessel", "chat_id": scope, "vessel_player_chat": True})
+    _put(1, 4, {"interface": "vessel", "chat_id": "vessel/other"})  # other world
+    _put(2, 5, {"interface": "telegram_bot", "chat_id": scope})  # non-vessel
+
+    dropped = message_queue.drop_vessel_queue_for_world(scope)
+
+    assert dropped == 3
+    remaining = [entry[2] for entry in q._queue]
+    # Nothing for the closed world scope survives — not even the player chat.
+    assert len(remaining) == 2
+    assert not any(
+        i.get("interface") == "vessel" and i.get("chat_id") == scope for i in remaining
+    )
+    # The other world's vessel traffic and the non-vessel chat are untouched.
+    assert any(i.get("chat_id") == "vessel/other" for i in remaining)
+    assert any(i.get("interface") == "telegram_bot" for i in remaining)
+    assert q._unfinished_tasks == 2
+
+    # An empty/no-match purge is a safe no-op.
+    assert message_queue.drop_vessel_queue_for_world(scope) == 0
+
+    # Cleanup.
+    q._queue.clear()
+    q._unfinished_tasks = 0
+    q._finished.set()
