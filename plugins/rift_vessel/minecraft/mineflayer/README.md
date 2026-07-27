@@ -15,7 +15,7 @@ recreated.
 | `bridge.json` | ❌ artefact | Runtime state (bridge PID/host/port). Gitignored. |
 | `bridge.log` | ❌ artefact | Bridge subprocess stdout/stderr. Gitignored. |
 
-The bridge **script** itself (`minecraft_bridge_minimal.js`) lives one level up
+The bridge **script** itself (`minecraft_bridge.js`) lives one level up
 in the plugin folder and is executed with `NODE_PATH` pointing here, so
 `require('mineflayer')` resolves against this folder's `node_modules`
 regardless of the script's own location.

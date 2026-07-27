@@ -2,7 +2,7 @@
 """Provisioner for the Minecraft Vessel bridge.
 
 Manages the lifecycle of the Node.js Mineflayer bridge
-(:mod:`plugins/rift_vessel/minecraft/minecraft_bridge_minimal.js`) as a child
+(:mod:`plugins/rift_vessel/minecraft/minecraft_bridge.js`) as a child
 subprocess:
 
 * :meth:`BridgeProvisioner.install` — ensure the bridge deps (``mineflayer``)
@@ -55,7 +55,7 @@ LOG_PREFIX = "[minecraft_provisioner]"
 _MINECRAFT_PLUGIN_DIR = Path("plugins") / "rift_vessel" / "minecraft"
 
 # Name of the bridge script within the plugin folder.
-_BRIDGE_SCRIPT_NAME = "minecraft_bridge_minimal.js"
+_BRIDGE_SCRIPT_NAME = "minecraft_bridge.js"
 
 # The bridge's Node runtime lives in a ``mineflayer`` sub-folder *inside the
 # plugin folder* (``plugins/rift_vessel/minecraft/mineflayer/``) so the plugin
@@ -189,6 +189,19 @@ class BridgeProvisioner:
             if existing_node_path
             else str(node_modules)
         )
+        # Cap the Node heap as a safety belt against the mineflayer chunk-cache
+        # memory growth (see the viewDistance note in the bridge script). Without
+        # a cap V8 lets the old-space climb toward the ~4 GB default limit where
+        # mark-compact becomes ineffective and the process OOM-crashes; a tight
+        # cap forces aggressive GC well before that. Preserve any caller-provided
+        # NODE_OPTIONS.
+        existing_node_options = env.get("NODE_OPTIONS", "").strip()
+        heap_opt = "--max-old-space-size=512"
+        env["NODE_OPTIONS"] = (
+            f"{existing_node_options} {heap_opt}".strip()
+            if existing_node_options
+            else heap_opt
+        )
         return env
 
     def _read_state(self) -> Dict[str, Any]:
@@ -250,7 +263,38 @@ class BridgeProvisioner:
             # Unreadable (e.g. owned by another user) — fall back to liveness.
             return BridgeProvisioner._pid_alive(pid)
         cmdline = raw.replace(b"\x00", b" ").decode("utf-8", errors="replace")
-        return "minecraft_bridge_minimal.js" in cmdline
+        return "minecraft_bridge.js" in cmdline
+
+    @staticmethod
+    def _find_bridge_pids() -> list[int]:
+        """Return every PID on /proc whose cmdline runs the bridge script.
+
+        Used by the reaper as a fuser-free fallback: the slim synth container
+        ships no ``fuser``/``psmisc``, so when a stale orphan bridge holds the
+        port under a PID we no longer track, scanning ``/proc`` is the only way
+        to find and kill it before a fresh launch dies with ``EADDRINUSE``.
+        Best-effort — non-Linux hosts (no ``/proc``) simply yield an empty list.
+        """
+        proc_root = Path("/proc")
+        if not proc_root.exists():
+            return []
+        pids: list[int] = []
+        try:
+            entries = list(proc_root.iterdir())
+        except Exception:
+            return []
+        for entry in entries:
+            name = entry.name
+            if not name.isdigit():
+                continue
+            try:
+                raw = (entry / "cmdline").read_bytes()
+            except Exception:
+                continue
+            cmdline = raw.replace(b"\x00", b" ").decode("utf-8", errors="replace")
+            if "minecraft_bridge.js" in cmdline:
+                pids.append(int(name))
+        return pids
 
     def _running_pid(self) -> int | None:
         if self._proc is not None and self._proc.returncode is None:
@@ -307,22 +351,35 @@ class BridgeProvisioner:
         so :meth:`start` never recognises it, launches a fresh process that dies
         with ``EADDRINUSE``, and the connector keeps reading the sick bridge.
 
-        This reaper detects that situation structurally (a live ``/health`` that
-        reports ``mineflayer:false``, or a process bound to the port that is not
-        the PID we track) and terminates it via ``fuser``/PID so a clean bridge
-        can bind. Returns ``True`` if something was reaped.
+        This reaper detects that situation structurally — a live ``/health``
+        that reports ``mineflayer:false`` — and terminates it via ``fuser``/PID
+        so a clean bridge can bind. A bridge answering ``mineflayer:true`` is
+        healthy and is NEVER reaped, regardless of whether its PID is tracked
+        (an empty ``bridge.json`` must not be mistaken for an orphan). Returns
+        ``True`` if something was reaped.
         """
         health = await self._probe_health()
         if health is None:
             return False  # nothing answering — port is free for a fresh start.
 
-        tracked = self._running_pid()
-        if tracked and health.get("mineflayer", False):
-            # Our tracked, healthy bridge already owns the port — leave it.
+        if health.get("mineflayer", False):
+            # A bridge answering /health with mineflayer:true is HEALTHY — its
+            # Node module loaded and it is (or is about to be) embodied. NEVER
+            # reap it, whether or not we currently track its PID.
+            #
+            # The recurring ~30s session death (bridge.log: ``logged in as
+            # Rekku`` immediately followed by ``shutting down``) was caused here:
+            # ``bridge.json`` frequently comes back empty across provisioner
+            # calls, so ``_running_pid()`` returns None and the old
+            # ``if tracked and mineflayer`` guard fell through to the kill branch
+            # — SIGTERM-ing a freshly-logged-in, perfectly healthy bridge as if
+            # it were an untracked orphan. A healthy bridge is defined solely by
+            # its /health reporting mineflayer:true, not by whether we track it.
             return False
 
-        # Either the bridge is sick (mineflayer:false) or it is an orphan we do
-        # not track. Kill whatever holds the port so start() can bind cleanly.
+        # The bridge is sick (answers /health but mineflayer:false — its
+        # one-shot require('mineflayer') failed). Kill whatever holds the port
+        # so start() can bind cleanly.
         port = self._bridge_port()
         killed = False
 
@@ -342,10 +399,19 @@ class BridgeProvisioner:
                 log_warning(f"{LOG_PREFIX} fuser reap failed: {exc}")
 
         if not killed:
-            # Fallback: kill the PID we track, if any (best-effort).
+            # Fallback when fuser is unavailable (e.g. the slim synth container
+            # ships no fuser/psmisc). Kill the PID we track AND every process on
+            # /proc whose cmdline runs the bridge script — a stale orphan bridge
+            # left over from a prior connect can hold the port under a PID we no
+            # longer track, which is exactly what triggers the EADDRINUSE crash
+            # on the next launch.
+            pids = set(self._find_bridge_pids())
+            tracked = self._running_pid()
             if tracked:
+                pids.add(tracked)
+            for pid in pids:
                 try:
-                    os.kill(tracked, signal.SIGTERM)
+                    os.kill(pid, signal.SIGTERM)
                     killed = True
                 except Exception:
                     pass
@@ -417,7 +483,7 @@ class BridgeProvisioner:
                             "version": "0.1.0",
                             "private": True,
                             "description": "SyntH Rift Vessel Minecraft bridge",
-                            "main": "minecraft_bridge_minimal.js",
+                            "main": "minecraft_bridge.js",
                         },
                         indent=2,
                     ),
@@ -490,15 +556,20 @@ class BridgeProvisioner:
                 "detail": "minecraft_vessel plugin is disabled (enable it in the WebUI)",
             }
 
-        pid = self._running_pid()
-        if pid:
-            # A bridge we track is running — but if it came up sick (its
-            # one-shot require('mineflayer') failed), it will answer /health with
-            # mineflayer:false forever. Reap it so we relaunch a healthy one
-            # instead of returning "already running" onto a broken bridge.
-            health = await self._probe_health()
-            if health is not None and health.get("mineflayer", False):
-                return {"ok": True, "detail": "already running", "pid": pid}
+        # Detect an already-running bridge by probing the PORT, not our tracked
+        # PID. ``bridge.json`` frequently comes back empty across provisioner
+        # calls (the child is start_new_session and self._proc is lost between
+        # process lifetimes), so a PID-gated check would miss a perfectly
+        # healthy bridge and spawn a duplicate that dies with EADDRINUSE — the
+        # churn behind the recurring ~30s session death. A bridge answering
+        # /health with mineflayer:true is authoritative: adopt it.
+        health = await self._probe_health()
+        if health is not None and health.get("mineflayer", False):
+            pid = self._running_pid()
+            return {"ok": True, "detail": "already running", "pid": pid}
+        if health is not None:
+            # Something answers but reports mineflayer:false — a sick bridge.
+            # Reap it so we relaunch a healthy one.
             await self._reap_orphan_bridge()
 
         node = shutil.which("node")
