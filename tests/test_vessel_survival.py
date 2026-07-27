@@ -37,8 +37,10 @@ def _state(**extra: Any) -> WorldState:
     """Build a WorldState with a populated ``extra`` dict (health lives there)."""
     base: dict[str, Any] = {
         "is_alive": True,
-        # Oxygen is in mineflayer air ticks (vanilla ~300 = full breath), not 0..20.
-        "oxygen": 300,
+        # At RUNTIME mineflayer ``bot.oxygenLevel`` reports the 0..20 air-bubble
+        # scale (20 = full lungs, 0 = out of air) — NOT air ticks. A healthy body
+        # reads ~20, so the drowning reflex must only fire near 0 (threshold 6).
+        "oxygen": 20,
         "health": 20.0,
         "block_head": "air",
         "block_feet": "grass_block",
@@ -101,11 +103,36 @@ def test_drowning_beats_burning_and_hostiles() -> None:
 
 def test_no_drowning_when_oxygen_high() -> None:
     conn = _make_conn()
-    # Head underwater but plenty of air left (full breath in ticks) → no threat.
+    # Head underwater but full lungs (20 on the 0..20 bubble scale) → no threat.
+    # A healthy submerged bot reads ~20 at runtime; an air-ticks threshold (e.g.
+    # 200) would false-fire here since the value never approaches it.
     plan = conn._survival_threat(
-        _state(block_head="water", is_in_water=True, oxygen=300)
+        _state(block_head="water", is_in_water=True, oxygen=20)
     )
     assert plan is None
+
+
+def test_no_drowning_while_wading_head_in_air() -> None:
+    conn = _make_conn()
+    # Body in water (feet wet) but head is in AIR — merely wading/swimming at
+    # the surface, not drowning. The ``is_in_water`` flag must NOT trigger the
+    # reflex on its own: only a liquid ``block_head`` counts as submerged.
+    plan = conn._survival_threat(_state(block_head="air", is_in_water=True, oxygen=6))
+    assert plan is None
+
+
+def test_no_drowning_when_oxygen_unavailable() -> None:
+    conn = _make_conn()
+    # The bridge reports -1/None when oxygen is unavailable — that sentinel must
+    # never be read as suffocation even with the head submerged.
+    plan = conn._survival_threat(
+        _state(block_head="water", is_in_water=True, oxygen=-1)
+    )
+    assert plan is None
+    plan_none = conn._survival_threat(
+        _state(block_head="water", is_in_water=True, oxygen=None)
+    )
+    assert plan_none is None
 
 
 def test_burning_beats_hostiles() -> None:

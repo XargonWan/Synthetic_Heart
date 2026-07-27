@@ -985,3 +985,121 @@ async def test_motor_step_failsafe_on_error() -> None:
     assert result["acted"] is False
     assert result["reason"] == "error"
     assert "bridge down" in result["error"]
+
+
+# ----------------------------------------------------------------------
+# Phase 4: a named BLOCK target already within reach is MINED, not walked to
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_motor_step_mines_named_block_target_when_within_reach() -> None:
+    # Cognition named a block target (oak_log) that is already within reach, but
+    # the generic in-reach affordance branch was skipped this tick (the block
+    # was just interacted with and re-surfaced). The named-target branch must
+    # still MINE it rather than walk in place — the "walks up but never picks it
+    # up" gap. Structural match only: same kind + exact id + distance ≤ reach.
+    conn = _FakeConnector(
+        affordances=[
+            {"kind": "block", "target": "oak_log", "verb": "use", "distance": 1.5}
+        ]
+    )
+    # Force the generic in-reach branch to skip oak_log so control reaches the
+    # named-target branch (it dedupes against the last reflex interaction).
+    conn._last_reflex_interaction = "block:oak_log"
+    goal = {
+        "id": 11,
+        "description": "gather wood",
+        "target_kind": "block",
+        "target_name": "oak_log",
+    }
+    result = await conn.motor_step(goal)
+    assert result == {
+        "acted": True,
+        "action": "mine",
+        "target": "oak_log",
+        "target_kind": "block",
+    }
+    assert conn.calls == [("mine", {"target": "oak_log"})]
+
+
+@pytest.mark.asyncio
+async def test_motor_step_walks_to_named_block_target_when_out_of_reach() -> None:
+    # A named block target whose affordance is beyond MOTOR_REACH → the reflex
+    # walks to it by name (goto), never a premature mine.
+    conn = _FakeConnector(
+        affordances=[
+            {"kind": "block", "target": "oak_log", "verb": "use", "distance": 9.0}
+        ]
+    )
+    conn._last_reflex_interaction = "block:oak_log"
+    goal = {
+        "id": 12,
+        "description": "gather wood",
+        "target_kind": "block",
+        "target_name": "oak_log",
+    }
+    result = await conn.motor_step(goal)
+    assert result["action"] == "goto"
+    assert result["target"] == "oak_log"
+    assert ("mine", {"target": "oak_log"}) not in conn.calls
+
+
+@pytest.mark.asyncio
+async def test_motor_step_entity_target_never_mined() -> None:
+    # An ENTITY target is NEVER mined (mining is block-only). The named-target
+    # branch routes it via goto; the generic in-reach branch (if it fires) may
+    # ``use`` it, but never ``mine`` it.
+    conn = _FakeConnector(
+        affordances=[
+            {"kind": "entity", "target": "cow", "verb": "use", "distance": 1.0}
+        ]
+    )
+    conn._last_reflex_interaction = "entity:cow"
+    goal = {
+        "id": 13,
+        "description": "find a cow",
+        "target_kind": "entity",
+        "target_name": "cow",
+    }
+    result = await conn.motor_step(goal)
+    assert result["action"] == "goto"
+    assert ("mine", {"target": "cow"}) not in conn.calls
+
+
+# ----------------------------------------------------------------------
+# Phase 3: structured inventory aggregation (_inventory_counts)
+# ----------------------------------------------------------------------
+
+
+def test_inventory_counts_aggregates_duplicate_stacks() -> None:
+    # The raw inventory is a flat list of stacks; the same id can appear in
+    # several stacks. ``_inventory_counts`` sums them into an id->total map so
+    # cognition can judge "how many oak_log do I still need" without rescanning.
+    inventory = [
+        {"name": "oak_log", "count": 12},
+        {"name": "oak_log", "count": 5},
+        {"name": "cobblestone", "count": 64},
+    ]
+    assert MinecraftConnector._inventory_counts(inventory) == {
+        "oak_log": 17,
+        "cobblestone": 64,
+    }
+
+
+def test_inventory_counts_is_fail_safe_on_bad_entries() -> None:
+    inventory = [
+        {"name": "stone", "count": 3},
+        "not-a-dict",
+        {"count": 9},  # missing name
+        {"name": "dirt"},  # missing count → treated as 0
+        {"name": "iron_ore", "count": "not-a-number"},  # unparsable → skipped
+    ]
+    assert MinecraftConnector._inventory_counts(inventory) == {  # type: ignore[list-item]
+        "stone": 3,
+        "dirt": 0,
+    }
+
+
+def test_inventory_counts_empty() -> None:
+    assert MinecraftConnector._inventory_counts([]) == {}

@@ -2,7 +2,7 @@
 """Minecraft Vessel connector.
 
 Bridges SyntH's Rift Vessel layer to a Minecraft world via the Node.js
-Mineflayer bridge (``minecraft_bridge_minimal.js``, in this same folder,
+Mineflayer bridge (``minecraft_bridge.js``, in this same folder,
 managed by :mod:`interface.minecraft_provisioner`). This connector speaks plain
 HTTP to the local bridge:
 
@@ -31,7 +31,7 @@ import os
 import random
 import socket
 from urllib.parse import urlparse
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import aiohttp
 
@@ -54,6 +54,17 @@ LOG_PREFIX = "[minecraft_connector]"
 ENVIRONMENT = "minecraft"
 _POLL_INTERVAL_SEC = 1.0
 _HTTP_TIMEOUT_SEC = 10.0
+# The bridge's /connect can take up to its own pre-spawn retry budget
+# (CONNECT_TIMEOUT_MS = 90000 in minecraft_bridge.js) because some
+# servers close the first handshake before spawn and the bridge silently
+# retries, and slow/proxied servers can take well over 30s to complete the
+# login+world-load handshake. The Python client timeout for /connect must
+# therefore exceed that budget, otherwise aiohttp aborts at _HTTP_TIMEOUT_SEC
+# (10s) — or an over-tight value — while the bridge is still waiting for spawn;
+# the connector then reports connect_failed and closes the session even though
+# the bot spawns a moment later, leaving an orphaned bridge. 100s leaves
+# headroom over the bridge's 90s budget.
+_CONNECT_HTTP_TIMEOUT_SEC = 100.0
 # Consecutive failed ``/events`` polls after which the connector considers the
 # bridge/world client gone and flips ``is_connected`` to False. Without this the
 # poll loop would spin forever on a dead bridge, leaving ``is_connected`` stuck
@@ -311,13 +322,16 @@ class MinecraftConnector(VesselConnectorBase):
     # ``VESSEL_SP_*`` config keys resolved in ``connect``). All structural:
     # numeric readings on health/oxygen/distance, never keyword matching.
     #
-    # Air below which the body heads for the surface. NOTE: mineflayer's
-    # ``bot.oxygenLevel`` is expressed in *air ticks* (vanilla max ~300, i.e.
-    # ~15s of breath), NOT on the 0..20 hearts/hunger scale. The threshold is
-    # therefore kept high (in ticks) so surfacing starts with several seconds of
-    # air to spare — otherwise, with the motor reflex only ticking every ~3s,
-    # the body would react too late and drown (the original reported bug).
-    _LOW_OXYGEN = 200
+    # Air below which the body heads for the surface. NOTE: in this
+    # mineflayer/server runtime ``bot.oxygenLevel`` is reported on the 0..20
+    # scale (full breath = 20), NOT in air-ticks (vanilla ~300) as some
+    # versions do — runtime-confirmed values only ever range 0..20. The
+    # threshold must therefore be on the 0..20 scale: a value near the top
+    # (e.g. the old 200) makes ``oxygen <= threshold`` always true the instant
+    # the head touches water, firing the drowning reflex at FULL air on every
+    # tick spent near/along water and stalling autonomous play. 6 (~three
+    # bubbles) leaves a few seconds of air to surface given the ~3s motor tick.
+    _LOW_OXYGEN = 6
     # Health (0..20) below which the reflex flees a fight instead of trading
     # blows. Roughly three hearts — enough to survive the run to safety.
     _LOW_HEALTH_FLEE = 6.0
@@ -411,12 +425,20 @@ class MinecraftConnector(VesselConnectorBase):
             target["version"] = version_str
         return target
 
-    async def _post(self, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    async def _post(
+        self,
+        path: str,
+        payload: Dict[str, Any],
+        timeout: Optional[float] = None,
+    ) -> Dict[str, Any]:
         if self._session is None:
             return {"ok": False, "detail": "no http session"}
         try:
+            req_timeout = (
+                aiohttp.ClientTimeout(total=timeout) if timeout is not None else None
+            )
             async with self._session.post(
-                f"{self._base_url}{path}", json=payload
+                f"{self._base_url}{path}", json=payload, timeout=req_timeout
             ) as resp:
                 return await resp.json()
         except Exception as exc:
@@ -499,18 +521,68 @@ class MinecraftConnector(VesselConnectorBase):
             await self._close_session()
             return False
 
-        # Tell the bridge to (re)connect to the Minecraft server. Pass the
-        # resolved target (per-connect override or configured default) so Synth
-        # can enter a different server on demand.
-        target = self._resolve_server_target(settings or {})
-        conn = await self._post("/connect", target)
-        if not conn.get("ok"):
-            detail = conn.get("detail") or "unknown error"
-            server = f"{target.get('host')}:{target.get('port')}"
-            self.last_error = f"could not enter the Minecraft server {server}: {detail}"
-            log_error(f"{LOG_PREFIX} bridge failed to connect: {detail}")
-            await self._close_session()
-            return False
+        # ADOPT an already-connected bridge. A cold-start /connect can exceed
+        # the bridge CONNECT_TIMEOUT_MS budget (npm/spawn + login + world load
+        # on a distant server), which makes the first /connect report a timeout
+        # and the core close the freshly-opened session — yet the bridge's
+        # in-process auto-reconnect then settles the connection a moment later,
+        # leaving a live bridge (/health connected:true) with no driven session
+        # (no motor tick, no will beat). If a subsequent connect finds the
+        # bridge already embodied for this environment, adopt it instead of
+        # re-issuing /connect (which would bot.quit() and restart from scratch,
+        # racing the same cold-start timeout again). Structural check only:
+        # /health's own connected/environment fields, no keyword matching.
+        env = str(health.get("environment") or "").strip().lower()
+        if bool(health.get("connected")) and (not env or env == "minecraft"):
+            log_info(
+                f"{LOG_PREFIX} adopting already-connected bridge at {self._base_url} "
+                f"(username={health.get('username')})"
+            )
+        else:
+            # Tell the bridge to (re)connect to the Minecraft server. Pass the
+            # resolved target (per-connect override or configured default) so
+            # Synth can enter a different server on demand.
+            target = self._resolve_server_target(settings or {})
+            conn = await self._post(
+                "/connect", target, timeout=_CONNECT_HTTP_TIMEOUT_SEC
+            )
+            if not conn.get("ok"):
+                # A cold-start /connect can exceed the bridge's
+                # CONNECT_TIMEOUT_MS budget (npm/spawn + login + world load on a
+                # distant server) and report a timeout — yet the bridge's
+                # in-process auto-reconnect frequently settles the connection a
+                # moment later, leaving a live /health connected:true with no
+                # driven session. Before giving up, re-probe /health a few
+                # times: if the bridge has since entered the world, adopt it
+                # instead of failing (which would close the session and leave
+                # an orphaned, undriven bridge). Structural check only —
+                # /health's own connected/environment fields, no keyword match.
+                recovered = False
+                for _ in range(15):
+                    await asyncio.sleep(2.0)
+                    late = await self._get("/health")
+                    late_env = str(late.get("environment") or "").strip().lower()
+                    if (
+                        late.get("ok")
+                        and bool(late.get("connected"))
+                        and (not late_env or late_env == "minecraft")
+                    ):
+                        log_info(
+                            f"{LOG_PREFIX} /connect reported timeout but the bridge "
+                            f"is now in-world; adopting it "
+                            f"(username={late.get('username')})"
+                        )
+                        recovered = True
+                        break
+                if not recovered:
+                    detail = conn.get("detail") or "unknown error"
+                    server = f"{target.get('host')}:{target.get('port')}"
+                    self.last_error = (
+                        f"could not enter the Minecraft server {server}: {detail}"
+                    )
+                    log_error(f"{LOG_PREFIX} bridge failed to connect: {detail}")
+                    await self._close_session()
+                    return False
 
         self._connected = True
         self._poll_task = asyncio.create_task(self._poll_loop())
@@ -959,6 +1031,7 @@ class MinecraftConnector(VesselConnectorBase):
         entities = data.get("entities") or []
         blocks = data.get("blocks") or []
         inventory = data.get("inventory") or []
+        inventory_counts = self._inventory_counts(inventory)
         affordances = self._build_affordances(entities, blocks)
         current_goal, recent_goals = await self._resolve_goals()
         return WorldState(
@@ -978,6 +1051,7 @@ class MinecraftConnector(VesselConnectorBase):
                 # Minecraft-specific gameplay verbs (see get_world_actions).
                 "goto",
                 "mine",
+                "collect_block",
                 "place",
                 "craft",
                 "inventory",
@@ -1001,6 +1075,11 @@ class MinecraftConnector(VesselConnectorBase):
                 "entities": entities,
                 "blocks": blocks,
                 "inventory": inventory,
+                # Structured id->count view of the inventory, so cognition (the
+                # action beat) and any world-agnostic consumer can judge "how
+                # many oak_log do I still need" without re-scanning the list.
+                # Keyword-free: it is a plain aggregation of the bridge ids.
+                "inventory_counts": inventory_counts,
                 "affordances": affordances,
                 # Self-preservation telemetry (structural numeric/game-id fields
                 # from the bridge status snapshot). Feed the survival reflex and
@@ -1050,6 +1129,28 @@ class MinecraftConnector(VesselConnectorBase):
         except Exception as exc:  # pragma: no cover - defensive
             log_debug(f"{LOG_PREFIX} goal resolution failed: {exc}")
             return None, []
+
+    @staticmethod
+    def _inventory_counts(inventory: list[dict[str, Any]]) -> dict[str, int]:
+        """Aggregate the raw inventory list into an ``id -> total count`` map.
+
+        Pure structural aggregation of the bridge's inventory records (which may
+        list the same item id across several stacks); never inspects names for
+        keywords. Fail-safe: malformed rows are skipped.
+        """
+        counts: dict[str, int] = {}
+        for item in inventory:
+            if not isinstance(item, dict):
+                continue
+            name = item.get("name")
+            if not name:
+                continue
+            try:
+                count = int(item.get("count") or 0)
+            except (TypeError, ValueError):
+                continue
+            counts[str(name)] = counts.get(str(name), 0) + count
+        return counts
 
     @staticmethod
     def _build_affordances(
@@ -1534,20 +1635,35 @@ class MinecraftConnector(VesselConnectorBase):
         # 2. Drowning — head submerged and air running low. Structural: the
         # bridge tells us the block at the head is a water/liquid id and the
         # numeric oxygen level. Head for the surface before air hits 0.
+        #
+        # The body is only actually DROWNING when its HEAD is submerged in a
+        # liquid block (block_head is a water id). The raw ``is_in_water``
+        # physics flag is True even when merely wading through shallow water
+        # (feet wet, head in air) or swimming at the surface — neither of which
+        # loses air — so it must NOT trigger the reflex on its own, otherwise
+        # the reflex fires on every tick spent near/along water and constantly
+        # interrupts autonomous travel. ``is_in_water`` is kept only as a
+        # secondary confirmation. Oxygen must also be a real, non-negative
+        # reading below the low-air threshold (the bridge reports -1/None when
+        # the value is unavailable — that must never look like suffocation).
         oxygen = extra.get("oxygen")
         block_head = extra.get("block_head")
         is_in_water = extra.get("is_in_water")
-        head_submerged = _is_liquid_block(block_head) or bool(is_in_water)
         if (
-            head_submerged
+            _is_liquid_block(block_head)
             and isinstance(oxygen, (int, float))
+            and oxygen >= 0
             and oxygen <= self._sp_low_oxygen
         ):
             return {
                 "threat": "drowning",
                 "verb": "goto_surface",
                 "payload": {},
-                "reason": {"oxygen": oxygen, "block_head": block_head},
+                "reason": {
+                    "oxygen": oxygen,
+                    "block_head": block_head,
+                    "is_in_water": is_in_water,
+                },
             }
 
         # 3. Standing in lava or fire → run to the nearest safe ground.
@@ -1673,23 +1789,17 @@ class MinecraftConnector(VesselConnectorBase):
         return {"acted": acted, "reason": f"survival:{threat}"}
 
     async def _act_goto_surface(self, state: "WorldState") -> Any:
-        """Swim/climb straight up toward the water surface (mindcraft style).
+        """Swim straight up to escape drowning (mineflayer ``jump`` in water).
 
-        Steers to the highest air/non-liquid block directly above the current
-        x,z column via the bridge ``goto`` verb (structural coordinate move — no
-        keyword logic). Fail-safe: returns a plain dict on any error.
+        Delegates to the bridge ``surface`` verb, which holds the ``jump``
+        control (the body ascends while submerged) and polls the head block
+        until it clears the liquid. This is the correct way to emerge in open
+        water: a pathfinder ``goto`` toward an air coordinate above has no
+        walkable block to stand on and never surfaces the body — it just keeps
+        drowning (oxygen falls 14→3). Purely structural — no keyword logic.
+        Fail-safe: returns a plain dict on any error.
         """
-        try:
-            pos = state.position if isinstance(state.position, dict) else None
-            if pos is None:
-                return {"acted": False, "reason": "no_position"}
-            x = int(float(pos["x"]))
-            z = int(float(pos["z"]))
-            y = int(float(pos["y"]))
-        except (KeyError, TypeError, ValueError):
-            return {"acted": False, "reason": "bad_position"}
-        # Target several blocks up; the bridge pathfinder will surface the body.
-        return await self.act("goto", {"x": x, "y": y + _SURFACE_CLIMB_BLOCKS, "z": z})
+        return await self.act("surface", {})
 
     async def _act_flee(self, state: "WorldState") -> Any:
         """Run away from the nearest threat (mindcraft moveAway style).
@@ -2048,6 +2158,42 @@ class MinecraftConnector(VesselConnectorBase):
             if goal_target is not None and not force_march:
                 self._arrival_goal_key = None
                 self._arrival_stall_ticks = 0
+                # If the named block target is already within reach, MINE it
+                # rather than re-issuing ``goto`` at a thing the body is already
+                # standing next to. The generic in-reach branch above only fires
+                # when there is no travel destination *and* the block surfaced as
+                # a benign affordance; a named goal target can reach this branch
+                # with the block right in front of it (e.g. the affordance was
+                # just consumed and re-surfaced, or the will beat named a target
+                # the body already arrived at) and would otherwise walk in place.
+                # Structural match only: same ``kind`` + exact ``target`` id +
+                # numeric distance ≤ reach — never keyword inspection. The
+                # bridge's ``mine`` picks up the drop and reports the delta, so a
+                # single reflex mine advances a gather goal. Entities are never
+                # mined here (mining is block-only); they fall through to goto.
+                if goal_target["kind"] == "block":
+                    reachable = next(
+                        (
+                            a
+                            for a in affordances
+                            if isinstance(a, dict)
+                            and a.get("kind") == "block"
+                            and a.get("target") == goal_target["name"]
+                            and isinstance(a.get("distance"), (int, float))
+                            and a.get("distance") <= self._MOTOR_REACH
+                        ),
+                        None,
+                    )
+                    if reachable is not None:
+                        name = goal_target["name"]
+                        self._last_reflex_interaction = f"block:{name}"
+                        await self.act("mine", {"target": name})
+                        return {
+                            "acted": True,
+                            "action": "mine",
+                            "target": name,
+                            "target_kind": "block",
+                        }
                 result = await self.act("goto", {"target": goal_target["name"]})
                 # Record the structural 3-state outcome (arrived / not_found /
                 # unreachable) so the next will beat can re-plan when the named
@@ -2141,6 +2287,19 @@ class MinecraftConnector(VesselConnectorBase):
                 ),
                 "required_fields": ["target"],
                 "optional_fields": ["search_radius", "timeout_ms"],
+                "security_level": "low",
+            },
+            "collect_block": {
+                "description": (
+                    "Gather several of the same thing by name (name), e.g. "
+                    "collect 5 blocks of wood you spotted around you. Give how "
+                    "many you want (count). You walk to each one, break it and "
+                    "pick up the drop, repeating until you have that many or "
+                    "there are none left nearby. This is the reliable way to "
+                    "stock up on a material for a goal."
+                ),
+                "required_fields": ["name"],
+                "optional_fields": ["count", "search_radius", "timeout_ms"],
                 "security_level": "low",
             },
             "place": {
