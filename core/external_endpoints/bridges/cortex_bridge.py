@@ -29,6 +29,34 @@ if TYPE_CHECKING:
 # unless they set max_tokens explicitly.
 _LOCAL_MAX_TOKENS_DEFAULT = 4096
 
+# Hard downstream character budget for the fully assembled OpenAI-style messages
+# sent to an endpoint, enforced by ``_clamp_messages_to_char_budget``. Kept
+# safely below the ``selenium-llm-engine`` 32000-char chunking threshold so the
+# chunking path — and its "reply only OK" protocol contamination / empty-actions
+# garbling — is never triggered, regardless of how large the injected action
+# catalog is.
+#
+# IMPORTANT — serialization headroom: the clamp measures the *content* length of
+# each message (``_message_content_len``), but the payload the endpoint actually
+# receives is the role-separated serialization of those messages, which is
+# meaningfully larger (role labels, JSON framing/escaping, chat-template glue).
+# Measured LIVE (2026-07-28) on the selenium-llm-engine: a content-sum clamped to
+# exactly 27000 chars produced a real selenium prompt of 32232 chars — i.e.
+# ~5200 chars of serialization/template overhead — which STILL exceeded the
+# 32000 limit and triggered 2-part chunking (garbled request → empty
+# ``{"actions": []}`` → corrector loop → "😵" fallback). The overhead is far
+# larger than the ~2600 originally assumed. The budget is therefore set to 24000
+# (32000 − ~5200 measured overhead − ~2800 safety margin) so the final serialized
+# payload stays comfortably under 32000 even on the heaviest turns. Applies to
+# every openai-protocol endpoint; harmless for endpoints that accept larger
+# prompts (their payloads are already below this) unless overridden via
+# ``extra_config["downstream_char_budget"]`` (a non-positive value disables the
+# clamp entirely). Unlike the up-front ``max_chars`` reducer, this clamp only
+# trims the *user* body and never the system message (instructions + action
+# catalog), so protected content is never lost even when it alone exceeds the
+# budget.
+_DEFAULT_DOWNSTREAM_CHAR_BUDGET = 24000
+
 # --- NATIVE TOOLS ACCANTONATI GLOBALMENTE (2026-07-04) ---
 # I tool nativi (function-calling OpenAI/Gemini/Anthropic) sono disattivati
 # finché non implementeremo la funzionalità agentica (PR futura già pianificata).
@@ -752,6 +780,7 @@ class ExternalCortexEngine(AIPluginBase):
         else:
             prompt_extra_kwargs = self._tool_api_kwargs(messages)
             msg_list = self._build_messages(messages)
+            msg_list = self._clamp_messages_to_char_budget(msg_list)
 
         model = self._scope_model_override or self._endpoint.default_model
         if not model and self._endpoint.available_models:
@@ -839,6 +868,134 @@ class ExternalCortexEngine(AIPluginBase):
                     f"[cortex_bridge:{self._endpoint.name}] generate_response failed: {exc}"
                 )
                 raise
+
+    def _downstream_char_budget(self) -> int:
+        """Resolve the hard downstream char budget for assembled messages.
+
+        Endpoints may override the default via
+        ``extra_config["downstream_char_budget"]``; a non-positive value
+        disables the clamp entirely.
+        """
+        extra = self._endpoint.extra_config or {}
+        try:
+            return int(
+                extra.get("downstream_char_budget", _DEFAULT_DOWNSTREAM_CHAR_BUDGET)
+            )
+        except (TypeError, ValueError):
+            return _DEFAULT_DOWNSTREAM_CHAR_BUDGET
+
+    @staticmethod
+    def _message_content_len(content: Any) -> int:
+        """Character length of a message's content (string or multipart list)."""
+        if isinstance(content, str):
+            return len(content)
+        if isinstance(content, list):
+            total = 0
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "text":
+                    total += len(str(part.get("text", "")))
+            return total
+        return len(str(content))
+
+    @staticmethod
+    def _truncate_message_content(content: Any, remove_chars: int) -> Any:
+        """Trim ``remove_chars`` from the tail of a message's text content.
+
+        Only text is trimmed; multimodal (image) parts are left intact so the
+        clamp never corrupts an attachment. A short marker is appended so the
+        model knows the body was shortened.
+        """
+        if remove_chars <= 0:
+            return content
+        marker = "\n\n[...context trimmed to fit the model's input budget...]"
+        if isinstance(content, str):
+            keep = max(0, len(content) - remove_chars - len(marker))
+            if keep <= 0:
+                return content[: max(0, len(content) - remove_chars)]
+            return content[:keep] + marker
+        if isinstance(content, list):
+            remaining = remove_chars
+            out: list[Any] = []
+            for part in content:
+                if (
+                    remaining > 0
+                    and isinstance(part, dict)
+                    and part.get("type") == "text"
+                ):
+                    text = str(part.get("text", ""))
+                    if len(text) <= remaining:
+                        remaining -= len(text)
+                        continue  # drop this text part entirely
+                    new_text = text[: len(text) - remaining] + marker
+                    remaining = 0
+                    out.append({**part, "text": new_text})
+                else:
+                    out.append(part)
+            return out
+        return content
+
+    def _clamp_messages_to_char_budget(
+        self, messages: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """Hard-cap the assembled messages below the downstream char budget.
+
+        The up-front ``max_chars`` reducer in ``plugin_instance`` runs BEFORE the
+        action catalog is folded into the system message and before the messages
+        are serialised into role-separated JSON, so the real payload can be much
+        larger than the reduced context (dominated, for vessel turns, by the
+        injected ``vessel_minecraft_*`` catalog). This clamp operates on the
+        fully assembled messages and trims only the ``user`` body — never the
+        ``system`` message (instructions + action catalog the model must see) and
+        never image parts — so the payload stays under the endpoint's chunking
+        threshold. This is what actually prevents the ``selenium-llm-engine``
+        chunking + "reply only OK" contamination / empty-actions garbling on
+        heavy (vessel) turns.
+        """
+        budget = self._downstream_char_budget()
+        if budget <= 0 or not isinstance(messages, list) or not messages:
+            return messages
+
+        total = sum(self._message_content_len(m.get("content")) for m in messages)
+        if total <= budget:
+            return messages
+
+        overflow = total - budget
+        system_len = sum(
+            self._message_content_len(m.get("content"))
+            for m in messages
+            if m.get("role") == "system"
+        )
+        trimmable = total - system_len
+        if trimmable <= 0:
+            log_warning(
+                f"[cortex_bridge:{self._endpoint.name}] downstream payload "
+                f"{total} chars exceeds budget {budget} but only the system "
+                f"message is present — cannot trim without dropping the action "
+                f"catalog; sending as-is."
+            )
+            return messages
+
+        remaining_to_remove = overflow
+        for msg in messages:
+            if remaining_to_remove <= 0:
+                break
+            if msg.get("role") == "system":
+                continue
+            content = msg.get("content")
+            content_len = self._message_content_len(content)
+            if content_len <= 0:
+                continue
+            take = min(content_len, remaining_to_remove)
+            msg["content"] = self._truncate_message_content(content, take)
+            remaining_to_remove -= take
+
+        log_warning(
+            f"[cortex_bridge:{self._endpoint.name}] downstream payload {total} "
+            f"chars exceeded budget {budget}; trimmed ~{overflow} chars from the "
+            f"user body (system/action catalog preserved) to avoid endpoint "
+            f"prompt chunking."
+        )
+        return messages
 
     def _build_messages(self, prompt: Any) -> list[dict[str, Any]]:
         """Convert a SyntH prompt into an OpenAI-style messages list.
