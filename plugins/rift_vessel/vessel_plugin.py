@@ -248,12 +248,14 @@ config_registry.get_value(
     value_type=bool,
     label="Game Knowledge Base",
     description=(
-        "When enabled, Synth can consult a small curated knowledge base of "
-        "real game rules for the world it is in (e.g. Minecraft 'iron ore needs "
-        "a stone pickaxe'). Relevant facts are surfaced into the will/action "
-        "beats and a short-lived Drone uses them to expand a fresh goal into an "
-        "ordered plan of sub-steps. This is reference material only — it informs "
-        "Synth's reasoning but never scripts its actions."
+        "When enabled, Synth can consult the real game wiki (for Minecraft, the "
+        "live minecraft.wiki) for how the world works (e.g. 'iron ore needs a "
+        "stone pickaxe'). Pages are fetched on demand, summarised once by the "
+        "LLM into a compact factual note, and cached on disk so later lookups "
+        "are instant and work offline. Relevant facts are surfaced into the "
+        "will/action beats and a short-lived Drone uses them to expand a fresh "
+        "goal into an ordered plan of sub-steps. Reference material only — it "
+        "informs Synth's reasoning but never scripts its actions."
     ),
     group="plugins",
     component="vessel_plugin",
@@ -268,6 +270,54 @@ config_registry.get_value(
         "will/action beat (clamped to 1–20). Higher gives more context at the "
         "cost of a longer prompt. Only used when the Game Knowledge Base is "
         "enabled."
+    ),
+    group="plugins",
+    component="vessel_plugin",
+    advanced=True,
+)
+config_registry.get_value(
+    "VESSEL_KNOWLEDGE_LIVE_FETCH",
+    True,
+    value_type=bool,
+    label="Game Knowledge: Live Wiki Fetch",
+    description=(
+        "When enabled, the explicit knowledge lookup may fetch pages from the "
+        "live game wiki (minecraft.wiki) and summarise them once via the LLM, "
+        "caching the result on disk. When disabled, lookups are served purely "
+        "from the on-disk cache (fully offline). The automatic will/action "
+        "beats always read from cache regardless of this setting, so a beat "
+        "never blocks on the network. Only used when the Game Knowledge Base "
+        "is enabled."
+    ),
+    group="plugins",
+    component="vessel_plugin",
+    advanced=True,
+)
+config_registry.get_value(
+    "VESSEL_KNOWLEDGE_FETCH_TIMEOUT_SEC",
+    4,
+    value_type=int,
+    label="Game Knowledge: Fetch Timeout (s)",
+    description=(
+        "Per-request timeout for live game-wiki fetches (clamped to 1–30). "
+        "Kept short so a slow or unreachable wiki degrades gracefully to "
+        "whatever is already cached rather than delaying a lookup. Only used "
+        "when Live Wiki Fetch is enabled."
+    ),
+    group="plugins",
+    component="vessel_plugin",
+    advanced=True,
+)
+config_registry.get_value(
+    "VESSEL_KNOWLEDGE_SUMMARY_MAX_CHARS",
+    600,
+    value_type=int,
+    label="Game Knowledge: Summary Max Chars",
+    description=(
+        "Maximum length of the compact factual note the LLM distils from each "
+        "fetched wiki page (clamped to 120–4000), cached on disk. Smaller "
+        "keeps prompts lean; larger retains more detail. Only used when Live "
+        "Wiki Fetch is enabled."
     ),
     group="plugins",
     component="vessel_plugin",
