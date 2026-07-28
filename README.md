@@ -79,7 +79,7 @@ Because Synthetic Heart system are inspired on how humans are, SyntHs are not un
 ### Features
 
 - **Switchable Cortex engines** (API-driven Gemini, OpenAI, Claude, Grok, or local OpenAI-compatible instances). Hot-swappable at runtime.
-- Typed prompt pipeline with native renderers for OpenAI-compatible, Anthropic, Gemini, external-endpoint, and Live engine paths.
+- **OpenAI API compatible** (both directions): a typed prompt pipeline with native renderers for OpenAI-compatible, Anthropic, Gemini, external-endpoint, and Live engine paths. Anything designed to call the OpenAI API can interface with Synthetic Heart, and Synthetic Heart can call any OpenAI-compatible endpoint — bring your SyntH into any application with AI support.
 - **Media subsystems** — each hot-swappable and independently configurable:
    - **Vox** (Text-to-Speech): give your Synth a voice, with per-language engine/voice overrides.
    - **Auris** (Speech-to-Text): let your Synth understand voice messages and audio.
@@ -91,13 +91,13 @@ Because Synthetic Heart system are inspired on how humans are, SyntHs are not un
 - **SyntH Web UI**: A production-ready web interface featuring VRM avatar support and real-time animations.  
    The avatar's animations reflect the persona's global state—for example, if the character is replying on Telegram, connecting via the web UI will show the avatar busy typing on its smartphone. This ensures the visual representation always matches the character's current activity, regardless of the interface in use.
 - **Persistent inner life**: emotions with decay, a personal diary, long-term memory with semantic search, and self-knowledge (bio) — all stored in the database so the persona keeps continuity across sessions and interfaces.
+- **Self-growth**: SyntH keeps an evolving reflection on who it is becoming — a rolling self-growth state written autonomously by G.R.I.L.L.O. and fed back into the persona, so the character genuinely develops over time instead of staying frozen.
+- **Rift Vessel**: embodiment into external game/virtual worlds through pluggable connectors, while identity, memory and personality persist across worlds and chat interfaces. Minecraft ships today (with autonomous play — Synth wanders, sets its own goals and pursues them); Skyrim, VRChat and Hytale might be coming next.
 - **SOUL**: runtime orchestration layer that compiles buffered conversation into structured, persistent state (in-memory or PostgreSQL backend).
-- Action plugins such as a persistent terminal and scheduled events
-- G.R.I.L.L.O. ("grillo"): an autonomous internal "beat" system that periodically triggers reflective prompts (memory consolidation, tag elaboration, self-reflection, curiosity, relationship checks) and can create diary entries, schedule actions, or enqueue other tasks. G.R.I.L.L.O. stands for "Generator for Reflective Inner Loop & Logical Observation" — and the word "grillo" in Italian literally means 'cricket' (see the Pinocchio reference: "grillo parlante", the talking cricket). See `plugins/grillo_plugin.py` for details; it's configurable and may be enabled or disabled.
-- OpenAI API compatible: whatever is designed to call the OpenAI API can interface with Synthetic Heart, and Synthetic Heart can call any OpenAI-compatible endpoint.
-- Docker deployment with automatic database backups
-- Mobile support
-- [Azuracast integration](https://synthetic-heart.readthedocs.io/en/latest/radio_azuracast.html): with radio plugin, SyntH can interact with [Azuracast](https://www.azuracast.com/) radio station and speak between songs
+- **Action plugins** such as a persistent terminal and scheduled events
+- **G.R.I.L.L.O.** ("grillo"): an autonomous internal "beat" system that periodically triggers reflective prompts (memory consolidation, tag elaboration, self-reflection, curiosity, relationship checks) and can create diary entries, schedule actions, or enqueue other tasks. G.R.I.L.L.O. stands for "Generator for Reflective Inner Loop & Logical Observation" — and the word "grillo" in Italian literally means 'cricket' (see the Pinocchio reference: "grillo parlante", the talking cricket). See `plugins/grillo_plugin.py` for details; it's configurable and may be enabled or disabled.
+- **Mobile support**
+- **[Azuracast integration](https://synthetic-heart.readthedocs.io/en/latest/radio_azuracast.html)**: with radio plugin, SyntH can interact with [Azuracast](https://www.azuracast.com/) radio station and speak between songs
 
 <div align="center">
    <img src="docs/res/screenshots/mobile_home.jpg" alt="SyntH Mobile Home Screenshot" width="120" />
@@ -272,10 +272,12 @@ Both servers are pre-configured for **Claude Code** (`.mcp.json`) and **VS Code 
 ## What's next (Planned features & fixes)
 Here are the main improvements and integrations we plan to work on — contributions are welcome:
 
-- Rift Vessel: bring your SyntH friend with you in any supported game and play together, currently investigating support for: Skyrim, Minecraft, HyTale, any contribution for the game-side support is welcome
-- Azuracast integration: now SyntH can just announce and disannounce the songs, this support will be enhanced time to time with the goal to let a SyntH manage a radio station
 - Multimodal persistence: allow SyntH to take video calls from the WebUI and stream their own video as a webcam, useful for those who wish to stream gameplays or just talk face to face, even on other applications
-- Self development enhancements: SyntH now are growing, but we are planning to enhance this feature even more by allowing them to manipulate their own prompts based on their will
-- Agentic Runtime enhancements: the agentic runtime (bounded tool loop, sandboxed filesystem/shell tools, Drones and MCP integration) is already available; we plan to broaden the tool catalogue and refine multi-agent delegation over time
+- VR Support: meet your SyntH in a VR space
+- More games added: Now the Rift Vessels supports Minecraft, but other game plugins are planned to be added next
+- Extended goals support: the Synth will be able to use the goals system outside the gaming context for real life matters
+- Plugins store / repository: search and download new plugins and add community plugin repositories
+- Live2D models
+- More interfaces
 
 If you're interested in helping implement these features or testing them, open an issue or a PR and tag it with the relevant area (e.g. `interface`, `cortex`, `plugin`, etc.).
