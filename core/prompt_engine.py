@@ -167,9 +167,18 @@ def minify_actions_block(
 
     minified = {}
     for action_name, action_def in available_actions.items():
-        # In lite mode, skip non-essential actions
+        # In lite mode, skip non-essential actions. Vessel embodiment actions
+        # (``vessel_*``, e.g. ``vessel_minecraft_say``/move/look) MUST survive
+        # this pass: a Vessel turn is always built in lite mode, and stripping
+        # the world verbs would leave Synth unable to speak or act in-world —
+        # the model would silently fall back to diary/animation and never reply
+        # to a player. The prefix is a structural embodiment marker, not a
+        # keyword, and the set is already scoped to the connected world by the
+        # caller's allowlist, so only the currently-usable verbs reach here.
         if lite and not (
-            action_name.startswith("message_") or action_name in _LITE_ESSENTIAL_ACTIONS
+            action_name.startswith("message_")
+            or action_name.startswith("vessel_")
+            or action_name in _LITE_ESSENTIAL_ACTIONS
         ):
             continue
 
@@ -2399,12 +2408,12 @@ def load_json_instructions() -> str:
         "If an action you need is not available, reply with JSON explaining why.\n"
         f"AUTONOMY GUIDELINES: You MAY proactively propose or execute allowed actions when beneficial. When acting autonomously include a brief `meta` object with `autonomous: true` and a short first-person `rationale` (your own voice) for why you are acting.{naming_hint} If an action is disallowed, return a JSON proposal describing the need.\n"
         "RESPOND ONLY WITH VALID JSON. No text before or after.\n"
-        "REPLY ROUTING: input.payload.current_chat.interface_path is the chat the incoming message arrived in — this is WHERE you must reply by default. Any other conversation shown in the context block is background context only; do NOT reply there unless the user explicitly asks to message someone or somewhere else. Always copy input.payload.current_chat.interface_path into the 'interface_path' of your message_* action.\n"
+        "REPLY ROUTING: input.payload.current_chat.interface_path is the chat the incoming message arrived in — this is WHERE you must reply by default. Any other conversation shown in the context block is background context only; do NOT reply there unless the user explicitly asks to message someone or somewhere else. Always copy input.payload.current_chat.interface_path into the 'interface_path' of your message_* action. When you are embodied in a world (the incoming message and current_chat come through a vessel interface), the way to reply in that world is the embodiment speak action (a vessel_* say/emote action), NOT a message_* action — reply there in-world.\n"
         "CROSS-CHAT PRIVACY: You take part in many separate conversations. People, names, or events mentioned in any context that is NOT the current conversation (other chats, background history, third-party memories or diary notes) are private to those other spaces. Do NOT name-drop those people to the current interlocutor, do NOT assume the current user knows them, and do NOT reference them unless the current user explicitly brings them up first. Treat cross-chat context as ambient background, never as shared social knowledge.\n"
         "Use input.interface and input.payload.source.interface_path to route replies.\n"
         "NEVER use 'target' — always use 'interface_path' in message actions.\n"
         "Include reply_message_id when replying to specific messages. Use thread_id from input.payload.source.thread_id when present (omit if missing).\n"
-        "CHAT REPLY REQUIRED: When GRILLO INTERNAL MODE is NOT active (this is a normal human chat turn), you MUST include a message_* action in every response. Diary entries and emotion updates are supplementary bookkeeping — they do NOT substitute for replying. Returning only internal actions (diary, emotions, update_emotion_state) without a message_* action is a hard failure and will trigger a correction.\n"
+        "CHAT REPLY REQUIRED: When GRILLO INTERNAL MODE is NOT active (this is a normal human chat turn), you MUST reply to the person with an outward speaking action in every response: a message_* action in ordinary chats, or the embodiment speak action (a vessel_* say/emote action) when you are embodied in a world. Diary entries and emotion updates are supplementary bookkeeping — they do NOT substitute for replying. Returning only internal actions (diary, emotions, update_emotion_state) without an outward reply action is a hard failure and will trigger a correction.\n"
         "CLARIFICATION POLICY: If the user's intent, referent, or the subject of a follow-up is ambiguous or missing, DO NOT GUESS — ask one concise clarifying question before asserting facts or taking action. When the user asks whether you 'understood' but there is no clear context, request clarification rather than assuming.\n"
         "MEMORY HONESTY: When the user asks what you remember, prefer honesty over confidence. Memories can be incomplete or stale. If you do not clearly recall or cannot verify a detail, say so. Do not invent events, conversations, promises, or feelings to fill gaps. SyntH is not roleplay or fiction, so never turn uncertainty into fiction.\n"
         "REFERENCE CLARITY: When the user refers indirectly to a person, message, post, image, clip, or quoted content, refer to its author or speaker in a clear generic way and avoid vague or impersonal wording that obscures who created or said it.\n"

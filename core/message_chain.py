@@ -585,6 +585,35 @@ def _normalize_message_unknown(actions: list, interface_path: Optional[str]) -> 
     return actions
 
 
+def _build_missing_reply_hint(
+    interface_path: str, is_reactive_vessel_chat: bool
+) -> str:
+    """Build the corrector hint shown when a user-facing turn produced no reply.
+
+    For an embodied vessel turn the correct outward reply is a spoken action
+    (``vessel_<world>_say``), not a chat ``message_*`` action, so the hint must
+    name the right action family. The vessel world is the second segment of the
+    interface path (e.g. ``vessel/minecraft`` -> ``vessel_minecraft_say``); if it
+    is missing we fall back to the generic ``vessel_<world>_say`` placeholder.
+    """
+    if is_reactive_vessel_chat:
+        parts = (interface_path or "").split("/")
+        world = parts[1] if len(parts) > 1 and parts[1] else "<world>"
+        say_action = f"vessel_{world}_say"
+        return (
+            "CHAT REPLY REQUIRED: A player spoke to you in-world and is waiting for a reply. "
+            f"You MUST include a speak action for this world (e.g., '{say_action}') so your words "
+            "are voiced in the world. Internal actions like diary entries and emotion updates do "
+            "NOT substitute for speaking back to the player."
+        )
+    return (
+        "CHAT REPLY REQUIRED: The user is waiting for a reply in this active conversation turn. "
+        f"You MUST include a message action targeting the originating interface '{(interface_path or '').split('/')[0]}' "
+        "(e.g., 'message_telegram_bot') to reply to the user. Internal actions like diary entries "
+        "and emotion updates do NOT substitute for replying."
+    )
+
+
 async def send_llm_fallback_message(
     bot,
     message: SimpleNamespace,
@@ -1006,8 +1035,23 @@ async def handle_incoming_message(
         interface_path = ctx.get("interface_path") or ""
         chat_id = ctx.get("chat_id")
 
-        is_user_facing = interface_path and any(
-            interface_path.startswith(f"{iface}/") for iface in user_facing_interfaces
+        # A reactive in-world player chat (structural ``vessel_player_chat`` flag,
+        # set by the vessel interface from event kind + actor and propagated by the
+        # queue) is a human speaking directly to Synth and therefore user-facing:
+        # it must receive an outward reply just like an ordinary chat. Synth's own
+        # autonomous vessel perceptions/will-beats leave the flag False, so they are
+        # NOT treated as user-facing and never trigger the missing-reply corrector.
+        is_reactive_vessel_chat = bool(ctx.get("vessel_player_chat"))
+
+        is_user_facing = bool(
+            interface_path
+            and (
+                any(
+                    interface_path.startswith(f"{iface}/")
+                    for iface in user_facing_interfaces
+                )
+                or is_reactive_vessel_chat
+            )
         )
 
         is_internal_chat = chat_id == -1 or chat_id == "-1" or str(chat_id) == "-1"
@@ -1863,6 +1907,14 @@ async def handle_incoming_message(
                 if source == "llm" or getattr(message, "from_cortex", False):
                     has_user_response = False
                     has_tts = False
+                    # Set when the LLM emits an embodiment speak verb
+                    # (``vessel_<world>_say``) — the ONLY channel that reaches the
+                    # player inside the world. Tracked separately from
+                    # ``has_user_response`` so that on a reactive in-world player chat
+                    # a stray ``message_*`` action toward some other connected chat
+                    # (e.g. the WebUI) does NOT satisfy the "did the player get an
+                    # in-world reply?" check. Detection is purely structural.
+                    has_inworld_reply = False
                     # Set when the LLM emits an action that delivers user-visible
                     # output on its own (a self-replying plugin action). Tracked
                     # separately from has_user_response so it suppresses the
@@ -1992,9 +2044,29 @@ async def handle_incoming_message(
                                 action_name = action.get("action") or action.get("type")
                             if action_name == "tts_speak":
                                 has_tts = True
-                            if action_name in current_message_action_types or (
+                            # An embodiment speak verb (structurally a
+                            # ``vessel_<world>_say`` action, namespaced per connected
+                            # world by the vessel plugin) delivers the reply in-world,
+                            # so it counts as the outward user reply just like a
+                            # ``message_*`` action. Detection is purely structural
+                            # (prefix + speak-verb suffix), never based on the message
+                            # text, so the missing-reply corrector does not fire and
+                            # try to force a non-existent ``message_*`` action on a
+                            # vessel turn.
+                            is_vessel_speak = (
                                 isinstance(action_name, str)
-                                and action_name.startswith("message_")
+                                and action_name.startswith("vessel_")
+                                and action_name.endswith("_say")
+                            )
+                            if is_vessel_speak:
+                                has_inworld_reply = True
+                            if (
+                                action_name in current_message_action_types
+                                or (
+                                    isinstance(action_name, str)
+                                    and action_name.startswith("message_")
+                                )
+                                or is_vessel_speak
                             ):
                                 has_user_response = True
                                 if not user_message_action:
@@ -2118,10 +2190,20 @@ async def handle_incoming_message(
                         chat_id = ctx.get("chat_id")
 
                         # interface_path must have a chat_id suffix to be user-facing
-                        # e.g., "telegram_bot/5551234567" not just "telegram_bot"
-                        is_user_facing = interface_path and any(
-                            interface_path.startswith(f"{iface}/")
-                            for iface in user_facing_interfaces
+                        # e.g., "telegram_bot/5551234567" not just "telegram_bot".
+                        # A reactive in-world player chat is user-facing too (see the
+                        # earlier ``is_reactive_vessel_chat`` note); autonomous vessel
+                        # perceptions leave the structural flag False and stay excluded.
+                        is_reactive_vessel_chat = bool(ctx.get("vessel_player_chat"))
+                        is_user_facing = bool(
+                            interface_path
+                            and (
+                                any(
+                                    interface_path.startswith(f"{iface}/")
+                                    for iface in user_facing_interfaces
+                                )
+                                or is_reactive_vessel_chat
+                            )
                         )
 
                         # Check if this is an internal/system message
@@ -2451,12 +2533,16 @@ async def handle_incoming_message(
                         interface_path = ctx.get("interface_path") or ""
                     if "is_user_facing" not in locals():
                         is_user_facing = False
+                    if "is_reactive_vessel_chat" not in locals():
+                        is_reactive_vessel_chat = bool(ctx.get("vessel_player_chat"))
                     if "is_grillo_internal" not in locals():
                         is_grillo_internal = False
                     if "is_internal_chat" not in locals():
                         is_internal_chat = False
                     if "has_user_response" not in locals():
                         has_user_response = False
+                    if "has_inworld_reply" not in locals():
+                        has_inworld_reply = False
 
                     if not has_user_response:
                         if (
@@ -2571,8 +2657,14 @@ async def handle_incoming_message(
                     # ensure they exist before the reads below.
                     if "has_user_response" not in locals():
                         has_user_response = False
+                    if "has_inworld_reply" not in locals():
+                        has_inworld_reply = False
                     if "has_user_output_action" not in locals():
                         has_user_output_action = False
+                    if "interface_path" not in locals():
+                        interface_path = ctx.get("interface_path") or ""
+                    if "is_reactive_vessel_chat" not in locals():
+                        is_reactive_vessel_chat = bool(ctx.get("vessel_player_chat"))
                     try:
                         log_debug(
                             f"[message_chain] EXECUTING ACTIONS: count={len(actions) if actions else 0}, interface_path={ctx.get('interface_path')}, chat_id={ctx.get('chat_id')}, action_types={[a.get('type') or a.get('action') for a in (actions or []) if isinstance(a, dict)]}"
@@ -2728,13 +2820,24 @@ async def handle_incoming_message(
                                 )
 
                             # Check if user response is required but missing.
+                            # On a reactive in-world player chat the ONLY reply that
+                            # reaches the player is an embodiment speak verb
+                            # (``vessel_<world>_say``); a ``message_*`` action toward a
+                            # different connected chat (e.g. the WebUI) does NOT count,
+                            # so require ``has_inworld_reply`` in that case. Structural,
+                            # no message-text inspection.
+                            reply_present = (
+                                has_inworld_reply
+                                if is_reactive_vessel_chat
+                                else has_user_response
+                            )
                             missing_user_reply = False
                             if (
                                 is_user_facing
                                 and not is_grillo_internal
                                 and not is_internal_chat
                                 and not is_scoped_non_message
-                                and not has_user_response
+                                and not reply_present
                                 and not has_user_output_action
                                 and not delivered_to_llm
                             ):
@@ -2743,10 +2846,9 @@ async def handle_incoming_message(
                             errors_list = list(errors)
                             if missing_user_reply:
                                 errors_list.append(
-                                    "CHAT REPLY REQUIRED: The user is waiting for a reply in this active conversation turn. "
-                                    f"You MUST include a message action targeting the originating interface '{interface_path.split('/')[0]}' "
-                                    "(e.g., 'message_telegram_bot') to reply to the user. Internal actions like diary entries "
-                                    "and emotion updates do NOT substitute for replying."
+                                    _build_missing_reply_hint(
+                                        interface_path, is_reactive_vessel_chat
+                                    )
                                 )
 
                             # Build correction context with info about what succeeded and what failed
@@ -2784,13 +2886,21 @@ async def handle_incoming_message(
                                 )
                                 return ACTIONS_EXECUTED
                         else:
-                            # All actions succeeded, but check if user response is required and missing
+                            # All actions succeeded, but check if user response is
+                            # required and missing. Same in-world reply rule as above:
+                            # a reactive vessel player chat needs a ``vessel_*_say``,
+                            # not just any ``message_*``.
+                            reply_present = (
+                                has_inworld_reply
+                                if is_reactive_vessel_chat
+                                else has_user_response
+                            )
                             if (
                                 is_user_facing
                                 and not is_grillo_internal
                                 and not is_internal_chat
                                 and not is_scoped_non_message
-                                and not has_user_response
+                                and not reply_present
                                 and not has_user_output_action
                                 and not delivered_to_llm
                             ):
@@ -2806,10 +2916,9 @@ async def handle_incoming_message(
                                     ],
                                     "failed_actions": [],
                                     "errors": [
-                                        "CHAT REPLY REQUIRED: The user is waiting for a reply in this active conversation turn. "
-                                        f"You MUST include a message action targeting the originating interface '{interface_path.split('/')[0]}' "
-                                        "(e.g., 'message_telegram_bot') to reply to the user. Internal actions like diary entries "
-                                        "and emotion updates do NOT substitute for replying."
+                                        _build_missing_reply_hint(
+                                            interface_path, is_reactive_vessel_chat
+                                        )
                                     ],
                                     "had_json_errors": False,
                                     "original_text": text,

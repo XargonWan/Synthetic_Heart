@@ -68,6 +68,39 @@ class TestPromptGeneration(unittest.IsolatedAsyncioTestCase):
             self.assertIn("message_telegram_bot", actions)
             self.assertIn("terminal_bash", actions)
 
+    def test_lite_mode_preserves_vessel_actions(self):
+        """Lite mode must keep vessel embodiment verbs (e.g. vessel_minecraft_say).
+
+        A Vessel turn is always built in lite mode; if the world verbs were
+        stripped, Synth could never speak or act in-world and would silently
+        ignore player chat. Non-essential, non-vessel actions must still be
+        filtered out.
+        """
+        from core.prompt_engine import minify_actions_block
+
+        actions = {
+            "vessel_minecraft_say": {"brief": "Speak in world", "description": "say"},
+            "vessel_minecraft_move": {"brief": "Move", "description": "move"},
+            "vessel_disconnect": {"brief": "Leave", "description": "disconnect"},
+            "message_telegram_bot": {"brief": "TG", "description": "send"},
+            "use_animation": {"brief": "Animate", "description": "anim"},
+            "terminal_bash": {"brief": "Shell", "description": "shell"},
+            "spawn_drone": {"brief": "Drone", "description": "drone"},
+        }
+
+        minified = minify_actions_block(actions, lite=True)
+
+        # Vessel verbs survive lite filtering.
+        self.assertIn("vessel_minecraft_say", minified)
+        self.assertIn("vessel_minecraft_move", minified)
+        self.assertIn("vessel_disconnect", minified)
+        # message_* and essential actions survive too.
+        self.assertIn("message_telegram_bot", minified)
+        self.assertIn("use_animation", minified)
+        # Non-essential, non-vessel actions are filtered out.
+        self.assertNotIn("terminal_bash", minified)
+        self.assertNotIn("spawn_drone", minified)
+
     @patch("core.core_initializer.core_initializer.actions_block")
     def test_actions_block_population(self, mock_actions_block):
         """Test that the actions block is properly populated."""

@@ -1328,6 +1328,18 @@ async def _consumer_loop() -> None:
                         else:
                             context.pop("voice_channel_id", None)
 
+                        # Propagate the structural in-world player-chat marker so
+                        # message_chain can treat a reactive vessel player turn as
+                        # user-facing (and demand a reply) while leaving Synth's own
+                        # autonomous vessel perceptions/will-beats unaffected. Set by
+                        # the vessel interface from event kind + actor presence, never
+                        # from message text. Written both True and False so a stale
+                        # value from a previous turn never lingers on the context.
+                        if getattr(_queued_msg, "_vessel_player_chat", False):
+                            context["vessel_player_chat"] = True
+                        else:
+                            context.pop("vessel_player_chat", None)
+
                         # Propagate trainer flag so plugin_instance can route
                         # to TRAINER_CORTEX when a scope override is configured.
                         if is_trainer:
