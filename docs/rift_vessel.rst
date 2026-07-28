@@ -530,29 +530,47 @@ decision, driven by its personality and wants — not a hardcoded script.
 know a world's *rules* plays badly — e.g. it tries to mine iron ore bare-handed
 and gets nothing, because it never learned that iron needs at least a stone
 pickaxe. To close this gap without turning autonomy into a scripted quest list,
-each world may ship a small **knowledge base (KB)** of curated facts. The
-*mechanism* is world-agnostic (the Vessel core renders whatever facts a world
-supplies); the *content* is world-specific (the Minecraft adapter owns its own
-facts). The KB is strictly **reference**: it states how the world works, it never
-tells Synth what to do — the spontaneity rule (self-authored goals, no catalogue)
-is fully preserved.
+each world may ship a small **knowledge base (KB)**. The *mechanism* is
+world-agnostic (the Vessel core renders whatever facts a world supplies); the
+*content* is world-specific (the Minecraft adapter owns its own facts). The KB is
+strictly **reference**: it states how the world works, it never tells Synth what
+to do — the spontaneity rule (self-authored goals, no catalogue) is fully
+preserved.
 
-* **Storage (Minecraft).** Facts live in
-  ``plugins/rift_vessel/minecraft/wiki/knowledge.json`` — a plain
-  ``{"entries": [ {title, tags, text, url, fallback}, … ]}`` file next to the
-  connector. ``title``/``text`` are the human-readable fact; ``tags`` are the
-  lowercase block/item/verb ids the fact is about (e.g. ``iron_ore``,
-  ``stone_pickaxe``, ``oak_log``); ``url`` links the source wiki page; the
-  optional ``fallback`` flags a static entry usable when no live wiki is
-  reachable.
+* **Source (Minecraft) — the live wiki, not a curated file.** The Minecraft
+  adapter consults the **live** `minecraft.wiki <https://minecraft.wiki>`_ (its
+  MediaWiki API is open to bots, no auth) via
+  ``plugins/rift_vessel/minecraft/wiki_client.py``. There is **no** hand-written
+  fact file. ``wiki_client.lookup(query, limit, *, cache_only=False)`` searches
+  for pages matching the query, then for each page serves a **one-time LLM
+  summary** — a short EN factual note (*how the game works*, never *what to do*)
+  — cached incrementally on disk as
+  ``plugins/rift_vessel/minecraft/wiki/cache/<slug>.json``
+  (``{title, url, raw_extract, summary, fetched_at}``). Repeated lookups of the
+  same page are served straight from cache with no re-fetch and no
+  re-summarise. Matching is keyword-free and structural: the ``query`` is
+  whitespace-joined game tokens (a goal ``target_name``, block/item ids) matched
+  against page-title slugs.
 * **Lookup verb.** The connector exposes a Fast-Lane, ``external_effects``-free
   ``lookup_knowledge`` verb (namespaced ``vessel_minecraft_lookup_knowledge``,
   ``required_fields: ["query"]``, ``optional_fields: ["limit"]``,
   ``security_level: "low"``). ``MinecraftConnector.lookup_knowledge(query,
-  limit=5)`` tokenises the query, ranks entries by tag-overlap (with a
-  title-substring fallback), and returns the top ``limit`` notes as
-  ``{title, text, url}``. It touches no bridge, DB, network, or LLM, so it is
-  fully offline-testable (``tests/test_vessel_knowledge.py``).
+  limit=5, *, cache_only=False)`` delegates to ``wiki_client.lookup`` and returns
+  the notes as ``{title, text, url}``. It is fully fail-safe — offline or on any
+  error the client returns whatever it has cached (possibly empty) and never
+  raises — so a Fast-Lane beat can never break.
+* **Beat vs verb split.** The automatic will/motor-beat path
+  (``_resolve_knowledge``) calls the lookup with **``cache_only=True``**, so a
+  ``WorldState`` build never blocks on the network or the LLM — it serves only
+  already-cached pages. The **explicit** ``lookup_knowledge`` verb and the
+  goal-expansion Drone use the default live path (``cache_only=False``), which is
+  allowed to fetch and summarise. Config:
+  ``VESSEL_KNOWLEDGE_LIVE_FETCH`` (bool, default ``True`` — set ``False`` to
+  disable all network and stay cache-only everywhere),
+  ``VESSEL_KNOWLEDGE_FETCH_TIMEOUT_SEC`` (int, default 4, clamp 1–30) and
+  ``VESSEL_KNOWLEDGE_SUMMARY_MAX_CHARS`` (int, default 600, clamp 120–4000). The
+  KB is fully offline-testable with the live API and the LLM mocked
+  (``tests/test_vessel_knowledge.py``).
 * **Prompt injection.** When a beat's ``WorldState.extra["knowledge"]`` is
   populated, ``core/vessel_beat.py::_fmt_knowledge`` renders it into both the
   will and the action prompts as a bulleted **"Game knowledge"** block, headed
