@@ -501,6 +501,74 @@ def test_build_json_prompt_derives_default_interface_action_scope(monkeypatch):
         core_initializer.actions_block = original_actions_block
 
 
+def test_build_json_prompt_suppresses_diary_actions_on_vessel_turn(monkeypatch):
+    """AGENTS.md §5c: a Vessel embodiment turn must not expose diary/memory-write
+    actions in the prompt (the single 'lived experience' entry is written only at
+    end-of-session). The in-world reply action must survive."""
+
+    async def dummy_gather(message, ctx):
+        return {}
+
+    monkeypatch.setattr("core.action_parser.gather_static_injections", dummy_gather)
+
+    from core.core_initializer import core_initializer
+
+    monkeypatch.setattr(
+        "core.core_initializer.INTERFACE_REGISTRY",
+        {"vessel": object(), "matrix_chat": object()},
+        raising=False,
+    )
+
+    original_actions_block = core_initializer.actions_block
+    core_initializer.actions_block = {
+        "available_actions": {
+            "create_personal_diary_entry": {
+                "schema": {"type": "object", "properties": {}, "required": []},
+                "brief": "Create diary entry.",
+                "source": "ai_diary",
+            },
+            "update_diary_entry": {
+                "schema": {"type": "object", "properties": {}, "required": []},
+                "brief": "Replace diary entry content.",
+                "source": "ai_diary",
+            },
+            "vessel_minecraft_say": {
+                "schema": {"type": "object", "properties": {}, "required": []},
+                "brief": "Say something in-world.",
+                "source": "vessel_plugin, vessel",
+            },
+            "message_matrix_chat": {
+                "schema": {"type": "object", "properties": {}, "required": []},
+                "brief": "Send Matrix message.",
+                "source": "message_plugin, matrix_chat",
+            },
+        }
+    }
+
+    try:
+        message = SimpleNamespace(
+            chat_id="minecraft",
+            text="Rekku, ci sei?",
+            message_id=1,
+            from_user=SimpleNamespace(full_name="player", username="player"),
+            date=datetime.now(timezone.utc),
+            interface_path="vessel/minecraft",
+        )
+
+        result = asyncio.run(build_json_prompt(message, {}, interface_name="vessel"))
+
+        action_keys = set(result["actions"].keys())
+        # Diary/memory-write actions must be gone on a vessel turn (§5c).
+        assert "create_personal_diary_entry" not in action_keys
+        assert "update_diary_entry" not in action_keys
+        # The in-world reply action must survive.
+        assert "vessel_minecraft_say" in action_keys
+        # A cross-interface message channel must not be offered on a vessel turn.
+        assert "message_matrix_chat" not in action_keys
+    finally:
+        core_initializer.actions_block = original_actions_block
+
+
 def test_prompt_request_attached_to_result(monkeypatch):
     """build_json_prompt must attach a PromptRequest under '__prompt_request'."""
     from core.prompt_request import PromptRequest

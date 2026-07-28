@@ -1076,7 +1076,12 @@ function wireBotEvents(b) {
     pushEvent({
       environment: ENVIRONMENT,
       event_type: 'chat',
-      summary: `${username}: ${message}`,
+      // Summary is the bare spoken text only. The speaker is carried
+      // separately in ``actor`` and the conversational context manager
+      // re-prefixes it as the sender name; embedding ``username:`` here too
+      // produced a double prefix (``XargonWan: "XargonWan: ..."``) that
+      // confused the model about who was being addressed.
+      summary: message,
       actor: username,
       data: { message },
     });

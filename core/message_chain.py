@@ -614,6 +614,74 @@ def _build_missing_reply_hint(
     )
 
 
+def _vessel_say_delivered(processed: Any) -> bool:
+    """Return True if any successfully-processed action was an in-world speak verb.
+
+    Detection is purely structural (``vessel_<world>_say`` prefix/suffix), never
+    based on the message text, so it stays world-agnostic and keyword-free.
+    """
+    if not isinstance(processed, list):
+        return False
+    for item in processed:
+        name: str | None = None
+        if isinstance(item, dict):
+            name = item.get("action") or item.get("type")
+        elif isinstance(item, str):
+            name = item
+        if (
+            isinstance(name, str)
+            and name.startswith("vessel_")
+            and name.endswith("_say")
+        ):
+            return True
+    return False
+
+
+async def _deliver_vessel_fallback_reply(
+    bot: Any,
+    message: Any,
+    ctx: dict[str, Any],
+    reason: str,
+) -> bool:
+    """Speak a deterministic in-world reply when the LLM never produced a ``say``.
+
+    The weak vessel cortex sometimes answers a reactive player chat with only an
+    internal verb (e.g. ``vessel_<world>_observe``) and ignores the corrector's
+    request for a speak action, leaving the player with no reply at all. As a
+    last-resort safety net we synthesise a ``vessel_<world>_say`` ourselves and
+    run it through the normal action dispatch so the connector voices it in-world.
+
+    Purely structural: the world is the second segment of the vessel
+    ``interface_path`` (``vessel/minecraft`` -> ``vessel_minecraft_say``). Returns
+    True when a fallback speak action was dispatched.
+    """
+    interface_path = str(ctx.get("interface_path") or "")
+    parts = interface_path.split("/")
+    world = parts[1] if len(parts) > 1 and parts[1] else ""
+    if not world:
+        return False
+
+    fallback_text = get_failed_message_text()
+    say_action_type = f"vessel_{world}_say"
+    say_action = {
+        "type": say_action_type,
+        "payload": {"text": fallback_text},
+    }
+    log_warning(
+        f"[message_chain] 🌀 Vessel reactive turn produced no in-world reply "
+        f"({reason}); dispatching deterministic '{say_action_type}' fallback so "
+        "the player still hears back"
+    )
+    try:
+        from core.action_parser import run_actions
+
+        result = await run_actions([say_action], ctx, bot, message)
+        return bool(result.get("processed"))
+    except Exception as exc:  # pragma: no cover - defensive
+        log_error(f"[message_chain] Failed to dispatch vessel fallback reply: {exc}")
+        return False
+
+
 async def send_llm_fallback_message(
     bot,
     message: SimpleNamespace,
@@ -1018,6 +1086,12 @@ async def handle_incoming_message(
     # requirement that "LLM failure" should only be emitted when the entire
     # iteration failed (or there was a technical error with no reply at all).
     actions_executed_during_loop = False
+
+    # Track whether a ``vessel_<world>_say`` was actually voiced in-world at any
+    # point during the loop (across correction retries). Used only for a reactive
+    # in-world player chat: if the loop ends without one, we deterministically
+    # speak a fallback so the player never gets total silence from a weak cortex.
+    vessel_reply_delivered = False
 
     while True:
         log_info(
@@ -2742,6 +2816,12 @@ async def handle_incoming_message(
                         # remember if we actually ran anything
                         if processed:
                             actions_executed_during_loop = True
+                        # remember if an in-world speak verb was voiced this turn
+                        # (structural detection, keyword-free) so a reactive player
+                        # chat that never produced a ``say`` can be backfilled with a
+                        # deterministic fallback reply at loop exit
+                        if _vessel_say_delivered(processed):
+                            vessel_reply_delivered = True
 
                         log_info(
                             f"[message_chain] Actions result: {len(processed)} successful, {len(failed)} failed"
@@ -3021,6 +3101,10 @@ async def handle_incoming_message(
                 log_warning(
                     f"[message_chain] {failure_reason} but {len(actions or [])} action(s) already executed; skipping fallback"
                 )
+                if is_reactive_vessel_chat and not vessel_reply_delivered:
+                    await _deliver_vessel_fallback_reply(
+                        bot, message, ctx, failure_reason
+                    )
                 return ACTIONS_EXECUTED
 
         if text in tried_texts:
@@ -3037,6 +3121,10 @@ async def handle_incoming_message(
                 log_warning(
                     f"[message_chain] {failure_reason} but some actions already executed; skipping fallback"
                 )
+                if is_reactive_vessel_chat and not vessel_reply_delivered:
+                    await _deliver_vessel_fallback_reply(
+                        bot, message, ctx, failure_reason
+                    )
                 return ACTIONS_EXECUTED
 
         tried_texts.add(text)
@@ -3077,6 +3165,10 @@ async def handle_incoming_message(
                 log_warning(
                     "[message_chain] Corrector exception but actions already executed; skipping fallback"
                 )
+                if is_reactive_vessel_chat and not vessel_reply_delivered:
+                    await _deliver_vessel_fallback_reply(
+                        bot, message, ctx, failure_reason
+                    )
                 return ACTIONS_EXECUTED
 
         if not corrected:
@@ -3098,6 +3190,10 @@ async def handle_incoming_message(
                     log_warning(
                         f"[message_chain] {failure_reason} but some actions already executed; skipping fallback"
                     )
+                    if is_reactive_vessel_chat and not vessel_reply_delivered:
+                        await _deliver_vessel_fallback_reply(
+                            bot, message, ctx, failure_reason
+                        )
                     return ACTIONS_EXECUTED
             # On no-correction, loop and let retry counter enforce blocking
             await asyncio.sleep(0.5)

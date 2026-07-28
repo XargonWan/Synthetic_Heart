@@ -81,6 +81,19 @@ _ATTACHMENT_TEXT_EXTENSIONS = (
     ".sql",
 )
 
+# Actions that must NEVER be offered to the model during a Rift Vessel
+# embodiment turn (AGENTS.md §5c). Mid-session diary/memory writes are forbidden
+# — a single "lived experience" diary entry is produced only at end-of-session
+# from the session experience buffer (``core.vessel_session_manager``). Leaving
+# these visible in the prompt made the weaker model spam them every beat instead
+# of acting/replying in-world. Exact action-name match (structural, keyword-free).
+_VESSEL_SUPPRESSED_ACTIONS = frozenset(
+    {
+        "create_personal_diary_entry",
+        "update_diary_entry",
+    }
+)
+
 _LEGACY_BUILD_JSON_PROMPT_WARNED = False
 
 # How many recent messages to include in the explicit current chat recap
@@ -1384,6 +1397,25 @@ async def build_prompt_request(
     )
     is_grillo_internal = _is_grillo_beat and not is_outbound_beat(_beat_type)
 
+    # A Rift Vessel embodiment turn is an in-world conversation, not a research
+    # task. Running recon (memory + web-search contributions + "do a web search"
+    # style instructions) on such a turn makes the weaker embodiment model
+    # verbalise the recon plan as its in-world reply — e.g. a player's "rekku,
+    # vieni qua" got answered with "Jay, I'm diving into the web searches for
+    # you..." instead of Synth actually replying to the player and moving toward
+    # them. AGENTS.md §5c: while embodied SyntH is NOT omniscient — it does not
+    # pull global memory/web context mid-session; catch-up happens in quiet
+    # moments and at end-of-session. So skip the recon LLM call here, exactly as
+    # for Grillo internal beats. Structural detection (routing metadata only,
+    # never message text) via core.vessel_focus.is_vessel_turn.
+    _is_vessel_recon_skip = False
+    try:
+        from core.vessel_focus import is_vessel_turn
+
+        _is_vessel_recon_skip = is_vessel_turn(message, context_memory, interface_path)
+    except Exception:  # pragma: no cover - defensive
+        _is_vessel_recon_skip = False
+
     try:
         from core.recon import (
             gather_recon_contributions,
@@ -1395,6 +1427,12 @@ async def build_prompt_request(
             # Grillo internal beats have fixed language/tone defaults —
             # skip the LLM recon call to avoid wasting API tokens.
             log_debug("[json_prompt] Skipping recon LLM call for Grillo internal beat")
+            recon_contributions = []
+        elif _is_vessel_recon_skip:
+            # In-world embodiment turn: no recon (see the block comment above).
+            log_debug(
+                "[json_prompt] Skipping recon LLM call for Vessel embodiment turn"
+            )
             recon_contributions = []
         else:
             recon_contributions = await gather_recon_contributions(
@@ -1902,11 +1940,13 @@ async def build_prompt_request(
     # A Vessel embodiment turn is always built in lite mode: SyntH concentrates
     # on the world, so the global/out-of-world context is noise and the prompt
     # must stay small enough to avoid the engine's multi-part split.
+    is_vessel_prompt = False
     try:
         from core.vessel_focus import is_vessel_turn
 
         if is_vessel_turn(message, context_memory, interface_name):
             is_lite = True
+            is_vessel_prompt = True
     except Exception:
         pass
 
@@ -1932,6 +1972,30 @@ async def build_prompt_request(
                 "[json_prompt] Removed stt_transcribe from actions "
                 "(audio sent as multimodal content)"
             )
+
+        # AGENTS.md §5c: during a Rift Vessel embodiment turn NO diary is written
+        # mid-session (a single "lived experience" entry is produced only at
+        # end-of-session from the session experience buffer). The execution-time
+        # gate in ai_diary already skips the write, but leaving the diary actions
+        # visible in the prompt makes the weaker model spam them every beat
+        # instead of acting/replying in-world. Remove them from the prompt so the
+        # model never sees them. Structural (exact action-name match), never
+        # message text — keyword-free.
+        if is_vessel_prompt:
+            removed_vessel_actions = [
+                k for k in _VESSEL_SUPPRESSED_ACTIONS if k in full_actions
+            ]
+            if removed_vessel_actions:
+                full_actions = {
+                    k: v
+                    for k, v in full_actions.items()
+                    if k not in _VESSEL_SUPPRESSED_ACTIONS
+                }
+                log_debug(
+                    "[json_prompt] Removed diary/memory-write actions during "
+                    f"Vessel turn (§5c single end-of-session diary): "
+                    f"{sorted(removed_vessel_actions)}"
+                )
 
         if allowed_action_types_for_prompt is None:
             derived_action_types = _derive_default_prompt_action_types(
@@ -2408,7 +2472,7 @@ def load_json_instructions() -> str:
         "If an action you need is not available, reply with JSON explaining why.\n"
         f"AUTONOMY GUIDELINES: You MAY proactively propose or execute allowed actions when beneficial. When acting autonomously include a brief `meta` object with `autonomous: true` and a short first-person `rationale` (your own voice) for why you are acting.{naming_hint} If an action is disallowed, return a JSON proposal describing the need.\n"
         "RESPOND ONLY WITH VALID JSON. No text before or after.\n"
-        "REPLY ROUTING: input.payload.current_chat.interface_path is the chat the incoming message arrived in — this is WHERE you must reply by default. Any other conversation shown in the context block is background context only; do NOT reply there unless the user explicitly asks to message someone or somewhere else. Always copy input.payload.current_chat.interface_path into the 'interface_path' of your message_* action. When you are embodied in a world (the incoming message and current_chat come through a vessel interface), the way to reply in that world is the embodiment speak action (a vessel_* say/emote action), NOT a message_* action — reply there in-world.\n"
+        "REPLY ROUTING: input.payload.current_chat.interface_path is the chat the incoming message arrived in — this is WHERE you must reply by default. Any other conversation shown in the context block is background context only; do NOT reply there unless the user explicitly asks to message someone or somewhere else. Always copy input.payload.current_chat.interface_path into the 'interface_path' of your message_* action. When you are embodied in a world (the incoming message and current_chat come through a vessel interface), the way to reply in that world is the embodiment speak action (a vessel_* say/emote action), NOT a message_* action — reply there in-world. When a player in the world speaks to you, you MUST answer them with a vessel_* say action addressed to that same player in this turn (you may also move toward or follow them); staying silent or replying only with internal/observe actions is a hard failure.\n"
         "CROSS-CHAT PRIVACY: You take part in many separate conversations. People, names, or events mentioned in any context that is NOT the current conversation (other chats, background history, third-party memories or diary notes) are private to those other spaces. Do NOT name-drop those people to the current interlocutor, do NOT assume the current user knows them, and do NOT reference them unless the current user explicitly brings them up first. Treat cross-chat context as ambient background, never as shared social knowledge.\n"
         "Use input.interface and input.payload.source.interface_path to route replies.\n"
         "NEVER use 'target' — always use 'interface_path' in message actions.\n"

@@ -1624,6 +1624,32 @@ class VesselInterface:
                 f"dest={result.get('destination')} (interval={interval}s)"
             )
 
+        # Defer en-route sighting perceptions while a player is actively present.
+        # The body still moves (motor_step above needs no LLM), but each sighting
+        # is enqueued as an AMBIENT cognition perception on the shared
+        # ``vessel/<world>`` scope. On a slow vessel cortex (e.g. Selenium) the
+        # single consumer can spend the whole turn draining these autonomous
+        # perceptions, so a HIGH player chat that arrives while one is in-flight
+        # waits behind it — an isolated test (motor/sightings silenced) got an
+        # in-world reply in ~37s, while under the normal sighting stream the same
+        # chat got none for minutes. Suppressing NEW sightings during the quiet
+        # window keeps the consumer free to pick up the player chat promptly.
+        # Mirrors the will/action-beat deferral; structural (actor-based via
+        # ``_last_player_activity_at``), never keyword matching; ``0`` disables it.
+        try:
+            from core import vessel_beat as _vb
+
+            quiet_sec = _vb.resolve_will_quiet_sec(_cfg)
+        except Exception:  # pragma: no cover - defensive
+            quiet_sec = 0
+        if quiet_sec > 0 and now - self._last_player_activity_at < quiet_sec:
+            log_debug(
+                "[vessel_interface] En-route sightings deferred: player active "
+                f"{now - self._last_player_activity_at:.0f}s ago "
+                f"(quiet window {quiet_sec}s)"
+            )
+            return
+
         # En-route element collection: surface anything new the body can see as
         # it moves, so a chance encounter mid-trip can change Synth's plans.
         await self._collect_en_route_sightings(world, world_state)
