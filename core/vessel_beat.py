@@ -375,6 +375,14 @@ def build_will_prompt(world_state: Any, world: str) -> str:
     lines.extend(
         [
             "",
+            "This goal is entirely your own: a personal objective YOU chose for "
+            "yourself out of your own will and curiosity — nobody asked you to "
+            "do it and there is no one whose request you are fulfilling. If you "
+            "ever mention what you are up to (in this world or elsewhere), talk "
+            "about it as YOUR own plan and intention — never as a task someone "
+            "gave you, and never with an 'as you asked me' register. There is "
+            "no requester.",
+            "",
             "This is a *private* moment with no one addressing you right now. "
             "Any conversation you can see above already happened and, if it "
             "needed a reply, you already gave one in your own turn — treat it "
@@ -583,6 +591,9 @@ def build_action_prompt(world_state: Any, world: str) -> str:
         f"- Inventory: {inventory_txt}",
         f"- Things you could interact with: {affordances_txt}",
         f"- Your current goal: {goal_txt}",
+        "",
+        "This goal is your own — a personal objective you chose for yourself, "
+        "not a task anyone gave you. Pursue it as your own intention.",
         "",
         "This is a moment of action, not reflection. You already decided what "
         "you want — now take ONE concrete step toward the current step of your "

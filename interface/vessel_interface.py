@@ -1513,7 +1513,9 @@ class VesselInterface:
 
             drone_goal = (
                 f"You are embodied in the '{world}' world and have just set "
-                f'yourself this goal: "{description}". Break it down into a '
+                f'yourself this goal: "{description}". This is your own '
+                "personal goal — you chose it for yourself out of your own "
+                "will, nobody asked you to do it. Break it down into a "
                 "concrete, ordered plan of sub-steps a player would actually "
                 "follow. First consult the game's rules and knowledge base by "
                 f"calling vessel_{world}_lookup_knowledge with short queries "
