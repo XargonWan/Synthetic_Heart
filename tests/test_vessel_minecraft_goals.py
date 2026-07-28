@@ -87,6 +87,8 @@ class _FakeStore:
             row.get("destination"),
             row.get("steps"),
             row.get("current_step", 0),
+            row.get("target_kind"),
+            row.get("target_name"),
             row["status"],
         )
 
@@ -106,10 +108,18 @@ class _FakeStore:
             return
         if s.startswith("INSERT INTO minecraft_goals"):
             # Columns: session_id, description, note, destination,
-            #          steps, current_step, status
-            session_id, description, note, destination, steps, current_step, status = (
-                params
-            )
+            #          steps, current_step, target_kind, target_name, status
+            (
+                session_id,
+                description,
+                note,
+                destination,
+                steps,
+                current_step,
+                target_kind,
+                target_name,
+                status,
+            ) = params
             self.rows.append(
                 {
                     "id": self._next_id,
@@ -119,6 +129,8 @@ class _FakeStore:
                     "destination": destination,
                     "steps": steps,
                     "current_step": current_step,
+                    "target_kind": target_kind,
+                    "target_name": target_name,
                     "status": status,
                 }
             )
@@ -177,8 +189,8 @@ def test_clip_trims_and_caps() -> None:
 def test_row_to_goal_tuple_and_dict() -> None:
     assert goals._row_to_goal(None) is None
     # Row columns: id, session_id, description, note, destination,
-    #              steps, current_step, status
-    tup = (7, "sess", "build a house", "started", None, None, 0, "active")
+    #              steps, current_step, target_kind, target_name, status
+    tup = (7, "sess", "build a house", "started", None, None, 0, None, None, "active")
     g = goals._row_to_goal(tup)
     assert g == {
         "id": 7,
@@ -190,6 +202,9 @@ def test_row_to_goal_tuple_and_dict() -> None:
         "current_step": 0,
         "current_step_text": None,
         "steps_total": 0,
+        "target": None,
+        "target_kind": None,
+        "target_name": None,
         "status": "active",
     }
     d = goals._row_to_goal(
@@ -201,6 +216,8 @@ def test_row_to_goal_tuple_and_dict() -> None:
             "destination": None,
             "steps": None,
             "current_step": 0,
+            "target_kind": None,
+            "target_name": None,
             "status": "done",
         }
     )

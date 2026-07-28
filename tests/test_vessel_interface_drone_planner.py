@@ -41,16 +41,28 @@ class TestGoalHasRoute:
         goal = {"target_kind": "coordinate", "target_name": ""}
         assert VesselInterface._goal_has_route(goal) is False
 
-    def test_numeric_destination_dict_is_routable(self) -> None:
+    def test_numeric_destination_alone_is_not_routable(self) -> None:
+        # A bare destination only says *where to walk*, not *what to do* there;
+        # the planner must still fire to assign a concrete gameplay target.
         goal = {"destination": {"x": 100, "z": -40}}
-        assert VesselInterface._goal_has_route(goal) is True
+        assert VesselInterface._goal_has_route(goal) is False
 
     def test_partial_destination_dict_is_not_routable(self) -> None:
         goal = {"destination": {"x": 100}}
         assert VesselInterface._goal_has_route(goal) is False
 
-    def test_flat_destination_is_routable(self) -> None:
+    def test_flat_destination_alone_is_not_routable(self) -> None:
         goal = {"destination_x": 12.0, "destination_z": -8.0}
+        assert VesselInterface._goal_has_route(goal) is False
+
+    def test_target_wins_even_with_destination(self) -> None:
+        # A goal with a real block/entity target is routable regardless of any
+        # destination it also carries.
+        goal = {
+            "target_kind": "block",
+            "target_name": "iron_ore",
+            "destination": {"x": 100, "z": -40},
+        }
         assert VesselInterface._goal_has_route(goal) is True
 
 

@@ -300,10 +300,6 @@ class VesselInterface:
             ]
         except Exception as exc:
             log_debug(f"[vessel_interface] reattach lookup failed: {exc}")
-            return
-
-        if not environments:
-            return
 
         try:
             from core.core_initializer import PLUGIN_REGISTRY
@@ -315,6 +311,73 @@ class VesselInterface:
         if plugin is None or not hasattr(plugin, "connect_world"):
             log_debug("[vessel_interface] reattach: vessel_plugin unavailable")
             return
+
+        # Phase 2 — adopt an already-embodied external body that has NO active
+        # DB session. A world whose external body (e.g. the Minecraft Mineflayer
+        # bridge) stayed logged into the world can outlive its SyntH session:
+        # a genuine long drop, or a transient the connector mis-read, ends the
+        # session while the bridge keeps the body in-world. Without this Synth
+        # is inert forever (no active row → nothing reattaches → beats frozen).
+        # For each ENABLED world not already handled above, cheaply probe the
+        # external body's liveness (read-only, never starts a bridge); if it is
+        # alive and embodied, run ``connect_world`` whose bridge-alive-no-session
+        # branch re-opens the session and restarts the poll loop. Best-effort.
+        adopt_worlds: list[str] = []
+        try:
+            enabled = (
+                plugin._enabled_worlds() if hasattr(plugin, "_enabled_worlds") else []
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            log_debug(
+                f"[vessel_interface] reattach: enabled-worlds lookup failed: {exc}"
+            )
+            enabled = []
+        for world in enabled:
+            if world in environments:
+                continue
+            try:
+                from core.vessel_registry import VESSEL_REGISTRY
+
+                connector = VESSEL_REGISTRY.load_connector(world)
+            except Exception as exc:  # pragma: no cover - defensive
+                log_debug(
+                    f"[vessel_interface] reattach: connector load failed for "
+                    f"'{world}': {exc}"
+                )
+                continue
+            probe = getattr(connector, "probe_external_liveness", None)
+            if probe is None:
+                continue
+            try:
+                if await probe():
+                    adopt_worlds.append(world)
+            except Exception as exc:  # pragma: no cover - defensive
+                log_debug(
+                    f"[vessel_interface] reattach: liveness probe raised for "
+                    f"'{world}': {exc}"
+                )
+
+        if not environments and not adopt_worlds:
+            return
+
+        for environment in adopt_worlds:
+            try:
+                result = await plugin.connect_world(connector_name=environment)
+                if getattr(result, "ok", False) and self._connector_live(environment):
+                    log_info(
+                        f"[vessel_interface] Adopted already-embodied body in "
+                        f"'{environment}' (no active session) after restart"
+                    )
+                else:
+                    detail = getattr(result, "detail", "unknown")
+                    log_debug(
+                        f"[vessel_interface] Adoption of '{environment}' did not "
+                        f"take ({detail})"
+                    )
+            except Exception as exc:
+                log_warning(
+                    f"[vessel_interface] adoption failed for '{environment}': {exc}"
+                )
 
         for environment in environments:
             try:
@@ -1151,15 +1214,18 @@ class VesselInterface:
 
     @staticmethod
     def _goal_has_route(goal: dict[str, Any] | None) -> bool:
-        """True when the goal already carries a concrete waypoint to walk to.
+        """True when the goal names a concrete block/entity **target** to act on.
 
         Purely **structural** (never keyword matching on the free text): a goal
-        is "routable" when it names a block/entity **target** (a closed-enum
-        ``target_kind`` of ``block``/``entity`` with a non-empty
-        ``target_name``) *or* a numeric **destination** the motor tick can steer
-        toward. When both are absent the motor tick can only fall back to the
-        directional march — the situation the out-of-band Drone planner exists
-        to resolve. Fully guarded.
+        is "routable" only when it names a block/entity **target** (a
+        closed-enum ``target_kind`` of ``block``/``entity`` with a non-empty
+        ``target_name``). A bare numeric **destination** is deliberately **not**
+        enough: it only tells the body *where to walk*, not *what to do* when it
+        gets there, so the motor tick would still only march-and-arrive with
+        nothing to mine/use. That is exactly the aimless situation the
+        out-of-band Drone planner exists to resolve — it must therefore still
+        fire for a goal that has only a destination but no gameplay target.
+        Fully guarded.
         """
         if not isinstance(goal, dict):
             return False
@@ -1167,17 +1233,6 @@ class VesselInterface:
             kind = goal.get("target_kind")
             name = goal.get("target_name")
             if kind in ("block", "entity") and isinstance(name, str) and name.strip():
-                return True
-            dest = goal.get("destination")
-            if isinstance(dest, dict):
-                if isinstance(dest.get("x"), (int, float)) and isinstance(
-                    dest.get("z"), (int, float)
-                ):
-                    return True
-            # Flat form some worlds publish alongside the goal.
-            if isinstance(goal.get("destination_x"), (int, float)) and isinstance(
-                goal.get("destination_z"), (int, float)
-            ):
                 return True
         except Exception:
             return False
@@ -1355,12 +1410,13 @@ class VesselInterface:
         now-detailed goal (the user's explicit requirement: the updated goal
         must go back to Synth via will).
 
-        Gated: (1) ``VESSEL_AUTONOMY_ENABLED`` on; (2) ``VESSEL_KNOWLEDGE_ENABLED``
-        on; (3) a session active; (4) the will beat has run at least once;
-        (5) an active goal exists that still has no ``steps``; (6) that goal id
-        has not already been expanded for this world; (7) no expansion already
-        running for this world. Fully guarded — any failure degrades to a no-op
-        and never breaks the scheduler.
+        Gated: (1) ``VESSEL_AUTONOMY_ENABLED`` on; (2) ``VESSEL_GOAL_EXPAND_ENABLED``
+        on (the feature's own master switch); (3) ``VESSEL_KNOWLEDGE_ENABLED``
+        on (the expander consults the knowledge base); (4) a session active;
+        (5) the will beat has run at least once; (6) an active goal exists that
+        still has no ``steps``; (7) that goal id has not already been expanded
+        for this world; (8) no expansion already running for this world. Fully
+        guarded — any failure degrades to a no-op and never breaks the scheduler.
         """
         try:
             from core import vessel_beat
@@ -1374,7 +1430,15 @@ class VesselInterface:
 
         if not vessel_beat.is_autonomy_enabled(_cfg):
             return
-        # Goal expansion is the knowledge-base feature: honour its master switch.
+        # Honour the feature's own master switch (the toggle exposed in the
+        # WebUI as "Goal Plan Expansion (Drone)"). Without this check the toggle
+        # was inert — the expander only ever looked at VESSEL_KNOWLEDGE_ENABLED.
+        try:
+            if not bool(_cfg("VESSEL_GOAL_EXPAND_ENABLED", True)):
+                return
+        except Exception:
+            pass
+        # Goal expansion consults the knowledge base: honour its switch too.
         try:
             if not bool(_cfg("VESSEL_KNOWLEDGE_ENABLED", True)):
                 return

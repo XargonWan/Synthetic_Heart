@@ -309,6 +309,25 @@ class VesselConnectorBase(ABC):
         """Whether the connector currently holds a live world connection."""
         return False
 
+    async def probe_external_liveness(self) -> bool:
+        """Whether an **external body** for this world is already embodied.
+
+        Some worlds keep the actual embodiment in a separate, longer-lived
+        process than SyntH itself — e.g. the Minecraft Mineflayer bridge is a
+        Node subprocess that survives a SyntH restart (and a brief connector
+        drop) while the bot stays logged into the world. In that state the
+        connector instance reports ``is_connected == False`` (it was just
+        loaded and has no live socket), yet the world still holds Synth's body.
+
+        This probe lets the interface's boot-time reattach adopt such an
+        already-embodied body **without** starting anything: it must be a cheap,
+        read-only check of the external body's own liveness (never spawn a
+        bridge, never issue a connect). Default ``False`` — a world with no
+        separate external process has nothing to adopt. Fully fail-safe:
+        implementations must never raise (return ``False`` on any error).
+        """
+        return False
+
     def get_in_world_name(self) -> str | None:
         """Return the name Synth's body carries **inside this world**.
 
