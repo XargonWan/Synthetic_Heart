@@ -1525,6 +1525,10 @@ function changePage(type, newPage) { historyState[type].page = newPage; loadHist
 // Expose to the global scope so the inline onclick="changePage(...)" handlers in
 // renderPagination() can reach it (this file runs inside an IIFE).
 window.changePage = changePage;
+// Same reason: the inline onclick handlers in renderGoalsWorld()/renderGoalCard()
+// call these, so they must be reachable on the global scope.
+window.deleteVesselGoal = deleteVesselGoal;
+window.clearVesselAbandonedGoals = clearVesselAbandonedGoals;
 
 function debounce(func, wait) { let timeout; return function executedFunction(...args) { const later = () => { clearTimeout(timeout); func(...args); }; clearTimeout(timeout); timeout = setTimeout(later, wait); }; }
 
