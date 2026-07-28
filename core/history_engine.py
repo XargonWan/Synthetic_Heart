@@ -332,6 +332,33 @@ def _is_vessel_autonomous_perception(entry: HistoryEntry) -> bool:
     return bool(isinstance(metadata, dict) and metadata.get("vessel_perception"))
 
 
+def _is_vessel_beat_perception(entry: HistoryEntry) -> bool:
+    """Return True for one of Synth's *own* autonomous vessel **beat** turns.
+
+    Will beats and action beats are enqueued as perceptions (so they never
+    evict player chat from the conversational deque), but their persisted text
+    is the *first-person self-instruction prompt* — e.g. "this is a private
+    moment, no one is addressing you, do NOT speak, return no ``say`` action".
+    That framing is meant only for the beat's own solitary cognition turn; if it
+    leaks into a **reactive** player-chat turn's context it directly suppresses
+    the reply (the model obeys "do NOT speak" instead of answering the player).
+
+    Unlike genuine world-grounding perceptions (sightings, movement, damage,
+    status) — which are legitimate ambient context — beat perceptions must never
+    be merged back into a reactive turn. Detection is purely structural: the
+    persisted ``metadata.vessel_event_type`` ends with ``_beat``
+    (``will_beat`` / ``action_beat`` / any future ``*_beat``). Never keyword
+    matching on the text (project rule: multi-language safe).
+    """
+    if not isinstance(entry, dict):
+        return False
+    metadata = entry.get("metadata")
+    if not isinstance(metadata, dict):
+        return False
+    event_type = metadata.get("vessel_event_type")
+    return bool(isinstance(event_type, str) and event_type.endswith("_beat"))
+
+
 def _is_ignored_prompt_history_entry(entry: HistoryEntry) -> bool:
     if not isinstance(entry, dict):
         return False
@@ -627,7 +654,18 @@ class HistoryEngine:
                                 else None
                             )
                             if pbuf:
-                                recent_perceptions = list(pbuf)[-perception_budget:]
+                                # Keep only genuine world-grounding perceptions
+                                # (sightings/movement/damage/status). Exclude
+                                # will/action **beat** turns: their persisted
+                                # text is a solitary self-instruction ("do NOT
+                                # speak, return no say action") that suppresses
+                                # the reply when re-injected into a reactive
+                                # player-chat turn. Structural filter on the
+                                # persisted event type, never keyword matching.
+                                grounding = [
+                                    m for m in pbuf if not _is_vessel_beat_perception(m)
+                                ]
+                                recent_perceptions = grounding[-perception_budget:]
                         except Exception as _pe:
                             log_debug(
                                 f"[history_engine] Could not read vessel perceptions: {_pe}"
