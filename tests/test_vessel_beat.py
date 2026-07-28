@@ -220,6 +220,32 @@ def test_build_will_prompt_is_volition_focused() -> None:
     assert "move toward what you need on its own" in lowered
 
 
+def test_build_will_prompt_pushes_set_goal_when_no_goal() -> None:
+    # Structural branch: with no active goal the will beat must actively push
+    # Synth to author one this turn (not merely permit it) so the goal
+    # expander has an empty-steps goal to fill. Keyword-free: the branch keys
+    # off the structural presence of current_goal, never its text.
+    state = {"extra": {}}  # no current_goal at all
+    prompt = build_will_prompt(state, "minecraft")
+    lowered = prompt.lower()
+    assert "no goal at all" in lowered
+    assert "this is the moment to choose one" in lowered
+    assert "vessel_minecraft_set_goal" in prompt
+    # The discouraging "only call set_goal when you want a *different*
+    # objective" caution belongs to the has-goal branch and must be absent.
+    assert "different* objective" not in prompt
+
+
+def test_build_will_prompt_cautions_set_goal_when_goal_exists() -> None:
+    # With an active goal the will beat must NOT push a fresh set_goal; it
+    # keeps the cautious framing that protects any already-computed steps.
+    prompt = build_will_prompt(_rich_world_state(), "minecraft")
+    assert "different* objective" in prompt
+    assert "do NOT re-state it" in prompt
+    # The no-goal push must be absent here.
+    assert "this is the moment to choose one" not in prompt.lower()
+
+
 def test_build_will_prompt_lists_scan_targets_and_requests_structured_target() -> None:
     # The anti-circling fix: the will beat must enumerate the *exact* block and
     # entity ids present on the live scan and imperatively ask Synth to name

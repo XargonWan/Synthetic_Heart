@@ -150,6 +150,20 @@ def _fmt_affordances(affordances: list[Any]) -> str:
     return "; ".join(lines) if lines else "none"
 
 
+def _has_current_goal(goal: Any) -> bool:
+    """Structural check: does Synth currently hold an active goal?
+
+    True only when ``goal`` is a dict carrying a non-empty ``description`` —
+    the exact criterion :func:`_fmt_goal` uses to decide between rendering the
+    goal and ``none``. This is a pure presence/absence test on the structured
+    field; it never inspects the goal's text for keywords, so the branch stays
+    language-agnostic.
+    """
+    if not isinstance(goal, dict):
+        return False
+    return bool(str(goal.get("description") or "").strip())
+
+
 def _fmt_goal(goal: dict[str, Any] | None) -> str:
     """Render Synth's self-authored current goal (free text), or ``none``.
 
@@ -298,6 +312,7 @@ def build_will_prompt(world_state: Any, world: str) -> str:
     affordances_txt = _fmt_affordances(extra.get("affordances") or [])
     goal_txt = _fmt_goal(extra.get("current_goal"))
     recent_txt = _fmt_items(extra.get("recent_goals") or [], key="description")
+    has_goal = _has_current_goal(extra.get("current_goal"))
 
     prefix = f"vessel_{world}_"
 
@@ -320,13 +335,45 @@ def build_will_prompt(world_state: Any, world: str) -> str:
             f"- Your current goal: {goal_txt}",
             f"- Things you set out to do before: {recent_txt}",
             "",
+        ]
+    )
+    if not has_goal:
+        lines.append(
+            "*** WARNING: YOU HAVE NO ACTIVE GOAL. *** Without a goal your body "
+            "just wanders aimlessly and gets nothing done. You MUST set a goal "
+            f"this turn by calling `{prefix}set_goal` to keep playing with "
+            "purpose. This is the single most important thing to do right now."
+        )
+        lines.append("")
+    if has_goal:
+        lines.append(
             "This is a moment of will, not motion — think about what you *want* "
             "to be doing, in character. This is your world to play however you "
             "like; there is no script and no fixed quest list. Look at your "
             "current goal and the things you set out to do before: does your "
-            "current goal still feel right? If you have no goal, or you feel "
-            "like doing something different now, decide in your own words what "
-            f"you want and set it with `{prefix}set_goal`.",
+            "current goal still feel right? IMPORTANT: only call "
+            f"`{prefix}set_goal` when you genuinely want a *different* "
+            "objective — it replaces your whole plan and throws away any steps "
+            "already worked out for the current one. If your current goal is "
+            "still fine, do NOT re-state it; leave it as it is (or use "
+            f"`{prefix}update_goal` to note progress or re-aim). Only if you "
+            "truly want to change direction, decide in your own words what you "
+            f"want and set it with `{prefix}set_goal`."
+        )
+    else:
+        lines.append(
+            "This is a moment of will, not motion — think about what you *want* "
+            "to be doing, in character. This is your world to play however you "
+            "like; there is no script and no fixed quest list. Right now you "
+            "have no goal at all — this is the moment to choose one. Decide, in "
+            "your own words and in character, what you want to be doing in this "
+            "world, and set it now by calling "
+            f"`{prefix}set_goal` with a free-text description. Do not leave "
+            "yourself aimless: pick something you genuinely want — big or "
+            "small — and commit to it this turn."
+        )
+    lines.extend(
+        [
             "",
             "This is a *private* moment with no one addressing you right now. "
             "Any conversation you can see above already happened and, if it "
@@ -339,20 +386,21 @@ def build_will_prompt(world_state: Any, world: str) -> str:
             "action.",
             "",
             "If what you want is a bigger project that takes several stages "
-            "(for example a full iron armor set, or building a house), break it "
-            "down YOURSELF into an ordered list of concrete sub-steps and pass "
-            f"them as 'steps' to `{prefix}set_goal`. Use your own Minecraft "
-            "knowledge to work out the order (gather → craft tools → mine → "
-            "smelt → craft → wear, and so on) — there is no template and no one "
-            "checks it for you. Look at your inventory above to judge what you "
-            "already have and where you actually are in the plan. When you "
-            f"finish the current step, call `{prefix}update_goal` with "
-            "'advance' set to true to move to the next one; note progress, "
-            "mark the whole goal 'done' when you have truly achieved it, or "
-            "'abandoned' if you change your mind. You are the judge of your own "
-            "progress. You do not need to plan every single movement — once "
-            "your goal and current step are clear your body will move toward "
-            "what you need on its own.",
+            "(for example a full iron armor set, or building a house), just "
+            "state the goal itself in your own words with "
+            f"`{prefix}set_goal` — do NOT try to spell out the ordered "
+            "sub-steps yourself. A separate planning pass will look up the "
+            "right Minecraft order (gather → craft tools → mine → smelt → "
+            "craft → wear, and so on) and fill the concrete steps in for you "
+            "shortly after; you will then see them and can act on them. Leave "
+            "'steps' empty. Look at your inventory above to judge what you "
+            "already have. When you finish a step, call "
+            f"`{prefix}update_goal` with 'advance' set to true to move to the "
+            "next one; note progress, mark the whole goal 'done' when you have "
+            "truly achieved it, or 'abandoned' if you change your mind. You are "
+            "the judge of your own progress. You do not need to plan every "
+            "single movement — once your goal and current step are clear your "
+            "body will move toward what you need on its own.",
             "",
             "One thing to be honest with yourself about: if what you want is "
             "*not here* — you see no trees but you want wood, no animals to "
@@ -549,9 +597,14 @@ def build_action_prompt(world_state: Any, world: str) -> str:
         "(by exact item id), or `{prefix}smelt` to cook/refine;",
         f"- `{prefix}place` to put a block down when you are building;",
         f"- `{prefix}goto` to walk to a spot or a thing you named, when the "
-        "thing you need is out of reach;",
-        f"- `{prefix}say` ONLY if a nearby player is clearly involved in what "
-        "you are doing — otherwise stay quiet and just act.",
+        "thing you need is out of reach.",
+        "",
+        "This is a moment to ACT, not to talk. Do NOT narrate your plan, "
+        "announce your goal, or chat here — return no `say` action even if a "
+        "player is nearby. Any conversation you can see above already happened "
+        "and, if it needed a reply, you gave it in a separate reactive turn; "
+        "when someone speaks to you again you will get another turn to answer. "
+        "For now, just do the one concrete thing.",
         "",
         "Use the exact block/item/entity ids shown above — copy them verbatim, "
         "never invent one. Look at your inventory to judge what you still need "
