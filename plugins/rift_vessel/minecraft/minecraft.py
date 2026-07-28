@@ -78,10 +78,21 @@ _MAX_POLL_FAILURES = 5
 # closes the gap where the Node bridge process stays alive (so ``/events`` keeps
 # succeeding and the poll-failure streak above never fires) but its mineflayer
 # bot was dropped by the server — leaving ``is_connected`` stuck True and Synth
-# believing it is in-world when it is not. The small threshold absorbs the
-# transient login→spawn window where the bridge briefly reports not-yet-embodied
-# before ``markSpawned`` sets it live. Structural boolean check, no keyword logic.
-_MAX_HEALTH_FALSE_STREAK = 3
+# believing it is in-world when it is not.
+#
+# The threshold MUST be generous: the Node bridge auto-reconnects in-process, so
+# the mineflayer bot routinely reports ``connected: false`` for several seconds
+# during ordinary play — the login→spawn handshake, a respawn after death, a
+# dimension/world change, or a momentary server hiccup all blip the flag. A
+# small threshold (the historical 3, i.e. ~3s at ``_POLL_INTERVAL_SEC``) turned
+# those benign transients into a full disconnect: the connector flipped
+# ``is_connected`` False, the interface's grace sweep ended the session with
+# ``connect_failed`` while the bridge was still alive and embodied a moment
+# later, and every autonomy beat froze — Synth looked "switched off". Only a
+# *sustained* absence is a genuine drop, so this is set to ~60s worth of ticks;
+# the bridge's own auto-reconnect settles any shorter blip long before it trips.
+# Structural boolean check, no keyword logic.
+_MAX_HEALTH_FALSE_STREAK = 60
 
 # Loopback host names that mean "this same machine". When Synth runs inside a
 # container these do NOT point at the Docker host (where a "Open to LAN" world
@@ -1106,12 +1117,18 @@ class MinecraftConnector(VesselConnectorBase):
                 return VesselActionResult(
                     ok=False, detail="set_goal requires a free-text description"
                 )
+            # NOTE: `steps` is deliberately NOT threaded from set_goal. The
+            # slow will beat authors goals as free text only; the ordered,
+            # tool-first plan is filled in by the out-of-band Goal-expander
+            # Drone via update_goal (it consults the knowledge base first).
+            # Letting the will beat pass `steps` here would pre-fill a vague
+            # plan and gate the expander out (_goal_needs_expansion -> False),
+            # so the goal would never be expanded. Structural, keyword-free.
             result = await mc_goals.set_goal(
                 description,
                 self._session_id,
                 note=payload.get("note"),
                 destination=await self._resolve_travel_destination(payload),
-                steps=payload.get("steps"),
                 target_kind=payload.get("target_kind"),
                 target_name=payload.get("target_name"),
             )
@@ -2280,6 +2297,21 @@ class MinecraftConnector(VesselConnectorBase):
                     a_key = f"{a.get('kind')}:{a_name}" if a_name else None
                     if a_key is not None and a_key == self._last_reflex_interaction:
                         continue
+                    # Never let the incidental mine reflex destroy a light /
+                    # utility block (torches, lanterns, glowstone, …). Breaking
+                    # a player's torches to "grab scenery" removes the light
+                    # they placed to keep a path lit — pure vandalism. Skip
+                    # such blocks here so the body falls through to travel /
+                    # march instead. Structural (exact block id vs a denylist
+                    # of mcData ids) — never keyword/natural-language matching.
+                    # A block cognition *deliberately* named as its goal target
+                    # is still honoured further below; this only suppresses the
+                    # unasked-for reflex grab.
+                    if (
+                        a.get("kind") == "block"
+                        and a_name in self._REFLEX_NO_MINE_BLOCKS
+                    ):
+                        continue
                     fresh.append(a)
                 target = fresh[0] if fresh else None
                 distance = target.get("distance") if target else None
@@ -2607,6 +2639,40 @@ class MinecraftConnector(VesselConnectorBase):
                 "optional_fields": ["radius", "timeout_ms"],
                 "security_level": "low",
             },
+            "dig_staircase": {
+                "description": (
+                    "Dig your way down while leaving yourself a walkable way "
+                    "back up. Instead of digging straight down (which leaves a "
+                    "pit you cannot climb out of), you carve a descending "
+                    "staircase: each step goes one block down and one block "
+                    "forward, so the same corridor becomes a stair you can walk "
+                    "back up on foot. Give how many steps down you want with "
+                    "'depth'. Use this whenever you need to go underground to "
+                    "reach ores or caves and still be able to return to the "
+                    "surface later. It carves toward the way you are currently "
+                    "facing; pass 'yaw' only if you want to force a direction."
+                ),
+                "required_fields": [],
+                "optional_fields": ["depth", "yaw"],
+                "security_level": "low",
+            },
+            "return_surface": {
+                "description": (
+                    "Climb back up to the surface out of a dry pit or tunnel by "
+                    "pillaring up: you jump and place a block under your feet "
+                    "again and again, rising one block each time, until you "
+                    "reach open sky. Use this when you are stuck underground "
+                    "with no staircase and need to get out. You must be "
+                    "carrying blocks to build with; give 'height' for how far "
+                    "up to climb, or 'target_y' to stop at a specific height. "
+                    "Pass 'item' only if you want to use a particular block as "
+                    "scaffolding. (This is different from swimming up out of "
+                    "water — use it when you are on dry land underground.)"
+                ),
+                "required_fields": [],
+                "optional_fields": ["height", "target_y", "item"],
+                "security_level": "low",
+            },
             "scan": {
                 "description": (
                     "Take a wider, tunable survey of your surroundings than a "
@@ -2638,18 +2704,18 @@ class MinecraftConnector(VesselConnectorBase):
                     "just relax by the water…). Put it in 'description'. This "
                     "becomes your single active goal and guides how you play "
                     "until you finish or change your mind. This is how you play "
-                    "your own game, not a script. If your goal is a bigger "
-                    "project that takes several stages (for example crafting a "
-                    "full iron armor set, or building a house), break it down "
-                    "YOURSELF into an ordered list of concrete sub-steps and "
-                    "pass them in 'steps' (e.g. [\"get wood and make a "
-                    'crafting table", "craft a wooden then stone pickaxe", '
-                    '"mine iron ore", "smelt the iron", "craft the armor '
-                    'pieces", "wear the armor"]). Use your own Minecraft '
-                    "knowledge — there is no template. You will work through "
-                    "the steps one at a time and mark each done with "
-                    "'update_goal' (advance). If what you want is NOT in this "
-                    "area (for example there are no trees here and you want "
+                    "your own game, not a script. Just say what you want in "
+                    "'description' — do NOT try to spell out the ordered "
+                    "sub-steps yourself. If the goal is a bigger project that "
+                    "takes several stages (for example crafting a full iron "
+                    "armor set, or building a house), a separate planning pass "
+                    "will look up the correct Minecraft order (gather the "
+                    "prerequisites, craft the tools, mine, smelt, craft, wear, "
+                    "and so on) and fill the concrete steps in for you shortly "
+                    "after, so you always have the right tools before you need "
+                    "them. You will then work through those steps one at a time "
+                    "and mark each done with 'update_goal' (advance). If what "
+                    "you want is NOT in this "
                     "wood, or you want to reach a different biome), pick a "
                     "place to head toward and give its coordinates in "
                     "'destination_x' and 'destination_z' (from your position "
@@ -2670,7 +2736,6 @@ class MinecraftConnector(VesselConnectorBase):
                 "required_fields": ["description"],
                 "optional_fields": [
                     "note",
-                    "steps",
                     "destination_x",
                     "destination_z",
                     "target_kind",
@@ -2856,6 +2921,31 @@ class MinecraftConnector(VesselConnectorBase):
     @property
     def is_connected(self) -> bool:
         return self._connected
+
+    async def probe_external_liveness(self) -> bool:
+        """Return True if the Node bridge is already alive and embodied.
+
+        Cheap, read-only ``GET /health`` against the bridge address resolved
+        from the saved plugin config — it never starts the bridge, never issues
+        ``/connect``, and never touches ``self._session``/``self._connected``.
+        Lets the interface's boot-time reattach adopt a bridge that stayed
+        logged into the world across a SyntH restart (or a connector drop) so
+        the session can be re-opened and the autonomy beats resume, without
+        spawning anything. Fully fail-safe: any error means "not live".
+        """
+        base_url = self._resolve_base_url({})
+        try:
+            timeout = aiohttp.ClientTimeout(total=_HTTP_TIMEOUT_SEC)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(f"{base_url}/health") as resp:
+                    health = await resp.json()
+        except Exception as exc:
+            log_debug(f"{LOG_PREFIX} liveness probe failed at {base_url}: {exc}")
+            return False
+        if not isinstance(health, dict) or not health.get("ok"):
+            return False
+        env = str(health.get("environment") or "").strip().lower()
+        return bool(health.get("connected")) and (not env or env == ENVIRONMENT)
 
     def get_in_world_name(self) -> str | None:
         """Return the in-world Minecraft username other players use to address
@@ -3098,7 +3188,7 @@ class MinecraftVesselPlugin(PluginBase):
         register_exposed_var(
             "MINECRAFT_SKIN_URL",
             label="Minecraft Skin URL",
-            default="",
+            default="https://www.minecraftskins.com/uploads/skins/2026/07/28/rei-24229347.png",
             value_type=str,
             description=(
                 "Direct web URL to a Minecraft skin texture PNG (e.g. "
