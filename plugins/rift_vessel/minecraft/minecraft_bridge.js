@@ -1019,9 +1019,60 @@ function wireBotEvents(b) {
     });
   });
 
+  // Short-lived record of the raw rendered text of messages that arrived with
+  // ``position === 'chat'`` (genuine player chat). mineflayer fires the
+  // low-level ``messagestr`` event *before* the parsed high-level ``chat``
+  // event for the same packet, so the ``chat`` handler can cross-check here
+  // that the packet was really chat — and not a ``position: 'system'`` message
+  // (op-command feedback, join/leave, plugin broadcasts) that the vanilla chat
+  // matcher mis-decodes into ``(username, message)``. This is the structural
+  // fix for the bug where ``[XargonWan: Teleported Rekku to XargonWan]`` (a
+  // system teleport broadcast) was forwarded as a player ``chat`` event and
+  // flooded the conversational context, evicting the player's real questions.
+  // Position-based (never keyword/format matching); entries expire quickly.
+  const recentChatText = [];
+  const CHAT_TEXT_TTL_MS = 2000;
+  // Whether we have EVER observed a ``position === 'chat'`` message. On servers
+  // where ``messagestr`` never reports a string position we must not silently
+  // drop every ``chat`` event — the probe is then treated as unavailable and
+  // the ``chat`` handler falls back to forwarding (see ``wasChatPosition``).
+  let sawChatPositionEver = false;
+  const rememberChatText = (text) => {
+    const now = Date.now();
+    sawChatPositionEver = true;
+    recentChatText.push({ text: String(text), at: now });
+    while (recentChatText.length && now - recentChatText[0].at > CHAT_TEXT_TTL_MS) {
+      recentChatText.shift();
+    }
+  };
+  const wasChatPosition = (message) => {
+    // Probe unavailable (server never emitted a ``position: 'chat'`` message):
+    // fail open so genuine chat is never lost on an unusual server.
+    if (!sawChatPositionEver) return true;
+    const now = Date.now();
+    const needle = String(message);
+    for (let i = recentChatText.length - 1; i >= 0; i -= 1) {
+      const entry = recentChatText[i];
+      if (now - entry.at > CHAT_TEXT_TTL_MS) continue;
+      // The rendered chat line is ``<username> message``; the parsed ``chat``
+      // event hands us only ``message``. A structural containment check on the
+      // rendered text confirms this packet came in as ``position: 'chat'``.
+      if (entry.text.indexOf(needle) !== -1) return true;
+    }
+    return false;
+  };
+
   b.on('chat', (username, message) => {
     log('chat event:', JSON.stringify({ username, message }));
     if (username === b.username) return;
+    // Only forward genuine player chat. A ``chat`` event whose text never
+    // arrived as a ``position: 'chat'`` message is a system/command broadcast
+    // (e.g. teleport feedback) the vanilla matcher mis-parsed — drop it so it
+    // never pollutes the conversational context. Structural, not keyword-based.
+    if (!wasChatPosition(message)) {
+      log('chat event dropped (not position=chat):', JSON.stringify({ username, message }));
+      return;
+    }
     pushEvent({
       environment: ENVIRONMENT,
       event_type: 'chat',
@@ -1031,13 +1082,14 @@ function wireBotEvents(b) {
     });
   });
 
-  // Diagnostic catch-all: some servers deliver player chat through a custom
+  // Record the raw rendered text of every ``position === 'chat'`` message so
+  // the ``chat`` handler above can confirm a packet was genuine player chat.
+  // Also a diagnostic probe: some servers deliver player chat through a custom
   // formatted system message (chat plugins, LuckPerms prefixes, etc.) that the
-  // high-level 'chat' event does not decode into (username, message). Log the
-  // raw rendered text of every incoming message so we can see WHY 'chat' is not
-  // firing. This is a structural probe (no keyword logic), diagnostic only.
+  // high-level ``chat`` event does not decode into ``(username, message)``.
   b.on('messagestr', (message, position) => {
     log('messagestr:', JSON.stringify({ position, message: String(message).slice(0, 200) }));
+    if (position === 'chat') rememberChatText(message);
   });
 
   b.on('playerJoined', (player) => {
@@ -2014,6 +2066,207 @@ async function runAction(action, payload) {
         wanderHeading = (wanderHeading + Math.PI / 2 + Math.random() * (Math.PI / 2)) % (Math.PI * 2);
       }
       return nav;
+    }
+    case 'dig_staircase': {
+      // Dig a walkable descending staircase so the bot can climb back out on
+      // foot — mineflayer/pathfinder never do this on their own, and a plain
+      // straight-down dig leaves a pit the bot cannot escape. We carve, one
+      // step at a time, a 1-wide 2-tall corridor that drops one block per
+      // forward step: for each step we clear the block AT the next lower
+      // forward cell (feet) and the block ABOVE it (head), then walk onto that
+      // lower step. The result is an inherently walkable ramp: every tread is
+      // exactly one block down and one block forward, so the same corridor
+      // reverses into a climbable stair. Purely direct `bot.dig` on cells
+      // computed from the bot's own position — NO pathfind/collectblock, so it
+      // can never trigger the buried-block OOM (see the 'mine' handler).
+      if (!bot || !bot.entity || !bot.entity.position) {
+        return { ok: false, detail: 'staircase unavailable (no bot position)', data: {} };
+      }
+      const Vec3 = bot.entity.position.constructor;
+      // How many descending steps to carve. Bounded so a runaway request can
+      // never loop forever underground.
+      const steps = Math.min(Math.max(parseInt(payload.depth || '4', 10) || 4, 1), 32);
+      // Heading: an explicit yaw (radians) may be forced; otherwise face the
+      // bot's current look direction, snapped to a cardinal axis so the stair
+      // stays a clean grid corridor rather than a diagonal.
+      let yaw =
+        payload.yaw !== undefined && payload.yaw !== null && payload.yaw !== ''
+          ? parseFloat(payload.yaw)
+          : bot.entity.yaw;
+      if (!Number.isFinite(yaw)) yaw = bot.entity.yaw || 0;
+      // Snap to the nearest cardinal (unit) step on X or Z. In mineflayer yaw,
+      // -sin(yaw) is +X (east) and -cos(yaw) is +Z (south).
+      const fx = -Math.sin(yaw);
+      const fz = -Math.cos(yaw);
+      const stepX = Math.abs(fx) >= Math.abs(fz) ? (fx >= 0 ? 1 : -1) : 0;
+      const stepZ = stepX === 0 ? (fz >= 0 ? 1 : -1) : 0;
+      const before = inventoryTotals();
+      let carved = 0;
+      const startPos = bot.entity.position.clone();
+      try {
+        for (let i = 0; i < steps; i++) {
+          // Recompute from the LIVE feet position each step: after walking down
+          // a tread the reference must follow the bot, not the original start.
+          const feet = bot.entity.position.floored();
+          // Next tread cell: one forward, one down (where the feet will land)
+          // plus the head cell above it so there is 2-tall clearance.
+          const treadFeet = feet.offset(stepX, -1, stepZ);
+          const treadHead = treadFeet.offset(0, 1, 0);
+          for (const cell of [treadHead, treadFeet]) {
+            const blk = bot.blockAt(cell);
+            if (!blk || blk.name === 'air') continue;
+            if (typeof bot.canDigBlock === 'function' && !bot.canDigBlock(blk)) continue;
+            try {
+              if (
+                typeof bot.tool === 'object' &&
+                bot.tool &&
+                typeof bot.tool.equipForBlock === 'function'
+              ) {
+                try {
+                  await bot.tool.equipForBlock(blk, {});
+                } catch (_e) {
+                  /* best-effort tool select */
+                }
+              }
+              await bot.dig(blk);
+            } catch (_digErr) {
+              // Skip a block we could not dig this step; the corridor may still
+              // be traversable, and the next step recomputes from live pos.
+            }
+          }
+          // Step onto the freshly carved tread: nudge toward its centre so
+          // gravity drops the bot one block down-forward. Bounded by a short
+          // control pulse — no pathfind.
+          try {
+            const centre = new Vec3(treadFeet.x + 0.5, treadFeet.y, treadFeet.z + 0.5);
+            await bot.lookAt(centre.offset(0, 0.5, 0), true);
+            bot.setControlState('forward', true);
+            await sleep(450);
+            bot.setControlState('forward', false);
+          } catch (_moveErr) {
+            bot.setControlState('forward', false);
+          }
+          carved++;
+        }
+      } catch (err) {
+        bot.setControlState('forward', false);
+        return { ok: false, detail: String(err && err.message ? err.message : err), data: { carved } };
+      }
+      bot.setControlState('forward', false);
+      const gained = inventoryDelta(before, inventoryTotals());
+      const endPos = bot.entity.position;
+      const descended = Math.max(0, Math.round(startPos.y - endPos.y));
+      pushEvent({
+        environment: ENVIRONMENT,
+        event_type: 'build',
+        summary: `Dug a ${carved}-step staircase down (descended ~${descended} blocks)`,
+        actor: bot.username,
+        data: { steps: carved, descended, gained, start: roundVec(startPos), end: roundVec(endPos) },
+      });
+      return {
+        ok: true,
+        detail: `carved a ${carved}-step walkable staircase (descended ~${descended} blocks)`,
+        data: { steps: carved, descended, gained, end: roundVec(endPos) },
+      };
+    }
+    case 'return_surface': {
+      // Climb back up out of a DRY pit/tunnel by pillar-jumping: repeatedly
+      // place a scaffolding block under the feet while jumping onto it, so the
+      // bot rises one block per iteration until it reaches open sky (or a
+      // target Y). This complements the liquid-only 'surface' verb, which only
+      // works when the head is submerged. Bounded iterations + a per-step
+      // block-count guard mean it can never loop forever. All placement reuses
+      // the same reference-face logic as 'place' via bot.placeBlock — NO
+      // pathfind, so no OOM risk.
+      if (!bot || !bot.entity || !bot.entity.position) {
+        return { ok: false, detail: 'return_surface unavailable (no bot position)', data: {} };
+      }
+      const Vec3 = bot.entity.position.constructor;
+      const maxRise = Math.min(Math.max(parseInt(payload.height || '16', 10) || 16, 1), 128);
+      // Optional absolute target Y; when set we stop once the feet reach it.
+      const targetY =
+        payload.target_y !== undefined && payload.target_y !== null && payload.target_y !== ''
+          ? parseInt(payload.target_y, 10)
+          : null;
+      // Blocks usable as scaffolding: any solid, placeable, non-tool item the
+      // bot is carrying. We prefer common throwaway materials but never match
+      // on meaning — we just try each held item until one places.
+      const preferred = payload.item ? [String(payload.item).trim().toLowerCase()] : [];
+      const held = botInventory();
+      const scaffoldNames = [
+        ...preferred,
+        ...held.map((it) => it.name.toLowerCase()),
+      ].filter((v, i, a) => v && a.indexOf(v) === i);
+      if (!scaffoldNames.length) {
+        return { ok: false, detail: 'no blocks in inventory to pillar up with', data: {} };
+      }
+      // Is there open sky (air) straight above the head for a couple of cells?
+      const skyClear = () => {
+        const feet = bot.entity.position.floored();
+        for (let dy = 2; dy <= 4; dy++) {
+          const blk = bot.blockAt(feet.offset(0, dy, 0));
+          if (blk && blk.name !== 'air') return false;
+        }
+        return true;
+      };
+      const before = inventoryTotals();
+      const startY = bot.entity.position.y;
+      let risen = 0;
+      try {
+        for (let i = 0; i < maxRise; i++) {
+          if (targetY !== null && bot.entity.position.y >= targetY) break;
+          if (targetY === null && skyClear() && i > 0) break;
+          // Jump and, at the top of the arc, drop a block into the cell we just
+          // left so we land on it one block higher.
+          let placed = false;
+          bot.setControlState('jump', true);
+          await sleep(220);
+          for (const name of scaffoldNames) {
+            const stack = bot.inventory.items().find((it) => it.name.toLowerCase() === name);
+            if (!stack) continue;
+            try {
+              await bot.equip(stack, 'hand');
+              const feet = bot.entity.position.floored();
+              const refPos = feet.offset(0, -1, 0);
+              const refBlock = bot.blockAt(refPos.offset(0, -1, 0));
+              if (refBlock && refBlock.name !== 'air') {
+                await bot.placeBlock(refBlock, new Vec3(0, 1, 0));
+                placed = true;
+                break;
+              }
+            } catch (_placeErr) {
+              // Try the next candidate material.
+            }
+          }
+          bot.setControlState('jump', false);
+          await sleep(200);
+          if (!placed) {
+            // Could not place this iteration — stop rather than spin uselessly.
+            break;
+          }
+          risen = Math.max(0, Math.round(bot.entity.position.y - startY));
+        }
+      } catch (err) {
+        bot.setControlState('jump', false);
+        return { ok: false, detail: String(err && err.message ? err.message : err), data: { risen } };
+      }
+      bot.setControlState('jump', false);
+      const used = inventoryDelta(inventoryTotals(), before);
+      const reachedSky = skyClear();
+      pushEvent({
+        environment: ENVIRONMENT,
+        event_type: 'build',
+        summary: `Pillared up ~${risen} blocks toward the surface`,
+        actor: bot.username,
+        data: { risen, reached_sky: reachedSky, used, position: roundVec(bot.entity.position) },
+      });
+      return {
+        ok: true,
+        detail: reachedSky
+          ? `climbed ~${risen} blocks and reached open sky`
+          : `climbed ~${risen} blocks (still enclosed)`,
+        data: { risen, reached_sky: reachedSky, used },
+      };
     }
     case 'craft': {
       // Craft an item by its resolved item name (e.g. "oak_planks", "stick",
