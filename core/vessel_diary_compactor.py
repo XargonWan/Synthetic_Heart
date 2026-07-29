@@ -1,33 +1,38 @@
-"""Rift Vessel diary compactor — chunked, LLM-driven lived-experience summary.
+"""Rift Vessel diary compactor — chunked, LLM-driven end-of-session summary.
 
-At end-of-session the Vessel no longer writes to the real ``ai_diary`` (that
+At end-of-session the Vessel does not write to the real ``ai_diary`` (that
 polluted every non-vessel Fast-Lane prompt with an ever-growing shared daily
-row). Instead the session's buffered lived experience is compacted here, in
-**chunks**, into a single autobiographical entry stored in the dedicated
-``vessel_diary`` table.
+row). Instead the session is compacted here, in **chunks**, into a single entry
+stored in the dedicated ``vessel_diary`` table.
 
-Why chunks? A long embodiment session accumulates hundreds of buffered moments
+Two compaction modes live in this module:
+
+* :func:`compact_activity_recap` — the **operational recap** (the current
+  end-of-session product). It reads the session's rows from
+  ``vessel_activity_log`` and produces a factual, third-person recap of *what
+  happened* — coordinates, quantities, world state, actions taken and their
+  outcomes — with **no** first-person voice, personality or emotion. This is the
+  mode the Rift Vessel Compactor plugin (``plugins/rift_vessel/vessel_compactor``)
+  enqueues when a session reaches the ENDED state.
+* :func:`compact_session` — the **legacy autobiographical** first-person diary,
+  kept for backward compatibility / tests. It is no longer wired into the
+  end-of-session path.
+
+Why chunks? A long embodiment session accumulates hundreds of moments
 (perceptions, actions, sightings). Feeding them all to the LLM in one shot
 overruns the context and fails — exactly the failure this whole change is
 fixing. So we:
 
-1. Split the buffer into chunks (by item-count and char-budget, whichever hits
+1. Split the source into chunks (by item-count and char-budget, whichever hits
    first).
-2. Summarise each chunk into a short first-person "lived experience" partial.
+2. Summarise each chunk into a short partial.
 3. Fold the partials into one coherent entry (recursing if the fold itself is
    still too large).
 
 Everything is best-effort and fail-safe: any LLM error falls back to a
 deterministic plain-text join, so session teardown can never break. This module
 is deliberately free of any Agent-Lane / Drone dependency (Vessel Fast-Lane
-constraint) and runs off the hot path (launched as a background task by the
-session manager).
-
-.. note::
-   Whether — and how — to import these ``vessel_diary`` entries into the real
-   ``ai_diary`` is a deliberate, **unimplemented** decision (see the TODO in
-   :func:`compact_session`). It will be revisited once we can measure how large
-   a well-formed vessel diary actually is.
+constraint) and runs off the hot path.
 """
 
 from __future__ import annotations
@@ -40,8 +45,15 @@ from core.logging_utils import log_debug, log_error, log_info, log_warning
 
 __all__ = [
     "compact_session",
+    "compact_activity_recap",
+    "load_activity_lines",
     "save_vessel_diary",
 ]
+
+# ``reason`` value stamped on the operational recap rows saved to
+# ``vessel_diary`` by :func:`compact_activity_recap`, so the factual recap can be
+# distinguished from any other diary entry sharing the table.
+ACTIVITY_RECAP_REASON = "activity_recap"
 
 # Per-item truncation so one runaway summary cannot dominate a chunk. Mirrors
 # the grillo compactor's 1200-char clamp.
@@ -423,3 +435,272 @@ async def save_vessel_diary(
     except Exception as exc:
         log_error(f"[vessel_diary] failed to save vessel_diary entry: {exc}")
         return None
+
+
+# ---------------------------------------------------------------------------
+# Operational recap (factual, third-person) — the end-of-session product.
+#
+# Distinct scope from the autobiographical diary above: this reads the audit
+# rows in ``vessel_activity_log`` and produces a *factual* recap of what the
+# session actually did (coordinates, quantities, world state, action outcomes),
+# with no first-person voice or personality. It is the mode the Rift Vessel
+# Compactor plugin enqueues when a session reaches the ENDED state.
+# ---------------------------------------------------------------------------
+
+
+def _stringify_metadata(metadata: Any) -> str:
+    """Render an activity-log ``metadata`` value into a compact factual string.
+
+    Only structural, factual key/value pairs are surfaced (coordinates,
+    quantities, ids, state) — never interpreted, never keyword-matched. Nested
+    values are JSON-encoded. Fully fail-safe: any error yields an empty string.
+    """
+    if metadata is None:
+        return ""
+    if isinstance(metadata, (bytes, bytearray)):
+        try:
+            metadata = metadata.decode("utf-8", errors="replace")
+        except Exception:
+            return ""
+    if isinstance(metadata, str):
+        stripped = metadata.strip()
+        if not stripped:
+            return ""
+        try:
+            import json as _json
+
+            metadata = _json.loads(stripped)
+        except Exception:
+            return stripped
+    if isinstance(metadata, dict):
+        parts: list[str] = []
+        for key, value in metadata.items():
+            key_s = str(key).strip()
+            if not key_s:
+                continue
+            if isinstance(value, (dict, list)):
+                try:
+                    import json as _json
+
+                    value_s = _json.dumps(value, ensure_ascii=False, sort_keys=True)
+                except Exception:
+                    value_s = str(value)
+            else:
+                value_s = str(value)
+            value_s = value_s.strip()
+            if not value_s:
+                continue
+            parts.append(f"{key_s}={value_s}")
+        return " ".join(parts)
+    return str(metadata).strip()
+
+
+def _activity_row_to_line(row: dict[str, Any]) -> str:
+    """Render one ``vessel_activity_log`` row into a compact factual line.
+
+    Format: ``[event_type] summary | key=value key=value`` — the human-readable
+    summary plus the structural metadata (coordinates/quantities/state). No
+    interpretation, no keyword matching. Truncated to ``_ITEM_MAX_CHARS``.
+    """
+    event_type = str(row.get("event_type") or "").strip()
+    summary = str(row.get("summary") or "").strip()
+    meta = _stringify_metadata(row.get("metadata"))
+    head = f"[{event_type}] {summary}" if event_type else summary
+    line = f"{head} | {meta}" if meta else head
+    line = line.strip()
+    if len(line) > _ITEM_MAX_CHARS:
+        line = line[:_ITEM_MAX_CHARS] + "…"
+    return line
+
+
+async def load_activity_lines(session_id: str) -> list[str]:
+    """Load a session's ``vessel_activity_log`` rows as factual text lines.
+
+    Returns the rows for ``session_id`` in chronological order, each rendered by
+    :func:`_activity_row_to_line`. Empty (no summary and no metadata) lines are
+    skipped. Fully fail-safe — any DB error yields an empty list.
+    """
+    if not session_id:
+        return []
+    lines: list[str] = []
+    try:
+        async with get_conn_ctx() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT event_type, summary, metadata, created_at "
+                    "FROM vessel_activity_log WHERE session_id = %s "
+                    "ORDER BY created_at ASC, id ASC",
+                    (session_id,),
+                )
+                rows = await cur.fetchall()
+                columns = [c[0] for c in (cur.description or [])]
+    except Exception as exc:
+        log_error(
+            f"[vessel_recap] failed to read vessel_activity_log for {session_id}: {exc}"
+        )
+        return []
+    for raw in rows or []:
+        if isinstance(raw, dict):
+            row = raw
+        else:
+            row = dict(zip(columns, raw))
+        line = _activity_row_to_line(row)
+        if line:
+            lines.append(line)
+    return lines
+
+
+def _build_recap_chunk_prompt(
+    environment: str,
+    lines: list[str],
+    part_no: int,
+    part_total: int,
+) -> dict[str, Any]:
+    """Build the prompt to summarise ONE chunk of activity into a factual partial.
+
+    Deliberately persona-free, third-person and operational: it asks for facts
+    (positions, quantities, state, actions and their outcomes), never a
+    first-person narrative. The chunk is delivered as structured payload data,
+    not interpolated free text, so no phrase matching is involved.
+    """
+    instructions = (
+        f"Below is part {part_no} of {part_total} of the operational activity "
+        f"log of a single embodiment session in the world '{environment}'. "
+        "Write a SHORT, FACTUAL, third-person recap of this part: what actions "
+        "were taken and their outcomes, plus concrete state — positions, "
+        "quantities, resources, health, notable entities. Report facts only. Do "
+        "NOT use first person, do NOT add personality, emotion, or narrative. Do "
+        "NOT invent anything not present in the log. Keep it terse.\n"
+        'Return ONLY a JSON object: {"partial": "<factual recap>"}.'
+    )
+    return {
+        "input": {
+            "type": "vessel_recap_chunk",
+            "payload": {"environment": environment, "activity": lines},
+        },
+        "context": {},
+        "instructions": instructions,
+    }
+
+
+def _build_recap_fold_prompt(
+    environment: str,
+    partials: list[str],
+    reason: str,
+) -> dict[str, Any]:
+    """Build the prompt to fold factual partials into one operational recap."""
+    instructions = (
+        "Below are several factual, third-person fragments recapping, in order, "
+        f"a single embodiment session in the world '{environment}' (the session "
+        f"ended: {reason}). Merge them into ONE concise, FACTUAL, third-person "
+        "operational recap of the whole session — actions taken and outcomes, "
+        "final state, resources gained/lost, and any unresolved goal. Report "
+        "facts only. Do NOT use first person, personality, emotion, or "
+        "narrative. Do NOT invent anything beyond the fragments.\n"
+        'Return ONLY a JSON object: {"entry": "<factual operational recap>"}.'
+    )
+    return {
+        "input": {
+            "type": "vessel_recap_fold",
+            "payload": {"environment": environment, "fragments": partials},
+        },
+        "context": {},
+        "instructions": instructions,
+    }
+
+
+async def _fold_recap_partials(
+    engine: Any,
+    environment: str,
+    partials: list[str],
+    reason: str,
+    chunk_chars: int,
+    depth: int = 0,
+) -> str:
+    """Fold factual partials into one recap, recursing if still oversized."""
+    if not partials:
+        return ""
+    if len(partials) == 1:
+        return partials[0]
+
+    joined_len = sum(len(p) for p in partials)
+    if joined_len > chunk_chars and depth < _MAX_FOLD_DEPTH:
+        group_partials = _chunk_lines(partials, len(partials), chunk_chars)
+        reduced: list[str] = []
+        for group in group_partials:
+            if len(group) == 1:
+                reduced.append(group[0])
+                continue
+            prompt = _build_recap_fold_prompt(environment, group, reason)
+            folded = await _generate_json(engine, prompt, "entry")
+            reduced.append(folded if folded else "\n".join(group))
+        return await _fold_recap_partials(
+            engine, environment, reduced, reason, chunk_chars, depth + 1
+        )
+
+    prompt = _build_recap_fold_prompt(environment, partials, reason)
+    folded = await _generate_json(engine, prompt, "entry")
+    return folded if folded else "\n\n".join(partials)
+
+
+def _recap_fallback(environment: str, lines: list[str], reason: str) -> str:
+    """Deterministic plain-text recap used when the LLM is unavailable."""
+    body = "\n".join(f"- {line}" for line in lines)
+    return f"Operational recap of {environment} (session ended: {reason}).\n{body}"
+
+
+async def compact_activity_recap(
+    session_id: str,
+    environment: str,
+    interface_path: str | None,
+    reason: str,
+) -> int | None:
+    """Compact a session's ``vessel_activity_log`` into one operational recap.
+
+    Reads the session's audit rows, summarises them in chunks into a factual,
+    third-person recap (no first person / personality), folds the partials into
+    one entry and saves it to ``vessel_diary`` with
+    ``reason = ACTIVITY_RECAP_REASON``. Returns the new ``vessel_diary`` id, or
+    ``None`` if there was nothing to recap. Never raises — on any LLM failure it
+    falls back to a deterministic plain-text join.
+    """
+    lines = await load_activity_lines(session_id)
+    if not lines:
+        log_debug(f"[vessel_recap] no activity to recap for session {session_id}")
+        return None
+
+    chunk_items, chunk_chars = _resolve_chunk_config()
+    chunks = _chunk_lines(lines, chunk_items, chunk_chars)
+
+    engine = await _resolve_engine()
+    if engine is None:
+        log_warning(
+            "[vessel_recap] no Cortex engine available; using plain-text fallback"
+        )
+        summary = _recap_fallback(environment, lines, reason)
+    else:
+        partials: list[str] = []
+        part_total = len(chunks)
+        for idx, chunk in enumerate(chunks, start=1):
+            prompt = _build_recap_chunk_prompt(environment, chunk, idx, part_total)
+            partial = await _generate_json(engine, prompt, "partial")
+            partials.append(partial if partial else "\n".join(chunk))
+        summary = await _fold_recap_partials(
+            engine, environment, partials, reason, chunk_chars
+        )
+        if not summary:
+            summary = _recap_fallback(environment, lines, reason)
+
+    entry_id = await save_vessel_diary(
+        session_id=session_id,
+        environment=environment,
+        interface_path=interface_path,
+        summary=summary,
+        moments_count=len(lines),
+        reason=ACTIVITY_RECAP_REASON,
+    )
+    log_info(
+        f"[vessel_recap] compacted session {session_id} "
+        f"({len(lines)} activity rows) into vessel_diary #{entry_id}"
+    )
+    return entry_id

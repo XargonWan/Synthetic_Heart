@@ -66,10 +66,38 @@ class VesselSessionManager:
         # :meth:`has_active_session` (see that docstring). ``None`` until the
         # interface starts; the probe must be cheap, synchronous and never raise.
         self._liveness_probe: Callable[[], bool] | None = None
+        # Optional end-of-session compaction handler, registered by the Rift
+        # Vessel Compactor plugin (``plugins/rift_vessel/vessel_compactor``) via
+        # :meth:`set_compaction_handler`. When a session reaches the ENDED state
+        # (see :meth:`end_session`) we hand the ended-session facts to this
+        # handler instead of compacting inline, so the plugin can enqueue a
+        # low-priority operational recap on its own off-chain worker. Kept as a
+        # registration hook — this ``core`` module never imports the plugin. The
+        # handler is a callable ``(session_id, environment, interface_path,
+        # reason) -> None`` and must never raise. ``None`` until the plugin
+        # starts, in which case :meth:`end_session` falls back to the legacy
+        # inline autobiographical compaction so teardown still records something.
+        self._compaction_handler: Callable[[str, str, str | None, str], None] | None = (
+            None
+        )
         # Strong references to in-flight background compaction tasks, so the
         # event loop does not garbage-collect them before they finish. Each task
         # removes itself via a done-callback (see :meth:`_launch_compaction`).
         self._compaction_tasks: set[asyncio.Task[None]] = set()
+
+    def set_compaction_handler(
+        self, handler: Callable[[str, str, str | None, str], None] | None
+    ) -> None:
+        """Register (or clear) the end-of-session compaction handler.
+
+        Called once by the Rift Vessel Compactor plugin on startup. The handler
+        receives ``(session_id, environment, interface_path, reason)`` when a
+        session reaches the ENDED state and is expected to enqueue an operational
+        recap on its own off-chain worker (it must return immediately and never
+        raise). Passing ``None`` clears it (e.g. on plugin teardown), reverting
+        :meth:`end_session` to the legacy inline compaction.
+        """
+        self._compaction_handler = handler
 
     def set_liveness_probe(self, probe: Callable[[], bool] | None) -> None:
         """Register (or clear) the connector-liveness probe.
@@ -269,13 +297,29 @@ class VesselSessionManager:
         interface_path = row.get("interface_path")
         buffer = _load_buffer(row.get("experience_buffer"))
 
-        # The lived experience is NO LONGER written to the real ``ai_diary`` —
-        # that concatenated into a single shared daily row and polluted every
-        # non-vessel Fast-Lane prompt. Instead we compact the buffer (in chunks,
-        # off the hot path) into the dedicated ``vessel_diary`` table. The
-        # ``diary_entry_id`` link therefore stays NULL. Launched as a background
-        # task so end_session returns fast (teardown must not block on the LLM).
-        if buffer:
+        # End-of-session compaction. This is the ENDED state (a true disconnect,
+        # logout or cooldown close) — the only point a session is compacted.
+        #
+        # Preferred path: hand the ended-session facts to the Rift Vessel
+        # Compactor plugin's registered handler, which enqueues a low-priority,
+        # off-chain *operational recap* built from ``vessel_activity_log`` (the
+        # current end-of-session product). The handler returns immediately.
+        #
+        # Fallback path (no plugin registered): the legacy inline
+        # autobiographical compaction of the experience buffer, so teardown
+        # still records something. In neither case do we touch the real
+        # ``ai_diary`` (that polluted every non-vessel Fast-Lane prompt), so the
+        # ``diary_entry_id`` link stays NULL.
+        handler = self._compaction_handler
+        if handler is not None:
+            try:
+                handler(session_id, environment, interface_path, reason)
+            except Exception as exc:
+                log_error(
+                    f"[vessel_session] compaction handler failed for "
+                    f"{session_id}: {exc}"
+                )
+        elif buffer:
             self._launch_compaction(
                 session_id=session_id,
                 environment=environment,
