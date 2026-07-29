@@ -18,6 +18,7 @@ from typing import Any
 
 from core.vessel_beat import (
     build_action_prompt,
+    build_damage_appraisal_prompt,
     build_decision_prompt,
     build_reflection_prompt,
     build_will_prompt,
@@ -488,6 +489,85 @@ def test_knowledge_block_absent_when_no_knowledge() -> None:
     # No extra["knowledge"] → the whole block is skipped, keeping the beat lean.
     prompt = build_will_prompt(_rich_world_state(), "minecraft")
     assert "Game knowledge" not in prompt
+
+
+# ---------------------------------------------------------------------------
+# build_damage_appraisal_prompt — post-damage cognitive appraisal
+# ---------------------------------------------------------------------------
+
+
+def _hurt_world_state(**over: Any) -> dict[str, Any]:
+    state = _rich_world_state()
+    state["health"] = 12.0
+    state["extra"]["damage_taken"] = 4.0
+    state["extra"]["has_ranged_weapon"] = False
+    state["extra"]["ranged_ammo"] = 0
+    state["extra"]["best_melee_damage"] = 6.0
+    state["extra"].update(over)
+    return state
+
+
+def test_appraisal_combat_framing_lists_attack_verb() -> None:
+    prompt = build_damage_appraisal_prompt(_hurt_world_state(), "minecraft")
+    # Combat framing when the source is not a player.
+    assert "hostile creature hurt you" in prompt
+    assert "vessel_minecraft_attack" in prompt
+    # Damage magnitude surfaced verbatim.
+    assert "about 4 damage" in prompt
+
+
+def test_appraisal_combat_framing_offers_shoot_when_ranged_ready() -> None:
+    prompt = build_damage_appraisal_prompt(
+        _hurt_world_state(has_ranged_weapon=True, ranged_ammo=9), "minecraft"
+    )
+    assert "vessel_minecraft_shoot" in prompt
+    assert "9 arrows" in prompt
+    assert "Ranged weapon ready: yes" in prompt
+
+
+def test_appraisal_combat_framing_no_shoot_when_unarmed_ranged() -> None:
+    prompt = build_damage_appraisal_prompt(_hurt_world_state(), "minecraft")
+    assert "no ranged option" in prompt
+    assert "Ranged weapon ready: no" in prompt
+
+
+def test_appraisal_social_framing_when_player_struck() -> None:
+    prompt = build_damage_appraisal_prompt(
+        _hurt_world_state(damage_from_player=True), "minecraft"
+    )
+    # Social framing: a person hit you — do not reflexively swing back.
+    assert "person* struck you" in prompt
+    assert "Do NOT reflexively swing back" in prompt
+    assert "vessel_minecraft_say" in prompt
+
+
+def test_appraisal_bare_hands_when_no_weapon() -> None:
+    prompt = build_damage_appraisal_prompt(
+        _hurt_world_state(best_melee_damage=0), "minecraft"
+    )
+    assert "bare hands" in prompt
+
+
+def test_appraisal_some_damage_when_magnitude_unknown() -> None:
+    # Non-numeric damage magnitude falls back to "some".
+    prompt = build_damage_appraisal_prompt(
+        _hurt_world_state(damage_taken=None), "minecraft"
+    )
+    assert "about some damage" in prompt
+
+
+def test_appraisal_renders_knowledge_block() -> None:
+    state = _hurt_world_state()
+    state["extra"]["knowledge"] = [
+        {
+            "title": "Skeletons",
+            "text": "Skeletons shoot arrows from range.",
+            "url": "https://example/w/Skeleton",
+        }
+    ]
+    prompt = build_damage_appraisal_prompt(state, "minecraft")
+    assert "Game knowledge" in prompt
+    assert "Skeletons:" in prompt
 
 
 def test_knowledge_block_skipped_when_entries_have_no_text() -> None:

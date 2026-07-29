@@ -532,12 +532,65 @@ config_registry.get_value(
 )
 config_registry.get_value(
     "VESSEL_SP_FIGHT_MAX_FAILS",
-    3,
+    8,
     value_type=int,
     label="Self-Preservation: Max Fight Attempts",
     description=(
         "How many failed attack attempts against the same hostile before the "
-        "reflex escalates from fighting to fleeing."
+        "reflex escalates from fighting to fleeing. Escalation is primarily "
+        "health-driven (Synth breaks off when health falls to the flee "
+        "threshold); this fail counter is only the secondary safety net for a "
+        "target that stays out of reach, so the default is generous (8) to let "
+        "Synth actually commit to a fight rather than give up after a couple of "
+        "missed swings."
+    ),
+    group="plugins",
+    component="vessel_plugin",
+    advanced=True,
+)
+config_registry.get_value(
+    "VESSEL_SP_USE_RANGED",
+    True,
+    value_type=bool,
+    label="Self-Preservation: Use Ranged Weapon",
+    description=(
+        "When enabled, Synth evaluates using a ranged weapon (bow/crossbow) it "
+        "is carrying — provided it has ammunition — against a hostile that is "
+        "still at range, instead of only closing in for melee. It closes in and "
+        "switches to melee once the target is near. Disable to always fight in "
+        "melee."
+    ),
+    group="plugins",
+    component="vessel_plugin",
+    advanced=True,
+)
+config_registry.get_value(
+    "VESSEL_SP_RANGED_MIN_DIST",
+    5.0,
+    value_type=float,
+    label="Self-Preservation: Ranged Engagement Distance (blocks)",
+    description=(
+        "Minimum distance in blocks at or beyond which the reflex prefers a "
+        "ranged shot (when a bow/crossbow with ammo is carried and ranged use "
+        "is enabled). Below this distance Synth closes in and fights in melee "
+        "with its best weapon. Lower makes Synth prefer melee sooner."
+    ),
+    group="plugins",
+    component="vessel_plugin",
+    advanced=True,
+)
+config_registry.get_value(
+    "VESSEL_SP_APPRAISAL_ENABLED",
+    True,
+    value_type=bool,
+    label="Self-Preservation: Post-Damage Appraisal",
+    description=(
+        "When enabled, taking damage triggers a single elevated cognition turn "
+        "(on top of the fast mechanical survival reflex) in which Synth decides "
+        "how to respond in character — press the attack with its best weapon, "
+        "loose a ranged shot, break off and heal, or respond socially if a "
+        "person struck it rather than reflexively swinging back. Disable to rely "
+        "on the mechanical reflex alone."
     ),
     group="plugins",
     component="vessel_plugin",

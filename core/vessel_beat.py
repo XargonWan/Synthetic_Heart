@@ -756,6 +756,126 @@ def build_action_prompt(world_state: Any, world: str) -> str:
     return "\n".join(lines)
 
 
+def build_damage_appraisal_prompt(world_state: Any, world: str) -> str:
+    """Build the **post-damage appraisal** prompt from a ``WorldState``.
+
+    Fired reactively (at an elevated priority) right after Synth *took* damage.
+    The fast survival reflex already reacted mechanically (fought back, fled,
+    surfaced…); this turn is the *cognitive* appraisal of "I just got hurt —
+    what do I actually want to do about it?". It is Synth's chance to make a
+    deliberate combat choice — press the attack with its best weapon, switch to
+    a ranged shot, disengage and heal, or (if a *player* struck it) respond
+    socially rather than reflexively swinging back.
+
+    Routing between a **combat** framing and a **social** framing is decided by
+    the caller purely from structural metadata (the damage source kind), never
+    from message text — this function only renders whichever framing it is
+    told. When ``extra["damage_from_player"]`` is truthy the prompt leans
+    social (a person hit you — decide how to respond, do not reflexively
+    attack); otherwise it leans combat (a hostile creature hurt you — fight
+    smart).
+
+    Pure and keyword-free: it surfaces only the structured combat snapshot
+    (health, the damage magnitude, nearby aggressors, ranged readiness, best
+    melee damage) and lets Synth choose. The verbs (``vessel_<world>_*``) are
+    injected by the normal action machinery.
+
+    Args:
+        world_state: A ``WorldState`` dataclass or an equivalent dict.
+        world:       The connected world name (e.g. ``"minecraft"``).
+
+    Returns:
+        A ready-to-enqueue prompt string.
+    """
+    ws = world_state_to_dict(world_state)
+    extra = ws["extra"]
+
+    health = ws["health"]
+    health_txt = f"{float(health):.0f}" if isinstance(health, (int, float)) else "?"
+    position_txt = _fmt_position(ws["position"])
+
+    damage = extra.get("damage_taken")
+    damage_txt = f"{float(damage):.0f}" if isinstance(damage, (int, float)) else "some"
+
+    entities_txt = _fmt_items(extra.get("entities") or [])
+    inventory_txt = _fmt_items(extra.get("inventory") or [])
+    affordances_txt = _fmt_affordances(extra.get("affordances") or [])
+
+    has_ranged = bool(extra.get("has_ranged_weapon"))
+    ranged_ammo = extra.get("ranged_ammo")
+    ammo_txt = str(ranged_ammo) if isinstance(ranged_ammo, (int, float)) else "?"
+    best_melee = extra.get("best_melee_damage")
+    melee_txt = (
+        f"{float(best_melee):.0f}"
+        if isinstance(best_melee, (int, float)) and best_melee
+        else "bare hands"
+    )
+    from_player = bool(extra.get("damage_from_player"))
+
+    prefix = f"vessel_{world}_"
+
+    lines = [
+        f"[Embodiment — you were just HURT in the {world} world. Take stock.]",
+        "",
+        "What just happened:",
+        f"- You took about {damage_txt} damage.",
+        f"- Health now: {health_txt}",
+        f"- Position: {position_txt}",
+        f"- Around you: {entities_txt}",
+        f"- Things you could interact with: {affordances_txt}",
+        f"- Inventory: {inventory_txt}",
+        f"- Best melee weapon damage you carry: {melee_txt}",
+        (
+            f"- Ranged weapon ready: yes ({ammo_txt} arrows)"
+            if has_ranged
+            else "- Ranged weapon ready: no"
+        ),
+        "",
+    ]
+
+    if from_player:
+        lines.extend(
+            [
+                "A *person* struck you — this is a social situation, not just a "
+                "fight. Do NOT reflexively swing back. Decide, in character, "
+                "how you feel and want to respond: you might speak to them "
+                f"(`{prefix}say`), warn them, forgive it, walk away, or — only "
+                "if you genuinely choose to — defend yourself. Let your persona "
+                "and mood drive the choice; a person is not a monster.",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                "A hostile creature hurt you. Your instincts already reacted; "
+                "this is your moment to fight *smart*, not just flail. Decide "
+                "deliberately what to do next:",
+                f"- Press the attack with your best weapon (`{prefix}attack`) "
+                "if the enemy is close and you can win the trade;",
+                (
+                    f"- Loose a shot (`{prefix}shoot`) if the enemy is at a "
+                    "distance and you have a bow/crossbow with arrows ready "
+                    f"(you do — {ammo_txt} arrows);"
+                    if has_ranged
+                    else "- You have no ranged option right now, so close in "
+                    "and melee or disengage;"
+                ),
+                "- Break off and heal/retreat if your health is low and the "
+                "trade is not worth it.",
+                "",
+                "Choose based on the numbers above (your health, how far the "
+                "enemy is, whether you can out-damage it), not on habit. "
+                "Survival first, but do not run from a fight you can win.",
+            ]
+        )
+
+    # Curated game-rule facts (reference only), selected structurally by the
+    # connector into extra["knowledge"] — e.g. which mobs shoot from range.
+    lines.extend(_fmt_knowledge(extra.get("knowledge")))
+
+    return "\n".join(lines)
+
+
 def is_autonomy_enabled(config_get: Any) -> bool:
     """Return whether autonomous play is enabled.
 

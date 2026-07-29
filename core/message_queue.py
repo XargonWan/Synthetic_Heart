@@ -808,6 +808,13 @@ async def enqueue(
         # player chat but below any real emergency/urgent notification — and to
         # prune stale autonomous beats so the reflection turn runs unobstructed.
         "vessel_reflection": bool(getattr(message, "_vessel_reflection", False)),
+        # Structural marker: a Vessel post-damage appraisal turn (set by the
+        # vessel interface right after Synth took damage). Ranked at
+        # PRIORITY_URGENT so the "I was just hurt — what do I do?" cognition turn
+        # jumps ahead of ordinary autonomous play and in-world chat; the fast
+        # survival reflex already reacted mechanically, this is the deliberate
+        # combat/social appraisal on top. Prunes stale autonomous beats too.
+        "vessel_appraisal": bool(getattr(message, "_vessel_appraisal", False)),
     }
 
     global _counter
@@ -831,6 +838,19 @@ async def enqueue(
     # failure, leaves enqueue behaviour unchanged.
     if priority:
         priority_val = PRIORITY_URGENT
+    elif interface == "vessel" and item.get("vessel_appraisal"):
+        # Synth just took damage. The fast survival reflex already reacted; this
+        # is the deliberate appraisal turn ("I was hurt — fight smart, disengage,
+        # or respond socially if a person struck me?"). Rank it URGENT so it is
+        # consumed ahead of ordinary autonomous play and in-world chat, and prune
+        # the older autonomous beats for this world so it runs unobstructed
+        # (structural + world scope, guarded; player chats and ``no_compact``
+        # items are preserved).
+        priority_val = PRIORITY_URGENT
+        try:
+            _supersede_pending_vessel_beats(chat_id)
+        except Exception as _apr_exc:  # pragma: no cover - defensive
+            log_debug(f"[QUEUE] Vessel appraisal prune skipped: {_apr_exc}")
     elif interface == "vessel" and item.get("vessel_reflection"):
         # Synth deliberately stopped to think about its goal. This ranks ABOVE
         # ordinary in-world player chat (HIGH) yet below any urgent/emergency

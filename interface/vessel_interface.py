@@ -128,6 +128,14 @@ class VesselInterface:
         self._reflecting: bool = False
         self._reflecting_until: float = 0.0
         self._last_reflection_at: float = 0.0
+        # Post-damage appraisal bookkeeping. When Synth takes damage the
+        # connector surfaces a positive ``extra["damage_taken"]`` delta for that
+        # one tick. The scheduler then fires a single elevated (PRIORITY_URGENT)
+        # cognition turn — "I was just hurt, what do I do?" — on top of the fast
+        # survival reflex. ``_last_appraisal_at`` is an anti-thrash floor so a
+        # sustained damage stream (e.g. lava) does not enqueue an appraisal on
+        # every tick. Monotonic clock; structural, never keyword logic.
+        self._last_appraisal_at: float = 0.0
         # Disconnect-grace bookkeeping: environment -> monotonic timestamp when
         # its connector was first observed no longer ``is_connected`` while a
         # session was still active. Once the grace window elapses the session is
@@ -940,7 +948,14 @@ class VesselInterface:
             # in-world player chat while yielding to any real emergency. Purely
             # structural (event kind), never keyword text.
             is_reflection = event_type == "reflection"
-            no_compact = is_player_chat or is_reflection
+            # A damage-appraisal turn is the deliberate "I was just hurt — what
+            # do I do?" cognition turn fired right after Synth took damage. It
+            # must run standalone (never coalesced) and, via the queue's
+            # ``vessel_appraisal`` band, jump ahead of ordinary autonomous play
+            # and in-world chat (PRIORITY_URGENT). Structural (event kind), never
+            # keyword text.
+            is_appraisal = event_type == "damage_appraisal"
+            no_compact = is_player_chat or is_reflection or is_appraisal
 
             wrapped = SimpleNamespace(
                 message_id=None,
@@ -967,6 +982,12 @@ class VesselInterface:
                 # this world so it runs unobstructed. Set only for the reflection
                 # perception; everything else leaves it False.
                 _vessel_reflection=is_reflection,
+                # Structural signal for the queue: a post-damage appraisal turn
+                # ranks at PRIORITY_URGENT — ahead of ordinary autonomous play
+                # and in-world chat — and prunes the older autonomous beats for
+                # this world so it runs unobstructed. Set only for the
+                # damage-appraisal perception; everything else leaves it False.
+                _vessel_appraisal=is_appraisal,
                 chat=SimpleNamespace(
                     id=interface_path,
                     type="vessel",
@@ -1046,6 +1067,16 @@ class VesselInterface:
                 # objective, stop and dedicate one elevated turn to sorting out
                 # the goal. While a pause is in flight the will/action beats are
                 # held off inside their own gates (the motor tick keeps moving).
+                # Post-damage appraisal FIRST: if Synth just took damage, fire
+                # one elevated (URGENT) cognition turn to decide how to respond
+                # (fight smart / disengage / respond socially). The fast survival
+                # reflex already reacted mechanically on the motor tick; this is
+                # the deliberate combat/social judgement on top. It must run
+                # first because the ``extra["damage_taken"]`` delta is consumed
+                # by the *first* ``get_world_state`` read of the tick (the read
+                # advances the connector's ``_last_health`` baseline), so any
+                # earlier beat that reads the world state would clear it.
+                await self._maybe_run_damage_appraisal()
                 await self._maybe_run_reflection()
                 # Volition (may set a fresh goal), then motorics acts on it.
                 await self._maybe_run_will_beat()
@@ -1352,6 +1383,103 @@ class VesselInterface:
             summary=prompt,
             environment=world,
             event_type="action_beat",
+        )
+
+    async def _maybe_run_damage_appraisal(self) -> None:
+        """Enqueue a **post-damage appraisal** cognition turn when Synth is hurt.
+
+        The fast survival reflex (``MinecraftConnector._survival_threat`` on the
+        motor tick) already reacts *mechanically* to danger — fighting back,
+        fleeing, surfacing. This adds the deliberate *appraisal* on top: right
+        after Synth takes damage, one elevated (:data:`PRIORITY_URGENT`)
+        cognition turn asks "I was just hurt — do I press the attack with my
+        best weapon, loose a ranged shot, break off and heal, or (if a *person*
+        struck me) respond in character rather than reflexively swinging back?".
+
+        Detection is purely **structural**: the connector surfaces a positive
+        ``extra["damage_taken"]`` delta on the single tick the health bar
+        dropped (and, when known, ``extra["damage_from_player"]`` for the
+        attacker kind). No keyword logic. Fully guarded so a failure never
+        breaks the scheduler.
+
+        Gated: (1) ``VESSEL_AUTONOMY_ENABLED`` on (autonomous play must be
+        enabled for Synth to act on its own); (2) ``VESSEL_SP_APPRAISAL_ENABLED``
+        on; (3) a session active; (4) a positive ``damage_taken`` delta this
+        tick; (5) an anti-thrash floor (``VESSEL_WILL_INTERVAL_SEC`` reused as a
+        minimum spacing) so a sustained damage stream (lava/drowning) fires at
+        most one appraisal per window. Runs on the Fast Lane — no Agent Lane, no
+        Drone, no diary.
+        """
+        try:
+            from core import vessel_beat
+        except Exception:
+            return
+
+        def _cfg(key: str, default: Any) -> Any:
+            return config_registry.get_value(
+                key, default, group="vessel", component="vessel"
+            )
+
+        if not vessel_beat.is_autonomy_enabled(_cfg):
+            return
+        # Gate on the self-preservation appraisal toggle (default on). Structural
+        # bool read; any failure disables the beat rather than crashing.
+        try:
+            appraisal_on = bool(
+                _cfg("VESSEL_SP_APPRAISAL_ENABLED", True)
+                in (True, "true", "True", 1, "1")
+            )
+        except Exception:
+            appraisal_on = True
+        if not appraisal_on:
+            return
+
+        manager = get_vessel_session_manager()
+        if not manager.has_active_session():
+            return
+
+        now = asyncio.get_event_loop().time()
+        # Anti-thrash: reuse the will interval as a minimum spacing so a
+        # sustained damage stream (lava, drowning) cannot enqueue an appraisal
+        # every tick. The mechanical survival reflex still reacts each tick.
+        min_spacing = vessel_beat.resolve_will_interval(_cfg)
+        if now - self._last_appraisal_at < min_spacing:
+            return
+
+        world, world_state = await self._read_active_world_state()
+        if world is None or world_state is None:
+            return
+
+        # Positive damage delta this tick? Purely structural read of the
+        # connector-surfaced numeric field; absent/non-positive → no appraisal.
+        extra = getattr(world_state, "extra", None)
+        if not isinstance(extra, dict):
+            return
+        damage_taken = extra.get("damage_taken")
+        try:
+            if damage_taken is None or float(damage_taken) <= 0.0:
+                return
+        except (TypeError, ValueError):
+            return
+
+        interface_path = self._decision_interface_path(world)
+        if interface_path is None:
+            return
+
+        prompt = vessel_beat.build_damage_appraisal_prompt(world_state, world)
+        if not prompt:
+            return
+
+        self._last_appraisal_at = now
+        log_debug(
+            f"[vessel_interface] Damage appraisal beat for '{world}' "
+            f"(damage_taken={damage_taken})"
+        )
+        await self._enqueue_perception(
+            interface_path=interface_path,
+            summary=prompt,
+            environment=world,
+            event_type="damage_appraisal",
         )
 
     @staticmethod
