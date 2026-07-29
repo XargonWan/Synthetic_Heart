@@ -30,6 +30,9 @@ def _make_conn() -> MinecraftConnector:
     conn._sp_hostile_dist = float(MinecraftConnector._HOSTILE_NEAR_DIST)
     conn._sp_fight_back = True
     conn._sp_fight_max_fails = int(MinecraftConnector._FIGHT_MAX_FAILS)
+    conn._sp_use_ranged = True
+    conn._sp_ranged_min_dist = float(MinecraftConnector._RANGED_MIN_DIST)
+    conn._sp_appraisal_enabled = True
     return conn
 
 
@@ -162,10 +165,11 @@ def test_fire_at_head_also_burns() -> None:
 
 def test_healthy_hostile_triggers_defend() -> None:
     conn = _make_conn()
+    # Within melee reach (<= 3.5) a healthy body swings; only reachable mobs.
     plan = conn._survival_threat(
         _state(
             health=20.0,
-            entities=[{"name": "zombie", "hostile": True, "distance": 4.0}],
+            entities=[{"name": "zombie", "hostile": True, "distance": 2.0}],
         )
     )
     assert plan is not None
@@ -202,9 +206,10 @@ def test_fight_back_off_always_flees() -> None:
 
 def test_repeated_fails_escalate_to_flee() -> None:
     conn = _make_conn()
+    # Reachable mob (<= 3.5) so the reflex defends before escalating.
     hostile_state = _state(
         health=20.0,
-        entities=[{"name": "zombie", "hostile": True, "distance": 4.0}],
+        entities=[{"name": "zombie", "hostile": True, "distance": 2.0}],
     )
     # First assessment: defend (also latches the fight target).
     first = conn._survival_threat(hostile_state)
@@ -309,3 +314,210 @@ def test_will_prompt_unknown_threat_still_noted() -> None:
     prompt = build_will_prompt(_ws_with_threat("meteor"), "minecraft")
     assert "instincts already reacted" in prompt
     assert "meteor" in prompt
+
+
+# ----------------------------------------------------------------------
+# Fight-all-aggressive: _aggressive_targets
+# ----------------------------------------------------------------------
+
+
+def test_aggressive_targets_returns_all_in_range_nearest_first() -> None:
+    conn = _make_conn()
+    state = _state(
+        entities=[
+            {"name": "zombie", "hostile": True, "distance": 5.0},
+            {"name": "skeleton", "hostile": True, "distance": 2.0},
+            {"name": "spider", "hostile": True, "distance": 7.0},
+        ]
+    )
+    targets = conn._aggressive_targets(state, conn._sp_hostile_dist)
+    # All three are within the default HOSTILE_NEAR_DIST (8), nearest first.
+    assert [t["name"] for t in targets] == ["skeleton", "zombie", "spider"]
+
+
+def test_aggressive_targets_includes_ranged_attacker_out_of_range() -> None:
+    conn = _make_conn()
+    # A skeleton shooting from far away (beyond near_dist) but actively
+    # targeting the bot must still be engaged.
+    state = _state(
+        entities=[
+            {
+                "name": "skeleton",
+                "hostile": True,
+                "distance": 25.0,
+                "is_targeting_me": True,
+            }
+        ]
+    )
+    targets = conn._aggressive_targets(state, conn._sp_hostile_dist)
+    assert len(targets) == 1
+    assert targets[0]["name"] == "skeleton"
+
+
+def test_aggressive_targets_never_includes_player() -> None:
+    conn = _make_conn()
+    state = _state(
+        entities=[
+            {
+                "name": "Steve",
+                "kind": "player",
+                "hostile": True,
+                "distance": 2.0,
+                "is_targeting_me": True,
+            }
+        ]
+    )
+    # A human hitting Synth is a social matter, never a reflex melee target.
+    assert conn._aggressive_targets(state, conn._sp_hostile_dist) == []
+
+
+def test_multi_mob_fight_picks_nearest_target() -> None:
+    conn = _make_conn()
+    plan = conn._survival_threat(
+        _state(
+            health=20.0,
+            entities=[
+                {"name": "zombie", "hostile": True, "distance": 6.0},
+                {"name": "skeleton", "hostile": True, "distance": 1.5},
+            ],
+        )
+    )
+    assert plan is not None
+    assert plan["threat"] == "defend"
+    # Nearest of the aggressive set is engaged first.
+    assert plan["payload"].get("target") == "skeleton"
+    assert plan["reason"].get("targets") == 2
+
+
+# ----------------------------------------------------------------------
+# Ranged vs melee selection
+# ----------------------------------------------------------------------
+
+
+def test_ranged_weapon_used_at_distance() -> None:
+    conn = _make_conn()
+    plan = conn._survival_threat(
+        _state(
+            health=20.0,
+            has_ranged_weapon=True,
+            ranged_ammo=12,
+            entities=[{"name": "skeleton", "hostile": True, "distance": 6.0}],
+        )
+    )
+    assert plan is not None
+    assert plan["threat"] == "defend"
+    assert plan["verb"] == "shoot"
+    assert plan["reason"].get("ranged") is True
+
+
+def test_ranged_weapon_not_used_up_close() -> None:
+    conn = _make_conn()
+    # Within RANGED_MIN_DIST (5.0) melee is preferred even with a bow.
+    plan = conn._survival_threat(
+        _state(
+            health=20.0,
+            has_ranged_weapon=True,
+            ranged_ammo=12,
+            entities=[{"name": "zombie", "hostile": True, "distance": 2.0}],
+        )
+    )
+    assert plan is not None
+    assert plan["verb"] == "attack"
+
+
+def test_no_ranged_weapon_reachable_mob_melees_not_flees() -> None:
+    conn = _make_conn()
+    # A melee mob at 6 blocks with NO bow/ammo. The bridge ``attack`` verb
+    # walks the body up to reach before swinging, so a mob inside the hostile
+    # radius is reachable ON FOOT — the reflex must APPROACH AND ATTACK, not
+    # flee just because it is momentarily beyond arm's length. (The old
+    # premature ``unreachable -> flee`` branch made her flee every ordinary
+    # melee mob and never finish a fight.)
+    plan = conn._survival_threat(
+        _state(
+            health=20.0,
+            has_ranged_weapon=False,
+            ranged_ammo=0,
+            entities=[{"name": "skeleton", "hostile": True, "distance": 6.0}],
+        )
+    )
+    assert plan is not None
+    assert plan["threat"] == "defend"
+    assert plan["verb"] == "attack"
+
+
+def test_no_ranged_weapon_close_attacker_melees() -> None:
+    conn = _make_conn()
+    # Same disarmed body, mob within arm's length — swing at it.
+    plan = conn._survival_threat(
+        _state(
+            health=20.0,
+            has_ranged_weapon=False,
+            ranged_ammo=0,
+            entities=[{"name": "zombie", "hostile": True, "distance": 2.0}],
+        )
+    )
+    assert plan is not None
+    assert plan["verb"] == "attack"
+
+
+def test_low_health_flees_disarmed_regardless_of_distance() -> None:
+    conn = _make_conn()
+    # Health is the PRIMARY disengage driver: when the body is actually losing
+    # (health at/below the flee threshold) it flees even if it cannot answer a
+    # ranged attacker — this is what stops the passive death loop, NOT a raw
+    # distance cutoff.
+    plan = conn._survival_threat(
+        _state(
+            health=4.0,
+            has_ranged_weapon=False,
+            ranged_ammo=0,
+            entities=[{"name": "skeleton", "hostile": True, "distance": 6.0}],
+        )
+    )
+    assert plan is not None
+    assert plan["threat"] == "flee"
+    assert plan["verb"] == "flee"
+
+
+# ----------------------------------------------------------------------
+# Health-primary escalation (FIGHT_MAX_FAILS = 8)
+# ----------------------------------------------------------------------
+
+
+def test_fight_max_fails_default_is_eight() -> None:
+    assert MinecraftConnector._FIGHT_MAX_FAILS == 8
+
+
+def test_low_health_escalates_before_fail_cap() -> None:
+    conn = _make_conn()
+    # Health is the PRIMARY escalation driver: below the flee threshold the
+    # body flees immediately, without waiting for the fail counter.
+    state = _state(
+        health=4.0,
+        entities=[{"name": "zombie", "hostile": True, "distance": 4.0}],
+    )
+    plan = conn._survival_threat(state)
+    assert plan is not None
+    assert plan["threat"] == "flee"
+    assert conn._fight_fail_count == 0
+
+
+def test_target_change_resets_fail_counter() -> None:
+    conn = _make_conn()
+    # Fight zombie, accrue fails.
+    zombie_state = _state(
+        health=20.0,
+        entities=[{"name": "zombie", "hostile": True, "distance": 4.0}],
+    )
+    conn._survival_threat(zombie_state)
+    conn._fight_fail_count = 5
+    # A different mob becomes the nearest target → counter resets.
+    skeleton_state = _state(
+        health=20.0,
+        entities=[{"name": "skeleton", "hostile": True, "distance": 3.0}],
+    )
+    plan = conn._survival_threat(skeleton_state)
+    assert plan is not None
+    assert plan["threat"] == "defend"
+    assert conn._fight_fail_count == 0

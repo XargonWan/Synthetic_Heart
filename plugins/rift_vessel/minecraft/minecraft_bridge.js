@@ -362,6 +362,15 @@ let lastSwing = null;
 const SWING_ATTRIBUTION_WINDOW_MS = 1500;
 const ATTACKER_MAX_DISTANCE = 6;
 
+// Tracks the most recent hit the bot took, so `worldSnapshot` can tell the
+// post-damage appraisal whether the last blow came from a *person* (player) or
+// a creature/environment. Structural: `source` is the classifyAttacker game
+// type, never a keyword scan. Expired by DAMAGE_ATTRIBUTION_WINDOW_MS so a
+// stale attribution never leaks into a later, unrelated snapshot.
+/** @type {{ source: string, at: number } | null} */
+let lastDamage = null;
+const DAMAGE_ATTRIBUTION_WINDOW_MS = 2500;
+
 // Classify an entity as an attacker source without keyword matching: a mob is
 // hostile game logic, a real player is a person. Falls back to a neutral
 // "entity" when the structural type is unknown.
@@ -372,11 +381,26 @@ function classifyAttacker(entity) {
   return String(entity.type || 'entity');
 }
 
-// Passive/tameable mobs whose structural type is "mob" but which are NOT a
-// self-preservation threat. These are game-mechanic categories (kind/category
-// exposed by mineflayer's entity metadata), not user-facing words, so this is
-// structural game logic — not keyword matching on human language.
+// Creature categories that ARE a self-preservation threat. mineflayer >=4
+// derives `entity.type` from minecraft-data's coarse category enum: a hostile
+// mob reports `entity.type === 'hostile'` (older mineflayer reported the
+// generic `'mob'`). Both are treated as threats. These are game-mechanic enum
+// values, not user-facing words, so this is structural game logic — never a
+// keyword scan of human language.
+const _HOSTILE_MOB_TYPES = new Set(['hostile', 'mob']);
+
+// Passive/tameable/ambient creature categories that are NEVER a threat. In
+// mineflayer >=4 these surface as `entity.type`; older builds surfaced them on
+// `entity.kind` / metadata.category. All are game-mechanic enum buckets, not
+// human language.
 const _NON_HOSTILE_MOB_CATEGORIES = new Set([
+  // mineflayer >=4 minecraft-data coarse categories
+  'passive',
+  'animal',
+  'water_creature',
+  'ambient',
+  'npc',
+  // legacy mineflayer <4 category strings
   'Passive mobs',
   'Tameable mobs',
   'Water animals',
@@ -388,22 +412,56 @@ const _NON_HOSTILE_MOB_CATEGORIES = new Set([
 const _FRIENDLY_MOB_NAMES = new Set(['iron_golem', 'snow_golem']);
 
 // Structural hostility flag for the self-preservation reflex. A creature is a
-// threat when its game-logic type is "mob" AND it is not a passive/tameable
-// category and not a friendly golem. Purely structural (entity.type /
-// entity.kind / canonical id) — never a keyword scan of display text, so it
-// works regardless of client language.
+// threat when its game-logic category (entity.type in mineflayer >=4, e.g.
+// 'hostile'; or the legacy 'mob') is in the hostile set AND it is not a
+// friendly golem AND its (legacy) fine category is not a passive/tameable
+// bucket. Purely structural (entity.type / entity.kind / canonical id) —
+// never a keyword scan of display text, so it works regardless of client
+// language. mineflayer <4 reported entity.type === 'mob' for every mob; 4.x
+// reports the coarse category ('hostile'/'passive'/'animal'/'water_creature'/
+// …), so we must key off the hostile categories, not a bare 'mob' check.
 function isHostileEntity(entity) {
   if (!entity) return false;
-  if (entity.type !== 'mob') return false;
+  const type = entity.type ? String(entity.type) : '';
+  if (!_HOSTILE_MOB_TYPES.has(type)) return false;
   const id = entity.name ? String(entity.name).toLowerCase() : '';
   if (_FRIENDLY_MOB_NAMES.has(id)) return false;
-  // mineflayer exposes a coarse category on `kind` / `entityType` metadata for
-  // many mobs; when present, exclude the passive/tameable buckets.
+  // Exclude passive/tameable buckets exposed on the legacy `kind`/metadata
+  // category (mineflayer <4). In 4.x these already fail the _HOSTILE_MOB_TYPES
+  // gate above, so this is a defensive belt for older builds.
   const category = entity.kind || (entity.metadata && entity.metadata.category);
   if (category && _NON_HOSTILE_MOB_CATEGORIES.has(String(category))) {
     return false;
   }
   return true;
+}
+
+// Structural "is this creature actively aggressing the bot right now?" flag.
+// Used to fight EVERY nearby aggressive mob (including one that hit the bot
+// from range) rather than only the single nearest. It is purely structural —
+// it never reads display text:
+//   1) the entity swung its arm at us within the attribution window, or
+//   2) mineflayer exposes an attack target/goal pointing at the bot entity.
+// Some server/plugin combinations do not surface (2), so (1) is the reliable
+// signal. Absent evidence => false (the hostile flag still handles proximity).
+function isTargetingBot(entity) {
+  if (!bot || !bot.entity || !entity) return false;
+  const now = Date.now();
+  if (
+    lastSwing &&
+    lastSwing.id === entity.id &&
+    now - lastSwing.at <= SWING_ATTRIBUTION_WINDOW_MS
+  ) {
+    return true;
+  }
+  // mineflayer surfaces a live attack target on some mobs. Compare by entity
+  // id/reference to the bot — structural, no text.
+  const tgt =
+    entity.target || (entity.metadata && entity.metadata.attackTarget) || null;
+  if (tgt && (tgt === bot.entity || tgt.id === bot.entity.id)) {
+    return true;
+  }
+  return false;
 }
 
 // Resolve who most likely dealt the damage: prefer the entity that swung its
@@ -424,11 +482,14 @@ function resolveAttacker() {
       }
     }
   }
-  // 2) Fallback: the nearest mob or player within melee range.
+  // 2) Fallback: the nearest hostile mob or player within melee range.
+  // A player is identified structurally (type/username); a threatening mob via
+  // isHostileEntity (handles both mineflayer <4 'mob' and 4.x 'hostile').
   let best = null;
   for (const e of Object.values(bot.entities)) {
     if (!e || e === self || !e.position) continue;
-    if (e.type !== 'mob' && e.type !== 'player' && !e.username) continue;
+    const isPlayer = e.type === 'player' || Boolean(e.username);
+    if (!isPlayer && !isHostileEntity(e)) continue;
     const dist = self.position.distanceTo(e.position);
     if (dist > ATTACKER_MAX_DISTANCE) continue;
     if (!best || dist < best.distance) {
@@ -533,6 +594,11 @@ function nearbyEntities(maxCount, maxDistance) {
       // threatening mob, false for players/passive creatures/friendly golems.
       // Purely game-logic based, no keyword scan of display names.
       hostile: isHostileEntity(e),
+      // Structural aggro flag: true when this creature is actively attacking
+      // the bot right now (recent swing or an attack target pointing at us).
+      // Lets the combat reflex engage a mob that hit from range, not only the
+      // nearest one. See isTargetingBot.
+      is_targeting_me: isTargetingBot(e),
     });
   }
   out.sort((a, b) => a.distance - b.distance);
@@ -636,6 +702,144 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// --- Weapon perception helpers --------------------------------------------
+// Structural weapon appraisal for combat. Everything here reads canonical
+// game data (minecraft-data item definitions + item ids) — never a keyword
+// scan of human-language display names — so it works in any client language.
+
+// Canonical Minecraft ranged-weapon item ids (game enum). A crossbow needs no
+// draw hold (it fires a pre-loaded bolt on activate); a bow is drawn and
+// released. These are item ids, not display text.
+const _RANGED_WEAPON_IDS = new Set(['bow', 'crossbow']);
+// Canonical projectile ammunition item ids. A bow/crossbow only helps if the
+// bot is carrying something to fire.
+const _AMMO_IDS = new Set(['arrow', 'spectral_arrow', 'tipped_arrow']);
+
+// Resolve minecraft-data for the connected world version, cached per version.
+let _mcDataCache = null;
+function mcDataForBot() {
+  if (!bot || !minecraftData) return null;
+  const version = bot.version;
+  if (!version) return null;
+  if (_mcDataCache && _mcDataCache.version === version) {
+    return _mcDataCache.data;
+  }
+  try {
+    const data = minecraftData(version);
+    _mcDataCache = { version, data };
+    return data;
+  } catch (e) {
+    return null;
+  }
+}
+
+// Vanilla melee attack-damage attribute (hearts-per-hit) as a function of the
+// weapon class and material tier. This is a *game-data table* keyed on the
+// canonical item id (like a recipe table), NOT phrase/keyword feature routing:
+// minecraft-data ships no `attackDamage` field for 1.20.2 items, so the base
+// combat stat has to come from the vanilla ruleset. Sword and axe base damage
+// per material tier (the value shown on the item tooltip, i.e. the
+// generic.attack_damage attribute, before the +1 unarmed base is folded in by
+// the game). Netherite/diamond/iron/stone/wood/gold are the six vanilla tiers.
+const _MATERIAL_TIER = {
+  wooden: 'wood',
+  golden: 'wood', // gold tools share wood's base damage tier
+  stone: 'stone',
+  iron: 'iron',
+  diamond: 'diamond',
+  netherite: 'netherite',
+};
+const _SWORD_DAMAGE = { wood: 4, stone: 5, iron: 6, diamond: 7, netherite: 8 };
+const _AXE_DAMAGE = { wood: 7, stone: 9, iron: 9, diamond: 9, netherite: 10 };
+
+// The melee attack damage of an item id (hearts-per-hit). Returns 0 when the
+// item is not a melee weapon (a block, food, non-combat tool, etc.). Structural:
+// keyed on the canonical item id and its registry `enchantCategories`, never on
+// display text or a feature-activation keyword.
+function itemAttackDamage(itemName) {
+  if (!itemName) return 0;
+  const mcData = mcDataForBot();
+  if (!mcData || !mcData.itemsByName) return 0;
+  const id = String(itemName).toLowerCase();
+  const def = mcData.itemsByName[id];
+  if (!def) return 0;
+  // 1) Prefer a registry-declared value if a future minecraft-data build
+  //    exposes one.
+  if (def.attackDamage != null) {
+    const dmg = Number(def.attackDamage);
+    if (Number.isFinite(dmg) && dmg > 0) return dmg;
+  }
+  // 2) Derive from the vanilla weapon-class + material-tier table. The material
+  //    is the id prefix before the class suffix (e.g. `iron` in `iron_sword`);
+  //    the class is identified structurally via enchantCategories — a `weapon`
+  //    is a sword, a `digger` is an axe/pickaxe/shovel/hoe (only axes have a
+  //    combat stat). Both are registry attributes, not name matching.
+  const cats = Array.isArray(def.enchantCategories) ? def.enchantCategories : [];
+  const under = id.lastIndexOf('_');
+  const material = under > 0 ? id.slice(0, under) : '';
+  const tier = _MATERIAL_TIER[material];
+  if (!tier) return 0;
+  if (cats.includes('weapon') && id.endsWith('_sword')) {
+    return _SWORD_DAMAGE[tier] || 0;
+  }
+  if (cats.includes('digger') && id.endsWith('_axe')) {
+    return _AXE_DAMAGE[tier] || 0;
+  }
+  return 0;
+}
+
+// Pick the inventory item with the highest melee attack damage. Returns the
+// mineflayer item object (or null). Structural: compares registry damage
+// numbers, never item-name keywords.
+function bestMeleeWeapon() {
+  if (!bot || !bot.inventory || typeof bot.inventory.items !== 'function') {
+    return null;
+  }
+  let best = null;
+  let bestDmg = 0;
+  try {
+    for (const it of bot.inventory.items()) {
+      if (!it || !it.name) continue;
+      const dmg = itemAttackDamage(it.name);
+      if (dmg > bestDmg) {
+        bestDmg = dmg;
+        best = it;
+      }
+    }
+  } catch (e) {
+    return null;
+  }
+  return best;
+}
+
+// Find a carried ranged weapon (bow/crossbow) item object, or null.
+function rangedWeaponItem() {
+  if (!bot || !bot.inventory || typeof bot.inventory.items !== 'function') {
+    return null;
+  }
+  try {
+    for (const it of bot.inventory.items()) {
+      if (it && it.name && _RANGED_WEAPON_IDS.has(String(it.name).toLowerCase())) {
+        return it;
+      }
+    }
+  } catch (e) {
+    return null;
+  }
+  return null;
+}
+
+// Total projectile ammunition currently carried (summed across stacks).
+function ammoCount() {
+  let total = 0;
+  for (const it of botInventory()) {
+    if (it.name && _AMMO_IDS.has(String(it.name).toLowerCase())) {
+      total += it.count || 0;
+    }
+  }
+  return total;
+}
+
 function timeOfDay() {
   if (!bot || !bot.time) return null;
   const t = typeof bot.time.timeOfDay === 'number' ? bot.time.timeOfDay : null;
@@ -698,6 +902,33 @@ function worldSnapshot(opts) {
     // standing in lava/fire or having its head underwater (drowning).
     block_feet: blockNameAt(0, 0, 0),
     block_head: blockNameAt(0, 1, 0),
+    // --- Combat telemetry (structural, all guarded) ------------------------
+    // Whether the bot is carrying a usable ranged weapon (bow/crossbow) AND
+    // has projectile ammunition. The reflex uses this to decide whether it can
+    // engage a distant/ranged attacker from afar instead of closing in. Both
+    // are needed: a bow with no arrows is useless.
+    has_ranged_weapon: !!rangedWeaponItem() && ammoCount() > 0,
+    // Projectile ammunition count (arrows). Lets the reflex stop shooting when
+    // it runs dry and fall back to melee.
+    ranged_ammo: ammoCount(),
+    // Registry attack damage (hearts/hit) of the best melee weapon carried, or
+    // 0 if the bot is bare-handed. Purely informational for the reflex/beat.
+    best_melee_damage: (function () {
+      const w = bestMeleeWeapon();
+      return w ? itemAttackDamage(w.name) : 0;
+    })(),
+    // Whether the most recent hit (within the attribution window) came from a
+    // *person* (another player) rather than a creature/environment. Lets the
+    // post-damage appraisal respond in character to a player instead of
+    // reflexively swinging back. Structural (classifyAttacker game type),
+    // time-boxed so a stale attribution never leaks. Null when no recent hit.
+    damage_from_player: (function () {
+      if (!lastDamage) return null;
+      if (Date.now() - lastDamage.at > DAMAGE_ATTRIBUTION_WINDOW_MS) {
+        return null;
+      }
+      return lastDamage.source === 'player';
+    })(),
   };
 }
 
@@ -1136,6 +1367,13 @@ function wireBotEvents(b) {
       };
       actor = name;
       summary = `Took damage from ${name}`;
+      // Remember the source (game type) so worldSnapshot can flag whether the
+      // last hit came from a person vs a creature. Structural, time-boxed.
+      lastDamage = { source: src, at: Date.now() };
+    } else {
+      // Environmental/unattributed damage (fall, lava, drowning): still record
+      // it so the appraisal knows a hit landed, with a non-person source.
+      lastDamage = { source: 'environment', at: Date.now() };
     }
     // Clear the swing so a later unrelated hurt is not mis-attributed.
     lastSwing = null;
@@ -1549,11 +1787,159 @@ async function runAction(action, payload) {
       if (!entity) {
         return { ok: false, detail: 'no target to attack', data: {} };
       }
+      const name = entity.username || entity.name || 'entity';
+      // Melee reach in vanilla is ~3 blocks; give a little slack for lag.
+      const MELEE_REACH = 3.5;
       try {
-        bot.attack(entity);
-        const name = entity.username || entity.name || 'entity';
-        return { ok: true, detail: `attacked ${name}`, data: { target: name } };
+        // 1) Equip the strongest melee weapon we carry before swinging so the
+        //    hit deals maximum damage (structural: highest registry attack
+        //    damage, never a name keyword). Bare-handed if we have none.
+        const weapon = bestMeleeWeapon();
+        if (weapon) {
+          try {
+            await bot.equip(weapon, 'hand');
+          } catch (e) {
+            /* equip failed — swing bare-handed rather than abort */
+          }
+        }
+        // 2) Close the gap. bot.attack only lands within reach, so pathfind
+        //    toward a moving target if it is out of melee range. GoalFollow
+        //    keeps re-pathing as the mob moves; it is cleared right after.
+        let dist = bot.entity.position.distanceTo(entity.position);
+        if (dist > MELEE_REACH && pathfinder && pathfinder.goals && bot.pathfinder) {
+          try {
+            bot.pathfinder.setGoal(
+              new pathfinder.goals.GoalFollow(entity, 2),
+              true
+            );
+            const deadline = Date.now() + 2500;
+            while (Date.now() < deadline) {
+              await sleep(150);
+              if (!entity.isValid) break;
+              dist = bot.entity.position.distanceTo(entity.position);
+              if (dist <= MELEE_REACH) break;
+            }
+          } catch (e) {
+            /* pathing failed — try swinging from where we are */
+          } finally {
+            try {
+              bot.pathfinder.setGoal(null);
+            } catch (e) {
+              /* ignore */
+            }
+          }
+        }
+        if (!entity.isValid) {
+          return { ok: true, detail: `${name} is gone`, data: { target: name } };
+        }
+        // 3) Face the target and land a burst of a few swings (a single swing
+        //    rarely kills; the reflex re-issues attack each tick to finish it).
+        try {
+          if (entity.position) {
+            const head = entity.position.offset(0, entity.height ? entity.height * 0.85 : 1.4, 0);
+            await bot.lookAt(head, true);
+          }
+        } catch (e) {
+          /* ignore look failure */
+        }
+        let swings = 0;
+        const SWING_BURST = 3;
+        for (let i = 0; i < SWING_BURST; i += 1) {
+          if (!entity.isValid) break;
+          const d = bot.entity.position.distanceTo(entity.position);
+          if (d > MELEE_REACH) break;
+          bot.attack(entity);
+          swings += 1;
+          await sleep(250);
+        }
+        if (swings === 0) {
+          return {
+            ok: false,
+            detail: `${name} out of reach`,
+            data: { target: name, distance: Math.round(dist * 10) / 10 },
+          };
+        }
+        return {
+          ok: true,
+          detail: `attacked ${name}`,
+          data: { target: name, swings },
+        };
       } catch (err) {
+        try {
+          bot.pathfinder && bot.pathfinder.setGoal(null);
+        } catch (e) {
+          /* ignore */
+        }
+        return { ok: false, detail: String(err && err.message ? err.message : err), data: {} };
+      }
+    }
+    case 'shoot': {
+      // Fire a carried bow/crossbow at a target entity. Done natively with
+      // mineflayer primitives (no bow plugin dependency): equip the ranged
+      // weapon by canonical id, aim at the target's head, then draw+release.
+      // Structural throughout — weapon/ammo resolved by item id, target by the
+      // same resolver as melee.
+      const weapon = rangedWeaponItem();
+      if (!weapon) {
+        return { ok: false, detail: 'no ranged weapon carried', data: {} };
+      }
+      if (ammoCount() <= 0) {
+        return { ok: false, detail: 'no ammunition', data: {} };
+      }
+      const entity = resolveTargetEntity(payload.target);
+      if (!entity || !entity.position) {
+        return { ok: false, detail: 'no target to shoot', data: {} };
+      }
+      const name = entity.username || entity.name || 'entity';
+      try {
+        try {
+          await bot.equip(weapon, 'hand');
+        } catch (e) {
+          return { ok: false, detail: `could not ready ${weapon.name}`, data: {} };
+        }
+        // Aim at the target's head each shot (it may have moved).
+        const head = entity.position.offset(
+          0,
+          entity.height ? entity.height * 0.85 : 1.4,
+          0
+        );
+        await bot.lookAt(head, true);
+        // Draw and release. A crossbow fires its pre-loaded bolt on release
+        // too; a bow needs a short draw. Reuse the activateItem/deactivateItem
+        // pattern from `use`, with a longer charge for a full-power bow shot.
+        const isCrossbow = String(weapon.name).toLowerCase() === 'crossbow';
+        const chargeMs = isCrossbow ? 1300 : 1100;
+        bot.activateItem();
+        await sleep(chargeMs);
+        if (!entity.isValid) {
+          try {
+            bot.deactivateItem();
+          } catch (e) {
+            /* ignore */
+          }
+          return { ok: true, detail: `${name} is gone`, data: { target: name } };
+        }
+        // Re-aim right before release for a moving target, then loose.
+        try {
+          await bot.lookAt(
+            entity.position.offset(0, entity.height ? entity.height * 0.85 : 1.4, 0),
+            true
+          );
+        } catch (e) {
+          /* ignore */
+        }
+        bot.deactivateItem();
+        return {
+          ok: true,
+          detail: `shot at ${name}`,
+          data: { target: name, weapon: weapon.name, ammo: ammoCount() },
+        };
+      } catch (err) {
+        try {
+          bot.deactivateItem();
+        } catch (e) {
+          /* ignore */
+        }
         return { ok: false, detail: String(err && err.message ? err.message : err), data: {} };
       }
     }

@@ -340,6 +340,21 @@ class MinecraftConnector(VesselConnectorBase):
         self._sp_hostile_dist: float = float(self._HOSTILE_NEAR_DIST)
         self._sp_fight_back = True
         self._sp_fight_max_fails: int = int(self._FIGHT_MAX_FAILS)
+        # Whether the reflex may use a carried ranged weapon (bow/crossbow) when
+        # it has ammunition and the target is far enough to warrant it. When
+        # off, combat is melee-only. Loaded from VESSEL_SP_USE_RANGED.
+        self._sp_use_ranged = True
+        # Minimum distance (blocks) at/above which the reflex prefers a ranged
+        # shot over closing to melee (when a ranged weapon + ammo are carried).
+        # Below this it closes and swings. From VESSEL_SP_RANGED_MIN_DIST.
+        self._sp_ranged_min_dist: float = float(self._RANGED_MIN_DIST)
+        # Whether a post-damage social/combat appraisal will beat may be raised
+        # when the body takes a hit this tick. From VESSEL_SP_APPRAISAL_ENABLED.
+        self._sp_appraisal_enabled = True
+        # Last observed health reading, used to detect "took damage this tick"
+        # (health dropped vs the previous motor tick). Structural numeric delta,
+        # never keyword logic. None until the first reading.
+        self._last_health: float | None = None
 
     # Self-preservation thresholds (defaults; overridable per-connect via the
     # ``VESSEL_SP_*`` config keys resolved in ``connect``). All structural:
@@ -361,10 +376,27 @@ class MinecraftConnector(VesselConnectorBase):
     # How close (blocks) a hostile mob must be for the reflex to engage it
     # (defend or flee). Beyond this it is left to the slow will beat.
     _HOSTILE_NEAR_DIST = 8.0
-    # How far (blocks) to run when fleeing a threat.
-    _FLEE_DISTANCE = 16.0
-    # Consecutive failed defend ticks before escalating DEFEND → FLEE.
-    _FIGHT_MAX_FAILS = 3
+    # How far (blocks) to run when fleeing a threat. Kept deliberately large so
+    # a low-health escape actually breaks mob aggro and puts real ground between
+    # the body and the threat (a short hop just left Rekku still in range).
+    _FLEE_DISTANCE = 48.0
+    # Vanilla melee reach (~3 blocks) plus a little slack for lag — mirrors the
+    # bridge ``attack`` MELEE_REACH. A mob beyond this cannot be hit by a
+    # bare-handed/melee swing, so chasing it while carrying no ranged weapon is
+    # pointless (and lethal against a mob that shoots back, e.g. a skeleton):
+    # the reflex flees instead of swinging at empty air.
+    _MELEE_REACH = 3.5
+    # Consecutive failed defend ticks before escalating DEFEND → FLEE. Raised
+    # from the historic 3: escalation to flight should be driven primarily by
+    # LOW HEALTH (the body is actually losing the fight), with the fail counter
+    # only a secondary safeguard against getting stuck swinging at an
+    # unreachable mob — so it needs a longer fuse to actually let Synth win a
+    # winnable fight rather than bail after three swings.
+    _FIGHT_MAX_FAILS = 8
+    # Distance (blocks) at/above which the reflex prefers a ranged shot over
+    # closing to melee, when a bow/crossbow with ammo is carried. Below this it
+    # is faster/safer to close and swing.
+    _RANGED_MIN_DIST = 5.0
     # Max characters per in-world chat line. Minecraft vanilla chat rejects or
     # truncates anything past ~256 characters, so a long ``say`` is split on
     # word boundaries into multiple ≤256-char lines rather than hard-cut
@@ -1185,6 +1217,19 @@ class MinecraftConnector(VesselConnectorBase):
         affordances = self._build_affordances(entities, blocks)
         current_goal, recent_goals = await self._resolve_goals()
         knowledge = await self._resolve_knowledge(current_goal, affordances)
+        # Structural "took damage this tick" delta: health dropped versus the
+        # previous snapshot. Numeric-only, never keyword logic. The magnitude
+        # feeds the post-damage appraisal will beat (see vessel_interface).
+        cur_health = data.get("health")
+        damage_taken: float | None = None
+        if isinstance(cur_health, (int, float)) and isinstance(
+            self._last_health, (int, float)
+        ):
+            drop = float(self._last_health) - float(cur_health)
+            if drop > 0:
+                damage_taken = drop
+        if isinstance(cur_health, (int, float)):
+            self._last_health = float(cur_health)
         return WorldState(
             environment=ENVIRONMENT,
             health=data.get("health"),
@@ -1196,6 +1241,7 @@ class MinecraftConnector(VesselConnectorBase):
                 "observe",
                 "use",
                 "attack",
+                "shoot",
                 "follow",
                 "unfollow",
                 "respawn",
@@ -1237,11 +1283,37 @@ class MinecraftConnector(VesselConnectorBase):
                 # the will-beat "heads up" cue. Null-safe: absent on an older
                 # bridge that predates the telemetry, in which case the reflex
                 # simply degrades to inaction for that danger.
+                #
+                # ``health`` is mirrored into ``extra`` (it is also the
+                # top-level WorldState.health field) because the fast survival
+                # reflex reads ``extra.get("health")`` — without it the reflex
+                # saw ``None`` every tick, so ``low_health`` was permanently
+                # False and the body would keep swinging at mobs instead of
+                # fleeing when actually dying. Numeric-only, null-safe.
+                "health": data.get("health"),
                 "oxygen": data.get("oxygen"),
                 "is_in_water": data.get("is_in_water"),
                 "is_alive": data.get("is_alive"),
                 "block_feet": data.get("block_feet"),
                 "block_head": data.get("block_head"),
+                # Combat readiness telemetry (structural, from the bridge
+                # inventory + minecraft-data): whether a bow/crossbow with ammo
+                # is carried, how much ammo, and the attack-damage of the best
+                # melee weapon in the inventory. Feed the ranged-vs-melee reflex
+                # decision and the will beat. Null/0 on an older bridge.
+                "has_ranged_weapon": data.get("has_ranged_weapon"),
+                "ranged_ammo": data.get("ranged_ammo"),
+                "best_melee_damage": data.get("best_melee_damage"),
+                # Structural "took damage this tick" magnitude (health drop vs
+                # the previous snapshot), or None if unchanged/unknown. Drives
+                # the post-damage appraisal will beat. Numeric-only.
+                "damage_taken": damage_taken,
+                # Whether the most recent hit came from a *person* (another
+                # player) vs a creature/environment. Structural bool from the
+                # bridge (classifyAttacker game type, time-boxed), or None when
+                # unknown/absent. Lets the appraisal choose a social response to
+                # a player instead of reflexively swinging back.
+                "damage_from_player": data.get("damage_from_player"),
                 # The most recent survival threat the reflex acted on (or the
                 # currently-active one). Lets the slow will beat acknowledge the
                 # danger in-character. None when the body is safe.
@@ -1818,6 +1890,11 @@ class MinecraftConnector(VesselConnectorBase):
             self._sp_fight_max_fails = _intv(
                 "VESSEL_SP_FIGHT_MAX_FAILS", int(self._FIGHT_MAX_FAILS)
             )
+            self._sp_use_ranged = _boolv("VESSEL_SP_USE_RANGED", True)
+            self._sp_ranged_min_dist = _flt(
+                "VESSEL_SP_RANGED_MIN_DIST", float(self._RANGED_MIN_DIST)
+            )
+            self._sp_appraisal_enabled = _boolv("VESSEL_SP_APPRAISAL_ENABLED", True)
         except Exception as exc:  # pragma: no cover - defensive
             log_debug(f"{LOG_PREFIX} self-preservation config load failed: {exc}")
 
@@ -1853,6 +1930,45 @@ class MinecraftConnector(VesselConnectorBase):
                 best = ent
                 best_dist = dist
         return best
+
+    def _aggressive_targets(
+        self, state: "WorldState", near_dist: float
+    ) -> list[dict[str, Any]]:
+        """Return every aggressive mob worth engaging, nearest first.
+
+        Structural only. A mob qualifies when EITHER it is flagged ``hostile``
+        (game-logic mob classification) and within ``near_dist``, OR it is
+        actively attacking the bot right now (``is_targeting_me`` from the
+        bridge — a recent swing or an attack target pointing at us), regardless
+        of distance so a ranged attacker that hit us from afar is still
+        engaged. Players are NEVER included (a human hitting Synth is a social
+        matter for the will beat, never a reflex melee). No keyword logic.
+        """
+        try:
+            entities = (state.extra or {}).get("entities") or []
+        except Exception:
+            return []
+        out: list[dict[str, Any]] = []
+        for ent in entities:
+            if not isinstance(ent, dict):
+                continue
+            # Never reflex-attack a person.
+            if ent.get("kind") == "player":
+                continue
+            hostile = ent.get("hostile")
+            if hostile is None:
+                hostile = ent.get("kind") == "mob"
+            targeting = bool(ent.get("is_targeting_me"))
+            try:
+                dist = float(ent.get("distance"))
+            except (TypeError, ValueError):
+                continue
+            near = hostile and dist <= near_dist
+            if not (near or (targeting and hostile)):
+                continue
+            out.append(ent)
+        out.sort(key=lambda e: float(e.get("distance") or 1e9))
+        return out
 
     def _survival_threat(self, state: "WorldState") -> dict[str, Any] | None:
         """Assess the highest-priority survival threat from the world state.
@@ -1926,50 +2042,106 @@ class MinecraftConnector(VesselConnectorBase):
                 "reason": {"block_feet": block_feet, "block_head": block_head},
             }
 
-        # 4/5. Hostile mob nearby → defend or flee.
-        hostile = self._nearest_hostile(state)
-        if hostile is not None:
+        # 4/5. Aggressive mob(s) nearby → defend (melee or ranged) or flee.
+        #
+        # Engage EVERY aggressive mob around the body, not just the single
+        # nearest: the target list includes any mob flagged hostile within
+        # range PLUS any mob actively attacking us from range (is_targeting_me),
+        # so a skeleton shooting from afar is fought back rather than only fled.
+        # The chosen target is the nearest of that set (finish the closest first
+        # then the reflex re-evaluates next tick and moves to the next one).
+        targets = self._aggressive_targets(state, self._sp_hostile_dist)
+        if targets:
+            target = targets[0]
             try:
-                raw_dist = hostile.get("distance")
+                raw_dist = target.get("distance")
                 dist = float(raw_dist) if raw_dist is not None else None
             except (TypeError, ValueError):
                 dist = None
-            if dist is not None and dist <= self._sp_hostile_dist:
-                health = extra.get("health")
-                low_health = (
-                    isinstance(health, (int, float)) and health <= self._sp_low_health
-                )
-                target_id = str(hostile.get("name") or "")
-                # Track the fail counter against the specific mob being fought;
-                # a new/changed threat resets it.
-                if self._fight_target != target_id:
-                    self._fight_target = target_id
-                    self._fight_fail_count = 0
-                escalated = self._fight_fail_count >= self._sp_fight_max_fails
-                if self._sp_fight_back and not low_health and not escalated:
+            health = extra.get("health")
+            low_health = (
+                isinstance(health, (int, float)) and health <= self._sp_low_health
+            )
+            target_id = str(target.get("name") or "")
+            # Track the fail counter against the specific mob being fought; a
+            # new/changed threat resets it.
+            if self._fight_target != target_id:
+                self._fight_target = target_id
+                self._fight_fail_count = 0
+            # Escalation to flight is driven PRIMARILY by low health (the body
+            # is actually losing), with the fail counter only a secondary
+            # safeguard against swinging forever at an unreachable mob.
+            escalated = self._fight_fail_count >= self._sp_fight_max_fails
+            if self._sp_fight_back and not low_health and not escalated:
+                # Ranged vs melee: prefer a bow/crossbow shot when we carry one
+                # with ammo AND the target is far enough to warrant it (closing
+                # to melee would take damage on the way). Structural: uses the
+                # bridge-reported has_ranged_weapon/ranged_ammo flags and the
+                # numeric distance — never a name keyword.
+                has_ranged = bool(extra.get("has_ranged_weapon"))
+                if (
+                    self._sp_use_ranged
+                    and has_ranged
+                    and dist is not None
+                    and dist >= self._sp_ranged_min_dist
+                ):
                     return {
                         "threat": "defend",
-                        "verb": "attack",
+                        "verb": "shoot",
                         "payload": {"target": target_id} if target_id else {},
                         "reason": {
                             "distance": dist,
                             "health": health,
+                            "ranged": True,
+                            "ammo": extra.get("ranged_ammo"),
+                            "targets": len(targets),
                             "fails": self._fight_fail_count,
                         },
                     }
-                # Escalate to flight.
+                # Melee engage: close the gap and swing. The bridge ``attack``
+                # verb already runs a GoalFollow that walks the body up to
+                # melee reach before striking, so a mob anywhere inside the
+                # hostile radius (``_sp_hostile_dist``) is REACHABLE on foot —
+                # the reflex must approach and fight it, not flee just because
+                # it is momentarily beyond arm's length.
+                #
+                # The original passive death loop (chasing a kiting skeleton
+                # that shoots and never lets the gap close) is NOT handled here
+                # by a distance cutoff — that made the body flee every ordinary
+                # melee mob at 3.5–8 blocks and never finish a fight. It is
+                # handled by the EXISTING escalation above: a mob that keeps us
+                # from landing hits either drains our health (→ ``low_health``
+                # → the outer flee branch) or trips the ``_fight_fail_count``
+                # cap (→ ``escalated`` → flee). Both are structural and require
+                # no knowledge of whether the mob is ranged, so no name keyword
+                # is ever needed.
                 return {
-                    "threat": "flee",
-                    "verb": "flee",
-                    "payload": {},
+                    "threat": "defend",
+                    "verb": "attack",
+                    "payload": {"target": target_id} if target_id else {},
                     "reason": {
                         "distance": dist,
                         "health": health,
-                        "low_health": low_health,
-                        "fight_back": self._sp_fight_back,
-                        "escalated": escalated,
+                        "ranged": False,
+                        "best_melee_damage": extra.get("best_melee_damage"),
+                        "targets": len(targets),
+                        "fails": self._fight_fail_count,
                     },
                 }
+            # Escalate to flight.
+            return {
+                "threat": "flee",
+                "verb": "flee",
+                "payload": {},
+                "reason": {
+                    "distance": dist,
+                    "health": health,
+                    "low_health": low_health,
+                    "fight_back": self._sp_fight_back,
+                    "escalated": escalated,
+                    "targets": len(targets),
+                },
+            }
 
         # Safe — clear any lingering fight state.
         if self._fight_target is not None:
@@ -2015,10 +2187,24 @@ class MinecraftConnector(VesselConnectorBase):
             elif verb == "goto_surface":
                 result = await self._act_goto_surface(state)
             elif verb == "flee":
-                result = await self._act_flee(state)
+                # Fleeing while submerged: a horizontal ``goto`` has no walkable
+                # block underwater, so the pathfinder cannot move the body and
+                # it just hangs in the water taking hits (the "ferma nell'acqua"
+                # symptom). Surface first — emerging breaks line-of-sight/reach
+                # of aquatic mobs (drowned) and puts solid ground back under the
+                # feet so a subsequent flee can actually run. Structural: reuses
+                # the numeric ``is_in_water`` flag, no keyword logic.
+                if (state.extra or {}).get("is_in_water"):
+                    result = await self._act_goto_surface(state)
+                else:
+                    result = await self._act_flee(state)
             elif verb == "attack":
                 result = await self.act("attack", payload)
                 # Count this defend tick; escalate on repeated engagement.
+                self._fight_fail_count += 1
+            elif verb == "shoot":
+                result = await self.act("shoot", payload)
+                # A shot is also a defend tick for escalation purposes.
                 self._fight_fail_count += 1
             else:  # pragma: no cover - defensive
                 return None
@@ -2524,6 +2710,20 @@ class MinecraftConnector(VesselConnectorBase):
         by the exact block/entity name Synth read from ``observe``/``scan``.
         """
         return {
+            "shoot": {
+                "description": (
+                    "Fire a ranged weapon (a bow or crossbow you are carrying, "
+                    "with arrows) at a nearby thing by name (target), e.g. a "
+                    "hostile mob attacking you from a distance. You equip the "
+                    "weapon, aim at it and loose a shot. Only works when you "
+                    "actually carry a bow/crossbow and have arrows — otherwise "
+                    "close in and attack instead. Use this to hit things that "
+                    "are too far or too dangerous to melee."
+                ),
+                "required_fields": [],
+                "optional_fields": ["target"],
+                "security_level": "low",
+            },
             "goto": {
                 "description": (
                     "Walk to somewhere in the world. Give either exact "
