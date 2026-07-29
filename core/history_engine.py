@@ -670,16 +670,23 @@ class HistoryEngine:
                             log_debug(
                                 f"[history_engine] Could not read vessel perceptions: {_pe}"
                             )
-                    # Merge conversation + recent perceptions, chronologically.
-                    merged = list(window) + list(recent_perceptions)
-
-                    def _ts_key(m: Any) -> str:
-                        return (
-                            str(m.get("timestamp", "")) if isinstance(m, dict) else ""
-                        )
-
-                    merged.sort(key=_ts_key)
-                    window = merged
+                    # Order: ambient grounding perceptions FIRST, then the
+                    # conversation. Perceptions are background scene-setting, not
+                    # part of the conversational thread, so they must never be
+                    # the *last* line the model reads: on a reactive player-chat
+                    # turn the player's question is the last conversational entry
+                    # and MUST stay last, or a weak embodiment model continues
+                    # its own autonomous pattern (mining/observe) instead of
+                    # answering. A prior chronological sort keyed on the string
+                    # timestamp broke this: perceptions carry ``timestamp=None``
+                    # (→ ``"None"``) which sorts AFTER a real ISO player-chat
+                    # timestamp (``"2026-…"``), shoving mining perceptions past
+                    # the player's question and burying it mid-list. Both the
+                    # conversation ``window`` and ``recent_perceptions`` are
+                    # already in insertion (chronological) order, so no re-sort
+                    # is needed — just concatenate perceptions before the
+                    # conversation.
+                    window = list(recent_perceptions) + list(window)
 
                 for m in window:
                     if _is_ignored_prompt_history_entry(m):
