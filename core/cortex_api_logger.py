@@ -29,7 +29,6 @@ import contextvars
 import time
 from importlib import import_module
 from datetime import datetime, timezone
-from logging.handlers import RotatingFileHandler
 from collections.abc import Sequence
 from typing import Any
 from uuid import uuid4
@@ -65,10 +64,17 @@ def _get_logger() -> logging.Logger:
     logger.propagate = False  # don't bubble into the main synth logger
 
     if not logger.handlers:
-        handler = RotatingFileHandler(
+        # Daily rotation aligned with the shared archive naming scheme so the
+        # synth-logs MCP / WebUI archive treat cortex_api.log like every other
+        # log (dated files, gzip of old days, 7-day retention).
+        from core import log_archive
+        from core.logging_utils import TimestampedRotatingFileHandler
+
+        handler = TimestampedRotatingFileHandler(
             _LOG_FILE,
-            maxBytes=10 * 1024 * 1024,  # 10 MB per file
-            backupCount=5,
+            maxBytes=log_archive.DEFAULT_MAX_BYTES,
+            maxLines=log_archive.DEFAULT_MAX_LINES,
+            backupCount=0,
             encoding="utf-8",
         )
         handler.setLevel(logging.DEBUG)
