@@ -773,6 +773,7 @@ All keys stored in the `config` table and accessible via `config_registry.get_va
 | `LOG_CHAT_ID` | `interface_path` to send ERROR/WARNING log notifications to |
 | `LOG_CHAT_INTERFACE` | Interface name for LogChat delivery |
 | `LOG_CHAT_THREAD_ID` | Thread ID for LogChat (Discord threads etc.) |
+| `LOG_RETENTION_DAYS` | **Env var** (not config-registry — logging is initialised at bootstrap before the DB). Days of logs to keep (plain + gzip combined) before deletion (default `7`). Today/yesterday plain text; older days gzip-compressed; past the window deleted. See `docs/logging.rst`. |
 | `PROJECT_DEFAULT_LANGUAGE` | Default language for responses |
 | `PROJECT_DEFAULT_TONE` | Default response tone |
 | `INTERFACE_LANGUAGE_OVERRIDES` | JSON: per-interface language overrides |
